@@ -66,8 +66,13 @@ type runtimeManifest struct {
 const (
 	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
 
-	pluginScanScript = `import json,sys
-from defenseclaw.config import load
+	// pluginScanScript runs the plugin judge the gateway resolved for
+	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
+	// the scan rather than leaving a rules-only result (GAP-1408).
+	pluginScanScript = `import json,os,sys
+from defenseclaw.config import LLMConfig, load
+from defenseclaw.scanner._llm_env import llm_analyzer_ready
+from defenseclaw.scanner.plugin import _llm_to_override
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
@@ -89,6 +94,12 @@ while i<len(a):
         sys.exit("plugin-scan: unexpected argument "+x)
 if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
+e=os.environ.get
+llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
+if llm.model:
+    if not llm_analyzer_ready(llm):
+        sys.exit("plugin-scan: the plugin LLM judge "+llm.model+" is configured but its API key did not reach the scanner runtime, so the plugin is not scanned without it; store its key with enterprise secret set (named by enterprise.inspection.llm.credential), or remove the judge model")
+    o.llm_override={**(_llm_to_override(llm) or {}),"enabled":True}
 result=scan_plugin(t,o).to_dict()
 if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_self_paths):
     existing={(f.get("id"),f.get("location")) for f in result["findings"]}
@@ -154,13 +165,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "versions":
-		prepared := false
+		report := map[string]any{"versions": manifest.Versions, "runtime_sha256": manifest.SHA256, "prepared": false}
 		if root, err := runtimeRoot(); err == nil {
-			prepared = runtimeComplete(filepath.Join(root, manifest.SHA256[:16]), manifest.SHA256)
+			dir := filepath.Join(root, manifest.SHA256[:16])
+			if runtimeComplete(dir, manifest.SHA256) {
+				// The marker alone said ready after the antivirus took a file
+				// away: status and verify passed and repair skipped the
+				// prepare that restores it (GAP-1409).
+				if err := runtimeFilesPresent(dir); err != nil {
+					report["problem"] = err.Error()
+				} else {
+					report["prepared"] = true
+				}
+			}
 		}
-		encoded, _ := json.MarshalIndent(map[string]any{
-			"versions": manifest.Versions, "runtime_sha256": manifest.SHA256, "prepared": prepared,
-		}, "", "  ")
+		encoded, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 		return 0
 	case "--version":
@@ -414,7 +433,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if err != nil {
 		return "", errors.New("this build carries no scanner runtime archive")
 	}
-	verifyErr := verifyRuntime(dir, archive)
+	verifyErr := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true)
 	if verifyErr == nil {
 		return dir, nil
 	}
@@ -425,7 +444,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if dir, err = ensureRuntime(manifest); err != nil {
 		return "", err
 	}
-	if err := verifyRuntime(dir, archive); err != nil {
+	if err := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true); err != nil {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	return dir, nil
@@ -477,11 +496,34 @@ func notPreparedError(err error) error {
 	return err
 }
 
+// runtimeFilesPresent is the check versions runs: every file of the embedded
+// archive exists under dir as a regular file of its archived size. It reads
+// only the archive directory and the file sizes; the SHA-256 of every file,
+// which prepare compares, reads the whole tree and takes about two minutes on
+// a cold disk, too slow for status and verify.
+func runtimeFilesPresent(dir string) error {
+	archive, err := payload.Open(runtimeArchiveName)
+	if err != nil {
+		return errors.New("this build carries no scanner runtime archive")
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
+	if err != nil {
+		return err
+	}
+	at, ok := archive.(io.ReaderAt)
+	if !ok {
+		return errors.New("the embedded scanner runtime archive cannot be read in place")
+	}
+	return verifyRuntime(dir, at, info.Size(), false)
+}
+
 // verifyRuntime checks that every file of archive exists under dir as a
-// regular file with the archived size and SHA-256. Files prepare adds (the
-// byte-compiled caches) are not in the archive and are not checked.
-func verifyRuntime(dir string, archive []byte) error {
-	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+// regular file with the archived size and, with hashes, SHA-256. Files
+// prepare adds (the byte-compiled caches) are not in the archive and are not
+// checked. The error names the first file that differs.
+func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) error {
+	reader, err := zip.NewReader(archive, size)
 	if err != nil {
 		return err
 	}
@@ -493,6 +535,9 @@ func verifyRuntime(dir string, archive []byte) error {
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != file.UncompressedSize64 {
 			return fmt.Errorf("%s is missing or changed", file.Name)
+		}
+		if !hashes {
+			continue
 		}
 		want, err := entrySHA256(file)
 		if err != nil {
