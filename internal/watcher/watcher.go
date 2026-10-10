@@ -2121,6 +2121,7 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	case InstallPlugin:
 		plugin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		plugin.Connector = w.eventConnector(evt)
+		plugin.LLM = cfg.ResolveLLM("scanners.plugin")
 		return plugin
 	default:
 		return nil

@@ -94,3 +94,45 @@ class PluginLLMDefaultOnTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
+    """GAP-1408: the standalone Windows runtime ran plugin scans rules-only."""
+
+    def _run(self, env):
+        import contextlib
+        import re
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "cmd", "defenseclaw-scanners", "main.go"), encoding="utf-8") as stream:
+            script = re.search(r"pluginScanScript = `(.*?)`", stream.read(), re.S).group(1)
+        captured: dict = {}
+
+        class _Result:
+            def to_dict(self):
+                return {"scanner": "plugin-scanner", "target": "/p", "findings": []}
+
+        def fake_scan_plugin(target, options):
+            captured["override"] = options.llm_override
+            return _Result()
+
+        clean = {k: "" for k in ("DEFENSECLAW_LLM_KEY", "DEFENSECLAW_SCANNER_LLM_API_KEY")}
+        with patch.dict(os.environ, {**clean, **env}), \
+                patch("defenseclaw.scanner.plugin_scanner.scan_plugin", fake_scan_plugin), \
+                patch("defenseclaw.scanner.rulepack.overlay_findings", return_value=[]), \
+                patch("defenseclaw.config.load", return_value=None), \
+                patch.object(sys, "argv", ["plugin-scan", "/p"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(script, "pluginScanScript", "exec"), {"__name__": "__main__"})
+        return captured
+
+    def test_runtime_runs_the_configured_judge(self):
+        cap = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": "openai/gpt-4o-mini",
+                         "DEFENSECLAW_SCANNER_LLM_API_KEY": "k"})
+        self.assertEqual(cap["override"]["model"], "openai/gpt-4o-mini")
+        self.assertTrue(cap["override"]["enabled"])
+
+    def test_runtime_judge_without_its_key_stops_the_scan(self):
+        with self.assertRaises(SystemExit) as stop:
+            self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": "openai/gpt-4o-mini"})
+        self.assertIn("openai/gpt-4o-mini", str(stop.exception.code))

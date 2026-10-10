@@ -112,6 +112,13 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	if _, args := plugin.pluginScanCommand("C:/p"); !reflect.DeepEqual(args, []string{"plugin-scan", "C:/p", "--connector", "codex", "--include-self"}) {
 		t.Fatalf("plugin args = %v", args)
 	}
+	// GAP-1408: the runtime's plugin scan gets the scanners.plugin judge.
+	plugin.LLM = config.LLMConfig{Model: "gpt-4o-mini", Provider: "openai", APIKey: "pk"}
+	pluginEnv := strings.Join(plugin.runtimeEnv(os.Environ()), "\n")
+	if !strings.Contains(pluginEnv, "DEFENSECLAW_SCANNER_LLM_MODEL=openai/gpt-4o-mini") ||
+		!strings.Contains(pluginEnv, "DEFENSECLAW_SCANNER_LLM_API_KEY=pk") || strings.Contains(pluginEnv, "DEFENSECLAW_SCANNER_LLM_MODEL=from-shell") {
+		t.Fatal("the plugin runtime scan lacks the resolved judge")
+	}
 }
 
 // GAP-0710: the Windows runtime must receive the exact stdio definition,
