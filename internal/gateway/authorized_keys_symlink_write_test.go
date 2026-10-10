@@ -499,6 +499,51 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 				}
 			})
 		}
+		// The whole command up to the hook payload cap is walked for redirect
+		// operands, past the 64 KiB ActionFacts limit; an operand neither side
+		// can list makes the decision unknown (GAP-1395).
+		t.Run(connector+" over analysis limits", func(t *testing.T) {
+			prefix := ": " + strings.Repeat("x", 65<<10) + " && "
+			for _, row := range []struct {
+				command string
+				block   bool
+			}{
+				{prefix + "echo marker >> " + link, true},
+				{chain(200, "") + " && L=" + link + " && echo marker >> \"$L\"", true},
+				{prefix + "echo marker > " + filepath.Join(external, "notes.txt"), false},
+			} {
+				if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
+					t.Fatal(err)
+				}
+				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
+					"tool_input": map[string]string{"command": row.command}}))
+				want := allow
+				if row.block {
+					want = block
+				}
+				if got := post(t, connector, "action", row.command, header); !strings.HasPrefix(got, want) {
+					t.Fatalf("%.60s...%s = %.400s", row.command, row.command[len(row.command)-60:], got)
+				}
+			}
+		})
+		// A redirect word is spelled the way the shell opens it (GAP-1396).
+		t.Run(connector+" quoted and escaped names", func(t *testing.T) {
+			spaced := filepath.Join(external, "key file")
+			for _, word := range []string{`key\ file`, `"key file"`, `'key file'`, `$'key\x20file'`} {
+				if err := os.Symlink(keys, spaced); err != nil && !os.IsExist(err) {
+					t.Fatal(err)
+				}
+				command := chain(200, "") + " && echo marker >> " + external + "/" + word
+				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
+					"tool_input": map[string]string{"command": command}}))
+				if err := os.Remove(spaced); err != nil {
+					t.Fatal(err)
+				}
+				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, block) {
+					t.Fatalf("append through %s = %.400s", word, got)
+				}
+			}
+		})
 		t.Run(connector+" benign only", func(t *testing.T) {
 			if got := post(t, connector, "action", chain(31, ""), ""); !strings.HasPrefix(got, allow) {
 				t.Fatalf("benign targets = %.400s", got)
