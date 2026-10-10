@@ -384,6 +384,15 @@ func publishedDirAccess(index int) os.FileMode {
 	return 0o001
 }
 
+// publishedDirModeAccess is publishedDirAccess in the mode bits of both the
+// owning group and other: a member of the directory's group gets the group
+// bits and never the other bits, so root:staff 0705 kept every staff member
+// from loading the hooks while verify reported coverage (GAP-1407).
+func publishedDirModeAccess(index int) os.FileMode {
+	access := publishedDirAccess(index)
+	return access | access<<3
+}
+
 // The macOS ACL is independent of POSIX mode. Keep the reader and clearer
 // replaceable so rooted tests on Linux can model a macOS deny entry.
 var publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error) {
@@ -459,7 +468,7 @@ func publishedDirProblem(opts Options, path string) string {
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if want := publishedDirAccess(index); info.Mode().Perm()&want != want {
+		if want := publishedDirModeAccess(index); info.Mode().Perm()&want != want {
 			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, info.Mode().Perm()))
 		}
 		if problem, err := publishedDirACLProblem(opts, dir, index); err != nil {
@@ -482,7 +491,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 			continue
 		}
 		perm := info.Mode().Perm()
-		needMode := perm&publishedDirAccess(index) != publishedDirAccess(index)
+		needMode := perm&publishedDirModeAccess(index) != publishedDirModeAccess(index)
 		aclProblem, err := publishedDirACLProblem(opts, dir, index)
 		if err != nil {
 			return restored, err
