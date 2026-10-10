@@ -48,6 +48,19 @@ type Observation struct {
 	Path       string
 	Confidence float64
 	At         time.Time
+	// LastAt is the latest sighting of the same key, zero when it was seen
+	// once. A stage the session reached early and again later can take its
+	// place in the chain at either time, so an early, unrelated sighting
+	// cannot hold a later real one out of order (GAP-1419).
+	LastAt time.Time
+}
+
+// lastSighting is the latest time this observation was seen.
+func (o Observation) lastSighting() time.Time {
+	if o.LastAt.After(o.At) {
+		return o.LastAt
+	}
+	return o.At
 }
 
 // Key deduplicates observations within a session. Two reads of the same
@@ -81,31 +94,36 @@ func NewSession(rootPID int, agentName string, at time.Time) *Session {
 }
 
 // Record adds an observation, keeping the highest-confidence sighting of a
-// repeated key and the earliest time it was seen.
+// repeated key, the earliest time it was seen and the latest.
 //
-// The two are kept separately on purpose. Adopting the later sighting's
-// timestamp along with its confidence would move a stage forward in time, and
-// Progressed reads exactly those timestamps to decide whether the session
-// moved through its stages in order -- so re-observing an early stage more
-// confidently could reorder a chain that had already formed, or form one that
-// never happened.
+// Confidence and time are kept separately on purpose. Adopting a later
+// sighting's timestamp along with its confidence would move the stage's start
+// forward, and Progressed reads the sighting times to decide whether the
+// session moved through its stages in order -- so re-observing an early stage
+// more confidently could reorder a chain that had already formed, or form one
+// that never happened. The latest sighting is kept beside the earliest so a
+// stage that recurs still counts at the time it recurred.
 func (s *Session) Record(observation Observation) {
-	existing, ok := s.observations[observation.Key()]
-	switch {
-	case !ok:
-		s.observations[observation.Key()] = observation
-	case observation.Confidence > existing.Confidence:
-		promoted := observation
-		if existing.At.Before(promoted.At) {
-			promoted.At = existing.At
+	key := observation.Key()
+	kept := observation
+	if existing, ok := s.observations[key]; ok {
+		latest := existing.lastSighting()
+		if observation.lastSighting().After(latest) {
+			latest = observation.lastSighting()
 		}
-		s.observations[observation.Key()] = promoted
-	case observation.At.Before(existing.At):
-		// Same or lower confidence, but an earlier sighting: the stage began
-		// sooner than recorded.
-		existing.At = observation.At
-		s.observations[observation.Key()] = existing
+		if observation.Confidence <= existing.Confidence {
+			kept = existing
+		}
+		kept.At = existing.At
+		if observation.At.Before(kept.At) {
+			kept.At = observation.At
+		}
+		kept.LastAt = time.Time{}
+		if latest.After(kept.At) {
+			kept.LastAt = latest
+		}
 	}
+	s.observations[key] = kept
 	if observation.At.After(s.LastSeen) {
 		s.LastSeen = observation.At
 	}
@@ -113,10 +131,18 @@ func (s *Session) Record(observation Observation) {
 
 // Expire drops observations older than cutoff, so a chain is a chain within a
 // window rather than over the lifetime of a long-running agent.
+//
+// A key seen again inside the window keeps only that later sighting, so the
+// chain is still built from sightings within the window.
 func (s *Session) Expire(cutoff time.Time) {
 	for key, observation := range s.observations {
-		if observation.At.Before(cutoff) {
+		switch {
+		case observation.lastSighting().Before(cutoff):
 			delete(s.observations, key)
+		case observation.At.Before(cutoff):
+			observation.At = observation.lastSighting()
+			observation.LastAt = time.Time{}
+			s.observations[key] = observation
 		}
 	}
 }
@@ -151,42 +177,45 @@ func (s *Session) TacticsSeen() []tactics.Tactic {
 	return seen
 }
 
-// FirstAt is when a tactic was first observed in this session, or the zero
-// time when it was not.
-func (s *Session) FirstAt(tactic tactics.Tactic) time.Time {
-	var earliest time.Time
-	for _, observation := range s.observations {
-		if observation.Tactic != tactic {
-			continue
-		}
-		if earliest.IsZero() || observation.At.Before(earliest) {
-			earliest = observation.At
-		}
-	}
-	return earliest
-}
-
 // Progressed reports whether the session moved forward through the chain.
 //
 // Requiring order rather than just a count is what separates an incident from
 // a busy afternoon. An agent that reads a credential and later uploads
 // something has progressed; one that uploads something and much later happens
 // to read a config file has not.
+//
+// Every sighting of a stage counts, not only its first. A session whose first
+// observation was an unrelated or low-confidence packaging step, and which
+// then read a credential, minted a principal and packaged data for real, has
+// moved through the chain in order; reading only each stage's first sighting
+// put packaging first and never formed the chain (GAP-1419).
 func (s *Session) Progressed(minimum int) bool {
-	seen := s.TacticsSeen()
-	if len(seen) < minimum {
+	if len(s.TacticsSeen()) < minimum {
 		return false
 	}
-	timeline := make([]time.Time, len(seen))
-	for index, tactic := range seen {
-		timeline[index] = s.FirstAt(tactic)
+	sightings := make([]stageSighting, 0, 2*len(s.observations))
+	for _, observation := range s.observations {
+		stage := tactics.ChainStage(observation.Tactic)
+		if stage < 0 {
+			continue
+		}
+		sightings = append(sightings, stageSighting{stage: stage, at: observation.At})
+		if last := observation.lastSighting(); last.After(observation.At) {
+			sightings = append(sightings, stageSighting{stage: stage, at: last})
+		}
 	}
-	return longestOrderedRun(timeline) >= minimum
+	return orderedStages(sightings) >= minimum
 }
 
-// longestOrderedRun returns the most stages the session moved through in
-// order: the longest subsequence whose chain position and first-seen time
-// both advance together.
+// stageSighting is one time a chain stage was seen.
+type stageSighting struct {
+	stage int
+	at    time.Time
+}
+
+// orderedStages returns the most stages the session moved through in order:
+// the longest run of sightings whose chain stage and time both advance
+// together.
 //
 // Counting forward-going pairs instead is not the same thing, and the
 // difference decides whether a finding is critical. Stage times [5 6 1 2]
@@ -194,32 +223,33 @@ func (s *Session) Progressed(minimum int) bool {
 // clears a three-stage threshold, while the longest actual progression is
 // two stages. Two unrelated ascending pairs are not a chain.
 //
-// seen is already in chain order, so advancing the index is advancing the
-// stage; the quadratic walk is over at most the handful of ATT&CK tactics
-// this package tracks.
-func longestOrderedRun(timeline []time.Time) int {
-	if len(timeline) == 0 {
-		return 0
-	}
-	best := 1
-	longest := make([]int, len(timeline))
-	for index := range timeline {
-		longest[index] = 1
-		for earlier := 0; earlier < index; earlier++ {
-			if timeline[earlier].After(timeline[index]) {
-				// That stage was reached later than this one, so the two are
-				// out of order and cannot extend the same progression.
-				continue
-			}
-			if longest[earlier]+1 > longest[index] {
-				longest[index] = longest[earlier] + 1
+// Sightings at the same instant are taken in chain order. The walk keeps,
+// per stage, the longest run ending there, over the handful of ATT&CK
+// tactics this package tracks.
+func orderedStages(sightings []stageSighting) int {
+	sort.Slice(sightings, func(i, j int) bool {
+		if sightings[i].at.Equal(sightings[j].at) {
+			return sightings[i].stage < sightings[j].stage
+		}
+		return sightings[i].at.Before(sightings[j].at)
+	})
+	best := make([]int, len(tactics.ChainOrder))
+	longest := 0
+	for _, sighting := range sightings {
+		run := 1
+		for earlier := 0; earlier < sighting.stage; earlier++ {
+			if best[earlier]+1 > run {
+				run = best[earlier] + 1
 			}
 		}
-		if longest[index] > best {
-			best = longest[index]
+		if run > best[sighting.stage] {
+			best[sighting.stage] = run
+		}
+		if run > longest {
+			longest = run
 		}
 	}
-	return best
+	return longest
 }
 
 // Score sums the session's observations and adds the chain bonus when the

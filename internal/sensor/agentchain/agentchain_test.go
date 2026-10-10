@@ -340,6 +340,35 @@ func TestRepeatedObservationsAreOneStage(t *testing.T) {
 	}
 }
 
+// TestAnEarlyStageSightingDoesNotHoldBackALaterChain is GAP-1419. The first
+// thing a Claude Code session was scored for was a packaging step (its own
+// shell bootstrap), before it read a credential, minted a principal and then
+// really packaged data. Reading each stage at its first sighting put
+// packaging first, so the in-order chain never formed.
+func TestAnEarlyStageSightingDoesNotHoldBackALaterChain(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	session := NewSession(1, "claude", base)
+	staging := Observation{Tactic: tactics.Exfiltration, SignalID: "agent_encoded_payload",
+		Detail: "base64 encoding", Confidence: 1, At: base}
+	session.Record(staging)
+	session.Record(Observation{Tactic: tactics.CredentialAccess, SignalID: "agent_credential_access",
+		Detail: "/.aws/credentials", Confidence: 0.9, At: base.Add(time.Minute)})
+	session.Record(Observation{Tactic: tactics.IdentityCreation, SignalID: "agent_identity_creation",
+		Detail: "AWS IAM principal created", Confidence: 1, At: base.Add(2 * time.Minute)})
+	staging.At = base.Add(3 * time.Minute)
+	session.Record(staging)
+
+	_, signals := session.Score(scoring.KillChainMinStages)
+	for _, signal := range signals {
+		if signal.ID == "agent_kill_chain" {
+			return
+		}
+	}
+	t.Fatalf("credential access, identity creation and then a real packaging step formed no "+
+		"agent_kill_chain because an earlier packaging sighting came first: %+v", signals)
+}
+
 // TestExpireBoundsTheChainToItsWindow pins that a chain is a chain within a
 // window rather than over the lifetime of a long-running agent.
 func TestExpireBoundsTheChainToItsWindow(t *testing.T) {
@@ -365,13 +394,14 @@ func TestExpireBoundsTheChainToItsWindow(t *testing.T) {
 // moved through three stages in order -- and that threshold is what awards
 // the kill-chain bonus, which is what lifts a finding to critical.
 func TestLongestOrderedRunRejectsDisjointAscendingPairs(t *testing.T) {
-	at := func(seconds ...int) []time.Time {
+	// One sighting per stage, stage n first seen at seconds[n].
+	at := func(seconds ...int) []stageSighting {
 		base := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
-		times := make([]time.Time, len(seconds))
+		sightings := make([]stageSighting, len(seconds))
 		for index, second := range seconds {
-			times[index] = base.Add(time.Duration(second) * time.Second)
+			sightings[index] = stageSighting{stage: index, at: base.Add(time.Duration(second) * time.Second)}
 		}
-		return times
+		return sightings
 	}
 
 	for _, test := range []struct {
@@ -388,8 +418,8 @@ func TestLongestOrderedRunRejectsDisjointAscendingPairs(t *testing.T) {
 		{"single stage", []int{7}, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := longestOrderedRun(at(test.seconds...)); got != test.want {
-				t.Fatalf("longestOrderedRun(%v) = %d, want %d", test.seconds, got, test.want)
+			if got := orderedStages(at(test.seconds...)); got != test.want {
+				t.Fatalf("orderedStages(%v) = %d, want %d", test.seconds, got, test.want)
 			}
 		})
 	}
@@ -530,8 +560,8 @@ func TestRecordKeepsTheEarliestSightingWhileAdoptingConfidence(t *testing.T) {
 	session.Record(early)
 	session.Record(late)
 
-	if got := session.FirstAt(tactics.CredentialAccess); !got.Equal(base) {
-		t.Fatalf("FirstAt = %s, want the earlier sighting %s", got, base)
+	if got := session.Observations()[0].At; !got.Equal(base) {
+		t.Fatalf("At = %s, want the earlier sighting %s", got, base)
 	}
 	observations := session.Observations()
 	if len(observations) != 1 {
@@ -546,8 +576,8 @@ func TestRecordKeepsTheEarliestSightingWhileAdoptingConfidence(t *testing.T) {
 	earlier.At = base.Add(-5 * time.Minute)
 	earlier.Confidence = 0.2
 	session.Record(earlier)
-	if got := session.FirstAt(tactics.CredentialAccess); !got.Equal(earlier.At) {
-		t.Fatalf("FirstAt = %s, want the earliest sighting %s", got, earlier.At)
+	if got := session.Observations()[0].At; !got.Equal(earlier.At) {
+		t.Fatalf("At = %s, want the earliest sighting %s", got, earlier.At)
 	}
 	if session.Observations()[0].Confidence != 0.95 {
 		t.Error("an earlier low-confidence sighting downgraded the recorded confidence")
