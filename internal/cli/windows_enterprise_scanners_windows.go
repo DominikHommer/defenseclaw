@@ -190,7 +190,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			// fails and an MDM detection remediates (GAP-0294).
 			message := ""
 			if result.Scanners.State != "ready" {
-				message = windowsScannerRuntimeUnavailable(result.Scanners.State)
+				message = windowsScannerRuntimeUnavailable(result.Scanners)
 			} else {
 				// Prepared, but not as the gateway service runs it: every
 				// scan failed while status and verify said ok (GAP-0686).
@@ -385,8 +385,13 @@ func windowsScannerRuntimeServiceProblem() string {
 
 // windowsScannerRuntimeUnavailable says what a scanner runtime that is not
 // ready blocks and what restores it.
-func windowsScannerRuntimeUnavailable(state string) string {
+func windowsScannerRuntimeUnavailable(scanners *enterprisestatus.ScannerRuntime) string {
 	const blocked = "so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed)"
+	state := scanners.State
+	if state == "not_prepared" && scanners.Problem != "" {
+		return "the skill, MCP and plugin scanner runtime is prepared but damaged (" + scanners.Problem + "), " + blocked +
+			"; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair, to unpack it again"
+	}
 	if state == "untrusted" {
 		return "the skill, MCP and plugin scanner runtime executable is not the one the payload trust policy admitted " +
 			"(it was changed or replaced outside DefenseClaw), so DefenseClaw does not run it, " + blocked +
@@ -411,7 +416,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 		return
 	}
 	if current.State == "missing" || current.State == "untrusted" {
-		result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current.State))
+		result.AddWarning("scanner_runtime_unavailable", windowsScannerRuntimeUnavailable(current))
 		result.Scanners = current
 		return
 	}
@@ -696,9 +701,11 @@ func readWindowsScannerRuntime() *enterprisestatus.ScannerRuntime {
 		var report struct {
 			Versions map[string]string `json:"versions"`
 			Prepared bool              `json:"prepared"`
+			Problem  string            `json:"problem"`
 		}
 		if json.Unmarshal(out, &report) == nil {
 			state.Versions = report.Versions
+			state.Problem = report.Problem
 			if report.Prepared {
 				state.State = "ready"
 			}

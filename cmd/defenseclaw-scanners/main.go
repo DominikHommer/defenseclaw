@@ -165,13 +165,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "versions":
-		prepared := false
+		report := map[string]any{"versions": manifest.Versions, "runtime_sha256": manifest.SHA256, "prepared": false}
 		if root, err := runtimeRoot(); err == nil {
-			prepared = runtimeComplete(filepath.Join(root, manifest.SHA256[:16]), manifest.SHA256)
+			dir := filepath.Join(root, manifest.SHA256[:16])
+			if runtimeComplete(dir, manifest.SHA256) {
+				// The marker alone said ready after the antivirus took a file
+				// away: status and verify passed and repair skipped the
+				// prepare that restores it (GAP-1409).
+				if err := runtimeFilesPresent(dir); err != nil {
+					report["problem"] = err.Error()
+				} else {
+					report["prepared"] = true
+				}
+			}
 		}
-		encoded, _ := json.MarshalIndent(map[string]any{
-			"versions": manifest.Versions, "runtime_sha256": manifest.SHA256, "prepared": prepared,
-		}, "", "  ")
+		encoded, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 		return 0
 	case "--version":
@@ -425,7 +433,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if err != nil {
 		return "", errors.New("this build carries no scanner runtime archive")
 	}
-	verifyErr := verifyRuntime(dir, archive)
+	verifyErr := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true)
 	if verifyErr == nil {
 		return dir, nil
 	}
@@ -436,7 +444,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if dir, err = ensureRuntime(manifest); err != nil {
 		return "", err
 	}
-	if err := verifyRuntime(dir, archive); err != nil {
+	if err := verifyRuntime(dir, bytes.NewReader(archive), int64(len(archive)), true); err != nil {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	return dir, nil
@@ -488,11 +496,34 @@ func notPreparedError(err error) error {
 	return err
 }
 
+// runtimeFilesPresent is the check versions runs: every file of the embedded
+// archive exists under dir as a regular file of its archived size. It reads
+// only the archive directory and the file sizes; the SHA-256 of every file,
+// which prepare compares, reads the whole tree and takes about two minutes on
+// a cold disk, too slow for status and verify.
+func runtimeFilesPresent(dir string) error {
+	archive, err := payload.Open(runtimeArchiveName)
+	if err != nil {
+		return errors.New("this build carries no scanner runtime archive")
+	}
+	defer archive.Close()
+	info, err := archive.Stat()
+	if err != nil {
+		return err
+	}
+	at, ok := archive.(io.ReaderAt)
+	if !ok {
+		return errors.New("the embedded scanner runtime archive cannot be read in place")
+	}
+	return verifyRuntime(dir, at, info.Size(), false)
+}
+
 // verifyRuntime checks that every file of archive exists under dir as a
-// regular file with the archived size and SHA-256. Files prepare adds (the
-// byte-compiled caches) are not in the archive and are not checked.
-func verifyRuntime(dir string, archive []byte) error {
-	reader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+// regular file with the archived size and, with hashes, SHA-256. Files
+// prepare adds (the byte-compiled caches) are not in the archive and are not
+// checked. The error names the first file that differs.
+func verifyRuntime(dir string, archive io.ReaderAt, size int64, hashes bool) error {
+	reader, err := zip.NewReader(archive, size)
 	if err != nil {
 		return err
 	}
@@ -504,6 +535,9 @@ func verifyRuntime(dir string, archive []byte) error {
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || uint64(info.Size()) != file.UncompressedSize64 {
 			return fmt.Errorf("%s is missing or changed", file.Name)
+		}
+		if !hashes {
+			continue
 		}
 		want, err := entrySHA256(file)
 		if err != nil {
