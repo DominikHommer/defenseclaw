@@ -120,6 +120,21 @@ func runtimeJudgeEnv(llm config.LLMConfig) map[string]string {
 	return derived
 }
 
+// scannerRuntimeOwnedEnv is every variable only the gateway sets for the
+// scanner runtime: the judge and the AI Defense settings it derives from
+// config. A value of these in the service environment never reaches a scan.
+// They are the scanner runtime names declared in the env-var registry, so no
+// name prefix is matched.
+var scannerRuntimeOwnedEnv = map[string]bool{
+	"DEFENSECLAW_SCANNER_LLM_MODEL":    true,
+	"DEFENSECLAW_SCANNER_LLM_PROVIDER": true,
+	"DEFENSECLAW_SCANNER_LLM_API_KEY":  true,
+	"DEFENSECLAW_SCANNER_LLM_BASE_URL": true,
+	"DEFENSECLAW_SCANNER_LLM_REGION":   true,
+	"DEFENSECLAW_SCANNER_AID_API_KEY":  true,
+	"DEFENSECLAW_SCANNER_AID_ENDPOINT": true,
+}
+
 // runtimeEnv is a plugin scan's environment under the embedded runtime: the
 // gateway's own environment plus the scanners.plugin judge it resolved from
 // config. Before, the runtime got no judge and ran the plugin scan rules-only
@@ -131,7 +146,7 @@ func (s *PluginScanner) runtimeEnv(base []string) []string {
 	for _, kv := range base {
 		name, _, _ := strings.Cut(kv, "=")
 		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "DEFENSECLAW_SCANNER_") || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+		if scannerRuntimeOwnedEnv[upper] || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
 			continue
 		}
 		if derived[upper] != "" {
