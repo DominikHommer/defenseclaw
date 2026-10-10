@@ -10147,6 +10147,19 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
                 remediation="Rebase the pack on the 1.0 default pack, run `defenseclaw guardrail use-pack <folder>`, "
                 "then `defenseclaw-gateway config migrate --ack`",
             )
+    # GAP-1399: a Rego module read a data.json key 1.0 no longer loads.
+    for lost in record.get("unenforced_rego_data") or []:
+        if isinstance(lost, str) and lost.isprintable():
+            _emit(
+                "warn",
+                "Rego data",
+                lost,
+                r=r,
+                check_id="doctor.config.rego-data",
+                reason_code="rego-data-not-enforced",
+                remediation="Express the rules in config.yaml or in a module that reads input, "
+                "then run `defenseclaw-gateway config migrate --ack`",
+            )
     moved = len(record.get("moved") or [])
     conflicts = len(record.get("conflicts") or [])
     when = str(record.get("migrated_at") or "")[:10] or "an earlier upgrade"

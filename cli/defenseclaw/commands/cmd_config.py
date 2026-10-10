@@ -913,6 +913,8 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
         click.echo(f"  conflict {conflict.get('to')}: kept {conflict.get('kept')}, dropped {conflict.get('lost')}")
     for note in record.get("notes") or []:
         click.echo(f"  note: {note}")
+    for lost in record.get("unenforced_rego_data") or []:
+        click.echo(f"  WARNING: {lost}")
 
 
 def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:

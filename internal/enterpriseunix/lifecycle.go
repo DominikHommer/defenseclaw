@@ -1035,6 +1035,9 @@ func (l *lifecycle) warnConfigV8(record config.MigrationRecord) {
 	if len(conflicts) > 0 {
 		message += fmt.Sprintf("; %d value(s) conflicted and the migration resolved them: %s", len(conflicts), strings.Join(conflicts, "; "))
 	}
+	if len(record.UnenforcedRegoData) > 0 {
+		message += "; Rego rules no longer enforced: " + strings.Join(record.UnenforcedRegoData, "; ")
+	}
 	l.result.AddWarning(codeConfigV8, message)
 }
 
