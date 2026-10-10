@@ -1417,6 +1417,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	hot := l.hotConfigApply(ctx, record, p, adopting)
 	if gateway, ok := gatewayUnitOf(units); hot && ok {
 		keep[gateway.Name] = true
+		keepSensorHelperRunning(keep, units)
 	}
 	l.quiesce(ctx, units, keep)
 	pending.Phase = "apply"
@@ -1628,6 +1629,20 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)
+	}
+}
+
+// keepSensorHelperRunning keeps the sensor helper up through a config
+// change the gateway applies in place. Nothing the helper reads changes in
+// one (its unit, binary and arguments stay, and it watches the homes
+// manifest itself), but stopping it ended the gateway's kernel event stream
+// while the gateway kept running, and Plane C stayed down until the gateway
+// was restarted (GAP-1418).
+func keepSensorHelperRunning(keep map[string]bool, units []Unit) {
+	for _, unit := range units {
+		if unit.Kind == "sensor_helper" {
+			keep[unit.Name] = true
+		}
 	}
 }
 
@@ -1940,6 +1955,11 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			if err := restartUnit(ctx, env.Services, unit); err != nil {
 				return fmt.Errorf("restart %s: %w", unit.Name, err)
 			}
+			continue
+		}
+		if hot && unit.Kind == "sensor_helper" && env.Services.Active(ctx, unit) {
+			// Kept running through the config change; starting it again
+			// would restart a launchd job (kickstart -k).
 			continue
 		}
 		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {

@@ -67,9 +67,17 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	}
 	hot := strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1)
 	runner.digest = digest("b")
+	from := len(h.services.calls)
 	r, touched := ensure(hot)
 	if touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") || r.Policy == nil || !r.Policy.Applied {
 		t.Fatalf("hot change: gateway touched = %v, changes = %q, policy = %+v", touched, r.Changes, r.Policy)
+	}
+	// GAP-1418: the sensor helper stays up with the gateway; stopping it
+	// ended the running gateway's kernel event stream.
+	for _, call := range h.services.calls[from:] {
+		if call == "stop "+unitSensorHelper || call == "start "+unitSensorHelper || call == "restart "+unitSensorHelper {
+			t.Fatalf("hot change touched the sensor helper: %q", call)
+		}
 	}
 	// GAP-0545: a change in bytes only keeps the gateway and its policy.
 	if r, touched := ensure("# edited by configuration management\n" + strings.ReplaceAll(hot, "\n", "\r\n")); touched || !strings.Contains(strings.Join(r.Changes, "\n"), "it was not restarted") {

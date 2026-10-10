@@ -60,6 +60,11 @@ type hostPlane struct {
 	classified int64
 	running    bool
 	coverage   plane.Coverage
+	// started is set once a source has started, and done is closed when the
+	// consumer of that source stops: a source whose stream ended is replaced
+	// with a fresh one before Plane C starts again (GAP-1418).
+	started bool
+	done    chan struct{}
 }
 
 // hostSessionKey keeps the first pid/start key stable through a late exec or
@@ -84,25 +89,32 @@ func newHostPlane(
 // caller rather than retried silently: the capability layer has already said
 // the plane should work here, so a failure is a fact an operator needs.
 func (h *hostPlane) start(ctx context.Context) error {
-	if err := h.source.Start(ctx); err != nil {
+	h.mu.Lock()
+	source := h.source
+	h.mu.Unlock()
+	if err := source.Start(ctx); err != nil {
 		return err
 	}
+	done := make(chan struct{})
 	h.mu.Lock()
 	h.running = true
-	h.coverage = h.source.Coverage()
+	h.started = true
+	h.done = done
+	h.coverage = source.Coverage()
 	h.mu.Unlock()
 
-	go h.consume(ctx)
+	go h.consume(ctx, source, done)
 	return nil
 }
 
-func (h *hostPlane) consume(ctx context.Context) {
+func (h *hostPlane) consume(ctx context.Context, source plane.Source, done chan struct{}) {
 	defer func() {
 		h.mu.Lock()
 		h.running = false
 		h.mu.Unlock()
+		close(done)
 	}()
-	events := h.source.Events()
+	events := source.Events()
 	for {
 		select {
 		case <-ctx.Done():
@@ -113,6 +125,40 @@ func (h *hostPlane) consume(ctx context.Context) {
 			}
 			h.handle(event)
 		}
+	}
+}
+
+// stopped is closed when the consumer of the started source stops; it is
+// nil while no source has started.
+func (h *hostPlane) stopped() <-chan struct{} {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.done == nil {
+		return nil
+	}
+	return h.done
+}
+
+// ended reports a source that started and whose stream has since ended.
+func (h *hostPlane) ended() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.started && !h.running
+}
+
+// replaceSource closes the source whose stream ended and puts next in its
+// place. A brokered stream cannot be started twice (its connection is gone
+// and its buffer is closed), so a reconnect needs a fresh source. Sessions,
+// counters and the lineage tracker carry over (GAP-1418).
+func (h *hostPlane) replaceSource(next plane.Source) {
+	h.mu.Lock()
+	previous := h.source
+	h.source = next
+	h.started = false
+	h.done = nil
+	h.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
 	}
 }
 
@@ -271,8 +317,11 @@ func (h *hostPlane) stats() (classified, gated int64, running bool, coverage pla
 }
 
 func (h *hostPlane) close() error {
-	if h.source == nil {
+	h.mu.Lock()
+	source := h.source
+	h.mu.Unlock()
+	if source == nil {
 		return nil
 	}
-	return h.source.Close()
+	return source.Close()
 }
