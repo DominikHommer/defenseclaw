@@ -45,6 +45,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"reflect"
@@ -485,11 +486,21 @@ func parsePath(path string) ([]pathPart, error) {
 	return parts, nil
 }
 
+// ErrMultipleDocuments refuses a config.yaml that holds more than one YAML
+// document. DefenseClaw reads only the first, and a patch re-encodes only
+// that one, so writing would silently delete the rest (GAP-1400).
+var ErrMultipleDocuments = errors.New("configwrite: config.yaml holds more than one YAML document (a --- line " +
+	"starts another); DefenseClaw reads only the first and does not rewrite the file. Merge the documents into one " +
+	"or remove the later one, then try again")
+
 func parseDocument(current []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(current)) > 0 {
 		if err := yaml.Unmarshal(current, &doc); err != nil {
 			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+		}
+		if err := singleDocument(current); err != nil {
+			return nil, err
 		}
 	}
 	if doc.Kind == 0 {
@@ -502,6 +513,27 @@ func parseDocument(current []byte) (*yaml.Node, error) {
 		return nil, errors.New("configwrite: config.yaml root must be a mapping")
 	}
 	return &doc, nil
+}
+
+// singleDocument fails with ErrMultipleDocuments when a document with content
+// follows the first. An empty one (a trailing --- or ...) holds nothing to
+// lose.
+func singleDocument(current []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(current))
+	for first := true; ; first = false {
+		var next yaml.Node
+		err := dec.Decode(&next)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("configwrite: parse config.yaml: %w", err)
+		}
+		empty := len(next.Content) == 0 || (len(next.Content) == 1 && next.Content[0].Tag == "!!null" && len(next.Content[0].Content) == 0)
+		if !first && !empty {
+			return ErrMultipleDocuments
+		}
+	}
 }
 
 func encodeDocument(doc *yaml.Node) ([]byte, error) {
