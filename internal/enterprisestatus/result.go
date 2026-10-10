@@ -192,6 +192,9 @@ type ScannerRuntime struct {
 	// scanner LLM judge model ("" when no judge is configured).
 	Policy     string `json:"policy,omitempty"`
 	JudgeModel string `json:"judge_model,omitempty"`
+	// Problem names the unpacked file that is missing or changed when a
+	// prepared runtime is damaged (State not_prepared).
+	Problem string `json:"problem,omitempty"`
 }
 
 // PolicyState reports the effective policy a lifecycle step left in place.

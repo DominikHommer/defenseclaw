@@ -3428,6 +3428,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         for failure in record.get("rule_pack_rebase_failures") or []:
             if isinstance(failure, str) and failure.isprintable():
                 ux.warn(failure, indent="    ")
+        # GAP-1399: a Rego module read a data.json key of the operator's that
+        # 1.0 does not load; the rules that read it are no longer enforced.
+        for lost in record.get("unenforced_rego_data") or []:
+            if isinstance(lost, str) and lost.isprintable():
+                ux.warn(lost, indent="    ")
         # GAP-1314/GAP-1344: name each rule of the operator's the rebase kept
         # blocking (a renamed built-in by both IDs), and the ones that block
         # less than on 0.8.x.

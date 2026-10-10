@@ -3042,6 +3042,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+	ps.LLM = cfg.ResolveLLM("scanners.plugin")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()

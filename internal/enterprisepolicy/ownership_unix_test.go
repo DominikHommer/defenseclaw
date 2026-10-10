@@ -185,6 +185,35 @@ func TestVerifyAndRestorePublishedDirWithMacOSDenyACL(t *testing.T) {
 	}
 }
 
+// GAP-1407: root:staff 0705 on the macOS drop-in directory lets other
+// users in but keeps every member of its group out, so verify must report
+// the mode and the restore must give the group search and list again.
+func TestVerifyAndRestorePublishedDirWithoutGroupAccess(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	opts.GOOS = "darwin"
+	if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(opts.Root, "Library/Application Support/ClaudeCode/managed-settings.d")
+	if err := os.Chmod(dir, 0o705); err != nil {
+		t.Fatal(err)
+	}
+	result, err := VerifyAll(opts, []string{"claudecode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range result.States {
+		if state.Connector == "claudecode" && (state.Covered || !hasConflict(state, "mode 0705")) {
+			t.Fatalf("a managed directory its group cannot list was reported covered: %+v", state)
+		}
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if info, statErr := os.Stat(dir); err != nil || statErr != nil || !containsString(restored, dir) || info.Mode().Perm() != 0o755 {
+		t.Fatalf("restore published dirs = %v, %v", restored, err)
+	}
+}
+
 // GAP-1350: a Linux named-user ACL entry without search on the 0755
 // managed-settings directory keeps that user's Claude Code from loading the
 // policy while the mode bits look right. Verify reports it and the restore

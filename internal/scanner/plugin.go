@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -43,6 +44,10 @@ type PluginScanner struct {
 	Policy      string
 	Profile     string
 	IncludeSelf bool
+	// LLM is the resolved scanners.plugin judge (config ResolveLLM). Only
+	// the embedded Windows runtime needs it: the defenseclaw CLI resolves
+	// it from config itself.
+	LLM config.LLMConfig
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
@@ -106,6 +111,9 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 	binaryPath, args := s.pluginScanCommand(target)
 	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	cmd.Env = append(os.Environ(), ScanRecordedByCallerEnv+"=1")
+	if usesScannerRuntime(binaryPath) {
+		cmd.Env = s.runtimeEnv(cmd.Env)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

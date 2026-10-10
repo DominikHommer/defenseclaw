@@ -4247,7 +4247,7 @@
     {
       "name": "DEFENSECLAW_SCANNER_LLM_API_KEY",
       "category": "credential",
-      "purpose": "Secret transport of the LLM judge API key (llm.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "purpose": "Secret transport of the LLM judge API key (llm.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
       "default": "unset (set by the gateway for the scanner runtime)",
       "accepted_values": [
         "secret-value",
@@ -4271,7 +4271,7 @@
     {
       "name": "DEFENSECLAW_SCANNER_LLM_BASE_URL",
       "category": "hook_internal",
-      "purpose": "LLM judge base URL (llm.base_url) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "purpose": "LLM judge base URL (llm.base_url) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
       "default": "unset (set by the gateway for the scanner runtime)",
       "accepted_values": [
         "URL",
@@ -4295,7 +4295,7 @@
     {
       "name": "DEFENSECLAW_SCANNER_LLM_MODEL",
       "category": "hook_internal",
-      "purpose": "LiteLLM model id of the LLM judge (llm.provider and llm.model) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "purpose": "LiteLLM model id of the LLM judge (llm.provider and llm.model) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
       "default": "unset (set by the gateway for the scanner runtime)",
       "accepted_values": [
         "LiteLLM model id",
@@ -4319,7 +4319,7 @@
     {
       "name": "DEFENSECLAW_SCANNER_LLM_PROVIDER",
       "category": "hook_internal",
-      "purpose": "LLM judge provider (llm.provider) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "purpose": "LLM judge provider (llm.provider) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
       "default": "unset (set by the gateway for the scanner runtime)",
       "accepted_values": [
         "provider name",
@@ -4343,7 +4343,7 @@
     {
       "name": "DEFENSECLAW_SCANNER_LLM_REGION",
       "category": "hook_internal",
-      "purpose": "LLM judge region (llm.region, or llm.bedrock.region when set) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan); the gateway also sets AWS_REGION to it. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "purpose": "LLM judge region (llm.region, or llm.bedrock.region when set) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan); the gateway also sets AWS_REGION to it. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
       "default": "unset (set by the gateway for the scanner runtime)",
       "accepted_values": [
         "cloud region",

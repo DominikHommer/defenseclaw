@@ -733,12 +733,15 @@ dc_require_free_space() {
 }
 
 # dc_package_script_result <marker>: after a failed installer run, print the
-# result the package's preinstall or postinstall wrote during it and exit 1.
-# The Installer only says "an error occurred while running scripts", while
-# that result names the cause: a refused downgrade with both versions, or a
-# rejected config (GAP-0538). A result not older than the marker is this
-# run's: the file system can stamp both in one clock tick, and a strict
-# "newer" test dropped a preinstall that refused at once.
+# result the package's preinstall or postinstall wrote during it and exit
+# with its exit code. The Installer only says "an error occurred while
+# running scripts", while that result names the cause: a refused downgrade
+# with both versions, or a rejected config (GAP-0538). A postinstall that
+# timed out waiting for another lifecycle run reports 75, which an MDM
+# retries; exiting 1 instead turned it into a failure (GAP-1413). A result
+# not older than the marker is this run's: the file system can stamp both
+# in one clock tick, and a strict "newer" test dropped a preinstall that
+# refused at once.
 dc_package_script_result() {
     result=$DC_PACKAGE_RESULT
     [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] && [ -f "$1" ] || return 0
@@ -746,6 +749,9 @@ dc_package_script_result() {
     cp "$result" "$DC_STAGE/package-result.json" 2>/dev/null || return 0
     DC_RESULT="$DC_STAGE/package-result.json"
     dc_emit_result
+    # The top-level exit_code is the document's last field.
+    status=$(grep -o '"exit_code"[[:space:]]*:[[:space:]]*[0-9]*' "$DC_RESULT" | tail -n 1 | sed 's/.*://; s/[[:space:]]//g')
+    case "$status" in 2 | 75) exit "$status" ;; esac
     exit "$DC_EXIT_FAILURE"
 }
 

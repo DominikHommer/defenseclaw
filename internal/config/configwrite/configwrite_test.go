@@ -122,6 +122,24 @@ func TestApplyKeepsCommentsOnRetainedListItems(t *testing.T) {
 	}
 }
 
+// yaml.Unmarshal decodes only the first document; a write must not delete a
+// second one an operator appended (GAP-1400).
+func TestApplyRefusesASecondYAMLDocument(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n---\nguardrail:\n  mode: action\n")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Apply(context.Background(), path, []Change{{Path: "gateway.api_port", Value: 18971}}, Options{Actor: "cli:test"})
+	if !errors.Is(err, ErrMultipleDocuments) {
+		t.Fatalf("Apply error = %v, want ErrMultipleDocuments", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("a refused write changed config.yaml:\n%s", after)
+	}
+}
+
 func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	path := writeTestConfig(t, "observability: {}\n")
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")

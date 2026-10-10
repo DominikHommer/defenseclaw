@@ -118,6 +118,24 @@ func copilotHandlerIsIntact(opts Options, event string, raw any) bool {
 	return stringField(raw, "type") == "command" && stringField(raw, field) == stringField(copilotHandler(opts, event, 0), field)
 }
 
+// copilotHandlerTimeout returns the handler's timeoutSec as written, or ""
+// when it is absent. Copilot lets the tool call proceed when a policy hook
+// times out, so a shorter timeout than DefenseClaw publishes leaves calls
+// unchecked while the command still matches (GAP-1406).
+func copilotHandlerTimeout(raw any) string {
+	var value any
+	switch v := raw.(type) {
+	case *object:
+		value = v.values["timeoutSec"]
+	case map[string]any:
+		value = v["timeoutSec"]
+	}
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
 func inspectCopilot(opts Options, state *State) error {
 	dir, err := CopilotPolicyDir(opts)
 	if err != nil {
@@ -142,6 +160,10 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	sort.Strings(names)
 	ownedPerEvent := map[string]int{}
+	timeouts := map[string]int{}
+	for _, group := range groups {
+		timeouts[group.Event] = group.Timeout
+	}
 	for _, name := range names {
 		file := joinFor(opts, dir, name)
 		data, exists, err := readPolicyFile(opts, file)
@@ -183,6 +205,9 @@ func inspectCopilot(opts Options, state *State) error {
 					ownedPerEvent[event]++
 					if !copilotHandlerIsIntact(opts, event, handler) {
 						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
+					}
+					if want, ok := timeouts[event]; ok && copilotHandlerTimeout(handler) != fmt.Sprint(want) {
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s has timeoutSec %q, DefenseClaw publishes %d; Copilot lets the tool call proceed when the hook times out, so deploy the exported value; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event, copilotHandlerTimeout(handler), want)
 					}
 				} else {
 					state.ForeignEntries++

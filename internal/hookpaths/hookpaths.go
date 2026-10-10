@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -48,23 +49,35 @@ const (
 	MaxHeaderValueBytes = 88 << 10
 )
 
-// maxShellOperandCommandBytes is the bound for walking the shell syntax of a
-// command, the same on the hook client and in the gateway.
-const maxShellOperandCommandBytes = 64 << 10
+// MaxPayloadBytes is the hook payload cap, the same for the hook client and
+// the gateway request body. The shell walk below covers a whole command up to
+// this size, past the smaller ActionFacts analysis limits.
+const MaxPayloadBytes = 1 << 20
 
-// ShellWriteOperands lists the literal file operands of the output
-// redirects in a POSIX command as absolute, cleaned paths. The hook client
-// and the gateway both use it, so a client-resolved operand has the key the
-// gateway looks up. ok is false when the command is too long or does not
-// parse; its operands are then unknown.
-func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) {
-	if len(command) > maxShellOperandCommandBytes {
-		return nil, false
+// ShellWriteOperands lists the file operands of the output redirects in a
+// shell command as absolute, cleaned paths, spelled the way the shell opens
+// them (backslash escapes, single, double and ANSI-C quotes resolved). The
+// hook client and the gateway both use it, so a client-resolved operand has
+// the key the gateway looks up. ok is false when the command is over
+// MaxPayloadBytes or does not parse; its operands are then unknown. dynamic
+// reports a redirect target that is not a static word (a parameter other
+// than HOME, a substitution or a glob), which is not listed.
+func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
+	if len(command) > MaxPayloadBytes {
+		return nil, false, false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	var file *syntax.File
+	var err error
+	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
+		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	syntax.Walk(file, func(node syntax.Node) bool {
 		redirect, isRedirect := node.(*syntax.Redirect)
 		if !isRedirect || redirect.Word == nil {
@@ -75,17 +88,13 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) 
 		default:
 			return true
 		}
-		start, end := int(redirect.Word.Pos().Offset()), int(redirect.Word.End().Offset())
-		if start < 0 || end > len(command) || end <= start {
+		name, static := staticShellWord(redirect.Word, env, home != "")
+		if !static {
+			dynamic = true
 			return true
 		}
-		name := strings.Trim(command[start:end], "\"\x27")
-		if name == "" || strings.ContainsAny(name, "*?[]`") ||
-			strings.Contains(name, "$") && !strings.HasPrefix(name, "$HOME/") {
+		if name == "" {
 			return true
-		}
-		if strings.HasPrefix(name, "~/") || strings.HasPrefix(name, "$HOME/") {
-			name = strings.TrimRight(home, "/") + name[strings.IndexByte(name, '/'):]
 		}
 		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
 			name = filepath.Join(cwd, name)
@@ -93,7 +102,58 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) 
 		operands = append(operands, filepath.Clean(name))
 		return true
 	})
-	return operands, true
+	return operands, true, dynamic
+}
+
+// staticShellWord expands a redirect word that names one fixed path: quotes,
+// escapes, a leading ~/ and $HOME. Anything whose value depends on the
+// runtime (another parameter, a substitution, a glob, ~user) is not static.
+func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
+	for i, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[") {
+				return "", false
+			}
+			if i == 0 && strings.HasPrefix(part.Value, "~") &&
+				(!haveHome || part.Value != "~" && !strings.HasPrefix(part.Value, "~/")) {
+				return "", false
+			}
+		case *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				switch inner := inner.(type) {
+				case *syntax.Lit:
+				case *syntax.ParamExp:
+					if !homeParam(inner, haveHome) {
+						return "", false
+					}
+				default:
+					return "", false
+				}
+			}
+		case *syntax.ParamExp:
+			if !homeParam(part, haveHome) {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+	}
+	// Fields removes quotes and backslash escapes like the shell; a target
+	// that splits into several fields is an ambiguous redirect, not a write.
+	fields, err := expand.Fields(&expand.Config{Env: env}, word)
+	if err != nil || len(fields) != 1 {
+		return "", false
+	}
+	return fields[0], true
+}
+
+func homeParam(param *syntax.ParamExp, haveHome bool) bool {
+	return haveHome && param.Param != nil && param.Param.Value == "HOME" && !param.Excl && !param.Length &&
+		!param.Width && !param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil &&
+		param.Names == 0 && param.Exp == nil && param.Flags == nil && param.NestedParam == nil &&
+		len(param.Modifiers) == 0
 }
 
 // resolveWritePath follows existing links, including a link whose final file
@@ -215,8 +275,11 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 // is never dropped silently: when one cannot be listed (over a bound, or the command exceeds
 // the shell analysis limits) the map carries TruncatedKey.
 func Resolve(payload []byte) string {
+	if len(payload) > MaxPayloadBytes {
+		return incompleteEvidence("")
+	}
 	var envelope map[string]json.RawMessage
-	if len(payload) > 1<<20 || json.Unmarshal(payload, &envelope) != nil {
+	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
 	field := func(names ...string) json.RawMessage {
@@ -267,7 +330,7 @@ func Resolve(payload []byte) string {
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
-				operands, parsed = ShellWriteOperands(command, cwd, home)
+				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
 				break
 			}
@@ -278,8 +341,10 @@ func Resolve(payload []byte) string {
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
-	add := func(path string) {
-		if path == "" || strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~") {
+	// A shell operand is already the literal path the shell opens; only a
+	// path fact can still carry unexpanded syntax.
+	add := func(path string, literal bool) {
+		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
 		if !filepath.IsAbs(path) {
@@ -316,10 +381,10 @@ func Resolve(payload []byte) string {
 		if path == "" {
 			path = candidate.Normalized
 		}
-		add(path)
+		add(path, false)
 	}
 	for _, operand := range operands {
-		add(operand)
+		add(operand, true)
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"

@@ -524,11 +524,13 @@ echo extracted
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
-@pytest.mark.parametrize("failure", ["disk_full", "downgrade"])
+@pytest.mark.parametrize("failure", ["disk_full", "downgrade", "busy"])
 def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:
     # The Installer only says "The upgrade failed": a full data volume is
     # refused before it runs (GAP-0539), and a refused downgrade reports the
-    # result the preinstall wrote, naming both versions (GAP-0538).
+    # result the preinstall wrote, naming both versions (GAP-0538). The
+    # wrapper exits with that result's code: a postinstall that timed out on
+    # the lifecycle lock reports 75, which the MDM retries (GAP-1413).
     text = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
     functions = "\n".join(
         _shell_function(text, name)
@@ -543,7 +545,7 @@ def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path:
 esac"""
     stubs["df"] = 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/disk3 9000000 8000000 %s 90%% /\\n" "$DC_TEST_FREE"'
     stubs["installer"] = """echo "installer -pkg" >>"$DC_TEST_LOG"
-printf '{"ok":false,"errors":[{"code":"downgrade_refused","message":"DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2"}]}\\n' >"$DC_TEST_RESULT"
+printf '%s\\n' "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT"
 echo "installer: The upgrade failed."
 exit 1"""
     bin_dir = tmp_path / "bin"
@@ -568,10 +570,17 @@ dc_install_package
 echo installed-ok
 """
     free = "150000" if failure == "disk_full" else "9000000"
+    code, message = ("lifecycle_busy", "another lifecycle run holds the lock") if failure == "busy" else (
+        "downgrade_refused", "DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2")
+    document = json.dumps({"ok": False, "errors": [{"code": code, "message": message}],
+                           "exit_code": 75 if failure == "busy" else 1}, indent=2)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_FREE": free, "DC_TEST_LOG": str(log),
-           "DC_TEST_RESULT": str(result_file)}
+           "DC_TEST_RESULT": str(result_file), "DC_TEST_DOCUMENT": document}
     result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=30)
-    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert result.returncode == (75 if failure == "busy" else 1), (result.stdout, result.stderr)
+    if failure == "busy":
+        assert "lifecycle_busy" in result.stdout, result.stdout
+        return
     if failure == "disk_full":
         assert "FAIL mdm_disk_full" in result.stdout and "MB is free" in result.stdout, result.stdout
         assert not log.exists(), "the installer ran on a full volume"

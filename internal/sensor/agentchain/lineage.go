@@ -56,17 +56,27 @@ type processRecord struct {
 	// start is the kernel creation time when known. keyStart is the first
 	// observed start used for the session key, zero when the first source
 	// could not say. It stays fixed when a later poll refines or fills start.
-	start          time.Time
-	keyStart       time.Time
+	start    time.Time
+	keyStart time.Time
+	// firstSeen is when this instance was first observed. A process cannot
+	// be observed before it was created, so a start learnt later that falls
+	// after it belongs to another process that took the pid.
+	firstSeen      time.Time
 	instance       uint64
 	ppid           int
 	responsiblePID int
-	name           string
-	cmdline        string
-	agentName      string
-	via            string
-	exitedAt       time.Time
-	lastSeen       time.Time
+	// parentInstance and responsibleInstance are the instances ppid and
+	// responsiblePID named when the edge was learnt, zero when the tracker
+	// had no record of them then. They confirm an edge when a start is
+	// unknown: exec events carry none.
+	parentInstance      uint64
+	responsibleInstance uint64
+	name                string
+	cmdline             string
+	agentName           string
+	via                 string
+	exitedAt            time.Time
+	lastSeen            time.Time
 }
 
 // Tracker keeps process ancestry so an observation about a short-lived
@@ -108,14 +118,33 @@ func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline strin
 	t.recordLocked(pid, ppid, responsiblePID, name, cmdline, start)
 }
 
+// instanceLocked is the instance recorded under pid, zero when there is none.
+func (t *Tracker) instanceLocked(pid int) uint64 {
+	if record, ok := t.records[pid]; ok {
+		return record.instance
+	}
+	return 0
+}
+
 // ObserveProcessTable records a poll of the live process table. It is the
 // unprivileged fallback for ObserveExec and is lossy in exactly one way worth
 // naming: a process that started and exited between two polls is never seen.
 func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	learnt := make([]*processRecord, 0, len(rows))
 	for _, row := range rows {
-		t.recordLocked(row.PID, row.PPID, row.PPID, row.Name, row.Cmdline, row.Start)
+		if record := t.recordLocked(row.PID, row.PPID, row.PPID, row.Name, row.Cmdline, row.Start); record != nil {
+			learnt = append(learnt, record)
+		}
+	}
+	// A parent listed after its child in the same poll was unknown when the
+	// edge was learnt. Both rows describe the table at one moment.
+	for _, record := range learnt {
+		if record.parentInstance == 0 {
+			record.parentInstance = t.instanceLocked(record.ppid)
+			record.responsibleInstance = record.parentInstance
+		}
 	}
 }
 
@@ -129,9 +158,13 @@ type ProcessRow struct {
 	Start time.Time
 }
 
-func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
+// recordLocked records one observation and returns the record when it learnt
+// a new parent edge for it, nil otherwise.
+func (t *Tracker) recordLocked(
+	pid, ppid, responsiblePID int, name, cmdline string, start time.Time,
+) *processRecord {
 	if pid <= 0 {
-		return
+		return nil
 	}
 	now := t.now()
 	existing, ok := t.records[pid]
@@ -142,7 +175,7 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 			// ancestry, which is worse than forgetting a dead pid.
 			t.evictOldestExitedLocked()
 			if len(t.records) >= maxTrackedProcesses {
-				return
+				return nil
 			}
 		}
 		existing = &processRecord{pid: pid}
@@ -150,20 +183,34 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 	}
 	// Exec replaces an image, not a process. Only an observed exit or a
 	// different kernel start means the pid names a new process instance.
-	recycled := !existing.exitedAt.IsZero() || differentStart(existing.start, start)
+	// A start after the instance was first seen is the same evidence for an
+	// instance first seen without one.
+	recycled := !existing.exitedAt.IsZero() || differentStart(existing.start, start) ||
+		(existing.instance != 0 && existing.start.IsZero() && !start.IsZero() &&
+			start.After(existing.firstSeen.Add(startTolerance)))
 	reimaged := existing.name != name
 	if !existing.exitedAt.IsZero() {
 		t.exited--
 	}
-	if existing.instance == 0 || recycled {
+	fresh := existing.instance == 0 || recycled
+	if fresh {
 		t.nextInstance++
 		existing.instance = t.nextInstance
 		existing.start = start
 		existing.keyStart = start
+		existing.firstSeen = now
 	} else if existing.start.IsZero() && !start.IsZero() {
 		// Learn the real start without changing the key of a live session
 		// first seen while its creation time was unavailable.
 		existing.start = start
+	}
+	var learnt *processRecord
+	if fresh || existing.ppid != ppid {
+		existing.parentInstance = t.instanceLocked(ppid)
+		learnt = existing
+	}
+	if fresh || existing.responsiblePID != responsiblePID {
+		existing.responsibleInstance = t.instanceLocked(responsiblePID)
 	}
 	existing.ppid = ppid
 	existing.responsiblePID = responsiblePID
@@ -178,7 +225,7 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		} else {
 			existing.via = "cmdline"
 		}
-		return
+		return learnt
 	}
 	if recycled || reimaged {
 		// Clear rather than carry forward. The lineage gate is the whole
@@ -188,6 +235,7 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		existing.agentName = ""
 		existing.via = ""
 	}
+	return learnt
 }
 
 func (t *Tracker) evictOldestExitedLocked() {
@@ -263,12 +311,18 @@ func differentStart(recorded, observed time.Time) bool {
 	return delta > startTolerance || delta < -startTolerance
 }
 
-// reusedParent reports a parent record that started after its child: the
-// child's parent exited and its pid now names a younger process, which is
-// not the child's ancestor and must not lend it an agent identity.
-func reusedParent(parent, child *processRecord) bool {
-	return !parent.start.IsZero() && !child.start.IsZero() &&
-		parent.start.After(child.start.Add(startTolerance))
+// confirmedParent reports whether parent is still the process the edge from
+// child named, link being the instance recorded with that edge. Two known
+// starts decide by order: a parent younger than its child is a later process
+// on the pid. With either start unknown only the instance can confirm it, so
+// an unknown start is unverified rather than a match: an exec-only child of an
+// agent that exited would otherwise take the identity of whatever now holds
+// that pid.
+func confirmedParent(parent, child *processRecord, link uint64) bool {
+	if !parent.start.IsZero() && !child.start.IsZero() {
+		return !parent.start.After(child.start.Add(startTolerance))
+	}
+	return link != 0 && link == parent.instance
 }
 
 // Attribute walks a pid's ancestry to the agent answerable for it, or reports
@@ -334,12 +388,12 @@ func (t *Tracker) walkAncestryLocked(
 	record *processRecord, preferResponsible bool,
 ) (Attribution, bool) {
 	for depth, current := 1, record; depth <= maxAncestryWalk; depth++ {
-		next := current.ppid
+		next, link := current.ppid, current.parentInstance
 		viaResponsible := false
 		if preferResponsible &&
 			current.responsiblePID > 0 && current.responsiblePID != current.pid {
 			if _, ok := t.records[current.responsiblePID]; ok {
-				next = current.responsiblePID
+				next, link = current.responsiblePID, current.responsibleInstance
 				viaResponsible = next != current.ppid
 			}
 		}
@@ -347,7 +401,7 @@ func (t *Tracker) walkAncestryLocked(
 			return Attribution{}, false
 		}
 		parent, ok := t.records[next]
-		if !ok || reusedParent(parent, current) {
+		if !ok || !confirmedParent(parent, current, link) {
 			return Attribution{}, false
 		}
 		if parent.agentName != "" {
@@ -388,17 +442,17 @@ func (t *Tracker) outermostSameAgentLocked(pid int, agentName string) int {
 		// Following ppid alone stopped at that reparenting and rooted the
 		// child at itself, splitting one agent session into one per fork --
 		// the exact fragmentation this walk exists to prevent.
-		next := current.ppid
+		next, link := current.ppid, current.parentInstance
 		if current.responsiblePID > 0 && current.responsiblePID != current.pid {
 			if _, ok := t.records[current.responsiblePID]; ok {
-				next = current.responsiblePID
+				next, link = current.responsiblePID, current.responsibleInstance
 			}
 		}
 		if next <= 0 || next == InitPID || next == current.pid {
 			return root
 		}
 		parent, ok := t.records[next]
-		if !ok || parent.agentName != agentName || reusedParent(parent, current) {
+		if !ok || parent.agentName != agentName || !confirmedParent(parent, current, link) {
 			return root
 		}
 		root = next

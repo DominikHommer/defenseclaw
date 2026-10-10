@@ -441,6 +441,52 @@ func TestRecycledPidLosesTheOldAgentIdentity(t *testing.T) {
 	}
 }
 
+// TestExecOnlyChildDoesNotFollowARecycledAgentPid covers a child known only
+// from its exec event, which carries no start time. Its agent exits and the
+// pid goes to another agent before the next poll: comparing two unknown starts
+// proved nothing and the old child was attributed to the new agent session.
+func TestExecOnlyChildDoesNotFollowARecycledAgentPid(t *testing.T) {
+	base := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name  string
+		reuse func(tracker *Tracker, advance func(time.Duration))
+	}{
+		{
+			name: "the exit was observed and the new agent exec carries no start",
+			reuse: func(tracker *Tracker, _ func(time.Duration)) {
+				tracker.ObserveExit(100)
+				tracker.ObserveExec(100, 1, 1, "claude", "claude", time.Time{})
+			},
+		},
+		{
+			name: "no exit was observed and a poll shows a start after the agent was seen",
+			reuse: func(tracker *Tracker, advance func(time.Duration)) {
+				advance(time.Minute)
+				tracker.ObserveProcessTable([]ProcessRow{
+					{PID: 100, PPID: 1, Name: "claude", Start: base.Add(30 * time.Second)},
+				})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now, advance := fixedClock(base)
+			tracker := newTracker(lineageTTL, now)
+			tracker.ObserveExec(100, 1, 1, "claude", "claude", time.Time{})
+			tracker.ObserveExec(200, 100, 100, "cat", "cat notes", time.Time{})
+			if attribution, ok := tracker.Attribute(200); !ok || attribution.RootPID != 100 {
+				t.Fatalf("precondition: the child was not attributed to its agent: %+v", attribution)
+			}
+
+			test.reuse(tracker, advance)
+
+			if attribution, ok := tracker.Attribute(200); ok {
+				t.Fatalf("the old child was attributed to the agent now on its parent pid "+
+					"(instance %d)", attribution.RootInstance)
+			}
+		})
+	}
+}
+
 // TestSameAgentWalkFollowsTheResponsiblePid covers the macOS shape. A shell an
 // agent spawned is reparented to launchd, so its ppid no longer points at the
 // agent and only the responsible pid does. Following ppid alone rooted each

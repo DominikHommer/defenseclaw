@@ -496,7 +496,7 @@ observability:
 	if pem, _ := os.ReadFile(filepath.Join(dir, "provider-ca", v9ProviderCAName("acme"))); !strings.Contains(string(pem), "BEGIN CERTIFICATE") {
 		t.Error("the inline provider CA was not moved to provider-ca/acme.pem")
 	}
-	if refreshed, _ := os.ReadFile(staleRego); v9LegacyRegoData.Match(refreshed) || !strings.Contains(string(refreshed), "input.admission") {
+	if refreshed, _ := os.ReadFile(staleRego); strings.Contains(string(refreshed), "data.config") || !strings.Contains(string(refreshed), "input.admission") {
 		t.Error("the pre-9 admission.rego was not replaced with the shipped module")
 	}
 	if _, err := os.Stat(staleRego + DataJSONMigratedSuffix); err != nil {
@@ -1687,6 +1687,40 @@ func TestMigrateV9KeepsCustomRegoWithLegacyComment(t *testing.T) {
 	}
 	if string(got) != string(custom) {
 		t.Fatalf("custom admission module was replaced: %s", got)
+	}
+}
+
+// A 0.8.x admission module that read an operator's own data.json key
+// (data.operator_policy) loses that rule: 1.0 loads no data.json. The
+// migration must treat it as a pre-9 module and record the lost key, not
+// leave it for the gateway to refuse silently (GAP-1399).
+func TestMigrateV9RecordsCustomRegoDataKey(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(dir, "policies", "rego", "admission.rego")
+	if err := os.MkdirAll(filepath.Dir(module), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := "package defenseclaw.admission\nimport rego.v1\n" +
+		"verdict := \"blocked\" if { input.target_name in data.operator_policy.denied_skills }\n"
+	if err := os.WriteFile(module, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lost := strings.Join(result.Record.UnenforcedRegoData, "\n")
+	if !strings.Contains(lost, module+" reads data.operator_policy") {
+		t.Fatalf("unenforced_rego_data = %q, want the data.operator_policy read of %s", lost, module)
+	}
+	if kept, _ := os.ReadFile(module + DataJSONMigratedSuffix); string(kept) != custom {
+		t.Errorf("the operator module was not kept as %s%s: %q", module, DataJSONMigratedSuffix, kept)
 	}
 }
 

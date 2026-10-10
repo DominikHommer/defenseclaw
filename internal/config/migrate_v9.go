@@ -32,6 +32,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -43,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -200,6 +202,12 @@ type MigrationRecord struct {
 	// upgrade, doctor and an audit alert at each gateway start name it until
 	// the record is acknowledged (GAP-1358).
 	RulePackRebaseFailures []string `json:"rule_pack_rebase_failures,omitempty"`
+	// UnenforcedRegoData names each Rego module that reads a data document
+	// 1.0 no longer provides and the migration did not move into config.yaml
+	// (an operator's own data.json key): its rules that read it are not
+	// enforced. The upgrade, config migrate, the managed lifecycle and doctor
+	// print them until the record is acknowledged (GAP-1399).
+	UnenforcedRegoData []string `json:"unenforced_rego_data,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
@@ -1095,38 +1103,29 @@ func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 // ---------------------------------------------------------------------------
 // Rego modules
 
-// v9LegacyRegoData matches the data.json documents a pre-9 admission,
-// guardrail or skill_actions module read. Since 9 those values are
-// evaluation input, so such a module sees nothing and fails open.
-var v9LegacyRegoData = regexp.MustCompile(`\bdata\.(config|actions|scanner_overrides|first_party_allow_list|guardrail|severity_ranking)\b`)
-
-// v9RegoReadsLegacyData inspects references in parsed rules, not comments or
-// string literals. A custom module that only mentions a v8 key in prose must
-// keep its active enforcement rules.
-func v9RegoReadsLegacyData(name string, raw []byte) (bool, error) {
-	mod, err := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
-	if err != nil {
-		return false, err
-	}
-	legacy := false
-	ast.WalkRefs(mod, func(ref ast.Ref) bool {
-		if len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
-			return false
-		}
-		key, ok := ref[1].Value.(ast.String)
-		if ok && v9LegacyRegoData.MatchString("data."+string(key)) {
-			legacy = true
-		}
-		return legacy
-	})
-	return legacy, nil
+// v9DataJSONDocs are the data.json documents the 0.8.x admission, guardrail
+// and skill_actions modules read. The migration moves their values into
+// config.yaml, where the shipped module and the config-driven fallback read
+// them. Any other document a module reads, such as an operator's own key in
+// data.json, has no config_version 9 home (GAP-1399).
+var v9DataJSONDocs = map[string]bool{
+	"data.config": true, "data.actions": true, "data.scanner_overrides": true,
+	"data.first_party_allow_list": true, "data.guardrail": true, "data.severity_ranking": true,
 }
 
-// planRegoRefresh finds the pre-9 vendor modules left under
-// <policy_dir>/rego: init only seeded missing files, so an upgrade keeps the
-// old ones. On a per-user install they are replaced with the shipped module
-// (skill_actions.rego, removed in 9, is retired); on a managed host the
-// admin owns policy_dir, so they are only reported.
+// v9VendorRegoModules are the modules 0.8.x init seeded.
+var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_actions.rego"}
+
+// planRegoRefresh finds the modules under <policy_dir>/rego that read a data
+// document outside data.defenseclaw, which config_version 9 no longer
+// provides: the gateway refuses such a bundle and uses the config-driven
+// admission and thresholds (regodata, the check the policy engine runs). A
+// pre-9 vendor module left by init (it only seeded missing files) is
+// replaced on a per-user install with the shipped module (skill_actions.rego,
+// removed in 9, is retired); on a managed host the admin owns policy_dir, so
+// it is only reported. A document data.json held that the migration does not
+// move is recorded in unenforced_rego_data: the rules that read it are no
+// longer enforced, and the upgrade and doctor say so.
 func (m *v9Migrator) planRegoRefresh() error {
 	dir := filepath.Join(m.policyDir(), "rego")
 	shipped := map[string][]byte{}
@@ -1139,31 +1138,80 @@ func (m *v9Migrator) planRegoRefresh() error {
 			shipped[strings.TrimPrefix(f.Path, "rego/")] = f.Data
 		}
 	}
-	for _, name := range []string{"admission.rego", "guardrail.rego", "skill_actions.rego"} {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	parsed := map[string]*ast.Module{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if filepath.Ext(name) != ".rego" || !entry.Type().IsRegular() {
+			continue
+		}
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		legacy, parseErr := v9RegoReadsLegacyData(name, raw)
+		mod, parseErr := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
 		if parseErr != nil {
-			m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
+			if slices.Contains(v9VendorRegoModules, name) {
+				m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
+			}
 			continue
 		}
-		if !legacy {
-			continue
+		parsed[name] = mod
+	}
+	reads := map[string][]string{}
+	for _, read := range regodata.OutsideReads(parsed, "data.defenseclaw.admission", "data.defenseclaw.guardrail") {
+		reads[read.Module] = read.Docs
+	}
+	for _, name := range v9VendorRegoModules {
+		if mod := parsed[name]; mod != nil && reads[name] == nil {
+			if _, docs := regodata.ModuleReads(mod); len(docs) > 0 {
+				reads[name] = docs
+			}
 		}
-		if m.in.Managed || m.leftOutsideRollbackCopy(path) {
+	}
+	names := make([]string, 0, len(reads))
+	for name := range reads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		var effect string
+		switch {
+		case !slices.Contains(v9VendorRegoModules, name):
+			m.note("%s reads %s, which config_version 9 no longer provides; the gateway refuses the Rego modules and "+
+				"uses the config-driven admission and thresholds until it reads input instead", path, strings.Join(reads[name], ", "))
+			effect = "the gateway refuses the Rego modules and uses the config-driven admission"
+		case m.in.Managed || m.leftOutsideRollbackCopy(path):
 			m.note("%s is a pre-9 module that reads data.json; the gateway refuses it and uses the config-driven "+
 				"admission and thresholds until it is replaced with the shipped module", path)
-			continue
+			effect = "the gateway refuses the module and uses the config-driven admission"
+		default:
+			m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+			if shipped[name] == nil {
+				m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
+				effect = "the module is retired and kept as " + name + DataJSONMigratedSuffix
+			} else {
+				m.note("%s is a pre-9 module that reads data.json; it is kept as %s%s and replaced with the shipped module",
+					path, name, DataJSONMigratedSuffix)
+				effect = "the module is kept as " + name + DataJSONMigratedSuffix + " and replaced with the shipped one"
+			}
 		}
-		m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
-		if shipped[name] == nil {
-			m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
-		} else {
-			m.note("%s is a pre-9 module that reads data.json; it is kept as %s%s and replaced with the shipped module",
-				path, name, DataJSONMigratedSuffix)
+		var lost []string
+		for _, doc := range reads[name] {
+			if !v9DataJSONDocs[doc] {
+				lost = append(lost, doc)
+			}
+		}
+		if len(lost) > 0 {
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s reads %s, which 1.0 no longer loads (no data.json): the rules that use it are not enforced (%s). "+
+					"Express them in config.yaml (asset_policy, admission) or in a module that reads input, then run "+
+					"`defenseclaw-gateway config migrate --ack`", path, strings.Join(lost, ", "), effect))
 		}
 	}
 	return nil

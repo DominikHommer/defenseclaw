@@ -129,6 +129,9 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 	}
 	if reverted, err := os.Stat(env.P(env.Layout.ConfigPath)); err == nil {
 		_ = os.Chtimes(env.rejectedConfigPath(), reverted.ModTime(), reverted.ModTime())
+		if l.planned != nil {
+			l.planned.revertedConfig = reverted
+		}
 	}
 	kept := filepath.Join(env.Layout.LifecycleDir, rejectedConfigName)
 	if newer != nil {

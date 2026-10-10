@@ -196,6 +196,11 @@ type plannedInputs struct {
 	// appliedConfigSHA is the config of the deployment this transaction
 	// started from, which a rollback restores ("" on a first install).
 	appliedConfigSHA string
+	// revertedConfig is config.yaml as revertRejectedConfig left it when it
+	// put the last applied config back in place of this transaction's
+	// rejected edit, or nil. A config.yaml written after it holds a fresh
+	// push, also one of the rejected bytes (GAP-1412).
+	revertedConfig os.FileInfo
 }
 
 // Run executes one lifecycle action and returns its result; the result's
@@ -1034,6 +1039,9 @@ func (l *lifecycle) warnConfigV8(record config.MigrationRecord) {
 	}
 	if len(conflicts) > 0 {
 		message += fmt.Sprintf("; %d value(s) conflicted and the migration resolved them: %s", len(conflicts), strings.Join(conflicts, "; "))
+	}
+	if len(record.UnenforcedRegoData) > 0 {
+		message += "; Rego rules no longer enforced: " + strings.Join(record.UnenforcedRegoData, "; ")
 	}
 	l.result.AddWarning(codeConfigV8, message)
 }
