@@ -833,6 +833,20 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
+	// An apply_patch edit (its own tool or a shell wrapper) names its files
+	// in the envelope. Its targets get the same decision as a redirect
+	// operand; when they are unknown, the protected file may be one of them.
+	patchTargets, patchKnown := hookpaths.ApplyPatchWriteTargets(
+		request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
+	)
+	if !patchKnown {
+		return true
+	}
+	for _, target := range patchTargets {
+		if writeTarget(target) {
+			return true
+		}
+	}
 	return false
 }
 

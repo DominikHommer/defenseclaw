@@ -352,6 +352,13 @@ func Resolve(payload []byte) string {
 	for _, operand := range operands {
 		add(operand, true)
 	}
+	// An apply_patch edit names its files in the patch envelope, not in a
+	// redirect. Unknown targets make the map incomplete.
+	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	truncated = truncated || !patchKnown
+	for _, target := range patchTargets {
+		add(target, true)
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
