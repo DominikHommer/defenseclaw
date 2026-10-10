@@ -66,8 +66,13 @@ type runtimeManifest struct {
 const (
 	consoleEntryPointScript = `import importlib.metadata as m,sys; name=sys.argv[1]; sys.argv=[name,*sys.argv[2:]]; matches=[e for e in m.entry_points(group="console_scripts") if e.name==name]; sys.exit(matches[0].load()() if len(matches)==1 else 1)`
 
-	pluginScanScript = `import json,sys
-from defenseclaw.config import load
+	// pluginScanScript runs the plugin judge the gateway resolved for
+	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
+	// the scan rather than leaving a rules-only result (GAP-1408).
+	pluginScanScript = `import json,os,sys
+from defenseclaw.config import LLMConfig, load
+from defenseclaw.scanner._llm_env import llm_analyzer_ready
+from defenseclaw.scanner.plugin import _llm_to_override
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
@@ -89,6 +94,12 @@ while i<len(a):
         sys.exit("plugin-scan: unexpected argument "+x)
 if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
+e=os.environ.get
+llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
+if llm.model:
+    if not llm_analyzer_ready(llm):
+        sys.exit("plugin-scan: the plugin LLM judge "+llm.model+" is configured but its API key did not reach the scanner runtime, so the plugin is not scanned without it; store its key with enterprise secret set (named by enterprise.inspection.llm.credential), or remove the judge model")
+    o.llm_override={**(_llm_to_override(llm) or {}),"enabled":True}
 result=scan_plugin(t,o).to_dict()
 if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_self_paths):
     existing={(f.get("id"),f.get("location")) for f in result["findings"]}

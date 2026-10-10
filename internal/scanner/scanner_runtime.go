@@ -69,25 +69,11 @@ func (s *MCPScanner) runtimeSettings() (string, error) {
 // skill scanner's allowlist plus the judge and AI Defense settings derived
 // from config (the runtime reads no config of its own).
 func (s *MCPScanner) runtimeEnv() []string {
-	llm := s.LLM
-	derived := map[string]string{
-		"NO_COLOR":                            "1",
-		"TERM":                                "dumb",
-		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
-		"DEFENSECLAW_SCANNER_LLM_MODEL":       liteLLMModel(llm),
-		"DEFENSECLAW_SCANNER_LLM_PROVIDER":    strings.TrimSpace(llm.Provider),
-		"DEFENSECLAW_SCANNER_LLM_API_KEY":     llm.ResolvedAPIKey(),
-		"DEFENSECLAW_SCANNER_LLM_BASE_URL":    strings.TrimSpace(llm.BaseURL),
-		"DEFENSECLAW_SCANNER_LLM_REGION":      strings.TrimSpace(llm.Region),
-		"DEFENSECLAW_SCANNER_AID_API_KEY":     s.CiscoAIDefense.ResolvedAPIKey(),
-		"DEFENSECLAW_SCANNER_AID_ENDPOINT":    strings.TrimSpace(s.CiscoAIDefense.Endpoint),
-	}
-	if llm.Bedrock != nil && strings.TrimSpace(llm.Bedrock.Region) != "" {
-		derived["DEFENSECLAW_SCANNER_LLM_REGION"] = strings.TrimSpace(llm.Bedrock.Region)
-	}
-	if region := derived["DEFENSECLAW_SCANNER_LLM_REGION"]; region != "" {
-		derived["AWS_REGION"] = region
-	}
+	derived := runtimeJudgeEnv(s.LLM)
+	derived["NO_COLOR"] = "1"
+	derived["TERM"] = "dumb"
+	derived["DEFENSECLAW_SCANNER_AID_API_KEY"] = s.CiscoAIDefense.ResolvedAPIKey()
+	derived["DEFENSECLAW_SCANNER_AID_ENDPOINT"] = strings.TrimSpace(s.CiscoAIDefense.Endpoint)
 	env := make([]string, 0, 32)
 	for _, kv := range os.Environ() {
 		name, _, ok := strings.Cut(kv, "=")
@@ -104,6 +90,54 @@ func (s *MCPScanner) runtimeEnv() []string {
 		if skillScannerEnvPassthrough[upper] || hasAnyPrefix(upper, skillScannerEnvPassthroughPrefixes) {
 			env = append(env, kv)
 		}
+	}
+	for name, value := range derived {
+		if value != "" {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+// runtimeJudgeEnv is the resolved scanner judge as the variables the
+// embedded runtime's scan programs read: the runtime reads no config of its
+// own, so the gateway hands it the judge it resolved from config.
+func runtimeJudgeEnv(llm config.LLMConfig) map[string]string {
+	derived := map[string]string{
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
+		"DEFENSECLAW_SCANNER_LLM_MODEL":       liteLLMModel(llm),
+		"DEFENSECLAW_SCANNER_LLM_PROVIDER":    strings.TrimSpace(llm.Provider),
+		"DEFENSECLAW_SCANNER_LLM_API_KEY":     llm.ResolvedAPIKey(),
+		"DEFENSECLAW_SCANNER_LLM_BASE_URL":    strings.TrimSpace(llm.BaseURL),
+		"DEFENSECLAW_SCANNER_LLM_REGION":      strings.TrimSpace(llm.Region),
+	}
+	if llm.Bedrock != nil && strings.TrimSpace(llm.Bedrock.Region) != "" {
+		derived["DEFENSECLAW_SCANNER_LLM_REGION"] = strings.TrimSpace(llm.Bedrock.Region)
+	}
+	if region := derived["DEFENSECLAW_SCANNER_LLM_REGION"]; region != "" {
+		derived["AWS_REGION"] = region
+	}
+	return derived
+}
+
+// runtimeEnv is a plugin scan's environment under the embedded runtime: the
+// gateway's own environment plus the scanners.plugin judge it resolved from
+// config. Before, the runtime got no judge and ran the plugin scan rules-only
+// although an administrator configured one (GAP-1408). A judge variable or an
+// AWS endpoint from the service environment never reaches the scan.
+func (s *PluginScanner) runtimeEnv(base []string) []string {
+	derived := runtimeJudgeEnv(s.LLM)
+	env := make([]string, 0, len(base)+len(derived))
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "DEFENSECLAW_SCANNER_") || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+			continue
+		}
+		if derived[upper] != "" {
+			continue
+		}
+		env = append(env, kv)
 	}
 	for name, value := range derived {
 		if value != "" {

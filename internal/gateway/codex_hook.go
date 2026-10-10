@@ -4129,6 +4129,7 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 	case "plugin":
 		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		ps.Connector = "codex"
+		ps.LLM = cfg.ResolveLLM("scanners.plugin")
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(

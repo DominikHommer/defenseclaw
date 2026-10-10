@@ -165,7 +165,8 @@ func TestPluginRuntimeAppliesRulePackOverlay(t *testing.T) {
 	const stubs = `import sys,types
 for name in ("defenseclaw", "defenseclaw.config", "defenseclaw.scanner",
              "defenseclaw.scanner.plugin_scanner", "defenseclaw.scanner.plugin_scanner.types",
-             "defenseclaw.scanner.plugin_scanner.self_identity", "defenseclaw.scanner.rulepack"):
+             "defenseclaw.scanner.plugin_scanner.self_identity", "defenseclaw.scanner.rulepack",
+             "defenseclaw.scanner._llm_env", "defenseclaw.scanner.plugin"):
     sys.modules[name]=types.ModuleType(name)
 class Options:
     include_self=False
@@ -183,6 +184,9 @@ sys.modules["defenseclaw.scanner.plugin_scanner"].scan_plugin=lambda target,opti
 sys.modules["defenseclaw.scanner.plugin_scanner.types"].PluginScanOptions=Options
 sys.modules["defenseclaw.scanner.plugin_scanner.self_identity"].is_first_party_self_target=lambda target,**kw: False
 sys.modules["defenseclaw.config"].load=lambda: object()
+sys.modules["defenseclaw.config"].LLMConfig=lambda **kw: types.SimpleNamespace(**kw)
+sys.modules["defenseclaw.scanner._llm_env"].llm_analyzer_ready=lambda llm: True
+sys.modules["defenseclaw.scanner.plugin"]._llm_to_override=lambda llm: None
 sys.modules["defenseclaw.scanner.rulepack"].overlay_findings=lambda cfg,connector=None,**kw: [Finding()] if connector=="codex" else []
 `
 	cmd := exec.Command(python, "-c", stubs+"\n"+pluginScanScript, "/plugin", "--connector", "codex")
