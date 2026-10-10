@@ -573,6 +573,99 @@ func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
 	}
 }
 
+// TestAuthorizedKeys2LinkWriteMatchesDirectWrite covers links to
+// ~/.ssh/authorized_keys2, which the direct-write rule protects but the link
+// checks compared only with authorized_keys (GAP-1370).
+func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook paths")
+	}
+	root := t.TempDir()
+	home, project, external := filepath.Join(root, "home"), filepath.Join(root, "home", "proj"), filepath.Join(root, "external")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project, external} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys2 := filepath.Join(home, ".ssh", "authorized_keys2")
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	symlink := func(target string) func(string) error {
+		return func(link string) error { return os.Symlink(target, link) }
+	}
+	// "action" (not "raw_action") is the enforced decision.
+	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, row := range []struct {
+			name, link, operand string
+			existing            bool
+			create              func(string) error
+			want                string
+		}{
+			{"link to missing file", filepath.Join(external, "kmiss"), "", false, symlink(keys2), block},
+			{"link to existing file", filepath.Join(external, "kfile"), "", true, symlink(keys2), block},
+			{"relative link", filepath.Join(project, "krel"), "./krel", true,
+				symlink(filepath.Join("..", ".ssh", "authorized_keys2")), block},
+			{"hard link", filepath.Join(external, "hard.cfg"), "", true,
+				func(link string) error { return os.Link(keys2, link) }, block},
+			{"direct write", "", keys2, true, nil, block},
+			{"benign file", "", filepath.Join(external, "notes.txt"), false, nil, allow},
+		} {
+			for _, count := range []int{1, 31} {
+				t.Run(fmt.Sprintf("%s %s %d", connector, row.name, count), func(t *testing.T) {
+					_ = os.Remove(keys2)
+					if row.existing {
+						if err := os.WriteFile(keys2, []byte("marker\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					operand := row.operand
+					if operand == "" {
+						operand = row.link
+					}
+					if row.create != nil {
+						if err := row.create(row.link); err != nil {
+							t.Fatal(err)
+						}
+					}
+					writes := make([]string, 0, count+1)
+					for i := range count {
+						writes = append(writes, fmt.Sprintf("echo x > %s", filepath.Join(external, fmt.Sprintf("t%02d", i))))
+					}
+					command := strings.Join(append(writes, "echo marker >> "+operand), " && ")
+					body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
+						"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
+					header := hookpaths.Resolve(body)
+					// The managed gateway may not see the caller's link: keep
+					// only the hook client's header evidence.
+					if row.create != nil {
+						if err := os.Remove(row.link); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cfg := &config.Config{}
+					cfg.Guardrail.Mode = "action"
+					cfg.Guardrail.Connector = connector
+					api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
+					req.Header.Set(hookpaths.Header, header)
+					if connector == "codex" {
+						setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+					}
+					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+					recorder := httptest.NewRecorder()
+					api.handleAgentHook(connector).ServeHTTP(recorder, req)
+					got := recorder.Body.String()
+					if !strings.HasPrefix(got, row.want) ||
+						row.want == block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Fatalf("append after %d targets = %.400s, want %s", count, got, row.want)
+					}
+				})
+			}
+		}
+	}
+}
+
 func encodeTargets(t *testing.T, targets map[string]string) string {
 	t.Helper()
 	return base64.RawURLEncoding.EncodeToString(mustJSON(t, targets))

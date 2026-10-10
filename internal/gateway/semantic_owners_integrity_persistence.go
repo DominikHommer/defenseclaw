@@ -2185,9 +2185,7 @@ func matchesAuthorizedKeys(
 			relative, ok = liveHomeRelative(resolved)
 		}
 	}
-	if ok &&
-		(relative == ".ssh/authorized_keys" ||
-			relative == ".ssh/authorized_keys2") {
+	if ok && authorizedKeysRelative(relative) {
 		return true
 	}
 	value := canonicalSemanticPath(semanticPathValue(candidate))
