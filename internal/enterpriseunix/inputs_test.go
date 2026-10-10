@@ -293,6 +293,54 @@ func TestConfigPushedDuringAFailedInPlaceEditIsAppliedNext(t *testing.T) {
 	}
 }
 
+// GAP-1412: configuration management writes the rejected edit's bytes
+// again after the failed run reverted them, while the rollback restarts the
+// previous deployment. That is a fresh push of the same desired config: the
+// apply trigger is started for it, so the retry is not left unapplied.
+func TestRejectedEditPushedAgainDuringTheRollbackRetriggersApply(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edit := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	if err := os.WriteFile(configPath, edit, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// The rollback's restart is the first gateway start that sees the
+	// reverted file after the transaction's own.
+	sawOwn, pushed := false, false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != unitGateway || pushed {
+			return
+		}
+		if h.read(h.env.Layout.ConfigPath) != applied {
+			sawOwn = true
+		} else if sawOwn {
+			pushed = true
+			tmp := configPath + ".push"
+			if err := os.WriteFile(tmp, edit, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, configPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}}
+	h.healthy = false
+	failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, failed, codeActivate)
+	if !pushed || !hasWarning(failed, codeConfigReverted) {
+		t.Fatalf("premise: the edit was reverted and pushed again during the rollback (%v): %+v", pushed, failed.Warnings)
+	}
+	found := false
+	for _, call := range h.runner.calls {
+		found = found || call == "systemctl start --no-block "+unitApplyService
+	}
+	if !found || !hasWarning(failed, codeInputChanged) {
+		t.Fatalf("the apply trigger was not started for the same-byte push (%v): %+v", found, failed.Warnings)
+	}
+}
+
 // A follow-up transaction describes the deployment again; a standing
 // warning such as a failed oneshot is reported once in the one result, not
 // once per pass.
