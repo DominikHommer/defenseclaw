@@ -117,12 +117,20 @@ func POSIXPowerShellCommandFacts(input Input, facts Facts) []Facts {
 // inner commands of each exact body. A caller may use a match only for a
 // monotone argv subset rule, as an extra pass next to any other view of the
 // action; a non-match proves nothing about the original action.
+//
+// An action that is itself a PowerShell script, as a Windows shell tool sends
+// it (Codex runs every shell call through PowerShell), is read as such a body:
+// the view holds the commands of its leading statements and pipeline stages
+// (GAP-1415).
 func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, ok = Facts{}, false
 		}
 	}()
+	if facts.Parse.Dialect == DialectPowerShell {
+		return powerShellScriptSubset(input, facts)
+	}
 	if facts.Parse.Status != StatusPartial ||
 		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectMixed) ||
 		len(facts.Commands) == 0 {
@@ -181,17 +189,7 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		if !valid {
 			continue
 		}
-		var commands []CommandFact
-		for _, segment := range segments {
-			if len(commands) != 0 && !powerShellCommandPreservesNext(commands[len(commands)-1]) {
-				break
-			}
-			command, valid := exactPowerShellSegmentCommand(input, segment)
-			if !valid {
-				break
-			}
-			commands = append(commands, command)
-		}
+		commands := staticPowerShellSegmentCommands(input, segments)
 		if len(commands) == 0 || len(view.Commands)+len(commands) > maxCommands {
 			continue
 		}
@@ -210,6 +208,91 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		return Facts{}, false
 	}
 	return view, true
+}
+
+// powerShellScriptSubset is the view of a partial PowerShell action read as a
+// -Command body: the commands of its leading statements and pipeline stages
+// that staticPowerShellSegmentCommands keeps. The first statement runs before
+// anything later in the script can change what it is, and the first stage of
+// a pipeline runs whatever the later stages are, so each kept command runs as
+// the view has it (GAP-1415: "New-Item -Name marker.txt | Out-Null").
+func powerShellScriptSubset(input Input, facts Facts) (Facts, bool) {
+	if facts.Parse.Status != StatusPartial || len(input.Argv) != 0 {
+		return Facts{}, false
+	}
+	for _, issue := range facts.Parse.Issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueDynamicWord &&
+			issue != IssueUnknownOperandGrammar {
+			return Facts{}, false
+		}
+	}
+	source := input.Command
+	if source == "" {
+		extracted := extractArgsForTool(input.Args, input.Tool)
+		if len(extracted.issues) != 0 || extracted.status != StatusComplete || len(extracted.argv) != 0 {
+			return Facts{}, false
+		}
+		source = extracted.command
+	}
+	segments, ok := staticPowerShellSegments(source, 0)
+	if !ok {
+		return Facts{}, false
+	}
+	commands := staticPowerShellSegmentCommands(input, segments)
+	if len(commands) == 0 || len(commands) > maxCommands {
+		return Facts{}, false
+	}
+	view := Facts{
+		Tool:       facts.Tool,
+		CWD:        facts.CWD,
+		ActiveHome: facts.ActiveHome,
+		Parse:      ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
+	}
+	for _, command := range commands {
+		command.ID = int64(len(view.Commands) + 1)
+		command.ParentCommandID = 0
+		command.PipelineID = 0
+		command.ControlFlowUncertain = false
+		command.ControlFlowOperator = ControlFlowOperatorNone
+		command.Wrappers = nil
+		view.Commands = append(view.Commands, command)
+	}
+	return view, true
+}
+
+// staticPowerShellSegmentCommands returns the exact commands of the leading
+// segments of a PowerShell body: the first one, and each next one only while
+// the command before it cannot change what the next command is. A segment
+// "$null = <command>" runs <command> and drops its output.
+func staticPowerShellSegmentCommands(input Input, segments []string) []CommandFact {
+	var commands []CommandFact
+	for _, segment := range segments {
+		if len(commands) != 0 && !powerShellCommandPreservesNext(commands[len(commands)-1]) {
+			break
+		}
+		command, valid := exactPowerShellSegmentCommand(input, powerShellNullAssignmentCommand(segment))
+		if !valid {
+			break
+		}
+		commands = append(commands, command)
+	}
+	return commands
+}
+
+// powerShellNullAssignmentCommand returns the command of "$null = <command>",
+// or segment unchanged.
+func powerShellNullAssignmentCommand(segment string) string {
+	if len(segment) < 6 || !strings.EqualFold(segment[:5], "$null") {
+		return segment
+	}
+	rest := strings.TrimLeft(segment[5:], " \t")
+	if !strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, "==") {
+		return segment
+	}
+	if command := strings.TrimSpace(rest[1:]); command != "" {
+		return command
+	}
+	return segment
 }
 
 // Only these output/read commands can precede another statement in the

@@ -121,6 +121,37 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	}
 }
 
+// GAP-1408: a variable only the gateway derives for the scanner runtime, or
+// an AWS endpoint, never reaches a plugin scan from the service environment,
+// even when the config sets no judge. The drop set must cover every variable
+// the judge environment derives.
+func TestPluginRuntimeEnvDropsServiceScannerVariables(t *testing.T) {
+	var base []string
+	dropped := []string{"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"}
+	for name := range scannerRuntimeOwnedEnv {
+		dropped = append(dropped, name)
+	}
+	for _, name := range dropped {
+		base = append(base, name+"=from-service")
+	}
+	base = append(base, "AWS_PROFILE=credential-profile")
+	plugin := &PluginScanner{}
+	got := strings.Join(plugin.runtimeEnv(base), "\n")
+	for _, name := range dropped {
+		if strings.Contains(got, name+"=") {
+			t.Errorf("%s from the service environment reached the plugin scan", name)
+		}
+	}
+	if !strings.Contains(got, "AWS_PROFILE=credential-profile") {
+		t.Error("an unrelated AWS variable was dropped")
+	}
+	for name := range runtimeJudgeEnv(config.LLMConfig{}) {
+		if !strings.HasPrefix(name, "AWS_") && !scannerRuntimeOwnedEnv[name] {
+			t.Errorf("runtimeJudgeEnv sets %s, which the plugin scan does not drop from the service environment", name)
+		}
+	}
+}
+
 // GAP-0710: the Windows runtime must receive the exact stdio definition,
 // not only its name (which the wrapper would otherwise parse as a URL).
 func TestMCPRuntimeStdioEntry(t *testing.T) {

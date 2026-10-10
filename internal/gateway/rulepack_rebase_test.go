@@ -186,7 +186,7 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 	defer RemoveConnectorRulePackOverrides(connector)
 	for _, tc := range []struct {
 		tool, command, args, rule string
-		blocked                   bool
+		blocked, powerShell       bool
 	}{
 		{tool: "Bash", command: "touch dccert-block-marker.txt", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: "echo dccert-block-marker", rule: "CERT-MARKER", blocked: true},
@@ -200,10 +200,18 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		{tool: "Bash", command: "echo dcword", rule: "CERT-WORD", blocked: true},
 		{tool: "Bash", command: "cat /tmp/dcword.txt", rule: "CERT-WORD", blocked: true},
 		{tool: "Bash", command: "cat /tmp/dcwords.txt", rule: "CERT-WORD"},
+		// GAP-1415: Codex on Windows sends a PowerShell script; a pipeline or
+		// a second statement left it partial, so the rule was detection-only.
+		{tool: "Bash", command: "New-Item -ItemType File -Name dccert-block-marker.txt -Force | Out-Null", rule: "CERT-MARKER", blocked: true, powerShell: true},
+		{tool: "Bash", command: "$null = New-Item -Path . -Name dccert-block-marker.txt; Get-Item x", rule: "CERT-MARKER", blocked: true, powerShell: true},
+		{tool: "Bash", command: "echo dccert-block-marker > m.txt", rule: "CERT-MARKER", blocked: true, powerShell: true},
 	} {
 		input := actionfacts.Input{
 			Tool: tc.tool, Command: tc.command, CWD: "/home/alice/project",
 			ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+		}
+		if tc.powerShell {
+			input.DialectHint = actionfacts.DialectPowerShell
 		}
 		legacy := tc.command
 		if tc.args != "" {
