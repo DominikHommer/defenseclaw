@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -56,12 +57,18 @@ func (l *lifecycle) inputsChanged() bool {
 		return l.rollbackConfigSHA != "" && planned.appliedConfigSHA != "" && current != planned.appliedConfigSHA
 	}
 	if len(r.Errors) > 0 && hasMessageCode(r.Warnings, codeConfigReverted) {
-		// A rejected in-place edit was reverted on purpose; only a
-		// config.yaml that is neither the rejected edit nor the restored last
-		// applied config is a newer push to apply (revertRejectedConfig puts
-		// one written during the run back).
+		// A rejected in-place edit was reverted on purpose; the restored
+		// last applied config is not a newer push to apply. Any other
+		// config.yaml is one (revertRejectedConfig puts one written during
+		// the run back), also the rejected bytes written again after the
+		// revert: configuration management retrying the same desired config
+		// (GAP-1412). The rejected bytes still in place because the revert
+		// failed are not.
 		committed, err := readBounded(env.committedConfigPath(), maxInputBytes)
-		return err == nil && current != planned.configSHA && current != sha256Bytes(committed)
+		if err != nil || current == sha256Bytes(committed) {
+			return false
+		}
+		return current != planned.configSHA || writtenSince(env.P(env.Layout.ConfigPath), planned.revertedConfig)
 	}
 	return current != planned.configSHA
 }
@@ -106,6 +113,16 @@ func (l *lifecycle) retriggerApply(ctx context.Context) {
 		}
 	}
 	r.AddWarning(codeInputChanged, message+"; run `"+env.lifecycleCommand("ensure")+"` to apply it")
+}
+
+// writtenSince reports whether the file at path was written after it was
+// in the state before describes; a nil before is never written since.
+func writtenSince(path string, before os.FileInfo) bool {
+	if before == nil {
+		return false
+	}
+	now, err := os.Stat(path)
+	return err == nil && (!os.SameFile(before, now) || !now.ModTime().Equal(before.ModTime()) || now.Size() != before.Size())
 }
 
 func hasMessageCode(messages []enterprisestatus.Message, code string) bool {
