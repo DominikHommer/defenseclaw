@@ -120,9 +120,9 @@ type Service struct {
 	dnsCache  *dnscapture.Cache
 	dnsCap    dnscapture.Capturer
 
-	// hostPlaneTried and hostPlaneRetry belong to Run's goroutine: Run tried
-	// to start the host plane, and the last try could not reach the helper.
-	hostPlaneTried, hostPlaneRetry bool
+	// hostPlaneRetrying is set while Plane C is down and the supervisor will
+	// start it again, so the reason says the gap is being closed.
+	hostPlaneRetrying bool
 
 	// pollMu serializes Poll. The ticker and an operator-triggered scan can
 	// arrive together, and Poll mutates episodes and the lineage tracker
@@ -312,8 +312,25 @@ func (s *Service) Run(ctx context.Context) error {
 		defer func() { _ = s.dnsCap.Close() }()
 	}
 	if s.hostPlane != nil {
-		s.startHostPlane(ctx)
-		defer func() { _ = s.hostPlane.close() }()
+		planeCtx, stopPlane := context.WithCancel(ctx)
+		firstTry, supervised := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(supervised)
+			s.superviseHostPlane(planeCtx, firstTry)
+		}()
+		defer func() {
+			stopPlane()
+			<-supervised
+			_ = s.hostPlane.close()
+		}()
+		// The first snapshot shows Plane C as started when the start answers
+		// quickly, but a slow one (a helper still coming up) must not hold
+		// Planes A and B back: a poll stalled behind it for a minute.
+		select {
+		case <-firstTry:
+		case <-ctx.Done():
+		case <-time.After(hostPlaneFirstStartWait):
+		}
 	}
 	// Poll once immediately so a freshly enabled sensor has a snapshot before
 	// the first interval elapses, rather than reporting "no data" for a minute.
@@ -326,36 +343,98 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			s.startHostPlane(ctx)
 			s.Poll(ctx)
 		}
 	}
 }
 
-// startHostPlane starts Plane C on Run's first pass and, while the sensor
-// helper could not be reached, on every later tick. A host plane that cannot
-// start is degraded coverage, not a fatal error: planes A and B still work,
-// and the reason reaches the snapshot so an operator sees it rather than an
-// empty row. During a package upgrade the gateway can start before the
-// sensor helper listens again; the first dial error then stayed until the
-// gateway restarted (GAP-1255). Other start failures (a refused local
-// source, a stream that ended later) are reported, not retried. Only Run
-// calls it, so the consumer runs on Run's context. A nil host plane means
-// Plane C is not selected (a per-user install without the sensor helper):
-// there is nothing to start, so every tick returns here (GAP-1810).
-func (s *Service) startHostPlane(ctx context.Context) {
-	if s.hostPlane == nil || (s.hostPlaneTried && !s.hostPlaneRetry) {
-		return
+// Bounds of the wait between two starts of Plane C while it is down.
+// Short at first, because the sensor helper restarts in seconds (a package
+// upgrade or a config push), and capped so a helper that stays away costs
+// one dial every half minute.
+const (
+	hostPlaneRetryMin = time.Second
+	hostPlaneRetryMax = 30 * time.Second
+	// hostPlaneFirstStartWait is how long Run's first poll waits for the
+	// first start of Plane C.
+	hostPlaneFirstStartWait = 2 * time.Second
+)
+
+// startHostPlane makes one attempt to start Plane C and reports whether the
+// supervisor should keep it up. A source whose stream ended is replaced with
+// a fresh one first. A start that could not reach the sensor helper is
+// retried (GAP-1255), and so is anything on a brokered source: the helper
+// restarts on every package upgrade and on a config push, and the gateway
+// kept the closed stream until it was restarted itself (GAP-1418). A refused
+// local source is reported and not retried. A nil host plane means Plane C
+// is not selected; there is nothing to start (GAP-1810).
+func (s *Service) startHostPlane(ctx context.Context) bool {
+	if s.hostPlane == nil {
+		return false
 	}
-	s.hostPlaneTried = true
+	if s.hostPlane.ended() && s.options.NewPlaneSource != nil {
+		s.hostPlane.replaceSource(s.options.NewPlaneSource(s.options.HomeDirs))
+	}
 	err := s.hostPlane.start(ctx)
-	s.hostPlaneRetry = errors.Is(err, acquire.ErrHelperUnreachable)
+	retry := s.reconnectsHelper() || errors.Is(err, acquire.ErrHelperUnreachable)
 	s.mu.Lock()
 	s.hostPlaneStartErr = ""
 	if err != nil {
 		s.hostPlaneStartErr = err.Error()
 	}
+	s.hostPlaneRetrying = err != nil && retry
 	s.mu.Unlock()
+	return retry
+}
+
+// reconnectsHelper reports a brokered acquisition, whose event stream ends
+// whenever the sensor helper restarts.
+func (s *Service) reconnectsHelper() bool {
+	return s.options.Acquirer != nil && s.options.Acquirer.Brokered()
+}
+
+// superviseHostPlane keeps Plane C up for Run's lifetime: it makes the first
+// start (closing firstTry after it), waits for the running stream to end and
+// starts it again, with a capped exponential backoff between failed starts.
+// Each change of state is followed by a poll, so status reports the plane
+// down as soon as the stream ends and up again as soon as it is back, rather
+// than one poll interval (up to an hour) later.
+func (s *Service) superviseHostPlane(ctx context.Context, firstTry chan<- struct{}) {
+	began := time.Now()
+	retry := s.startHostPlane(ctx)
+	close(firstTry)
+	if time.Since(began) >= hostPlaneFirstStartWait {
+		// Run's first poll went ahead without this start.
+		s.Poll(ctx)
+	}
+	backoff := hostPlaneRetryMin
+	for retry {
+		if stopped := s.hostPlane.stopped(); stopped != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopped:
+			}
+			if ctx.Err() != nil || !s.reconnectsHelper() {
+				return
+			}
+			s.mu.Lock()
+			s.hostPlaneRetrying = true
+			s.mu.Unlock()
+			s.Poll(ctx)
+			backoff = hostPlaneRetryMin
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(2*backoff, hostPlaneRetryMax)
+		retry = s.startHostPlane(ctx)
+		if s.hostPlane.stopped() != nil {
+			s.Poll(ctx)
+		}
+	}
 }
 
 // Poll runs one sampling cycle and replaces the snapshot.
@@ -735,13 +814,20 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 		return false, capability.Mechanism, s.deselectedReason(platform.PlaneC)
 	}
 	s.mu.RLock()
-	startErr := s.hostPlaneStartErr
+	startErr, retrying := s.hostPlaneStartErr, s.hostPlaneRetrying
 	s.mu.RUnlock()
+	suffix := ""
+	if retrying {
+		suffix = "; reconnecting"
+	}
 	if startErr != "" {
-		return false, capability.Mechanism, startErr
+		return false, capability.Mechanism, startErr + suffix
 	}
 	_, _, up, coverage := s.hostPlane.stats()
 	if !up {
+		if s.reconnectsHelper() {
+			return false, capability.Mechanism, "the sensor helper closed the event stream" + suffix
+		}
 		return false, capability.Mechanism, "the kernel event source stopped delivering"
 	}
 	// Partial coverage is running, with the gap named. Reporting it as fully
