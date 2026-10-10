@@ -23,7 +23,10 @@
 
 package plane
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // A representative Security-channel 4688 record, in the exact XML wevtapi
 // renders. Decoding is tested against the real wire shape because the shape is
@@ -95,6 +98,73 @@ func TestWindowsDecodesAccountCreation(t *testing.T) {
 	}
 	if event.Detail == "" {
 		t.Error("an identity event carried no detail")
+	}
+}
+
+// security4663 is a Security-channel 4663 record as EvtRenderEventXml
+// returns it, taken from a managed Windows host where Claude Code wrote a
+// profile settings.json: AccessList holds unresolved %%NNNN message ids, never
+// the text the old check looked for.
+const security4663 = `<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+<System><EventID>4663</EventID><EventRecordID>%d</EventRecordID>
+<TimeCreated SystemTime="2026-10-10T21:04:02.1230000Z"/></System>
+<EventData>
+<Data Name="SubjectUserSid">S-1-5-21-2566694559-2372738039-4094494201-1124</Data>
+<Data Name="SubjectUserName">dcw-rv16adm</Data>
+<Data Name="ObjectServer">Security</Data>
+<Data Name="ObjectType">%s</Data>
+<Data Name="ObjectName">%s</Data>
+<Data Name="HandleId">0x2dcc</Data>
+<Data Name="AccessList">%s</Data>
+%s<Data Name="ProcessId">0x2f18</Data>
+<Data Name="ProcessName">C:\Users\dcw-rv16adm\.local\bin\claude.exe</Data>
+<Data Name="ResourceAttributes">S:AI</Data>
+</EventData></Event>`
+
+// TestWindowsClassifiesObjectAccessWrites pins how a 4663 record becomes a
+// file write: the AccessMask decides when present, the AccessList ids
+// otherwise, and an unrecognised list is a write only on an agent
+// configuration path.
+func TestWindowsClassifiesObjectAccessWrites(t *testing.T) {
+	t.Parallel()
+	const settings = `C:\Users\dcw-rv16bob.DCFC-WIN2-RS8\.claude\settings.json.tmp.12056.7572fa2d6107`
+	const document = `C:\Users\dcw-rv16bob.DCFC-WIN2-RS8\Documents\notes.txt`
+	const runKey = `\REGISTRY\USER\S-1-5-21-1\Software\Microsoft\Windows\CurrentVersion\Run`
+	mask := func(value string) string { return `<Data Name="AccessMask">` + value + "</Data>\n" }
+	for index, tc := range []struct {
+		name, objectType, path, accessList, accessMask string
+		want                                           Kind
+	}{
+		{"WriteData with its mask", "File", settings, "%%4417\n\t\t\t\t", mask("0x2"), KindFileWrite},
+		{"WriteData without a mask", "File", settings, "%%4417", "", KindFileWrite},
+		{"AppendData without a mask", "File", document, "%%4418", "", KindFileWrite},
+		{"AppendData mask", "File", document, "", mask("0x4"), KindFileWrite},
+		{"resolved WriteData text", "File", document, "WriteData (or AddFile)", "", KindFileWrite},
+		{"DELETE mask", "File", settings, "%%1537", mask("0x10000"), KindFileWrite},
+		{"WRITE_DAC mask in decimal", "File", document, "%%1539", mask("262144"), KindFileWrite},
+		{"ReadData", "File", settings, "%%4416", mask("0x1"), KindFileRead},
+		{"SYNCHRONIZE only", "File", settings, "%%1541", mask("0x100000"), KindFileRead},
+		{"unknown id on an agent config path", "File", settings, "%%9999", "", KindFileWrite},
+		{"unknown id elsewhere", "File", document, "%%9999", "", KindFileRead},
+		{"mask wins over a write list", "File", settings, "%%4417", mask("0x1"), KindFileRead},
+		{"mask wins over a read list", "File", document, "%%4416", mask("0x2"), KindFileWrite},
+		{"registry notify is a read", "Key", runKey, "%%4436", mask("0x10"), KindFileRead},
+	} {
+		raw := fmt.Sprintf(security4663, 5000+index, tc.objectType, tc.path, tc.accessList, tc.accessMask)
+		record, err := decodeSecurityXML(raw)
+		if err != nil {
+			t.Fatalf("%s: decode: %v", tc.name, err)
+		}
+		event, ok := translateSecurityRecord(record)
+		if !ok {
+			t.Fatalf("%s: a 4663 record did not translate", tc.name)
+		}
+		if event.Kind != tc.want {
+			t.Errorf("%s: Kind = %s, want %s", tc.name, event.Kind, tc.want)
+		}
+		if event.PID != 0x2f18 || event.Name != "claude.exe" || event.User != "dcw-rv16adm" || event.Path != tc.path {
+			t.Errorf("%s: event = %+v; the process, user and path drive attribution", tc.name, event)
+		}
 	}
 }
 

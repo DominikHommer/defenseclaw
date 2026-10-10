@@ -34,6 +34,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 // Security-log event ids this source consumes. Each maps to exactly one tactic
@@ -467,10 +469,7 @@ func translateSecurityRecord(record securityRecord) (Event, bool) {
 		if path == "" {
 			return Event{}, false
 		}
-		kind := KindFileRead
-		if strings.Contains(strings.ToLower(record.data("AccessList")), "writedata") {
-			kind = KindFileWrite
-		}
+		kind := classifyObjectAccess(record.data("ObjectType"), record.data("AccessMask"), record.data("AccessList"), path)
 		return Event{
 			Kind: kind, PID: parseHexOrDecimal(record.data("ProcessId")),
 			Name: baseName(record.data("ProcessName")), Path: path,
@@ -504,6 +503,122 @@ func translateSecurityRecord(record securityRecord) (Event, bool) {
 		}, true
 	}
 	return Event{}, false
+}
+
+// Write rights in a 4663 AccessMask, from the Microsoft "4663(S) An attempt
+// was made to access an object" access-rights table. A file or directory
+// event is a write when it used any right that can change content, metadata,
+// the directory listing or the security descriptor; these are exactly the
+// rights Microsoft recommends monitoring as write actions.
+const (
+	accessWriteData       = 0x2     // WriteData / AddFile (registry: Set key value)
+	accessAppendData      = 0x4     // AppendData / AddSubdirectory (registry: Create sub-key)
+	accessWriteEA         = 0x10    // WriteEA (registry: Notify, a read)
+	accessKeyCreateLink   = 0x20    // registry: Create link (files: Execute/Traverse, a read)
+	accessDeleteChild     = 0x40    // DeleteChild
+	accessWriteAttributes = 0x100   // WriteAttributes
+	accessDelete          = 0x10000 // DELETE
+	accessWriteDAC        = 0x40000 // WRITE_DAC
+	accessWriteOwner      = 0x80000 // WRITE_OWNER
+
+	accessStandardWrites = accessDelete | accessWriteDAC | accessWriteOwner
+	fileWriteMask        = accessWriteData | accessAppendData | accessWriteEA | accessDeleteChild |
+		accessWriteAttributes | accessStandardWrites
+	keyWriteMask = accessWriteData | accessAppendData | accessKeyCreateLink | accessStandardWrites
+)
+
+// objectAccessRights maps every AccessList entry the plane understands to
+// whether it is a write. EvtRenderEventXml never resolves these, so the list
+// arrives as %%NNNN message ids; the names are the resolved English forms,
+// kept for a record rendered with its message strings.
+var objectAccessRights = map[string]bool{
+	// Files and directories.
+	"4416": false, "readdata": false, "listdirectory": false,
+	"4417": true, "writedata": true, "addfile": true,
+	"4418": true, "appenddata": true, "addsubdirectory": true, "createpipeinstance": true,
+	"4419": false, "readea": false,
+	"4420": true, "writeea": true,
+	"4421": false, "execute/traverse": false, "execute": false, "traverse": false,
+	"4422": true, "deletechild": true,
+	"4423": false, "readattributes": false,
+	"4424": true, "writeattributes": true,
+	// Standard rights, any object type.
+	"1537": true, "delete": true,
+	"1538": false, "read_control": false,
+	"1539": true, "write_dac": true,
+	"1540": true, "write_owner": true,
+	"1541": false, "synchronize": false,
+	"1542": false, "access_sys_sec": false,
+	// Registry keys: query value, set value, create sub-key, enumerate
+	// sub-keys, notify, create link.
+	"4432": false, "4433": true, "4434": true, "4435": false, "4436": false, "4437": true,
+}
+
+// classifyObjectAccess decides whether a 4663 record is a write.
+//
+// The numeric AccessMask is authoritative when present, because it does not
+// depend on how the record was rendered. Without one, the AccessList entries
+// decide. An entry the table does not recognise, with no write beside it, is
+// treated as a write on an agent configuration path, so an unexpected
+// rendering cannot hide a change to the files the persistence finding exists
+// for; elsewhere it stays a read.
+func classifyObjectAccess(objectType, accessMask, accessList, path string) Kind {
+	if mask, ok := parseAccessMask(accessMask); ok {
+		writes := uint64(fileWriteMask)
+		if strings.EqualFold(strings.TrimSpace(objectType), "Key") {
+			writes = keyWriteMask
+		}
+		if mask&writes != 0 {
+			return KindFileWrite
+		}
+		return KindFileRead
+	}
+	unknown := false
+	for _, token := range strings.Fields(accessList) {
+		write, known := objectAccessRights[strings.ToLower(strings.TrimPrefix(token, "%%"))]
+		if write {
+			return KindFileWrite
+		}
+		if !known {
+			unknown = true
+		}
+	}
+	if unknown && isAgentConfigPath(path) {
+		return KindFileWrite
+	}
+	return KindFileRead
+}
+
+// parseAccessMask reads a Security-log AccessMask: 0x-prefixed hex in every
+// record seen so far, bare decimal otherwise. Zero carries no rights and is
+// treated as absent.
+func parseAccessMask(value string) (uint64, bool) {
+	value = strings.TrimSpace(value)
+	base := 10
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		value, base = value[2:], 16
+	}
+	mask, err := strconv.ParseUint(value, base, 32)
+	if err != nil || mask == 0 {
+		return 0, false
+	}
+	return mask, true
+}
+
+// isAgentConfigPath reports whether path is in a .claude folder or matches
+// one of the agent configuration indicators that raise
+// agent_config_persistence.
+func isAgentConfigPath(path string) bool {
+	normalised := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	if strings.Contains(normalised, "/.claude/") || strings.HasSuffix(normalised, "/.claude") {
+		return true
+	}
+	for _, fragment := range tactics.IndicatorsFor("windows").AgentConfigPaths {
+		if strings.Contains(normalised, strings.ToLower(strings.ReplaceAll(fragment, `\`, "/"))) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseHexOrDecimal decodes a Security-log pid, which is written as 0x1a4 in
