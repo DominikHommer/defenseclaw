@@ -287,7 +287,7 @@ func trustedActiveAuthorizedKeysRedirectTarget(input actionfacts.Input, target *
 				continue
 			}
 			relative, ok := activeHomeRelative(facts, path)
-			if ok && (relative == ".ssh/authorized_keys" || relative == ".ssh/authorized_keys2") {
+			if ok && authorizedKeysRelative(relative) {
 				return true
 			}
 		}
@@ -485,13 +485,11 @@ func trustedAuthorizedKeysPathInText(text, activeHome string) bool {
 			strings.HasPrefix(value, "$ENV{HOME}/") {
 			return true
 		}
-		if relative, ok := liveHomeRelative(value); ok &&
-			(relative == ".ssh/authorized_keys" || relative == ".ssh/authorized_keys2") {
+		if relative, ok := liveHomeRelative(value); ok && authorizedKeysRelative(relative) {
 			return true
 		}
-		if activeHome != "" &&
-			(value == strings.TrimRight(activeHome, "/")+"/.ssh/authorized_keys" ||
-				value == strings.TrimRight(activeHome, "/")+"/.ssh/authorized_keys2") {
+		if activeHome != "" && strings.HasPrefix(value, strings.TrimRight(activeHome, "/")+"/") &&
+			authorizedKeysRelative(strings.TrimPrefix(value, strings.TrimRight(activeHome, "/")+"/")) {
 			return true
 		}
 	}
@@ -708,6 +706,17 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 	return found
 }
 
+// authorizedKeysRelative reports a home-relative path that names one of the
+// hookpaths.AuthorizedKeysFiles under .ssh.
+func authorizedKeysRelative(relative string) bool {
+	for _, name := range hookpaths.AuthorizedKeysFiles {
+		if relative == ".ssh/"+name {
+			return true
+		}
+	}
+	return false
+}
+
 func trustedSymlinkName(input actionfacts.Input, name string) string {
 	if strings.HasPrefix(name, "~/") || strings.HasPrefix(name, "$HOME/") {
 		name = strings.TrimRight(input.ActiveHome, "/") + name[strings.IndexByte(name, '/'):]
@@ -722,7 +731,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
-	active := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
+	// One list for the path, hard-link and missing-final-file checks, the
+	// same files the direct-write rule protects (GAP-1370).
+	protectedPaths := hookpaths.AuthorizedKeysPaths(facts.ActiveHome)
+	protected := make(map[string]struct{}, len(protectedPaths))
+	for _, path := range protectedPaths {
+		protected[canonicalSemanticPath(path)] = struct{}{}
+	}
+	isProtected := func(path string) bool {
+		_, ok := protected[canonicalSemanticPath(path)]
+		return ok
+	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
 		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
@@ -736,14 +755,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = filepath.Clean(target)
-		if canonicalSemanticPath(target) == active {
+		if isProtected(target) {
 			return true
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
 			switch {
 			case present && resolved != "":
-				return canonicalSemanticPath(resolved) == active
+				return isProtected(resolved)
 			case present:
 				// The user's hook could not resolve the operand (a link
 				// loop, a chain past the kernel limit or an unreadable
@@ -762,16 +781,25 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		info, err := os.Lstat(target)
-		if err != nil {
+		if err != nil && !os.IsNotExist(err) {
 			return false
 		}
-		if info.Mode()&os.ModeSymlink == 0 {
-			// A hard link names the protected file under another path.
-			protected, err := os.Stat(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
-			return err == nil && info.Mode().IsRegular() && os.SameFile(info, protected)
+		if err == nil && info.Mode()&os.ModeSymlink == 0 {
+			// A hard link names a protected file under another path.
+			if !info.Mode().IsRegular() {
+				return false
+			}
+			for _, path := range protectedPaths {
+				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
+					return true
+				}
+			}
+			return false
 		}
-		resolved, err := filepath.EvalSymlinks(target)
-		return err == nil && canonicalSemanticPath(resolved) == active
+		// Resolve as the hook client does, so a link to a missing final
+		// file that the redirect would create is covered as well.
+		resolved, ok := hookpaths.ResolveWriteTarget(target)
+		return ok && isProtected(resolved)
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.

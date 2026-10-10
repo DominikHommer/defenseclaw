@@ -189,8 +189,31 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	return filepath.Join(resolvedParent, filepath.Base(path)), true
 }
 
-// protectedFile is the identity of the user's authorized_keys file. A hard
-// link elsewhere names the same file under another path, so a target is
+// AuthorizedKeysFiles names the user's authorized-keys files under ~/.ssh:
+// the sshd default AuthorizedKeysFile (.ssh/authorized_keys and
+// .ssh/authorized_keys2), the same set the direct-write rule
+// persistence.ssh_authorized_keys_command protects. A symlink, a hard link
+// and a direct write are judged against this one list.
+var AuthorizedKeysFiles = [...]string{"authorized_keys", "authorized_keys2"}
+
+// AuthorizedKeysPaths returns the AuthorizedKeysFiles paths under home.
+func AuthorizedKeysPaths(home string) []string {
+	paths := make([]string, 0, len(AuthorizedKeysFiles))
+	for _, name := range AuthorizedKeysFiles {
+		paths = append(paths, filepath.Join(home, ".ssh", name))
+	}
+	return paths
+}
+
+// ResolveWriteTarget resolves an absolute write operand the way the hook
+// client does: links are followed, including one whose final file does not
+// exist yet. ok is false when the target cannot be resolved.
+func ResolveWriteTarget(path string) (string, bool) {
+	return resolveWritePath(path, 0)
+}
+
+// protectedFile is the identity of one of the user's authorized-keys files. A
+// hard link elsewhere names the same file under another path, so a target is
 // compared by file identity (device and inode on Unix, volume serial and file
 // index on Windows) and not by pathname alone.
 type protectedFile struct {
@@ -199,37 +222,48 @@ type protectedFile struct {
 	unknown bool
 }
 
-func newProtectedFile(home string) protectedFile {
-	protected := protectedFile{path: filepath.Join(home, ".ssh", "authorized_keys")}
-	info, err := os.Stat(protected.path)
-	switch {
-	case err == nil:
-		protected.info = info
-	case !os.IsNotExist(err):
-		protected.unknown = true
+type protectedFiles []protectedFile
+
+func newProtectedFiles(home string) protectedFiles {
+	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
+	for _, path := range AuthorizedKeysPaths(home) {
+		protected := protectedFile{path: path}
+		info, err := os.Stat(path)
+		switch {
+		case err == nil:
+			protected.info = info
+		case !os.IsNotExist(err):
+			protected.unknown = true
+		}
+		files = append(files, protected)
 	}
-	return protected
+	return files
 }
 
 // target maps a resolved write target to the protected path when both name
-// the same file. When the protected file cannot be identified, a multiply
+// the same file. When a protected file cannot be identified, a multiply
 // linked target may be an alias of it and is reported as unresolvable.
-func (p protectedFile) target(resolved string) (string, bool) {
-	if p.info == nil && !p.unknown {
-		return resolved, true
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() {
-		return resolved, true
-	}
-	if p.info != nil {
-		if os.SameFile(info, p.info) {
-			return p.path, true
+func (files protectedFiles) target(resolved string) (string, bool) {
+	var info os.FileInfo
+	for _, p := range files {
+		if p.info == nil && !p.unknown {
+			continue
 		}
-		return resolved, true
-	}
-	if linkCount(resolved, info) > 1 {
-		return "", false
+		if info == nil {
+			var err error
+			if info, err = os.Stat(resolved); err != nil || !info.Mode().IsRegular() {
+				return resolved, true
+			}
+		}
+		if p.info != nil {
+			if os.SameFile(info, p.info) {
+				return p.path, true
+			}
+			continue
+		}
+		if linkCount(resolved, info) > 1 {
+			return "", false
+		}
 	}
 	return resolved, true
 }
@@ -237,8 +271,8 @@ func (p protectedFile) target(resolved string) (string, bool) {
 // Resolve returns a bounded, header-safe map from absolute write operands to
 // their filesystem targets. An empty value means resolution was attempted but
 // could not be trusted. A regular file maps to itself, unless it is a hard
-// link to the user's authorized_keys file. An operand is never dropped
-// silently: when one cannot be listed (over a bound, or the command exceeds
+// link to one of the user's authorized-keys files. An operand
+// is never dropped silently: when one cannot be listed (over a bound, or the command exceeds
 // the shell analysis limits) the map carries TruncatedKey.
 func Resolve(payload []byte) string {
 	if len(payload) > MaxPayloadBytes {
@@ -305,7 +339,7 @@ func Resolve(payload []byte) string {
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
-	protected := newProtectedFile(home)
+	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
