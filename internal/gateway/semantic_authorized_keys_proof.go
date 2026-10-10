@@ -729,6 +729,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			clientCWD = filepath.Clean(cwd)
 		}
 	}
+	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
 	writeTarget := func(target string) bool {
 		if !filepath.IsAbs(target) {
 			return false
@@ -739,7 +741,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
-			cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
 			switch {
 			case present && resolved != "":
 				return canonicalSemanticPath(resolved) == active
@@ -750,7 +751,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				if cannotResolveLocally {
 					return true
 				}
-			case request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" && cannotResolveLocally:
+			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
 				// into the protected home, in or outside the home. Its target
 				// is unknown, so fail closed.
@@ -788,7 +789,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	if input.Command != "" {
-		operands, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		operands, parsed, dynamic := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		// A truncated client map is not complete, so a nonempty target in it
+		// proves only its own operand. When the gateway cannot list every
+		// redirect target either (the command does not parse, or a target is
+		// not a static word) and cannot resolve one itself, the protected-path
+		// decision is unknown: fail closed (GAP-1395). Every write redirect
+		// operator contains a greater-than sign.
+		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
+			return true
+		}
 		for _, operand := range operands {
 			if writeTarget(operand) {
 				return true

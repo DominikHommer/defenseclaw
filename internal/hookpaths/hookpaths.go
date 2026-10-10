@@ -49,21 +49,22 @@ const (
 	MaxHeaderValueBytes = 88 << 10
 )
 
-// maxShellOperandCommandBytes is the bound for walking the shell syntax of a
-// command, the same on the hook client and in the gateway.
-const maxShellOperandCommandBytes = 64 << 10
+// MaxPayloadBytes is the hook payload cap, the same for the hook client and
+// the gateway request body. The shell walk below covers a whole command up to
+// this size, past the smaller ActionFacts analysis limits.
+const MaxPayloadBytes = 1 << 20
 
 // ShellWriteOperands lists the file operands of the output redirects in a
 // shell command as absolute, cleaned paths, spelled the way the shell opens
 // them (backslash escapes, single, double and ANSI-C quotes resolved). The
 // hook client and the gateway both use it, so a client-resolved operand has
-// the key the gateway looks up. ok is false when the command is too long or
-// does not parse; its operands are then unknown. A redirect target that is
-// not a static word (a parameter other than HOME, a substitution or a glob)
-// is not listed.
-func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) {
-	if len(command) > maxShellOperandCommandBytes {
-		return nil, false
+// the key the gateway looks up. ok is false when the command is over
+// MaxPayloadBytes or does not parse; its operands are then unknown. dynamic
+// reports a redirect target that is not a static word (a parameter other
+// than HOME, a substitution or a glob), which is not listed.
+func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
+	if len(command) > MaxPayloadBytes {
+		return nil, false, false
 	}
 	var file *syntax.File
 	var err error
@@ -74,7 +75,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) 
 		}
 	}
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -88,7 +89,11 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) 
 			return true
 		}
 		name, static := staticShellWord(redirect.Word, env, home != "")
-		if !static || name == "" {
+		if !static {
+			dynamic = true
+			return true
+		}
+		if name == "" {
 			return true
 		}
 		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
@@ -97,7 +102,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok bool) 
 		operands = append(operands, filepath.Clean(name))
 		return true
 	})
-	return operands, true
+	return operands, true, dynamic
 }
 
 // staticShellWord expands a redirect word that names one fixed path: quotes,
@@ -236,8 +241,11 @@ func (p protectedFile) target(resolved string) (string, bool) {
 // silently: when one cannot be listed (over a bound, or the command exceeds
 // the shell analysis limits) the map carries TruncatedKey.
 func Resolve(payload []byte) string {
+	if len(payload) > MaxPayloadBytes {
+		return incompleteEvidence("")
+	}
 	var envelope map[string]json.RawMessage
-	if len(payload) > 1<<20 || json.Unmarshal(payload, &envelope) != nil {
+	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
 	field := func(names ...string) json.RawMessage {
@@ -288,7 +296,7 @@ func Resolve(payload []byte) string {
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
-				operands, parsed = ShellWriteOperands(command, cwd, home)
+				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
 				break
 			}
