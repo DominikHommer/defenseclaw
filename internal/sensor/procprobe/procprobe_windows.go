@@ -98,9 +98,7 @@ func snapshot() ([]Process, int, error) {
 	// lacks; each row's session comes from the kernel's process list instead,
 	// and the sensor asks who is signed in to it (SessionUser).
 	if len(missingOwners) != 0 {
-		for pid, owner := range lookupWMIProcessOwners(missingOwners) {
-			rows[missingOwners[pid]].User, rows[missingOwners[pid]].UserSID = owner.name, owner.sid
-		}
+		adoptWMIOwners(rows, missingOwners, lookupWMIProcessOwners)
 	}
 	return rows, partial, nil
 }

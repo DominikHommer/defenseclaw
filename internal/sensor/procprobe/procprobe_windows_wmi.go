@@ -8,13 +8,49 @@ package procprobe
 import (
 	"fmt"
 	"runtime"
+	"strconv"
+	"time"
 
 	ole "github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
 	"golang.org/x/sys/windows"
 )
 
-type processOwner struct{ name, sid string }
+type processOwner struct {
+	name, sid string
+	// created is the creation time of the process WMI answered about, read
+	// before and after GetOwnerSid. The owner is dropped when the two
+	// readings differ: the pid changed hands while the method ran.
+	created time.Time
+}
+
+// wmiCreationTolerance absorbs the microsecond rounding of CIM datetimes
+// against the kernel creation time of the snapshot row.
+const wmiCreationTolerance = time.Millisecond
+
+// adoptWMIOwners asks lookup for the owners of the rows whose tokens could
+// not be read and copies each one into its row only when WMI answered about
+// that process instance: same creation time as the row. The pid of a process
+// that exited after the Toolhelp snapshot can already name a process of
+// another account when WMI is asked, and that SID must never land on the
+// earlier row.
+func adoptWMIOwners(
+	rows []Process, missing map[uint32]int, lookup func(map[uint32]int) map[uint32]processOwner,
+) {
+	for pid, owner := range lookup(missing) {
+		index, ok := missing[pid]
+		if !ok {
+			continue
+		}
+		row := &rows[index]
+		delta := row.StartedAt.Sub(owner.created)
+		if row.StartedAt.IsZero() || owner.created.IsZero() ||
+			delta > wmiCreationTolerance || delta < -wmiCreationTolerance {
+			continue
+		}
+		row.User, row.UserSID = owner.name, owner.sid
+	}
+}
 
 // lookupWMIProcessOwners asks the local Win32_Process provider for only the
 // PIDs whose process tokens were inaccessible. GetOwnerSid is a WMI method
@@ -74,6 +110,47 @@ func lookupWMIProcessOwners(wanted map[uint32]int) map[uint32]processOwner {
 	return owners
 }
 
+// wmiProcessCreated reads Win32_Process.CreationDate for pid, zero when WMI
+// has no such process or no date.
+func wmiProcessCreated(service *ole.IDispatch, pid uint32) time.Time {
+	processRaw, err := oleutil.CallMethod(service, "Get", fmt.Sprintf(`Win32_Process.Handle="%d"`, pid))
+	if err != nil {
+		return time.Time{}
+	}
+	defer processRaw.Clear()
+	process := processRaw.ToIDispatch()
+	if process == nil {
+		return time.Time{}
+	}
+	return wmiCreationDate(process)
+}
+
+func wmiCreationDate(process *ole.IDispatch) time.Time {
+	value, err := oleutil.GetProperty(process, "CreationDate")
+	if err != nil {
+		return time.Time{}
+	}
+	defer value.Clear()
+	return parseCIMDateTime(value.ToString())
+}
+
+// parseCIMDateTime parses a CIM datetime, yyyymmddHHMMSS.mmmmmm in local time
+// followed by the signed UTC offset in minutes.
+func parseCIMDateTime(text string) time.Time {
+	if len(text) != 25 {
+		return time.Time{}
+	}
+	local, err := time.ParseInLocation("20060102150405.000000", text[:21], time.UTC)
+	if err != nil {
+		return time.Time{}
+	}
+	offset, err := strconv.Atoi(text[21:])
+	if err != nil {
+		return time.Time{}
+	}
+	return local.Add(-time.Duration(offset) * time.Minute)
+}
+
 func wmiProcessOwner(service *ole.IDispatch, pid uint32) (processOwner, bool) {
 	processRaw, err := oleutil.CallMethod(service, "Get", fmt.Sprintf(`Win32_Process.Handle="%d"`, pid))
 	if err != nil {
@@ -82,6 +159,10 @@ func wmiProcessOwner(service *ole.IDispatch, pid uint32) (processOwner, bool) {
 	defer processRaw.Clear()
 	process := processRaw.ToIDispatch()
 	if process == nil {
+		return processOwner{}, false
+	}
+	created := wmiCreationDate(process)
+	if created.IsZero() {
 		return processOwner{}, false
 	}
 	resultRaw, err := oleutil.CallMethod(process, "ExecMethod_", "GetOwnerSid")
@@ -112,6 +193,12 @@ func wmiProcessOwner(service *ole.IDispatch, pid uint32) (processOwner, bool) {
 	if err != nil {
 		return processOwner{}, false
 	}
+	// GetOwnerSid opens the process by pid when it runs, so read the
+	// creation time again: a pid that changed hands meanwhile answered for
+	// another process.
+	if after := wmiProcessCreated(service, pid); !after.Equal(created) {
+		return processOwner{}, false
+	}
 	name, sidText := windowsOwner(sid)
-	return processOwner{name: name, sid: sidText}, sidText != ""
+	return processOwner{name: name, sid: sidText, created: created}, sidText != ""
 }
