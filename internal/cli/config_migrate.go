@@ -322,6 +322,9 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 	for _, line := range config.MigratedRuleLines(r) {
 		fmt.Fprintf(out, "  rule     %s\n", line)
 	}
+	for _, line := range r.UnenforcedRegoData {
+		fmt.Fprintf(out, "  WARNING  %s\n", line)
+	}
 	if len(result.Written) > 0 {
 		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(result.Written, ", "))
 	}

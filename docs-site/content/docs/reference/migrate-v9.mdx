@@ -634,6 +634,19 @@ managed host the administrator owns `policy_dir`, so the migration only
 records a note, and the gateway refuses the old module and uses the
 config-driven policy.
 
+The migration checks every module under `policies/rego` that the admission or
+guardrail module reaches, with the same check the gateway runs: a module that
+reads any `data.*` document outside `data.defenseclaw` is a pre-9 module. The
+`data.json` values 0.8.x shipped (`data.config`, `data.actions`,
+`data.guardrail` and the others above) move into `config.yaml`. A key of your
+own in `data.json`, such as `data.operator_policy`, has no 1.0 home: the rules
+that read it are no longer enforced. The migration lists each such module and
+key under `unenforced_rego_data` in `migration-v9.json`, the upgrade and
+`config migrate` print it as a warning, and doctor shows a `Rego data` warning
+until you run `defenseclaw-gateway config migrate --ack`. Express those rules
+in `config.yaml` (`asset_policy`, `admission`) or in a module that reads
+`input`.
+
 ### Custom providers
 
 The migration moves entries from a legacy `custom-providers.json` into
@@ -762,6 +775,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
 | `renamed_rules[]`, `expressed_rules[]`, `whole_argument_rules[]`, `detection_only_rules[]` | The custom-pack rules the rebase changed: built-in rules you gave a pattern of your own and their new ID (`CMD-RM-RF -> CUSTOM-CMD-RM-RF`), the rules that still block with an expression derived from their literal pattern, the ones of those that block only a command argument equal to the literal, and the ones that only record tool-call matches. |
 | `rule_pack_rebase_failures[]` | The custom packs pinned without their 1.0 copy, each with the reason; their pattern-only rules no longer block a tool call. |
+| `unenforced_rego_data[]` | The Rego modules that read a `data.json` key of yours that 1.0 no longer loads, each with the key and what happened to the module; the rules that read it are not enforced. |
 | `unscannable_mcp[]` | The MCP servers a scan refuses to start: `name`, `connector`, `command`, the scanner's `reason`, the `runtime_effect` and the `fix` command. Written by `defenseclaw migrate` after the commit. |
 | `acknowledged` | Set by `--ack`. |
 

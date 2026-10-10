@@ -31,6 +31,8 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"  //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 	"github.com/open-policy-agent/opa/rego" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+
+	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 )
 
 const (
@@ -425,91 +427,12 @@ func compileModules(modules map[string]string) error {
 // neither query reaches, such as policy tests or the firewall and audit
 // modules an upgraded 0.8 install keeps, cannot change a verdict.
 func checkNoLegacyData(modules map[string]*ast.Module) error {
-	names := make([]string, 0, len(modules))
-	for name := range modules {
-		names = append(names, name)
+	reads := regodata.OutsideReads(modules, admissionQuery, guardrailQuery)
+	if len(reads) == 0 {
+		return nil
 	}
-	sort.Strings(names)
-	reached := make(map[string]bool, len(names))
-	var queue []string
-	for _, name := range names {
-		if pkg := modules[name].Package.Path.String(); pkg == admissionQuery || pkg == guardrailQuery {
-			reached[name] = true
-			queue = append(queue, name)
-		}
-	}
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		refs, legacy := moduleDataRefs(modules[name])
-		if legacy != "" {
-			return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
-				"(the data.json values moved into config.yaml); replace it with this release's module", name, legacy)
-		}
-		for _, other := range names {
-			if reached[other] {
-				continue
-			}
-			for _, ref := range refs {
-				if dataRefOverlaps(ref, modules[other].Package.Path) {
-					reached[other] = true
-					queue = append(queue, other)
-					break
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// moduleDataRefs returns the data references in the imports and rules of mod
-// and the first one outside data.defenseclaw. The package clause names the
-// document of the module itself and a with target replaces a document for one
-// expression; neither reads one, so only a with value is inspected.
-func moduleDataRefs(mod *ast.Module) ([]ast.Ref, string) {
-	var refs []ast.Ref
-	var legacy string
-	var walk *ast.GenericVisitor
-	walk = ast.NewGenericVisitor(func(node any) bool {
-		if legacy != "" {
-			return true
-		}
-		if with, ok := node.(*ast.With); ok {
-			walk.Walk(with.Value)
-			return true
-		}
-		ref, ok := node.(ast.Ref)
-		if !ok || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
-			return false
-		}
-		if key, ok := ref[1].Value.(ast.String); ok && string(key) != "defenseclaw" {
-			legacy = "data." + string(key)
-			return true
-		}
-		refs = append(refs, ref)
-		return false
-	})
-	for _, imp := range mod.Imports {
-		walk.Walk(imp)
-	}
-	for _, rule := range mod.Rules {
-		walk.Walk(rule)
-	}
-	return refs, legacy
-}
-
-// dataRefOverlaps reports whether ref can read the document of the package
-// at path: one is a prefix of the other, and a variable key matches any key.
-func dataRefOverlaps(ref, path ast.Ref) bool {
-	for i := 1; i < len(ref) && i < len(path); i++ {
-		if _, ok := ref[i].Value.(ast.String); !ok {
-			return true
-		}
-		if !ref[i].Equal(path[i]) {
-			return false
-		}
-	}
-	return true
+	return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
+		"(the data.json values moved into config.yaml); replace it with this release's module", reads[0].Module, reads[0].Docs[0])
 }
 
 func toMap(v interface{}) (map[string]interface{}, error) {
