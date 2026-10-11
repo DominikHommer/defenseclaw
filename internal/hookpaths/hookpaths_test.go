@@ -58,6 +58,7 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'\ncat staged.patch | apply_patch":  false,
 		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; cat staged.patch | apply_patch":  false,
 		"apply_patch '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; APPLY_PATCH < staged.patch": false,
+		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch' | apply_patch < staged.patch":     false,
 		"env FOO=1 apply_patch < draft.patch":        false,
 		"command apply_patch < draft.patch":          false,
 		"exec apply_patch < draft.patch":             false,

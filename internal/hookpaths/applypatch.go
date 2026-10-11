@@ -212,15 +212,22 @@ func patchShellInvocationsKnown(text string) bool {
 		if strings.TrimSpace(opener) == "" && start > 0 {
 			inputLine, opener = start-1, lines[start-1]
 		}
-		if patchDirectInput.MatchString(opener) || patchHeredocInput.MatchString(opener) || patchPipedHeredoc.MatchString(opener) {
+		close := strings.TrimSpace(lines[end])
+		if index := strings.Index(close, patchEndMarker); index >= 0 {
+			close = close[index+len(patchEndMarker):]
+		}
+		direct := patchDirectInput.FindStringIndex(opener)
+		if direct == nil {
+			direct = patchHeredocInput.FindStringIndex(opener)
+		}
+		if direct == nil {
+			direct = patchPipedHeredoc.FindStringIndex(opener)
+		}
+		if direct != nil && !strings.Contains(opener[direct[1]:], "<") && !strings.Contains(close, "<") {
 			bound[inputLine]++
 		} else if patchPrinter.MatchString(opener) {
 			pipeLine := end
-			close := strings.TrimSpace(lines[end])
-			if index := strings.Index(close, patchEndMarker); index >= 0 {
-				close = close[index+len(patchEndMarker):]
-			}
-			if patchPipeCall.MatchString(close) {
+			if patchPipeCall.MatchString(close) && !strings.Contains(close, "<") {
 				bound[pipeLine]++
 			} else if end+1 < len(lines) {
 				// A pipe on the next line must continue the quoted printer.
