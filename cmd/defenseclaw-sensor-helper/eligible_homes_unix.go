@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -52,7 +53,11 @@ func eligibleHomes(manifestPath string, manifest enterprisehooks.Manifest) ([]st
 		return nil, err
 	}
 	if strings.EqualFold(strings.TrimSpace(mode), config.EnterpriseEnrollmentManifest) {
-		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, manifest)
+		// A target the administrator disabled enrolls nobody, as in
+		// manifestHomes; one that does not say is enabled (GAP-1488).
+		enabled := enterprisehooks.Manifest{Targets: slices.DeleteFunc(slices.Clone(manifest.Targets),
+			func(target enterprisehooks.ManifestTarget) bool { return !target.IsEnabled() })}
+		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, enabled)
 	}
 	homes := make([]string, 0, len(accounts))
 	for _, account := range accounts {
