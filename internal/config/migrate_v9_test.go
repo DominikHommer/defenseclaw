@@ -2182,3 +2182,86 @@ func TestAcknowledgeMigrationV9KeepsUnscannableMCP(t *testing.T) {
 		t.Fatalf("unscannable_mcp = %+v, want %+v", record.UnscannableMCP, want)
 	}
 }
+
+// The gateway loads Rego modules kept flat in policy_dir when policy_dir/rego
+// holds none (policy.resolveRegoDir), as 0.8.x did. A pre-9 flat module that
+// reads data.json is then refused and the gateway falls back to the config
+// policy, so the migration must refresh or report it the way it does a module
+// under rego/ (GAP-1481). With modules under rego/ the flat copies are not
+// loaded and stay as they are.
+func TestMigrateV9RefreshesFlatRegoModules(t *testing.T) {
+	admission := "package defenseclaw.admission\nimport rego.v1\n" +
+		"verdict := \"blocked\" if { input.target_name == \"marker-skill\" }\n" +
+		"verdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	operator := "package defenseclaw.admission\nimport rego.v1\n" +
+		"denied if { input.target_name in data.operator_policy.denied_skills }\n"
+	for _, tc := range []struct {
+		name            string
+		managed, nested bool
+	}{{name: "per-user"}, {name: "managed", managed: true}, {name: "rego subfolder", nested: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			policies := filepath.Join(dir, "policies")
+			files := map[string]string{"admission.rego": admission, "operator.rego": operator}
+			if tc.nested {
+				files["rego/admission.rego"] = admission
+			}
+			for name, body := range files {
+				path := filepath.Join(policies, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configPath := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\npolicy_dir: "+policies+
+				"\nobservability: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyDir, dataJSON := V8PolicyDataJSON(policies)
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, PolicyDir: policyDir, DataJSONPath: dataJSON, Managed: tc.managed,
+			})
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			flat := filepath.Join(policies, "admission.rego")
+			notes := strings.Join(result.Record.Notes, "\n")
+			got, _ := os.ReadFile(flat)
+			switch {
+			case tc.nested:
+				nested := filepath.Join(policies, "rego", "admission.rego")
+				if kept, _ := os.ReadFile(nested + DataJSONMigratedSuffix); string(kept) != admission {
+					t.Errorf("rego/admission.rego was not kept as %s: %q", DataJSONMigratedSuffix, kept)
+				}
+				if string(got) != admission || strings.Contains(notes, flat) {
+					t.Errorf("the flat module the gateway does not load was changed or reported: %q\n%s", got, notes)
+				}
+				return
+			case tc.managed:
+				if string(got) != admission || !strings.Contains(notes, flat+" is a pre-9 module that reads data.json") {
+					t.Errorf("managed: want %s left and reported:\n%s", flat, notes)
+				}
+			default:
+				if kept, _ := os.ReadFile(flat + DataJSONMigratedSuffix); string(kept) != admission {
+					t.Errorf("%s was not kept as %s: %q", flat, DataJSONMigratedSuffix, kept)
+				}
+				if string(got) == admission || !strings.Contains(string(got), "package defenseclaw.admission") {
+					t.Errorf("%s was not replaced with the shipped module: %q", flat, got)
+				}
+				if !strings.Contains(notes, flat+" is a pre-9 module that reads data.json; it is kept as") {
+					t.Errorf("no note names the refreshed flat module:\n%s", notes)
+				}
+			}
+			lost := strings.Join(result.Record.UnenforcedRegoData, "\n")
+			if custom := filepath.Join(policies, "operator.rego"); !strings.Contains(lost, custom+" reads data.operator_policy") ||
+				!strings.Contains(notes, custom+" reads data.operator_policy") {
+				t.Errorf("the flat custom module read is not reported: %q\n%s", lost, notes)
+			}
+		})
+	}
+}
