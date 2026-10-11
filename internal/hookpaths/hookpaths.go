@@ -605,6 +605,45 @@ func commandLinks(command, cwd, home string) shellLinks {
 	return links
 }
 
+// Links are the links one shell command creates, read as Resolve reads them.
+type Links struct {
+	links     shellLinks
+	protected protectedFiles
+}
+
+// CommandLinks reads the links that the shell command of a tool call
+// creates. The command of an apply_patch tool is a patch envelope, not shell.
+func CommandLinks(tool, command, cwd, home string) Links {
+	if command == "" || isApplyPatchToolName(tool) {
+		return Links{links: shellLinks{known: true}}
+	}
+	links := Links{links: commandLinks(command, cwd, home)}
+	if len(links.links.aliases) > 0 {
+		links.protected = newProtectedFiles(home)
+	}
+	return links
+}
+
+// Opaque reports a link that the command may create but that cannot be read
+// statically: a wrapper or a multicall binary running ln, an interpreter or
+// Windows link call, an archive or sync link option, or a mv or relative cd
+// with a link. Every write target of the command is then unknown. A program
+// word that is not static alone does not count (GAP-1523).
+func (l Links) Opaque() bool {
+	return l.links.opaque
+}
+
+// Target maps an absolute write operand through the links the command
+// creates as Resolve does: a name that reaches one of the user's
+// authorized-keys files maps to that file. ok is false when one of the names
+// cannot be resolved.
+func (l Links) Target(path string) (string, bool) {
+	if len(l.links.aliases) == 0 {
+		return path, true
+	}
+	return l.links.resolve(path, l.protected)
+}
+
 // copyLinkOptions reports a cp call with a static link option, and one with
 // a word that is not static and may expand to an option.
 func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option, dynamic bool) {
