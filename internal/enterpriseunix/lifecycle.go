@@ -170,6 +170,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
+	// configACLWritable is set when a transaction removed a macOS ACL entry
+	// that let another account write config.yaml after the plan checked it:
+	// bytes that changed since are not applied (GAP-1501).
+	configACLWritable bool
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.
 	machinePolicyPublished bool
@@ -1377,8 +1381,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// this transaction wrote its own (a push during activation) would
 			// be lost to the snapshot restore, so it is kept and put back
 			// after the restart like one applyFiles kept.
-			current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
-			if err == nil && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
+			// Not one another account could write (GAP-1501).
+			current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath))
+			if err == nil && problem == "" && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
 				l.configWrittenDuringRun = current
 			}
 		}
@@ -1457,7 +1462,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.clearStaleHookSocket(account)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
-		return failAndRollback(codeApply, err)
+		return failAndRollback(errorCode(err, codeApply), err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -1812,6 +1817,35 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	changed := map[string]bool{}
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
 		current, _ := sha256File(env.P(file.Path))
+		// config.yaml is checked again as it is applied: the plan checked
+		// who could write it, but a push can loosen its mode before this
+		// point, and restoring the managed owner and mode of bytes another
+		// account wrote since made the follow-up transaction trust them as
+		// administrator policy (GAP-1501).
+		var checked []byte
+		untrusted := ""
+		if file.Kind == "config" {
+			data, problem, err := env.readConfigChecked(env.P(file.Path))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			current, checked, untrusted = "", data, problem
+			if data != nil {
+				current = sha256Bytes(data)
+			}
+			if untrusted == "" && l.configACLWritable {
+				untrusted = "a macOS ACL entry let another account write it"
+			}
+		}
+		if current == file.SHA && untrusted != "" {
+			// The planned bytes: a new file holds them, so a descriptor the
+			// other account opened writes nowhere.
+			if err := env.writeFileAtomic(env.P(file.Path), checked, file.Mode, file.Owner); err != nil {
+				return nil, err
+			}
+			l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", file.Path, untrusted)
+			continue
+		}
 		if current == file.SHA {
 			if l.reportChanges && env.metadataDiffers(env.P(file.Path), file.Mode, file.Owner) {
 				l.noteChange("restored the mode and owner of %s", file.Path)
@@ -1826,8 +1860,12 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		// stays and a follow-up transaction applies it (input_changed). The
 		// run overwrote it with its own file and nothing warned (GAP-0745).
 		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
+		if (file.KeepContent || written) && untrusted != "" {
+			return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+				file.Path, untrusted, env.lifecycleCommand(ActionEnsure))}
+		}
 		if written {
-			l.configWrittenDuringRun, _ = readBounded(env.P(file.Path), maxInputBytes)
+			l.configWrittenDuringRun = checked
 		}
 		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the

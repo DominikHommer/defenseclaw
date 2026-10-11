@@ -418,6 +418,9 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 				finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
 		}
 		removed = append(removed, finding.path)
+		if finding.write && finding.path == env.Layout.ConfigPath {
+			l.configACLWritable = true
+		}
 	}
 	left, err := env.aclFindings(ctx, targets)
 	if err != nil {

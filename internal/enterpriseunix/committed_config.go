@@ -101,10 +101,12 @@ func (l *lifecycle) inPlaceConfigEdit(record *Deployment) []byte {
 func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned []byte, cause string) (newer []byte) {
 	env, r := l.env, l.result
 	rejected := planned
-	if current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+	if current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath)); err == nil && current != nil {
 		if planned == nil {
 			rejected = current
-		} else if sha256Bytes(current) != sha256Bytes(planned) {
+		} else if sha256Bytes(current) != sha256Bytes(planned) && problem == "" {
+			// Newer bytes another account could write are not put back for
+			// the apply trigger to apply (GAP-1501).
 			newer = current
 		}
 	}

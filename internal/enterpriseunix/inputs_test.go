@@ -124,6 +124,53 @@ func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 	}
 }
 
+// A push left config.yaml 0666 after the run planned and a standard user
+// switched enforcement before applyFiles ran. The run restored the managed
+// owner and mode of the edited file, and its follow-up transaction applied
+// the edit as administrator policy (GAP-1501). Bytes written while another
+// account could write the file are refused when the run applies them and
+// never kept for a follow-up, for a --config run and for an in-place edit.
+func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
+	for _, configFlag := range []bool{true, false} {
+		t.Run(fmt.Sprintf("config-flag-%v", configFlag), func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			path := h.env.P(h.env.Layout.ConfigPath)
+			admin := append(DefaultConfig(h.env.Layout), "# pushed\n"...)
+			opts := Options{Action: ActionEnsure}
+			if configFlag {
+				opts.ConfigFile = filepath.Join(t.TempDir(), "pushed.yaml")
+				if err := os.WriteFile(opts.ConfigFile, admin, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, admin, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			edited := []byte(strings.Replace(string(admin), "mode: observe", "mode: action", 1))
+			done := false
+			h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+				if name != unitOf("linux", "enumerator") || done {
+					return
+				}
+				done = true
+				if err := os.Chmod(path, 0o666); err != nil {
+					t.Error(err)
+				}
+				if err := os.WriteFile(path, edited, 0o640); err != nil {
+					t.Error(err)
+				}
+			}}
+			requireError(t, h.run(opts), codeConfig)
+			h.env.Services = h.services
+			_ = h.run(Options{Action: ActionEnsure})
+			record, _ := h.env.loadDeployment()
+			if h.read(h.env.Layout.ConfigPath) == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+				t.Fatalf("the edit written while config.yaml was 0666 was kept or applied (%04o)", h.mode(h.env.Layout.ConfigPath))
+			}
+		})
+	}
+}
+
 // A protected credential written during a transaction is applied the same
 // way.
 func TestSecretWrittenDuringATransactionIsApplied(t *testing.T) {
