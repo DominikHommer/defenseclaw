@@ -68,6 +68,10 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 		"apply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+apply_patch(\"x\")\n*** End Patch\nP\napply_patch < staged.patch":          false,
 		"cat <<'+A'\napply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+A\n+x; apply_patch < staged.patch\n*** End Patch\nP":           false,
 		"x=\"$(echo ')\"\napply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+y'; apply_patch < staged.patch; echo '\n*** End Patch\nP": false,
+		// An expanding feed may carry other directives than the text shows, so
+		// it binds no call and its visible targets do not count (GAP-1506).
+		"apply_patch <<P\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n$EXTRA\n*** End Patch\nP": false,
+		"apply_patch \"*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+$EXTRA\n*** End Patch\"":        false,
 		"command apply_patch < draft.patch":          false,
 		"exec apply_patch < draft.patch":             false,
 		"nohup apply_patch < draft.patch":            false,

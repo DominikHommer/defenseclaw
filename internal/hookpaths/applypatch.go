@@ -199,7 +199,8 @@ var (
 // and every earlier envelope closed its feed on its End line (or the line
 // after it). A body line that may close or expand the feed, a body line that
 // is not a patch line, or any doubt about the state makes the rest of the
-// text shell, so an apply_patch in it counts as a call of its own.
+// text shell, so an apply_patch in it counts as a call of its own, and the
+// envelope binds no call.
 func patchShellInvocationsKnown(text string) bool {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
@@ -235,6 +236,13 @@ func patchShellInvocationsKnown(text string) bool {
 		}
 		cursor, known = feed.closeAfter(lines, end)
 		known = known && fed
+		if !fed {
+			// An expanding or malformed feed may hand apply_patch other
+			// directives than the text shows, so it binds no call: the
+			// apply_patch that reads it stays unknown (GAP-1506).
+			start = end
+			continue
+		}
 		close := strings.TrimSpace(lines[end])
 		if index := strings.Index(close, patchEndMarker); index >= 0 {
 			close = close[index+len(patchEndMarker):]
