@@ -780,6 +780,60 @@ tool_suppressions: []
 	}
 }
 
+// GAP-1508: a connector application protection protects automatically scans
+// with its own scope, application_protection.guardrail.rules layered on the
+// profile pack. The start-time preload listed no such scope, the request
+// missed it, and Claude Code and Codex scanned with the base rule set: the
+// profile rule never blocked. A scope the preload missed loads on first use.
+func TestAutoProtectedConnectorsUseTheProfileRulePack(t *testing.T) {
+	stubProfileSources(t)
+	resetConnectorRuleCategories(t)
+	withLocalPatternsRestored(t)
+	priorManaged := ManagedEnterpriseActive()
+	setManagedEnterpriseRedactionPosture(false)
+	t.Cleanup(func() { setManagedEnterpriseRedactionPosture(priorManaged) })
+	packDir := filepath.Join(t.TempDir(), "strict")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: AUTO-PROFILE-MARKER
+    pattern: "auto_profile_marker_token"
+    title: auto-protected profile fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	inspect := true
+	cfg := &config.Config{}
+	cfg.ApplicationProtection.Enabled = true
+	cfg.ApplicationProtection.Guardrail.Rules = &config.GuardrailRulesConfig{
+		SensitiveTools: []config.GuardrailSensitiveTool{{Name: "crm_export", ResultInspection: &inspect}},
+	}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action", RulePackDir: packDir}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	set := api.guardrailProfileSet()
+	if set == nil {
+		t.Fatal("profile set was not built")
+	}
+	scan := func(connector string) []string {
+		ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+		ctx = api.withGuardrailProfileDecision(ctx, connector)
+		return findingIDs(scanAllRulesForConnectorFor(ctx, connector, "auto_profile_marker_token", "exec"))
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		if ids := scan(connector); !containsRuleID(ids, "AUTO-PROFILE-MARKER") {
+			t.Fatalf("%s: auto-protected request scanned without the profile rule: %v", connector, ids)
+		}
+	}
+	key := effectiveRulePackKey(set.profiles["strict"].Config, "claudecode")
+	delete(set.rules, key)
+	delete(set.packs, key)
+	if ids := scan("claudecode"); !containsRuleID(ids, "AUTO-PROFILE-MARKER") {
+		t.Fatalf("a scope missing from the preload fell back to the base rules: %v", ids)
+	}
+}
+
 // GAP-0094: a local account's groups count once each. macOS listed every
 // gid and then its name, so explain and identity.observed doubled the count.
 func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
