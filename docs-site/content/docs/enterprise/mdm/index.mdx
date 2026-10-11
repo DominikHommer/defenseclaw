@@ -425,6 +425,7 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture`, `mdm_version_mismatch` | — / `1` | The archive or package is not a DefenseClaw enterprise artifact for this host, or not the version you pinned. |
 | `mdm_package_manager_busy` | — / `75` | dpkg, rpm or the macOS installer held its lock. Retry. |
 | `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | — / `1` | The package manager failed or is absent. |
+| `mdm_package_result_empty` | — / `1` | macOS: the Installer failed and the package's postinstall left an empty result, and no lifecycle run holds the lock. When one still holds it, the wrapper reports `lifecycle_busy` and exits `75`. |
 | `mdm_download_failed`, `mdm_download_unavailable` | — / `1` | The HTTPS download failed, or neither curl nor wget is installed. |
 | `mdm_not_installed` | `1603` / `1` | A read-only action, or `ensure` without an artifact, found no installed deployment. |
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |

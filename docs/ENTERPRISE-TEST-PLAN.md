@@ -93,7 +93,7 @@ differs from its expected result. Severity:
 | Foreign-hook cleanup of user-level hook files | About every five minutes; allow up to about 5.5 minutes. The hook-time guard blocks affected calls in the meantime |
 | Enumerator cycle (new account, agent install or version change) | Every five minutes, and once at service start |
 | Revocation of a deleted account (Linux, macOS) | The third consecutive definitive miss, 10 to 15 minutes; `enterprise <os> repair` removes it at once |
-| Lifecycle lock wait | Linux and macOS: 5 s by default (`--lock-wait` up to 15 m), then exit `75`; package scripts and the config-apply trigger wait up to 10 minutes. Windows: about 30 s, then exit `1618` |
+| Lifecycle lock wait | Linux and macOS: 5 s by default (`--lock-wait` up to 15 m), then exit `75`; package scripts wait up to 8 minutes and the config-apply trigger up to 10. Windows: about 30 s, then exit `1618` |
 | Config apply after an in-place edit | Linux path unit: within about 10 s. macOS apply daemon: at most once every 30 s |
 | Daily verify | Linux timer: daily with up to one hour of random delay. macOS: 03:17 local time |
 | Windows per-user writes | Only while that user has an active session (R17). Signed-out users are handled at their next sign-in |
@@ -1226,7 +1226,7 @@ old key after `status` shows the new digest.
 | `detect.sh` | `0` detected | `1` not detected | `2` | - | Formats `value` and `jamf` always exit `0` |
 | `detect.ps1` | `0` detected (one stdout line) | `1` (reason on stderr) | - | - | |
 | `Remediate-Detect.ps1` | `0` healthy or not installed | `1` | - | - | |
-| Linux package scripts | postinstall always `0` | preremove `1` when the lock stays busy for 10 minutes or hook-removal precheck refuses | - | - | |
+| Linux package scripts | postinstall always `0` | preremove `1` when the lock stays busy for 8 minutes or hook-removal precheck refuses | - | - | |
 | macOS pkg postinstall | `0` | The lifecycle's code (fails `installer`) | - | - | preinstall `1` on a Secure Client host or a refused downgrade |
 
 ## Standard-account rows
@@ -1886,7 +1886,7 @@ has found a regression.
   follow-up run (`input_changed`), not overwritten by the older bytes or dropped; a config put
   back after a rejected edit supersedes the rejection. Code.
 - **REG-1-1-14** **[L] Package steps wait for the lock.** Remove or upgrade the package while an apply run
-  holds the lock. Expect: the package scripts wait (`--lock-wait 10m`); the removal fails on a
+  holds the lock. Expect: the package scripts wait (`--lock-wait 8m`); the removal fails on a
   busy lock instead of deleting files under a live deployment. Code.
 - **REG-1-1-15** **[U] Non-purge uninstall can be retried.** Make an uninstall hit one error, then retry and
   reinstall. Expect: the deployment record is kept until an uninstall fully succeeds, so the

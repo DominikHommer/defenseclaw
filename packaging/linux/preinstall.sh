@@ -124,8 +124,8 @@ fi
 # A running lifecycle run (the apply unit, an MDM ensure) holds the lock for
 # its whole transaction; wait for it, as the postinstall ensure would.
 if [ -f "$state/lifecycle.lock" ] && command -v flock >/dev/null 2>&1; then
-    if ! flock -w 600 "$state/lifecycle.lock" true >/dev/null 2>&1; then
-        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 10 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
+    if ! flock -w 480 "$state/lifecycle.lock" true >/dev/null 2>&1; then
+        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; the upgrade continues, and the postinstall waits for that run before it applies the package." >&2
     fi
 fi
 exit 0
