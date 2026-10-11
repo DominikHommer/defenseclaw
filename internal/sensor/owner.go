@@ -85,7 +85,10 @@ type processInstance struct {
 	name                    string
 	user, sid               string
 	sessionUser, sessionSID string
-	lastSeen                time.Time
+	// session is the Windows session the instance runs in, zero when
+	// unknown. A process never changes session.
+	session  uint32
+	lastSeen time.Time
 	// replacedAt is the first exec or process creation the host plane saw
 	// for the pid after the polls last saw this instance, and exitedAt the
 	// first exit. From replacedAt on the pid may name another process, and
@@ -115,6 +118,11 @@ const (
 	// process's start may be: an exec event's time and the kernel's
 	// creation time agree to well under a second.
 	instanceStartTolerance = 2 * time.Second
+	// sameReadingTolerance is how far apart two process-table readings of
+	// one process's start may be once the pid was handed on: the probes
+	// read the same kernel creation time each poll, while a process that
+	// reused the pid within instanceStartTolerance has its own (GAP-1464).
+	sameReadingTolerance = 10 * time.Millisecond
 	// maxOwnerInstances bounds the book under process churn.
 	maxOwnerInstances = 40000
 	// minOwnerRetention keeps an exited process's owner at least as long
@@ -149,13 +157,26 @@ func (b *ownerBook) observe(processes []procprobe.Process, now time.Time) {
 			continue
 		}
 		instance := b.liveInstance(process)
+		if instance != nil && instance.ownedByOther(process) {
+			// Another account's process holds the pid now: it is a new
+			// instance, and the recorded one names nothing after it.
+			handedOn := now
+			if process.StartedAt.After(instance.lastSeen) && process.StartedAt.Before(now) {
+				handedOn = process.StartedAt
+			}
+			markFirst(&instance.replacedAt, handedOn)
+			instance = nil
+		}
 		if instance == nil {
-			instance = &processInstance{started: process.StartedAt, name: process.Name}
+			instance = &processInstance{started: process.StartedAt, name: process.Name, session: process.SessionID}
 			b.byPID[process.PID] = append(b.byPID[process.PID], instance)
 			b.count++
 		}
 		if instance.started.IsZero() {
 			instance.started = process.StartedAt
+		}
+		if instance.session == 0 {
+			instance.session = process.SessionID
 		}
 		instance.lastSeen = now
 		instance.replacedAt, instance.exitedAt = time.Time{}, time.Time{}
@@ -182,13 +203,20 @@ func (b *ownerBook) observe(processes []procprobe.Process, now time.Time) {
 
 // liveInstance is the recorded instance a process-table row continues. Once
 // a creation or exit was seen for the pid only the start ties the row to the
-// instance: the same image is no evidence after the pid was handed on.
+// instance, and only as the same reading: the same image is no evidence after
+// the pid was handed on, and a process that took the pid within
+// instanceStartTolerance of the earlier holder's start is not it (GAP-1464).
 func (b *ownerBook) liveInstance(process procprobe.Process) *processInstance {
 	var found *processInstance
 	for _, instance := range b.byPID[process.PID] {
-		same := sameImage(instance.name, process.Name) && instance.replacedAt.IsZero() && instance.exitedAt.IsZero()
+		handedOn := !instance.replacedAt.IsZero() || !instance.exitedAt.IsZero()
+		same := sameImage(instance.name, process.Name) && !handedOn
 		if !instance.started.IsZero() && !process.StartedAt.IsZero() {
-			same = closeStarts(instance.started, process.StartedAt)
+			tolerance := instanceStartTolerance
+			if handedOn {
+				tolerance = sameReadingTolerance
+			}
+			same = withinTolerance(instance.started, process.StartedAt, tolerance)
 		}
 		if same && (found == nil || instance.lastSeen.After(found.lastSeen)) {
 			found = instance
@@ -197,25 +225,40 @@ func (b *ownerBook) liveInstance(process procprobe.Process) *processInstance {
 	return found
 }
 
+// ownedByOther reports that a process-table row names another owner than the
+// one recorded for the instance, or runs in another Windows session: the pid
+// was handed on, whatever the start says (GAP-1464).
+func (instance *processInstance) ownedByOther(process procprobe.Process) bool {
+	if instance.session != 0 && process.SessionID != 0 && instance.session != process.SessionID {
+		return true
+	}
+	if instance.sid != "" && process.UserSID != "" {
+		return !strings.EqualFold(instance.sid, process.UserSID)
+	}
+	return instance.user != "" && process.User != "" && !strings.EqualFold(instance.user, process.User)
+}
+
+// markFirst keeps the earliest instant a pid was seen handed on or exited.
+func markFirst(at *time.Time, when time.Time) {
+	if at.IsZero() || when.Before(*at) {
+		*at = when
+	}
+}
+
 // heard files the host plane's creations and exits against the instances
 // the polls last saw before them, so a pid handed on between two polls never
 // lends the earlier holder's owner to what the new holder does. Past an
 // overflow every instance the polls last saw before it counts as handed on.
 func (b *ownerBook) heard(events pidEvents) {
-	mark := func(at *time.Time, when time.Time) {
-		if at.IsZero() || when.Before(*at) {
-			*at = when
-		}
-	}
 	for pid, seen := range events.ByPID {
 		for _, instance := range b.byPID[pid] {
 			for _, event := range seen {
 				switch {
 				case !event.At.After(instance.lastSeen):
 				case event.Exit:
-					mark(&instance.exitedAt, event.At)
+					markFirst(&instance.exitedAt, event.At)
 				default:
-					mark(&instance.replacedAt, event.At)
+					markFirst(&instance.replacedAt, event.At)
 				}
 			}
 		}
@@ -226,7 +269,7 @@ func (b *ownerBook) heard(events pidEvents) {
 	for _, instances := range b.byPID {
 		for _, instance := range instances {
 			if instance.lastSeen.Before(events.Overflow) {
-				mark(&instance.replacedAt, events.Overflow)
+				markFirst(&instance.replacedAt, events.Overflow)
 			}
 		}
 	}
@@ -294,12 +337,25 @@ func (b *ownerBook) instance(ref procRef) (found *processInstance, reused bool) 
 		if !refMatches(candidate, ref) {
 			continue
 		}
-		if found == nil || candidate.started.After(found.started) ||
-			(candidate.started.Equal(found.started) && candidate.lastSeen.After(found.lastSeen)) {
+		if found == nil || closerInstance(candidate, found, ref) {
 			found = candidate
 		}
 	}
 	return found, found == nil && len(candidates) > 0
+}
+
+// closerInstance reports that candidate names ref better than found. With
+// the starts known the nearer start wins, so a process that reused the pid
+// within instanceStartTolerance never takes the earlier holder's findings
+// (GAP-1464); otherwise the later start, then the later poll.
+func closerInstance(candidate, found *processInstance, ref procRef) bool {
+	if !ref.Start.IsZero() && !candidate.started.IsZero() && !found.started.IsZero() {
+		if a, b := startDistance(candidate.started, ref.Start), startDistance(found.started, ref.Start); a != b {
+			return a < b
+		}
+	}
+	return candidate.started.After(found.started) ||
+		(candidate.started.Equal(found.started) && candidate.lastSeen.After(found.lastSeen))
 }
 
 func refMatches(instance *processInstance, ref procRef) bool {
@@ -320,8 +376,18 @@ func refMatches(instance *processInstance, ref procRef) bool {
 }
 
 func closeStarts(a, b time.Time) bool {
-	delta := a.Sub(b)
-	return delta <= instanceStartTolerance && delta >= -instanceStartTolerance
+	return withinTolerance(a, b, instanceStartTolerance)
+}
+
+func withinTolerance(a, b time.Time, tolerance time.Duration) bool {
+	return startDistance(a, b) <= tolerance
+}
+
+func startDistance(a, b time.Time) time.Duration {
+	if delta := a.Sub(b); delta >= 0 {
+		return delta
+	}
+	return b.Sub(a)
 }
 
 // sameImage compares executable names as the probes report them: Windows
