@@ -157,12 +157,17 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 	}
 	own := "version: 1\ncategory: cert-marker\nrules:\n" +
 		"  - id: CERT-MARKER\n    pattern: dccert-block-marker\n    title: \"Marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n" +
-		"  - id: CERT-WORD\n    pattern: '\\bdcword\\b'\n    title: \"Word\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+		"  - id: CERT-WORD\n    pattern: '\\bdcword\\b'\n    title: \"Word\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n" +
+		// GAP-1478: the rule of the Windows upgrade smoke, a regex rule
+		// (detection-only) and a literal rule with an expression of its own.
+		"  - id: UPG6W089-MARKER-BLOCK\n    pattern: upg6w089-block-marker\n    title: \"Windows upgrade smoke marker command (block)\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [upgrade-smoke]\n" +
+		"  - id: CERT-REGEX\n    pattern: 'dcregex-[0-9]+'\n    title: \"Regex\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n" +
+		"  - id: CERT-EXPR\n    pattern: dcexpr-marker\n    expression: \"f.commands.exists(c, c.program == 'dcexpr-tool')\"\n    title: \"Expr\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
 	if err := os.WriteFile(filepath.Join(old, "rules", "cert.yaml"), []byte(own), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	plan, err := guardrail.PlanRulePackRebase(old)
-	if err != nil || plan == nil || !slices.Equal(plan.Expressed, []string{"CERT-MARKER", "CERT-WORD"}) || len(plan.WholeArgument) != 0 {
+	if err != nil || plan == nil || !slices.Equal(plan.Expressed, []string{"CERT-MARKER", "CERT-WORD", "UPG6W089-MARKER-BLOCK"}) || len(plan.WholeArgument) != 0 {
 		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
 	}
 	rebased := t.TempDir()
@@ -185,8 +190,8 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 	}
 	defer RemoveConnectorRulePackOverrides(connector)
 	for _, tc := range []struct {
-		tool, command, args, rule string
-		blocked, powerShell       bool
+		tool, command, args, rule    string
+		blocked, powerShell, windows bool
 	}{
 		{tool: "Bash", command: "touch dccert-block-marker.txt", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: "echo dccert-block-marker", rule: "CERT-MARKER", blocked: true},
@@ -211,12 +216,42 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		// GAP-1469: the literal as a quoted string inside a call that is
 		// parsed only in part (the retry Codex wrote after the first block,
 		// a .NET method call), inside a longer argument, and in an inline
-		// script; text a file tool writes is still only recorded.
+		// script.
 		{tool: "Bash", command: `[System.IO.File]::WriteAllText((Join-Path (Get-Location) m.txt), 'dccert-block-marker')`, rule: "CERT-MARKER", blocked: true, powerShell: true},
 		{tool: "Bash", command: `Set-Content -Path m.txt -Value 'dccert-block-marker'`, rule: "CERT-MARKER", blocked: true, powerShell: true},
 		{tool: "Bash", command: "echo xdccert-block-markery", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: `python3 -c "open('m', 'w').write('dccert-block-marker')"`, rule: "CERT-MARKER", blocked: true},
-		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dccert-block-marker"}`, rule: "CERT-MARKER"},
+		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dccert-block-marker"}`, rule: "CERT-MARKER", blocked: true},
+		// GAP-1478: the Windows per-user upgrade smoke. Codex on Windows
+		// sends its PowerShell as is (the dialect the hook picks, which is
+		// not PowerShell for a .NET call), so the rule pattern runs over the
+		// text of the call: every way to write the marker blocks, the
+		// controls (no literal, a near miss) stay allowed.
+		{tool: "Bash", command: "Set-Content -LiteralPath .\\upg6w-codex2.txt -Value 'upg6w089-block-marker' -NoNewline", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'upg6w-codex2.txt'), 'upg6w089-block-marker')", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "[System.IO.File]::AppendAllText('m.txt', 'upg6w089-block-marker')", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "[System.IO.File]::WriteAllText('C:\\Users\\Public\\upg6w089-block-marker.txt', 'x')", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "'upg6w089-block-marker' | Out-File -FilePath m.txt", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "Add-Content -Path m.txt -Value 'upg6w089-block-marker'", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "New-Item -ItemType File -Name upg6w089-block-marker.txt", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "New-Item -ItemType File -Path .\\upg6w089-block-marker.txt", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "@'\nupg6w089-block-marker\n'@ | Set-Content m.txt", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "$m = 'upg6w089-block-marker'; Set-Content -Path m.txt -Value $m", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "cmd /c echo upg6w089-block-marker > m.txt", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "bash -c \"echo upg6w089-block-marker\"", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "python -c \"open('m.txt', 'w').write('upg6w089-block-marker')\"", rule: "UPG6W089-MARKER-BLOCK", blocked: true, windows: true},
+		{tool: "Bash", command: "[System.IO.File]::WriteAllText((Join-Path (Get-Location) 'upg6w-codex2.txt'), 'hello')", rule: "UPG6W089-MARKER-BLOCK", windows: true},
+		{tool: "Bash", command: "Set-Content -Path m.txt -Value 'upg6w089-block-markr'", rule: "UPG6W089-MARKER-BLOCK", windows: true},
+		{tool: "Write", args: `{"file_path":"C:\\Users\\dcw-std1\\m.txt","content":"upg6w089-block-marker"}`, rule: "UPG6W089-MARKER-BLOCK", blocked: true},
+		{tool: "Bash", command: "echo upg6w089-block-marker", rule: "UPG6W089-MARKER-BLOCK", blocked: true},
+		// Rules that were never a plain literal are not widened: a regex
+		// rule stays detection-only, and a literal pattern with an
+		// expression of its own blocks only what the expression says.
+		{tool: "Bash", command: "echo dcregex-12", rule: "CERT-REGEX"},
+		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dcregex-12"}`, rule: "CERT-REGEX"},
+		{tool: "Bash", command: "echo dcexpr-marker", rule: "CERT-EXPR"},
+		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dcexpr-marker"}`, rule: "CERT-EXPR"},
+		{tool: "Bash", command: "dcexpr-tool run", rule: "CERT-EXPR", blocked: true},
 		// GAP-1415 (rv18): Codex assigns the path to a variable first, and
 		// Claude Code wraps the same script in powershell -Command; a control
 		// of the same shape with another file name stays allowed.
@@ -232,6 +267,9 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		}
 		if tc.powerShell {
 			input.DialectHint = actionfacts.DialectPowerShell
+		}
+		if tc.windows {
+			input.DialectHint = selectWindowsShellDialect(tc.tool, tc.command, input)
 		}
 		legacy := tc.command
 		if tc.args != "" {

@@ -317,7 +317,7 @@ func compileRulePackGenerationWithCompiler(
 				}
 				compiled.semanticRules[position] = compiledSemanticRule{
 					rule: rule, program: program, owner: semanticOwnerForRule(rule.ID),
-					literalWords: migratedLiteralRule(rule),
+					migratedLiteral: migratedLiteralRule(rule),
 				}
 				continue
 			}
@@ -341,10 +341,10 @@ func compileRulePackGenerationWithCompiler(
 				claimed[claimedID] = rule.ID
 			}
 			compiled.semanticRules = append(compiled.semanticRules, compiledSemanticRule{
-				rule:         rule,
-				program:      program,
-				owner:        owner,
-				literalWords: migratedLiteralRule(rule),
+				rule:            rule,
+				program:         program,
+				owner:           owner,
+				migratedLiteral: migratedLiteralRule(rule),
 			})
 			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
@@ -353,7 +353,7 @@ func compileRulePackGenerationWithCompiler(
 }
 
 // migratedLiteralRule reports whether rule is a 0.8.x literal rule the
-// upgrade gave its full literal expression (GAP-1469).
+// upgrade gave an expression from its literal (GAP-1469, GAP-1478).
 func migratedLiteralRule(rule PatternRule) bool {
 	return rule.Pattern != nil && guardrail.MigratedLiteralRule(rule.Pattern.String(), rule.Expression)
 }

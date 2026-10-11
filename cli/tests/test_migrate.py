@@ -248,7 +248,6 @@ def test_v8_config_runs_the_go_v9_step(
             "conflicts": [],
             "detection_only_rules": ["ACME-A", "ACME-B", "CUSTOM-CMD-SUDO"],
             "expressed_rules": ["CUSTOM-CMD-RM-RF", "ACME-LIT"],
-            "whole_argument_rules": ["ACME-LIT"],
             "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"],
             "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
         }
@@ -297,10 +296,10 @@ def test_v8_config_runs_the_go_v9_step(
     assert "3 rule(s) of your custom pack changed by the 1.0 upgrade" in out
     assert (
         "CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its "
-        "severity decides block or alert) when a command word, a quoted string in a command" in out
+        "severity decides block or alert) when the text of a tool call holds its literal" in out
     )
-    # GAP-1469: argv-only and detection-only rules are named as such.
-    assert "ACME-LIT: argv-only, blocks only a command argument equal to its literal" in out
+    # GAP-1478: a literal rule blocks its literal anywhere in the call, as on 0.8.x.
+    assert "ACME-LIT: enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call" in out
     assert "CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only" in out
     # GAP-1339: the summary says which rule files of one category were merged.
     assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out

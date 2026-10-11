@@ -61,10 +61,11 @@ type compiledSemanticRule struct {
 	rule    PatternRule
 	program *semantic.Program
 	owner   semanticOwner
-	// literalWords is set for a migrated 0.8.x literal rule
+	// migratedLiteral is set for a migrated 0.8.x literal rule
 	// (guardrail.MigratedLiteralRule): its pattern also blocks when it
-	// matches a parsed word of the call (withTrustedLiteralWordFindings).
-	literalWords bool
+	// matches the text of the call, as on 0.8.x
+	// (withMigratedLiteralRuleFindings).
+	migratedLiteral bool
 }
 
 var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
