@@ -296,6 +296,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		return resp, finalization
 	}
 	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+		ctx,
 		req.ConnectorName,
 		profile,
 	)
@@ -2493,10 +2494,11 @@ var toolChainRelevantRuleIDs = []string{
 }
 
 func activeToolChainRulesetFingerprint(
+	ctx context.Context,
 	connectorName string,
 	profile connector.HookProfile,
 ) (string, error) {
-	generation := snapshotRulePackGeneration(connectorName)
+	generation := pinnedRuleGeneration(ctx, connectorName)
 	active := make(map[string]PatternRule, len(toolChainRelevantRuleIDs))
 	if generation != nil {
 		for _, category := range generation.categories {

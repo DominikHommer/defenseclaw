@@ -75,6 +75,13 @@ type Generation struct {
 	activePatterns *localPatternsActivation
 	connectorRules map[string]*compiledRulePackCategories
 	judge          *LLMJudge
+	// registeredRules are the compiled rules registered for connectors
+	// outside the configuration (connector setup, a sandbox harness) while
+	// g is live: the process-wide set when g was published plus the
+	// registrations made since. A request pinned to g reads them here, not
+	// from the process-wide map the next generation rewrites (GAP-1466).
+	// Guarded by ruleCategoriesMu; nil for a generation never published.
+	registeredRules map[string]*compiledRulePackCategories
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
 	// scannerPinError is why a non-strict build found a pinned scanner file
