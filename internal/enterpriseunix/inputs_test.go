@@ -14,9 +14,14 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -378,6 +383,17 @@ func TestRejectedEditPushedAgainDuringTheTriggerRunIsRetriedBounded(t *testing.T
 	h.env.SelfUnit = unitApplyService
 	h.healthy = false
 	push()
+	// A systemd-run that fails schedules nothing, so it keeps no count and
+	// the next run still waits the first delay.
+	first := fmt.Sprintf("systemd-run --quiet --collect --unit=%s --on-active=%ds --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no systemctl start --no-block %s",
+		unitApplyRetry, int(applyRetryDelay/time.Second), unitApplyService)
+	h.runner.replies = map[string]fakeReply{first: {result: CommandResult{ExitCode: 1}, err: errors.New("exit 1")}}
+	failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireError(t, failed, codeActivate)
+	if !pushed || exists(h.env.applyRetryPath()) {
+		t.Fatalf("a failed systemd-run kept a retry count (pushed again: %v): %+v", pushed, failed.Warnings)
+	}
+	h.runner.replies = nil
 	for attempt := 1; attempt <= maxApplyRetries+1; attempt++ {
 		sawOwn, pushed = false, false
 		before := len(h.runner.calls)
@@ -411,6 +427,83 @@ func TestRejectedEditPushedAgainDuringTheTriggerRunIsRetriedBounded(t *testing.T
 	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
 	if exists(h.env.applyRetryPath()) {
 		t.Fatal("a healthy apply kept the retry count")
+	}
+}
+
+// Every host tool the package runs by name needs a commandCandidates entry:
+// the production runner resolves names only through that table, and the
+// fake runner of the other tests accepts any name. systemd-run had none, so
+// the apply-trigger retry was never scheduled on a real host (GAP-1412).
+// Every entry is also run somewhere, so the table keeps no dead names.
+func TestEveryCommandRunByNameHasACandidate(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := map[string]string{}
+	fset := token.NewFileSet()
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			index := map[string]int{"Run": 1, "RunEnv": 2}[selector.Sel.Name]
+			if index == 0 || len(call.Args) <= index {
+				return true
+			}
+			if literal, ok := call.Args[index].(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				if name, err := strconv.Unquote(literal.Value); err == nil {
+					called[name] = fset.Position(literal.Pos()).String()
+				}
+			}
+			return true
+		})
+	}
+	if _, ok := called["systemd-run"]; !ok || len(called) < 10 {
+		t.Fatalf("premise: the scan found too few commands run by name: %v", called)
+	}
+	for name, at := range called {
+		if len(commandCandidates[name]) == 0 {
+			t.Errorf("%s runs %q, which has no commandCandidates entry", at, name)
+		}
+	}
+	for name := range commandCandidates {
+		if _, ok := called[name]; !ok {
+			t.Errorf("commandCandidates[%q] is never run", name)
+		}
+	}
+}
+
+// The production resolver finds systemd-run where the supported
+// distributions install it, and only there.
+func TestSystemdRunResolvesFromItsInstalledPaths(t *testing.T) {
+	want := []string{"/usr/bin/systemd-run", "/bin/systemd-run"}
+	if got := commandCandidates["systemd-run"]; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("systemd-run candidates = %v, want %v", got, want)
+	}
+	path, err := resolveCommand("systemd-run")
+	for _, candidate := range want {
+		if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() {
+			if err != nil || path != candidate {
+				t.Fatalf("resolveCommand(systemd-run) = %q, %v; want %s", path, err, candidate)
+			}
+			return
+		}
+	}
+	if !errors.Is(err, ErrCommandNotFound) {
+		t.Fatalf("resolveCommand(systemd-run) on a host without it = %q, %v", path, err)
 	}
 }
 

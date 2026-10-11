@@ -168,6 +168,8 @@ func (l *lifecycle) scheduleApplyRetry(ctx context.Context, message string) bool
 		_ = json.Unmarshal(raw, &state)
 	}
 	if state.ConfigSHA256 != sha || state.Attempts < 0 {
+		// A different config.yaml starts a new count.
+		env.clearApplyRetries()
 		state = applyRetries{ConfigSHA256: sha}
 	}
 	if state.Attempts >= maxApplyRetries {
@@ -176,15 +178,20 @@ func (l *lifecycle) scheduleApplyRetry(ctx context.Context, message string) bool
 		return true
 	}
 	delay := applyRetryDelay << state.Attempts
-	state.Attempts++
-	// Without the count the re-runs would not be bounded.
-	data, err := json.Marshal(state)
-	if err != nil || env.writeFileAtomic(env.applyRetryPath(), append(data, '\n'), 0o600, rootOwner()) != nil {
-		return false
-	}
 	if _, err := env.Runner.Run(ctx, "systemd-run", "--quiet", "--collect", "--unit="+unitApplyRetry,
 		fmt.Sprintf("--on-active=%ds", int(delay/time.Second)), "--timer-property=AccuracySec=1s", "--timer-property=RemainAfterElapse=no",
 		"systemctl", "start", "--no-block", unitApplyService); err != nil {
+		// Nothing is scheduled, so the count stays as it was (GAP-1412).
+		return false
+	}
+	state.Attempts++
+	data, err := json.Marshal(state)
+	if err == nil {
+		err = env.writeFileAtomic(env.applyRetryPath(), append(data, '\n'), 0o600, rootOwner())
+	}
+	if err != nil {
+		// An uncounted re-run would not be bounded.
+		_, _ = env.Runner.Run(ctx, "systemctl", "stop", unitApplyRetry+".timer")
 		return false
 	}
 	r.AddWarning(codeInputChanged, fmt.Sprintf("%s; the apply trigger runs ensure again in %s (retry %d of %d)", message, delay, state.Attempts, maxApplyRetries))

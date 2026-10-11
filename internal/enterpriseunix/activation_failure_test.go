@@ -53,9 +53,6 @@ func TestFailedActivationKeepsTheGatewayOutput(t *testing.T) {
 // now name the refusal and the fix, and status does not send the
 // administrator to repair, which applies the same config again.
 func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
-	if _, ok := commandCandidates["journalctl"]; !ok {
-		t.Fatal("journalctl has no command candidate, so the gateway journal is never read")
-	}
 	const refusal = `sidecar: init: global rule pack "acme": digest sha256:aaaa does not match guardrail.custom_packs.acme.digest`
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))

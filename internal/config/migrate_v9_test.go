@@ -611,6 +611,41 @@ func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
 	}
 }
 
+// TestMigrateV9PinsACustomBalancedPack: 0.8.x shipped no guardrail/balanced
+// folder, so a rule_pack_dir naming one is the operator's own pack; it stays
+// selected and pinned instead of becoming the default preset (GAP-1452).
+func TestMigrateV9PinsACustomBalancedPack(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	pack := filepath.Join(dir, "policies", "guardrail", "balanced")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + pack + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	var got struct {
+		Guardrail struct {
+			RulePack    string `yaml:"rule_pack"`
+			CustomPacks map[string]struct {
+				Path string `yaml:"path"`
+			} `yaml:"custom_packs"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Guardrail.RulePack != "balanced" || got.Guardrail.CustomPacks["balanced"].Path != pack {
+		t.Fatalf("want rule_pack balanced pinned at %s:\n%s", pack, result.Migrated)
+	}
+}
+
 func TestMigrateV9RefreshesRollbackBackupOnSecondMigration(t *testing.T) {
 	// A second upgrade must leave the immediate pre-migration source at the
 	// documented rollback path, while preserving the first source as history.
@@ -1130,6 +1165,55 @@ func TestMigrateV8InMemoryReadsTheUnexpandedPolicyDir(t *testing.T) {
 	if got.Guardrail.BlockAt != "MEDIUM" || got.PolicyDir != filepath.Join(home, "team-policies") {
 		t.Fatalf("block_at %q, policy_dir %q; want MEDIUM from the unexpanded folder and the expanded folder:\n%s",
 			got.Guardrail.BlockAt, got.PolicyDir, migrated)
+	}
+}
+
+// TestMigrateV9ReadsPolicyDataBesideFlatRegoModules: the 0.8.x engine also
+// loaded a policy_dir that held its Rego modules and data.json directly, so
+// the MEDIUM block that data.json set reaches config.yaml and the report
+// (GAP-1453).
+func TestMigrateV9ReadsPolicyDataBesideFlatRegoModules(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	regoDir := filepath.Join(dir, "policies", "rego")
+	if err := os.MkdirAll(regoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"admission.rego": "package defenseclaw.admission\n",
+		"data.json":      `{"actions": {"MEDIUM": {"install": "block", "file": "none", "runtime": "block"}}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(regoDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := "config_version: 8\ndata_dir: " + dir + "\npolicy_dir: " + regoDir + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyDir, dataJSON := V8PolicyDataJSON(regoDir)
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, PolicyDir: policyDir, DataJSONPath: dataJSON})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Admission AdmissionConfig `yaml:"admission"`
+	}
+	if err := yaml.Unmarshal(written, &got); err != nil {
+		t.Fatal(err)
+	}
+	if medium := got.Admission.Skill.Actions.Medium; medium == nil || medium.Shorthand != "block" {
+		t.Fatalf("admission.skill.actions.medium is not block in config.yaml:\n%s", written)
+	}
+	if !slices.ContainsFunc(result.Record.Moved, func(move MigrationMove) bool {
+		return move.Source == "data.json" && move.From == "data.json:actions.MEDIUM" && move.To == "admission.skill.actions.medium"
+	}) {
+		t.Fatalf("the report does not name the MEDIUM block: %+v", result.Record.Moved)
 	}
 }
 
