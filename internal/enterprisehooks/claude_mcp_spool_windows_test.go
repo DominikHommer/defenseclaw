@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,7 +22,7 @@ import (
 // Project names in .claude.json are controlled by the enrolled user. A UNC
 // path must be rejected before LocalSystem touches the remote filesystem.
 func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {
-	_, _, err := readWindowsClaudeProjectMCP(`\\server\share\project`, "S-1-5-21-1-1001", `C:\Users\Alice`)
+	_, _, err := readWindowsClaudeProjectMCP(`\\server\share\project`)
 	if err == nil || !strings.Contains(err.Error(), "local drive letter") {
 		t.Fatalf("UNC project path was not rejected before filesystem access: %v", err)
 	}
@@ -118,6 +119,9 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnreadableState(t *testing.T) {
 // A rejected project file leaves the account unreadable instead of silently
 // publishing a partial server set.
 func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
 	home := t.TempDir()
 	project := `\\server\share\project`
 	state := map[string]any{
@@ -221,15 +225,22 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := windowsClaudeProjectWithUserToken
+	originalRead := windowsClaudeProjectRead
 	calls := 0
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error {
 		calls++
-		if calls == 1 {
-			return os.ErrPermission // no session token or project access
-		}
 		return fn()
 	}
-	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	windowsClaudeProjectRead = func(project string) ([]byte, error, error) {
+		if project == bob {
+			return nil, fmt.Errorf("%w: project directory: %w", errClaudeProjectAccessDenied, windows.ERROR_ACCESS_DENIED), nil
+		}
+		return originalRead(project)
+	}
+	t.Cleanup(func() {
+		windowsClaudeProjectWithUserToken = original
+		windowsClaudeProjectRead = originalRead
+	})
 	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
 	const sid = "S-1-5-21-1-1001"
 	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
@@ -240,7 +251,7 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err != nil || unreadable != nil || calls != 2 {
+	if err != nil || unreadable != nil || calls != 1 {
 		t.Fatalf("servers=%v unreadable=%+v calls=%d err=%v", servers, unreadable, calls, err)
 	}
 	got := map[string]bool{}
@@ -252,6 +263,52 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], bob) {
 		t.Fatalf("refused project warnings = %v", warnings)
+	}
+}
+
+// A missing or invalid session token must not publish a normal record that
+// drops project servers. The unreadable marker makes the gateway fail closed.
+func TestWriteWindowsClaudeMCPSpoolMarksUnavailableToken(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := map[string]any{"projects": map[string]any{
+		project: map[string]any{"mcpServers": map[string]any{
+			"local": map[string]any{"command": "x"},
+		}},
+	}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(statePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := windowsClaudeProjectWithUserToken
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || unreadable != nil || len(servers) != 1 {
+		t.Fatalf("initial record: servers=%v unreadable=%+v err=%v", servers, unreadable, err)
+	}
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, _ func() error) error {
+		return errors.New("session token unavailable")
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err = ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != statePath {
+		t.Fatalf("token failure: servers=%v unreadable=%+v err=%v", servers, unreadable, err)
 	}
 }
 
@@ -309,8 +366,8 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 				nil, nil, acl, nil); err != nil {
 				t.Fatal(err)
 			}
-			data, accessErr, readErr := readWindowsClaudeProjectMCP(project, sid.String(), project)
-			if len(data) != 0 || accessErr == nil || readErr != nil {
+			data, accessErr, readErr := readWindowsClaudeProjectMCP(project)
+			if len(data) != 0 || !errors.Is(accessErr, errClaudeProjectAccessDenied) || readErr != nil {
 				t.Fatalf("data=%q accessErr=%v readErr=%v; want project refused before read", data, accessErr, readErr)
 			}
 		})
