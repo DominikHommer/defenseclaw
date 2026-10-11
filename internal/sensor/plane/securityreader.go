@@ -374,6 +374,34 @@ func (r securityRecord) data(name string) string {
 	return ""
 }
 
+// nullSID is what a 4688 names as its target account when the new process
+// runs under its creator's token.
+const nullSID = "S-1-0-0"
+
+// account is the DOMAIN\name and SID of the account a record names under
+// prefix ("Subject" or "Target"), both empty when it names none.
+func (r securityRecord) account(prefix string) (user, sid string) {
+	sid = strings.TrimSpace(r.data(prefix + "UserSid"))
+	if sid == "" || sid == "-" || strings.EqualFold(sid, nullSID) {
+		return "", ""
+	}
+	user = strings.TrimSpace(r.data(prefix + "UserName"))
+	if domain := strings.TrimSpace(r.data(prefix + "DomainName")); domain != "" && domain != "-" && user != "" {
+		user = domain + `\` + user
+	}
+	return user, sid
+}
+
+// createdAccount is the account a 4688's new process runs as: the target
+// account when the creator started it under another token, the creator's
+// otherwise.
+func createdAccount(record securityRecord) (user, sid string) {
+	if user, sid = record.account("Target"); sid != "" {
+		return user, sid
+	}
+	return record.account("Subject")
+}
+
 func decodeSecurityXML(raw string) (securityRecord, error) {
 	var record securityRecord
 	if err := xml.Unmarshal([]byte(raw), &record); err != nil {
@@ -391,13 +419,15 @@ func translateSecurityRecord(record securityRecord) (Event, bool) {
 		if pid <= 0 {
 			return Event{}, false
 		}
+		user, sid := createdAccount(record)
 		return Event{
 			Kind: KindExec, PID: pid,
 			PPID:           parseHexOrDecimal(record.data("ProcessId")),
 			ResponsiblePID: parseHexOrDecimal(record.data("ProcessId")),
 			Name:           baseName(record.data("NewProcessName")),
 			Cmdline:        record.data("CommandLine"),
-			User:           record.data("SubjectUserName"),
+			User:           user,
+			UserSID:        sid,
 			At:             at,
 		}, true
 
@@ -414,10 +444,11 @@ func translateSecurityRecord(record securityRecord) (Event, bool) {
 			return Event{}, false
 		}
 		kind := classifyObjectAccess(record.data("ObjectType"), record.data("AccessMask"), record.data("AccessList"), path)
+		user, sid := record.account("Subject")
 		return Event{
 			Kind: kind, PID: parseHexOrDecimal(record.data("ProcessId")),
 			Name: baseName(record.data("ProcessName")), Path: path,
-			User: record.data("SubjectUserName"), At: at,
+			User: user, UserSID: sid, At: at,
 		}, true
 
 	case eventAccountCreated:

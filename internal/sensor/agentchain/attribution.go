@@ -80,6 +80,9 @@ type Attribution struct {
 	// RootKeyStart is the first known kernel start used for the session key.
 	// RootInstance separates generations even when the start is unavailable.
 	RootKeyStart time.Time
+	// RootBorn is when the event that started the root was logged, zero
+	// when a poll found it first.
+	RootBorn     time.Time
 	RootInstance uint64
 	// RootName is the root process's image name.
 	RootName  string

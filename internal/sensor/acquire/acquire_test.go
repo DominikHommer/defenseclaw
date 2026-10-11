@@ -287,11 +287,16 @@ func requestFieldCount(request Request) int {
 
 // GAP-1250: a brokered process row keeps its Windows owner SID and session,
 // so a finding read through the helper is attributed as a direct one is.
+// GAP-1464: so does a brokered event the account it named for its process.
 func TestProcessRowKeepsOwnerSIDAndSessionOverTheWire(t *testing.T) {
 	row := procprobe.Process{PID: 7, Name: "uvx.exe", User: `DCLAB\alice`, UserSID: "S-1-5-21-1-2-3-1104", SessionID: 2}
 	got := decodeProcess(encodeProcess(row))
 	if got.User != row.User || got.UserSID != row.UserSID || got.SessionID != row.SessionID {
 		t.Fatalf("round trip = %+v, want %+v", got, row)
+	}
+	event := plane.Event{Kind: plane.KindFileWrite, PID: 7, User: row.User, UserSID: row.UserSID}
+	if got := decodeEvent(encodeEvent(event)); got.User != event.User || got.UserSID != event.UserSID {
+		t.Fatalf("event round trip = %+v, want %+v", got, event)
 	}
 }
 

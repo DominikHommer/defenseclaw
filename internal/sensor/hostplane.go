@@ -23,6 +23,7 @@ package sensor
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,16 +169,21 @@ func (h *hostPlane) replaceSource(next plane.Source) {
 }
 
 func (h *hostPlane) handle(event plane.Event) {
+	at := event.At
+	if at.IsZero() {
+		at = time.Now()
+	}
 	// Every exec teaches the tracker, whether or not it classifies. Lineage is
 	// built from the whole process tree; discarding non-agent execs would break
 	// attribution for the agent -> sh -> cat chain this exists to follow.
 	switch event.Kind {
 	case plane.KindExec:
-		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline, time.Time{})
-		h.noteLifecycle(event)
+		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline,
+			agentchain.Creation{At: at, SID: event.UserSID})
+		h.noteLifecycle(event, at)
 	case plane.KindExit:
 		h.tracker.ObserveExit(event.PID)
-		h.noteLifecycle(event)
+		h.noteLifecycle(event, at)
 		return
 	}
 
@@ -202,9 +208,10 @@ func (h *hostPlane) handle(event plane.Event) {
 		return
 	}
 
-	at := event.At
-	if at.IsZero() {
-		at = time.Now()
+	instance := h.tracker.InstanceOf(event.PID)
+	user := ""
+	if event.UserSID != "" {
+		user = event.User
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -222,13 +229,20 @@ func (h *hostPlane) handle(event plane.Event) {
 	if session.RootStart.IsZero() && !attribution.RootStart.IsZero() {
 		session.RootStart = attribution.RootStart
 	}
+	if session.RootBorn.IsZero() {
+		session.RootBorn = attribution.RootBorn
+	}
 	session.Record(agentchain.Observation{
 		Tactic:     match.Tactic,
 		SignalID:   match.SignalID,
 		Title:      match.Title,
 		Detail:     match.Detail,
 		PID:        event.PID,
-		Start:      h.tracker.StartOf(event.PID),
+		Start:      instance.Start,
+		Born:       instance.Born,
+		Instance:   instance.ID,
+		User:       user,
+		SID:        event.UserSID,
 		Name:       event.Name,
 		Path:       event.Path,
 		Confidence: match.Confidence,
@@ -240,15 +254,14 @@ func (h *hostPlane) handle(event plane.Event) {
 const maxLifecycleEvents = maxOwnerInstances
 
 // noteLifecycle keeps a creation or exit for the owner book, which must hear
-// that a pid was handed on before it attributes what the pid did next.
-func (h *hostPlane) noteLifecycle(event plane.Event) {
+// that a pid was handed on before it attributes what the pid did next. It is
+// called once the tracker has learnt the event, so it names the tracker's
+// instance the event concerned.
+func (h *hostPlane) noteLifecycle(event plane.Event, at time.Time) {
 	if event.PID <= 0 {
 		return
 	}
-	at := event.At
-	if at.IsZero() {
-		at = time.Now()
-	}
+	instance := h.tracker.InstanceOf(event.PID).ID
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.lifecycleCount >= maxLifecycleEvents {
@@ -261,7 +274,7 @@ func (h *hostPlane) noteLifecycle(event plane.Event) {
 		h.lifecycle.ByPID = map[int][]pidEvent{}
 	}
 	h.lifecycle.ByPID[event.PID] = append(h.lifecycle.ByPID[event.PID],
-		pidEvent{At: at, Exit: event.Kind == plane.KindExit})
+		pidEvent{At: at, Exit: event.Kind == plane.KindExit, Instance: instance})
 	h.lifecycleCount++
 }
 
@@ -270,6 +283,7 @@ func (h *hostPlane) takeLifecycle() pidEvents {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	taken := h.lifecycle
+	taken.Taken = time.Now()
 	h.lifecycle, h.lifecycleCount = pidEvents{}, 0
 	return taken
 }
@@ -314,7 +328,10 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 		if score < minRisk {
 			continue
 		}
-		processes, configPaths := sessionOwnerEvidence(root.process.PID, session.RootStart, session.RootName, session.LastSeen, session.Observations())
+		processes, configPaths := sessionOwnerEvidence(procRef{
+			PID: root.process.PID, Start: session.RootStart, Born: session.RootBorn, Instance: root.instance,
+			Name: session.RootName, At: session.LastSeen,
+		}, session.Observations())
 		findings = append(findings, hostFinding{
 			RootPID: root.process.PID, RootStart: session.RootStart, AgentName: session.AgentName,
 			Processes: processes, ConfigPaths: configPaths,
@@ -326,22 +343,28 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 }
 
 // sessionOwnerEvidence lists a session's process instances, root first,
-// each with when the session last saw it, and the agent configuration files
-// it wrote.
-func sessionOwnerEvidence(
-	rootPID int, rootStart time.Time, rootName string, lastSeen time.Time, observations []agentchain.Observation,
-) ([]procRef, []string) {
-	root := procprobe.KeyOf(rootPID, rootStart)
-	processes := []procRef{{PID: rootPID, Start: rootStart, Name: rootName, At: lastSeen}}
-	seen := map[procprobe.ProcKey]int{root: 0}
+// each with when the session last saw it and the account its events named,
+// and the agent configuration files it wrote.
+func sessionOwnerEvidence(root procRef, observations []agentchain.Observation) ([]procRef, []string) {
+	type refKey struct {
+		process  procprobe.ProcKey
+		instance uint64
+		sid      string
+	}
+	processes := []procRef{root}
+	seen := map[refKey]int{{process: procprobe.KeyOf(root.PID, root.Start), instance: root.Instance}: 0}
 	var configPaths []string
 	for _, observation := range observations {
 		if observation.PID > 0 {
-			key := procprobe.KeyOf(observation.PID, observation.Start)
+			key := refKey{
+				process:  procprobe.KeyOf(observation.PID, observation.Start),
+				instance: observation.Instance, sid: strings.ToUpper(observation.SID),
+			}
 			if index, ok := seen[key]; !ok {
 				seen[key] = len(processes)
 				processes = append(processes, procRef{
 					PID: observation.PID, Start: observation.Start, Name: observation.Name, At: observation.At,
+					Born: observation.Born, Instance: observation.Instance, User: observation.User, SID: observation.SID,
 				})
 			} else if observation.At.After(processes[index].At) {
 				processes[index].At = observation.At

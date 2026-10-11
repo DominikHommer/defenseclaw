@@ -23,6 +23,7 @@ package agentchain
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
@@ -42,6 +43,16 @@ type Observation struct {
 	// later one that reused its pid (GAP-1372).
 	Start time.Time
 	Name  string
+	// Born is when the event that started the process was logged and
+	// Instance the lineage tracker's instance of it, each zero when
+	// unknown: with the start unknown they still tell it from a later
+	// process on its pid (GAP-1464).
+	Born     time.Time
+	Instance uint64
+	// User and SID are the account the event itself named for the process
+	// (the writer's token of a Windows file access), empty when it named
+	// none. Unlike an owner looked up by pid it cannot be a later holder's.
+	User, SID string
 	// Path is the file the observation concerns, for file kinds. It names
 	// the profile an agent's configuration lives in, which can attribute
 	// the session to its account.
@@ -69,14 +80,18 @@ func (o Observation) lastSighting() time.Time {
 func (o Observation) Key() string {
 	// Retain distinct file paths even when their signal and detail agree.
 	// Ownership resolution needs every profile touched by the session.
-	return o.SignalID + "|" + o.Detail + "|" + o.Path
+	// Sightings under different accounts stay apart, so neither account's
+	// sighting is folded into the other's (GAP-1464).
+	return o.SignalID + "|" + o.Detail + "|" + o.Path + "|" + strings.ToUpper(o.SID)
 }
 
 // Session accumulates the observations attributed to one agent root pid.
 type Session struct {
 	RootPID int
-	// RootStart is the kernel creation time when known.
+	// RootStart is the kernel creation time when known, and RootBorn when
+	// the event that started the root was logged, zero when unknown.
 	RootStart time.Time
+	RootBorn  time.Time
 	// RootName is the root process's image name, empty when unknown.
 	RootName     string
 	AgentName    string
