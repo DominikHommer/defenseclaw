@@ -2364,9 +2364,9 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	clean := filepath.Clean(dir)
 	base := strings.ToLower(filepath.Base(clean))
 	parent := filepath.Base(filepath.Dir(clean))
-	if base == "balanced" {
-		base = "default"
-	}
+	// Only default, strict and permissive are presets. 0.8.x never shipped a
+	// guardrail/balanced folder, so one is the operator's own pack: it is
+	// pinned under its own name, not mapped to the default folder (GAP-1452).
 	if v9BuiltinPacks[base] && v9SameDir(clean, filepath.Join(m.policyDir(), "guardrail", filepath.Base(clean))) {
 		return base, nil, nil
 	}

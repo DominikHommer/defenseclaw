@@ -611,6 +611,41 @@ func TestMigrateV9TransliteratesANonASCIIPackFolder(t *testing.T) {
 	}
 }
 
+// TestMigrateV9PinsACustomBalancedPack: 0.8.x shipped no guardrail/balanced
+// folder, so a rule_pack_dir naming one is the operator's own pack; it stays
+// selected and pinned instead of becoming the default preset (GAP-1452).
+func TestMigrateV9PinsACustomBalancedPack(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	pack := filepath.Join(dir, "policies", "guardrail", "balanced")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + pack + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	var got struct {
+		Guardrail struct {
+			RulePack    string `yaml:"rule_pack"`
+			CustomPacks map[string]struct {
+				Path string `yaml:"path"`
+			} `yaml:"custom_packs"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Guardrail.RulePack != "balanced" || got.Guardrail.CustomPacks["balanced"].Path != pack {
+		t.Fatalf("want rule_pack balanced pinned at %s:\n%s", pack, result.Migrated)
+	}
+}
+
 func TestMigrateV9RefreshesRollbackBackupOnSecondMigration(t *testing.T) {
 	// A second upgrade must leave the immediate pre-migration source at the
 	// documented rollback path, while preserving the first source as history.
