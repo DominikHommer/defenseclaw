@@ -934,7 +934,9 @@ type AzureKeyConfig struct {
 //
 // Mirrors cli/defenseclaw/config.py::LLMConfig.resolved_api_key — the
 // Python parity test (cli/tests/test_llm_env.py::ParityTests) asserts
-// these stay in lock-step.
+// these stay in lock-step. A role ResolveLLM resolved for a standalone
+// managed deployment carries only its protected credential's key and
+// reads no environment.
 func (l LLMConfig) ResolvedAPIKey() string {
 	if l.protectedCredentialRequired {
 		return l.APIKey
@@ -1195,24 +1197,20 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.APIKeyEnv = c.DefaultLLMAPIKeyEnv
 	}
 
-	// A standalone deployment that names enterprise.inspection.llm.credential
-	// takes every role's key from that protected credential.
-	if key, configured := c.standaloneLLMKey(); configured {
-		out.APIKey = key
+	// A standalone deployment takes every role's key from the protected
+	// credential named by enterprise.inspection.llm.credential and from
+	// nothing else: with no credential named there is no key, never
+	// llm.api_key_env, the .env file or a DEFENSECLAW_LLM_KEY the gateway
+	// service inherited, so a scan whose judge needs a key fails closed
+	// (GAP-1437).
+	if c.StandaloneEnterprise() {
+		out.APIKey, _ = c.standaloneLLMKey()
 		out.APIKeyEnv = ""
 		out.protectedCredentialRequired = true
 	}
 
 	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
 	return out
-}
-
-// ResolvedDefaultLLMAPIKey returns the shared LLM API key from the
-// configured env var. DEPRECATED: prefer Config.ResolveLLM(path) which
-// handles the top-level + per-component override merge for each
-// component in one call.
-func (c *Config) ResolvedDefaultLLMAPIKey() string {
-	return c.ResolveLLM("").ResolvedAPIKey()
 }
 
 type FirewallConfig struct {
@@ -1348,16 +1346,6 @@ type InspectLLMConfig struct {
 	BaseURL    string `mapstructure:"base_url"    yaml:"base_url"`
 	Timeout    int    `mapstructure:"timeout"     yaml:"timeout"`
 	MaxRetries int    `mapstructure:"max_retries" yaml:"max_retries"`
-}
-
-// ResolvedAPIKey returns the API key from the env var (if set) or the direct value.
-func (c *InspectLLMConfig) ResolvedAPIKey() string {
-	if c.APIKeyEnv != "" {
-		if v := os.Getenv(c.APIKeyEnv); v != "" {
-			return v
-		}
-	}
-	return c.APIKey
 }
 
 type SkillScannerConfig struct {
@@ -1496,6 +1484,10 @@ type CiscoAIDefenseConfig struct {
 	// pricing per-call matters and the operator already gets
 	// per-tool coverage from the bundled regex rule pack).
 	ScanHookSurface *bool `mapstructure:"scan_hook_surface" yaml:"scan_hook_surface,omitempty"`
+
+	// protectedCredentialRequired is set by Load on a standalone managed
+	// deployment, where only the protected credential carries the key.
+	protectedCredentialRequired bool
 }
 
 // HookSurfaceEnabled reports whether the AID lane should fire on the
@@ -1510,8 +1502,15 @@ func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
 	return *c.ScanHookSurface
 }
 
-// ResolvedAPIKey returns the API key from the key store, env var, or inline value.
+// ResolvedAPIKey returns the API key from the key store, env var, or inline
+// value. A standalone managed deployment ignores cisco_ai_defense.api_key_env:
+// its only key is the protected credential the gateway sets inline, so a
+// scanner's AI Defense analyzer never takes a key from the service
+// environment (GAP-1437).
 func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
+	if c.protectedCredentialRequired {
+		return c.APIKey
+	}
 	if c.APIKeyEnv != "" {
 		if v, ok := GetKey(c.APIKeyEnv); ok && v != "" {
 			return v
@@ -2282,30 +2281,6 @@ func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
 	return false
 }
 
-// ResolvedJudgeAPIKey returns the judge API key from the env var.
-// DEPRECATED: prefer Config.ResolveLLM("guardrail.judge").ResolvedAPIKey().
-func (c *JudgeConfig) ResolvedJudgeAPIKey() string {
-	if c.LLM.APIKeyEnv != "" || c.LLM.APIKey != "" {
-		return c.LLM.ResolvedAPIKey()
-	}
-	if c.APIKeyEnv != "" {
-		if v := os.Getenv(c.APIKeyEnv); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// ResolvedJudgeAPIKeyWithFallback returns the judge key, falling back to the
-// shared default LLM key when none is configured.
-// DEPRECATED: prefer Config.ResolveLLM("guardrail.judge").ResolvedAPIKey().
-func (c *JudgeConfig) ResolvedJudgeAPIKeyWithFallback(sharedKey string) string {
-	if k := c.ResolvedJudgeAPIKey(); k != "" {
-		return k
-	}
-	return sharedKey
-}
-
 // EffectiveHost returns the hostname clients (e.g. OpenClaw) use to reach the
 // guardrail proxy — same value written to openclaw.json baseUrl. Defaults to
 // "127.0.0.1" when not configured so macOS IPv6-first resolution of
@@ -2868,6 +2843,7 @@ func loadConfigSourceChecked(
 		return nil, err
 	}
 	applySecureClientScannerDefaults(&cfg)
+	cfg.CiscoAIDefense.protectedCredentialRequired = cfg.StandaloneEnterprise()
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {

@@ -984,36 +984,6 @@ func TestDefaultConfigCiscoAIDefense(t *testing.T) {
 	}
 }
 
-func TestInspectLLMResolvedAPIKey_Direct(t *testing.T) {
-	llm := &InspectLLMConfig{APIKey: "direct-key"}
-	if got := llm.ResolvedAPIKey(); got != "direct-key" {
-		t.Errorf("expected 'direct-key', got %q", got)
-	}
-}
-
-func TestInspectLLMResolvedAPIKey_Env(t *testing.T) {
-	t.Setenv("TEST_GO_LLM_KEY_XYZ", "env-key")
-	llm := &InspectLLMConfig{APIKey: "fallback", APIKeyEnv: "TEST_GO_LLM_KEY_XYZ"}
-	if got := llm.ResolvedAPIKey(); got != "env-key" {
-		t.Errorf("expected env-key, got %q", got)
-	}
-}
-
-func TestInspectLLMResolvedAPIKey_EnvUnset(t *testing.T) {
-	os.Unsetenv("TEST_GO_LLM_NONEXIST_XYZ")
-	llm := &InspectLLMConfig{APIKey: "fallback", APIKeyEnv: "TEST_GO_LLM_NONEXIST_XYZ"}
-	if got := llm.ResolvedAPIKey(); got != "fallback" {
-		t.Errorf("expected 'fallback', got %q", got)
-	}
-}
-
-func TestInspectLLMResolvedAPIKey_Empty(t *testing.T) {
-	llm := &InspectLLMConfig{}
-	if got := llm.ResolvedAPIKey(); got != "" {
-		t.Errorf("expected empty, got %q", got)
-	}
-}
-
 func TestCiscoAIDefenseResolvedAPIKey_Direct(t *testing.T) {
 	aid := &CiscoAIDefenseConfig{APIKey: "cisco-direct", APIKeyEnv: ""}
 	if got := aid.ResolvedAPIKey(); got != "cisco-direct" {
