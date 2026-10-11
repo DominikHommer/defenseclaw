@@ -53,7 +53,11 @@ func TestResolveHardLinkToAuthorizedKeys(t *testing.T) {
 // apply_patch fails closed too (GAP-1428).
 func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 	for command, known := range map[string]bool{
-		"env apply_patch < draft.patch":              false,
+		"env apply_patch < draft.patch": false,
+		"echo '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'\napply_patch < staged.patch":        false,
+		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'\ncat staged.patch | apply_patch":  false,
+		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; cat staged.patch | apply_patch":  false,
+		"apply_patch '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; APPLY_PATCH < staged.patch": false,
 		"env FOO=1 apply_patch < draft.patch":        false,
 		"command apply_patch < draft.patch":          false,
 		"exec apply_patch < draft.patch":             false,
@@ -68,6 +72,22 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 	} {
 		if targets, ok := ApplyPatchWriteTargets("Bash", nil, command, "", ""); ok != known || len(targets) != 0 {
 			t.Errorf("%s: targets %v, known %v; want known %v", command, targets, ok, known)
+		}
+	}
+}
+
+func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
+	envelope := "*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch"
+	for _, command := range []string{
+		"apply_patch <<'PATCH'\n" + envelope + "\nPATCH",
+		"apply_patch <<< '" + envelope + "'",
+		"apply_patch '" + envelope + "'",
+		"echo '" + envelope + "' | apply_patch",
+		"@'\n" + envelope + "\n'@ | apply_patch",
+	} {
+		targets, ok := ApplyPatchWriteTargets("Bash", nil, command, "", "")
+		if !ok || len(targets) != 1 || targets[0] != "/tmp/notes.txt" {
+			t.Errorf("%q: targets %v, known %v", command, targets, ok)
 		}
 	}
 }

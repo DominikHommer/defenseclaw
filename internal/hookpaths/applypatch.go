@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
@@ -57,7 +58,7 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 			continue
 		}
 		paths, envelopes, parsed := patchEnvelopePaths(text)
-		if !parsed || envelopes == 0 && !patchTool && invokesApplyPatch(text) {
+		if !parsed || !patchTool && !patchShellInvocationsKnown(text) {
 			return nil, false
 		}
 		found = found || envelopes > 0
@@ -174,6 +175,78 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 		return nil, envelopes, false
 	}
 	return paths, envelopes, true
+}
+
+// A patch envelope only explains a shell invocation when it is actually
+// supplied to that invocation. In particular, a quoted envelope printed by
+// another command cannot explain a later file-fed apply_patch.
+var (
+	patchProgramWord  = regexp.MustCompile("(?i)\\b(?:apply_patch|applypatch|apply-patch)\\b")
+	patchDirectInput  = regexp.MustCompile("\\b(?:apply_patch|applypatch|apply-patch)\\s*(?:<<<\\s*|<<\\s*|@)?['\"]")
+	patchHeredocInput = regexp.MustCompile("\\b(?:apply_patch|applypatch|apply-patch)\\s*<<-?\\s*[A-Za-z_][A-Za-z0-9_]*\\s*$")
+	patchPipedHeredoc = regexp.MustCompile("\\bcat\\s+<<[^\\n|]*\\|\\s*(?:apply_patch|applypatch|apply-patch)\\b")
+	patchPipeCall     = regexp.MustCompile("^\\s*['\\\"]?@?\\s*\\|\\s*(?:apply_patch|applypatch|apply-patch)\\b")
+	patchPrinter      = regexp.MustCompile("(?i)\\b(?:echo|printf|write-output)\\b|@['\"]")
+)
+
+func patchShellInvocationsKnown(text string) bool {
+	lines := strings.Split(text, "\n")
+	bound := make([]int, len(lines))
+	body := make([]bool, len(lines))
+	for start := 0; start < len(lines); start++ {
+		begin := strings.Index(lines[start], patchBeginMarker)
+		if begin < 0 || strings.TrimSpace(lines[start][begin+len(patchBeginMarker):]) != "" {
+			continue
+		}
+		end := start + 1
+		for end < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[end]), patchEndMarker) {
+			end++
+		}
+		if end == len(lines) {
+			continue // patchEnvelopePaths already rejects an open envelope
+		}
+		for i := start + 1; i < end; i++ {
+			body[i] = true
+		}
+		inputLine, opener := start, lines[start][:begin]
+		if strings.TrimSpace(opener) == "" && start > 0 {
+			inputLine, opener = start-1, lines[start-1]
+		}
+		if patchDirectInput.MatchString(opener) || patchHeredocInput.MatchString(opener) || patchPipedHeredoc.MatchString(opener) {
+			bound[inputLine]++
+		} else if patchPrinter.MatchString(opener) {
+			pipeLine := end
+			close := strings.TrimSpace(lines[end])
+			if index := strings.Index(close, patchEndMarker); index >= 0 {
+				close = close[index+len(patchEndMarker):]
+			}
+			if patchPipeCall.MatchString(close) {
+				bound[pipeLine]++
+			} else if end+1 < len(lines) {
+				// A pipe on the next line must continue the quoted printer.
+				next := strings.TrimSpace(lines[end+1])
+				if strings.HasPrefix(next, "'") || strings.HasPrefix(next, "\"") {
+					if patchPipeCall.MatchString(next) {
+						bound[end+1]++
+					}
+				}
+			}
+		}
+		start = end
+	}
+	calls := 0
+	for i, line := range lines {
+		if body[i] || !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
+			continue
+		}
+		count := len(patchProgramWord.FindAllString(line, -1))
+		calls += count
+		if count > bound[i] {
+			return false
+		}
+	}
+	// The whole-text parser also sees scripts that a line scan might miss.
+	return calls > 0 || !invokesApplyPatch(text)
 }
 
 // invokesApplyPatch reports a shell text that may run apply_patch as a

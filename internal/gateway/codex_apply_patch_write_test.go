@@ -74,11 +74,15 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"edit tool path", "apply_patch", map[string]any{"path": symlink, "content": "x"}, symlink, true},
 		{"bash -c heredoc", "Bash", command("bash -lc \"apply_patch <<'PATCH'\n" + envelope(update("~/.ssh/authorized_keys")) + "\nPATCH\""), "", true},
 		{"env wrapper", "Bash", command("env apply_patch < draft.patch"), "", true},
+		{"inert envelope then staged redirect", "Bash", command("echo '" + envelope(update("notes.txt")) + "'\napply_patch < staged.patch"), "", true},
+		{"inert envelope then staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'\ncat staged.patch | apply_patch"), "", true},
+		{"inert envelope then same-line staged pipe", "Bash", command("printf '" + envelope(update("notes.txt")) + "'; cat staged.patch | apply_patch"), "", true},
 		{"here-string", "Bash", command("apply_patch <<< '" + envelope(update("hard.cfg")) + "'"), hardLink, true},
 		{"powershell wrapper", "shell", command("powershell -NoProfile -Command \"apply_patch @'\n" + envelope(update("$HOME/.ssh/authorized_keys")) + "\n'@\""), "", true},
 		// The protected path compares case-insensitively (Windows case forms).
 		{"case form", "apply_patch", command(envelope(update(strings.ToUpper(keys)))), "", true},
 		{"benign patch", "apply_patch", command(envelope(update("notes.txt"))), "", false},
+		{"benign unquoted heredoc", "Bash", command("apply_patch <<PATCH\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
 		{"benign heredoc", "Bash", command("apply_patch <<'PATCH'\n" + envelope(update("notes.txt")) + "\nPATCH"), "", false},
 		{"benign search", "Bash", command(`grep -rn "*** Begin Patch" .`), "", false},
 	} {
