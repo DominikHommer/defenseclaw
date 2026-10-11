@@ -3,6 +3,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -114,5 +115,46 @@ func TestEnsureRefusesAnEditedInstalledConfigWithWriteACL(t *testing.T) {
 	}
 	if got := h.read(h.env.Layout.ConfigPath); got == edited || got != applied {
 		t.Fatal("the policy edit made through the ACL was accepted")
+	}
+}
+
+// chmodHookRunner calls onChmod with the path before the fake removes its ACL.
+type chmodHookRunner struct {
+	*fakeRunner
+	onChmod func(path string)
+}
+
+func (r *chmodHookRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if name == "chmod" && len(args) > 0 {
+		r.onChmod(args[len(args)-1])
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
+}
+
+// GAP-1441: a folder ACL entry let a standard user put another config.yaml
+// in place after the run replaced the file and before the transaction
+// removed the entry; the follow-up transaction applied it.
+func TestEnsureDoesNotApplyAConfigSwappedBeforeTheFolderACLIsRemoved(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	before, _ := h.env.loadDeployment()
+	dir := h.env.P(filepath.Dir(h.env.Layout.ConfigPath))
+	h.runner.acls = map[string][]string{dir: {"user:standard allow add_file,delete_child"}}
+	weaker := strings.Replace(applied, "mode: action", "mode: observe", 1)
+	h.env.Runner = &chmodHookRunner{fakeRunner: h.runner, onChmod: func(path string) {
+		swap := filepath.Join(dir, "swap.yaml")
+		if path == dir && os.WriteFile(swap, []byte(weaker), 0o640) == nil {
+			_ = os.Rename(swap, h.env.P(h.env.Layout.ConfigPath))
+		}
+	}}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	after, _ := h.env.loadDeployment()
+	if got := h.read(h.env.Layout.ConfigPath); got != applied || after.ConfigSHA256 != before.ConfigSHA256 {
+		t.Fatalf("the config swapped in through the folder ACL was applied (errors %+v):\n%s", r.Errors, got)
+	}
+	if len(r.Errors) > 0 {
+		requireError(t, r, codeConfig)
 	}
 }
