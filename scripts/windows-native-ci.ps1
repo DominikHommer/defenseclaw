@@ -2202,6 +2202,37 @@ function Get-WatchdogIdentity([string]$DataDir) {
     return Get-ManagedProcessIdentity $DataDir 'watchdog.pid'
 }
 
+function Set-ContentWithSharingRetry {
+    # Every packaged DefenseClaw process opens installer\install-state.json
+    # with FILE_SHARE_READ only while it validates it (nativeinstallstate), and
+    # endpoint scanners briefly open fresh files. The product writers retry
+    # such sharing violations (safefile.ReplaceFile); this in-place harness
+    # edit of the same file must tolerate them too (GAP-1511).
+    param(
+        [Parameter(Mandatory)][string]$LiteralPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [ValidateRange(1, 100)][int]$MaxAttempts = 40
+    )
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -ErrorAction Stop
+            return
+        } catch {
+            $exception = $_.Exception
+            while ($null -ne $exception -and $exception -isnot [IO.IOException]) {
+                $exception = $exception.InnerException
+            }
+            # 0x80070020 ERROR_SHARING_VIOLATION, 0x80070021 ERROR_LOCK_VIOLATION
+            $transient = $null -ne $exception -and
+                ($exception.HResult -eq -2147024864 -or $exception.HResult -eq -2147024863)
+            if (-not $transient -or $attempt -ge $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds ([Math]::Min(1000, 50 * $attempt))
+        }
+    }
+}
+
 function Test-GatewayIdentityChanged([object]$Before, [object]$After) {
     return $Before.ProcessId -ne $After.ProcessId -or
         $Before.StartIdentity -ne $After.StartIdentity
@@ -5828,7 +5859,7 @@ function Invoke-SetupAcceptance {
         }
         $targetVersion = [string]$installedState.version
         $installedState.version = '99.0.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
         # Model the exact native 0.8.0 -> current-candidate observability-v8
@@ -5836,7 +5867,7 @@ function Invoke-SetupAcceptance {
         # preflight this configuration with the staged target runtime before
         # it stops these owned services or publishes either managed tree.
         $installedState.version = '0.8.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         $configPath = Join-Path $dataRoot 'config.yaml'
         $setupGatewayApiPort = Get-PackagedGatewayApiPort $python $dataRoot
         [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
