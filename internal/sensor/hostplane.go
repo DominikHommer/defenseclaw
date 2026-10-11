@@ -65,6 +65,11 @@ type hostPlane struct {
 	// with a fresh one before Plane C starts again (GAP-1418).
 	started bool
 	done    chan struct{}
+
+	// lifecycle holds the creations and exits seen since the owner book
+	// last took them (GAP-1403), at most maxLifecycleEvents of them.
+	lifecycle      pidEvents
+	lifecycleCount int
 }
 
 // hostSessionKey keeps the first pid/start key stable through a late exec or
@@ -169,8 +174,10 @@ func (h *hostPlane) handle(event plane.Event) {
 	switch event.Kind {
 	case plane.KindExec:
 		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline, time.Time{})
+		h.noteLifecycle(event)
 	case plane.KindExit:
 		h.tracker.ObserveExit(event.PID)
+		h.noteLifecycle(event)
 		return
 	}
 
@@ -227,6 +234,44 @@ func (h *hostPlane) handle(event plane.Event) {
 		Confidence: match.Confidence,
 		At:         at,
 	})
+}
+
+// maxLifecycleEvents bounds the creations and exits kept between two polls.
+const maxLifecycleEvents = maxOwnerInstances
+
+// noteLifecycle keeps a creation or exit for the owner book, which must hear
+// that a pid was handed on before it attributes what the pid did next.
+func (h *hostPlane) noteLifecycle(event plane.Event) {
+	if event.PID <= 0 {
+		return
+	}
+	at := event.At
+	if at.IsZero() {
+		at = time.Now()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lifecycleCount >= maxLifecycleEvents {
+		if h.lifecycle.Overflow.IsZero() {
+			h.lifecycle.Overflow = at
+		}
+		return
+	}
+	if h.lifecycle.ByPID == nil {
+		h.lifecycle.ByPID = map[int][]pidEvent{}
+	}
+	h.lifecycle.ByPID[event.PID] = append(h.lifecycle.ByPID[event.PID],
+		pidEvent{At: at, Exit: event.Kind == plane.KindExit})
+	h.lifecycleCount++
+}
+
+// takeLifecycle hands the creations and exits seen so far to the owner book.
+func (h *hostPlane) takeLifecycle() pidEvents {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	taken := h.lifecycle
+	h.lifecycle, h.lifecycleCount = pidEvents{}, 0
+	return taken
 }
 
 // hostFinding is one agent session, scored.

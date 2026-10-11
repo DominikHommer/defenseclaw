@@ -29,6 +29,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 func TestSessionOwnerEvidenceKeepsDistinctClaudeProfiles(t *testing.T) {
@@ -271,5 +273,40 @@ func TestPollAttributesProcessFindingsThroughTheOwnerLookups(t *testing.T) {
 	finding := snapshot.Findings[0]
 	if finding.User != `DCLAB\alice` || finding.UserSID != aliceSID || finding.Attribution != AttributionSession {
 		t.Fatalf("finding = %+v, want alice through her session", finding)
+	}
+}
+
+// GAP-1403: a LocalSystem cmd.exe a poll saw held pid 944; it exited with
+// no exit record and alice's claude.exe got 944 and wrote her settings.json
+// before the next poll. The lineage tracker still holds cmd.exe's start
+// for the pid, so the finding must not take cmd.exe's owner: only her
+// profile names claude.exe.
+func TestRecycledPIDNeverLendsTheEarlierHoldersOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	host := newHostPlane(newFake(fullCoverage()), agentchain.NewTracker(),
+		tactics.IndicatorsFor("windows"), time.Hour, scoring.KillChainMinStages)
+	host.handle(plane.Event{Kind: plane.KindExec, PID: 944, PPID: 4, Name: "cmd.exe",
+		Cmdline: `cmd /d /c Setup.exe /ensure`, User: "DCFC-WIN2-RS8$", At: base})
+	cmd := procprobe.Process{PID: 944, PPID: 4, Name: "cmd.exe", User: `NT AUTHORITY\SYSTEM`, UserSID: "S-1-5-18",
+		StartedAt: base}
+	host.tracker.ObserveProcessTable([]agentchain.ProcessRow{{PID: 944, PPID: 4, Name: "cmd.exe", Start: base}})
+	book := newOwnerBook(ownerTestLookups(), time.Hour)
+	book.observe([]procprobe.Process{cmd}, base.Add(time.Minute))
+
+	host.handle(plane.Event{Kind: plane.KindExec, PID: 944, PPID: 5000, Name: "claude.exe", Cmdline: "claude",
+		User: "alice", At: base.Add(18 * time.Minute)})
+	host.handle(plane.Event{Kind: plane.KindFileWrite, PID: 944, Name: "claude.exe",
+		Path: `C:\Users\alice\.claude\settings.json`, User: "alice", At: base.Add(19 * time.Minute)})
+
+	findings := (&Service{hostPlane: host}).hostPlaneFindings(base.Add(20*time.Minute), 1,
+		correlate.New(correlate.Snapshot{}), book.resolver())
+	if len(findings) != 1 {
+		t.Fatalf("findings = %+v, want the claude.exe session", findings)
+	}
+	got := findings[0]
+	if got.User != `DCLAB\alice` || got.UserSID != aliceSID || got.Attribution != AttributionEnrolledProfile {
+		t.Fatalf("finding = %s %s (%s), want alice through her profile, never cmd.exe's owner",
+			got.User, got.UserSID, got.Attribution)
 	}
 }

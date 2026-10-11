@@ -86,6 +86,28 @@ type processInstance struct {
 	user, sid               string
 	sessionUser, sessionSID string
 	lastSeen                time.Time
+	// replacedAt is the first exec or process creation the host plane saw
+	// for the pid after the polls last saw this instance, and exitedAt the
+	// first exit. From replacedAt on the pid may name another process, and
+	// the start the lineage tracker reports for it may still be this
+	// instance's: a Windows 4688 carries no creation time, so a pid whose
+	// exit went unseen keeps its earlier holder's start (GAP-1403). Only a
+	// poll that sees the instance again clears either.
+	replacedAt, exitedAt time.Time
+}
+
+// pidEvent is a process creation (exec) or exit the host plane saw.
+type pidEvent struct {
+	At   time.Time
+	Exit bool
+}
+
+// pidEvents are the creations and exits the host plane saw since the owner
+// book last took them. Overflow is when it stopped recording them under
+// churn, zero when it did not.
+type pidEvents struct {
+	ByPID    map[int][]pidEvent
+	Overflow time.Time
 }
 
 const (
@@ -136,6 +158,7 @@ func (b *ownerBook) observe(processes []procprobe.Process, now time.Time) {
 			instance.started = process.StartedAt
 		}
 		instance.lastSeen = now
+		instance.replacedAt, instance.exitedAt = time.Time{}, time.Time{}
 		if instance.sid != "" || instance.user != "" {
 			continue
 		}
@@ -157,11 +180,13 @@ func (b *ownerBook) observe(processes []procprobe.Process, now time.Time) {
 	b.prune(now)
 }
 
-// liveInstance is the recorded instance a process-table row continues.
+// liveInstance is the recorded instance a process-table row continues. Once
+// a creation or exit was seen for the pid only the start ties the row to the
+// instance: the same image is no evidence after the pid was handed on.
 func (b *ownerBook) liveInstance(process procprobe.Process) *processInstance {
 	var found *processInstance
 	for _, instance := range b.byPID[process.PID] {
-		same := sameImage(instance.name, process.Name)
+		same := sameImage(instance.name, process.Name) && instance.replacedAt.IsZero() && instance.exitedAt.IsZero()
 		if !instance.started.IsZero() && !process.StartedAt.IsZero() {
 			same = closeStarts(instance.started, process.StartedAt)
 		}
@@ -170,6 +195,41 @@ func (b *ownerBook) liveInstance(process procprobe.Process) *processInstance {
 		}
 	}
 	return found
+}
+
+// heard files the host plane's creations and exits against the instances
+// the polls last saw before them, so a pid handed on between two polls never
+// lends the earlier holder's owner to what the new holder does. Past an
+// overflow every instance the polls last saw before it counts as handed on.
+func (b *ownerBook) heard(events pidEvents) {
+	mark := func(at *time.Time, when time.Time) {
+		if at.IsZero() || when.Before(*at) {
+			*at = when
+		}
+	}
+	for pid, seen := range events.ByPID {
+		for _, instance := range b.byPID[pid] {
+			for _, event := range seen {
+				switch {
+				case !event.At.After(instance.lastSeen):
+				case event.Exit:
+					mark(&instance.exitedAt, event.At)
+				default:
+					mark(&instance.replacedAt, event.At)
+				}
+			}
+		}
+	}
+	if events.Overflow.IsZero() {
+		return
+	}
+	for _, instances := range b.byPID {
+		for _, instance := range instances {
+			if instance.lastSeen.Before(events.Overflow) {
+				mark(&instance.replacedAt, events.Overflow)
+			}
+		}
+	}
 }
 
 func (b *ownerBook) prune(now time.Time) {
@@ -223,10 +283,11 @@ func (b *ownerBook) prune(now time.Time) {
 // the pid is on record only for other processes: the one the finding saw
 // exited and its number was handed on.
 //
-// With both start times known the start decides. Otherwise the instance
-// must carry the same image name and must not have started after the
-// finding last saw its process; a pid that cannot be tied to the exact
-// instance names nobody.
+// Nothing the finding saw once the pid was handed on is the instance. With
+// both start times known the start decides. Otherwise the instance must not
+// have exited before the finding saw its process, must carry the same image
+// name and must not have started after the finding last saw its process; a
+// pid that cannot be tied to the exact instance names nobody.
 func (b *ownerBook) instance(ref procRef) (found *processInstance, reused bool) {
 	candidates := b.byPID[ref.PID]
 	for _, candidate := range candidates {
@@ -242,8 +303,14 @@ func (b *ownerBook) instance(ref procRef) (found *processInstance, reused bool) 
 }
 
 func refMatches(instance *processInstance, ref procRef) bool {
+	if !instance.replacedAt.IsZero() && (ref.At.IsZero() || !ref.At.Before(instance.replacedAt)) {
+		return false
+	}
 	if !ref.Start.IsZero() && !instance.started.IsZero() {
 		return closeStarts(ref.Start, instance.started)
+	}
+	if !instance.exitedAt.IsZero() && (ref.At.IsZero() || ref.At.After(instance.exitedAt)) {
+		return false
 	}
 	if !sameImage(ref.Name, instance.name) {
 		return false

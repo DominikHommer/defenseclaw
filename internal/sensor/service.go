@@ -491,6 +491,9 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	minRisk := s.options.Config.EffectiveMinRisk()
 	findings := make([]Finding, 0, 8)
 	live := make(map[procprobe.ProcKey]bool, len(processes))
+	if s.hostPlane != nil {
+		s.owners.heard(s.hostPlane.takeLifecycle())
+	}
 	s.owners.observe(processes, now)
 	owners := s.owners.resolver()
 
@@ -855,6 +858,9 @@ func (s *Service) hostPlaneFindings(
 		return nil
 	}
 	harvested := s.hostPlane.harvest(now, minRisk)
+	// What the sessions did since the poll read the process table may follow
+	// a pid being handed on: the book hears of it before attributing them.
+	owners.book.heard(s.hostPlane.takeLifecycle())
 	findings := make([]Finding, 0, len(harvested))
 	for _, session := range harvested {
 		correlation := correlator.Connector(correlate.Observation{
