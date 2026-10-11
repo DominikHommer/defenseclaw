@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -70,12 +71,13 @@ func (s *MCPScanner) runtimeSettings() (string, error) {
 // skill scanner's allowlist plus the judge and AI Defense settings derived
 // from config (the runtime reads no config of its own).
 func (s *MCPScanner) runtimeEnv() []string {
-	derived := runtimeJudgeEnv(s.LLM)
+	base := os.Environ()
+	derived := runtimeJudgeEnv(s.LLM, base)
 	derived["NO_COLOR"] = "1"
 	derived["TERM"] = "dumb"
 	derived["DEFENSECLAW_SCANNER_AID_API_KEY"] = s.CiscoAIDefense.ResolvedAPIKey()
 	derived["DEFENSECLAW_SCANNER_AID_ENDPOINT"] = strings.TrimSpace(s.CiscoAIDefense.Endpoint)
-	return scannerRuntimeEnv(os.Environ(), derived, nil)
+	return scannerRuntimeEnv(base, derived, nil)
 }
 
 // scannerRuntimeEnv is a scanner runtime child's environment: the variables
@@ -84,7 +86,8 @@ func (s *MCPScanner) runtimeEnv() []string {
 // service environment reaches the scan: not DEFENSECLAW_LLM_KEY, which the
 // Python judge falls back to, and not a provider key or endpoint such as
 // OPENAI_BASE_URL, which LiteLLM uses when config names none (GAP-1437). An
-// AWS endpoint never passes, and a derived value replaces an inherited one.
+// AWS endpoint never passes, and a derived name replaces an inherited one,
+// even with an empty value, which then leaves the variable unset.
 func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string]bool) []string {
 	env := make([]string, 0, 32)
 	for _, kv := range base {
@@ -93,7 +96,7 @@ func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string
 			continue
 		}
 		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") || derived[upper] != "" {
+		if _, set := derived[upper]; set || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
 			continue
 		}
 		if keep[upper] || skillScannerEnvPassthrough[upper] || hasAnyPrefix(upper, skillScannerEnvPassthroughPrefixes) {
@@ -110,8 +113,9 @@ func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string
 
 // runtimeJudgeEnv is the resolved scanner judge as the variables the
 // embedded runtime's scan programs read: the runtime reads no config of its
-// own, so the gateway hands it the judge it resolved from config.
-func runtimeJudgeEnv(llm config.LLMConfig) map[string]string {
+// own, so the gateway hands it the judge it resolved from config. base is
+// the environment the runtime starts from.
+func runtimeJudgeEnv(llm config.LLMConfig, base []string) map[string]string {
 	derived := map[string]string{
 		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true",
 		"DEFENSECLAW_SCANNER_LLM_MODEL":       liteLLMModel(llm),
@@ -126,7 +130,58 @@ func runtimeJudgeEnv(llm config.LLMConfig) map[string]string {
 	if region := derived["DEFENSECLAW_SCANNER_LLM_REGION"]; region != "" {
 		derived["AWS_REGION"] = region
 	}
+	addBedrockAuthEnv(derived, llm, base)
 	return derived
+}
+
+// addBedrockAuthEnv hands the runtime a Bedrock judge auth_mode and, for
+// iam_credentials, the keys in base under the variable names llm.bedrock
+// configures (access_key_env, secret_key_env, session_token_env), as the
+// AWS variables LiteLLM signs with. The gateway judge reads the same
+// names; the runtime got neither the mode nor a custom-named key, found no
+// credentials and blocked the plugin (GAP-1460). The configured pair
+// replaces an inherited one and drops an inherited session token unless
+// session_token_env names one. Without both keys the runtime keeps the AWS
+// credential chain, as the gateway judge does. No other name is read.
+func addBedrockAuthEnv(derived map[string]string, llm config.LLMConfig, base []string) {
+	if llm.Bedrock == nil {
+		return
+	}
+	if prefix := llm.ProviderPrefix(); prefix != "bedrock" && prefix != "amazon-bedrock" {
+		return
+	}
+	mode := strings.ToLower(strings.TrimSpace(llm.Bedrock.AuthMode))
+	if mode == "" {
+		mode = "api_key"
+	}
+	derived["DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE"] = mode
+	if mode != "iam_credentials" {
+		return
+	}
+	access := baseEnvValue(base, llm.Bedrock.AccessKeyEnv)
+	secret := baseEnvValue(base, llm.Bedrock.SecretKeyEnv)
+	if access == "" || secret == "" {
+		return
+	}
+	derived["AWS_ACCESS_KEY_ID"] = access
+	derived["AWS_SECRET_ACCESS_KEY"] = secret
+	derived["AWS_SESSION_TOKEN"] = baseEnvValue(base, llm.Bedrock.SessionTokenEnv)
+}
+
+// baseEnvValue is the trimmed value of the variable name in base, or "".
+// Windows compares names case-insensitively, as os.Getenv does there.
+func baseEnvValue(base []string, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, kv := range base {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok && (key == name || runtime.GOOS == "windows" && strings.EqualFold(key, name)) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // pluginRuntimeConfigEnv are the DefenseClaw variables a plugin scan keeps
@@ -149,7 +204,7 @@ var pluginRuntimeConfigEnv = map[string]bool{
 // environment, so an inherited DEFENSECLAW_LLM_KEY stood in for a missing
 // protected credential and OPENAI_BASE_URL moved the judge (GAP-1437).
 func (s *PluginScanner) runtimeEnv(base []string) []string {
-	return scannerRuntimeEnv(base, runtimeJudgeEnv(s.LLM), pluginRuntimeConfigEnv)
+	return scannerRuntimeEnv(base, runtimeJudgeEnv(s.LLM, base), pluginRuntimeConfigEnv)
 }
 
 // MCPRulePack is the guardrail rule pack an MCP scan lays over the server
