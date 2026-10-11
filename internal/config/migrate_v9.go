@@ -84,7 +84,8 @@ type MigrateV9Input struct {
 	ConfigPath string
 	// Source is the v8 bytes; when nil they are read from ConfigPath.
 	Source []byte
-	// DataJSONPath is <policy_dir>/rego/data.json; "" or missing is skipped.
+	// DataJSONPath is the data.json the 0.8.x engine loaded (v8DataJSONIn);
+	// "" or missing is skipped.
 	DataJSONPath string
 	// PolicyDir is the resolved policy_dir. A v8 rule_pack_dir is a preset
 	// only when it is <PolicyDir>/guardrail/<name>, which is where the v9
@@ -407,7 +408,7 @@ func NeedsMigrationV9(raw []byte) bool {
 func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
 	raw := strings.TrimSpace(policyDir)
 	dir = expandPath(raw)
-	dataJSON = filepath.Join(dir, "rego", "data.json")
+	dataJSON = v8DataJSONIn(dir)
 	if dir == raw {
 		return dir, dataJSON
 	}
@@ -415,7 +416,7 @@ func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
 	if err != nil {
 		return dir, dataJSON
 	}
-	literal := filepath.Join(home, raw, "rego", "data.json")
+	literal := v8DataJSONIn(filepath.Join(home, raw))
 	written, err := os.Stat(literal)
 	if err != nil || !written.Mode().IsRegular() {
 		return dir, dataJSON
@@ -424,6 +425,40 @@ func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
 		return dir, dataJSON
 	}
 	return dir, literal
+}
+
+// v8DataJSONIn is the data.json the 0.8.x engine (policy.New) loaded for
+// policy_dir dir: <dir>/rego/data.json, or the data.json next to Rego modules
+// kept flat in dir itself when <dir>/rego holds no modules (GAP-1453).
+func v8DataJSONIn(dir string) string {
+	nested := filepath.Join(dir, "rego", "data.json")
+	if _, err := os.Stat(nested); err == nil || v8HasRegoModules(filepath.Join(dir, "rego")) {
+		return nested
+	}
+	if flat := filepath.Join(dir, "data.json"); v8RegularFile(flat) {
+		return flat
+	}
+	return nested
+}
+
+// v8HasRegoModules is the 0.8.x engine's hasRegoFiles: a folder with a .rego
+// file, or one it could not list for another reason than its absence.
+func v8HasRegoModules(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".rego" {
+			return true
+		}
+	}
+	return false
+}
+
+func v8RegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // MigrateV8InMemory is the gateway's read-only load of a config_version 8
@@ -452,7 +487,7 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	policyDir, dataJSON := V8PolicyDataJSON(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
 	if policyDir == "" {
 		policyDir = filepath.Join(dataDir, "policies")
-		dataJSON = filepath.Join(policyDir, "rego", "data.json")
+		dataJSON = v8DataJSONIn(policyDir)
 	}
 	managedHost := StandaloneManagedSource(raw)
 	in := MigrateV9Input{
@@ -758,7 +793,7 @@ func (m *v9Migrator) migratePolicyDir(root *yaml.Node) {
 	}
 	v9Set(root, v9Scalar(dir), "policy_dir")
 	m.moved("config", "policy_dir", "policy_dir", dir)
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && filepath.Clean(dj) != filepath.Join(dir, "rego", "data.json") {
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && filepath.Clean(dj) != v8DataJSONIn(dir) {
 		m.note("0.8.x did not expand policy_dir %s and kept its policy data in %s; that data.json was migrated", raw, dj)
 	}
 }
