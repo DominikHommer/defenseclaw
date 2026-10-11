@@ -116,6 +116,28 @@ func TestDiffConfigsSeesNoEnterpriseChangeAcrossAClone(t *testing.T) {
 	}
 }
 
+// GAP-1483: the published snapshot keeps the protected AI Defense credential
+// Load records, so with that credential unreadable the scanners get no key
+// rather than the service environment's, and a reload of the same file does
+// not rebuild (and reset the /health state of) the AI Defense client.
+func TestPublishedStandaloneConfigKeepsTheAIDefenseCredential(t *testing.T) {
+	t.Setenv("P0_AID_KEY_ENV", "inherited-aid")
+	const doc = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"  inspection:\n    ai_defense:\n      enabled: true\n      credential: aid-key\n" +
+		"cisco_ai_defense:\n  api_key_env: P0_AID_KEY_ENV\n"
+	loaded, err := config.LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := (&Sidecar{}).publishConfig(loaded)
+	if got := published.CiscoAIDefense.ResolvedAPIKey(); got != "" {
+		t.Fatalf("published AI Defense key = %q, want none while the credential is unreadable", got)
+	}
+	if inspectorNeedsRebuild(published, loaded) {
+		t.Fatal("reloading an unchanged standalone config rebuilt the AI Defense client")
+	}
+}
+
 func TestDiffConfigsLeavesSecureClientEnterpriseUntouched(t *testing.T) {
 	// A Secure Client deployment carries no enterprise block; nothing about
 	// its diff, restart set or inspector rebuild may change.

@@ -122,6 +122,9 @@ func TestStandaloneKeysIgnoreServiceEnvironment(t *testing.T) {
 	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "from-credential" {
 		t.Fatalf("standalone AI Defense key = %q, want the protected credential", got)
 	}
+	if copied, err := CopyConfig(loaded); err != nil || copied.CiscoAIDefense.ResolvedAPIKey() != "from-credential" {
+		t.Fatalf("a copied config lost the protected AI Defense credential (err %v)", err)
+	}
 	provisioned = false
 	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "" {
 		t.Fatalf("unreadable AI Defense credential gave key %q, want none", got)

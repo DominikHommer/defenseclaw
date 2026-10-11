@@ -627,7 +627,7 @@ func (g *GuardrailConfig) profileConnectorOverlay(connector string, overlay PerC
 	return overlay
 }
 
-// copyConfigSharingProfiles is deepCopyConfig for a derived configuration:
+// copyConfigSharingProfiles is CopyConfig for a derived configuration:
 // the copy shares c's profile table and assignments instead of copying
 // them. A derived configuration is read-only, and the copy used to carry
 // every profile again, so deriving P profiles copied P tables of P
@@ -636,7 +636,7 @@ func (g *GuardrailConfig) profileConnectorOverlay(connector string, overlay PerC
 func copyConfigSharingProfiles(c *Config) (*Config, error) {
 	slim := *c
 	slim.Guardrail.Profiles, slim.Guardrail.ProfileAssignments = nil, nil
-	out, err := deepCopyConfig(&slim)
+	out, err := CopyConfig(&slim)
 	if err != nil {
 		return nil, err
 	}
@@ -644,12 +644,15 @@ func copyConfigSharingProfiles(c *Config) (*Config, error) {
 	return out, nil
 }
 
-// deepCopyConfig copies c through JSON, which keeps nil and empty maps and
-// slices apart (the gateway's cloneConfig uses the same encoding). JSON
-// drops RuntimeV8RulePackRebase (json:"-"), so it is copied explicitly: a
-// derived profile without it scanned with the 0.8.x pack unrebased while
-// every other user got the rebased one (GAP-1359).
-func deepCopyConfig(c *Config) (*Config, error) {
+// CopyConfig copies c through JSON, which keeps nil and empty maps and
+// slices apart (the gateway publishes every configuration snapshot through
+// it). JSON drops the fields it cannot see, so they are copied explicitly:
+// RuntimeV8RulePackRebase (json:"-"; a derived profile without it scanned
+// with the 0.8.x pack unrebased while every other user got the rebased one,
+// GAP-1359) and the protected AI Defense credential Load records on a
+// standalone deployment (a copy without it handed the scanners' AI Defense
+// analyzers the key in the service environment, GAP-1483).
+func CopyConfig(c *Config) (*Config, error) {
 	data, err := json.Marshal(c)
 	if err != nil {
 		return nil, fmt.Errorf("copy configuration: %w", err)
@@ -659,5 +662,8 @@ func deepCopyConfig(c *Config) (*Config, error) {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
 	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
+	out.CiscoAIDefense.protectedCredentialRequired = c.CiscoAIDefense.protectedCredentialRequired
+	out.CiscoAIDefense.protectedCredential = c.CiscoAIDefense.protectedCredential
+	out.CiscoAIDefense.protectedSecretsDir = c.CiscoAIDefense.protectedSecretsDir
 	return &out, nil
 }

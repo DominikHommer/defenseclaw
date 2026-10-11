@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1190,16 +1189,13 @@ func cloneConfig(in *config.Config) *config.Config {
 	// and maps. YAML omitempty round-tripping collapsed those values, causing a
 	// freshly loaded snapshot to compare different from the same file on reload
 	// and spuriously classify unrelated security sections as changed.
-	data, err := json.Marshal(in)
+	// config.CopyConfig also carries the state JSON cannot see, such as the
+	// standalone AI Defense credential the scanners resolve (GAP-1483).
+	out, err := config.CopyConfig(in)
 	if err != nil {
 		panic(fmt.Errorf("config manager: clone config: %w", err))
 	}
-	var out config.Config
-	if err := json.Unmarshal(data, &out); err != nil {
-		panic(fmt.Errorf("config manager: decode cloned config: %w", err))
-	}
-	out.RuntimeV8RulePackRebase = in.RuntimeV8RulePackRebase
-	return &out
+	return out
 }
 
 func (m *ConfigManager) matches(path string) bool {
