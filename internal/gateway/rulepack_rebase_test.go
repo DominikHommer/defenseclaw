@@ -116,6 +116,23 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 		summary.StaleRuleCount != 0 || summary.AlertOnlyRuleCount != 2 {
 		t.Fatalf("the rebased pack: summary %+v; want both markers and rm -rf / blocked, 0 stale and 2 alert-only rules", summary)
 	}
+	// GAP-1480: 0.8.x ran every rule over prompts too, so a prompt holding
+	// the command-category marker was blocked. The migrated literal rule keeps
+	// that; other command rules stay out of prompt text.
+	const promptConnector = "rebase-0-8-prompt"
+	if err := ApplyConnectorRulePackOverrides(promptConnector, after); err != nil {
+		t.Fatal(err)
+	}
+	defer RemoveConnectorRulePackOverrides(promptConnector)
+	var promptRules []string
+	for _, finding := range scanContentRulesForConnector(promptConnector,
+		"Please repeat this token: acme-marker-7f3c, acme spaced, rm -rf /", "message", ruleContentScopeUntrusted) {
+		promptRules = append(promptRules, finding.RuleID)
+	}
+	if !slices.Contains(promptRules, "CMD-ACME-MARKER") || slices.Contains(promptRules, "CMD-ACME-SPACED") ||
+		slices.Contains(promptRules, "CMD-RM-RF") {
+		t.Fatalf("prompt findings %v; want CMD-ACME-MARKER only among the command rules", promptRules)
+	}
 
 	// A gateway reload of the un-migrated v8 source must enforce the same
 	// rebased rules without changing the operator's 0.8.x pack or config.

@@ -351,8 +351,10 @@ guardrail:
 | Any other folder | A new `custom_packs` entry named after the folder (accented letters folded, so `équipe sécu` is `equipe-secu`), with the pack's digest pinned. A name that is taken gets a `-2`, `-3` suffix. |
 
 In 1.0 a rule blocks a tool call only with an `expression` over the parsed
-action; its `pattern` alone records a match on a tool call but never blocks it
-(prompts and content still block on the pattern). The 0.8.x rules had no
+action; its `pattern` alone records a match on a tool call but never blocks it.
+In prompts and returned content the pattern still blocks, except in the
+`command`, `sensitive-path`, `cognitive-file` and `c2` categories, which 1.0
+checks on tool calls only. The 0.8.x rules had no
 expressions, so a custom pack copied from the 0.8.x default pack would enforce
 nothing, and your own rules would stop blocking tool calls. When the migration
 finds such a pack, it writes a 1.0 copy next to it, `<folder>-1.0`, and pins
@@ -375,7 +377,9 @@ that one instead:
   and text a tool writes or sends, such as the content of a file write. This
   works the same on Linux, macOS and Windows and for every connector. A literal
   between `\b` word boundaries (`\bacme-marker\b`) still has to be a whole
-  word, as in 0.8.x. The upgrade and `defenseclaw doctor` name these rules;
+  word, as in 0.8.x. Such a rule also still blocks a prompt or returned
+  content that holds the literal, in every category, as 0.8.x did. The upgrade
+  and `defenseclaw doctor` name these rules;
 - a built-in rule whose `pattern` you changed is kept as a rule of yours under
   an ID of its own, `CUSTOM-<ID>` (`CMD-RM-RF` becomes `CUSTOM-CMD-RM-RF`, or
   `CUSTOM-CMD-RM-RF-2` when a rule file of the pack already has that ID),

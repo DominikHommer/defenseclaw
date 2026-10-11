@@ -14136,7 +14136,8 @@ def _emit_rule_pack_row(
             "Rule pack",
             f"{kind} {shown_path}: {enabled_rule_count}/{rule_count} rules enabled, but "
             f"{' and '.join(problems)} with no expression: they are detection-only for tool calls "
-            "(a match is recorded, never blocked; prompts still block)",
+            "(a match is recorded, never blocked; prompts still block on them outside the command, path, "
+            "agent-file and C2 categories)",
             r=r,
             remediation=remediation,
         )

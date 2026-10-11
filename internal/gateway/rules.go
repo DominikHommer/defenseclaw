@@ -44,6 +44,10 @@ type PatternRule struct {
 	Severity     string
 	Confidence   float64
 	Tags         []string
+	// migratedLiteral is set when the generation is compiled for a migrated
+	// 0.8.x literal rule (migratedLiteralRule). Its pattern runs over prompt
+	// and content text in every category, as on 0.8.x (GAP-1480).
+	migratedLiteral bool
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -273,6 +277,12 @@ func compileRulePackGenerationWithCompiler(
 	claimed := make(map[string]string)
 	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
+	for categoryIndex := range ownedCategories {
+		rules := ownedCategories[categoryIndex].Rules
+		for ruleIndex := range rules {
+			rules[ruleIndex].migratedLiteral = migratedLiteralRule(rules[ruleIndex])
+		}
+	}
 	for _, category := range ownedCategories {
 		for _, rule := range category.Rules {
 			ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
@@ -317,7 +327,7 @@ func compileRulePackGenerationWithCompiler(
 				}
 				compiled.semanticRules[position] = compiledSemanticRule{
 					rule: rule, program: program, owner: semanticOwnerForRule(rule.ID),
-					migratedLiteral: migratedLiteralRule(rule),
+					migratedLiteral: rule.migratedLiteral,
 				}
 				continue
 			}
@@ -344,7 +354,7 @@ func compileRulePackGenerationWithCompiler(
 				rule:            rule,
 				program:         program,
 				owner:           owner,
-				migratedLiteral: migratedLiteralRule(rule),
+				migratedLiteral: rule.migratedLiteral,
 			})
 			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
@@ -859,6 +869,19 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 	}
 }
 
+// allowsMigratedLiteral reports whether a migrated 0.8.x literal rule of
+// category runs over content text that allowsCategory keeps the category out
+// of. 0.8.x ran every rule over prompts and content, so an operator literal
+// rule in the command, path, agent-file or C2 category blocked a prompt that
+// held the literal; the upgrade keeps that (GAP-1480). Only the content
+// boundary is lifted: a category filter or the trust-exploit exclusion still
+// applies.
+func (o ruleScanOptions) allowsMigratedLiteral(category string) bool {
+	return o.contentScope != ruleContentScopeAll &&
+		(o.onlyCategory == "" || category == o.onlyCategory) &&
+		(!o.excludeTrustExploit || category != "trust-exploit")
+}
+
 // neutralizeKnownFixtureDataLiterals removes only canonical public examples.
 // It deliberately does not suppress an entire detector category: a fixture can
 // still contain a real credential or PII value, and a fixture-looking path can
@@ -958,11 +981,15 @@ func scanRuleCategoriesWithOptions(
 	// Scan raw text first
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		if !options.allowsCategory(cat.Name) {
+		categoryAllowed := options.allowsCategory(cat.Name)
+		if !categoryAllowed && !options.allowsMigratedLiteral(cat.Name) {
 			continue
 		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
+			if !categoryAllowed && !rule.migratedLiteral {
+				continue
+			}
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
@@ -1001,11 +1028,15 @@ func scanRuleCategoriesWithOptions(
 	if normalized != text {
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
-			if !options.allowsCategory(cat.Name) {
+			categoryAllowed := options.allowsCategory(cat.Name)
+			if !categoryAllowed && !options.allowsMigratedLiteral(cat.Name) {
 				continue
 			}
 			for ruleIndex := range cat.Rules {
 				rule := &cat.Rules[ruleIndex]
+				if !categoryAllowed && !rule.migratedLiteral {
+					continue
+				}
 				if !options.allows(rule.ID, rule.ToolCallOnly) {
 					continue
 				}
