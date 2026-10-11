@@ -326,7 +326,9 @@ before the first install (a Claude Code or Codex window left open, for
 example) runs without DefenseClaw until it is restarted. The `/ensure`
 result, `status` and `verify` name each such user and session with the
 `agent_sessions_restart_required` warning; ask those users to restart their
-agents.
+agents. The same warning names a session that started before a later config
+change enabled its connector, or enrolled its account (for example one taken
+out of `exclude_users`), in that `ensure` result and every `status` after it.
 
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
@@ -1082,6 +1084,9 @@ services after it checks they belong to this deployment, moves
 `C:\Program Files\Cisco\DefenseClaw` and the machine-wide hook files, and
 then deletes the moved folder. The result has a `forced_uninstall` warning, and
 `forced_state_root_kept` names the moved folder if it could not be deleted.
+If the folder cannot be moved aside, for example because a process holds a
+file in it open, Setup fails with that error and the services get back the
+startup mode and running state they had. Close that process and run it again.
 Hook registrations in each account's profile cannot be attributed without the
 deployment state, so the result lists what stays. Keep the lifecycle log
 (`C:\Windows\Logs\DefenseClaw\enterprise-lifecycle.log`) for DefenseClaw

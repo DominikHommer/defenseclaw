@@ -139,6 +139,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	installedBeforeRun      bool
 	previousConnectors      []string
 	previousConnectorsKnown bool
+	// previousTargets are the targets the guardian manifest enrolled before
+	// the run, keyed as windowsEnterpriseManifestRowKey (GAP-1435).
+	previousTargets      map[string]bool
+	previousTargetsKnown bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -407,6 +411,8 @@ func runWindowsEnterpriseLifecycle(
 			if opts.installedBeforeRun {
 				connectors, connectorErr := windowsEnterpriseEnrolledConnectors()
 				opts.previousConnectors, opts.previousConnectorsKnown = connectors, connectorErr == nil
+				targets, targetsErr := windowsEnterpriseEnrolledTargets()
+				opts.previousTargets, opts.previousTargetsKnown = targets, targetsErr == nil
 			}
 		}
 	}

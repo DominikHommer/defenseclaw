@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -452,5 +453,63 @@ func TestWindowsEnterpriseHotConnectorEnableWarnsOpenSessions(t *testing.T) {
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "claudecode (pid 41)") ||
 		strings.Contains(warnings[0], "codex (pid 42)") {
 		t.Fatalf("session warnings = %q", warnings)
+	}
+}
+
+// GAP-1435: a hot ensure that only enrolls an account leaves the connector
+// set as it was; the open sessions of that account still need a restart, in
+// the ensure and in every later status.
+func TestWindowsEnterpriseHotEnrollmentWarnsOpenSessions(t *testing.T) {
+	const previous = "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users:\n      - alice\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	const next = "config_version: 9\nenterprise:\n  enrollment:\n    exclude_users: []\nguardrail:\n  connectors:\n    claudecode: {}\n"
+	const aliceSID = "S-1-5-21-1-2-3-1001"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original, originalMetadata := windowsEnterpriseAgentProcesses, windowsEnterpriseActivationMetadata
+	originalConnectors, originalTargets, originalSID := windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets, windowsEnterpriseAccountSID
+	t.Cleanup(func() {
+		windowsEnterpriseAgentProcesses, windowsEnterpriseActivationMetadata = original, originalMetadata
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets, windowsEnterpriseAccountSID = originalConnectors, originalTargets, originalSID
+	})
+	alice := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: aliceSID, Connector: "claudecode"})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"claudecode"}, nil }
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return map[string]bool{alice: true}, nil }
+	windowsEnterpriseAccountSID = func(account string) string {
+		if account == `DCFC\alice` {
+			return aliceSID
+		}
+		return ""
+	}
+	started := time.Now().Add(-time.Minute)
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{PID: 41, Connector: "claudecode", User: `DCFC\alice`, StartedAt: started}}, nil
+	}
+	// What the change-action preflight records before the run.
+	opts.activationStartedAt, opts.installedBeforeRun = started.Add(-time.Hour), true
+	opts.previousConnectors, opts.previousConnectorsKnown = []string{"claudecode"}, true
+	opts.previousTargets, opts.previousTargetsKnown = map[string]bool{}, true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	ensure := runHotConfigEnsure(t, host, opts, stub)
+	if !ensure.OK || host.refreshes != 1 {
+		t.Fatalf("hot ensure = %+v, target refreshes = %d", ensure, host.refreshes)
+	}
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	status.Installed = true
+	applyWindowsEnterpriseAgentSessions(status, &windowsEnterpriseLifecycleOptions{})
+	for _, result := range []*enterprisestatus.Result{ensure, status} {
+		var warnings []string
+		for _, warning := range result.Warnings {
+			if warning.Code == windowsAgentSessionsRestartCode {
+				warnings = append(warnings, warning.Message)
+			}
+		}
+		if len(warnings) != 1 || !strings.Contains(warnings[0], `user DCFC\alice runs claudecode (pid 41), started before the account was enrolled`) {
+			t.Fatalf("%s session warnings = %q", result.Action, warnings)
+		}
 	}
 }
