@@ -470,9 +470,8 @@ func runWindowsEnterpriseLifecycle(
 	}
 	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade" ||
 		(action == "repair" && strings.TrimSpace(opts.configPath) != "")) {
-		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
-			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
-				fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+		if refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(ctx, cmd, action, opts, script); refused {
+			return err
 		}
 	}
 	if windowsEnterpriseStandalone(opts) && action == "upgrade" && windowsEnterpriseKeepsInstalledConfig(opts) {
