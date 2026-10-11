@@ -36,7 +36,8 @@ import (
 // helperPlaneSource is Plane C delivered over the broker.
 //
 // It holds one long-lived connection: the helper writes a coverage frame,
-// then events until either side goes away. A source serves one stream; the
+// then events, and a fresh coverage frame whenever its coverage changes,
+// until either side goes away. A source serves one stream; the
 // sensor service reports the plane down when it ends and starts a fresh
 // source (GAP-1418), so the gap shows in status instead of being papered
 // over here.
@@ -110,10 +111,19 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 			return
 		}
 		var frame eventStreamFrame
-		if err := json.Unmarshal(response.Body, &frame); err != nil || frame.Event == nil {
+		if err := json.Unmarshal(response.Body, &frame); err != nil {
 			continue
 		}
-		s.buffer.Push(decodeEvent(*frame.Event))
+		if frame.Coverage != nil {
+			// The coverage of the helper source changed mid-stream (GAP-1473).
+			coverage := decodeCoverage(*frame.Coverage)
+			s.mu.Lock()
+			s.coverage = coverage
+			s.mu.Unlock()
+		}
+		if frame.Event != nil {
+			s.buffer.Push(decodeEvent(*frame.Event))
+		}
 	}
 }
 
