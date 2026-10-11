@@ -101,6 +101,21 @@ func TestVerifyRequiresThePublishedModeOfOwnedPolicyFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if name == "codex" {
+				// Configuration management also edited the file and kept the
+				// hooks: the mode is still checked (GAP-1485).
+				f, err := os.OpenFile(files[0], os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = f.WriteString("\n# an administrator's unrelated setting\n")
+				if cerr := f.Close(); err == nil {
+					err = cerr
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			verify, err := VerifyAll(opts, connectors)
 			if err != nil {

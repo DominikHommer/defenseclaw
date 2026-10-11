@@ -336,13 +336,8 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
 	}
-	// A rebased pack is written only during commit; its digest cannot be
-	// checked on disk during the dry run. Other referenced assets already
-	// exist and can be checked before either a preview or a commit.
-	if len(m.rebasedPacks) == 0 {
-		if err := ValidateCandidateAssets(abs, migrated); err != nil {
-			return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
-		}
+	if err := m.validateAssets(abs, migrated); err != nil {
+		return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
 	}
 	if in.DryRun || in.InMemory {
 		return result, nil
@@ -351,6 +346,42 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result.Written = written
 	result.Record = m.record
 	return result, err
+}
+
+// validateAssets runs the asset check of a config write (ValidateCandidateAssets)
+// on the migrated document, before a preview or a commit. A rebased pack is
+// written only at commit, so the check reads it from a temporary copy of its
+// files, which the custom_packs entry of the candidate points at; its pinned
+// digest is checked against that copy. Skipping the whole check for a rebased
+// pack let an unrelated reference the gateway refuses into config_version 9
+// (GAP-1482).
+func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
+	if len(m.rebasedPacks) == 0 || candidateAssetCheck == nil {
+		return ValidateCandidateAssets(configPath, migrated)
+	}
+	candidate, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, migrated)
+	if err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp("", "defenseclaw-rebased-packs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	for _, name := range slices.Sorted(maps.Keys(candidate.Guardrail.CustomPacks)) {
+		pack := candidate.Guardrail.CustomPacks[name]
+		files, ok := m.rebasedPacks[filepath.Clean(pack.Path)]
+		if !ok {
+			continue
+		}
+		copied := filepath.Join(staging, name, filepath.Base(pack.Path))
+		if err := writeRebasedRulePack(copied, files); err != nil {
+			return fmt.Errorf("stage the rebased rule pack %s: %w", pack.Path, err)
+		}
+		pack.Path = copied
+		candidate.Guardrail.CustomPacks[name] = pack
+	}
+	return CheckCandidateAssets(candidate)
 }
 
 // finishPendingV9 resumes the part after config commit under the config lock.
@@ -611,8 +642,8 @@ type v9Migrator struct {
 	auditRowsRead     bool
 	// envKey is an inline scanner key moved to .env on commit.
 	envKey, envValue string
-	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
-	// replaces with the shipped module (nil data retires the file).
+	// rego are the pre-9 Rego modules the gateway loads (planRegoRefresh) that
+	// commit replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
 	// providersOverlay is the legacy custom-providers.json folded into
 	// llm_providers; commit writes providerCAs and retires the file.
@@ -1151,10 +1182,14 @@ var v9DataJSONDocs = map[string]bool{
 // v9VendorRegoModules are the modules 0.8.x init seeded.
 var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_actions.rego"}
 
-// planRegoRefresh finds the modules under <policy_dir>/rego that read a data
+// planRegoRefresh finds the modules the gateway loads that read a data
 // document outside data.defenseclaw, which config_version 9 no longer
 // provides: the gateway refuses such a bundle and uses the config-driven
-// admission and thresholds (regodata, the check the policy engine runs). A
+// admission and thresholds (regodata, the check the policy engine runs). The
+// gateway loads <policy_dir>/rego, or the modules kept flat in policy_dir
+// when rego holds none (policy.resolveRegoDir), as 0.8.x did with them and
+// their data.json (v8DataJSONIn, GAP-1453); a flat folder was left as it was
+// and its custom block stopped applying without a word (GAP-1481). A
 // pre-9 vendor module left by init (it only seeded missing files) is
 // replaced on a per-user install with the shipped module (skill_actions.rego,
 // removed in 9, is retired); on a managed host the admin owns policy_dir, so
@@ -1163,6 +1198,9 @@ var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_ac
 // longer enforced, and the upgrade and doctor say so.
 func (m *v9Migrator) planRegoRefresh() error {
 	dir := filepath.Join(m.policyDir(), "rego")
+	if !v8HasRegoModules(dir) {
+		dir = m.policyDir()
+	}
 	shipped := map[string][]byte{}
 	files, err := policyassets.Files()
 	if err != nil {
