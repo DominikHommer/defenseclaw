@@ -145,7 +145,7 @@ class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
         model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
         with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=True), \
                 patch.object(_llm_env, "_aws_credential_chain_found", return_value=False), \
-                patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": ""}):
+                patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "", "DEFENSECLAW_LLM_KEY": ""}):
             with self.assertRaises(SystemExit) as stop:
                 self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model})
             self.assertIn(model, str(stop.exception.code))
