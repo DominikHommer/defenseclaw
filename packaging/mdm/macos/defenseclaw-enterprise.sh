@@ -702,7 +702,7 @@ dc_install_package() {
                         *"No space left"* | *"not enough space"* | *"not enough disk space"*)
                             dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "the installer ran out of disk space; free some space, then rerun: $output" ;;
                     esac
-                    dc_package_script_result "$started"
+                    dc_package_script_result "$started" "$output"
                     dc_fail_result "$DC_EXIT_FAILURE" mdm_package_install_failed "installer failed: $output"
                 fi
                 dc_package_step "$installed" "$version"
@@ -732,7 +732,19 @@ dc_require_free_space() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_disk_full "not enough free disk space on the volume of $DC_INSTALL_ROOT: the package needs about $((need / 1024)) MB and $((free / 1024)) MB is free; nothing was installed. Free some space, then rerun"
 }
 
-# dc_package_script_result <marker>: after a failed installer run, print the
+# dc_lifecycle_lock_held <lock>: whether a lifecycle run holds the lifecycle
+# lock now. The gateway takes it with flock(2) (internal/enterpriseunix/
+# lock.go) and macOS has no flock command, so perl tries a non-blocking
+# flock on a read-only descriptor. A missing lock file or a probe that
+# cannot run counts as not held.
+dc_lifecycle_lock_held() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    perl -e 'use Fcntl qw(:flock O_RDONLY O_NOFOLLOW);
+        sysopen(my $fh, $ARGV[0], O_RDONLY | O_NOFOLLOW) or exit 1;
+        exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : ($!{EWOULDBLOCK} ? 0 : 1))' "$1" 2>/dev/null
+}
+
+# dc_package_script_result <marker> <installer output>: after a failed installer run, print the
 # result the package's preinstall or postinstall wrote during it and exit
 # with its exit code. The Installer only says "an error occurred while
 # running scripts", while that result names the cause: a refused downgrade
@@ -741,11 +753,28 @@ dc_require_free_space() {
 # retries; exiting 1 instead turned it into a failure (GAP-1413). A result
 # not older than the marker is this run's: the file system can stamp both
 # in one clock tick, and a strict "newer" test dropped a preinstall that
-# refused at once.
+# refused at once. <installer output> goes into the failure that names a
+# result the package script left empty.
 dc_package_script_result() {
     result=$DC_PACKAGE_RESULT
     [ -n "$result" ] && [ -f "$result" ] && [ ! -L "$result" ] && [ -f "$1" ] || return 0
     [ -z "$(find "$1" -newer "$result" 2>/dev/null)" ] || return 0
+    # The postinstall empties the result when it starts the lifecycle. The
+    # Installer stops a script at 10 minutes and returns at once, while the
+    # lifecycle it started still writes its result a moment later: wait for
+    # that, and when none comes, say whether the lock is still held
+    # (GAP-1413). An empty result read at once gave exit 1 and no output.
+    waited=0
+    while [ ! -s "$result" ] && [ "$waited" -lt 30 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ ! -s "$result" ] || [ -L "$result" ]; then
+        if dc_lifecycle_lock_held "$(dirname "$result")/lifecycle.lock"; then
+            dc_fail_result "$DC_EXIT_BUSY" lifecycle_busy "another lifecycle run still holds the lock after the package script timed out; retry later"
+        fi
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_package_result_empty "the package script left no result in $result; its log is $(dirname "$result")/last-package-result.log. installer: $2"
+    fi
     cp "$result" "$DC_STAGE/package-result.json" 2>/dev/null || return 0
     DC_RESULT="$DC_STAGE/package-result.json"
     dc_emit_result

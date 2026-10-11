@@ -183,7 +183,10 @@ sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCR
 # postinstall applies the deployment. A failure has already been rolled back
 # by the lifecycle; it fails the install so the MDM reports it. It waits for
 # a config-apply run that holds the lifecycle lock, as that trigger does,
-# instead of failing the install as busy after the default 5 seconds.
+# instead of failing the install as busy after the default 5 seconds. It
+# waits 8 minutes, not the trigger's 10: the macOS Installer stops a package
+# script at 10 minutes, and the lifecycle must write its lifecycle_busy
+# result (exit 75) before that for the MDM wrapper to report it (GAP-1413).
 cat >"$SCRIPTS/postinstall" <<'EOF'
 #!/bin/sh
 gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
@@ -194,7 +197,7 @@ downgrade=""
 if [ -f "$state/allow-downgrade" ] && [ ! -L "$state/allow-downgrade" ] && [ "$(stat -f %u "$state/allow-downgrade")" = 0 ]; then
     downgrade=--allow-downgrade
 fi
-"$gateway" enterprise macos ensure --from-package $downgrade --reason package --json --lock-wait 10m \
+"$gateway" enterprise macos ensure --from-package $downgrade --reason package --json --lock-wait 8m \
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
 rm -f "$state/allow-downgrade"

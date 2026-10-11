@@ -759,7 +759,7 @@ def test_linux_postinstall_holds_the_apply_trigger_and_waits_for_the_lock(tmp_pa
     assert "the managed deployment is active" in result.stdout
     calls = host.calls()
     ensure = next(i for i, call in enumerate(calls) if call.startswith("gateway "))
-    assert calls[ensure] == "gateway enterprise linux ensure --from-package --reason package --json --lock-wait 10m"
+    assert calls[ensure] == "gateway enterprise linux ensure --from-package --reason package --json --lock-wait 8m"
     stop = calls.index(f"systemctl stop {APPLY_PATH}")
     # GAP-0467: the unpacked payload is flushed before anything uses it.
     assert calls.index("sync ") < next(i for i, call in enumerate(calls) if call.startswith("systemd-sysusers")), calls
@@ -769,7 +769,7 @@ def test_linux_postinstall_holds_the_apply_trigger_and_waits_for_the_lock(tmp_pa
     assert calls.index(f"systemctl start {APPLY_PATH}") > ensure, calls
 
 
-@pytest.mark.parametrize(("rc", "message"), [(75, "held the lock for 10 minutes"), (1, "the lifecycle reported a problem")])
+@pytest.mark.parametrize(("rc", "message"), [(75, "held the lock for 8 minutes"), (1, "the lifecycle reported a problem")])
 def test_linux_postinstall_reports_a_lifecycle_problem_and_restores_the_trigger(tmp_path: Path, rc: int, message: str) -> None:
     host = _Host(tmp_path, gateway_rc=rc, apply_path_active=True)
     result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
@@ -850,7 +850,7 @@ def test_linux_preinstall_holds_the_apply_trigger_until_the_postinstall(tmp_path
     )
     assert calls[3:] == [
         f"systemctl stop {APPLY_PATH}",
-        f"flock -w 600 {host.state}/lifecycle.lock true",
+        f"flock -w 480 {host.state}/lifecycle.lock true",
     ]
     assert held.exists()
     post = host.run(_linux_scriptlet(host, "postinstall.sh").replace("/run/defenseclaw-enterprise-apply-path.held", str(held)), "configure")
@@ -928,7 +928,7 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
     host = _Host(tmp_path, gateway_rc=rc)
     result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
     assert result.returncode == exit_code, (result.stdout, result.stderr)
-    assert host.calls() == ["gateway enterprise linux uninstall --json --lock-wait 10m"]
+    assert host.calls() == ["gateway enterprise linux uninstall --json --lock-wait 8m"]
     if rc == 75:
         assert "nothing was removed" in result.stderr
     elif rc:
@@ -1029,7 +1029,7 @@ def test_macos_pkg_postinstall_waits_for_the_lock(tmp_path: Path, rc: int) -> No
     host = _Host(tmp_path, gateway_rc=rc)
     result = host.run(_macos_pkg_postinstall(host))
     assert result.returncode == rc
-    assert host.calls() == ["gateway enterprise macos ensure --from-package --reason package --json --lock-wait 10m"]
+    assert host.calls() == ["gateway enterprise macos ensure --from-package --reason package --json --lock-wait 8m"]
 
 
 MDM = ROOT / "packaging" / "mdm"

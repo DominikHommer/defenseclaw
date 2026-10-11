@@ -524,18 +524,21 @@ echo extracted
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
-@pytest.mark.parametrize("failure", ["disk_full", "downgrade", "busy"])
+@pytest.mark.parametrize("failure", ["disk_full", "downgrade", "busy", "empty_busy", "empty_free", "late_busy"])
 def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path: Path) -> None:
     # The Installer only says "The upgrade failed": a full data volume is
     # refused before it runs (GAP-0539), and a refused downgrade reports the
     # result the preinstall wrote, naming both versions (GAP-0538). The
     # wrapper exits with that result's code: a postinstall that timed out on
-    # the lifecycle lock reports 75, which the MDM retries (GAP-1413).
+    # the lifecycle lock reports 75, which the MDM retries (GAP-1413). The
+    # Installer stops that postinstall at 10 minutes, before the lifecycle
+    # writes its result: the wrapper waits for it, and when it stays empty
+    # reports lifecycle_busy (75) while the lock is still held.
     text = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
     functions = "\n".join(
         _shell_function(text, name)
         for name in ("dc_busy_output", "dc_require_product_version", "dc_require_free_space",
-                     "dc_package_script_result", "dc_install_package")
+                     "dc_lifecycle_lock_held", "dc_package_script_result", "dc_install_package")
     )
     stubs = dict(_PACKAGE_TOOL_STUBS)
     stubs["pkgutil"] = """case "$1" in
@@ -545,9 +548,13 @@ def test_macos_wrapper_names_why_the_package_step_failed(failure: str, tmp_path:
 esac"""
     stubs["df"] = 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/disk3 9000000 8000000 %s 90%% /\\n" "$DC_TEST_FREE"'
     stubs["installer"] = """echo "installer -pkg" >>"$DC_TEST_LOG"
-printf '%s\\n' "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT"
+: >"$DC_TEST_RESULT"
+[ -z "$DC_TEST_DOCUMENT" ] || printf '%s\\n' "$DC_TEST_DOCUMENT" >"$DC_TEST_RESULT"
 echo "installer: The upgrade failed."
 exit 1"""
+    # The lifecycle writes its result while the wrapper waits.
+    stubs["sleep"] = '[ -z "$DC_TEST_LATE" ] || printf "%s\\n" "$DC_TEST_LATE" >"$DC_TEST_RESULT"'
+    stubs["perl"] = '[ "$DC_TEST_LOCK" = held ]'  # the non-blocking lock probe
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, body in stubs.items():
@@ -555,6 +562,7 @@ exit 1"""
         stub.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
         stub.chmod(0o755)
     log, result_file = tmp_path / "install.log", tmp_path / "last-package-result.json"
+    (tmp_path / "lifecycle.lock").write_text("", encoding="utf-8")
     script = f"""
 DC_SCRIPT_OS=darwin
 DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
@@ -570,16 +578,24 @@ dc_install_package
 echo installed-ok
 """
     free = "150000" if failure == "disk_full" else "9000000"
-    code, message = ("lifecycle_busy", "another lifecycle run holds the lock") if failure == "busy" else (
+    busy = failure in ("busy", "late_busy")
+    code, message = ("lifecycle_busy", "another lifecycle run holds the lock") if busy else (
         "downgrade_refused", "DefenseClaw 1.0.3 is installed; refusing to downgrade to 1.0.2")
     document = json.dumps({"ok": False, "errors": [{"code": code, "message": message}],
-                           "exit_code": 75 if failure == "busy" else 1}, indent=2)
+                           "exit_code": 75 if busy else 1}, indent=2)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "DC_TEST_FREE": free, "DC_TEST_LOG": str(log),
-           "DC_TEST_RESULT": str(result_file), "DC_TEST_DOCUMENT": document}
+           "DC_TEST_RESULT": str(result_file), "DC_TEST_LOCK": "held" if failure == "empty_busy" else "",
+           "DC_TEST_DOCUMENT": "" if failure.startswith(("empty", "late")) else document,
+           "DC_TEST_LATE": document if failure == "late_busy" else ""}
     result = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, timeout=30)
-    assert result.returncode == (75 if failure == "busy" else 1), (result.stdout, result.stderr)
-    if failure == "busy":
-        assert "lifecycle_busy" in result.stdout, result.stdout
+    expected_rc = 1 if failure in ("disk_full", "downgrade", "empty_free") else 75
+    assert result.returncode == expected_rc, (result.stdout, result.stderr)
+    if busy:
+        assert "lifecycle_busy" in result.stdout and "FAIL" not in result.stdout, result.stdout
+        return
+    if failure.startswith("empty"):
+        expected = "FAIL lifecycle_busy" if failure == "empty_busy" else "FAIL mdm_package_result_empty"
+        assert expected in result.stdout, result.stdout
         return
     if failure == "disk_full":
         assert "FAIL mdm_disk_full" in result.stdout and "MB is free" in result.stdout, result.stdout

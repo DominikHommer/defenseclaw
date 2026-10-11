@@ -33,8 +33,9 @@ deployment removes the file.
 Only one lifecycle run works at a time. On Linux and macOS a run that finds
 another one in progress waits 5 seconds and exits `75` (busy); pass
 `--lock-wait <duration>` (at most `15m`) to wait longer. The apply trigger
-and the deb, rpm and pkg install scripts wait up to 10 minutes, so a change
-made during another run is applied after it. The deb and rpm removal
+waits up to 10 minutes and the deb, rpm and pkg install scripts up to 8 (the
+macOS Installer stops a package script at 10), so a change made during
+another run is applied after it. The deb and rpm removal
 scripts wait the same, and a removal that still finds the lock busy fails
 without deleting anything (the macOS pkg has no removal script). On
 Windows a busy run exits `1618`. MDM agents retry both.

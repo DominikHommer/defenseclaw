@@ -78,9 +78,10 @@ if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -c %u "$marker" 2>/dev/nu
 fi
 # An apply run that started before the trigger was held may hold the lock
 # for a whole transaction; wait for it like the apply trigger does. When it
-# already applied this package, ensure is a no-op and reports success.
+# already applied this package, ensure is a no-op and reports success. Every
+# package script waits 8 minutes, as the macOS pkg must (GAP-1413).
 # shellcheck disable=SC2086 # $downgrade is empty or one flag
-"$gateway" enterprise linux ensure --from-package$downgrade --reason package --json --lock-wait 10m \
+"$gateway" enterprise linux ensure --from-package$downgrade --reason package --json --lock-wait 8m \
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
 rm -f "$marker"
@@ -116,7 +117,7 @@ case "$status" in
         fi
         ;;
     75)
-        echo "defenseclaw-enterprise: installed, but another DefenseClaw lifecycle run held the lock for 10 minutes." >&2
+        echo "defenseclaw-enterprise: installed, but another DefenseClaw lifecycle run held the lock for 8 minutes." >&2
         echo "  Apply this package with: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         ;;
     *)

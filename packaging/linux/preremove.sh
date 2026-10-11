@@ -34,7 +34,7 @@ esac
 if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     umask 077
     work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-preremove.XXXXXX") || exit 1
-    "$gateway" enterprise linux uninstall --json --lock-wait 10m >"$work/last-package-result.json" 2>"$work/last-package-result.log"
+    "$gateway" enterprise linux uninstall --json --lock-wait 8m >"$work/last-package-result.json" 2>"$work/last-package-result.log"
     status=$?
     precheck_refused=0
     if [ "$status" != 0 ] &&
@@ -47,7 +47,7 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     fi
     rm -rf "$work"
     if [ "$status" = 75 ]; then
-        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 10 minutes; nothing was removed. Retry the removal." >&2
+        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; nothing was removed. Retry the removal." >&2
         exit 1
     fi
     if [ "$precheck_refused" = 1 ]; then
