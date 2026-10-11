@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,14 +99,14 @@ func (l *lifecycle) inPlaceConfigEdit(record *Deployment) []byte {
 // edit, not the newer one nobody checked, and the newer bytes are returned
 // so the caller puts them back once the rollback restart is done and the
 // apply trigger applies them in their own transaction.
-func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned []byte, cause string) (newer []byte) {
+func (l *lifecycle) revertRejectedConfig(ctx context.Context, record *Deployment, committed, planned []byte, cause string) (newer []byte) {
 	env, r := l.env, l.result
 	rejected := planned
 	if current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
 		if planned == nil {
 			rejected = current
 		} else if sha256Bytes(current) != sha256Bytes(planned) {
-			newer = current
+			newer = l.keptNewerConfig(ctx)
 		}
 	}
 	if rejected != nil {

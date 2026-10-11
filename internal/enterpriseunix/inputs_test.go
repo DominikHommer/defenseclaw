@@ -124,6 +124,46 @@ func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 	}
 }
 
+// GAP-1501: during an ensure --config run a root push put config.yaml back
+// with mode 0666 and a standard user switched enforcement to observe before
+// the run wrote its files. The run gave the edited file the managed mode and
+// owner in place, and its follow-up transaction applied the edit as
+// administrator policy. A config.yaml written while another account could
+// write it is now refused, at whichever point of the transaction it is read.
+func TestConfigLoosenedDuringATransactionIsRefused(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			applied := h.read(h.env.Layout.ConfigPath)
+			before, _ := h.env.loadDeployment()
+			edited := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+			config := h.env.P(h.env.Layout.ConfigPath)
+			loosened := false
+			h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+				if name != unitOf(goos, "enumerator") || loosened {
+					return
+				}
+				loosened = true
+				_ = os.Remove(config)
+				if err := os.WriteFile(config, edited, 0o666); err != nil || os.Chmod(config, 0o666) != nil {
+					t.Errorf("loosen config.yaml: %v", err)
+				}
+			}}
+			pushed := filepath.Join(t.TempDir(), "pushed.yaml")
+			if err := os.WriteFile(pushed, append([]byte(applied), "# pushed\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: pushed})
+			requireError(t, r, codeConfig)
+			after, _ := h.env.loadDeployment()
+			if got := h.read(h.env.Layout.ConfigPath); got != applied || after.ConfigSHA256 != before.ConfigSHA256 || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+				t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o, %s):\n%s", h.mode(h.env.Layout.ConfigPath), after.ConfigSHA256[:8], got)
+			}
+		})
+	}
+}
+
 // A protected credential written during a transaction is applied the same
 // way.
 func TestSecretWrittenDuringATransactionIsApplied(t *testing.T) {

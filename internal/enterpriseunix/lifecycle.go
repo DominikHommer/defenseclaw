@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -1121,6 +1122,66 @@ func (e *Env) installedConfigWritable(ctx context.Context) (string, error) {
 	return "", nil
 }
 
+// captureWrittenConfig reads a config.yaml another writer put in place while
+// this run applied its own, once, through a descriptor opened without
+// following a symlink. loose says how an account other than root could have
+// written it: the mode or owner of the file that descriptor read, or what
+// installedConfigWritable finds (a folder that account can write, a macOS
+// ACL entry). The bytes are only for a caller that puts them in a new
+// root-owned file when loose is "" (GAP-1501).
+func (e *Env) captureWrittenConfig(ctx context.Context) (data []byte, loose string, err error) {
+	canonical := e.Layout.ConfigPath
+	file, err := os.OpenFile(e.P(canonical), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, canonical + " was a symlink", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	switch {
+	case !info.Mode().IsRegular():
+		return nil, canonical + " was not a regular file", nil
+	case !ok:
+		return nil, "", fmt.Errorf("%s: no unix ownership", canonical)
+	case info.Mode().Perm()&0o022 != 0 || (st.Uid != 0 && int(st.Uid) != os.Geteuid()):
+		return nil, fmt.Sprintf("%s was %04o and owned by uid %d", canonical, info.Mode().Perm(), st.Uid), nil
+	}
+	data, err = io.ReadAll(io.LimitReader(file, maxInputBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(data)) > maxInputBytes {
+		return nil, "", fmt.Errorf("%s exceeds %d bytes", canonical, maxInputBytes)
+	}
+	if loose, err = e.installedConfigWritable(ctx); err != nil || loose != "" {
+		return nil, loose, err
+	}
+	return data, "", nil
+}
+
+// keptNewerConfig returns a config.yaml another writer put in place during
+// this run, for a rollback to put back and a later run to apply, or nil when
+// another account could have written it (captureWrittenConfig): put back as
+// a root-owned file, that account's edit was applied as administrator
+// policy (GAP-1501).
+func (l *lifecycle) keptNewerConfig(ctx context.Context) []byte {
+	data, loose, err := l.env.captureWrittenConfig(ctx)
+	if loose != "" {
+		l.result.AddWarning(codeConfig, fmt.Sprintf("%s was written during this run while %s, so an account other than root could have written it; it is not kept or applied. Push the administrator config again",
+			l.env.Layout.ConfigPath, loose))
+	}
+	if err != nil || loose != "" {
+		return nil
+	}
+	return data
+}
+
 // replaceWritableConfig puts a new file in place of an installed config.yaml
 // another account could write (p.configWritable), before the transaction
 // changes anything. Re-owning the file in place blessed what that account
@@ -1250,7 +1311,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			_ = env.Accounts.Remove(ctx, serviceName)
 		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
-			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
+			l.revertRejectedConfig(ctx, record, committedConfig, nil, err.Error())
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -1379,7 +1440,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// after the restart like one applyFiles kept.
 			current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 			if err == nil && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
-				l.configWrittenDuringRun = current
+				l.configWrittenDuringRun = l.keptNewerConfig(ctx)
 			}
 		}
 		if committedConfig != nil {
@@ -1387,7 +1448,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
-			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
+			revertConfig = func() {
+				newerConfig = l.revertRejectedConfig(ctx, record, committedConfig, p.config.Raw, cause.Error())
+			}
 		}
 		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
 		if newerConfig != nil {
@@ -1457,7 +1520,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.clearStaleHookSocket(account)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
-		return failAndRollback(codeApply, err)
+		return failAndRollback(errorCode(err, codeApply), err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -1743,7 +1806,7 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action,
 	}, func() (bool, error) {
 		var err error
-		if changed, err = l.applyFiles(p); err != nil {
+		if changed, err = l.applyFiles(ctx, p); err != nil {
 			return false, err
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
@@ -1807,7 +1870,7 @@ func writeMigratedDotEnvKey(env *Env, migration *configMigration, account Accoun
 // applyFiles writes every binary and file whose bytes differ, fixes the
 // metadata of the rest, removes stale files, and returns the canonical
 // paths it wrote or removed.
-func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
+func (l *lifecycle) applyFiles(ctx context.Context, p *plan) (map[string]bool, error) {
 	env := l.env
 	changed := map[string]bool{}
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
@@ -1826,17 +1889,36 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		// stays and a follow-up transaction applies it (input_changed). The
 		// run overwrote it with its own file and nothing warned (GAP-0745).
 		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
-		if written {
-			l.configWrittenDuringRun, _ = readBounded(env.P(file.Path), maxInputBytes)
-		}
 		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the
-			// run applies them in a follow-up transaction. A regular file
-			// still gets the managed mode and owner.
-			if info, err := os.Lstat(env.P(file.Path)); err == nil && info.Mode().IsRegular() {
-				if err := env.fixMetadata(env.P(file.Path), file.Mode, file.Owner); err != nil {
+			// run applies them in a follow-up transaction. They are read
+			// once, with the mode and owner of the file they came from, and
+			// put in a new root-owned file the follow-up applies. Giving the
+			// written file the managed mode and owner in place hid that a
+			// standard user could write it, and the follow-up applied that
+			// user's edit as administrator policy (GAP-1501).
+			data, loose, err := env.captureWrittenConfig(ctx)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if loose != "" {
+				l.configWrittenDuringRun = nil
+				// The planned bytes go back in a new file, so a descriptor
+				// another account opened writes nowhere.
+				if err := env.writeFileAtomic(env.P(file.Path), file.Data, file.Mode, file.Owner); err != nil {
 					return nil, err
 				}
+				return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied the config and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+					env.Layout.ConfigPath, loose, env.lifecycleCommand(ActionEnsure))}
+			}
+			if written {
+				l.configWrittenDuringRun = data
+			}
+			if err := env.writeFileAtomic(env.P(file.Path), data, file.Mode, file.Owner); err != nil {
+				return nil, err
 			}
 			continue
 		}
