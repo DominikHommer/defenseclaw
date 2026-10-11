@@ -208,6 +208,15 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		// The script Codex ran: a pipeline and a compound if/else after the
 		// New-Item statement, whose own path holds the literal.
 		{tool: "Bash", command: `New-Item -ItemType File -Path 'C:\Users\Public\rv17u\dccert-block-marker.txt' -Force | Out-Null; if (Test-Path -LiteralPath 'C:\Users\Public\rv17u\dccert-block-marker.txt') { 'worked' } else { 'failed' }`, rule: "CERT-MARKER", blocked: true, powerShell: true},
+		// GAP-1469: the literal as a quoted string inside a call that is
+		// parsed only in part (the retry Codex wrote after the first block,
+		// a .NET method call), inside a longer argument, and in an inline
+		// script; text a file tool writes is still only recorded.
+		{tool: "Bash", command: `[System.IO.File]::WriteAllText((Join-Path (Get-Location) m.txt), 'dccert-block-marker')`, rule: "CERT-MARKER", blocked: true, powerShell: true},
+		{tool: "Bash", command: `Set-Content -Path m.txt -Value 'dccert-block-marker'`, rule: "CERT-MARKER", blocked: true, powerShell: true},
+		{tool: "Bash", command: "echo xdccert-block-markery", rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: `python3 -c "open('m', 'w').write('dccert-block-marker')"`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dccert-block-marker"}`, rule: "CERT-MARKER"},
 	} {
 		input := actionfacts.Input{
 			Tool: tc.tool, Command: tc.command, CWD: "/home/alice/project",
