@@ -806,7 +806,7 @@ func TestMigrateV9NamesACustomPackItCouldNotRebase(t *testing.T) {
 		!strings.Contains(failures[0], "no longer block a tool call") {
 		t.Fatalf("unrebased packs %q, want the pack named with its lost enforcement", failures)
 	}
-	if err := AcknowledgeMigrationV9(configPath); err != nil {
+	if err := AcknowledgeMigrationV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
 		t.Fatal(err)
 	}
 	if failures := UnrebasedRulePacks(configPath); failures != nil {
@@ -2071,6 +2071,89 @@ func TestMigrateV9RetryClearsPendingAuditRows(t *testing.T) {
 	}
 }
 
+// A cleanup that failed after the commit leaves the record pending with the
+// moved operator row still in audit.db. A config.yaml edited since (config
+// set, the TUI) must not keep it pending forever: the retry still clears the
+// moved row, and refuses one whose fingerprint changed with an error naming
+// `config migrate --ack`, which completes the record and keeps the row
+// (GAP-1533).
+func TestMigrateV9RetryClearsPendingAuditRowsAfterAConfigChange(t *testing.T) {
+	for _, changedRow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed-row=%v", changedRow), func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+			if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", auditDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec(`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`); err != nil {
+				t.Fatal(err)
+			}
+			insert := `INSERT INTO actions VALUES ('1', 'skill', 'restored-skill', '', '{"install":"block"}', 'operator', 'now', '')`
+			if _, err := db.Exec(insert); err != nil {
+				t.Fatal(err)
+			}
+			ctx, in := context.Background(), MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+			if _, err := MigrateV9(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			// What a cleanup that failed after the commit leaves.
+			if changedRow {
+				insert = strings.Replace(insert, "'operator'", "'operator, edited later'", 1)
+			}
+			if _, err := db.Exec(insert); err != nil {
+				t.Fatal(err)
+			}
+			record, ok := readMigrationRecord(configPath)
+			if !ok || record.ActionsRowsMoved != 1 {
+				t.Fatalf("missing migrated row record: %+v", record)
+			}
+			record.Pending = true
+			if err := writeMigrationRecord(MigrationRecordPath(configPath), record); err != nil {
+				t.Fatal(err)
+			}
+			committed, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(committed, "# changed after the commit\n"...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rowLeft := func() bool {
+				var count int
+				if err := db.QueryRow("SELECT COUNT(*) FROM actions WHERE id = '1'").Scan(&count); err != nil {
+					t.Fatal(err)
+				}
+				return count != 0
+			}
+			_, err = MigrateV9(ctx, in)
+			record, _ = readMigrationRecord(configPath)
+			if !changedRow {
+				if err != nil || record.Pending || rowLeft() {
+					t.Fatalf("retry after a config change: err %v, pending %v, row left %v", err, record.Pending, rowLeft())
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "defenseclaw-gateway config migrate --ack") ||
+				!record.Pending || !rowLeft() {
+				t.Fatalf("a changed row: err %v, pending %v, row left %v", err, record.Pending, rowLeft())
+			}
+			if err := AcknowledgeMigrationV9(ctx, in); err != nil {
+				t.Fatal(err)
+			}
+			if record, _ = readMigrationRecord(configPath); record.Pending || !record.Acknowledged || !rowLeft() {
+				t.Fatalf("--ack: pending %v, acknowledged %v, row left %v", record.Pending, record.Acknowledged, rowLeft())
+			}
+		})
+	}
+}
+
 // Watcher enforcement rows are a journal, including failed scans and failed
 // quarantine attempts. They must not become permanent operator policy.
 func TestMigrateV9LeavesWatcherBlocksInAuditJournal(t *testing.T) {
@@ -2258,7 +2341,7 @@ func TestAcknowledgeMigrationV9KeepsUnscannableMCP(t *testing.T) {
 	if err := os.WriteFile(MigrationRecordPath(configPath), []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := AcknowledgeMigrationV9(configPath); err != nil {
+	if err := AcknowledgeMigrationV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
 		t.Fatal(err)
 	}
 	record, ok := readMigrationRecord(configPath)

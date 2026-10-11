@@ -118,6 +118,9 @@ type MigrateV9Input struct {
 	// with an expression (guardrail.PlanRulePackRebase); a nil plan needs
 	// none. Without it such a pack is pinned as it is (GAP-0360, GAP-1225).
 	RebaseRulePack func(dir string) (*RulePackRebasePlan, error)
+	// ack completes a pending record without its audit.db cleanup
+	// (AcknowledgeMigrationV9).
+	ack bool
 }
 
 // RulePackRebasePlan is guardrail.RulePackRebase, which this package can not
@@ -313,18 +316,22 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err != nil {
 		return nil, err
 	}
+	if in.ack && !already {
+		return nil, errors.New("config: config.yaml is not on config_version 9 yet, so there is no committed migration " +
+			"to complete; run `defenseclaw-gateway config migrate --to 9`")
+	}
 	m.record.ResultSHA256 = cfgtxn.SHA256Hex(migrated)
 	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
 		// A config.yaml changed since the commit (config set, the TUI,
-		// connector setup) still resumes the pre-9 Rego refresh; only the
-		// audit.db cleanup is tied to the committed bytes (GAP-1517).
+		// connector setup) still resumes the pre-9 Rego refresh and the
+		// audit.db cleanup (GAP-1517, GAP-1533).
 		if record, ok := readMigrationRecord(abs); ok && record.Pending {
 			committed := strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source))
 			switch {
 			case !in.DryRun && !in.InMemory:
-				if err := m.finishPending(ctx, source, record, committed); err != nil {
+				if err := m.finishPending(ctx, source, record, in.ack); err != nil {
 					return result, err
 				}
 				result.Written = append(result.Written, MigrationRecordPath(abs))
@@ -393,11 +400,13 @@ func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
 // remains pending for an operator to resolve. So does a module the gateway
 // loads that still reads data.json (GAP-1497): the gateway refuses such a
 // bundle, and the input-based modules of the operator stop applying with it.
-// committed says config.yaml still holds the bytes the migration committed.
-// When it changed since, the row cleanup does not run (a later decision may
-// differ from the snapshot); the record then stays pending, with an error,
-// only while a moved operator row is still in audit.db (GAP-1517).
-func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord, committed bool) error {
+// The row cleanup runs also when config.yaml changed since the commit: the
+// rows were moved at the commit, and resumeV9ActionCleanup refuses a row
+// whose fingerprint changed since, so a later config edit does not make
+// clearing them unsafe (GAP-1533). A cleanup that cannot finish names
+// `config migrate --ack`; with ack the cleanup is skipped, the Rego refresh
+// still has to pass, and the record completes with the rows left in audit.db.
+func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord, ack bool) error {
 	configPath := m.configPath
 	txn, err := cfgtxn.Begin(ctx, configPath, 0)
 	if err != nil {
@@ -416,21 +425,12 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 		latest.ResultSHA256 != record.ResultSHA256 {
 		return errors.New("config: pending migration record changed while finishing config_version 9; run it again")
 	}
-	rowsLeft := false
-	if committed {
-		if latest.ActionsRowsMoved > 0 && latest.AuditCleanup == nil {
-			return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
+	if !ack {
+		if err := finishV9ActionCleanup(ctx, latest); err != nil {
+			return fmt.Errorf("%w; the config_version 9 migration stays pending: run `defenseclaw-gateway config migrate "+
+				"--to 9` again once that is fixed, or `defenseclaw-gateway config migrate --ack` to complete it and keep "+
+				"the moved rows in audit.db", err)
 		}
-		if cleanup := latest.AuditCleanup; cleanup != nil && !cleanup.Skipped {
-			if len(cleanup.Rows) != latest.ActionsRowsMoved {
-				return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
-			}
-			if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
-				return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
-			}
-		}
-	} else if rowsLeft, err = v9MovedRowsLeft(latest); err != nil {
-		return fmt.Errorf("config: read the migrated audit.db rows: %w", err)
 	}
 	unenforced, err := m.resumeRegoRefresh()
 	if err != nil {
@@ -441,40 +441,38 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 			latest.UnenforcedRegoData = append(latest.UnenforcedRegoData, line)
 		}
 	}
-	latest.Pending = rowsLeft
-	if err := writeMigrationRecord(MigrationRecordPath(configPath), latest); err != nil {
-		return err
-	}
-	if rowsLeft {
-		return errors.New("config: config.yaml changed after the config_version 9 commit, so the cleanup of the " +
-			"audit.db rows it moved cannot resume and the migration stays pending; operator review is required")
-	}
-	return nil
-}
-
-// v9MovedRowsLeft reports whether an operator row the record moved to
-// config.yaml may still be in audit.db: its cleanup did not finish.
-func v9MovedRowsLeft(record MigrationRecord) (bool, error) {
-	cleanup := record.AuditCleanup
-	if cleanup == nil {
-		return record.ActionsRowsMoved > 0, nil
-	}
-	if cleanup.Skipped || len(cleanup.Rows) == 0 {
-		return false, nil
-	}
-	if _, err := os.Stat(cleanup.Path); errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	rows, err := readV9ActionRows(cleanup.Path)
-	if err != nil {
-		return false, err
-	}
-	for _, row := range rows {
-		if slices.ContainsFunc(cleanup.Rows, func(p MigrationAuditCleanupRow) bool { return p.ID == row.id }) {
-			return true, nil
+	latest.Pending = false
+	if ack {
+		latest.Acknowledged = true
+		if cleanup := latest.AuditCleanup; latest.ActionsRowsMoved > 0 && (cleanup == nil || !cleanup.Skipped) {
+			latest.Notes = append(latest.Notes, "`config migrate --ack` completed the migration without the audit.db "+
+				"cleanup: the operator rows it moved to config.yaml may still be in audit.db")
 		}
 	}
-	return false, nil
+	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// finishV9ActionCleanup clears the operator rows a pending record moved from
+// audit.db. A missing or incomplete snapshot cannot prove which rows were
+// copied, so it is refused.
+func finishV9ActionCleanup(ctx context.Context, record MigrationRecord) error {
+	cleanup := record.AuditCleanup
+	if cleanup == nil {
+		if record.ActionsRowsMoved > 0 {
+			return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
+		}
+		return nil
+	}
+	if cleanup.Skipped {
+		return nil
+	}
+	if len(cleanup.Rows) != record.ActionsRowsMoved {
+		return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
+	}
+	if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
+		return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+	}
+	return nil
 }
 
 // resumeRegoRefresh runs the pre-9 Rego module refresh again for a commit that
@@ -688,10 +686,13 @@ func readMigrationRecord(configPath string) (MigrationRecord, bool) {
 	return record, record.SourceSHA256 != ""
 }
 
-// AcknowledgeMigrationV9 marks migration-v9.json next to configPath as read
-// (`defenseclaw config migrate --ack`), so doctor stops reporting it.
-func AcknowledgeMigrationV9(configPath string) error {
-	recordPath := MigrationRecordPath(configPath)
+// AcknowledgeMigrationV9 marks migration-v9.json next to in.ConfigPath as
+// read (`defenseclaw config migrate --ack`), so doctor stops reporting it. A
+// record still pending after the config_version 9 commit is completed first,
+// without the audit.db row cleanup that kept it pending; the pre-9 Rego
+// refresh still has to pass (finishPending, GAP-1533).
+func AcknowledgeMigrationV9(ctx context.Context, in MigrateV9Input) error {
+	recordPath := MigrationRecordPath(in.ConfigPath)
 	raw, err := os.ReadFile(recordPath)
 	if err != nil {
 		return err
@@ -699,6 +700,11 @@ func AcknowledgeMigrationV9(configPath string) error {
 	var record MigrationRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return fmt.Errorf("config: decode %s: %w", recordPath, err)
+	}
+	if record.Pending {
+		in.ack, in.DryRun, in.InMemory = true, false, false
+		_, err := MigrateV9(ctx, in)
+		return err
 	}
 	record.Acknowledged = true
 	return writeMigrationRecord(recordPath, record)

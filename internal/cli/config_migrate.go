@@ -89,10 +89,16 @@ var configMigrateCmd = &cobra.Command{
 			return err
 		}
 		if configMigrateAck {
-			if err := config.AcknowledgeMigrationV9(path); err != nil {
+			// A record that is not pending needs nothing from config.yaml; a
+			// pending one completes through MigrateV9, which reads it again.
+			input, err := configMigrateV9Input(path)
+			if err != nil {
+				input = config.MigrateV9Input{ConfigPath: path}
+			}
+			if err := config.AcknowledgeMigrationV9(context.Background(), input); err != nil {
 				return fmt.Errorf("acknowledge %s: %w", config.MigrationRecordPath(path), err)
 			}
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), "Marked the config_version 9 migration record as read.")
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Marked the config_version 9 migration record as read.")
 			return err
 		}
 		input, err := configMigrateV9Input(path)
@@ -114,7 +120,8 @@ func init() {
 	configMigrateCmd.Flags().StringVar(&configMigrateDataDir, "data-dir", "", "data directory holding config.yaml")
 	configMigrateCmd.Flags().BoolVar(&configMigrateDryRun, "dry-run", false, "show what would move; write nothing")
 	configMigrateCmd.Flags().BoolVar(&configMigrateJSON, "json", false, "print the result as JSON")
-	configMigrateCmd.Flags().BoolVar(&configMigrateAck, "ack", false, "mark migration-v9.json as read")
+	configMigrateCmd.Flags().BoolVar(&configMigrateAck, "ack", false,
+		"mark migration-v9.json as read; a pending record is completed first, without its audit.db cleanup")
 	configCmd.AddCommand(configMigrateCmd)
 	rootCmd.AddCommand(configCmd)
 }
