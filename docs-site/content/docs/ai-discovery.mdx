@@ -976,6 +976,14 @@ differently: Advanced Audit Policy for the events at all, and the separate
 command-line policy for argv. Without the second, lineage still works and
 argument-vector tactics do not.
 
+On Windows the plane reads the Security log from the last record it read, and
+it reads file and account events before process events. A burst of process
+starts, such as a scheduled task looping a short command, cannot hold back a
+file write that comes after it. A reader that falls behind is listed in
+`degraded_reasons` as `agent actions partially covered: Security event log
+reader is behind ...` until it catches up. Process events are delayed then,
+not skipped.
+
 ```powershell
 # Windows, elevated: the events themselves
 auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
