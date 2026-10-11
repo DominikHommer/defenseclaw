@@ -106,6 +106,36 @@ func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
 	return ValidateTrustedRuntimeDir(path, label)
 }
 
+// ValidateTrustedServiceRuntimeTree is ValidateTrustedServiceRuntimeDir for a
+// directory the gateway loads as a whole (the standalone policy_dir and rule
+// packs): the directory and the directories above it, then every directory
+// and file below it without following links, each held to the same rule (no
+// symlink, not writable by group or others, no ACL write entry, owned by root
+// or the service account). A trusted policy directory holding a Rego module a
+// standard user could edit changed the decisions for every user (GAP-1499).
+func ValidateTrustedServiceRuntimeTree(dir, label, serviceAccount string) error {
+	if err := ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	return validateTrustedRuntimeTreeEntries(root, label)
+}
+
+// validateTrustedRuntimeTreeEntries checks every entry below root, the
+// folders with the runtime directory rule and everything else as a regular
+// runtime file, so a link, socket or device is refused too.
+func validateTrustedRuntimeTreeEntries(root, label string) error {
+	return walkTrustedTree(root, func(path string, isDir bool) error {
+		if isDir {
+			return validateTrustedRuntimeDirElement(path, label)
+		}
+		return validateTrustedRuntimeFileElement(path, label)
+	})
+}
+
 // ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime
 // file. The file itself may be owned by the packaged defenseclaw service
 // account (WriteServiceRuntimeFile stages and renames as that user), so

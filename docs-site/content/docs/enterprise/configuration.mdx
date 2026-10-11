@@ -100,7 +100,11 @@ refuses conflicting values:
   `data_dir`, because the gateway loads its policies from there. Set it to
   `/etc/defenseclaw/policies` (Linux) or
   `/opt/cisco/defenseclaw/etc/policies` (macOS), as the minimal configs do,
-  to keep your own rule packs there.
+  to keep your own rule packs there. Every folder and file in `policy_dir`
+  and in each rule pack, not only the top folder, must be owned by root (or
+  the gateway service account), not writable by group or others and not a
+  symbolic link; otherwise the lifecycle refuses the config and the gateway
+  does not start, naming the first path that fails.
 - **API listener.** The gateway API is `127.0.0.1:18970` on every OS. Every
   OS refuses any bind address other than `127.0.0.1`; Linux and macOS also
   refuse any other port.

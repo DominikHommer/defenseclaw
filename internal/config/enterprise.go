@@ -1013,7 +1013,8 @@ func validateEnterpriseHomeRoot(root string) error {
 }
 
 // validateManagedStandalonePolicyInputs requires every policy input the
-// standalone local engine reads to be unwritable by standard users. The
+// standalone local engine reads, each folder and file of policy_dir and the
+// rule packs, to be unwritable by standard users. The
 // Secure Client profile never consults these (its local detectors are off),
 // so the check applies only to standalone. Absent directories are fine:
 // the engine falls back to its embedded rule packs.
@@ -1035,8 +1036,12 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 			}
 			return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
-			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
+		// Every folder and file the engine loads from it, not just the top
+		// folder: a writable Rego module or pack file changes the decisions
+		// for every user (GAP-1499).
+		if err := managed.ValidateTrustedServiceRuntimeTree(dir, label, serviceAccount); err != nil {
+			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w; keep it, every folder and file in it "+
+				"and the folders above it owned by an administrator or the gateway service account and not writable by anyone else, without links", label, err)
 		}
 		if err := managed.ValidateServiceCanReadTree(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %w", err)

@@ -13,9 +13,7 @@
 package managed
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +144,29 @@ func ValidateTrustedServiceRuntimeDir(path, label, serviceAccount string) error 
 	return validateTrustedWindowsRuntimeDir(path, label, serviceSID)
 }
 
+// ValidateTrustedServiceRuntimeTree is ValidateTrustedServiceRuntimeDir for a
+// folder the gateway loads as a whole (the standalone policy_dir and rule
+// packs): the folder and the folders above it, then every folder and file in
+// it without following links, each held to the same rule. A trusted policy
+// folder holding a module a standard user could edit changed the decisions
+// for every user (GAP-1499).
+func ValidateTrustedServiceRuntimeTree(dir, label, serviceAccount string) error {
+	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		return err
+	}
+	if err := validateTrustedWindowsRuntimeDir(dir, label, serviceSID); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	return walkTrustedTree(root, func(path string, isDir bool) error {
+		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, serviceSID, false)
+	})
+}
+
 // ValidateTrustedServiceRuntimeFilePath applies the same narrow service-SID
 // writer exception to a regular runtime file such as a scoped token.
 func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) error {
@@ -183,11 +204,6 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	)
 }
 
-// windowsRulePackTreeMaxEntries bounds the walk of an administrator rule pack.
-const windowsRulePackTreeMaxEntries = 20000
-
-var errWindowsRulePackTreeTooLarge = errors.New("too many entries")
-
 // ValidateTrustedRulePackTree is the standalone lifecycle check of an
 // administrator rule pack. The pack folder and the folders above it get the
 // check the gateway makes of a managed rule pack (ValidateTrustedServiceRuntimeDir),
@@ -211,32 +227,9 @@ func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
 	if err != nil {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
-	return walkWindowsRulePackTree(root, func(path string, isDir bool) error {
+	return walkTrustedTree(root, func(path string, isDir bool) error {
 		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, false)
 	})
-}
-
-// walkWindowsRulePackTree calls check for every folder and file below root
-// (root itself excluded: the caller checks it with its parents) without
-// following links, and stops at the first refusal.
-func walkWindowsRulePackTree(root string, check func(path string, isDir bool) error) error {
-	entries := 0
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if path == root {
-			return nil
-		}
-		if entries++; entries > windowsRulePackTreeMaxEntries {
-			return errWindowsRulePackTreeTooLarge
-		}
-		return check(path, entry.IsDir())
-	})
-	if errors.Is(err, errWindowsRulePackTreeTooLarge) {
-		return fmt.Errorf("%s has more than %d entries", root, windowsRulePackTreeMaxEntries)
-	}
-	return err
 }
 
 func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows.SID) error {

@@ -161,3 +161,49 @@ func TestTrustedRuntimeOwnerForTrustsLinuxServiceAccountOnBothPlatforms(t *testi
 		}
 	}
 }
+
+// GAP-1499: a trusted policy folder is not enough. Every folder and module
+// below it is held to the rule its top folder passes, so a writable rego
+// subfolder, a writable module or a linked module is refused.
+func TestValidateTrustedRuntimeTreeEntriesChecksEveryFolderAndModule(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	t.Setenv(UnixServiceAccountEnv, me.Username)
+	root := t.TempDir()
+	rego := filepath.Join(root, "rego")
+	module := filepath.Join(rego, "guardrail.rego")
+	if err := os.Mkdir(rego, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(module, []byte("package guardrail\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTrustedRuntimeTreeEntries(root, "policy_dir"); err != nil {
+		t.Fatalf("trusted tree refused: %v", err)
+	}
+	for _, step := range []struct {
+		path string
+		mode os.FileMode
+	}{{rego, 0o777}, {module, 0o666}} {
+		if err := os.Chmod(step.path, step.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateTrustedRuntimeTreeEntries(root, "policy_dir"); err == nil || !strings.Contains(err.Error(), step.path) {
+			t.Fatalf("writable %s accepted: %v", step.path, err)
+		}
+		if err := os.Chmod(step.path, step.mode&^0o022); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(module); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere.rego"), module); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateTrustedRuntimeTreeEntries(root, "policy_dir"); err == nil || !strings.Contains(err.Error(), "symlinks are not allowed") {
+		t.Fatalf("linked module accepted: %v", err)
+	}
+}
