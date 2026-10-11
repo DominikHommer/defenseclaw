@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +21,7 @@ import (
 // Project names in .claude.json are controlled by the enrolled user. A UNC
 // path must be rejected before LocalSystem touches the remote filesystem.
 func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {
-	_, err := readWindowsClaudeProjectMCP(`\\server\share\project`)
+	_, _, err := readWindowsClaudeProjectMCP(`\\server\share\project`, "S-1-5-21-1-1001", `C:\Users\Alice`)
 	if err == nil || !strings.Contains(err.Error(), "local drive letter") {
 		t.Fatalf("UNC project path was not rejected before filesystem access: %v", err)
 	}
@@ -30,6 +31,9 @@ func TestWindowsClaudeProjectMCPRejectsUNC(t *testing.T) {
 // user (user scope, local scope, and project .mcp.json files) for the
 // gateway, which cannot read ~/.claude.json.
 func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
 	home := t.TempDir()
 	outside := t.TempDir()
 	inside := filepath.Join(home, "proj")
@@ -169,5 +173,133 @@ func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 				t.Fatalf("short name %s: %q (%q)", short, dir, refused)
 			}
 		}
+	}
+}
+
+// GAP-1504: an inaccessible project contributes neither its local servers nor
+// its .mcp.json servers. Other projects and the user scope remain published.
+func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
+	home := t.TempDir()
+	projects := t.TempDir()
+	bob := filepath.Join(projects, "a-bob")
+	alice := filepath.Join(projects, "z-alice")
+	for _, dir := range []string{bob, alice} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for dir, name := range map[string]string{bob: "bob-file", alice: "alice-file"} {
+		if err := os.WriteFile(filepath.Join(dir, ".mcp.json"), []byte(`{"mcpServers":{"`+name+`":{"command":"x","env":{"SECRET":"private"}}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := map[string]any{
+		"mcpServers": map[string]any{"user": map[string]any{"command": "x"}},
+		"projects": map[string]any{
+			bob:   map[string]any{"mcpServers": map[string]any{"bob-local": map[string]any{"command": "x"}}},
+			alice: map[string]any{"mcpServers": map[string]any{"alice-local": map[string]any{"command": "x"}}},
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := windowsClaudeProjectWithUserToken
+	calls := 0
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error {
+		calls++
+		if calls == 1 {
+			return os.ErrPermission // no session token or project access
+		}
+		return fn()
+	}
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	const sid = "S-1-5-21-1-1001"
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
+	var warnings []string
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || unreadable != nil || calls != 2 {
+		t.Fatalf("servers=%v unreadable=%+v calls=%d err=%v", servers, unreadable, calls, err)
+	}
+	got := map[string]bool{}
+	for _, server := range servers {
+		got[server.Name] = true
+	}
+	if len(got) != 3 || !got["user"] || !got["alice-local"] || !got["alice-file"] || got["bob-local"] || got["bob-file"] {
+		t.Fatalf("published names = %v", got)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], bob) {
+		t.Fatalf("refused project warnings = %v", warnings)
+	}
+}
+
+// The real Windows directory and file DACLs are checked under the same
+// effective token used for the read. These ACLs deny the current test user
+// while allowing attribute checks in the preceding no-reparse walk.
+func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
+	sid := currentWindowsTestSID(t)
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	for _, tc := range []struct {
+		name, denyMask string
+		denyDirectory  bool
+	}{
+		{"directory list", "0x00000001", true},
+		{"file read", "GR", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := t.TempDir()
+			file := filepath.Join(project, ".mcp.json")
+			if err := os.WriteFile(file, []byte(`{"mcpServers":{"private":{"command":"x"}}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := file
+			if tc.denyDirectory {
+				path = project
+			}
+			before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldACL, _, err := before.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+					windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+					nil, nil, oldACL, nil); err != nil {
+					t.Errorf("restore project ACL: %v", err)
+				}
+			})
+			sd, err := windows.SecurityDescriptorFromString("D:P(D;;" + tc.denyMask + ";;;" + sid.String() +
+				")(A;;FA;;;SY)(A;;FA;;;BA)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			acl, _, err := sd.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+				nil, nil, acl, nil); err != nil {
+				t.Fatal(err)
+			}
+			data, accessErr, readErr := readWindowsClaudeProjectMCP(project, sid.String(), project)
+			if len(data) != 0 || accessErr == nil || readErr != nil {
+				t.Fatalf("data=%q accessErr=%v readErr=%v; want project refused before read", data, accessErr, readErr)
+			}
+		})
 	}
 }
