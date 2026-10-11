@@ -75,9 +75,11 @@ func (*fakeSecurityStream) Close() {}
 // looping a short command put tens of thousands of 4688 records in the
 // Security log, every per-poll query timed out, the timeout was read as "no
 // more events", and the persistence writes an agent made afterwards were
-// never delivered. The writes must arrive on the first poll, a timeout must
-// not end a poll, a broken stream must reopen where it stopped, and the lag
-// must be reported while it lasts and cleared once the reader catches up.
+// never delivered. The writes must arrive once they have waited the bounded
+// signalHoldPolls polls for the process records ahead of them (GAP-1487), a
+// timeout must not end a poll, a broken stream must reopen where it stopped,
+// and the lag must be reported while it lasts and cleared once the reader
+// catches up.
 func TestSecurityReaderSurvivesAProcessFlood(t *testing.T) {
 	const flood, writes = 80000, 10
 	log := &fakeSecurityLog{faults: map[int]error{
@@ -131,14 +133,12 @@ func TestSecurityReaderSurvivesAProcessFlood(t *testing.T) {
 		reader.pollOnce()
 		polled := drainBuffer()
 		limits := strings.Join(reader.limitations(), "; ")
-		if poll == 1 {
-			if written != writes {
-				t.Fatalf("first poll delivered %d of %d settings.json writes behind a %d-record flood",
-					written, writes, flood)
-			}
-			if !strings.Contains(limits, "behind") {
-				t.Fatalf("a capped poll reported no lag: %q", limits)
-			}
+		if poll == 1 && !strings.Contains(limits, "behind") {
+			t.Fatalf("a capped poll reported no lag: %q", limits)
+		}
+		if poll == 1+signalHoldPolls && written != writes {
+			t.Fatalf("poll %d delivered %d of %d settings.json writes behind a %d-record flood",
+				poll, written, writes, flood)
 		}
 		if before < 200 && log.lineageReads >= 200 {
 			sawTimeoutPoll = true
@@ -175,4 +175,56 @@ func TestSecurityReaderSurvivesAProcessFlood(t *testing.T) {
 		t.Fatalf("writes=%d dropped=%d opens=%d, want %d, 0 and 3 (one reopen)",
 			written, buffer.Dropped(), log.opens, writes)
 	}
+}
+
+// TestSecurityReaderHoldsAWriteForItsProcessCreation is GAP-1487: the file
+// stream is drained in full while the process stream stops at lineageCap, so
+// a write whose process was created past the cap reached the host plane
+// before that creation, failed the lineage gate and was never retried. The
+// write must wait for the poll that delivers its creation.
+func TestSecurityReaderHoldsAWriteForItsProcessCreation(t *testing.T) {
+	const flood, writer = lineageCap + 500, 0x9999
+	log := &fakeSecurityLog{}
+	for id := uint64(1); id <= flood; id++ {
+		pid := id + 1000
+		if id == flood {
+			pid = writer
+		}
+		log.lineage = append(log.lineage, fakeSecurityRecord{id: id, xml: fmt.Sprintf(
+			`<Event><System><EventID>4688</EventID><EventRecordID>%d</EventRecordID></System><EventData>`+
+				`<Data Name="NewProcessId">0x%x</Data><Data Name="ProcessId">0x4</Data>`+
+				`<Data Name="NewProcessName">C:\Windows\System32\cmd.exe</Data></EventData></Event>`, id, pid)})
+	}
+	log.signal = []fakeSecurityRecord{{id: flood + 1, xml: fmt.Sprintf(
+		`<Event><System><EventID>4663</EventID><EventRecordID>%d</EventRecordID></System><EventData>`+
+			`<Data Name="ObjectName">C:\Users\alice\.claude\settings.json</Data>`+
+			`<Data Name="AccessMask">0x2</Data><Data Name="ProcessId">0x%x</Data>`+
+			`<Data Name="ProcessName">C:\Windows\System32\cmd.exe</Data></EventData></Event>`, flood+1, writer)}}
+
+	buffer := NewBuffer()
+	reader := newSecurityReader(log.open, buffer, 0)
+	if err := reader.openAll(); err != nil {
+		t.Fatal(err)
+	}
+	created := false
+	for poll := 1; poll <= 2; poll++ {
+		reader.pollOnce()
+		for drained := false; !drained; {
+			select {
+			case event := <-buffer.Events():
+				if event.Kind == KindExec && event.PID == writer {
+					created = true
+				}
+				if event.Kind == KindFileWrite {
+					if !created {
+						t.Fatalf("poll %d delivered the write before the creation of its process", poll)
+					}
+					return
+				}
+			default:
+				drained = true
+			}
+		}
+	}
+	t.Fatal("the write was not delivered once the reader caught up")
 }
