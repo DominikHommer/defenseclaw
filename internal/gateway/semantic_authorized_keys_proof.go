@@ -1151,12 +1151,27 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 		if len(call.Args) == 0 {
 			return false
 		}
+		// A word that is one literal, plain or quoted. Anything else (a
+		// parameter, a substitution) is not static; it used to dereference a
+		// nil literal, and the recovered panic allowed the call (GAP-1530).
 		word := func(value *syntax.Word) (string, bool) {
 			if len(value.Parts) != 1 {
 				return "", false
 			}
-			literal, ok := value.Parts[0].(*syntax.Lit)
-			return literal.Value, ok
+			switch part := value.Parts[0].(type) {
+			case *syntax.Lit:
+				return part.Value, true
+			case *syntax.SglQuoted:
+				return part.Value, !part.Dollar
+			case *syntax.DblQuoted:
+				if len(part.Parts) == 1 {
+					literal, ok := part.Parts[0].(*syntax.Lit)
+					if ok {
+						return literal.Value, true
+					}
+				}
+			}
+			return "", false
 		}
 		program, static := word(call.Args[0])
 		if static && (program == "cd" || program == "pushd") {
