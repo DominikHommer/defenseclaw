@@ -318,7 +318,13 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
 			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
 			if !in.DryRun && !in.InMemory {
-				if err := finishPendingV9(ctx, abs, source, record); err != nil {
+				// The run may have stopped between the config commit and the
+				// Rego step: plan that step again so finishing the record
+				// leaves no pre-9 module the gateway refuses (GAP-1497).
+				if err := m.planRegoRefresh(); err != nil {
+					return result, err
+				}
+				if err := finishPendingV9(ctx, abs, source, record, m.rego); err != nil {
 					return result, err
 				}
 				result.Written = append(result.Written, MigrationRecordPath(abs))
@@ -379,10 +385,13 @@ func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
 	return CheckCandidateAssets(candidate)
 }
 
-// finishPendingV9 resumes the part after config commit under the config lock.
-// A missing cleanup snapshot cannot prove which operator rows were copied,
-// so it remains pending for an operator to resolve.
-func finishPendingV9(ctx context.Context, configPath string, source []byte, record MigrationRecord) error {
+// finishPendingV9 resumes the part after config commit under the config lock:
+// the pre-9 Rego modules still on disk (rego, planned again from the files)
+// and the audit.db row cleanup. A missing cleanup snapshot cannot prove which
+// operator rows were copied, so it remains pending for an operator to resolve.
+func finishPendingV9(
+	ctx context.Context, configPath string, source []byte, record MigrationRecord, rego []v9RegoRefresh,
+) error {
 	txn, err := cfgtxn.Begin(ctx, configPath, 0)
 	if err != nil {
 		return err
@@ -409,6 +418,12 @@ func finishPendingV9(ctx context.Context, configPath string, source []byte, reco
 		}
 		if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
 			return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+		}
+	}
+	for _, module := range rego {
+		if err := refreshV9RegoModule(module); err != nil {
+			latest.Notes = append(latest.Notes, fmt.Sprintf("could not replace the pre-9 module %s: %v; the gateway "+
+				"refuses it and uses the config-driven fallback", module.path, err))
 		}
 	}
 	latest.Pending = false
@@ -1000,7 +1015,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 	}
 	for _, module := range m.rego {
-		if err := m.refreshRegoModule(module); err != nil {
+		if err := refreshV9RegoModule(module); err != nil {
 			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
 			continue
 		}
@@ -1399,7 +1414,7 @@ func seedShippedRulePack(dir, name string) error {
 	return nil
 }
 
-func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
+func refreshV9RegoModule(module v9RegoRefresh) error {
 	info, err := os.Stat(module.path)
 	if err != nil {
 		return err

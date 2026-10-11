@@ -2071,6 +2071,56 @@ func TestMigrateV9RetryClearsPendingAuditRows(t *testing.T) {
 	}
 }
 
+// GAP-1497: a run that stopped after the config commit, before the Rego step,
+// left the pre-9 admission.rego in place, and the retry finished the record
+// with it there: the gateway refused the Rego bundle, custom modules included.
+func TestMigrateV9RetryReplacesPendingRegoModules(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	policies := filepath.Join(dir, "policies")
+	if err := os.MkdirAll(filepath.Join(policies, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const legacy = "package defenseclaw.admission\nimport rego.v1\n" +
+		"verdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	admission := filepath.Join(policies, "rego", "admission.rego")
+	if err := os.WriteFile(admission, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\npolicy_dir: "+policies+
+		"\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policyDir, dataJSON := V8PolicyDataJSON(policies)
+	in := MigrateV9Input{ConfigPath: configPath, PolicyDir: policyDir, DataJSONPath: dataJSON}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	// Back to the moment after the config commit: record pending, module not replaced.
+	record, ok := readMigrationRecord(configPath)
+	if !ok {
+		t.Fatal("no migration record")
+	}
+	record.Pending = true
+	if err := writeMigrationRecord(MigrationRecordPath(configPath), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(admission+DataJSONMigratedSuffix, admission); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), in); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if got, _ := os.ReadFile(admission); string(got) == legacy || !strings.Contains(string(got), "input.admission") {
+		t.Fatalf("the retry finished with the pre-9 admission.rego in place: %q", got)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
+		t.Fatalf("pending record was not finished: %+v", record)
+	}
+}
+
 // Watcher enforcement rows are a journal, including failed scans and failed
 // quarantine attempts. They must not become permanent operator policy.
 func TestMigrateV9LeavesWatcherBlocksInAuditJournal(t *testing.T) {
