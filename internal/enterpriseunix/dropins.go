@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -68,19 +69,23 @@ const dropInEnvironmentReset = "an empty Environment=, which clears the unit's D
 
 // dropInChanges returns the settings of a drop-in that change what the unit
 // is (Key, Environment=NAME for a refused variable, or
-// dropInEnvironmentReset).
+// dropInEnvironmentReset). It reads the file as systemd does: continuation
+// lines joined, and each Environment= value split into words with quotes
+// and C escapes decoded. Read as raw text, Environment=DEFENSECLAW\x5fCONFIG=
+// or DEFENSECLAW"_"CONFIG= set DEFENSECLAW_CONFIG unseen (GAP-1459).
+// EnvironmentFile= and PassEnvironment= are not kept settings, so a drop-in
+// with either is named whatever it lists.
 func dropInChanges(data []byte) []string {
 	seen := map[string]bool{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "[") {
+	for _, line := range systemdLines(data) {
+		if strings.HasPrefix(line, "[") {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 		if !dropInKeepKeys[key] {
 			seen[key] = true
 			continue
@@ -88,12 +93,12 @@ func dropInChanges(data []byte) []string {
 		if key != "Environment" {
 			continue
 		}
-		assignments := strings.Fields(strings.NewReplacer(`"`, " ", "'", " ").Replace(value))
-		if len(assignments) == 0 {
+		if value == "" {
 			seen[dropInEnvironmentReset] = true
 		}
-		for _, assignment := range assignments {
-			if name, _, ok := strings.Cut(assignment, "="); ok && dropInEnvironmentRefused(name) {
+		for _, assignment := range systemdWords(value) {
+			// systemd resolves a specifier (%) in a name; refuse one.
+			if name, _, ok := strings.Cut(assignment, "="); ok && (dropInEnvironmentRefused(name) || strings.Contains(name, "%")) {
 				seen["Environment="+name] = true
 			}
 		}
@@ -104,6 +109,115 @@ func dropInChanges(data []byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// systemdLines are the logical lines of a unit file, trimmed, as systemd's
+// parser reads them: a line that ends in an unescaped backslash continues on
+// the next with the backslash read as a space, and comment lines (# or ;)
+// are skipped, inside a continuation too.
+func systemdLines(data []byte) []string {
+	var lines []string
+	pending := ""
+	for _, raw := range strings.Split(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
+		raw = strings.TrimSuffix(raw, "\r")
+		if trimmed := strings.TrimSpace(raw); strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if (len(raw)-len(strings.TrimRight(raw, `\`)))%2 == 1 {
+			pending += raw[:len(raw)-1] + " "
+			continue
+		}
+		if line := strings.TrimSpace(pending + raw); line != "" {
+			lines = append(lines, line)
+		}
+		pending = ""
+	}
+	if line := strings.TrimSpace(pending); line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// systemdWords splits an Environment= value into its assignments as systemd
+// does (extract_first_word with EXTRACT_UNQUOTE and EXTRACT_CUNESCAPE):
+// words are separated by whitespace, single and double quotes anywhere in a
+// word are removed and keep the text between them in the word, and backslash
+// escapes are decoded. An escape systemd rejects is read as its character,
+// so a name is never read as less than systemd could make of it.
+func systemdWords(value string) []string {
+	var words []string
+	var word strings.Builder
+	inWord := false
+	var quote byte
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case c == '\\':
+			decoded, n := systemdUnescape(value[i+1:])
+			word.WriteString(decoded)
+			i += n
+			inWord = true
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				word.WriteByte(c)
+			}
+		case c == '\'' || c == '"':
+			quote, inWord = c, true
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
+}
+
+// systemdSimpleEscapes are the one-letter escapes of systemd's cunescape_one.
+var systemdSimpleEscapes = map[byte]string{'a': "\a", 'b': "\b", 'f': "\f", 'n': "\n", 'r': "\r", 't': "\t", 'v': "\v", 's': " "}
+
+// systemdUnescape decodes the escape after a backslash at the start of rest
+// (systemd's cunescape_one): \a \b \f \n \r \t \v \s, \xNN, \NNN octal,
+// \uNNNN and \UNNNNNNNN; any other character (\\, \", \') stands for itself.
+// It returns the text and how many bytes of rest it used.
+func systemdUnescape(rest string) (string, int) {
+	if rest == "" {
+		return "", 0
+	}
+	if decoded, ok := systemdSimpleEscapes[rest[0]]; ok {
+		return decoded, 1
+	}
+	var skip, digits, base int
+	switch c := rest[0]; {
+	case c == 'x':
+		skip, digits, base = 1, 2, 16
+	case c == 'u':
+		skip, digits, base = 1, 4, 16
+	case c == 'U':
+		skip, digits, base = 1, 8, 16
+	case c >= '0' && c <= '7':
+		skip, digits, base = 0, 3, 8
+	}
+	if end := skip + digits; digits > 0 && len(rest) >= end {
+		if n, err := strconv.ParseUint(rest[skip:end], base, 32); err == nil {
+			if digits >= 4 {
+				return string(rune(n)), end
+			}
+			if n < 256 {
+				return string([]byte{byte(n)}), end
+			}
+		}
+	}
+	return rest[:1], 1
 }
 
 // unitDropIns reviews the drop-ins of the DefenseClaw units that the
