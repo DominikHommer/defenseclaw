@@ -126,3 +126,52 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		}
 	}
 }
+
+// A link that the command creates makes a later write through the new name a
+// write to the linked file; a link the hook cannot read statically makes the
+// write targets unknown (GAP-1505).
+func TestResolveLinkCreatedInCommand(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.MkdirAll(filepath.Dir(keys), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// An existing alias that ln -f replaces.
+	notes := filepath.Join(home, "notes.txt")
+	if err := os.WriteFile(notes, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(home)
+	for _, tc := range []struct{ command, operand, want string }{
+		{"ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt", "notes.txt", keys},
+		{"ln -s ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
+		{"ln -f ~/.ssh/authorized_keys notes.txt\necho k >> notes.txt", "notes.txt", keys},
+		{"ln -sf ../.ssh/authorized_keys sub/notes.txt; echo k >> sub/notes.txt", "sub/notes.txt", keys},
+		{"ln -s ~/.ssh dir; echo k >> dir/authorized_keys", "dir/authorized_keys", keys},
+		{"cp --link ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt", "notes.txt", keys},
+		{"ln ~/.ssh/authorized_keys notes.txt; mv notes.txt n2; echo k >> n2", "n2", ""},
+		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
+		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
+		{"echo k >> notes.txt", "notes.txt", notes},
+	} {
+		payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": home,
+			"tool_input": map[string]any{"command": tc.command}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		operand := filepath.Join(home, filepath.FromSlash(tc.operand))
+		targets, ok := Decode(Resolve(payload))
+		got, present := targets[operand]
+		if !ok || !present || got != tc.want || (targets[TruncatedKey] == "1") != (tc.want == "") {
+			t.Errorf("%q: target of %s = %q (present %v), want %q; all=%v", tc.command, operand, got, present, tc.want, targets)
+		}
+	}
+}

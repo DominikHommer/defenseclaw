@@ -9,9 +9,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -63,18 +67,8 @@ const MaxPayloadBytes = 1 << 20
 // reports a redirect target that is not a static word (a parameter other
 // than HOME, a substitution or a glob), which is not listed.
 func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
-	if len(command) > MaxPayloadBytes {
-		return nil, false, false
-	}
-	var file *syntax.File
-	var err error
-	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
-		if err == nil {
-			break
-		}
-	}
-	if err != nil {
+	file, parsed := parseShell(command)
+	if !parsed {
 		return nil, false, false
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
@@ -103,6 +97,23 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// parseShell parses a command of at most MaxPayloadBytes as bash, or else as
+// POSIX sh.
+func parseShell(command string) (*syntax.File, bool) {
+	if len(command) > MaxPayloadBytes {
+		return nil, false
+	}
+	var file *syntax.File
+	var err error
+	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
+		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err == nil {
+			return file, true
+		}
+	}
+	return nil, false
 }
 
 // staticShellWord expands a redirect word that names one fixed path: quotes,
@@ -240,6 +251,16 @@ func newProtectedFiles(home string) protectedFiles {
 	return files
 }
 
+// has reports a resolved target that is one of the protected paths.
+func (files protectedFiles) has(resolved string) bool {
+	for _, p := range files {
+		if samePathName(resolved, p.path) {
+			return true
+		}
+	}
+	return false
+}
+
 // target maps a resolved write target to the protected path when both name
 // the same file. When a protected file cannot be identified, a multiply
 // linked target may be an alias of it and is reported as unresolvable.
@@ -317,6 +338,7 @@ func Resolve(payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands []string
+	links := shellLinks{known: true}
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -332,6 +354,13 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
+				// A link the command creates can make a later write a write
+				// to a protected file (GAP-1505). The command of an
+				// apply_patch tool is a patch envelope, not shell.
+				if !isApplyPatchToolName(tool) {
+					links = commandLinks(command, cwd, home)
+					truncated = truncated || !links.known
+				}
 				break
 			}
 		}
@@ -358,9 +387,9 @@ func Resolve(payload []byte) string {
 			truncated = true
 			return
 		}
-		resolved, ok := resolveWritePath(path, 0)
-		if ok {
-			resolved, ok = protected.target(resolved)
+		resolved, ok := "", false
+		if links.known {
+			resolved, ok = links.resolve(path, protected)
 		}
 		if !ok {
 			resolved = ""
@@ -437,4 +466,381 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	return targets, true
+}
+
+// Programs that create a link from their operands: ln and link always, cp
+// with --link or --symbolic-link. mv and rename move a link to another name;
+// cd changes what a relative link operand denotes.
+var (
+	linkPrograms   = []string{"ln", "gln", "link", "glink"}
+	copyPrograms   = []string{"cp", "gcp"}
+	renamePrograms = []string{"mv", "gmv", "rename"}
+	cdPrograms     = []string{"cd", "pushd", "popd"}
+	copyLinkOption = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
+	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
+	// creates from text this package does not evaluate.
+	opaqueLink = regexp.MustCompile(`(?i)\bos\.(?:sym)?link\s*\(|\.(?:hardlink_to|symlink_to|link_to)\s*\(|` +
+		`\bfs(?:\.promises)?\.(?:sym)?link(?:sync)?\s*\(|\bmklink\b|\bfsutil(?:\.exe)?\s+hardlink\b|` +
+		`-itemtype\s+['"]?(?:hardlink|symboliclink|junction)\b|\bcreate(?:symbolic|hard)link\b`)
+)
+
+// linkAlias is a name that a link created by the command gives to target.
+type linkAlias struct{ name, target string }
+
+// shellLinks are the links one shell command creates. known is false when a
+// link name or target is not a static word, or when a program that may
+// create a link cannot be read; the command's write targets are then
+// unknown.
+type shellLinks struct {
+	aliases  []linkAlias
+	known    bool
+	relative bool // a link operand is relative to the working directory
+}
+
+// commandLinks lists the links that ln, link and cp --link or
+// --symbolic-link create in command, in any order: a link made after a write
+// only makes the result more conservative.
+func commandLinks(command, cwd, home string) shellLinks {
+	links := shellLinks{known: true}
+	if opaqueLink.MatchString(command) {
+		links.known = false
+		return links
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		// Resolve already marks a command that does not parse incomplete.
+		return links
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	renames, cds := false, false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !isCall || len(call.Args) == 0 || !links.known {
+			return links.known
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = staticShellWord(arg, env, home != "")
+		}
+		program := ""
+		if static[0] {
+			program = programBase(words[0])
+		}
+		switch {
+		case program == "":
+			// A program named by a parameter or a substitution may be ln.
+			links.known = false
+		case slices.Contains(linkPrograms, program):
+			links.known = !slices.Contains(static, false) && links.add(program, words[1:], cwd)
+		case slices.Contains(copyPrograms, program):
+			if copyMayLink(call.Args[1:], words[1:], static[1:]) {
+				links.known = !slices.Contains(static, false) && links.add(program, words[1:], cwd)
+			}
+		case slices.Contains(renamePrograms, program):
+			renames = true
+		case slices.Contains(cdPrograms, program):
+			cds = true
+		default:
+			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
+			text := command[call.Pos().Offset():call.End().Offset()]
+			if tactics.RunsProgram(text, linkPrograms...) ||
+				tactics.RunsProgram(text, copyPrograms...) && copyLinkOption.MatchString(text) {
+				links.known = false
+			}
+			renames = renames || tactics.RunsProgram(text, renamePrograms...)
+			cds = cds || tactics.RunsProgram(text, cdPrograms...)
+		}
+		return links.known
+	})
+	if len(links.aliases) > 0 && (renames || cds && links.relative) {
+		links.known = false
+	}
+	return links
+}
+
+// copyMayLink reports a cp call that has a link option, or a dynamic word
+// that may expand to one.
+func copyMayLink(args []*syntax.Word, words []string, static []bool) bool {
+	for i, word := range words {
+		if !static[i] {
+			lit, isLit := args[i].Parts[0].(*syntax.Lit)
+			if !isLit || strings.HasPrefix(lit.Value, "-") {
+				return true
+			}
+			continue
+		}
+		if word == "--" {
+			return false
+		}
+		if copyLinkOption.MatchString(word) {
+			return true
+		}
+	}
+	return false
+}
+
+// programBase is a program's lowercased basename without ".exe".
+func programBase(word string) string {
+	if index := strings.LastIndexAny(word, `/\`); index >= 0 {
+		word = word[index+1:]
+	}
+	return strings.TrimSuffix(strings.ToLower(word), ".exe")
+}
+
+// Long options of ln and cp that matter here, and the flags that share their
+// prefixes; GNU accepts any unambiguous abbreviation.
+var (
+	lnLongOptions = []string{"symbolic", "relative", "no-target-directory", "target-directory", "suffix",
+		"force", "no-dereference", "backup", "interactive", "logical", "physical", "verbose", "directory",
+		"help", "version"}
+	cpLongOptions = []string{"link", "symbolic-link", "no-target-directory", "target-directory", "suffix",
+		"sparse", "no-preserve", "archive", "attributes-only", "backup", "copy-contents", "debug",
+		"dereference", "force", "interactive", "keep-directory-symlink", "no-clobber", "no-dereference",
+		"preserve", "parents", "recursive", "reflink", "remove-destination", "strip-trailing-slashes",
+		"update", "verbose", "one-file-system", "context", "help", "version"}
+	optionsWithValue = []string{"target-directory", "suffix", "sparse", "no-preserve"}
+)
+
+// longOption expands an abbreviated long option. ok is false when it is
+// ambiguous; an unknown option is a flag.
+func longOption(name string, options []string) (string, bool) {
+	if slices.Contains(options, name) {
+		return name, true
+	}
+	match := ""
+	for _, option := range options {
+		if strings.HasPrefix(option, name) {
+			if match != "" {
+				return "", false
+			}
+			match = option
+		}
+	}
+	return match, true
+}
+
+// add records the links that one ln, link or cp call creates. It returns
+// false when its options or operands are not understood.
+func (l *shellLinks) add(program string, args []string, cwd string) bool {
+	if program == "link" || program == "glink" {
+		if len(args) != 2 || strings.HasPrefix(args[0], "-") {
+			return false
+		}
+		l.record(args[0], args[1], false, cwd)
+		return true
+	}
+	copyCall := slices.Contains(copyPrograms, program)
+	options := lnLongOptions
+	if copyCall {
+		options = cpLongOptions
+	}
+	hard, symbolic, relative, noTargetDir := false, false, false, false
+	var targetDir string
+	var operands []string
+	optionsEnd := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if optionsEnd || arg == "-" || !strings.HasPrefix(arg, "-") {
+			operands = append(operands, arg)
+			continue
+		}
+		if arg == "--" {
+			optionsEnd = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, hasValue := strings.Cut(arg[2:], "=")
+			option, ok := longOption(name, options)
+			if !ok {
+				return false
+			}
+			if slices.Contains(optionsWithValue, option) && !hasValue {
+				if i++; i >= len(args) {
+					return false
+				}
+				value = args[i]
+			}
+			switch option {
+			case "symbolic", "symbolic-link":
+				symbolic = true
+			case "link":
+				hard = true
+			case "relative":
+				relative = true
+			case "no-target-directory":
+				noTargetDir = true
+			case "target-directory":
+				targetDir = value
+			}
+			continue
+		}
+		for j := 1; j < len(arg); j++ {
+			switch c := arg[j]; {
+			case c == 's':
+				symbolic = true
+			case c == 'l' && copyCall:
+				hard = true
+			case c == 'r' && !copyCall:
+				relative = true
+			case c == 'T':
+				noTargetDir = true
+			case c == 't' || c == 'S':
+				value := arg[j+1:]
+				if value == "" {
+					if i++; i >= len(args) {
+						return false
+					}
+					value = args[i]
+				}
+				if c == 't' {
+					targetDir = value
+				}
+				j = len(arg)
+			}
+		}
+	}
+	if copyCall && !hard && !symbolic {
+		return true
+	}
+	sources, dest, dir := operands, "", targetDir
+	switch {
+	case targetDir != "":
+	case len(operands) == 1 && !copyCall:
+		dir = cwd
+		l.relative = true
+	case len(operands) == 2:
+		sources, dest = operands[:1], operands[1]
+		if !noTargetDir {
+			// The name is a directory when it exists as one.
+			dir = dest
+		}
+	case len(operands) > 2:
+		sources, dir = operands[:len(operands)-1], operands[len(operands)-1]
+	}
+	// A symbolic link stores its target as written, relative to the link's
+	// directory; ln -r, a hard link and cp --link name the source file.
+	literal := symbolic && !relative
+	for _, source := range sources {
+		if dest != "" {
+			l.record(source, dest, literal, cwd)
+		}
+		if dir != "" {
+			l.record(source, filepath.Join(dir, filepath.Base(filepath.Clean(source))), literal, cwd)
+		}
+	}
+	return true
+}
+
+// record adds the alias that a link at name to source creates, under the
+// literal name and the name with its directory's existing links resolved.
+func (l *shellLinks) record(source, name string, literal bool, cwd string) {
+	if source == "" || name == "" {
+		return
+	}
+	l.relative = l.relative || !filepath.IsAbs(source) || !filepath.IsAbs(name)
+	name = absolutePath(name, cwd)
+	target := source
+	if literal && !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(name), target)
+	} else {
+		target = absolutePath(target, cwd)
+	}
+	target = filepath.Clean(target)
+	l.aliases = append(l.aliases, linkAlias{name: name, target: target})
+	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target})
+		}
+	}
+}
+
+func absolutePath(path, cwd string) string {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	return filepath.Clean(path)
+}
+
+// maxLinkAliasSteps bounds the names one write operand is followed through.
+const maxLinkAliasSteps = 256
+
+// resolve maps an absolute write operand to its target as resolveWritePath
+// and protectedFiles.target do, and also through the links the command
+// creates: when a name the operand may denote, itself or under a linked
+// directory, reaches a protected file, that file is the target. ok is false
+// when one of those names cannot be resolved.
+func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool) {
+	target := func(path string) (string, bool) {
+		resolved, ok := resolveWritePath(path, 0)
+		if ok {
+			resolved, ok = protected.target(resolved)
+		}
+		return resolved, ok
+	}
+	resolved, ok := target(path)
+	if !ok || len(l.aliases) == 0 || protected.has(resolved) {
+		return resolved, ok
+	}
+	seen := map[string]bool{path: true}
+	queue := []string{path}
+	for steps := 0; len(queue) > 0; {
+		name := queue[0]
+		queue = queue[1:]
+		forms := []string{name}
+		if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
+			forms = append(forms, filepath.Join(dir, filepath.Base(name)))
+		}
+		if full, ok := resolveWritePath(name, 0); ok {
+			forms = append(forms, full)
+		}
+		for _, form := range forms {
+			for _, alias := range l.aliases {
+				rest, under := cutPathPrefix(form, alias.name)
+				if !under {
+					continue
+				}
+				next := filepath.Join(alias.target, rest)
+				if seen[next] {
+					continue
+				}
+				seen[next] = true
+				if steps++; steps > maxLinkAliasSteps {
+					return "", false
+				}
+				linked, ok := target(next)
+				if !ok {
+					return "", false
+				}
+				if protected.has(linked) {
+					return linked, true
+				}
+				queue = append(queue, next)
+			}
+		}
+	}
+	return resolved, true
+}
+
+// cutPathPrefix returns the rest of path under prefix. Names compare without
+// case on macOS and Windows, whose file systems usually ignore it.
+func cutPathPrefix(path, prefix string) (string, bool) {
+	if len(path) < len(prefix) || !samePathName(path[:len(prefix)], prefix) {
+		return "", false
+	}
+	rest := path[len(prefix):]
+	if rest == "" {
+		return "", true
+	}
+	if !os.IsPathSeparator(rest[0]) {
+		return "", false
+	}
+	return rest[1:], true
+}
+
+func samePathName(a, b string) bool {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
