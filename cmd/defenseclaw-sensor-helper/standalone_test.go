@@ -89,6 +89,15 @@ targets:
 	if homes, staleDigest, err := manifestHomes(machinePolicy); err != nil || len(homes) != 0 || staleDigest == eligibleDigest {
 		t.Fatalf("manifest enrollment homes %v %v (digest unchanged: %v)", homes, err, staleDigest == eligibleDigest)
 	}
+	// A target the administrator disabled enrolls nothing: the stale record
+	// does not bring its home back (GAP-1488). The targets of alice do not
+	// say, and an absent enabled means enabled.
+	eligible = []enterprisehooks.UnixEligibleAccount{
+		{User: "alice", UID: 1001, Home: "/home/alice"}, {User: "bob", UID: 1003, Home: "/home/bob"},
+	}
+	if homes, _, err := manifestHomes(path); err != nil || !reflect.DeepEqual(homes, []string{"/home/alice"}) {
+		t.Fatalf("manifest enrollment with a disabled target: homes %v %v, want only /home/alice", homes, err)
+	}
 	mode, eligible = "", nil
 
 	validateManifestTrust = func(string) error { return errors.New("untrusted") }
