@@ -278,8 +278,28 @@ func describeACLFindings(findings []aclFinding) string {
 // listed afterwards fails the transaction with the paths, so a repair never
 // reports success while verify keeps naming them (GAP-0946).
 func (l *lifecycle) removeACLs(ctx context.Context, files, connectors []string) error {
+	return l.removeACLTargets(ctx, l.env.aclTargets(files, connectors))
+}
+
+// removeConfigACLs removes the macOS ACL entries that let another account
+// write config.yaml or put another file in its folder. replaceWritableConfig
+// runs it before it reads and replaces the file (GAP-1441).
+func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 	env := l.env
-	targets := env.aclTargets(files, connectors)
+	if env.GOOS != "darwin" {
+		return nil
+	}
+	var targets []aclTarget
+	for _, canonical := range []string{filepath.Dir(env.Layout.ConfigPath), env.Layout.ConfigPath} {
+		if info, err := os.Lstat(env.P(canonical)); err == nil && info.Mode()&os.ModeSymlink == 0 {
+			targets = append(targets, aclTarget{path: env.P(canonical)})
+		}
+	}
+	return l.removeACLTargets(ctx, targets)
+}
+
+func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) error {
+	env := l.env
 	findings, err := env.aclFindings(ctx, targets)
 	if err != nil {
 		return fmt.Errorf("read the macOS ACLs of the deployment: %w", err)
