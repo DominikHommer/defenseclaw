@@ -2144,7 +2144,6 @@ func removeWindowsManagedRuntimeRootContents(
 		if err := setWindowsManagedRuntimeMarkerSecurity(root, target.sid, marker); err != nil {
 			return err
 		}
-		rootMarker = true
 	}
 	if err := validateWindowsManagedRuntimeCleanupMarkerHandle(root, target.sid, marker); err != nil {
 		return fmt.Errorf("enterprise hooks: managed runtime root quarantine changed: %w", err)

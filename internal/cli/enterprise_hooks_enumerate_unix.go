@@ -429,12 +429,6 @@ func enterpriseHooksEnumerateDiscover(ctx context.Context, account unixidentity.
 	return enterpriseHooksEnumerateDiscoverWith(ctx, account, connectors, false)
 }
 
-// enterpriseHooksEnumerateDiscoverStatic is enterpriseHooksEnumerateDiscover
-// for an untrusted home: the worker executes nothing there.
-func enterpriseHooksEnumerateDiscoverStatic(ctx context.Context, account unixidentity.Account, connectors []string) (map[string]string, map[string]string, error) {
-	return enterpriseHooksEnumerateDiscoverWith(ctx, account, connectors, true)
-}
-
 func enterpriseHooksEnumerateDiscoverWith(ctx context.Context, account unixidentity.Account, connectors []string, static bool) (map[string]string, map[string]string, error) {
 	found, err := enterpriseHooksEnumerateDiscoverAll(ctx, account, connectors, static)
 	return found.Versions, found.Reasons, err

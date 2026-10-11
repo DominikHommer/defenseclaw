@@ -2211,18 +2211,6 @@ func exactReportedToolInvocation(
 		strings.TrimSpace(value.Value) != "" && value.Value == req.ToolInvocationID
 }
 
-func firstObject(
-	payload map[string]interface{},
-	keys ...string,
-) map[string]interface{} {
-	for _, key := range keys {
-		if child := objectAt(payload, key); child != nil {
-			return child
-		}
-	}
-	return nil
-}
-
 func exactBool(
 	payload map[string]interface{},
 	keys ...string,

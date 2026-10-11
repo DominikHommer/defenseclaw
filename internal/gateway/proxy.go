@@ -4760,13 +4760,6 @@ func (p *GuardrailProxy) llmSystemAndProvider(model string) (system, provider st
 	return system, provider
 }
 
-func truncateLog(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + fmt.Sprintf("... (%d more chars)", len(s)-maxLen)
-}
-
 // redactAuthValue masks an Authorization or api-key header value for safe
 // logging. Shows only the prefix (e.g. "Bearer") and the last 4 chars of
 // the credential, or "[empty]" / "[set]" for short values.
@@ -6208,8 +6201,8 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			}
 		}
 	}
-	if !stopped && frame.Len() > 0 && !processFrame(frame.Bytes()) {
-		stopped = true
+	if !stopped && frame.Len() > 0 {
+		processFrame(frame.Bytes())
 	}
 	streamReadErr := scanner.Err()
 	if streamReadErr == nil && !streamBlocked && (!inspectFinalText() || !inspectBufferedToolCalls()) {

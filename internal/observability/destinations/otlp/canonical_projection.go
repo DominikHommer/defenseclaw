@@ -24,8 +24,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const canonicalTraceRepresentationID = "defenseclaw-otlp-v1"
-
 // canonicalTraceProjectedBuilder implements the generated defenseclaw-otlp-v1
 // direct-span representation. Its input is already destination-routed and
 // redacted immutable bytes; it has no path back to a canonical producer record.

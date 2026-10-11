@@ -194,15 +194,6 @@ func (a *APIServer) bindTelemetryCanaryRuntime(emitter sidecarRuntimeCanaryEmitt
 	a.observabilityV8Mu.Unlock()
 }
 
-func (a *APIServer) bindLocalOnlyObservabilityRuntime(emitter sidecarRuntimeLocalOnlyEmitter) {
-	if a == nil {
-		return
-	}
-	a.observabilityV8Mu.Lock()
-	a.observabilityV8LocalOnly = emitter
-	a.observabilityV8Mu.Unlock()
-}
-
 func (a *APIServer) bindObservabilityV8Lifecycle(runtime lifecycleV8Runtime) {
 	if a == nil {
 		return

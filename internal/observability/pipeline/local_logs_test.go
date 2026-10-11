@@ -860,8 +860,7 @@ func TestLocalLogPipelinePreservesCanonicalAndOutcomeImmutability(t *testing.T) 
 		t.Fatal(err)
 	}
 	projectionBytes[0] ^= 0xff
-	failures := outcome.OptionalFailures()
-	failures = append(failures, OptionalFailure{destinationName: "mutated"})
+	_ = append(outcome.OptionalFailures(), OptionalFailure{destinationName: "mutated"})
 
 	after, err := canonical.Bytes()
 	if err != nil {

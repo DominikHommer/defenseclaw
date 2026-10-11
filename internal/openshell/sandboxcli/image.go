@@ -296,7 +296,7 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 	if err := a.Images.Preflight(ctx, spec, microVM, force); err != nil {
 		return fmt.Errorf("%s image: %w", spec.DisplayName, err)
 	}
-	var log io.Writer = io.Discard
+	var log io.Writer
 	var file *lazyLog
 	if verbose {
 		log = a.IO.Out

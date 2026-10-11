@@ -18,7 +18,6 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -294,38 +293,6 @@ func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.
 	if len(out.RuleIDs) != 2 {
 		t.Errorf("RuleIDs len = %d, want 2", len(out.RuleIDs))
 	}
-}
-
-// runHookHandler invokes a hook handler with the supplied JSON body
-// and returns the response body. We cannot use httptest.NewServer
-// because that would require a fully wired APIServer with audit +
-// otel + scanner dependencies — the parity contract is about wire
-// shape, so a minimal handler invocation is enough.
-func runHookHandler(t *testing.T, h http.HandlerFunc, body []byte) []byte {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/x/hook", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
-	}
-	return w.Body.Bytes()
-}
-
-// jsonEq is a lightweight JSONEq used by the parity tests. We do not
-// import testify in this package to keep the gateway test surface
-// dependency-light; reflect.DeepEqual on json.Unmarshal output is
-// sufficient because Go's json package normalizes map iteration.
-func jsonEq(a, b map[string]interface{}) bool {
-	ab, err := json.Marshal(a)
-	if err != nil {
-		return false
-	}
-	bb, err := json.Marshal(b)
-	if err != nil {
-		return false
-	}
-	return string(ab) == string(bb)
 }
 
 func contains(s, substr string) bool {

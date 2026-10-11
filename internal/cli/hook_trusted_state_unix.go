@@ -188,11 +188,6 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	return standaloneHookRuntime.reason
 }
 
-func enterpriseManagedHookRuntimeEndpoint(connectorName string) (string, string, bool) {
-	addr, service, _, ok := enterpriseManagedHookRuntimeConnection(connectorName)
-	return addr, service, ok
-}
-
 // enterpriseManagedHookRuntimeConnection returns the descriptor's gateway
 // address. There is no service name and no scoped token: the standalone
 // transport reaches the gateway only through the hook socket, which

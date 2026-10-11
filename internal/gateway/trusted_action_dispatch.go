@@ -5006,26 +5006,6 @@ func trustedSemanticOwnerClaimingRule(ruleID string) (semanticOwner, bool) {
 	return owner, ok
 }
 
-// trustedNetworkFindingProof requires a command-owned network fact from a
-// complete executing command. The rule pattern classifies the typed endpoint;
-// it is never allowed to turn a URL-shaped literal in source or test data into
-// an action. Nested endpoints remain bounded by the complete outer action.
-func trustedNetworkFindingProof(
-	generation *compiledRulePackCategories,
-	ruleID string,
-	input actionfacts.Input,
-	toolName string,
-	facts actionfacts.Facts,
-) (findingProof, bool) {
-	return trustedNetworkFindingProofFromActions(
-		generation,
-		ruleID,
-		toolName,
-		facts,
-		trustedNestedExecutionActions(input, facts),
-	)
-}
-
 func trustedNetworkFindingProofFromActions(
 	generation *compiledRulePackCategories,
 	ruleID string,
@@ -5477,24 +5457,6 @@ func appendTrustedWindowsPathFactFindings(
 		}
 	}
 	return findings
-}
-
-func argvHasOption(argv []string, option string) bool {
-	for _, argument := range argv[1:] {
-		if argument == option || strings.HasPrefix(argument, option+"=") {
-			return true
-		}
-	}
-	return false
-}
-
-func argvHasAnyOption(argv []string, options ...string) bool {
-	for _, option := range options {
-		if argvHasOption(argv, option) {
-			return true
-		}
-	}
-	return false
 }
 
 func awkInvocationExecutes(argv []string) bool {
@@ -6062,19 +6024,6 @@ func trustedPathReadingCommand(program string) bool {
 	default:
 		return false
 	}
-}
-
-func applyBoundaryEnforcement(
-	findings []RuleFinding,
-	enforcementCapable bool,
-) []RuleFinding {
-	if enforcementCapable {
-		return findings
-	}
-	for index := range findings {
-		findings[index].enforcement = findingEnforcementDetectionOnly
-	}
-	return findings
 }
 
 func enforceableRuleFindings(findings []RuleFinding) []RuleFinding {

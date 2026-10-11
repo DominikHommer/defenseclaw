@@ -134,12 +134,6 @@ func (processor *v8HandoffLegacyProcessor) OnEnd(span sdktrace.ReadOnlySpan) {
 	}
 }
 
-func (processor *v8HandoffLegacyProcessor) endTimes() []time.Time {
-	processor.mu.Lock()
-	defer processor.mu.Unlock()
-	return append([]time.Time(nil), processor.endedAt...)
-}
-
 func (processor *v8HandoffLegacyProcessor) ForceFlush(context.Context) error {
 	if processor.panicFlush {
 		panic("legacy flush panic")

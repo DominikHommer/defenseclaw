@@ -19,8 +19,6 @@ package gateway
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1325,15 +1323,6 @@ func mergeHookEnvelopeExtra(base map[string]string, extra map[string]string) map
 	return base
 }
 
-// hashRawPayloadHex returns the first 16 hex chars of the SHA-256
-// of body. 64 bits is enough to deduplicate replay-storms in SIEM
-// rules without bloating audit rows; full digest would be 64 hex
-// chars per truncated row.
-func hashRawPayloadHex(body []byte) string {
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:8])
-}
-
 // safeEvaluateHook wraps the profile-runtime evaluator with a
 // deferred recover so a panic in any connector-specific code path
 // (asset-policy probes, scanner invocations, codex notify-bridge
@@ -1683,16 +1672,6 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
 	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, connector.DefaultCorrelationSpec(connectorName), "", "")
-}
-
-// normalizeAgentHookRequestWithCorrelation decodes content using the shared
-// hook vocabulary but resolves identity exclusively through the connector's
-// reviewed CorrelationSpec. This separation is intentional: prompt/tool
-// content aliases are harmless inspection conveniences, while treating an
-// execution, message, step or task identifier as a turn changes correlation
-// meaning and therefore must be explicitly connector-scoped.
-func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec) agentHookRequest {
-	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, "", "")
 }
 
 // normalizeAgentHookRequestWithCorrelationEvent also takes the agent identity
@@ -2723,10 +2702,6 @@ func normalizeAgentHookMode(mode string) string {
 	default:
 		return "observe"
 	}
-}
-
-func (a *APIServer) hookCapabilities(name string) connector.HookCapability {
-	return a.hookProfileForConnector(name).Capabilities
 }
 
 func (a *APIServer) configDataDir() string {

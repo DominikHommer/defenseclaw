@@ -53,19 +53,6 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 	}
 }
 
-func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, eventType, details string) {
-	if a.logger == nil {
-		return
-	}
-	connectorName = normalizeHookTelemetryLabel(connectorName, "unknown")
-	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
-	if strings.TrimSpace(details) == "" {
-		details = "result=ok"
-	}
-	_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
-		fmt.Sprintf("connector=%s %s", connectorName, details))
-}
-
 // logConnectorHookAuditEnvelope is the structured-audit entry point
 // every connector hook handler should use once it has a fully-built
 // HookAuditEnvelope.
