@@ -164,6 +164,7 @@ class PluginScannerWrapper:
             provider=str(override.get("provider") or ""),
             api_key=str(override.get("api_key") or ""),
             base_url=str(override.get("api_base") or ""),
+            bedrock=self._llm.bedrock if self._llm else None,
         )
         llm_ready = model_configured and llm_analyzer_ready(readiness_llm)
         if use_llm is None:

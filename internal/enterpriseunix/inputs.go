@@ -14,7 +14,11 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -33,6 +37,15 @@ const (
 	codeInputChanged = "input_changed"
 	// maxInputFollowUps bounds the follow-up transactions of one run.
 	maxInputFollowUps = 3
+	// A failed run that is the systemd apply trigger itself has it started
+	// again by a transient timer (scheduleApplyRetry): at most
+	// maxApplyRetries times for one config.yaml, the first after
+	// applyRetryDelay and each next one after twice the delay before. The
+	// count is kept in applyRetryName in the lifecycle directory.
+	maxApplyRetries = 3
+	applyRetryDelay = 30 * time.Second
+	applyRetryName  = "apply-retry.json"
+	unitApplyRetry  = "defenseclaw-enterprise-apply-retry"
 )
 
 // inputsChanged reports whether config.yaml or the protected credentials
@@ -91,6 +104,9 @@ func (l *lifecycle) settleInputChanges(ctx context.Context, code int) int {
 		code = next.apply(ctx, record)
 		l.planned = next.planned
 	}
+	if len(r.Errors) == 0 {
+		env.clearApplyRetries()
+	}
 	return code
 }
 
@@ -111,8 +127,68 @@ func (l *lifecycle) retriggerApply(ctx context.Context) {
 			r.AddWarning(codeInputChanged, message+"; the apply trigger runs ensure once this run ends")
 			return
 		}
+	} else if env.GOOS != "darwin" && l.scheduleApplyRetry(ctx, message) {
+		return
 	}
 	r.AddWarning(codeInputChanged, message+"; run `"+env.lifecycleCommand("ensure")+"` to apply it")
+}
+
+// applyRetries counts the deferred re-runs scheduled for one config.yaml.
+type applyRetries struct {
+	ConfigSHA256 string `json:"config_sha256"`
+	Attempts     int    `json:"attempts"`
+}
+
+func (e *Env) applyRetryPath() string {
+	return filepath.Join(e.P(e.Layout.LifecycleDir), applyRetryName)
+}
+
+// clearApplyRetries resets the count once a run applied or confirmed the
+// installed config.
+func (e *Env) clearApplyRetries() {
+	_ = removeFile(e.applyRetryPath())
+}
+
+// scheduleApplyRetry makes the apply trigger run ensure again after this
+// run, which is that trigger, has ended (GAP-1412). systemd merges a start
+// of the oneshot it is still running into the running job, and kills what
+// the unit started when it ends, so a transient timer outside the unit
+// starts it after a delay. A config.yaml whose runs keep failing stops at
+// maxApplyRetries, and the result says so; the count starts again for a
+// different config.yaml and after a healthy run. It reports false when no
+// re-run was scheduled and the caller asks for a manual ensure.
+func (l *lifecycle) scheduleApplyRetry(ctx context.Context, message string) bool {
+	env, r := l.env, l.result
+	sha, err := sha256File(env.P(env.Layout.ConfigPath))
+	if err != nil {
+		return false
+	}
+	var state applyRetries
+	if raw, err := readBounded(env.applyRetryPath(), maxInputBytes); err == nil {
+		_ = json.Unmarshal(raw, &state)
+	}
+	if state.ConfigSHA256 != sha || state.Attempts < 0 {
+		state = applyRetries{ConfigSHA256: sha}
+	}
+	if state.Attempts >= maxApplyRetries {
+		r.AddWarning(codeInputChanged, fmt.Sprintf("%s; retry limit reached: the apply trigger ran ensure again %d times for this config.yaml and it is still not applied, run `%s` to apply it",
+			message, maxApplyRetries, env.lifecycleCommand("ensure")))
+		return true
+	}
+	delay := applyRetryDelay << state.Attempts
+	state.Attempts++
+	// Without the count the re-runs would not be bounded.
+	data, err := json.Marshal(state)
+	if err != nil || env.writeFileAtomic(env.applyRetryPath(), append(data, '\n'), 0o600, rootOwner()) != nil {
+		return false
+	}
+	if _, err := env.Runner.Run(ctx, "systemd-run", "--quiet", "--collect", "--unit="+unitApplyRetry,
+		fmt.Sprintf("--on-active=%ds", int(delay/time.Second)), "--timer-property=AccuracySec=1s", "--timer-property=RemainAfterElapse=no",
+		"systemctl", "start", "--no-block", unitApplyService); err != nil {
+		return false
+	}
+	r.AddWarning(codeInputChanged, fmt.Sprintf("%s; the apply trigger runs ensure again in %s (retry %d of %d)", message, delay, state.Attempts, maxApplyRetries))
+	return true
 }
 
 // writtenSince reports whether the file at path was written after it was
