@@ -2014,6 +2014,41 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 	})
 }
 
+// refuseWindowsEnterpriseStandaloneSuppliedConfig refuses a request whose
+// supplied config the gateway could not load, and reports refused=false
+// when the config passes. An interrupted upgrade leaves a pending
+// transaction with the services stopped, and only a lifecycle run recovers
+// it: refusing an ensure or upgrade before that run left the host stopped on
+// every MDM retry (GAP-1433). Those two actions first run the repair ensure
+// uses to recover a pending transaction, which restores the previous
+// deployment and its services, and check the config again: the restored
+// rule packs can make it load. A config still refused is refused, and the
+// refusal reports the restored host.
+func refuseWindowsEnterpriseStandaloneSuppliedConfig(
+	ctx context.Context,
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+) (bool, error) {
+	err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+	if err != nil && (action == "ensure" || action == "upgrade") && windowsEnterpriseStandaloneTransactionPending() {
+		recovery := *opts
+		recovery.jsonOutput = true
+		clearWindowsEnterpriseSources(&recovery)
+		// The refusal below probes the host, so the recovery report adds
+		// nothing: a recovery that failed leaves transaction_pending there.
+		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
+			windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery)))
+		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
+	}
+	if err == nil {
+		return false, nil
+	}
+	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
+		fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+}
+
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
 // request refused before it changed anything. describeHost fills the host
 // as it is into a refusal for invalid arguments.
