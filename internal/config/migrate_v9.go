@@ -2377,7 +2377,138 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 			m.moved("config", scope.name+".rule_pack_dir", scope.name+".rules.protections", protections)
 		}
 	}
+	return m.rebaseEditedPresetPacks(guardrail)
+}
+
+// rebaseEditedPresetPacks moves each scope that selects a default, strict or
+// permissive folder of policy_dir that its operator edited in place onto the
+// 1.0 copy of that folder, as rulePackFor does for a custom pack. The upgrade
+// keeps such a folder as it is, so the 1.0 gateway refused its two rule files
+// of one category (GAP-1479), and only recorded a match of its rules that
+// blocked a tool call with a pattern alone and of its 0.8.x copies of the
+// built-in action rules (GAP-1480, GAP-0360). The global scope selects the
+// default pack when it names none (0.8.x init writes no rule_pack_dir). A
+// folder that some 0.8.x release shipped and nobody edited keeps its preset
+// name: the upgrade replaces it with this release's copy. A managed host's
+// packs belong to its administrator, and a read-only load writes no copy.
+func (m *v9Migrator) rebaseEditedPresetPacks(guardrail *yaml.Node) error {
+	if m.in.RebaseRulePack == nil || m.in.RulePackDigest == nil || m.in.Managed || m.in.InMemory {
+		return nil
+	}
+	rebased := map[string]string{}
+	for _, scope := range v9GuardrailScopes(guardrail) {
+		preset := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack")))
+		if preset == "" && scope.name == "guardrail" {
+			preset = "default"
+		}
+		if !v9BuiltinPacks[preset] {
+			continue
+		}
+		dir := filepath.Join(expandPath(m.policyDir()), "guardrail", preset)
+		name, done := rebased[preset]
+		if !done {
+			var err error
+			if name, err = m.rebaseEditedPresetPack(guardrail, preset, dir); err != nil {
+				return fmt.Errorf("config: %s.rule_pack %s: %w", scope.name, preset, err)
+			}
+			rebased[preset] = name
+		}
+		if name == "" {
+			continue
+		}
+		v9Set(scope.node, v9Scalar(name), "rule_pack")
+		m.moved("config", dir, scope.name+".rule_pack", name)
+		if scope.name == "guardrail" {
+			m.globalPackPosture = v9DirPosture(dir)
+		}
+	}
 	return nil
+}
+
+// rebaseEditedPresetPack pins the 1.0 copy of the preset folder dir when its
+// operator edited it and returns the name of that custom pack; "" leaves the
+// folder selected by its preset name: it is a pack 0.8.x shipped, needs no
+// 1.0 copy, or could not be rebased (RulePackRebaseFailures names it).
+func (m *v9Migrator) rebaseEditedPresetPack(guardrail *yaml.Node, preset, dir string) (string, error) {
+	clean := filepath.Clean(dir)
+	if info, err := os.Lstat(clean); err != nil || !info.IsDir() || v9Stock08Pack(preset, clean) {
+		return "", nil
+	}
+	target, digest, err := m.rebaseRulePack(clean, clean)
+	if err != nil || target == clean {
+		return "", err
+	}
+	name := m.pinCustomPack(guardrail, preset, target, digest)
+	m.note("%s is the %s pack edited in place; the upgrade keeps it as it is for a rollback to 0.8.x, and the config "+
+		"selects its 1.0 copy %s as guardrail.custom_packs.%s instead of the %s preset", clean, preset, target, name, preset)
+	return name, nil
+}
+
+// v9Stock08PackDigests are the digests (profile_digest of
+// cli/defenseclaw/guardrail_profiles.py, whose STOCK_PROFILE_DIGESTS lists
+// them too) of the default, strict and permissive packs that 0.8.0 to 0.8.3
+// and 0.8.4 to 0.8.10 shipped. Keep until the config_version 8 migration is
+// dropped (1.1.0).
+var v9Stock08PackDigests = map[string][]string{
+	"default": {"5b9ca53ad605b53d1d1618b51e52c658140d42190e6f903abaaca604ae145c93",
+		"9dc9a1aa028a8b2232babe38e8519f864a1f6d3a6b3990150c2ec3f907d71b8a"},
+	"strict": {"9a718f87b06f75cfb1f4fa223fc6f3692ced3ecc17c10b5c8b96fff617d5da67",
+		"5b9b0f79c491c27b3feed63b90765091d37345621a95792ebcd34195abb097fd"},
+	"permissive": {"fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
+		"29ce292e52f2fac289d6567ec7994b1f17af98e3fd1c4a5e2084f8c8a97b5371"},
+}
+
+// v9Stock08Pack reports whether dir holds exactly the files of the preset
+// pack some 0.8.x release shipped, by the digest the Python upgrade uses to
+// refresh an unedited pack.
+func v9Stock08Pack(preset, dir string) bool {
+	digest, err := v9ProfileDigest(dir)
+	return err == nil && slices.Contains(v9Stock08PackDigests[preset], digest)
+}
+
+// v9ProfileDigest is guardrail_profiles.profile_digest: the sha256 over the
+// relative slash path of each file, a NUL, the hex sha256 of its bytes and a
+// newline, in path order, leaving out dot files and __pycache__. A link or
+// other non-regular file, or more files than a shipped pack has, is not a
+// shipped pack.
+func v9ProfileDigest(dir string) (string, error) {
+	sums := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return err
+		}
+		if name := entry.Name(); strings.HasPrefix(name, ".") || name == "__pycache__" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() || len(sums) >= 64 {
+			return errors.New("not a shipped rule pack")
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		sums[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, rel := range slices.Sorted(maps.Keys(sums)) {
+		h.Write([]byte(rel + "\x00" + sums[rel] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
@@ -2476,6 +2607,13 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 			return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
 		}
 	}
+	return m.pinCustomPack(guardrail, base, target, digest), nil, nil
+}
+
+// pinCustomPack names the folder target guardrail.custom_packs.<stem of
+// base>, custom-<base> for a preset name, pinned by digest, and returns the
+// name.
+func (m *v9Migrator) pinCustomPack(guardrail *yaml.Node, base, target, digest string) string {
 	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(v9PackNameASCII(base), "-"), "-_")
 	if stem == "" || v9BuiltinPacks[stem] {
 		stem = strings.TrimRight("custom-"+stem, "-")
@@ -2496,7 +2634,7 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 		v9Set(guardrail, v9Mapping("path", v9Scalar(target), "digest", v9Scalar("sha256:"+digest)), "custom_packs", name)
 		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": target, "digest": "sha256:" + digest})
 	}
-	return name, nil, nil
+	return name
 }
 
 // rebaseRulePack returns the folder and digest to pin for the custom pack at
