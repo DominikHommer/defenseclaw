@@ -156,7 +156,7 @@ class HintEngine:
             if gateway_state in {"", "unknown"}:
                 return "Gateway status is not available yet. Health checks will retry automatically."
             if gateway_state in {"offline", "stopped", "down"}:
-                return 'Gateway is not running. Press : and run "start", or run "doctor" to diagnose.'
+                return 'Gateway is not running. Press G to start it, or d to run doctor.'
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:
@@ -247,6 +247,8 @@ class HintEngine:
     def _inventory_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
+        if state.panel_view == "detail":
+            return "KEYS  PgUp/PgDn scroll detail | Esc close | j/k move | h/l sub-tab | r scan."
         return (
             "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."

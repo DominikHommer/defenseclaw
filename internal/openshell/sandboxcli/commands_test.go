@@ -32,6 +32,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -1179,9 +1180,17 @@ func TestPolicyEdit(t *testing.T) {
 				ta.Cfg.DeploymentMode = "managed_enterprise"
 			}
 			before, _ := os.ReadFile(ta.ConfigPath)
-			wantErr(t, ta.PolicyEdit(bg, "allow", []string{c.host}), c.want)
+			err := ta.PolicyEdit(bg, "allow", []string{c.host})
+			wantErr(t, err, c.want)
 			if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 				t.Fatal("a refused entry was written")
+			}
+			if c.name == "a managed install" {
+				// GAP-0052: the refusal exits 3, like every other local writer on a managed device.
+				var exit *ExitError
+				if !errors.As(err, &exit) || exit.Code != 3 {
+					t.Fatalf("managed refusal = %#v, want an exit-3 error", err)
+				}
 			}
 		})
 	}
@@ -1195,6 +1204,46 @@ func TestPolicyEdit(t *testing.T) {
 	wantErr(t, ta.PolicyEdit(bg, "allow", []string{"api.github.com"}), "api.github.com is not on your organization's list of allowed destinations")
 	if c := ta.adminCheck(); c.Status != openshell.StatusPass || strings.Contains(c.Detail, "subdomains") {
 		t.Fatalf("doctor check = %+v", c)
+	}
+}
+
+// The daemon saves its "always" decisions to the same egress lists while a
+// command runs. An edit builds its list from config.yaml and writes it only
+// if the file is still the one it read, so a host saved after the command
+// loaded its config stays, and edits that overlap all land.
+func TestPolicyEditKeepsConcurrentWrites(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	// The daemon saves an always-block after ta.Cfg was loaded.
+	writeConfig(t, ta, "  egress:\n    block:\n      - evil.example\n")
+	ta.ok(t, ta.PolicyEdit(bg, "block", []string{"other.example"}))
+	if got := loadConfig(t, ta).OpenShell.Egress.Block; !slices.Equal(got, []string{"evil.example", "other.example"}) {
+		t.Fatalf("block = %v, want the host the daemon saved kept", got)
+	}
+
+	hosts := []string{"a.example", "b.example", "c.example", "d.example"}
+	var wg sync.WaitGroup
+	errs := make([]error, len(hosts))
+	for i, h := range hosts {
+		app := newTestApp(t, "")
+		app.ConfigPath = ta.ConfigPath
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = app.PolicyEdit(bg, "block", []string{h})
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("%s: %v", hosts[i], err)
+		}
+	}
+	got := loadConfig(t, ta).OpenShell.Egress.Block
+	for _, h := range append([]string{"evil.example", "other.example"}, hosts...) {
+		if !slices.Contains(got, h) {
+			t.Fatalf("block = %v, lost %s", got, h)
+		}
 	}
 }
 
@@ -1587,7 +1636,7 @@ func TestDetectLLMNotes(t *testing.T) {
 		{"claude", nil, claude, "", nil, []string{"CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`", "stores a real token the agent can read"}, ""},
 		{"claude none", nil, claude, "none", nil, []string{"stores a real token the agent can read"}, ""},
 		{"claude not installed", func(ta *testApp) { ta.LookPath = func(string) (string, error) { return "", errors.New("not found") } }, claude, "", nil,
-			[]string{"set ANTHROPIC_API_KEY, or use /login in the sandbox"}, "setup-token"},
+			[]string{"(set ANTHROPIC_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock); a login inside"}, "setup-token"},
 		{"claude wrapped", func(ta *testApp) { ta.Cfg.OpenShell.Wrappers = []string{"claudecode"} }, claude, "", nil,
 			[]string{"CLAUDE_CODE_OAUTH_TOKEN from `DEFENSECLAW_NO_SANDBOX=1 claude setup-token`"}, ""},
 		{"hermes provider key", nil, harnessSpec(t, "hermes"), "", map[string]bool{"HERMES_DEFENSECLAW_API_KEY": true},

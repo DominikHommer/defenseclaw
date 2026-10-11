@@ -44,7 +44,8 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
@@ -308,7 +309,14 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(--config "/dev/fd/8")
 fi
 _DC_HOOK_PAYLOAD="${PAYLOAD}"
-
+{{if and .Managed (not .SecureClient)}}# Resolve write operands in the user's hook process; the managed gateway
+# cannot inspect this home under ProtectHome. Keep the payload off argv.
+_DC_RESOLVED_WRITES="$(/opt/defenseclaw/bin/defenseclaw-gateway hook resolve-writes < <(printf '%s' "${_DC_HOOK_PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+RESOLVED_HEADER_ARGS=()
+if [ -n "${_DC_RESOLVED_WRITES}" ]; then
+  RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
+fi
+{{end}}
 # curl does not need the original values: the request reads them from the
 # private descriptors opened below. Clear them before spawning curl so no
 # credential or payload is inherited as process environment.
@@ -332,7 +340,8 @@ codex_gateway_post() {
     -H "X-DefenseClaw-Client: codex-hook/1.0" \
     -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
     -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
-    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+{{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
+{{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
     "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
     --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
@@ -354,6 +363,9 @@ if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
   defenseclaw_gateway_cold_start "$CURL_STATUS"; then
   CURL_STATUS=0
   codex_gateway_post || CURL_STATUS=$?
+fi
+if [ "$CURL_STATUS" -eq 0 ]; then
+  defenseclaw_retry_busy codex_gateway_post || CURL_STATUS=$?
 fi
 _DC_CURL_CONFIG_TOKEN=
 _DC_HOOK_PAYLOAD=
