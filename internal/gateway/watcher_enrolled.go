@@ -72,29 +72,35 @@ type enrolledWatchSet struct {
 	// watcher once the enumerator grants access, and readable leaves them
 	// out, so that watcher admits what they hold (GAP-0913).
 	denied map[string]bool
-	// claudeUnreadable holds, by lowercased home, the enrolled users whose
-	// Claude Code state the hook enumerator could not read (GAP-0829).
-	claudeUnreadable map[string]enterprisehooks.ClaudeStateUnreadable
+	// mcpUnreadable holds, by mcpUnreadableKey, the enrolled users whose
+	// Claude Code state (GAP-0829) or Kiro mcp.json (GAP-1468) the hook
+	// enumerator could not read.
+	mcpUnreadable map[string]enterprisehooks.ClaudeStateUnreadable
 }
 
-// claudeStatesUnreadable is claudeUnreadable of the enrolled watch set the
-// gateway resolved last. The hook refuses those users' Claude Code MCP tool
-// calls: the gateway cannot see their servers, so it cannot admit them, and
-// a changed server would run unscanned (GAP-0829).
-var claudeStatesUnreadable atomic.Pointer[map[string]enterprisehooks.ClaudeStateUnreadable]
-
-func publishClaudeStatesUnreadable(states map[string]enterprisehooks.ClaudeStateUnreadable) {
-	claudeStatesUnreadable.Store(&states)
+// mcpUnreadableKey is the key of a connector and an enrolled home.
+func mcpUnreadableKey(connector, home string) string {
+	return connector + "|" + strings.ToLower(filepath.Clean(home))
 }
 
-// claudeStateUnreadableFor returns the unreadable Claude Code state of the
-// enrolled user whose home is home.
-func claudeStateUnreadableFor(home string) (enterprisehooks.ClaudeStateUnreadable, bool) {
-	states := claudeStatesUnreadable.Load()
+// mcpStatesUnreadable is mcpUnreadable of the enrolled watch set the gateway
+// resolved last. The hook refuses those users' MCP tool calls of that
+// connector: the gateway cannot see their servers, so it cannot admit them,
+// and a changed server would run unscanned (GAP-0829, GAP-1468).
+var mcpStatesUnreadable atomic.Pointer[map[string]enterprisehooks.ClaudeStateUnreadable]
+
+func publishMCPStatesUnreadable(states map[string]enterprisehooks.ClaudeStateUnreadable) {
+	mcpStatesUnreadable.Store(&states)
+}
+
+// mcpStateUnreadableFor returns the unreadable MCP server state of the
+// connector for the enrolled user whose home is home.
+func mcpStateUnreadableFor(connector, home string) (enterprisehooks.ClaudeStateUnreadable, bool) {
+	states := mcpStatesUnreadable.Load()
 	if states == nil || strings.TrimSpace(home) == "" {
 		return enterprisehooks.ClaudeStateUnreadable{}, false
 	}
-	state, ok := (*states)[strings.ToLower(filepath.Clean(home))]
+	state, ok := (*states)[mcpUnreadableKey(connector, home)]
 	return state, ok
 }
 
@@ -189,7 +195,7 @@ func resolveEnrolledWatchSet(cfg *config.Config, reg *connector.Registry, wcfg c
 func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry, wcfg config.GatewayWatcherConfig, serviceHome string, stat func(string) (os.FileInfo, error)) enrolledWatchSet {
 	set := enrolledWatchSet{
 		roots: map[string]string{}, live: &enrolledMCPServers{}, denied: map[string]bool{},
-		claudeUnreadable: map[string]enterprisehooks.ClaudeStateUnreadable{},
+		mcpUnreadable: map[string]enterprisehooks.ClaudeStateUnreadable{},
 	}
 	defer func() { set.live.set(set.mcp) }()
 	if cfg == nil || reg == nil || strings.TrimSpace(serviceHome) == "" {
@@ -273,12 +279,16 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
 		entries := config.ReadUserMCPServersForHome(target.connector, target.home)
-		if target.connector == "claudecode" {
-			servers, unreadable := enrolledClaudeMCPServers(cfg, target.sid)
+		// The service cannot read these files of an enrolled user; the
+		// enumerator publishes their servers (GAP-0424, GAP-1468). A record
+		// it could not write or a file it could not read is recorded, not
+		// taken for an empty list.
+		if spoolDir := enrolledMCPSpoolDir(cfg, target.connector); spoolDir != "" {
+			servers, unreadable := enrolledSpoolMCPServers(spoolDir, target.connector, target.sid)
 			entries = append(entries, servers...)
 			if unreadable != nil {
 				unreadable.Home = target.home
-				set.claudeUnreadable[strings.ToLower(target.home)] = *unreadable
+				set.mcpUnreadable[mcpUnreadableKey(target.connector, target.home)] = *unreadable
 			}
 		}
 		for _, entry := range entries {
@@ -294,18 +304,35 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 	return set
 }
 
-// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
-// published for the account sid: the gateway service account cannot read
-// ~/.claude.json in the profile root, which holds the user-scope and
-// local-scope servers (GAP-0424). The marker is set when the enumerator
-// could not read that file either (GAP-0829). The enumerator publishes a
-// record for every user it enrolls for Claude Code, an empty one when the
-// user has no state, so a missing record is unreadable state too: the
-// publication failed and the gateway does not know that user's servers
-// (GAP-1298).
-func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
-	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	servers, unreadable, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
+// enrolledMCPSpoolDir is the folder where the enumerator publishes the MCP
+// servers of the connector's enrolled users, or "" for a connector whose
+// files the service reads itself. The service account cannot read
+// ~/.claude.json in the profile root, which holds the Claude Code user-scope
+// and local-scope servers (GAP-0424), nor ~/.kiro/settings/mcp.json, which
+// the guardian protects for a user enrolled for Kiro (GAP-1468).
+func enrolledMCPSpoolDir(cfg *config.Config, connectorName string) string {
+	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
+	switch connectorName {
+	case "claudecode":
+		return enterprisehooks.ClaudeMCPSpoolDir(authorizationDir)
+	case "kiro":
+		return enterprisehooks.KiroMCPSpoolDir(authorizationDir)
+	}
+	return ""
+}
+
+// enrolledSpoolMCPServers are the MCP servers the enumerator published in
+// dir for the account sid. The marker is set when the enumerator could not
+// read the user file either (GAP-0829). The enumerator publishes a record
+// for every user it enrolls for the connector, an empty one when the user
+// has no file, so a missing record is unreadable state too: the publication
+// failed and the gateway does not know that user's servers (GAP-1298).
+func enrolledSpoolMCPServers(dir, connectorName, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
+	read := enterprisehooks.ReadClaudeMCPSpool
+	if connectorName == "kiro" {
+		read = enterprisehooks.ReadKiroMCPSpool
+	}
+	servers, unreadable, err := read(dir, sid, validateManagedGuardianAuthorization)
 	if err != nil {
 		reason := err.Error()
 		if errors.Is(err, os.ErrNotExist) {
@@ -317,6 +344,12 @@ func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServe
 		}
 	}
 	return servers, unreadable
+}
+
+// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
+// published for the account sid (enrolledSpoolMCPServers).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
+	return enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, "claudecode"), "claudecode", sid)
 }
 
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
@@ -470,7 +503,7 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 		case <-ticker.C:
 			next := resolveEnrolledWatchSet(s.currentConfig(), reg, wcfg, serviceHomeDir())
 			next.addProjectRoots(projectRoots)
-			publishClaudeStatesUnreadable(next.claudeUnreadable)
+			publishMCPStatesUnreadable(next.mcpUnreadable)
 			if next.dirsKey() != dirs {
 				close(changed)
 				return

@@ -3824,7 +3824,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		if watcherUsesEnrolledUserDirs(cfg) {
 			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
-			publishClaudeStatesUnreadable(set.claudeUnreadable)
+			publishMCPStatesUnreadable(set.mcpUnreadable)
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
 			// them: the hook guardian removes a quarantined source (GAP-0202).

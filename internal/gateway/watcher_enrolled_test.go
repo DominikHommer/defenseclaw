@@ -171,7 +171,7 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() {
 		validateManagedGuardianAuthorization = restore
-		publishClaudeStatesUnreadable(nil)
+		publishMCPStatesUnreadable(nil)
 	})
 	root := t.TempDir()
 	alice, bob, carol, dataDir := filepath.Join(root, "alice"), filepath.Join(root, "bob"), filepath.Join(root, "carol"), filepath.Join(root, "data")
@@ -214,7 +214,7 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 	}
 	set := resolveEnrolledWatchSet(&config.Config{DataDir: dataDir}, connector.NewDefaultRegistry(),
 		config.GatewayWatcherConfig{Enabled: true}, filepath.Join(root, "service"))
-	publishClaudeStatesUnreadable(set.claudeUnreadable)
+	publishMCPStatesUnreadable(set.mcpUnreadable)
 
 	api := &APIServer{scannerCfg: &config.Config{}}
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "mcp__notes__read"}

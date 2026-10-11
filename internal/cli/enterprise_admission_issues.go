@@ -36,6 +36,13 @@ func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir, guar
 			" are blocked: the hook enumerator could not read "+state.Path+" ("+state.Reason+
 			"); give SYSTEM read access to the file again or repair its JSON")
 	}
+	// The same for an enrolled user whose ~/.kiro/settings/mcp.json it could
+	// not read (GAP-1468).
+	for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.KiroMCPSpoolDir(guardianDir)) {
+		result.AddWarning("kiro_mcp_unreadable", "the Kiro MCP servers of "+state.Account()+
+			" are blocked: the hook enumerator could not read "+state.Path+" ("+state.Reason+
+			"); give SYSTEM read access to the file again or repair its JSON")
+	}
 	issues, err := watcher.ReadAdmissionIssues(dataDir)
 	if err != nil {
 		result.AddWarning("admission_state_unreadable", "could not read the install watcher's admission state: "+err.Error())

@@ -89,7 +89,7 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	probe.WorkspaceDir = req.CWD
 	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
-	if decision, refused := a.claudeStateUnreadableDecision(ctx, req.HookEventName, probe); refused {
+	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
 	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
@@ -118,28 +118,33 @@ func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcp
 	return probe.ServerName
 }
 
-// claudeStateUnreadableDecision refuses a Claude Code MCP tool call of an
-// enrolled user whose ~/.claude.json the hook enumerator could not read or
-// parse. The gateway service cannot read that file itself, so it does not
-// know the user's servers and cannot admit one: a server changed while the
-// file was unreadable would otherwise run unscanned (GAP-0829, fail closed).
-// The refusal names the file; status names it too. Secure Client has no
-// enrolled-user watcher (issue #1092).
-func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+// mcpStateUnreadableDecision refuses an MCP tool call of an enrolled user
+// whose ~/.claude.json (Claude Code, GAP-0829) or ~/.kiro/settings/mcp.json
+// (Kiro, GAP-1468) the hook enumerator could not read or parse. The gateway
+// service cannot read that file itself, so it does not know the user's
+// servers and cannot admit one: a server changed while the file was
+// unreadable would otherwise run unscanned (fail closed). The refusal names
+// the file; status names it too. Secure Client has no enrolled-user watcher
+// (issue #1092).
+func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" {
 		return config.AssetPolicyDecision{}, false
 	}
-	state, ok := claudeStateUnreadableFor(trustedActiveHome(ctx))
+	state, ok := mcpStateUnreadableFor(connectorName, trustedActiveHome(ctx))
 	if !ok {
 		return config.AssetPolicyDecision{}, false
 	}
-	reason := fmt.Sprintf("the Claude Code MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
-		"give SYSTEM read access to the file again or repair its JSON", state.Account(), state.Path, state.Reason)
-	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, "claudecode", "hook", reason, "claude-state-unreadable")
+	label, source := "Claude Code", "claude-state-unreadable"
+	if connectorName == "kiro" {
+		label, source = "Kiro", "kiro-mcp-unreadable"
+	}
+	reason := fmt.Sprintf("the %s MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
+		"give SYSTEM read access to the file again or repair its JSON", label, state.Account(), state.Path, state.Reason)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, source)
 	decision.RegistryStatus = "unknown"
-	a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+probe.ServerName, fmt.Sprintf(
-		"action=block source=%s hook=%s tool=%s connector=claudecode reason=%s", decision.Source, hookEvent, probe.ToolName, reason))
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
 	return decision, true
 }
 
