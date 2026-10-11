@@ -836,7 +836,7 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 	// Partial coverage is running, with the gap named. Reporting it as fully
 	// up would hide a whole missing event class; reporting it as down would
 	// discard the half that works.
-	if !coverage.Complete() {
+	if !coverage.Complete() || len(coverage.Limitations) > 0 {
 		return true, coverage.Mechanism, strings.Join(coverage.Limitations, "; ")
 	}
 	return true, coverage.Mechanism, ""

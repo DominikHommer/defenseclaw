@@ -355,10 +355,18 @@ func sessionOwnerEvidence(
 }
 
 // stats reports what the gate did, so the lineage filter is auditable.
+// stats reads the coverage from the running source each time rather than
+// the copy taken at start: a source that falls behind reports it while it
+// lasts and stops once it has caught up (GAP-1473).
 func (h *hostPlane) stats() (classified, gated int64, running bool, coverage plane.Coverage) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.classified, h.gated, h.running, h.coverage
+	classified, gated, running, coverage = h.classified, h.gated, h.running, h.coverage
+	source := h.source
+	h.mu.Unlock()
+	if running && source != nil {
+		coverage = source.Coverage()
+	}
+	return classified, gated, running, coverage
 }
 
 func (h *hostPlane) close() error {
