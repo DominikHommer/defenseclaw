@@ -1654,6 +1654,20 @@ func readMCPServersKiroAt(home, workspaceDir string) []MCPServerEntry {
 	return entries
 }
 
+// ParseKiroUserMCPServers parses the Kiro user MCP file at path, which the
+// caller read: the managed Windows enumerator reads it as LocalSystem, since
+// the gateway service cannot read a protected .kiro (GAP-1468).
+func ParseKiroUserMCPServers(data []byte, path string) ([]MCPServerEntry, error) {
+	found, err := parseDotMCPJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	for index := range found {
+		found[index].Source, found[index].SourceScope = path, "user"
+	}
+	return dedupMCPEntries(found), nil
+}
+
 const maxDevinInventoryConfigBytes int64 = 4 << 20
 
 // readMCPServersDevin reads Devin's canonical MCP registries in effective

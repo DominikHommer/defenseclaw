@@ -2510,6 +2510,9 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	probe.WorkspaceDir = req.CWD
+	if decision, refused := a.mcpStateUnreadableDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
+		return decision, true
+	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
 

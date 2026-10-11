@@ -25,6 +25,14 @@ import (
 // where the gateway can read them (GAP-0424).
 const ClaudeMCPSpoolDirName = "claude-mcp"
 
+// KiroMCPSpoolDirName is the folder, beside ClaudeMCPSpoolDirName, where the
+// managed Windows enumerator publishes the Kiro user MCP servers
+// (~/.kiro/settings/mcp.json) of each user it enrolls for Kiro, in the same
+// record format. The guardian keeps .kiro at its protected DACL for such a
+// user and the inventory grant leaves it alone, so the gateway service cannot
+// read the file; the enumerator reads it as LocalSystem (GAP-1468).
+const KiroMCPSpoolDirName = "kiro-mcp"
+
 // ClaudeMCPSpoolRecordVersion is the record format version.
 const ClaudeMCPSpoolRecordVersion = 1
 
@@ -83,6 +91,15 @@ func ClaudeMCPSpoolDir(authorizationDir string) string {
 	return filepath.Join(authorizationDir, ClaudeMCPSpoolDirName)
 }
 
+// KiroMCPSpoolDir is the Kiro spool folder below the hook guardian
+// authorization folder.
+func KiroMCPSpoolDir(authorizationDir string) string {
+	if strings.TrimSpace(authorizationDir) == "" {
+		return ""
+	}
+	return filepath.Join(authorizationDir, KiroMCPSpoolDirName)
+}
+
 // MarshalClaudeMCPSpoolRecord serializes the record of sid for servers.
 func MarshalClaudeMCPSpoolRecord(sid string, servers []config.MCPServerEntry) ([]byte, error) {
 	record := ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{}}
@@ -106,6 +123,17 @@ func MarshalClaudeMCPSpoolUnreadable(sid string, unreadable ClaudeStateUnreadabl
 // tagged claudecode, after trust validates the record file, and the marker
 // of a state the enumerator could not read.
 func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
+	return readMCPSpool(dir, sid, "claudecode", trust)
+}
+
+// ReadKiroMCPSpool returns the Kiro user MCP servers published for sid,
+// tagged kiro, after trust validates the record file, and the marker of a
+// mcp.json the enumerator could not read (GAP-1468).
+func ReadKiroMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
+	return readMCPSpool(dir, sid, "kiro", trust)
+}
+
+func readMCPSpool(dir, sid, connector string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
 	key := strings.ToUpper(strings.TrimSpace(sid))
 	if dir == "" || !strings.HasPrefix(key, "S-1-") || !validIdentitySpoolKey(key) {
 		return nil, nil, os.ErrNotExist
@@ -150,7 +178,7 @@ func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) (
 	out := make([]config.MCPServerEntry, 0, len(record.Servers))
 	for _, server := range record.Servers {
 		entry := server.Server
-		entry.Connector, entry.Project = "claudecode", server.Project
+		entry.Connector, entry.Project = connector, server.Project
 		// The working folder is the enumerator result only when trust has
 		// proved the record is the enumerator one.
 		if trust != nil {
@@ -161,8 +189,9 @@ func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) (
 	return out, record.Unreadable, nil
 }
 
-// ReadClaudeStateUnreadable lists the accounts whose Claude Code state the
-// enumerator could not read, from the records in dir.
+// ReadClaudeStateUnreadable lists the accounts whose Claude Code state (or,
+// for the Kiro spool folder, Kiro mcp.json) the enumerator could not read,
+// from the records in dir.
 func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
 	entries, err := os.ReadDir(dir)
 	if dir == "" || err != nil {

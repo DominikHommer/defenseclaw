@@ -233,7 +233,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
-			publishEnterpriseWindowsClaudeMCPServers(cfg, authored, stderr)
+			publishEnterpriseWindowsMCPServers(cfg, authored, stderr)
 		} else if cfg.StandaloneEnterprise() {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not load administrator targets for identity facts: %v\n", loadErr)
 		}
@@ -292,7 +292,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}); spoolErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
 		}
-		publishEnterpriseWindowsClaudeMCPServers(cfg, manifest, stderr)
+		publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
@@ -480,8 +480,8 @@ func runEnterpriseWindowsEnumerateInterval(
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
-	// Claude Code MCP servers are published between cycles too, so a server
-	// a user adds reaches install admission within a minute (GAP-0424).
+	// Claude Code and Kiro MCP servers are published between cycles too, so a server
+	// a user adds reaches install admission within a minute (GAP-0424, GAP-1468).
 	mcpRefresh := time.NewTicker(enterpriseWindowsClaudeMCPSpoolInterval)
 	defer mcpRefresh.Stop()
 	// A sign-in (forwarded by the standalone service host through
@@ -518,7 +518,7 @@ func runEnterpriseWindowsEnumerateInterval(
 				}
 			}
 		case <-mcpRefresh.C:
-			refreshEnterpriseWindowsClaudeMCPServers(stderr, manifestPath)
+			refreshEnterpriseWindowsMCPServers(stderr, manifestPath)
 		case <-ticker.C:
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {
@@ -529,29 +529,34 @@ func runEnterpriseWindowsEnumerateInterval(
 	}
 }
 
-// enterpriseWindowsClaudeMCPSpoolInterval is how often the Claude Code MCP
+// enterpriseWindowsClaudeMCPSpoolInterval is how often the Claude Code and Kiro MCP
 // servers of enrolled users are published between enumeration cycles.
 const enterpriseWindowsClaudeMCPSpoolInterval = 30 * time.Second
 
-// publishEnterpriseWindowsClaudeMCPServers publishes the Claude Code MCP
+// publishEnterpriseWindowsMCPServers publishes the Claude Code and Kiro MCP
 // servers of the users manifest enrolls for the gateway, whose service
-// account cannot read ~/.claude.json (GAP-0424). Standalone only: the Secure
-// Client profile gateway has no enrolled-user watcher.
-func publishEnterpriseWindowsClaudeMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
+// account cannot read ~/.claude.json (GAP-0424) nor a protected
+// ~/.kiro/settings/mcp.json (GAP-1468). Standalone only: the Secure Client
+// profile gateway has no enrolled-user watcher.
+func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterprisehooks.Manifest, stderr io.Writer) {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return
 	}
-	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	if err := enterpriseWindowsClaudeMCPSpoolWriter(dir, manifest, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
-		fmt.Fprintf(stderr, format+"\n", args...)
-	}); err != nil {
+	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
+	if err := enterpriseWindowsClaudeMCPSpoolWriter(enterprisehooks.ClaudeMCPSpoolDir(authorizationDir), manifest,
+		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Claude Code MCP servers: %v\n", err)
+	}
+	if err := enterpriseWindowsKiroMCPSpoolWriter(enterprisehooks.KiroMCPSpoolDir(authorizationDir), manifest,
+		enterpriseHookAuthorizationOwnershipSetter, logf); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish Kiro MCP servers: %v\n", err)
 	}
 }
 
-// refreshEnterpriseWindowsClaudeMCPServers republishes them from the last
+// refreshEnterpriseWindowsMCPServers republishes them from the last
 // published manifest.
-func refreshEnterpriseWindowsClaudeMCPServers(stderr io.Writer, manifestPath string) {
+func refreshEnterpriseWindowsMCPServers(stderr io.Writer, manifestPath string) {
 	cfg, err := enterpriseWindowsEnumerateConfigLoader()
 	if err != nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return
@@ -560,7 +565,7 @@ func refreshEnterpriseWindowsClaudeMCPServers(stderr io.Writer, manifestPath str
 	if err != nil {
 		return
 	}
-	publishEnterpriseWindowsClaudeMCPServers(cfg, manifest, stderr)
+	publishEnterpriseWindowsMCPServers(cfg, manifest, stderr)
 }
 
 // enumerationLoggerForStderr wraps the enumerator's per-drop logger
@@ -602,6 +607,7 @@ var (
 	enterpriseWindowsEnumerateGroupCacheWriter   = enterprisehooks.SaveWindowsEnrollmentGroupCache
 	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
 	enterpriseWindowsClaudeMCPSpoolWriter        = enterprisehooks.WriteWindowsClaudeMCPSpool
+	enterpriseWindowsKiroMCPSpoolWriter          = enterprisehooks.WriteWindowsKiroMCPSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory

@@ -26,6 +26,48 @@ const maxClaudeStateBytes = 32 << 20
 // maxClaudeProjectMCPBytes bounds a project .mcp.json read.
 const maxClaudeProjectMCPBytes = 1 << 20
 
+// maxKiroMCPBytes bounds the ~/.kiro/settings/mcp.json read.
+const maxKiroMCPBytes = 1 << 20
+
+// windowsMCPSpoolSource is the MCP server file of one connector that the
+// enumerator publishes for each user it enrolls for that connector.
+type windowsMCPSpoolSource struct {
+	connector, label, tmpPattern string
+	// file is the file below the user home that holds the servers.
+	file string
+	// read returns the servers of the user whose profile is home, and the
+	// path of the file that failed when err is set; homes lists every
+	// enrolled profile.
+	read func(home string, homes []string) ([]config.MCPServerEntry, string, error)
+}
+
+var windowsClaudeMCPSpoolSource = windowsMCPSpoolSource{
+	connector: "claudecode", label: "Claude Code", tmpPattern: ".claude-mcp-*", file: ".claude.json",
+	read: func(home string, homes []string) ([]config.MCPServerEntry, string, error) {
+		servers, path, err := windowsClaudeStateServers(home)
+		if err == nil {
+			vetClaudeMCPWorkDirs(servers, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
+		}
+		return servers, path, err
+	},
+}
+
+var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
+	connector: "kiro", label: "Kiro", tmpPattern: ".kiro-mcp-*", file: `.kiro\settings\mcp.json`,
+	read: func(home string, _ []string) ([]config.MCPServerEntry, string, error) {
+		path := filepath.Join(home, ".kiro", "settings", "mcp.json")
+		data, err := readWindowsProfileFile(home, `.kiro\settings\mcp.json`, maxKiroMCPBytes)
+		if err != nil {
+			return nil, path, err
+		}
+		servers, err := config.ParseKiroUserMCPServers(data, path)
+		if err != nil {
+			return nil, path, fmt.Errorf("parse %s: %w", path, err)
+		}
+		return servers, "", nil
+	},
+}
+
 // WriteWindowsClaudeMCPSpool publishes, for every user the manifest enrolls
 // for Claude Code, the MCP servers of that user (ClaudeMCPSpoolDirName). It
 // reads ~/.claude.json and the .mcp.json of each project named there,
@@ -36,15 +78,28 @@ const maxClaudeProjectMCPBytes = 1 << 20
 // presented as the current state, and the gateway fails closed for that
 // user's Claude Code MCP servers (GAP-0829).
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
+	return writeWindowsMCPSpool(dir, manifest, windowsClaudeMCPSpoolSource, setOwnership, logf)
+}
+
+// WriteWindowsKiroMCPSpool publishes, the same way, the user MCP servers
+// (~/.kiro/settings/mcp.json) of every user the manifest enrolls for Kiro
+// (KiroMCPSpoolDirName): the guardian protects that user's .kiro, so the
+// gateway service cannot read the file and admitted none of its servers
+// (GAP-1468).
+func WriteWindowsKiroMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
+	return writeWindowsMCPSpool(dir, manifest, windowsKiroMCPSpoolSource, setOwnership, logf)
+}
+
+func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolSource, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create claude mcp spool: %w", err)
+		return fmt.Errorf("create %s mcp spool: %w", source.connector, err)
 	}
 	if setOwnership != nil {
 		if err := setOwnership(dir); err != nil {
-			return fmt.Errorf("set claude mcp spool protection: %w", err)
+			return fmt.Errorf("set %s mcp spool protection: %w", source.connector, err)
 		}
 	}
 	keep := map[string]bool{}
@@ -55,7 +110,7 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 		}
 	}
 	for _, target := range manifest.Targets {
-		if !strings.EqualFold(strings.TrimSpace(target.Connector), "claudecode") || (target.Enabled != nil && !*target.Enabled) {
+		if !strings.EqualFold(strings.TrimSpace(target.Connector), source.connector) || (target.Enabled != nil && !*target.Enabled) {
 			continue
 		}
 		key := strings.ToUpper(strings.TrimSpace(target.SID))
@@ -65,25 +120,24 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 			continue
 		}
 		keep[strings.ToLower(name)] = true
-		servers, unreadablePath, err := windowsClaudeStateServers(home)
+		servers, unreadablePath, err := source.read(home, homes)
 		var data []byte
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			if logf != nil {
-				logf("[hook-enumerator] WARN Claude Code MCP servers for %s: %v", key, err)
+				logf("[hook-enumerator] WARN %s MCP servers for %s: %v", source.label, key, err)
 			}
 			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
 				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
 			})
 		} else {
-			vetClaudeMCPWorkDirs(servers, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
 			if err == nil && len(data) > maxClaudeMCPSpoolRecordBytes {
 				if logf != nil {
-					logf("[hook-enumerator] WARN Claude Code MCP spool for %s exceeds %d bytes", key, maxClaudeMCPSpoolRecordBytes)
+					logf("[hook-enumerator] WARN %s MCP spool for %s exceeds %d bytes", source.label, key, maxClaudeMCPSpoolRecordBytes)
 				}
 				data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
-					User: strings.TrimSpace(target.User), Home: home, Path: filepath.Join(home, ".claude.json"),
-					Reason: "Claude Code MCP server inventory exceeds the spool size limit",
+					User: strings.TrimSpace(target.User), Home: home, Path: filepath.Join(home, source.file),
+					Reason: source.label + " MCP server inventory exceeds the spool size limit",
 				})
 			}
 		}
@@ -93,8 +147,8 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr == nil && bytes.Equal(current, data) {
 			continue
 		}
-		if err := writeSpoolBytes(dir, name, ".claude-mcp-*", data, setOwnership); err != nil && logf != nil {
-			logf("[hook-enumerator] WARN publish Claude Code MCP servers for %s: %v", key, err)
+		if err := writeSpoolBytes(dir, name, source.tmpPattern, data, setOwnership); err != nil && logf != nil {
+			logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
 		}
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
