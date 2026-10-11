@@ -436,8 +436,15 @@ The judge and the skill, MCP and plugin scanners all take their key from
 that credential. A missing credential leaves them without a key; they never
 fall back to an environment variable. A plugin scan without the key stops with
 an error that names the judge model, so the install is blocked; that holds for
-a Bedrock judge in the default `api_key` auth mode too (the `iam_credentials`,
-`profile` and `instance_role` modes sign without a key). A plugin judge that
+a Bedrock judge in the default `api_key` auth mode too. The `profile` and
+`instance_role` modes sign with the AWS credential chain instead. The
+`iam_credentials` mode signs with the access key, secret key and optional
+session token in the variables that `llm.bedrock` names in `access_key_env`,
+`secret_key_env` and `session_token_env`; set them in the gateway service
+environment. The scanner runtime gets only those configured names through its
+allowlist, as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`AWS_SESSION_TOKEN`. When they are not set and the AWS credential chain has no
+keys either, the plugin scan stops with an error that names them. A plugin judge that
 fails during the scan also blocks the install instead of admitting the plugin
 with a warning. Until you store it, `status`, `verify`
 and the Setup result warn `credential_missing`, naming the credential and

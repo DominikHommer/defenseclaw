@@ -70,7 +70,7 @@ const (
 	// scanners.plugin, as the CLI wrapper does; a judge it cannot run stops
 	// the scan rather than leaving a rules-only result (GAP-1408).
 	pluginScanScript = `import json,os,sys
-from defenseclaw.config import LLMConfig, load
+from defenseclaw.config import BedrockKeyConfig, LLMConfig, load
 from defenseclaw.scanner._llm_env import llm_analyzer_ready
 from defenseclaw.scanner.plugin import _llm_to_override
 from defenseclaw.scanner.plugin_scanner import scan_plugin
@@ -95,9 +95,11 @@ while i<len(a):
 if t is None:
     sys.exit("plugin-scan: a plugin directory is required")
 e=os.environ.get
-llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
+llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""), bedrock=BedrockKeyConfig(auth_mode=m) if (m:=e("DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE","")) else None)
 if llm.model:
     if not llm_analyzer_ready(llm):
+        if llm.keyless_auth_mode()=="iam_credentials":
+            sys.exit("plugin-scan: the plugin LLM judge "+llm.model+" uses iam_credentials but the variables named by llm.bedrock access_key_env and secret_key_env are not set for the gateway service, so the plugin is not scanned without them; set them, or remove the judge model")
         sys.exit("plugin-scan: the plugin LLM judge "+llm.model+" is configured but its API key did not reach the scanner runtime, so the plugin is not scanned without it; store its key with enterprise secret set (named by enterprise.inspection.llm.credential), or remove the judge model")
     o.llm_override={**(_llm_to_override(llm) or {}),"enabled":True}
 result=scan_plugin(t,o).to_dict()
@@ -119,7 +121,7 @@ print(json.dumps(result))`
 	// process (GAP-1317); the runtime itself keeps the gateway's folder.
 	mcpScanScript = `import json,os,sys
 from types import SimpleNamespace
-from defenseclaw.config import CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
+from defenseclaw.config import BedrockKeyConfig, CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 a=sys.argv[1:]
 usage="usage: mcp-scan --input-stdin <server URL or name>"
@@ -135,7 +137,7 @@ t=a[i]
 if entry is not None and (entry.name!=t or not entry.command or entry.url):
     sys.exit("mcp-scan: invalid local server entry")
 e=os.environ.get
-llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""))
+llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""), bedrock=BedrockKeyConfig(auth_mode=m) if (m:=e("DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE","")) else None)
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)
 s=MCPScannerWrapper(c, None, aid, llm=llm)
 if entry is not None:

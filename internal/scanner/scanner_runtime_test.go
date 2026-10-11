@@ -165,6 +165,35 @@ func TestPluginRuntimeEnvAllowlist(t *testing.T) {
 	}
 }
 
+// GAP-1460: an iam_credentials Bedrock judge reaches the runtime with the
+// keys in the variables llm.bedrock names; no other credential does.
+func TestPluginRuntimeEnvBedrockIAMCredentials(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "CORP_BEDROCK_AK=ak-configured", "CORP_BEDROCK_SK=sk-configured",
+		"CORP_UNRELATED_SECRET=unrelated", "AWS_ACCESS_KEY_ID=ak-inherited", "AWS_SESSION_TOKEN=token-inherited"}
+	llm := config.LLMConfig{Provider: "bedrock", Model: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+		Bedrock: &config.BedrockKeyConfig{AuthMode: "iam_credentials",
+			AccessKeyEnv: "CORP_BEDROCK_AK", SecretKeyEnv: "CORP_BEDROCK_SK"}}
+	vars := map[string]string{}
+	for _, kv := range (&PluginScanner{LLM: llm}).runtimeEnv(base) {
+		name, value, _ := strings.Cut(kv, "=")
+		if _, dup := vars[name]; dup {
+			t.Fatalf("%s set twice in the runtime env", name)
+		}
+		vars[name] = value
+	}
+	for name, value := range map[string]string{"DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE": "iam_credentials",
+		"AWS_ACCESS_KEY_ID": "ak-configured", "AWS_SECRET_ACCESS_KEY": "sk-configured"} {
+		if vars[name] != value {
+			t.Errorf("runtime %s = %q, want %q", name, vars[name], value)
+		}
+	}
+	for _, name := range []string{"CORP_BEDROCK_AK", "CORP_BEDROCK_SK", "CORP_UNRELATED_SECRET", "AWS_SESSION_TOKEN"} {
+		if value, ok := vars[name]; ok {
+			t.Errorf("%s=%q reached the runtime", name, value)
+		}
+	}
+}
+
 // GAP-0710: the Windows runtime must receive the exact stdio definition,
 // not only its name (which the wrapper would otherwise parse as a URL).
 func TestMCPRuntimeStdioEntry(t *testing.T) {
