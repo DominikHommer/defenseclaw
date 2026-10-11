@@ -416,6 +416,9 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 	ruleCategoriesMu.Lock()
 	connectorRuleGenerations[connector] = compiled
 	connectorRuleCategories[connector] = compiled.categories
+	if liveRegisteredRules != nil {
+		liveRegisteredRules[connector] = compiled
+	}
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
 		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
@@ -424,6 +427,8 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 // publishConnectorRulePackGeneration replaces the manual connector portion of
 // the current generation under one lock. Dynamically protected connectors are
 // left intact unless they also appeared in the previous manual connector set.
+// A reload calls it before it publishes the next generation, which binds the
+// result; the generation still live keeps its own set.
 func publishConnectorRulePackGeneration(
 	previousManual []string,
 	next map[string]*compiledRulePackCategories,
@@ -467,7 +472,38 @@ func RemoveConnectorRulePackOverrides(connector string) {
 	ruleCategoriesMu.Lock()
 	delete(connectorRuleGenerations, connector)
 	delete(connectorRuleCategories, connector)
+	delete(liveRegisteredRules, connector)
 	ruleCategoriesMu.Unlock()
+}
+
+// liveRegisteredRules is the registeredRules of the live generation: a
+// connector registered or removed outside the configuration (connector
+// setup or teardown) changes the live generation, never one a request
+// pinned before it. Guarded by ruleCategoriesMu.
+var liveRegisteredRules map[string]*compiledRulePackCategories
+
+// bindRegisteredConnectorRules binds the connector rules registered outside
+// the configuration to g as it is published (GAP-1466).
+func bindRegisteredConnectorRules(g *Generation) {
+	ruleCategoriesMu.Lock()
+	defer ruleCategoriesMu.Unlock()
+	g.registeredRules = make(map[string]*compiledRulePackCategories, len(connectorRuleGenerations))
+	for name, compiled := range connectorRuleGenerations {
+		g.registeredRules[name] = compiled
+	}
+	liveRegisteredRules = g.registeredRules
+}
+
+// registeredRuleGenerationOf is the rule set registered for connector name
+// outside the configuration under g: the one bound to g, or for a
+// generation never published, the process-wide one.
+func registeredRuleGenerationOf(g *Generation, name string) *compiledRulePackCategories {
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	if g.registeredRules != nil {
+		return g.registeredRules[name]
+	}
+	return connectorRuleGenerations[name]
 }
 
 // mergeRulePackCategories builds a full rule-category slice by merging the

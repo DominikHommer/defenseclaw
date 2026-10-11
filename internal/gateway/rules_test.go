@@ -1133,8 +1133,10 @@ func resetConnectorRuleCategories(t *testing.T) {
 	savedGlobalGeneration := allRuleGeneration
 	savedConn := connectorRuleCategories
 	savedConnGenerations := connectorRuleGenerations
+	savedLiveRegistered := liveRegisteredRules
 	connectorRuleCategories = map[string][]ruleCategory{}
 	connectorRuleGenerations = map[string]*compiledRulePackCategories{}
+	liveRegisteredRules = nil
 	ruleCategoriesMu.Unlock()
 	t.Cleanup(func() {
 		ruleCategoriesMu.Lock()
@@ -1142,6 +1144,7 @@ func resetConnectorRuleCategories(t *testing.T) {
 		allRuleGeneration = savedGlobalGeneration
 		connectorRuleCategories = savedConn
 		connectorRuleGenerations = savedConnGenerations
+		liveRegisteredRules = savedLiveRegistered
 		ruleCategoriesMu.Unlock()
 	})
 }

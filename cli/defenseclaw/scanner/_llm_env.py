@@ -210,7 +210,11 @@ def llm_analyzer_ready(
     a key, ``AWS_BEARER_TOKEN_BEDROCK`` or a resolving AWS credential chain:
     the managed scanner runtime has none, so the key-less judge failed at call
     time and the plugin scan only warned instead of stopping with the error
-    that names the model (GAP-1444). The ``iam_credentials``, ``profile`` and
+    that names the model (GAP-1444). ``iam_credentials`` needs the variables
+    ``llm.bedrock`` names (``access_key_env``/``secret_key_env``, by default
+    ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``) or the AWS credential
+    chain, as the gateway judge does; before, the runtime searched only the
+    chain and missed keys under custom names (GAP-1460). The ``profile`` and
     ``instance_role`` modes stay ready.
     """
     effective_model = model or litellm_model(llm)
@@ -222,9 +226,24 @@ def llm_analyzer_ready(
         return True
     if "bedrock/" not in effective_model.lower():
         return False
-    if not _bedrock_needs_credential_source() or llm.keyless_auth_mode():
+    if not _bedrock_needs_credential_source():
+        return True
+    mode = llm.keyless_auth_mode()
+    if mode == "iam_credentials":
+        return _bedrock_iam_keys_set(llm) or _aws_credential_chain_found()
+    if mode:
         return True
     return bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()) or _aws_credential_chain_found()
+
+
+def _bedrock_iam_keys_set(llm: LLMConfig) -> bool:
+    """Whether the access and secret key variables ``llm.bedrock`` names are set."""
+    bedrock = llm.bedrock
+    names = (
+        (bedrock.access_key_env if bedrock else "") or "AWS_ACCESS_KEY_ID",
+        (bedrock.secret_key_env if bedrock else "") or "AWS_SECRET_ACCESS_KEY",
+    )
+    return all(os.environ.get(name.strip(), "").strip() for name in names)
 
 
 def _bedrock_needs_credential_source() -> bool:

@@ -488,7 +488,7 @@ func toolResultAlertSeverity(severity string) string {
 // that scanned this request. Findings from a judge or another category do not
 // prove a sensitive value; only matched entity values count.
 func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
-	g := a.generation()
+	g := a.decisionGeneration(ctx)
 	if g == nil {
 		return "", false
 	}

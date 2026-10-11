@@ -201,6 +201,7 @@ sys.modules["defenseclaw.scanner.plugin_scanner.types"].PluginScanOptions=Option
 sys.modules["defenseclaw.scanner.plugin_scanner.self_identity"].is_first_party_self_target=lambda target,**kw: False
 sys.modules["defenseclaw.config"].load=lambda: object()
 sys.modules["defenseclaw.config"].LLMConfig=lambda **kw: types.SimpleNamespace(**kw)
+sys.modules["defenseclaw.config"].BedrockKeyConfig=lambda **kw: types.SimpleNamespace(**kw)
 sys.modules["defenseclaw.scanner._llm_env"].llm_analyzer_ready=lambda llm: True
 sys.modules["defenseclaw.scanner.plugin"]._llm_to_override=lambda llm: None
 sys.modules["defenseclaw.scanner.rulepack"].overlay_findings=lambda cfg,connector=None,**kw: [Finding()] if connector=="codex" else []

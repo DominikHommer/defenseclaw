@@ -4293,6 +4293,33 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE",
+      "category": "hook_internal",
+      "purpose": "Bedrock auth mode of the LLM judge (llm.bedrock.auth_mode) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). For iam_credentials the gateway also hands the runtime the keys it reads from the variables named by llm.bedrock access_key_env, secret_key_env and session_token_env, as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for a Bedrock judge with a bedrock block)",
+      "accepted_values": [
+        "api_key",
+        "iam_credentials",
+        "profile",
+        "instance_role",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: addBedrockAuthEnv derives it from config for the scanner runtime (GAP-1460)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan and plugin-scan scripts read it as the judge Bedrock auth mode"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_SCANNER_LLM_MODEL",
       "category": "hook_internal",
       "purpose": "LiteLLM model id of the LLM judge (llm.provider and llm.model) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",

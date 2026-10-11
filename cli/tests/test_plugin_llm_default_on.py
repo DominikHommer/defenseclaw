@@ -138,7 +138,7 @@ class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
         self.assertIn("openai/gpt-4o-mini", str(stop.exception.code))
 
     def test_windows_bedrock_judge_without_a_key_stops_the_scan(self):
-        """GAP-1444: a key-less Bedrock judge (api_key mode) only warned on Windows."""
+        """GAP-1444: a key-less Bedrock judge (api_key mode) only warned on Windows; GAP-1460: iam_credentials."""
         from defenseclaw.config import BedrockKeyConfig, LLMConfig
         from defenseclaw.scanner import _llm_env
 
@@ -151,7 +151,15 @@ class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
             self.assertIn(model, str(stop.exception.code))
             keyed = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model, "DEFENSECLAW_SCANNER_LLM_API_KEY": "k"})
             self.assertTrue(keyed["override"]["enabled"])
-            iam = LLMConfig(model=model, bedrock=BedrockKeyConfig(auth_mode="iam_credentials"))
-            self.assertTrue(_llm_env.llm_analyzer_ready(iam))
+            # GAP-1460: iam_credentials signs with the keys in the variables
+            # llm.bedrock names; the runtime gets them with the auth mode.
+            iam = LLMConfig(model=model, bedrock=BedrockKeyConfig(
+                auth_mode="iam_credentials", access_key_env="CORP_BEDROCK_AK", secret_key_env="CORP_BEDROCK_SK"))
+            self.assertFalse(_llm_env.llm_analyzer_ready(iam))
+            with patch.dict(os.environ, {"CORP_BEDROCK_AK": "ak", "CORP_BEDROCK_SK": "sk"}):
+                self.assertTrue(_llm_env.llm_analyzer_ready(iam))
+            runtime = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model, "AWS_ACCESS_KEY_ID": "ak",
+                                 "AWS_SECRET_ACCESS_KEY": "sk", "DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE": "iam_credentials"})
+            self.assertTrue(runtime["override"]["enabled"])
         with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=False):
             self.assertTrue(_llm_env.llm_analyzer_ready(LLMConfig(model=model)))
