@@ -650,3 +650,35 @@ func TestReparentedShellStillReachesTheAgent(t *testing.T) {
 			attribution.Via)
 	}
 }
+
+// TestProcessPollKeepsTheExecResponsiblePid covers a long-lived child that is
+// reparented to launchd after its exec event named the agent as responsible.
+// The next poll used the row ppid as the responsible pid and erased the only
+// remaining link, so later file events from the child failed the lineage gate.
+// A poll still fills a responsible pid that nothing has named yet.
+func TestProcessPollKeepsTheExecResponsiblePid(t *testing.T) {
+	t.Parallel()
+	const (
+		launchd = 1
+		agent   = 500
+		child   = 900
+		other   = 901
+	)
+	tracker := NewTracker()
+	tracker.ObserveExec(agent, launchd, 0, "claude", "claude", time.Time{})
+	tracker.ObserveExec(child, agent, agent, "node", "node server.js", time.Time{})
+	tracker.ObserveExec(other, agent, 0, "sleep", "sleep 60", time.Time{})
+
+	tracker.ObserveProcessTable([]ProcessRow{
+		{PID: child, PPID: launchd, Name: "node", Cmdline: "node server.js"},
+		{PID: other, PPID: agent, Name: "sleep", Cmdline: "sleep 60"},
+		{PID: agent, PPID: launchd, Name: "claude", Cmdline: "claude"},
+	})
+
+	if attribution, ok := tracker.Attribute(child); !ok || attribution.RootPID != agent {
+		t.Fatalf("the reparented child lost its agent after a poll: %+v", attribution)
+	}
+	if got := tracker.records[other].responsiblePID; got != agent {
+		t.Fatalf("an unnamed responsible pid was not filled from the ppid: got %d", got)
+	}
+}

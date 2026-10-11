@@ -115,7 +115,7 @@ func newTracker(ttl time.Duration, now func() time.Time) *Tracker {
 func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.recordLocked(pid, ppid, responsiblePID, name, cmdline, start)
+	t.recordLocked(pid, ppid, responsiblePID, false, name, cmdline, start)
 }
 
 // instanceLocked is the instance recorded under pid, zero when there is none.
@@ -134,7 +134,7 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 	defer t.mu.Unlock()
 	learnt := make([]*processRecord, 0, len(rows))
 	for _, row := range rows {
-		if record := t.recordLocked(row.PID, row.PPID, row.PPID, row.Name, row.Cmdline, row.Start); record != nil {
+		if record := t.recordLocked(row.PID, row.PPID, 0, true, row.Name, row.Cmdline, row.Start); record != nil {
 			learnt = append(learnt, record)
 		}
 	}
@@ -143,6 +143,8 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 	for _, record := range learnt {
 		if record.parentInstance == 0 {
 			record.parentInstance = t.instanceLocked(record.ppid)
+		}
+		if record.responsibleInstance == 0 && record.responsiblePID == record.ppid {
 			record.responsibleInstance = record.parentInstance
 		}
 	}
@@ -160,8 +162,13 @@ type ProcessRow struct {
 
 // recordLocked records one observation and returns the record when it learnt
 // a new parent edge for it, nil otherwise.
+//
+// inferResponsible marks a process-table row, which has no responsible pid:
+// the ppid stands in for it only while none is known. A responsible pid
+// already learnt for this instance is kept, because once the child is
+// reparented to launchd it is the only link left to the agent.
 func (t *Tracker) recordLocked(
-	pid, ppid, responsiblePID int, name, cmdline string, start time.Time,
+	pid, ppid, responsiblePID int, inferResponsible bool, name, cmdline string, start time.Time,
 ) *processRecord {
 	if pid <= 0 {
 		return nil
@@ -203,6 +210,12 @@ func (t *Tracker) recordLocked(
 		// Learn the real start without changing the key of a live session
 		// first seen while its creation time was unavailable.
 		existing.start = start
+	}
+	if inferResponsible {
+		responsiblePID = ppid
+		if !fresh && existing.responsiblePID > 0 {
+			responsiblePID = existing.responsiblePID
+		}
 	}
 	var learnt *processRecord
 	if fresh || existing.ppid != ppid {
