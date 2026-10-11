@@ -410,6 +410,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 				}
 			}
 			l.settleRejectedConfig()
+			if len(r.Errors) == 0 {
+				env.clearApplyRetries()
+			}
 			l.clearSupersededUnitFailures(ctx)
 			l.describe(ctx, record, false)
 			// The host runs this package and is healthy, so what a failed
