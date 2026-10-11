@@ -122,7 +122,10 @@ type wireEvent struct {
 	Path           string `json:"path,omitempty"`
 	Detail         string `json:"detail,omitempty"`
 	User           string `json:"user,omitempty"`
-	AtUnixNano     int64  `json:"at_unix_ns,omitempty"`
+	// UserSID is the account the event named for its process; the owner
+	// book attributes the finding to it (GAP-1464).
+	UserSID    string `json:"user_sid,omitempty"`
+	AtUnixNano int64  `json:"at_unix_ns,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -130,7 +133,7 @@ func encodeEvent(event plane.Event) wireEvent {
 		Kind: string(event.Kind), PID: event.PID, PPID: event.PPID,
 		ResponsiblePID: event.ResponsiblePID, Name: event.Name,
 		Cmdline: event.Cmdline, Path: event.Path, Detail: event.Detail,
-		User: event.User,
+		User: event.User, UserSID: event.UserSID,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -143,7 +146,7 @@ func decodeEvent(event wireEvent) plane.Event {
 		Kind: plane.Kind(event.Kind), PID: event.PID, PPID: event.PPID,
 		ResponsiblePID: event.ResponsiblePID, Name: event.Name,
 		Cmdline: event.Cmdline, Path: event.Path, Detail: event.Detail,
-		User: event.User,
+		User: event.User, UserSID: event.UserSID,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)
