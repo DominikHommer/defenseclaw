@@ -216,6 +216,15 @@ func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
 	})
 }
 
+// ValidateTrustedServiceRuntimeTree checks a managed policy folder and
+// everything in it as ValidateTrustedRulePackTree checks a rule pack: the
+// folder check alone (and the readability check of
+// ValidateServiceCanReadTree) passed a policy_dir whose Rego modules a
+// standard user could modify (GAP-1499).
+func ValidateTrustedServiceRuntimeTree(path, label, serviceAccount string) error {
+	return ValidateTrustedRulePackTree(path, label, serviceAccount)
+}
+
 // walkWindowsRulePackTree calls check for every folder and file below root
 // (root itself excluded: the caller checks it with its parents) without
 // following links, and stops at the first refusal.

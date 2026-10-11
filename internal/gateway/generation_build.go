@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -61,6 +62,18 @@ type generationInputs struct {
 	// false (boot) the generation records it and the scans that load the
 	// file fail closed.
 	strictScannerPins bool
+}
+
+// managedPolicyTreeTrust refuses a managed standalone policy_dir that a
+// standard user could change (managed.ValidateTrustedServiceRuntimeTree).
+var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
+	if !cfg.StandaloneEnterprise() || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return managed.ValidateTrustedServiceRuntimeTree(dir, "policy_dir", os.Getenv(managed.WindowsServiceAccountEnv))
 }
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
@@ -116,6 +129,12 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	}
 
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
+		// A module a standard user could change since the config was
+		// loaded is not loaded as managed policy: the build fails, so a
+		// reload keeps the previous generation (GAP-1499).
+		if err := managedPolicyTreeTrust(cfg, dir); err != nil {
+			return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+		}
 		prepared, err := policy.Prepare(ctx, dir)
 		switch {
 		case err == nil:
