@@ -24974,6 +24974,10 @@ function Invoke-DefenseClawForcedUninstallPreparation {
         exact-scope purge, which removes the exact services, their IPC grant,
         InstallRoot and the machine-wide hook files, and names what stays.
         Returns the moved StateRoot, or an empty string when there was none.
+        When stopping the services or moving StateRoot fails (GAP-1438: a
+        process holds StateRoot open), the services get back the startup
+        mode and running state they had and the failure is rethrown, so a
+        refused forced uninstall does not leave the host unprotected.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -25001,6 +25005,8 @@ function Invoke-DefenseClawForcedUninstallPreparation {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName) `
         -SensorHelper
+    # Dependents first. Each service's prior state is read before any is touched.
+    $prior = [Collections.Generic.List[object]]::new()
     foreach ($name in @(
             $enumeratorServiceName,
             $GuardianServiceName,
@@ -25008,18 +25014,48 @@ function Invoke-DefenseClawForcedUninstallPreparation {
             [string]$Layout.SensorHelperServiceName
         )) {
         if (Test-DefenseClawServiceExists -Name $name) {
-            Set-DefenseClawServiceStartMode -Name $name -StartMode 4
-            Stop-DefenseClawService -Name $name
+            $prior.Add([pscustomobject]@{
+                    name = $name
+                    start_mode = Get-DefenseClawServiceStartMode -Name $name
+                    running = (Get-DefenseClawServiceState -Name $name) -in @('running', 'startpending')
+                })
         }
     }
-    $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot -PathType Container)) {
-        return ''
+    try {
+        foreach ($service in $prior) {
+            Set-DefenseClawServiceStartMode -Name $service.name -StartMode 4
+            Stop-DefenseClawService -Name $service.name
+        }
+        $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot -PathType Container)) {
+            return ''
+        }
+        Assert-DefenseClawNoReparsePath -Path $stateRoot
+        $moved = $stateRoot + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+        [IO.Directory]::Move($stateRoot, $moved)
+        return $moved
     }
-    Assert-DefenseClawNoReparsePath -Path $stateRoot
-    $moved = $stateRoot + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-    [IO.Directory]::Move($stateRoot, $moved)
-    return $moved
+    catch {
+        $failure = $_
+        # Reverse order: the gateway needs its sensor helper running.
+        $notRestored = [Collections.Generic.List[string]]::new()
+        for ($index = $prior.Count - 1; $index -ge 0; $index--) {
+            $service = $prior[$index]
+            try {
+                Set-DefenseClawServiceStartMode -Name $service.name -StartMode $service.start_mode
+                if ($service.running) {
+                    Start-DefenseClawService -Name $service.name
+                }
+            }
+            catch {
+                $notRestored.Add($service.name + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+            }
+        }
+        if ($notRestored.Count -eq 0) {
+            throw $failure
+        }
+        throw ('the forced uninstall stopped before StateRoot was moved aside (' + $failure.Exception.Message + '); these services were not restored: ' + ($notRestored -join '; '))
+    }
 }
 
 function Complete-DefenseClawForcedUninstall {
