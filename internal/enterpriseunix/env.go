@@ -62,6 +62,7 @@ var ErrCommandNotFound = errors.New("command not found")
 var commandCandidates = map[string][]string{
 	"systemctl":        {"/usr/bin/systemctl", "/bin/systemctl"},
 	"systemd-sysusers": {"/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"},
+	"systemd-run":      {"/usr/bin/systemd-run", "/bin/systemd-run"},
 	"getent":           {"/usr/bin/getent", "/bin/getent"},
 	"journalctl":       {"/usr/bin/journalctl", "/bin/journalctl"},
 	"useradd":          {"/usr/sbin/useradd", "/sbin/useradd"},
