@@ -243,7 +243,8 @@ func patchShellInvocationsKnown(text string) bool {
 	}
 	calls := 0
 	for i, line := range lines {
-		if body[i] || !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
+		if body[i] && inertPatchBodyLine(line) ||
+			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
 			continue
 		}
 		count := len(patchProgramWord.FindAllString(line, -1))
@@ -254,6 +255,20 @@ func patchShellInvocationsKnown(text string) bool {
 	}
 	// The whole-text parser also sees scripts that a line scan might miss.
 	return calls > 0 || !invokesApplyPatch(text)
+}
+
+// inertPatchBodyLine reports an envelope body line that only a patch can
+// read: a patch line (+, -, context, @@ or ***) with no quote, expansion,
+// separator or redirect. Any other body line may close the quote or
+// here-document that feeds the envelope, or run a command inside it, so an
+// apply_patch in it counts as a call of its own.
+func inertPatchBodyLine(line string) bool {
+	line = strings.TrimLeft(line, "\t")
+	if strings.ContainsAny(line, "'\"`$;|&<>()") {
+		return false
+	}
+	return line == "" || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") ||
+		strings.HasPrefix(line, " ") || strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "***")
 }
 
 // invokesApplyPatch reports a shell text that may run apply_patch as a

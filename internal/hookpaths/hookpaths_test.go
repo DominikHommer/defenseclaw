@@ -59,7 +59,10 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; cat staged.patch | apply_patch":  false,
 		"apply_patch '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch'; APPLY_PATCH < staged.patch": false,
 		"printf '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch' | apply_patch < staged.patch":     false,
-		"env FOO=1 apply_patch < draft.patch":        false,
+		"env FOO=1 apply_patch < draft.patch": false,
+		// A body line that closes the feeding quote or here-document (GAP-1462).
+		"echo '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n'; apply_patch < staged.patch; echo '\n*** End Patch' | apply_patch":             false,
+		"apply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\nP\napply_patch < staged.patch\napply_patch <<'Q'\n*** End Patch\nQ": false,
 		"command apply_patch < draft.patch":          false,
 		"exec apply_patch < draft.patch":             false,
 		"nohup apply_patch < draft.patch":            false,
