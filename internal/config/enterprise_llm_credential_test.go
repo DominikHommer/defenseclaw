@@ -102,6 +102,31 @@ func TestStandaloneKeysIgnoreServiceEnvironment(t *testing.T) {
 		t.Fatalf("standalone AI Defense key = %q, want none from the environment", got)
 	}
 
+	// GAP-1483: with AI Defense enabled the scanners' analyzers get the
+	// protected credential, and an unreadable one never the environment key.
+	provisioned := true
+	prev := resolveStandaloneLLMCredential
+	t.Cleanup(func() { resolveStandaloneLLMCredential = prev })
+	resolveStandaloneLLMCredential = func(name, _ string) ([]byte, error) {
+		if !provisioned || name != "aid-key" {
+			return nil, errors.New("not provisioned")
+		}
+		return []byte("from-credential"), nil
+	}
+	withAID := strings.Replace(doc, "profile: standalone\n",
+		"profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: aid-key\n", 1)
+	loaded, err = LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), []byte(withAID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "from-credential" {
+		t.Fatalf("standalone AI Defense key = %q, want the protected credential", got)
+	}
+	provisioned = false
+	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "" {
+		t.Fatalf("unreadable AI Defense credential gave key %q, want none", got)
+	}
+
 	perUser := Config{LLM: LLMConfig{Model: "openai/gpt-4o-mini"}, CiscoAIDefense: CiscoAIDefenseConfig{APIKeyEnv: "P0_AID_KEY_ENV"}}
 	if got := perUser.ResolveLLM("scanners.plugin").ResolvedAPIKey(); got != "inherited-key" {
 		t.Fatalf("per-user key = %q, want DEFENSECLAW_LLM_KEY", got)

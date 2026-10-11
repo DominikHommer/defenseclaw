@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -2180,5 +2181,163 @@ func TestAcknowledgeMigrationV9KeepsUnscannableMCP(t *testing.T) {
 	}}
 	if !slices.Equal(record.UnscannableMCP, want) {
 		t.Fatalf("unscannable_mcp = %+v, want %+v", record.UnscannableMCP, want)
+	}
+}
+
+// The gateway loads Rego modules kept flat in policy_dir when policy_dir/rego
+// holds none (policy.resolveRegoDir), as 0.8.x did. A pre-9 flat module that
+// reads data.json is then refused and the gateway falls back to the config
+// policy, so the migration must refresh or report it the way it does a module
+// under rego/ (GAP-1481). With modules under rego/ the flat copies are not
+// loaded and stay as they are.
+func TestMigrateV9RefreshesFlatRegoModules(t *testing.T) {
+	admission := "package defenseclaw.admission\nimport rego.v1\n" +
+		"verdict := \"blocked\" if { input.target_name == \"marker-skill\" }\n" +
+		"verdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	operator := "package defenseclaw.admission\nimport rego.v1\n" +
+		"denied if { input.target_name in data.operator_policy.denied_skills }\n"
+	for _, tc := range []struct {
+		name            string
+		managed, nested bool
+	}{{name: "per-user"}, {name: "managed", managed: true}, {name: "rego subfolder", nested: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			policies := filepath.Join(dir, "policies")
+			files := map[string]string{"admission.rego": admission, "operator.rego": operator}
+			if tc.nested {
+				files["rego/admission.rego"] = admission
+			}
+			for name, body := range files {
+				path := filepath.Join(policies, filepath.FromSlash(name))
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configPath := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\npolicy_dir: "+policies+
+				"\nobservability: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			policyDir, dataJSON := V8PolicyDataJSON(policies)
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, PolicyDir: policyDir, DataJSONPath: dataJSON, Managed: tc.managed,
+			})
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			flat := filepath.Join(policies, "admission.rego")
+			notes := strings.Join(result.Record.Notes, "\n")
+			got, _ := os.ReadFile(flat)
+			switch {
+			case tc.nested:
+				nested := filepath.Join(policies, "rego", "admission.rego")
+				if kept, _ := os.ReadFile(nested + DataJSONMigratedSuffix); string(kept) != admission {
+					t.Errorf("rego/admission.rego was not kept as %s: %q", DataJSONMigratedSuffix, kept)
+				}
+				if string(got) != admission || strings.Contains(notes, flat) {
+					t.Errorf("the flat module the gateway does not load was changed or reported: %q\n%s", got, notes)
+				}
+				return
+			case tc.managed:
+				if string(got) != admission || !strings.Contains(notes, flat+" is a pre-9 module that reads data.json") {
+					t.Errorf("managed: want %s left and reported:\n%s", flat, notes)
+				}
+			default:
+				if kept, _ := os.ReadFile(flat + DataJSONMigratedSuffix); string(kept) != admission {
+					t.Errorf("%s was not kept as %s: %q", flat, DataJSONMigratedSuffix, kept)
+				}
+				if string(got) == admission || !strings.Contains(string(got), "package defenseclaw.admission") {
+					t.Errorf("%s was not replaced with the shipped module: %q", flat, got)
+				}
+				if !strings.Contains(notes, flat+" is a pre-9 module that reads data.json; it is kept as") {
+					t.Errorf("no note names the refreshed flat module:\n%s", notes)
+				}
+			}
+			lost := strings.Join(result.Record.UnenforcedRegoData, "\n")
+			if custom := filepath.Join(policies, "operator.rego"); !strings.Contains(lost, custom+" reads data.operator_policy") ||
+				!strings.Contains(notes, custom+" reads data.operator_policy") {
+				t.Errorf("the flat custom module read is not reported: %q\n%s", lost, notes)
+			}
+		})
+	}
+}
+
+// A rebased custom pack is written only at commit. Skipping the whole asset
+// check for it let an unrelated reference the gateway refuses, such as an
+// enabled webhook to a loopback address, into config_version 9 (GAP-1482).
+// The check runs on every migration, with the rebased pack read from its
+// in-memory files.
+func TestMigrateV9ValidatesAssetsBesideARebasedPack(t *testing.T) {
+	RegisterCandidateAssetCheck(func(cfg *Config) error {
+		for name, pack := range cfg.Guardrail.CustomPacks {
+			if data, err := os.ReadFile(filepath.Join(pack.Path, "rules", "commands.yaml")); err != nil || string(data) != "rebased\n" {
+				return fmt.Errorf("custom pack %s: %s does not hold the rebased files", name, pack.Path)
+			}
+		}
+		for _, hook := range cfg.Webhooks {
+			if hook.Enabled && strings.Contains(hook.URL, "127.0.0.1") {
+				return errors.New("webhook url is a loopback address")
+			}
+		}
+		return nil
+	})
+	t.Cleanup(func() { RegisterCandidateAssetCheck(nil) })
+	for _, tc := range []struct {
+		name    string
+		webhook bool
+		dryRun  bool
+	}{{name: "invalid webhook", webhook: true}, {name: "valid"}, {name: "valid dry run", dryRun: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			acme := filepath.Join(dir, "policies", "guardrail", "acme")
+			source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme + "\nobservability: {}\n"
+			if tc.webhook {
+				source += "webhooks:\n  - name: ops\n    url: http://127.0.0.1:9/hook\n    type: generic\n    enabled: true\n"
+			}
+			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, DryRun: tc.dryRun,
+				RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+				RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
+					return &RulePackRebasePlan{
+						Files:  map[string][]byte{"rules/commands.yaml": []byte("rebased\n")},
+						Digest: strings.Repeat("b", 64), Updated: 1,
+					}, nil
+				},
+			})
+			if raw, _ := os.ReadFile(configPath); tc.webhook || tc.dryRun {
+				if string(raw) != source {
+					t.Errorf("config.yaml was written:\n%s", raw)
+				}
+				if _, statErr := os.Stat(acme + "-1.0"); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Errorf("the rebased pack was written: %v", statErr)
+				}
+			}
+			if tc.webhook {
+				if err == nil || !strings.Contains(err.Error(), "assets do not validate") {
+					t.Fatalf("MigrateV9 = %v, want the asset check to refuse the webhook", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			if !strings.Contains(string(result.Migrated), "path: "+acme+"-1.0") {
+				t.Errorf("want the rebased copy pinned:\n%s", result.Migrated)
+			}
+			if leftover, _ := filepath.Glob(filepath.Join(os.TempDir(), "defenseclaw-rebased-packs-*")); len(leftover) > 0 {
+				t.Errorf("staged copies left behind: %q", leftover)
+			}
+		})
 	}
 }

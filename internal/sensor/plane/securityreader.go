@@ -79,6 +79,11 @@ const (
 	lineageCap = 2000
 	// readBatch is how many records one read asks for.
 	readBatch = 64
+	// signalHoldPolls bounds how many polls a file or account record waits
+	// for the process records ahead of it (about 30 s at the 2 s poll
+	// interval), and maxHeldSignals how many wait at once (GAP-1487).
+	signalHoldPolls = 15
+	maxHeldSignals  = eventBuffer
 )
 
 // securityStream is one cursor over a filtered view of the Security channel,
@@ -124,6 +129,9 @@ type securityReader struct {
 	buffer  *Buffer
 	now     func() time.Time
 	cursors [2]*securityCursor
+	// held is the signal records waiting for the process stream to reach
+	// them (GAP-1487). Only the polling goroutine touches it.
+	held []heldSignal
 
 	mu sync.Mutex
 	// behind is set while the last poll stopped before reaching the end of a
@@ -137,6 +145,16 @@ type securityReader struct {
 	heldBack    int64
 	dropped     int64
 	lastDropped int64
+	// released counts signal records delivered before the process records
+	// ahead of them were read, because they had waited signalHoldPolls polls
+	// or too many were waiting.
+	released int64
+}
+
+// heldSignal is a signal record and the polls it has waited.
+type heldSignal struct {
+	record securityRecord
+	polls  int
 }
 
 func newSecurityReader(open openSecurityStream, buffer *Buffer, after uint64) *securityReader {
@@ -173,19 +191,26 @@ func (r *securityReader) close() {
 
 // pollOnce reads what both streams have gained since the previous poll and
 // delivers it in record order, so a process start still reaches the lineage
-// tracker before the file write it made.
+// tracker before the file write it made, also when the process stream
+// stopped short of that start in this poll (holdSignals).
 func (r *securityReader) pollOnce() {
 	start := r.now()
 	deadline := start.Add(pollBudget)
 	var (
-		records []securityRecord
-		behind  bool
-		failure string
+		records, signals []securityRecord
+		behind, lineage  bool
+		lineageAfter     uint64
+		failure          string
 	)
 	var timeouts, failures int64
 	for _, cursor := range r.cursors {
 		got, stopped, timedOut, err := r.read(cursor, deadline)
-		records = append(records, got...)
+		if cursor.capped {
+			records = append(records, got...)
+			lineage, lineageAfter = stopped || err != nil, cursor.after
+		} else {
+			signals = got
+		}
 		behind = behind || stopped
 		timeouts += timedOut
 		if err != nil {
@@ -193,6 +218,8 @@ func (r *securityReader) pollOnce() {
 			failure = err.Error()
 		}
 	}
+	ready, released := r.holdSignals(signals, lineage, lineageAfter)
+	records = append(records, ready...)
 	sort.Slice(records, func(i, j int) bool { return records[i].RecordID < records[j].RecordID })
 	for _, record := range records {
 		if event, ok := translateSecurityRecord(record); ok {
@@ -205,6 +232,7 @@ func (r *securityReader) pollOnce() {
 	defer r.mu.Unlock()
 	r.timeouts += timeouts
 	r.failures += failures
+	r.released += released
 	if behind {
 		r.heldBack++
 	}
@@ -213,6 +241,38 @@ func (r *securityReader) pollOnce() {
 	r.dropped = dropped
 	r.behind = behind || newDrops > 0
 	r.readErr = failure
+}
+
+// holdSignals returns the signal records to deliver in this poll and keeps
+// the others. The signal stream is drained in full while the process stream
+// stops at lineageCap, so while that stream is behind (lineageBehind), a
+// signal past its last record (lineageAfter) may have been made by a process whose creation
+// is still unread, and the host plane attributes a signal only through that
+// creation: delivered now, it would fail the lineage gate for good
+// (GAP-1487). Such a signal waits until the process stream passes it or
+// catches up, at most signalHoldPolls polls and maxHeldSignals records; then
+// it goes on as before, and released counts it.
+func (r *securityReader) holdSignals(
+	fresh []securityRecord, lineageBehind bool, lineageAfter uint64,
+) (ready []securityRecord, released int64) {
+	pending := r.held
+	r.held = nil
+	for _, record := range fresh {
+		pending = append(pending, heldSignal{record: record})
+	}
+	for _, signal := range pending {
+		waiting := lineageBehind && signal.record.RecordID > lineageAfter
+		if waiting && signal.polls < signalHoldPolls && len(r.held) < maxHeldSignals {
+			signal.polls++
+			r.held = append(r.held, signal)
+			continue
+		}
+		if waiting {
+			released++
+		}
+		ready = append(ready, signal.record)
+	}
+	return ready, released
 }
 
 // read drains one cursor until the stream catches up, the cap or the budget
@@ -279,9 +339,10 @@ func (r *securityReader) limitations() []string {
 	if r.behind {
 		out = append(out, fmt.Sprintf(
 			"Security event log reader is behind (a process-event flood or a full event queue): "+
-				"%d polls stopped before the end of the log, %d read timeouts, %d events dropped; "+
+				"%d polls stopped before the end of the log, %d read timeouts, %d events dropped, "+
+				"%d file or account events delivered before the process events ahead of them; "+
 				"it continues from the last record read and clears once it catches up",
-			r.heldBack, r.timeouts, r.dropped))
+			r.heldBack, r.timeouts, r.dropped, r.released))
 	}
 	if r.readErr != "" {
 		out = append(out, fmt.Sprintf(

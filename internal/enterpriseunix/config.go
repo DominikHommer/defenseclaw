@@ -341,6 +341,13 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 		} else if problem != "" {
 			return fmt.Errorf("observability destination %q writes %s, which %s", destination.Name, path, problem)
 		}
+		// The gateway opens the file as its service account, so it must pass
+		// through every folder above it, whether or not the file exists yet
+		// (GAP-1484).
+		if problem := e.jsonlParentTraversalProblem(path); problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s; give the %s gateway service account search (x) access to every folder above the file",
+				destination.Name, path, problem, e.Layout.ServiceUser)
+		}
 		if _, err := os.Lstat(e.P(path)); errors.Is(err, os.ErrNotExist) {
 			if problem := e.jsonlMissingParentProblem(path); problem != "" {
 				return fmt.Errorf("observability destination %q writes %s, which %s; choose a directory the %s gateway service account can create and write",
@@ -369,6 +376,58 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 }
 
 var jsonlACLReader posixacl.Reader = posixacl.System
+
+// jsonlParentTraversalProblem reports an existing folder above path that the
+// gateway service account cannot pass through. Folders the lifecycle owns
+// get their owner and mode at apply and are skipped; an account that does
+// not exist yet passes only where other users may.
+func (e *Env) jsonlParentTraversalProblem(path string) string {
+	account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+	if err != nil {
+		return fmt.Sprintf("cannot be checked: looking up the %s gateway service account failed: %v", e.Layout.ServiceUser, err)
+	}
+	if !ok {
+		account = Account{UID: -1, GID: -1}
+	}
+	owned := map[string]bool{}
+	for _, dir := range e.managedDirs(account, false) {
+		if !dir.External {
+			owned[filepath.Clean(dir.Path)] = true
+		}
+	}
+	for dir := filepath.Dir(path); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		if owned[dir] {
+			continue
+		}
+		info, err := os.Lstat(e.P(dir))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Sprintf("is below %s, which cannot be inspected: %v", dir, err)
+		}
+		if !info.IsDir() {
+			// A link or file in the path is refused by the path checks.
+			continue
+		}
+		uid, gid, err := e.OwnerOf(e.P(dir))
+		if err != nil {
+			return fmt.Sprintf("is below %s, whose owner cannot be inspected: %v", dir, err)
+		}
+		allowed := accountMayAccess(uid, gid, info.Mode(), account, 0o1)
+		if e.GOOS == "linux" {
+			acl, err := jsonlACLReader.Read(e.P(dir), info.Mode())
+			if err != nil {
+				return fmt.Sprintf("is below %s, whose ACL cannot be inspected: %v", dir, err)
+			}
+			allowed = acl.Allows(uid, gid, info.Mode(), account.UID, account.GID, 0o1)
+		}
+		if !allowed {
+			return fmt.Sprintf("is below %s (mode %04o, owner uid %d), which the %s gateway service account cannot pass through", dir, info.Mode().Perm(), uid, e.Layout.ServiceUser)
+		}
+	}
+	return ""
+}
 
 // jsonlMissingParentProblem checks the first existing parent or ancestor.
 // The gateway creates missing subdirectories as its service account;
