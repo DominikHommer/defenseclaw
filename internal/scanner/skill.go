@@ -495,22 +495,32 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 // error); the scan then finished with the deterministic analyzers only.
 const RuleLLMAnalysisFailed = "LLM_ANALYSIS_FAILED"
 
-// ErrJudgeDidNotRun marks a skill scan whose LLM judge did not run.
+// RulePluginLLMScanError is the MEDIUM finding the plugin scanner reports
+// when its enabled LLM judge failed to run or gave no usable answer.
+const RulePluginLLMScanError = "LLM-SCAN-ERROR"
+
+// ErrJudgeDidNotRun marks a skill or plugin scan whose LLM judge did not run.
 var ErrJudgeDidNotRun = errors.New("the LLM judge did not run, so the scan is incomplete")
 
 // JudgeFailure returns an ErrJudgeDidNotRun error when result carries the
-// scanner's LLM_ANALYSIS_FAILED finding, nil otherwise. The install watcher
-// fails such a scan closed, as skill-scanner.mdx promises for a judge that
-// cannot run (GAP-0376); the INFO finding alone read as a clean scan.
+// scanner's LLM_ANALYSIS_FAILED finding, or a plugin scan's LLM-SCAN-ERROR
+// finding from a configured judge (JudgeModel set), nil otherwise. The install
+// watcher fails such a scan closed, as skill-scanner.mdx promises for a judge
+// that cannot run (GAP-0376); the finding alone read as a clean scan or as a
+// MEDIUM warning (GAP-1444).
 func JudgeFailure(result *ScanResult) error {
 	if result == nil {
 		return nil
 	}
 	for _, f := range result.Findings {
-		if f.RuleID != RuleLLMAnalysisFailed {
+		pluginJudge := f.RuleID == RulePluginLLMScanError && result.JudgeModel != ""
+		if f.RuleID != RuleLLMAnalysisFailed && !pluginJudge {
 			continue
 		}
 		detail := strings.Join(strings.Fields(f.Description), " ")
+		if pluginJudge {
+			detail = strings.TrimSpace("judge " + result.JudgeModel + ": " + detail)
+		}
 		if len(detail) > 240 {
 			detail = detail[:240] + "..."
 		}

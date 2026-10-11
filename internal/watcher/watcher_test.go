@@ -1263,6 +1263,44 @@ func TestAdmissionFailsClosedWhenTheJudgeDidNotRun(t *testing.T) {
 	}
 }
 
+// GAP-1444: a plugin scan whose configured judge failed at call time reports
+// a MEDIUM LLM-SCAN-ERROR finding, which admission read as a warning and so
+// admitted the plugin. With a judge configured it now fails closed; with none
+// the same finding still only warns.
+func TestPluginAdmissionFailsClosedWhenTheConfiguredJudgeFailed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake plugin scanner is a shell script")
+	}
+	for _, tc := range []struct {
+		judge string
+		want  Verdict
+	}{
+		{judge: "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", want: VerdictBlocked},
+		{judge: "", want: VerdictWarning},
+	} {
+		cfg, store, logger, skillDir := setupTestEnv(t)
+		pluginDir := t.TempDir()
+		bin := filepath.Join(t.TempDir(), "defenseclaw")
+		script := "#!/bin/sh\necho '{\"scanner\":\"plugin-scanner\",\"findings\":[{\"id\":\"l1\",\"rule_id\":\"" +
+			scanner.RulePluginLLMScanError + "\",\"severity\":\"MEDIUM\",\"title\":\"LLM analysis failed to run\"}]}'\n"
+		if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
+		w.scannerFactory = func(InstallEvent) scanner.Scanner {
+			return &scanner.PluginScanner{BinaryPath: bin, LLM: config.LLMConfig{Model: tc.judge}}
+		}
+		pluginPath := filepath.Join(pluginDir, "prompt-notes")
+		if err := os.MkdirAll(pluginPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		res := w.runAdmission(context.Background(), InstallEvent{Type: InstallPlugin, Name: "prompt-notes", Path: pluginPath, Timestamp: time.Now()})
+		if res.Verdict != tc.want || (tc.judge != "" && !strings.Contains(res.Reason, tc.judge)) {
+			t.Fatalf("judge %q: verdict %q reason %q, want %q naming the judge", tc.judge, res.Verdict, res.Reason, tc.want)
+		}
+	}
+}
+
 // GAP-0393: quarantining Claude Code's skill-creator recorded the block and
 // the runtime disable for every connector, so Codex's vendor-bundled
 // skill-creator read as quarantined and disabled. The rows now belong to the
