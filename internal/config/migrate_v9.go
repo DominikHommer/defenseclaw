@@ -336,13 +336,8 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
 	}
-	// A rebased pack is written only during commit; its digest cannot be
-	// checked on disk during the dry run. Other referenced assets already
-	// exist and can be checked before either a preview or a commit.
-	if len(m.rebasedPacks) == 0 {
-		if err := ValidateCandidateAssets(abs, migrated); err != nil {
-			return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
-		}
+	if err := m.validateAssets(abs, migrated); err != nil {
+		return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
 	}
 	if in.DryRun || in.InMemory {
 		return result, nil
@@ -351,6 +346,42 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result.Written = written
 	result.Record = m.record
 	return result, err
+}
+
+// validateAssets runs the asset check of a config write (ValidateCandidateAssets)
+// on the migrated document, before a preview or a commit. A rebased pack is
+// written only at commit, so the check reads it from a temporary copy of its
+// files, which the custom_packs entry of the candidate points at; its pinned
+// digest is checked against that copy. Skipping the whole check for a rebased
+// pack let an unrelated reference the gateway refuses into config_version 9
+// (GAP-1482).
+func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
+	if len(m.rebasedPacks) == 0 || candidateAssetCheck == nil {
+		return ValidateCandidateAssets(configPath, migrated)
+	}
+	candidate, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, migrated)
+	if err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp("", "defenseclaw-rebased-packs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	for _, name := range slices.Sorted(maps.Keys(candidate.Guardrail.CustomPacks)) {
+		pack := candidate.Guardrail.CustomPacks[name]
+		files, ok := m.rebasedPacks[filepath.Clean(pack.Path)]
+		if !ok {
+			continue
+		}
+		copied := filepath.Join(staging, name, filepath.Base(pack.Path))
+		if err := writeRebasedRulePack(copied, files); err != nil {
+			return fmt.Errorf("stage the rebased rule pack %s: %w", pack.Path, err)
+		}
+		pack.Path = copied
+		candidate.Guardrail.CustomPacks[name] = pack
+	}
+	return CheckCandidateAssets(candidate)
 }
 
 // finishPendingV9 resumes the part after config commit under the config lock.

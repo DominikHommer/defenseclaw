@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -2261,6 +2262,81 @@ func TestMigrateV9RefreshesFlatRegoModules(t *testing.T) {
 			if custom := filepath.Join(policies, "operator.rego"); !strings.Contains(lost, custom+" reads data.operator_policy") ||
 				!strings.Contains(notes, custom+" reads data.operator_policy") {
 				t.Errorf("the flat custom module read is not reported: %q\n%s", lost, notes)
+			}
+		})
+	}
+}
+
+// A rebased custom pack is written only at commit. Skipping the whole asset
+// check for it let an unrelated reference the gateway refuses, such as an
+// enabled webhook to a loopback address, into config_version 9 (GAP-1482).
+// The check runs on every migration, with the rebased pack read from its
+// in-memory files.
+func TestMigrateV9ValidatesAssetsBesideARebasedPack(t *testing.T) {
+	RegisterCandidateAssetCheck(func(cfg *Config) error {
+		for name, pack := range cfg.Guardrail.CustomPacks {
+			if data, err := os.ReadFile(filepath.Join(pack.Path, "rules", "commands.yaml")); err != nil || string(data) != "rebased\n" {
+				return fmt.Errorf("custom pack %s: %s does not hold the rebased files", name, pack.Path)
+			}
+		}
+		for _, hook := range cfg.Webhooks {
+			if hook.Enabled && strings.Contains(hook.URL, "127.0.0.1") {
+				return errors.New("webhook url is a loopback address")
+			}
+		}
+		return nil
+	})
+	t.Cleanup(func() { RegisterCandidateAssetCheck(nil) })
+	for _, tc := range []struct {
+		name    string
+		webhook bool
+		dryRun  bool
+	}{{name: "invalid webhook", webhook: true}, {name: "valid"}, {name: "valid dry run", dryRun: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			acme := filepath.Join(dir, "policies", "guardrail", "acme")
+			source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme + "\nobservability: {}\n"
+			if tc.webhook {
+				source += "webhooks:\n  - name: ops\n    url: http://127.0.0.1:9/hook\n    type: generic\n    enabled: true\n"
+			}
+			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, DryRun: tc.dryRun,
+				RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+				RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
+					return &RulePackRebasePlan{
+						Files:  map[string][]byte{"rules/commands.yaml": []byte("rebased\n")},
+						Digest: strings.Repeat("b", 64), Updated: 1,
+					}, nil
+				},
+			})
+			if raw, _ := os.ReadFile(configPath); tc.webhook || tc.dryRun {
+				if string(raw) != source {
+					t.Errorf("config.yaml was written:\n%s", raw)
+				}
+				if _, statErr := os.Stat(acme + "-1.0"); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Errorf("the rebased pack was written: %v", statErr)
+				}
+			}
+			if tc.webhook {
+				if err == nil || !strings.Contains(err.Error(), "assets do not validate") {
+					t.Fatalf("MigrateV9 = %v, want the asset check to refuse the webhook", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			if !strings.Contains(string(result.Migrated), "path: "+acme+"-1.0") {
+				t.Errorf("want the rebased copy pinned:\n%s", result.Migrated)
+			}
+			if leftover, _ := filepath.Glob(filepath.Join(os.TempDir(), "defenseclaw-rebased-packs-*")); len(leftover) > 0 {
+				t.Errorf("staged copies left behind: %q", leftover)
 			}
 		})
 	}
