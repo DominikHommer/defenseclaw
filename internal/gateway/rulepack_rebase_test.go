@@ -217,6 +217,14 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		{tool: "Bash", command: "echo xdccert-block-markery", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: `python3 -c "open('m', 'w').write('dccert-block-marker')"`, rule: "CERT-MARKER", blocked: true},
 		{tool: "Write", args: `{"file_path":"/home/alice/project/m.txt","content":"dccert-block-marker"}`, rule: "CERT-MARKER"},
+		// GAP-1415 (rv18): Codex assigns the path to a variable first, and
+		// Claude Code wraps the same script in powershell -Command; a control
+		// of the same shape with another file name stays allowed.
+		{tool: "Bash", command: `$path = 'C:\Users\Public\rv18u\dccert-block-marker.txt'; New-Item -Path $path -ItemType File -Force | Out-Null; $item = Get-Item -LiteralPath $path; [pscustomobject]@{ Path = $item.FullName; Exists = $true; Length = $item.Length }`, rule: "CERT-MARKER", blocked: true, powerShell: true},
+		{tool: "Bash", command: `$path = 'C:\Users\Public\rv18u\dccert-notes.txt'; New-Item -Path $path -ItemType File -Force | Out-Null; $item = Get-Item -LiteralPath $path; [pscustomobject]@{ Path = $item.FullName; Exists = $true; Length = $item.Length }`, rule: "CERT-MARKER", powerShell: true},
+		{tool: "Bash", command: `powershell -Command "New-Item -ItemType File -Path 'C:\Users\Public\rv18u\dccert-block-marker.txt' -Force | Out-Null; Get-Item 'C:\Users\Public\rv18u\dccert-block-marker.txt' | Select-Object Name, Length"`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: `powershell -Command New-Item -ItemType File -Path C:\Users\Public\rv18u\dccert-block-marker.txt -Force | Out-Null; Get-Item C:\Users\Public\rv18u\dccert-block-marker.txt | Select-Object Name, Length`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: `powershell -Command "New-Item -ItemType File -Path 'C:\Users\Public\rv18u\dccert-notes.txt' -Force | Out-Null; Get-Item 'C:\Users\Public\rv18u\dccert-notes.txt' | Select-Object Name, Length"`, rule: "CERT-MARKER"},
 	} {
 		input := actionfacts.Input{
 			Tool: tc.tool, Command: tc.command, CWD: "/home/alice/project",

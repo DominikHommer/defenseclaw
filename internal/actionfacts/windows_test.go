@@ -6005,3 +6005,29 @@ func TestPowerShellScriptSubsetKeepsLeadingStatementFacts(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1415 (rv18): Codex assigned the path to a variable before New-Item, and
+// Claude Code passed the same script to powershell -Command from its POSIX
+// shell. Neither parse is complete, so no reduced view keeps New-Item; the
+// gateway's migrated literal rule matches the parsed words of the call
+// instead (GAP-1469), so the full path must stay one of those words.
+func TestPowerShellScriptPathStaysAParsedWord(t *testing.T) {
+	t.Parallel()
+	const target = `C:\Users\Public\rv18u\rv18w-block-marker.txt`
+	for _, input := range []Input{
+		{Tool: "shell", CWD: `C:\Users\rv18u`, DialectHint: DialectPowerShell, Command: `$path = '` + target +
+			`'; New-Item -Path $path -ItemType File -Force | Out-Null; $item = Get-Item -LiteralPath $path; ` +
+			`[pscustomobject]@{ Path = $item.FullName; Exists = $true; Length = $item.Length }`},
+		{Tool: "Bash", CWD: "/home/alice", DialectHint: DialectPOSIX, Command: `powershell -Command "New-Item -ItemType File -Path '` +
+			target + `' -Force | Out-Null; Get-Item '` + target + `' | Select-Object Name, Length"`},
+	} {
+		facts := Analyze(input)
+		if !slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
+			return slices.ContainsFunc(command.Arguments, func(argument ArgumentFact) bool {
+				return strings.Contains(argument.Value, target)
+			})
+		}) {
+			t.Errorf("%s: no parsed word holds %s: %+v", input.Command, target, facts.Commands)
+		}
+	}
+}
