@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -41,7 +42,14 @@ import (
 // (GAP-0950): on a private path (one whose mode gives other accounts no
 // access: the gateway data, the guardian records, the credentials, the
 // lifecycle state, config.yaml) any allow entry is reported and removed, and
-// every entry of those folders is checked. Linux needs no twin: a named POSIX ACL entry
+// every entry of those folders is checked. The folders above a vendor
+// machine-policy folder (/Library/Application Support, /private/etc, up to /)
+// are checked too: the machine-policy trust check reads only their owner and
+// mode, and an entry that lets a standard user add or delete a child there
+// let that user put another folder, with a policy without DefenseClaw hooks,
+// in place of the one ensure protected (GAP-1458). DefenseClaw does not change
+// system folders, so a transaction refuses them instead of removing the
+// entries. Linux needs no twin: a named POSIX ACL entry
 // shows in the group mode bits (the ACL mask), which the mode checks compare
 // and chmod resets.
 
@@ -51,23 +59,28 @@ const aclListBatch = 200
 // aclTarget is a rooted path whose macOS ACL the deployment checks. On a
 // private one any allow entry is wrong; on a published directory a deny
 // entry that hides policy is also wrong; on a published policy file a deny-read
-// entry is wrong; elsewhere an entry that grants write.
+// entry is wrong; on a folder above a vendor machine-policy folder an entry
+// that grants write to an account other than root or an administrator group;
+// elsewhere an entry that grants write.
 type aclTarget struct {
 	path          string
 	private       bool
 	publishedDir  bool
 	publishedFile bool
 	requireList   bool
+	ancestor      bool
 }
 
 // aclFinding is a path with the ACL entries that are wrong for it; write is
-// set when one of them grants write.
+// set when one of them grants write; ancestor when the path is a folder above
+// a vendor machine-policy folder.
 type aclFinding struct {
-	path    string // canonical
-	rooted  string
-	entries []string
-	write   bool
-	deny    bool
+	path     string // canonical
+	rooted   string
+	entries  []string
+	write    bool
+	deny     bool
+	ancestor bool
 }
 
 // aclTargets are the folders of the deployment, the files it installs
@@ -144,7 +157,60 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 	for _, file := range e.configStateFiles(Account{}) {
 		add(e.P(file.path), &yes)
 	}
+	// Last, so a folder the deployment also installs keeps its stricter check.
+	for _, dir := range e.machinePolicyAncestors(policyPaths) {
+		if seen[dir] {
+			continue
+		}
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			seen[dir] = true
+			targets = append(targets, aclTarget{path: dir, ancestor: true})
+		}
+	}
 	return targets
+}
+
+// machinePolicyAncestors are the folders above the rooted vendor
+// machine-policy paths, up to / (or the test root). /etc, /var and /tmp are
+// links to /private on macOS, so the folders of their targets are the ones
+// checked, as the machine-policy trust check walks them.
+func (e *Env) machinePolicyAncestors(policyPaths []string) []string {
+	stop := "/"
+	if e.Root != "" {
+		stop = filepath.Clean(e.Root)
+	}
+	var dirs []string
+	for _, path := range policyPaths {
+		if e.Root == "" {
+			for _, prefix := range []string{"/etc/", "/var/", "/tmp/"} {
+				if strings.HasPrefix(path, prefix) {
+					path = "/private" + path
+				}
+			}
+		}
+		for dir := filepath.Dir(path); ; dir = filepath.Dir(dir) {
+			dirs = append(dirs, dir)
+			if dir == stop || dir == filepath.Dir(dir) {
+				break
+			}
+		}
+	}
+	return dirs
+}
+
+// darwinACLAdminPrincipal reports an entry for root or an administrator
+// group (wheel, admin); any other account, or one ls could not name, is not
+// trusted with write on a folder above a vendor machine-policy folder.
+func darwinACLAdminPrincipal(entry managed.DarwinACLEntry) bool {
+	fields := strings.Fields(strings.ToLower(entry.Text))
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "user:root", "group:wheel", "group:admin":
+		return true
+	}
+	return false
 }
 
 // machinePolicyACLPaths are the rooted vendor machine-policy folders and
@@ -189,8 +255,21 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 			continue
 		}
 		for _, target := range batch {
-			finding := aclFinding{path: e.canonical(target.path), rooted: target.path}
-			for _, entry := range listed[target.path] {
+			entries, ok := listed[target.path]
+			if !ok && target.ancestor {
+				// Fail closed: an unread folder above a policy folder is not trusted.
+				failure = fmt.Errorf("ls did not list the ACL of %s", target.path)
+				continue
+			}
+			finding := aclFinding{path: e.canonical(target.path), rooted: target.path, ancestor: target.ancestor}
+			for _, entry := range entries {
+				if target.ancestor {
+					if entry.GrantsWrite() && !darwinACLAdminPrincipal(entry) {
+						finding.entries = append(finding.entries, entry.Text)
+						finding.write = true
+					}
+					continue
+				}
 				deny := (target.publishedDir && entry.DeniesDirectoryAccess(target.requireList)) ||
 					(target.publishedFile && entry.DeniesFileRead())
 				if entry.GrantsWrite() || (target.private && entry.GrantsAccess()) || deny {
@@ -222,8 +301,12 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 	if err != nil && e.Geteuid() == 0 {
 		problems = append(problems, fmt.Sprintf("the macOS ACLs of the deployment could not be read (%v), so entries that grant write or deny policy access are not checked", err))
 	}
-	var write, read, deny []aclFinding
+	var write, read, deny, ancestors []aclFinding
 	for _, finding := range findings {
+		if finding.ancestor {
+			ancestors = append(ancestors, finding)
+			continue
+		}
 		if finding.write {
 			write = append(write, finding)
 		}
@@ -233,6 +316,9 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 		if !finding.write && !finding.deny {
 			read = append(read, finding)
 		}
+	}
+	if len(ancestors) > 0 {
+		problems = append(problems, ancestorACLProblem(ancestors, e.lifecycleCommand(ActionRepair)))
 	}
 	if len(write) > 0 {
 		problems = append(problems, fmt.Sprintf(
@@ -250,6 +336,15 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 			describeACLFindings(read), e.lifecycleCommand(ActionRepair)))
 	}
 	return problems
+}
+
+// ancestorACLProblem names the entries that let a standard account change a
+// folder above a vendor machine-policy folder; the administrator removes
+// them, since DefenseClaw does not change system folders.
+func ancestorACLProblem(findings []aclFinding, rerun string) string {
+	return fmt.Sprintf(
+		"macOS ACL entries let accounts other than root and administrators add or delete folders above the vendor machine-policy folders, so they could put a policy without DefenseClaw hooks in place of the published one: %s; remove those entries with `chmod -a \"<entry>\" <folder>` (DefenseClaw does not change system folders), then run `%s`",
+		describeACLFindings(findings), rerun)
 }
 
 // describeACLFindings names every path, grouped by entry.
@@ -306,6 +401,15 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 	}
 	if len(findings) == 0 {
 		return nil
+	}
+	var ancestors []aclFinding
+	for _, finding := range findings {
+		if finding.ancestor {
+			ancestors = append(ancestors, finding)
+		}
+	}
+	if len(ancestors) > 0 {
+		return errors.New(ancestorACLProblem(ancestors, env.lifecycleCommand(l.opts.Action)))
 	}
 	var removed []string
 	for _, finding := range findings {
