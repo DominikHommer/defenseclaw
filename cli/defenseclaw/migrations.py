@@ -3463,9 +3463,8 @@ def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
     """One ``(kind, line)`` per rule of the operator's the custom-pack rebase
     changed, from migration-v9.json; the Go ``config.MigratedRuleLines`` prints
     the same lines in ``config migrate``. ``kind`` is ``expressed`` (still
-    blocks when a command word, quoted string, path or host holds its literal),
-    ``whole-argument`` (argv-only: blocks only a command argument equal to the
-    literal) or ``detection-only`` (GAP-1469). A built-in rule the operator gave a pattern of their own
+    blocks, as on 0.8.x, a tool call whose text holds its literal, GAP-1478) or
+    ``detection-only`` (GAP-1469). A built-in rule the operator gave a pattern of their own
     is kept under an ID of theirs and named by both IDs (GAP-1314)."""
 
     def strings(key: str) -> list[str]:
@@ -3481,23 +3480,14 @@ def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
         old = was.get(rule)
         return f"{rule} (your edited {old}; {old} is the shipped 1.0 rule)" if old else rule
 
-    whole = set(strings("whole_argument_rules"))
     lines = []
     for rule in strings("expressed_rules"):
-        if rule in whole:
-            lines.append((
-                "whole-argument",
-                f"{name(rule)}: argv-only, blocks only a command argument equal to its literal "
-                "(the pack's semantic cost budget was full); a longer argument or a quoted string that holds it "
-                "is only recorded",
-            ))
-        else:
-            lines.append((
-                "expressed",
-                f"{name(rule)}: enforced as on 0.8.x (its severity decides block or alert) when a command word, "
-                "a quoted string in a command, a file path or a network host holds its literal; text a tool writes, "
-                "such as file content, is only recorded",
-            ))
+        lines.append((
+            "expressed",
+            f"{name(rule)}: enforced as on 0.8.x (its severity decides block or alert) when the text of a tool "
+            "call holds its literal (as a whole word when the pattern has \\b): a command word, a quoted string, "
+            "a file path, a network host or text a tool writes, such as file content",
+        ))
     for rule in strings("detection_only_rules"):
         lines.append((
             "detection-only",

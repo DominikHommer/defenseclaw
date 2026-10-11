@@ -364,21 +364,18 @@ that one instead:
 - your own rules, in any rule file and category, are kept. A rule whose
   `pattern` is a plain literal (such as `acme-marker-7f3c` or `acme\.internal`)
   gets an expression and blocks what the 0.8.x pattern blocked, which was the
-  literal anywhere in the tool call's arguments: a word of one of its commands
-  that holds the literal (`echo acme-marker-7f3c`, `touch acme-marker-7f3c.txt`,
-  `echo xacme-marker-7f3cy`, `python3 -c "print('acme-marker-7f3c')"`), also a
-  quoted string inside a call DefenseClaw parses only in part, such as a .NET
-  method call in PowerShell
-  (`[System.IO.File]::WriteAllText($path, 'acme-marker-7f3c')`), or a file path
-  or network host of the call that contains it (`cat /tmp/acme-marker-7f3c/x`,
-  a file write to `acme-marker-7f3c.txt`, `curl https://acme.internal/`). This
-  works the same on Linux, macOS and Windows. A literal between `\b` word
-  boundaries (`\bacme-marker\b`) still has to be a whole word, as in 0.8.x.
-  Text a tool writes or sends, such as the content of a file write, is not a
-  command word: there the rule's pattern only records the match. The upgrade
-  names these rules. When the pack's semantic cost budget has no room left, the
-  remaining ones are argv-only: they block only a command argument equal to
-  the literal, and the upgrade and `defenseclaw doctor` name them as argv-only;
+  literal anywhere in the text of the tool call: the gateway runs the pattern
+  over that text, as 0.8.x did, and over the words it parsed from it. That
+  covers a command word (`echo acme-marker-7f3c`, `touch acme-marker-7f3c.txt`,
+  `echo xacme-marker-7f3cy`, `python3 -c "print('acme-marker-7f3c')"`), a
+  quoted string or here-string, also inside a call DefenseClaw parses only in
+  part, such as a .NET method call in PowerShell
+  (`[System.IO.File]::WriteAllText($path, 'acme-marker-7f3c')`), a file path or
+  network host (`cat /tmp/acme-marker-7f3c/x`, `curl https://acme.internal/`),
+  and text a tool writes or sends, such as the content of a file write. This
+  works the same on Linux, macOS and Windows and for every connector. A literal
+  between `\b` word boundaries (`\bacme-marker\b`) still has to be a whole
+  word, as in 0.8.x. The upgrade and `defenseclaw doctor` name these rules;
 - a built-in rule whose `pattern` you changed is kept as a rule of yours under
   an ID of its own, `CUSTOM-<ID>` (`CMD-RM-RF` becomes `CUSTOM-CMD-RM-RF`, or
   `CUSTOM-CMD-RM-RF-2` when a rule file of the pack already has that ID),
@@ -415,14 +412,15 @@ and the upgrade prints them on one line:
 ⚠ 2 custom rule(s) now detection-only for tool calls: ACME-SPACED, ACME-REGEX; add an expression, see policies/rules
 ```
 
-The upgrade also names, one per line, each rule that kept blocking under a
-new ID and each rule that blocks less than on 0.8.x
+The upgrade also names, one per line, each rule that kept blocking (a
+built-in you edited under its new ID) and each built-in you edited that is
+now detection-only
 (`defenseclaw-gateway config migrate` prints the same lines as `rule` lines):
 
 ```text title="Upgrade output"
 ⚠ 2 rule(s) of your custom pack changed by the 1.0 upgrade (see migration-v9.json):
-  - CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert) when a command word, a quoted string in a command, a file path or a network host holds its literal; text a tool writes, such as file content, is only recorded
-  - ACME-MARKER-40: argv-only, blocks only a command argument equal to its literal (the pack's semantic cost budget was full); a longer argument or a quoted string that holds it is only recorded
+  - CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call holds its literal (as a whole word when the pattern has \b): a command word, a quoted string, a file path, a network host or text a tool writes, such as file content
+  - ACME-MARKER: enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call holds its literal (as a whole word when the pattern has \b): a command word, a quoted string, a file path, a network host or text a tool writes, such as file content
 ```
 
 `defenseclaw doctor` shows these lines in its `Migrated custom rules` row
@@ -434,8 +432,7 @@ pinned as it is, and its rules are still named. The original folder is kept
 for a rollback to 0.8.x. The migration record (`migration-v9.json`) lists what
 moved, under `detection_only_rules` the rules that no longer block a tool
 call, under `rule_file_merges` the merged rule files, and under
-`renamed_rules`, `expressed_rules` and `whole_argument_rules` the rules
-named above.
+`renamed_rules` and `expressed_rules` the rules named above.
 
 If the 1.0 copy of a pack that loads as it is can not be made, the pack is
 pinned as it is and its 0.8.x copies of built-in rules and its rules without
@@ -776,7 +773,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `removed[]` | v8 keys dropped without a v9 value because nothing read them. |
 | `actions_rows_moved`, `actions_rows_ignored` | The `audit.db` rows moved, and (managed host) left in place. |
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
-| `renamed_rules[]`, `expressed_rules[]`, `whole_argument_rules[]`, `detection_only_rules[]` | The custom-pack rules the rebase changed: built-in rules you gave a pattern of your own and their new ID (`CMD-RM-RF -> CUSTOM-CMD-RM-RF`), the rules that still block with an expression derived from their literal pattern, the ones of those that block only a command argument equal to the literal, and the ones that only record tool-call matches. |
+| `renamed_rules[]`, `expressed_rules[]`, `detection_only_rules[]` | The custom-pack rules the rebase changed: built-in rules you gave a pattern of your own and their new ID (`CMD-RM-RF -> CUSTOM-CMD-RM-RF`), the rules that still block with an expression derived from their literal pattern (and their literal anywhere in a tool call), and the ones that only record tool-call matches. |
 | `rule_pack_rebase_failures[]` | The custom packs pinned without their 1.0 copy, each with the reason; their pattern-only rules no longer block a tool call. |
 | `unenforced_rego_data[]` | The Rego modules that read a `data.json` key of yours that 1.0 no longer loads, each with the key and what happened to the module; the rules that read it are not enforced. |
 | `unscannable_mcp[]` | The MCP servers a scan refuses to start: `name`, `connector`, `command`, the scanner's `reason`, the `runtime_effect` and the `fix` command. Written by `defenseclaw migrate` after the commit. |

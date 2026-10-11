@@ -132,9 +132,9 @@ func dispatchTrustedAction(
 	ctx := parent
 
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
-	// After every lane below, on what it returns (GAP-1469).
+	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
-		findings = withTrustedLiteralWordFindings(generation, request, facts, findings)
+		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
@@ -505,20 +505,23 @@ func dispatchTrustedAction(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
-// withTrustedLiteralWordFindings blocks a tool call that a migrated 0.8.x
-// literal rule (guardrail.MigratedLiteralRule) matches as 0.8.x did, where
-// the rule pattern matches a parsed word of the call: an argv entry or
-// argument of one of its commands (a quoted string included), a redirect
-// target, a wrapper argument, a path or a network host. The expression of
-// such a rule matches only an argument that starts or ends with the literal
-// (a CEL substring test over every argument does not fit the cost budget),
-// and a call parsed only in part, such as a PowerShell .NET call
-// ([System.IO.File]::WriteAllText(path, "LITERAL")), never ran it, so the
-// rule was detection-only there (GAP-1469). The words are text of the call
-// whatever the parse could prove about them, and the literal is all such a
-// rule means, so the match is its proof. Text a tool writes (file content)
-// is not a word and stays detection-only.
-func withTrustedLiteralWordFindings(
+// withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x
+// literal rule (guardrail.MigratedLiteralRule) matches as 0.8.x did: 0.8.x
+// ran the rule pattern over the text of the tool call, so the literal
+// anywhere in it blocked. The rule pattern runs, with its own case handling,
+// over that text (the raw arguments, their decoded strings, the command and
+// argv) and over the words the parse took from it (an argument with its
+// quotes or escapes removed, a redirect target, a wrapper argument, a path, a
+// network host). That covers a call parsed only in part or in another
+// dialect ([System.IO.File]::WriteAllText(path, "LITERAL") read as POSIX,
+// GAP-1478), a here-string or variable, and text a tool writes, such as file
+// content. The expression of such a rule matches only an argument that
+// starts or ends with the literal (a CEL substring test over every argument
+// does not fit the cost budget), and stays as it is. The literal is all such
+// a rule means, so the match is its proof. A match only adds: an already
+// enforcing finding is left alone, and a call the adapter cannot enforce
+// keeps the finding detection-only.
+func withMigratedLiteralRuleFindings(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
@@ -527,11 +530,11 @@ func withTrustedLiteralWordFindings(
 	if generation == nil {
 		return findings
 	}
-	var words []string
+	var texts []string
 	collected := false
 	for _, candidate := range generation.semanticRules {
 		owner := candidate.owner
-		if !candidate.literalWords || owner.prerequisite != nil || owner.detectionOnly || owner.alertOnly {
+		if !candidate.migratedLiteral || owner.prerequisite != nil || owner.detectionOnly || owner.alertOnly {
 			continue
 		}
 		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
@@ -541,9 +544,9 @@ func withTrustedLiteralWordFindings(
 			continue
 		}
 		if !collected {
-			words, collected = trustedActionWords(facts), true
+			texts, collected = trustedActionTexts(request, facts), true
 		}
-		if !slices.ContainsFunc(words, candidate.rule.Pattern.MatchString) {
+		if !slices.ContainsFunc(texts, candidate.rule.Pattern.MatchString) {
 			continue
 		}
 		finding := RuleFinding{
@@ -572,29 +575,52 @@ func withTrustedLiteralWordFindings(
 	return findings
 }
 
-// trustedActionWords returns the parsed words of the commands of a call,
-// with its path values and network hosts.
-func trustedActionWords(facts actionfacts.Facts) []string {
-	var words []string
+// trustedActionTexts returns the text of a tool call that 0.8.x scanned, its
+// raw arguments with their decoded strings, command and argv, and the words
+// the parse of its commands took from it, with its path values and network
+// hosts.
+func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
+	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
+	texts = append(texts, request.Input.Argv...)
+	texts = appendJSONStrings(texts, request.Input.Args)
 	for _, command := range facts.Commands {
-		words = append(words, command.Argv...)
+		texts = append(texts, command.Argv...)
 		for _, argument := range command.Arguments {
-			words = append(words, argument.Value)
+			texts = append(texts, argument.Value)
 		}
 		for _, redirect := range command.Redirects {
-			words = append(words, redirect.Target)
+			texts = append(texts, redirect.Target)
 		}
 		for _, wrapper := range command.Wrappers {
-			words = append(words, wrapper.Argv...)
+			texts = append(texts, wrapper.Argv...)
 		}
 	}
 	for _, path := range facts.Paths {
-		words = append(words, path.Value)
+		texts = append(texts, path.Value)
 	}
 	for _, network := range facts.Network {
-		words = append(words, network.Host)
+		texts = append(texts, network.Host)
 	}
-	return words
+	return texts
+}
+
+// appendJSONStrings appends every string of the JSON value raw, object keys
+// included, decoded, so a literal a JSON escape spells (\u003c for <) matches
+// too. Text that is not JSON adds nothing; the raw text is matched as it is.
+func appendJSONStrings(texts []string, raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return texts
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return texts
+		}
+		if text, ok := token.(string); ok {
+			texts = append(texts, text)
+		}
+	}
 }
 
 // withTwinProvenBlocks returns findings, the finalized findings of a

@@ -710,9 +710,9 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 			return &RulePackRebasePlan{
 				Files: map[string][]byte{"rules/commands.yaml": []byte("rebased\n")}, Digest: digest,
 				Updated: 26, Carried: []string{"CMD-ACME-MARKER"},
-				Expressed:     []string{"CUSTOM-CMD-RM-RF", "CMD-ACME-MARKER"},
-				WholeArgument: []string{"CMD-ACME-MARKER"}, AlertOnly: []string{"CUSTOM-CMD-SUDO"},
-				Renamed: []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"},
+				Expressed: []string{"CUSTOM-CMD-RM-RF", "CMD-ACME-MARKER"},
+				AlertOnly: []string{"CUSTOM-CMD-SUDO"},
+				Renamed:   []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"},
 			}, nil
 		},
 	})
@@ -733,10 +733,10 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	// GAP-1314: the upgrade output and doctor name every rule the rebase
 	// changed, and a renamed built-in by both of its IDs.
 	want := []string{
-		// GAP-1469: what each one still blocks, and argv-only and
-		// detection-only by name.
-		"CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert) when a command word, a quoted string in a command, a file path or a network host holds its literal; text a tool writes, such as file content, is only recorded",
-		"CMD-ACME-MARKER: argv-only, blocks only a command argument equal to its literal (the pack's semantic cost budget was full); a longer argument or a quoted string that holds it is only recorded",
+		// GAP-1469, GAP-1478: what each one still blocks, and the
+		// detection-only ones by name.
+		"CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call holds its literal (as a whole word when the pattern has \\b): a command word, a quoted string, a file path, a network host or text a tool writes, such as file content",
+		"CMD-ACME-MARKER: enforced as on 0.8.x (its severity decides block or alert) when the text of a tool call holds its literal (as a whole word when the pattern has \\b): a command word, a quoted string, a file path, a network host or text a tool writes, such as file content",
 		"CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only for tool calls in 1.0 (its pattern is not a literal); add an expression to block",
 	}
 	if got := MigratedRuleLines(result.Record); !slices.Equal(got, want) {

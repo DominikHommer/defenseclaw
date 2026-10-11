@@ -131,9 +131,6 @@ type RulePackRebasePlan struct {
 	// Renamed says which built-in rules the operator gave a pattern of their
 	// own now have an ID of theirs ("CMD-RM-RF -> CUSTOM-CMD-RM-RF").
 	Renamed []string
-	// WholeArgument names the Expressed rules that match only a command
-	// argument equal to their literal when the semantic cost budget is full.
-	WholeArgument []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -191,12 +188,10 @@ type MigrationRecord struct {
 	// pattern of their own were kept as rules of theirs under a new ID
 	// ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"): the built-in ID keeps the shipped
 	// rule (GAP-1314). ExpressedRules names the operator's rules that got
-	// an expression from their literal pattern and still block, and
-	// WholeArgumentRules those of them that block only a command argument
-	// equal to the literal (GAP-1344). The upgrade and doctor print them.
-	RenamedRules       []string `json:"renamed_rules,omitempty"`
-	ExpressedRules     []string `json:"expressed_rules,omitempty"`
-	WholeArgumentRules []string `json:"whole_argument_rules,omitempty"`
+	// an expression from their literal pattern and still block (GAP-1344).
+	// The upgrade and doctor print them.
+	RenamedRules   []string `json:"renamed_rules,omitempty"`
+	ExpressedRules []string `json:"expressed_rules,omitempty"`
 	// RulePackRebaseFailures names each 0.8.x custom pack whose 1.0 copy
 	// could not be made, and why. It is pinned as it is, so its rules that
 	// blocked a tool call with a pattern alone only record the match. The
@@ -2690,24 +2685,13 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
 	m.record.RenamedRules = append(m.record.RenamedRules, plan.Renamed...)
 	m.record.ExpressedRules = append(m.record.ExpressedRules, plan.Expressed...)
-	m.record.WholeArgumentRules = append(m.record.WholeArgumentRules, plan.WholeArgument...)
 	expressed := ""
 	if len(plan.Expressed) > 0 {
-		// GAP-1344: 0.8.x matched the literal anywhere in the tool call's
-		// arguments; say how far the 1.0 expression follows that.
-		// GAP-1469: the gateway also runs the literal over every parsed
-		// word of the call, quoted strings of a partly parsed call included.
-		expressed = fmt.Sprintf("these got an expression and block a tool call, as on 0.8.x, when a word of one of "+
-			"its commands (an argument, or a quoted string even inside a call DefenseClaw parses only in part, such "+
-			"as a .NET method call in PowerShell), a file path or a network host holds their literal (as a whole "+
-			"word when the pattern has \\b); text a tool writes, such as file content, is only recorded: %s",
+		// GAP-1344, GAP-1478: 0.8.x matched the literal anywhere in the
+		// tool call; the gateway runs the pattern over its text for these.
+		expressed = fmt.Sprintf("these got an expression and, as on 0.8.x, block a tool call whose text holds "+
+			"their literal (as a whole word when the pattern has \\b), file content a tool writes included: %s",
 			strings.Join(plan.Expressed, ", "))
-		if len(plan.WholeArgument) > 0 {
-			expressed += fmt.Sprintf("; the pack's semantic cost budget left room only for a command argument "+
-				"equal to the literal for %s, which are argv-only: a longer argument or a quoted string that holds "+
-				"the literal is only recorded (turn off rules you do not need, then run the upgrade again)",
-				strings.Join(plan.WholeArgument, ", "))
-		}
 	}
 	if len(plan.Merged) > 0 {
 		// 1.0 refuses two rule files of one category; 0.8.x enforced only
@@ -2770,12 +2754,11 @@ func (m *v9Migrator) noteDetectionOnly(pack string, ids []string) {
 }
 
 // MigratedRuleLines is one line per rule of the operator's that the rebase
-// of a custom pack changed: the rules that still block a tool call with an
-// expression derived from their literal pattern (and under which ID, for a
-// built-in rule they gave a pattern of their own, GAP-1314), the ones that
-// block only a command argument equal to the literal (argv-only), and the
-// detection-only ones (GAP-1469). `config migrate` prints them; the Python upgrade summary and doctor
-// read the same record fields.
+// of a custom pack changed: the rules that still block a tool call as on
+// 0.8.x with an expression derived from their literal pattern (and under
+// which ID, for a built-in rule they gave a pattern of their own, GAP-1314),
+// and the detection-only ones (GAP-1469). `config migrate` prints them; the
+// Python upgrade summary and doctor read the same record fields.
 func MigratedRuleLines(r MigrationRecord) []string {
 	was := map[string]string{}
 	for _, renamed := range r.RenamedRules {
@@ -2791,15 +2774,9 @@ func MigratedRuleLines(r MigrationRecord) []string {
 	}
 	var lines []string
 	for _, id := range r.ExpressedRules {
-		if slices.Contains(r.WholeArgumentRules, id) {
-			lines = append(lines, name(id)+": argv-only, blocks only a command argument equal to its literal (the "+
-				"pack's semantic cost budget was full); a longer argument or a quoted string that holds it is only "+
-				"recorded")
-			continue
-		}
-		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert) when a command "+
-			"word, a quoted string in a command, a file path or a network host holds its literal; text a tool "+
-			"writes, such as file content, is only recorded")
+		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert) when "+
+			"the text of a tool call holds its literal (as a whole word when the pattern has \\b): a command "+
+			"word, a quoted string, a file path, a network host or text a tool writes, such as file content")
 	}
 	for _, id := range r.DetectionOnlyRules {
 		lines = append(lines, name(id)+": detection-only for tool calls in 1.0 (its pattern is not a literal); "+
