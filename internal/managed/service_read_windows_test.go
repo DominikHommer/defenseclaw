@@ -150,6 +150,16 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 	if err := ValidateServiceCanWriteFile(path, account); err == nil {
 		t.Fatal("accepted a create-only folder")
 	}
+	// GAP-1431: a CREATOR OWNER entry passes DELETE on to the files the
+	// service creates there; one that does not reach files does not.
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20083;;;BU)(A;OIIO;SD;;;CO)")
+	if err := ValidateServiceCanWriteFile(path, account); err != nil {
+		t.Fatalf("create-only folder with CREATOR OWNER Delete for new files: %v", err)
+	}
+	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20083;;;BU)(A;CIIO;SD;;;CO)")
+	if err := ValidateServiceCanWriteFile(path, account); err == nil {
+		t.Fatal("accepted CREATOR OWNER Delete that only subfolders inherit")
+	}
 	setDACL(folder, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x200c3;;;BU)")
 	if err := ValidateServiceCanWriteFile(path, account); err != nil {
 		t.Fatalf("folder permits rotation and pruning: %v", err)

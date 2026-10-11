@@ -140,6 +140,13 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	if err != nil {
 		return err
 	}
+	// What the service creates inherits the folder entries for CREATOR
+	// OWNER with the service, its owner, in their place (GAP-1431).
+	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+	if err != nil {
+		return err
+	}
+	creators := append(sids[:len(sids):len(sids)], creatorOwner)
 	if missing > 0 {
 		if !serviceHasAccess(folder, sids, serviceFolderCreateChildAccess) {
 			return fmt.Errorf("the gateway service account %s cannot create a folder in %s", serviceAccount, folder)
@@ -150,15 +157,11 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 		// what it creates. Below the first new folder an entry that does
 		// not propagate is gone. A this-folder-only grant let the service
 		// create the first folder and nothing in it.
-		creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
-		if err != nil {
-			return err
-		}
 		want, skip := serviceFolderWriteAccess, uint8(0)
 		if missing > 1 {
 			want, skip = want|serviceFolderCreateChildAccess, windows.NO_PROPAGATE_INHERIT_ACE
 		}
-		if !serviceDACLGrants(folder, append(sids, creatorOwner), want, windows.CONTAINER_INHERIT_ACE, skip) {
+		if !serviceDACLGrants(folder, creators, want, windows.CONTAINER_INHERIT_ACE, skip) {
 			return fmt.Errorf("the gateway service account %s can create a folder in %s, but the folders it creates there "+
 				"would not let it create the rest of %s; grant it Modify on %s for its subfolders too, "+
 				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceAccount)
@@ -176,9 +179,10 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	// every file in the folder and not FILE_DELETE_CHILD, so requiring the
 	// folder right refused it (GAP-1123). The gateway creates the next active
 	// file after each rotation, so the folder must pass DELETE on to new
-	// files, and an existing file must grant it as well.
+	// files, also through CREATOR OWNER, and an existing file must grant it
+	// to the service itself.
 	if !serviceHasAccess(folder, sids, serviceFolderDeleteChildAccess) {
-		if !serviceDACLGrants(folder, sids, windows.DELETE, windows.OBJECT_INHERIT_ACE, 0) {
+		if !serviceDACLGrants(folder, creators, windows.DELETE, windows.OBJECT_INHERIT_ACE, 0) {
 			return fmt.Errorf("the gateway service account %s cannot rotate or prune files in %s", serviceAccount, folder)
 		}
 		if existing && !serviceHasAccess(path, sids, windows.DELETE) {
