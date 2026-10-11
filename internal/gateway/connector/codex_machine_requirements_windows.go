@@ -532,8 +532,8 @@ func RemoveWindowsCodexMachineRequirements(
 		report.PostimageSHA256 = windowsCodexMachineHash(requirements.data)
 
 		exactPostimage := requirements.existed && report.PostimageSHA256 == state.PostimageSHA256
-		candidate := append([]byte(nil), requirements.data...)
-		candidateExists := requirements.existed
+		var candidate []byte
+		var candidateExists bool
 		switch {
 		case exactPostimage && state.PreimageExisted:
 			candidate = append([]byte(nil), state.Preimage...)

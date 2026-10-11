@@ -684,29 +684,6 @@ func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
-func shadowContentAccessSafeNegative(facts actionfacts.Facts) bool {
-	if !facts.Authoritative() {
-		return false
-	}
-	for _, candidate := range facts.Paths {
-		if canonicalSemanticPath(semanticPathValue(candidate)) != "/etc/shadow" ||
-			candidate.Access != actionfacts.PathAccessRead {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if ok && command.Effect == actionfacts.EffectExecute &&
-			exactTargetedShadowAccountLookup(command) {
-			return true
-		}
-	}
-	return pathOwnerSafeNegative(
-		func(value string) bool { return canonicalSemanticPath(value) == "/etc/shadow" },
-		func(_ actionfacts.Facts, candidate actionfacts.PathFact) bool {
-			return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/shadow"
-		},
-	)(facts)
-}
-
 func exactTargetedShadowAccountLookup(command actionfacts.CommandFact) bool {
 	switch strings.ToLower(path.Base(strings.ReplaceAll(command.Program, `\`, "/"))) {
 	case "grep", "egrep", "fgrep":

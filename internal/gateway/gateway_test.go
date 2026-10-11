@@ -37,8 +37,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -4943,27 +4941,6 @@ func TestHandleGuardrailEvent_GeneratedMultipleEvents(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Metric collection helpers shared by gateway tests that exercise legacy
 // compatibility readers. Live v8 producers use generatedMetricByName.
-
-func findMetric(rm metricdata.ResourceMetrics, name string) *metricdata.Metrics {
-	for _, sm := range rm.ScopeMetrics {
-		for i := range sm.Metrics {
-			if sm.Metrics[i].Name == name {
-				return &sm.Metrics[i]
-			}
-		}
-	}
-	return nil
-}
-
-func counterByAttr(sum metricdata.Sum[int64], key, val string) int64 {
-	for _, dp := range sum.DataPoints {
-		v, ok := dp.Attributes.Value(attribute.Key(key))
-		if ok && v.AsString() == val {
-			return dp.Value
-		}
-	}
-	return 0
-}
 
 // ---------------------------------------------------------------------------
 // Guardrail evaluate endpoint tests

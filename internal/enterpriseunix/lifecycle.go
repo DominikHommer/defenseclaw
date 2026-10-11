@@ -754,7 +754,6 @@ type plan struct {
 	dirs           []desiredDir
 	files          []desiredFile
 	binaries       []desiredFile
-	createdDirs    []string
 	stale          []string
 	systemd        int
 	installedAt    string

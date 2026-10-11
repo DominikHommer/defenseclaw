@@ -2145,52 +2145,6 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
-func readMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		MCP map[string]struct {
-			Type        string            `json:"type"`
-			Command     []string          `json:"command"`
-			Environment map[string]string `json:"environment"`
-			URL         string            `json:"url"`
-		} `json:"mcp"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	entries := make([]MCPServerEntry, 0, len(doc.MCP))
-	for name, cfg := range doc.MCP {
-		kind := strings.ToLower(strings.TrimSpace(cfg.Type))
-		if kind == "remote" || (kind == "" && cfg.URL != "" && len(cfg.Command) == 0) {
-			entries = append(entries, MCPServerEntry{
-				Name:      name,
-				URL:       cfg.URL,
-				Transport: "remote",
-			})
-			continue
-		}
-		command := ""
-		var args []string
-		if len(cfg.Command) > 0 {
-			command = cfg.Command[0]
-			if len(cfg.Command) > 1 {
-				args = cfg.Command[1:]
-			}
-		}
-		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   command,
-			Args:      args,
-			Env:       cfg.Environment,
-			Transport: "local",
-		})
-	}
-	return entries, nil
-}
-
 func readMCPServersAMP(workspaceDir string) ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
 	cwd := strings.TrimSpace(workspaceDir)

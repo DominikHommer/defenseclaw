@@ -843,18 +843,6 @@ type hookV8MetricRecordBuilder func(
 	observability.FamilyEnvelopeInput,
 ) (observability.Record, error)
 
-func newHookV8MetricBatchItem(
-	ctx context.Context,
-	observedAt time.Time,
-	meta llmEventMeta,
-	family observability.EventName,
-	buildRecord hookV8MetricRecordBuilder,
-) observabilityruntime.GeneratedMetricBatchItem {
-	return newHookV8MetricBatchItemForProducer(
-		ctx, observedAt, meta, hookModelV8Producer, family, buildRecord,
-	)
-}
-
 func newHookV8MetricBatchItemForProducer(
 	ctx context.Context,
 	observedAt time.Time,

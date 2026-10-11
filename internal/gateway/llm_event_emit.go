@@ -122,34 +122,6 @@ func (m llmEventMeta) reportedToolID() string {
 	return ""
 }
 
-func agentPhaseCodePointer(meta llmEventMeta) *int {
-	if strings.TrimSpace(meta.Phase) == "" {
-		return nil
-	}
-	value := gatewaylog.AgentPhaseCode(meta.Phase)
-	return &value
-}
-
-func agentDepthPointer(meta llmEventMeta) *int {
-	if strings.TrimSpace(meta.AgentID) == "" {
-		return nil
-	}
-	value := meta.AgentDepth
-	return &value
-}
-
-func agentReportedCostPointer(meta llmEventMeta) *float64 {
-	if !meta.ReportedCost {
-		return nil
-	}
-	value := meta.ReportedCostUSD
-	return &value
-}
-
-func boolPointer(value bool) *bool {
-	return &value
-}
-
 func (a *APIServer) emitLLMPromptEventV8(ctx context.Context, meta llmEventMeta, prompt string, rawRequestBody []byte) string {
 	if a == nil {
 		return ""
@@ -360,16 +332,6 @@ func (r *EventRouter) emitLLMPromptEventV8(
 		return promptID
 	}
 	return emitLLMPromptEventV8WithEmitter(ctx, emitter, meta, prompt, rawRequestBody)
-}
-
-func (r *EventRouter) emitLLMResponseEventV8(
-	ctx context.Context,
-	meta llmEventMeta,
-	response, rawResponseBody string,
-	finishReasons []string,
-) string {
-	responseID, _, _, _ := r.emitLLMResponseEventV8Correlated(ctx, meta, response, rawResponseBody, finishReasons)
-	return responseID
 }
 
 func (r *EventRouter) emitLLMResponseEventV8Correlated(
@@ -1426,8 +1388,6 @@ const hookPromptCacheMaxEntries = 8192
 // cache and the eventual OTLP span attribute.
 const hookLLMSpanMaxContentBytes = 32 * 1024
 
-const hookLLMSpanMissingInput = "input unavailable: prompt hook was not observed in this gateway process"
-
 type hookLLMSpanPrompt struct {
 	meta          llmEventMeta
 	content       string
@@ -1717,8 +1677,6 @@ func (a *APIServer) prepareHookLifecycleTransition(meta llmEventMeta) (llmEventM
 	)
 	return meta, true
 }
-
-const hookSessionStartedOutput = "Live session started. Child operations stream as they complete."
 
 func hookSessionStateKey(meta llmEventMeta) string {
 	source := strings.TrimSpace(meta.Source)
@@ -2567,21 +2525,6 @@ func putBoundedHookLLMSpanPrompt(
 		*order = append(*order, key)
 	}
 	m[key] = value
-}
-
-func putBoundedHookLLMSpanCompletion(m map[string]struct{}, order *[]string, key string) {
-	if _, exists := m[key]; exists {
-		return
-	}
-	for len(m) >= hookPromptCacheMaxEntries && len(*order) > 0 {
-		oldest := (*order)[0]
-		*order = (*order)[1:]
-		if _, stillThere := m[oldest]; stillThere {
-			delete(m, oldest)
-		}
-	}
-	m[key] = struct{}{}
-	*order = append(*order, key)
 }
 
 func putBoundedStructKey(m map[string]struct{}, order *[]string, key string, maxEntries int) {

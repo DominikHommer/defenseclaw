@@ -271,8 +271,6 @@ type APIServer struct {
 	llmPromptBySourceSessionTurnOrder []string
 	hookLLMSpanPrompts                map[string]hookLLMSpanPrompt
 	hookLLMSpanPromptOrder            []string
-	hookLLMSpanCompleted              map[string]struct{}
-	hookLLMSpanCompletedOrder         []string
 	hookLLMSpanUsage                  map[string]hookLLMSpanUsage
 	hookLLMSpanUsageOrder             []string
 	hookLifecycleTransitions          map[string]struct{}

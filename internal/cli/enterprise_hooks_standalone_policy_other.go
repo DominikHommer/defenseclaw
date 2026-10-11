@@ -28,8 +28,6 @@ func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer
 func enterpriseHookStandalonePlatformFinish(context.Context, io.Writer, []enterpriseHookReconcileRow, time.Time) {
 }
 
-func pruneWindowsStandalonePerUserEnrollments(enterprisehooks.Manifest, string) error { return nil }
-
 func enterpriseHookStandalonePlatformRevokeUsers(context.Context, io.Writer, enterprisehooks.Manifest) error {
 	return nil
 }

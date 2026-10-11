@@ -542,16 +542,10 @@ func normalizeConnectorTelemetrySource(source string) string {
 }
 
 type otelTokenUsage struct {
-	operationName string
-	providerName  string
-	model         string
-	agentName     string
-	sessionID     string
-	tokenType     string
-	tokens        int64
-	cumulative    bool
-	seriesKey     string
-	startTime     string
+	tokens     int64
+	cumulative bool
+	seriesKey  string
+	startTime  string
 }
 
 type otlpCumulativePoint struct {

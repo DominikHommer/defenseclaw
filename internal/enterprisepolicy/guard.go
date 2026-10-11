@@ -678,14 +678,6 @@ func truncate(value string, limit int) string {
 	return value[:limit] + "…"
 }
 
-// readGuardFile reads a user or project file without following links or
-// blocking. Anything at the path that is not a regular file (a FIFO a
-// background writer feeds, a device, a socket, a directory) exists but
-// cannot be verified, so the guard and the cleanup fail closed on it.
-func readGuardFile(path string) ([]byte, bool, error) {
-	return readGuardFileLimit(path, guardFileLimit)
-}
-
 func readGuardFileLimit(path string, limit int64) ([]byte, bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -129,16 +129,6 @@ func (l *Logger) SetRuntimeV8Emitter(emitter RuntimeV8Emitter) {
 	}
 }
 
-func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
-	if l == nil {
-		return nil
-	}
-	l.mu.RLock()
-	emitter := l.runtimeV8
-	l.mu.RUnlock()
-	return emitter
-}
-
 type runtimeV8Binding struct {
 	emitter                     RuntimeV8Emitter
 	logBatch                    RuntimeV8LogBatchEmitter
@@ -660,10 +650,6 @@ func redactCredentialFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, sensitiveFindingRedactionPrefix)
 }
 
-func isSensitiveFindingRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, sensitiveFindingRedactionPrefix)
-}
-
 func redactFindingValueWithPrefix(value, prefix string) string {
 	if strings.TrimSpace(value) == "" || isFindingRedactionPlaceholder(value, prefix) {
 		return value
@@ -750,10 +736,6 @@ func canonicalizeSensitiveFindingMetadata(finding *scanner.Finding) {
 
 func redactPIIFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, piiFindingRedactionPrefix)
-}
-
-func isPIIRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, piiFindingRedactionPrefix)
 }
 
 func redactPIIFindingDecisionPath(finding *scanner.Finding) {
@@ -1236,21 +1218,6 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 // sink resources in v8.
 func (l *Logger) Close() {
 	l.SetRuntimeV8Emitter(nil)
-}
-
-func inferTargetType(scannerName string) string {
-	switch scannerName {
-	case "mcp-scanner", "mcp_scanner":
-		return "mcp"
-	case "skill-scanner", "skill_scanner":
-		return "skill"
-	case "codeguard", "aibom", "aibom-claw",
-		"clawshield-vuln", "clawshield-secrets", "clawshield-pii",
-		"clawshield-malware", "clawshield-injection":
-		return "code"
-	default:
-		return "unknown"
-	}
 }
 
 func inferAssetTypeFromAction(action, details string) string {

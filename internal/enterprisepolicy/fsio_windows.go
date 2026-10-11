@@ -903,10 +903,6 @@ func openGuardFileFollow(path string) (*os.File, error) {
 	return os.Open(path)
 }
 
-// adminOwnedFile is not derived on Windows: every referenced file is bound
-// by content.
-func adminOwnedFile(os.FileInfo) bool { return false }
-
 // systemBoundFile is never true on Windows (adminOwnedFile).
 func systemBoundFile(string, os.FileInfo) bool { return false }
 

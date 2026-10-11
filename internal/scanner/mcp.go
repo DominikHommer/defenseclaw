@@ -462,7 +462,6 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 				ExitCode:   -1,
 			}
 			scanErr = err
-			exitCode = -1
 			return result, scanErr
 		}
 	}

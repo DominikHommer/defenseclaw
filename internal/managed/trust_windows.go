@@ -265,10 +265,6 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 	return nil
 }
 
-func validateTrustedWindowsPathElement(path string, wantDir bool, label string) error {
-	return validateTrustedWindowsPathElementWithWriter(path, wantDir, label, nil, false)
-}
-
 func validateTrustedWindowsPathElementWithWriter(
 	path string,
 	wantDir bool,

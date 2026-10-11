@@ -4712,21 +4712,6 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 	)
 }
 
-// processNames is kept for backward compatibility with existing
-// callers and tests that only care about the process basename. The
-// new code path (detectProcesses) uses processSnapshot() instead.
-func processNames() ([]string, error) {
-	infos, err := processSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(infos))
-	for _, p := range infos {
-		out = append(out, p.Comm)
-	}
-	return out, nil
-}
-
 // processCommExactlyEquals reports whether `have` is byte-for-byte
 // equal (after path-stripping and case-folding) to `want`. The
 // confidence engine uses this to distinguish "exact" matches (which

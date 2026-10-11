@@ -2390,14 +2390,6 @@ func codexOtelEnvironment(opts SetupOpts) string {
 	return "dev"
 }
 
-func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
-	block, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
-	if err != nil {
-		return map[string]interface{}{}
-	}
-	return block
-}
-
 func codexNativeNotifyCommand() []string {
 	return []string{defenseclawHookBinary(), "notify"}
 }

@@ -427,7 +427,6 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := validateManagedRoot(filepath.Dir(maintenancePath)); err != nil {
 		return 1, err
 	}
-	hadInstall := pathExists(installRoot)
 	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil &&
 		!errors.Is(err, errUninstallCleanupRequiresRestart) {
 		return retryRequiredCode, err
@@ -453,7 +452,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return 1, err
 	}
 	// Recovery may publish, restore, or remove a transaction-owned tree.
-	hadInstall = pathExists(installRoot)
+	hadInstall := pathExists(installRoot)
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
@@ -2331,10 +2330,6 @@ func packagedTargetRuntimeEnv(input []string, root, dataRoot string) []string {
 		"DEFENSECLAW_INSTALL_ROOT="+root,
 		"DEFENSECLAW_GATEWAY_BIN="+filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
 	)
-}
-
-func startGateway(gatewayPath, dataRoot string) error {
-	return startGatewayWithEnv(gatewayPath, managedChildEnv(dataRoot))
 }
 
 func startGatewayWithEnv(gatewayPath string, env []string) error {

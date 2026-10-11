@@ -56,12 +56,11 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 	// the most common PreToolUse-equivalent so profile runtimes take
 	// a recognised codepath, not the dispatch fallback.
 	type wireShape struct {
-		connector       string
-		event           string
-		toolName        string
-		topLevelOutput  string // expected top-level JSON output key
-		expectAction    string
-		additionalAttrs map[string]string
+		connector      string
+		event          string
+		toolName       string
+		topLevelOutput string // expected top-level JSON output key
+		expectAction   string
 		// name distinguishes a second wire shape for the same connector.
 		name string
 		// argMetadata is merged into the Antigravity tool arguments.

@@ -31,9 +31,6 @@ import (
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
-// ledgerFreshness mirrors the gateway's guardian authorization window.
-const ledgerFreshness = 5 * time.Minute
-
 // codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
 const codeUnitFailed = "unit_failed"
 
