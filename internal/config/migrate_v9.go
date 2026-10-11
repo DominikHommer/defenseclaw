@@ -2519,13 +2519,17 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 	if len(plan.Expressed) > 0 {
 		// GAP-1344: 0.8.x matched the literal anywhere in the tool call's
 		// arguments; say how far the 1.0 expression follows that.
-		expressed = fmt.Sprintf("these got an expression that blocks a tool call with a command argument that "+
-			"starts or ends with their literal, or a file path or network host that contains it (as a whole word "+
-			"when the pattern has \\b); a literal inside a longer argument that is neither is only recorded "+
-			"(review it): %s", strings.Join(plan.Expressed, ", "))
+		// GAP-1469: the gateway also runs the literal over every parsed
+		// word of the call, quoted strings of a partly parsed call included.
+		expressed = fmt.Sprintf("these got an expression and block a tool call, as on 0.8.x, when a word of one of "+
+			"its commands (an argument, or a quoted string even inside a call DefenseClaw parses only in part, such "+
+			"as a .NET method call in PowerShell), a file path or a network host holds their literal (as a whole "+
+			"word when the pattern has \\b); text a tool writes, such as file content, is only recorded: %s",
+			strings.Join(plan.Expressed, ", "))
 		if len(plan.WholeArgument) > 0 {
 			expressed += fmt.Sprintf("; the pack's semantic cost budget left room only for a command argument "+
-				"equal to the literal for %s (turn off rules you do not need, then run the upgrade again)",
+				"equal to the literal for %s, which are argv-only: a longer argument or a quoted string that holds "+
+				"the literal is only recorded (turn off rules you do not need, then run the upgrade again)",
 				strings.Join(plan.WholeArgument, ", "))
 		}
 	}
@@ -2593,8 +2597,8 @@ func (m *v9Migrator) noteDetectionOnly(pack string, ids []string) {
 // of a custom pack changed: the rules that still block a tool call with an
 // expression derived from their literal pattern (and under which ID, for a
 // built-in rule they gave a pattern of their own, GAP-1314), the ones that
-// block only a command argument equal to the literal, and the alert-only
-// ones. `config migrate` prints them; the Python upgrade summary and doctor
+// block only a command argument equal to the literal (argv-only), and the
+// detection-only ones (GAP-1469). `config migrate` prints them; the Python upgrade summary and doctor
 // read the same record fields.
 func MigratedRuleLines(r MigrationRecord) []string {
 	was := map[string]string{}
@@ -2612,14 +2616,17 @@ func MigratedRuleLines(r MigrationRecord) []string {
 	var lines []string
 	for _, id := range r.ExpressedRules {
 		if slices.Contains(r.WholeArgumentRules, id) {
-			lines = append(lines, name(id)+": blocks only a command argument equal to its literal (the pack's "+
-				"semantic cost budget was full)")
+			lines = append(lines, name(id)+": argv-only, blocks only a command argument equal to its literal (the "+
+				"pack's semantic cost budget was full); a longer argument or a quoted string that holds it is only "+
+				"recorded")
 			continue
 		}
-		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert), with an expression derived from its literal pattern")
+		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert) when a command "+
+			"word, a quoted string in a command, a file path or a network host holds its literal; text a tool "+
+			"writes, such as file content, is only recorded")
 	}
 	for _, id := range r.DetectionOnlyRules {
-		lines = append(lines, name(id)+": alert-only for tool calls in 1.0 (its pattern is not a literal); "+
+		lines = append(lines, name(id)+": detection-only for tool calls in 1.0 (its pattern is not a literal); "+
 			"add an expression to block")
 	}
 	return lines
