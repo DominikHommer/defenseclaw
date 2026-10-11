@@ -132,6 +132,10 @@ func dispatchTrustedAction(
 	ctx := parent
 
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+	// After every lane below, on what it returns (GAP-1469).
+	defer func() {
+		findings = withTrustedLiteralWordFindings(generation, request, facts, findings)
+	}()
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -499,6 +503,98 @@ func dispatchTrustedAction(
 		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
 	)
 	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// withTrustedLiteralWordFindings blocks a tool call that a migrated 0.8.x
+// literal rule (guardrail.MigratedLiteralRule) matches as 0.8.x did, where
+// the rule pattern matches a parsed word of the call: an argv entry or
+// argument of one of its commands (a quoted string included), a redirect
+// target, a wrapper argument, a path or a network host. The expression of
+// such a rule matches only an argument that starts or ends with the literal
+// (a CEL substring test over every argument does not fit the cost budget),
+// and a call parsed only in part, such as a PowerShell .NET call
+// ([System.IO.File]::WriteAllText(path, "LITERAL")), never ran it, so the
+// rule was detection-only there (GAP-1469). The words are text of the call
+// whatever the parse could prove about them, and the literal is all such a
+// rule means, so the match is its proof. Text a tool writes (file content)
+// is not a word and stays detection-only.
+func withTrustedLiteralWordFindings(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
+	if generation == nil {
+		return findings
+	}
+	var words []string
+	collected := false
+	for _, candidate := range generation.semanticRules {
+		owner := candidate.owner
+		if !candidate.literalWords || owner.prerequisite != nil || owner.detectionOnly || owner.alertOnly {
+			continue
+		}
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return finding.RuleID == candidate.rule.ID
+		})
+		if index >= 0 && findings[index].contributesToEnforcement() {
+			continue
+		}
+		if !collected {
+			words, collected = trustedActionWords(facts), true
+		}
+		if !slices.ContainsFunc(words, candidate.rule.Pattern.MatchString) {
+			continue
+		}
+		finding := RuleFinding{
+			RuleID:     candidate.rule.ID,
+			Title:      candidate.rule.Title,
+			Severity:   candidate.rule.Severity,
+			Confidence: candidate.rule.Confidence,
+			Tags:       append([]string(nil), candidate.rule.Tags...),
+		}
+		if index >= 0 {
+			finding = findings[index]
+		} else {
+			finding = adjustConfidence(request.Input.Tool, finding)
+		}
+		finding.enforcement = findingEnforcementDetectionOnly
+		if request.EnforcementCapable {
+			finding.enforcement = findingEnforcementAllowed
+		}
+		finding = finding.withTrustedActionProof(newActionFactsSubgraphFindingProof(candidate.rule.ID, true, true))
+		if index >= 0 {
+			findings[index] = finding
+		} else {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+// trustedActionWords returns the parsed words of the commands of a call,
+// with its path values and network hosts.
+func trustedActionWords(facts actionfacts.Facts) []string {
+	var words []string
+	for _, command := range facts.Commands {
+		words = append(words, command.Argv...)
+		for _, argument := range command.Arguments {
+			words = append(words, argument.Value)
+		}
+		for _, redirect := range command.Redirects {
+			words = append(words, redirect.Target)
+		}
+		for _, wrapper := range command.Wrappers {
+			words = append(words, wrapper.Argv...)
+		}
+	}
+	for _, path := range facts.Paths {
+		words = append(words, path.Value)
+	}
+	for _, network := range facts.Network {
+		words = append(words, network.Host)
+	}
+	return words
 }
 
 // withTwinProvenBlocks returns findings, the finalized findings of a

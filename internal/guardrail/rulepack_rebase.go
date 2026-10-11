@@ -945,9 +945,14 @@ func literalPattern(pattern string) (literal string, before, after bool) {
 // 0.8.x (Go's ASCII \b) and still does: an argument must then start (\b
 // before), end (\b after) or be (both) the literal, and a path or host must
 // hold it as a word. A literal inside a longer argument that is neither a
-// path nor a URL (echo xLITERALy) is not matched; the rule's pattern still
-// records it. The whole-argument form (full false) matches only a command
-// argument equal to the literal.
+// path nor a URL (echo xLITERALy) is not matched by the expression: a CEL
+// substring test over every argument does not fit the semantic cost budget.
+// For a rule with the full form (MigratedLiteralRule) the gateway runs the
+// pattern itself over every parsed word of the commands of the call, so such
+// an argument, or a quoted string inside a call that is parsed only in part
+// ([System.IO.File]::WriteAllText(path, "LITERAL")), still blocks (GAP-1469).
+// The whole-argument form (full false) matches only a command argument
+// equal to the literal, and the gateway adds nothing to it.
 func literalRuleExpression(literal string, before, after, full bool) string {
 	quoted := "'" + literal + "'"
 	if !full {
@@ -974,6 +979,15 @@ func literalRuleExpression(literal string, before, after, full bool) string {
 	// A raw CEL string keeps the backslashes; the literal has no quote.
 	word = "r'" + word + "'"
 	return argument + " || f.paths.exists(p, p.value.matches(" + word + ")) || f.network.exists(n, n.host.matches(" + word + "))"
+}
+
+// MigratedLiteralRule reports whether expression is the full form the 0.8.x
+// rebase derives from pattern, a literal (literalRuleExpression). The
+// gateway then also blocks a tool call one of whose parsed command words,
+// paths or hosts pattern matches, as 0.8.x did (GAP-1469).
+func MigratedLiteralRule(pattern, expression string) bool {
+	literal, before, after := literalPattern(pattern)
+	return literal != "" && expression == literalRuleExpression(literal, before, after, true)
 }
 
 func yamlRulesSequence(document *yaml.Node) *yaml.Node {

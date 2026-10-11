@@ -731,11 +731,11 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	// GAP-1314: the upgrade output and doctor name every rule the rebase
 	// changed, and a renamed built-in by both of its IDs.
 	want := []string{
-		"CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its " +
-			"severity decides block or alert), with an expression derived from its literal pattern",
-		"CMD-ACME-MARKER: blocks only a command argument equal to its literal (the pack's semantic cost budget was full)",
-		"CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): alert-only for tool calls in 1.0 " +
-			"(its pattern is not a literal); add an expression to block",
+		// GAP-1469: what each one still blocks, and argv-only and
+		// detection-only by name.
+		"CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert) when a command word, a quoted string in a command, a file path or a network host holds its literal; text a tool writes, such as file content, is only recorded",
+		"CMD-ACME-MARKER: argv-only, blocks only a command argument equal to its literal (the pack's semantic cost budget was full); a longer argument or a quoted string that holds it is only recorded",
+		"CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only for tool calls in 1.0 (its pattern is not a literal); add an expression to block",
 	}
 	if got := MigratedRuleLines(result.Record); !slices.Equal(got, want) {
 		t.Errorf("rule lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
