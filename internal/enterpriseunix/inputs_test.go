@@ -14,10 +14,12 @@ package enterpriseunix
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // hookedServices runs a callback before the fake service manager stops or
@@ -338,6 +340,77 @@ func TestRejectedEditPushedAgainDuringTheRollbackRetriggersApply(t *testing.T) {
 	}
 	if !found || !hasWarning(failed, codeInputChanged) {
 		t.Fatalf("the apply trigger was not started for the same-byte push (%v): %+v", found, failed.Warnings)
+	}
+}
+
+// When the failed run is the apply trigger itself (the path unit runs
+// ensure --reason path), starting that oneshot again from inside it is a
+// no-op, so the same-byte push stayed unapplied (GAP-1412). The run
+// schedules one deferred start from a transient timer, with a growing delay,
+// and stops at the bound with a status line; a healthy run resets the count.
+func TestRejectedEditPushedAgainDuringTheTriggerRunIsRetriedBounded(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	applied := h.read(h.env.Layout.ConfigPath)
+	edit := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	push := func() {
+		tmp := configPath + ".push"
+		if err := os.WriteFile(tmp, edit, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, configPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sawOwn, pushed := false, false
+	h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+		if unit != unitGateway || pushed {
+			return
+		}
+		if h.read(h.env.Layout.ConfigPath) != applied {
+			sawOwn = true
+		} else if sawOwn {
+			pushed = true
+			push()
+		}
+	}}
+	h.env.SelfUnit = unitApplyService
+	h.healthy = false
+	push()
+	for attempt := 1; attempt <= maxApplyRetries+1; attempt++ {
+		sawOwn, pushed = false, false
+		before := len(h.runner.calls)
+		failed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireError(t, failed, codeActivate)
+		if !pushed {
+			t.Fatalf("premise: run %d reverted the edit and it was pushed again: %+v", attempt, failed.Warnings)
+		}
+		var scheduled []string
+		for _, call := range h.runner.calls[before:] {
+			if strings.HasPrefix(call, "systemd-run ") || strings.HasPrefix(call, "systemctl start") {
+				scheduled = append(scheduled, call)
+			}
+		}
+		limit := false
+		for _, warning := range failed.Warnings {
+			limit = limit || (warning.Code == codeInputChanged && strings.Contains(warning.Message, "retry limit reached"))
+		}
+		if attempt > maxApplyRetries {
+			if len(scheduled) != 0 || !limit {
+				t.Fatalf("run %d: retried past the bound (%v) or no retry-limit status: %v %+v", attempt, limit, scheduled, failed.Warnings)
+			}
+			continue
+		}
+		delay := fmt.Sprintf("--on-active=%ds", int(applyRetryDelay/time.Second)<<(attempt-1))
+		if len(scheduled) != 1 || !strings.Contains(scheduled[0], delay) || !strings.HasSuffix(scheduled[0], " systemctl start --no-block "+unitApplyService) || limit {
+			t.Fatalf("run %d: want one deferred apply start %s, got %v %+v", attempt, delay, scheduled, failed.Warnings)
+		}
+	}
+	h.healthy = true
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	if exists(h.env.applyRetryPath()) {
+		t.Fatal("a healthy apply kept the retry count")
 	}
 }
 
