@@ -6,6 +6,7 @@ package config
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,37 @@ func TestInstalledCredentialReferenceNamesTheJudgeKey(t *testing.T) {
 	}
 	if at := InstalledCredentialReference("config.yaml", raw, t.TempDir(), "unused"); at != "" {
 		t.Fatalf("unused key reference = %q, want none", at)
+	}
+}
+
+// GAP-1437: a standalone config that names no LLM credential has no LLM key,
+// and its AI Defense analyzers no key from cisco_ai_defense.api_key_env: a
+// DEFENSECLAW_LLM_KEY or AI Defense key the gateway service inherited never
+// stands in, so a plugin scan whose judge needs a key fails closed. Per-user
+// installs keep DEFENSECLAW_LLM_KEY and api_key_env.
+func TestStandaloneKeysIgnoreServiceEnvironment(t *testing.T) {
+	t.Setenv(DefenseClawLLMKeyEnv, "inherited-key")
+	t.Setenv("P0_AID_KEY_ENV", "inherited-aid")
+	const doc = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"llm:\n  model: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0\ncisco_ai_defense:\n  api_key_env: P0_AID_KEY_ENV\n"
+	loaded, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"guardrail.judge", "scanners.plugin", "scanners.skill", "scanners.mcp"} {
+		if got := loaded.ResolveLLM(role).ResolvedAPIKey(); got != "" {
+			t.Fatalf("standalone ResolveLLM(%q) without a credential = %q, want no key", role, got)
+		}
+	}
+	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "" {
+		t.Fatalf("standalone AI Defense key = %q, want none from the environment", got)
+	}
+
+	perUser := Config{LLM: LLMConfig{Model: "openai/gpt-4o-mini"}, CiscoAIDefense: CiscoAIDefenseConfig{APIKeyEnv: "P0_AID_KEY_ENV"}}
+	if got := perUser.ResolveLLM("scanners.plugin").ResolvedAPIKey(); got != "inherited-key" {
+		t.Fatalf("per-user key = %q, want DEFENSECLAW_LLM_KEY", got)
+	}
+	if got := perUser.CiscoAIDefense.ResolvedAPIKey(); got != "inherited-aid" {
+		t.Fatalf("per-user AI Defense key = %q, want api_key_env", got)
 	}
 }
