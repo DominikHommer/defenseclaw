@@ -317,16 +317,22 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
-		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
-			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
-			if !in.DryRun && !in.InMemory {
-				if err := m.finishPending(ctx, source, record); err != nil {
+		// A config.yaml changed since the commit (config set, the TUI,
+		// connector setup) still resumes the pre-9 Rego refresh; only the
+		// audit.db cleanup is tied to the committed bytes (GAP-1517).
+		if record, ok := readMigrationRecord(abs); ok && record.Pending {
+			committed := strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source))
+			switch {
+			case !in.DryRun && !in.InMemory:
+				if err := m.finishPending(ctx, source, record, committed); err != nil {
 					return result, err
 				}
 				result.Written = append(result.Written, MigrationRecordPath(abs))
 				record.Pending = false
+				result.Record = record
+			case committed:
+				result.Record = record
 			}
-			result.Record = record
 		}
 		return result, nil
 	}
@@ -387,7 +393,11 @@ func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
 // remains pending for an operator to resolve. So does a module the gateway
 // loads that still reads data.json (GAP-1497): the gateway refuses such a
 // bundle, and the input-based modules of the operator stop applying with it.
-func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord) error {
+// committed says config.yaml still holds the bytes the migration committed.
+// When it changed since, the row cleanup does not run (a later decision may
+// differ from the snapshot); the record then stays pending, with an error,
+// only while a moved operator row is still in audit.db (GAP-1517).
+func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord, committed bool) error {
 	configPath := m.configPath
 	txn, err := cfgtxn.Begin(ctx, configPath, 0)
 	if err != nil {
@@ -406,16 +416,21 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 		latest.ResultSHA256 != record.ResultSHA256 {
 		return errors.New("config: pending migration record changed while finishing config_version 9; run it again")
 	}
-	if latest.ActionsRowsMoved > 0 && latest.AuditCleanup == nil {
-		return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
-	}
-	if cleanup := latest.AuditCleanup; cleanup != nil && !cleanup.Skipped {
-		if len(cleanup.Rows) != latest.ActionsRowsMoved {
-			return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
+	rowsLeft := false
+	if committed {
+		if latest.ActionsRowsMoved > 0 && latest.AuditCleanup == nil {
+			return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
 		}
-		if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
-			return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+		if cleanup := latest.AuditCleanup; cleanup != nil && !cleanup.Skipped {
+			if len(cleanup.Rows) != latest.ActionsRowsMoved {
+				return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
+			}
+			if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
+				return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+			}
 		}
+	} else if rowsLeft, err = v9MovedRowsLeft(latest); err != nil {
+		return fmt.Errorf("config: read the migrated audit.db rows: %w", err)
 	}
 	unenforced, err := m.resumeRegoRefresh()
 	if err != nil {
@@ -426,8 +441,40 @@ func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record Mi
 			latest.UnenforcedRegoData = append(latest.UnenforcedRegoData, line)
 		}
 	}
-	latest.Pending = false
-	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+	latest.Pending = rowsLeft
+	if err := writeMigrationRecord(MigrationRecordPath(configPath), latest); err != nil {
+		return err
+	}
+	if rowsLeft {
+		return errors.New("config: config.yaml changed after the config_version 9 commit, so the cleanup of the " +
+			"audit.db rows it moved cannot resume and the migration stays pending; operator review is required")
+	}
+	return nil
+}
+
+// v9MovedRowsLeft reports whether an operator row the record moved to
+// config.yaml may still be in audit.db: its cleanup did not finish.
+func v9MovedRowsLeft(record MigrationRecord) (bool, error) {
+	cleanup := record.AuditCleanup
+	if cleanup == nil {
+		return record.ActionsRowsMoved > 0, nil
+	}
+	if cleanup.Skipped || len(cleanup.Rows) == 0 {
+		return false, nil
+	}
+	if _, err := os.Stat(cleanup.Path); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	rows, err := readV9ActionRows(cleanup.Path)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if slices.ContainsFunc(cleanup.Rows, func(p MigrationAuditCleanupRow) bool { return p.ID == row.id }) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // resumeRegoRefresh runs the pre-9 Rego module refresh again for a commit that

@@ -2508,6 +2508,66 @@ func TestMigrateV9RetryRefreshesPreNineRego(t *testing.T) {
 	}
 }
 
+// A refresh that failed after config.yaml committed left the record pending.
+// When config.yaml changed before the retry (config set, the TUI, connector
+// setup), the retry still refreshes the pre-9 module: only the audit.db
+// cleanup is tied to the committed bytes. It fails, naming the module, while
+// the refresh cannot run, and does nothing once complete (GAP-1517).
+func TestMigrateV9RetryRefreshesPreNineRegoAfterAConfigChange(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	rego := filepath.Join(dir, "policies", "rego")
+	admission := filepath.Join(rego, "admission.rego")
+	legacy := "package defenseclaw.admission\nimport rego.v1\nverdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	if err := os.MkdirAll(filepath.Join(admission+DataJSONMigratedSuffix, "obstruction"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(admission, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, in := context.Background(), MigrateV9Input{ConfigPath: configPath}
+	if _, err := MigrateV9(ctx, in); err == nil || !strings.Contains(err.Error(), admission) {
+		t.Fatalf("the migration did not name the module it could not refresh: %v", err)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || !record.Pending {
+		t.Fatalf("the record completed with the pre-9 module active: %+v", record)
+	}
+	committed, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, append(committed, "# changed after the commit\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(ctx, in); err == nil || !strings.Contains(err.Error(), admission) {
+		t.Fatalf("the retry after a config change did not name the module it could not refresh: %v", err)
+	}
+	if err := os.RemoveAll(admission + DataJSONMigratedSuffix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(ctx, in); err != nil {
+		t.Fatalf("retry after a config change: %v", err)
+	}
+	if got, _ := os.ReadFile(admission); strings.Contains(string(got), "data.actions") {
+		t.Fatalf("the retry after a config change left the pre-9 admission.rego: %q", got)
+	}
+	if kept, _ := os.ReadFile(admission + DataJSONMigratedSuffix); string(kept) != legacy {
+		t.Errorf("the pre-9 admission.rego was not kept as %s: %q", DataJSONMigratedSuffix, kept)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
+		t.Fatalf("the retry after a config change did not complete the record: %+v", record)
+	}
+	result, err := MigrateV9(ctx, in)
+	if err != nil || len(result.Written) != 0 {
+		t.Fatalf("second retry: written %v, err %v", result.Written, err)
+	}
+}
+
 // A rule the operator added to a 0.8.x vendor module is not in the shipped
 // module that replaces it, even when it reads only the standard data.actions.
 // The record names the module and its saved copy; an unedited vendor copy is
