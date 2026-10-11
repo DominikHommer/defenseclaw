@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
@@ -310,10 +311,15 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 		return nil, false
 	}
 	if !filepath.IsAbs(literal) {
-		if !filepath.IsAbs(cwd) {
+		if !filepath.IsAbs(cwd) || runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
 			return nil, false
 		}
-		literal = filepath.Join(cwd, literal)
+		if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
+			// A rooted path uses the current drive or UNC share on Windows.
+			literal = filepath.VolumeName(cwd) + literal
+		} else {
+			literal = filepath.Join(cwd, literal)
+		}
 	}
 	return append(paths, filepath.Clean(literal)), true
 }

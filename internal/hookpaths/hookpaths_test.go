@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -81,6 +82,10 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 }
 
 func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
+	cwd, want := "", "/tmp/notes.txt"
+	if runtime.GOOS == "windows" {
+		cwd, want = "C:\\work", "C:\\tmp\\notes.txt"
+	}
 	envelope := "*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch"
 	for _, command := range []string{
 		"apply_patch <<'PATCH'\n" + envelope + "\nPATCH",
@@ -89,9 +94,23 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		"echo '" + envelope + "' | apply_patch",
 		"@'\n" + envelope + "\n'@ | apply_patch",
 	} {
-		targets, ok := ApplyPatchWriteTargets("Bash", nil, command, "", "")
-		if !ok || len(targets) != 1 || targets[0] != "/tmp/notes.txt" {
+		targets, ok := ApplyPatchWriteTargets("Bash", nil, command, cwd, "")
+		if !ok || len(targets) != 1 || targets[0] != want {
 			t.Errorf("%q: targets %v, known %v", command, targets, ok)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, path := range []string{"C:/tmp/notes.txt", "\\\\server\\share\\notes.txt"} {
+			envelope := "*** Begin Patch\n*** Update File: " + path + "\n@@\n+x\n*** End Patch"
+			targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, "", "")
+			if !ok || len(targets) != 1 || targets[0] != filepath.Clean(path) {
+				t.Errorf("%q: targets %v, known %v", path, targets, ok)
+			}
+		}
+		// A drive-relative path depends on per-drive process state, not cwd.
+		envelope := "*** Begin Patch\n*** Update File: C:notes.txt\n@@\n+x\n*** End Patch"
+		if targets, ok := ApplyPatchWriteTargets("apply_patch", nil, envelope, cwd, ""); ok || len(targets) != 0 {
+			t.Errorf("drive-relative target: targets %v, known %v", targets, ok)
 		}
 	}
 }
