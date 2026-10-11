@@ -5982,3 +5982,26 @@ func TestWindowsRedirectFactProjectionLimit(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1415: Codex on Windows ran the first script. What follows the New-Item
+// statement (a pipeline to Out-Null, a compound if/else, a call operator or a
+// comment) must not take the statement, or the path of its own analysis, out
+// of the view.
+func TestPowerShellScriptSubsetKeepsLeadingStatementFacts(t *testing.T) {
+	t.Parallel()
+	const target = `C:\Users\Public\rv17u\rv17w-block-marker.txt`
+	statement := `New-Item -ItemType File -Path '` + target + `' -Force`
+	for _, script := range []string{
+		statement + ` | Out-Null; if (Test-Path -LiteralPath '` + target + `') { 'worked' } else { 'failed' }`,
+		statement + `; & 'C:\tools\check.exe' # verify`,
+	} {
+		input := Input{Tool: "shell", Command: script, CWD: `C:\Users\rv17u`, DialectHint: DialectPowerShell}
+		facts := Analyze(input)
+		view, ok := PowerShellCommandSubsetReduction(input, facts)
+		if facts.Authoritative() || !ok || len(view.Commands) != 1 || view.Commands[0].Program != "new-item" ||
+			!view.EnforcementEligible() ||
+			!slices.ContainsFunc(view.Paths, func(p PathFact) bool { return p.CommandID == 1 && p.Value == target }) {
+			t.Errorf("%s: view %v %+v", script, ok, view)
+		}
+	}
+}

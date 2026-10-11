@@ -205,6 +205,9 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		{tool: "Bash", command: "New-Item -ItemType File -Name dccert-block-marker.txt -Force | Out-Null", rule: "CERT-MARKER", blocked: true, powerShell: true},
 		{tool: "Bash", command: "$null = New-Item -Path . -Name dccert-block-marker.txt; Get-Item x", rule: "CERT-MARKER", blocked: true, powerShell: true},
 		{tool: "Bash", command: "echo dccert-block-marker > m.txt", rule: "CERT-MARKER", blocked: true, powerShell: true},
+		// The script Codex ran: a pipeline and a compound if/else after the
+		// New-Item statement, whose own path holds the literal.
+		{tool: "Bash", command: `New-Item -ItemType File -Path 'C:\Users\Public\rv17u\dccert-block-marker.txt' -Force | Out-Null; if (Test-Path -LiteralPath 'C:\Users\Public\rv17u\dccert-block-marker.txt') { 'worked' } else { 'failed' }`, rule: "CERT-MARKER", blocked: true, powerShell: true},
 	} {
 		input := actionfacts.Input{
 			Tool: tc.tool, Command: tc.command, CWD: "/home/alice/project",
