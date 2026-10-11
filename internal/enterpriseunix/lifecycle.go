@@ -170,6 +170,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
+	// configACLWritable is set when a transaction removed a macOS ACL entry
+	// that let another account write config.yaml after the plan checked it:
+	// bytes that changed since are not applied (GAP-1501).
+	configACLWritable bool
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.
 	machinePolicyPublished bool
@@ -1377,8 +1381,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// this transaction wrote its own (a push during activation) would
 			// be lost to the snapshot restore, so it is kept and put back
 			// after the restart like one applyFiles kept.
-			current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
-			if err == nil && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
+			// Not one another account could write (GAP-1501).
+			current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath))
+			if err == nil && problem == "" && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
 				l.configWrittenDuringRun = current
 			}
 		}
@@ -1457,7 +1462,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.clearStaleHookSocket(account)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
-		return failAndRollback(codeApply, err)
+		return failAndRollback(errorCode(err, codeApply), err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -1812,6 +1817,35 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	changed := map[string]bool{}
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
 		current, _ := sha256File(env.P(file.Path))
+		// config.yaml is checked again as it is applied: the plan checked
+		// who could write it, but a push can loosen its mode before this
+		// point, and restoring the managed owner and mode of bytes another
+		// account wrote since made the follow-up transaction trust them as
+		// administrator policy (GAP-1501).
+		var checked []byte
+		untrusted := ""
+		if file.Kind == "config" {
+			data, problem, err := env.readConfigChecked(env.P(file.Path))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			current, checked, untrusted = "", data, problem
+			if data != nil {
+				current = sha256Bytes(data)
+			}
+			if untrusted == "" && l.configACLWritable {
+				untrusted = "a macOS ACL entry let another account write it"
+			}
+		}
+		if current == file.SHA && untrusted != "" {
+			// The planned bytes: a new file holds them, so a descriptor the
+			// other account opened writes nowhere.
+			if err := env.writeFileAtomic(env.P(file.Path), checked, file.Mode, file.Owner); err != nil {
+				return nil, err
+			}
+			l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", file.Path, untrusted)
+			continue
+		}
 		if current == file.SHA {
 			if l.reportChanges && env.metadataDiffers(env.P(file.Path), file.Mode, file.Owner) {
 				l.noteChange("restored the mode and owner of %s", file.Path)
@@ -1826,8 +1860,12 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 		// stays and a follow-up transaction applies it (input_changed). The
 		// run overwrote it with its own file and nothing warned (GAP-0745).
 		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
+		if (file.KeepContent || written) && untrusted != "" {
+			return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+				file.Path, untrusted, env.lifecycleCommand(ActionEnsure))}
+		}
 		if written {
-			l.configWrittenDuringRun, _ = readBounded(env.P(file.Path), maxInputBytes)
+			l.configWrittenDuringRun = checked
 		}
 		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the
@@ -2423,6 +2461,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removed hook back within its debounce and the users are left with
 	// registrations naming a binary this uninstall deletes. The gateway and
 	// its sockets keep answering hooks until the registrations are gone.
+	// What ran and started at boot is recorded first: an uninstall that
+	// stops short of removing the deployment puts it back (GAP-1500).
+	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
+	for _, unit := range units {
+		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
+	}
 	for _, unit := range ordered {
 		if repairsRegistrations(unit) {
 			stopUnit(unit)
@@ -2473,16 +2518,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if perUserLeft || policyLeft {
-		disableKeptDefinitions()
 		// Some users' agents, or vendor machine policy that could not be
 		// withdrawn (GAP-1321), still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, so the agents run without enforcement and nothing is left
 		// to remove them: the binaries, the deployment record and the state
-		// stay, so a rerun of this uninstall removes the rest and ensure
-		// restores the deployment.
+		// stay, so a rerun of this uninstall removes the rest. The services
+		// the uninstall stopped start again as they were: left stopped, the
+		// gateway gave the retained hooks no decisions until an
+		// administrator ran ensure (GAP-1500).
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
+		}
+		if failed := l.restoreUninstallServices(ctx, units, wasActive, wasEnabled); len(failed) > 0 {
+			r.AddError(codeUninstall, "could not start the services this uninstall stopped again ("+strings.Join(failed, "; ")+"); run `"+env.lifecycleCommand(ActionEnsure)+"` to restore the deployment")
 		}
 		var holders []string
 		if perUserLeft {
@@ -2693,6 +2742,38 @@ func serviceAccountDeleteCommand(goos, name string) string {
 		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
 	}
 	return "`sudo userdel " + name + "`"
+}
+
+// restoreUninstallServices puts back the units an uninstall stopped, as
+// they were before it (wasActive, wasEnabled), in activation order, the way
+// a rollback does, and waits for the gateway. It returns what it could not
+// restore.
+func (l *lifecycle) restoreUninstallServices(ctx context.Context, units []Unit, wasActive, wasEnabled map[string]bool) []string {
+	env := l.env
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
+	var failed []string
+	for _, unit := range ordered {
+		if wasEnabled[unit.Name] {
+			if err := env.Services.Enable(ctx, unit); err != nil {
+				failed = append(failed, fmt.Sprintf("enable %s: %v", unit.Name, err))
+			}
+		}
+		// The run itself, and a queued apply run that waits for this one.
+		if !wasActive[unit.Name] || unit.Name == env.SelfUnit || unit.Name == unitApplyService {
+			continue
+		}
+		if err := env.Services.Start(ctx, unit); err != nil {
+			failed = append(failed, fmt.Sprintf("start %s: %v", unit.Name, err))
+			continue
+		}
+		if unit.Kind == "gateway" {
+			if err := l.waitGatewayReady(ctx, unit); err != nil {
+				failed = append(failed, err.Error())
+			}
+		}
+	}
+	return failed
 }
 
 // uninstallSummary says what a completed uninstall removed and kept, like

@@ -348,9 +348,17 @@ func (p failingRemovePolicy) RemoveAll() (enterprisepolicy.Result, error) {
 // GAP-1321: a failed machine policy removal left the vendor policy calling a
 // hook binary the uninstall then deleted, so the agent ran unguarded. The
 // binaries, record and state stay until a rerun can withdraw the policy.
+// GAP-1500: the gateway and its sockets stayed stopped and disabled, so the
+// retained hooks got no decisions; the services are put back as they were.
 func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ctx := context.Background()
+	running, enabled := map[string]bool{}, map[string]bool{}
+	for _, unit := range h.services.Units() {
+		running[unit.Name] = h.services.Active(ctx, unit)
+		enabled[unit.Name] = h.services.Enabled(ctx, unit)
+	}
 	fail := true
 	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
 	failed := h.run(Options{Action: ActionUninstall, Purge: true})
@@ -362,6 +370,15 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
 	if !exists(hook) || !exists(h.env.deploymentPath()) {
 		t.Fatal("the uninstall removed the hook binary the machine policy still names")
+	}
+	for _, unit := range h.services.Units() {
+		if h.services.Active(ctx, unit) != running[unit.Name] || h.services.Enabled(ctx, unit) != enabled[unit.Name] {
+			t.Errorf("%s: active %v enabled %v after the refused uninstall, was %v %v", unit.Name,
+				h.services.Active(ctx, unit), h.services.Enabled(ctx, unit), running[unit.Name], enabled[unit.Name])
+		}
+	}
+	if code, _, err := h.env.HealthGet(ctx); err != nil || code != 200 {
+		t.Fatalf("the gateway the retained hooks call is not ready: %d %v", code, err)
 	}
 	fail = false
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
