@@ -232,6 +232,31 @@ func TestManagedConfigRefusesJSONLFileOwnedByAnotherAccount(t *testing.T) {
 	}
 }
 
+// GAP-1484: an existing JSONL file is unreachable behind a folder the
+// gateway account cannot pass through, whatever the file's own owner.
+func TestManagedConfigRefusesExistingJSONLBehindClosedParent(t *testing.T) {
+	h := newTestHost(t, "linux")
+	parent := "/var/log/defenseclaw/private"
+	path := parent + "/events.jsonl"
+	if err := os.MkdirAll(h.env.P(parent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(path), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.accounts.Ensure(t.Context(), h.env.Layout.ServiceUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(parent)] = [2]int{0, 0}
+	h.owners[h.env.P(path)] = [2]int{account.UID, account.GID}
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	if got := installMessage(t, h, raw); !strings.Contains(got, `destination "events" writes `+path) ||
+		!strings.Contains(got, parent) || !strings.Contains(got, "cannot pass through") {
+		t.Fatalf("existing JSONL file behind a closed parent accepted or unclear refusal: %s", got)
+	}
+}
+
 // GAP-1146: a missing JSONL parent still needs a writable existing ancestor.
 func TestManagedConfigRefusesJSONLUnderUnwritableAncestor(t *testing.T) {
 	h := newTestHost(t, "linux")
