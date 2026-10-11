@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 // shellWord is one word of a command after quote removal. quoted records
@@ -60,6 +61,7 @@ func shellCommands(cmdline string) []shellCommand {
 type shellLexer struct {
 	commands  []shellCommand
 	pipelines int
+	truncated bool // a script nested past maxShellNesting was not read
 }
 
 type hereDocument struct {
@@ -69,6 +71,7 @@ type hereDocument struct {
 
 func (l *shellLexer) parse(script string, depth int) {
 	if depth > maxShellNesting {
+		l.truncated = true
 		return
 	}
 	var (
@@ -357,22 +360,42 @@ var shellKeywords = map[string]bool{
 
 var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
 
+// wrapperSwitches are the short options without a value that each command
+// wrapper takes, as letters. An option outside them and commandWrappers
+// leaves the wrapped program uncertain.
+var wrapperSwitches = map[string]string{
+	"sudo": "AbBEHKkNnPS", "doas": "ns", "env": "0iv", "command": "pVv", "exec": "cl",
+	"time": "apqv", "timeout": "v", "xargs": "0oprtx",
+}
+
 // commandProgram returns the program a simple command runs and its
 // arguments, past variable assignments, keywords and wrappers such as sudo,
 // env, nice or xargs.
 func commandProgram(words []shellWord) (string, []shellWord) {
+	program, args, _ := resolveProgram(words)
+	return program, args
+}
+
+// resolveProgram is commandProgram that also reports whether the program is
+// certain. It is not when a wrapper has an option it does not know (a long
+// option, an unknown letter, a value option ending a cluster) or when the
+// program or a wrapper option is a dynamic word ($VAR, $(...)).
+func resolveProgram(words []shellWord) (string, []shellWord, bool) {
+	certain := true
 	for index := 0; index < len(words); index++ {
 		word := words[index]
 		if !word.quoted && (shellKeywords[word.text] || shellAssignment.MatchString(word.text)) {
 			continue
 		}
 		program := programName(word.text)
+		certain = certain && !strings.Contains(word.text, "$")
 		valued, wrapper := commandWrappers[program]
 		if !wrapper {
-			return program, words[index+1:]
+			return program, words[index+1:], certain
 		}
 		for index+1 < len(words) && strings.HasPrefix(words[index+1].text, "-") {
 			index++
+			certain = certain && knownWrapperOption(program, words[index].text, valued)
 			if slices.Contains(valued, words[index].text) {
 				index++
 			}
@@ -381,7 +404,64 @@ func commandProgram(words []shellWord) (string, []shellWord) {
 			index++ // the duration
 		}
 	}
-	return "", nil
+	return "", nil, certain
+}
+
+// knownWrapperOption reports whether resolveProgram skips option of wrapper
+// exactly as the wrapper reads it.
+func knownWrapperOption(wrapper, option string, valued []string) bool {
+	letters := option[1:]
+	switch {
+	case option == "--":
+		return true
+	case letters == "":
+		return wrapper == "env" // env - is env -i
+	case letters[0] == '-' || strings.Contains(option, "$"):
+		return false
+	case wrapper == "nice" && strings.Trim(letters, "0123456789") == "":
+		return true // nice -5
+	}
+	for index := 0; index < len(letters); index++ {
+		if strings.IndexByte(wrapperSwitches[wrapper], letters[index]) >= 0 {
+			continue
+		}
+		if !slices.Contains(valued, "-"+letters[index:index+1]) {
+			return false
+		}
+		// A value option takes the rest of the word, or the next word when
+		// it stands alone (the only form resolveProgram skips past).
+		return index+1 < len(letters) || len(letters) == 1
+	}
+	return true
+}
+
+// RunsProgram reports whether a shell command line may run one of programs
+// (lowercased basenames without ".exe"): past assignments, keywords and
+// wrappers (env, sudo, nice, nohup, time, exec, command, ...), in lists,
+// pipelines and substitutions, and in the scripts handed to sh -c, eval,
+// PowerShell -Command and cmd /c. It fails closed: a command whose program
+// is uncertain, or a script nested past the limit, counts when one of its
+// words names one of programs.
+func RunsProgram(cmdline string, programs ...string) bool {
+	lexer := &shellLexer{}
+	lexer.parse(cmdline, 0)
+	names := func(text string) bool {
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
+		}) {
+			if slices.Contains(programs, programName(token)) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, command := range lexer.commands {
+		program, _, certain := resolveProgram(command.words)
+		if slices.Contains(programs, program) || !certain && names(joinWords(command.words, false)) {
+			return true
+		}
+	}
+	return lexer.truncated && names(cmdline)
 }
 
 // programName is a program's lowercased basename without ".exe".

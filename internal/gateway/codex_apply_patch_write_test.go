@@ -20,7 +20,7 @@ import (
 // A Codex apply_patch edit names its files in the patch envelope. Each one is
 // a write target with the same protected-path decision as a shell redirect,
 // also through a symlink, a hard link or a move, and in every wrapper shape
-// (GAP-1416).
+// (GAP-1416), also behind a command wrapper such as env (GAP-1428).
 func TestCodexApplyPatchWriteTargets(t *testing.T) {
 	root := t.TempDir()
 	home, project, external := filepath.Join(root, "home"), filepath.Join(root, "home", "proj"), filepath.Join(root, "external")
@@ -73,6 +73,7 @@ func TestCodexApplyPatchWriteTargets(t *testing.T) {
 		{"truncated", "apply_patch", command("*** Begin Patch\n" + update("notes.txt")), "", true},
 		{"edit tool path", "apply_patch", map[string]any{"path": symlink, "content": "x"}, symlink, true},
 		{"bash -c heredoc", "Bash", command("bash -lc \"apply_patch <<'PATCH'\n" + envelope(update("~/.ssh/authorized_keys")) + "\nPATCH\""), "", true},
+		{"env wrapper", "Bash", command("env apply_patch < draft.patch"), "", true},
 		{"here-string", "Bash", command("apply_patch <<< '" + envelope(update("hard.cfg")) + "'"), hardLink, true},
 		{"powershell wrapper", "shell", command("powershell -NoProfile -Command \"apply_patch @'\n" + envelope(update("$HOME/.ssh/authorized_keys")) + "\n'@\""), "", true},
 		// The protected path compares case-insensitively (Windows case forms).
