@@ -14,8 +14,10 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -36,11 +38,21 @@ const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 // rollback.
 const windowsEnterpriseActivationFileName = "activation-state.json"
 
+// windowsEnterpriseActivationMaxBytes bounds activation-state.json, which
+// holds a time for each account and connector enrolled after the install.
+const windowsEnterpriseActivationMaxBytes = 1 << 20
+
 type windowsEnterpriseActivationRecord struct {
 	ActivatedAt          string            `json:"activated_at,omitempty"`
 	Pending              bool              `json:"pending,omitempty"`
 	ConnectorActivatedAt map[string]string `json:"connector_activated_at,omitempty"`
 	PendingConnectors    []string          `json:"pending_connectors,omitempty"`
+	// EnrollmentActivatedAt dates each target (account and connector, keyed
+	// as windowsEnterpriseManifestRowKey) that a later change enrolled for
+	// an enabled connector: its sessions started earlier never read the
+	// hooks (GAP-1435).
+	EnrollmentActivatedAt map[string]string `json:"enrollment_activated_at,omitempty"`
+	PendingEnrollments    []string          `json:"pending_enrollments,omitempty"`
 }
 
 // Seams for the deployment record and the running agents; tests replace them.
@@ -57,6 +69,34 @@ var (
 	// action finished, after the lifecycle installed the hooks: an agent
 	// started while they were being installed did not read them (GAP-1352).
 	windowsEnterpriseActivationNow = time.Now
+	// windowsEnterpriseEnrolledTargets returns the targets the installed
+	// guardian manifest enrolls, keyed as windowsEnterpriseManifestRowKey.
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+		layout, err := managed.StandaloneWindowsLayout()
+		if err != nil {
+			return nil, err
+		}
+		manifest, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+		if err != nil {
+			return nil, err
+		}
+		targets := make(map[string]bool, len(manifest.Targets))
+		for _, target := range manifest.Targets {
+			if target.Enabled == nil || *target.Enabled {
+				targets[windowsEnterpriseManifestRowKey(target)] = true
+			}
+		}
+		return targets, nil
+	}
+	// windowsEnterpriseAccountSID resolves the account an agent process runs
+	// as to its SID, or "".
+	windowsEnterpriseAccountSID = func(account string) string {
+		sid, _, _, err := windows.LookupSID("", account)
+		if err != nil || sid == nil {
+			return ""
+		}
+		return sid.String()
+	}
 )
 
 // windowsEnterpriseStandaloneInstalled reports a standalone deployment that
@@ -150,6 +190,50 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			record.PendingConnectors = nil
 			writeRecord = true
 		}
+		// A change that enrolls an account for a connector already enabled
+		// leaves the connector set as it was; its targets show the account
+		// (GAP-1435). A newly enabled connector is dated above.
+		if current, err := windowsEnterpriseEnrolledTargets(); err == nil && opts.previousTargetsKnown {
+			enrolled := map[string]bool{}
+			for _, key := range record.PendingEnrollments {
+				if current[key] {
+					enrolled[key] = true
+				}
+			}
+			for key := range current {
+				_, connector, _ := strings.Cut(key, "\x00")
+				if !opts.previousTargets[key] && (!opts.previousConnectorsKnown || previous[connector]) {
+					enrolled[key] = true
+				}
+			}
+			for key := range record.EnrollmentActivatedAt {
+				if !current[key] {
+					delete(record.EnrollmentActivatedAt, key)
+					writeRecord = true
+				}
+			}
+			switch {
+			case len(enrolled) > 0 && !opts.noStart && result.Readiness.Gateway:
+				if record.EnrollmentActivatedAt == nil {
+					record.EnrollmentActivatedAt = map[string]string{}
+				}
+				for key := range enrolled {
+					record.EnrollmentActivatedAt[key] = activatedAt.Format(time.RFC3339Nano)
+				}
+				record.PendingEnrollments = nil
+				writeRecord = true
+			case len(enrolled) > 0:
+				record.PendingEnrollments = make([]string, 0, len(enrolled))
+				for key := range enrolled {
+					record.PendingEnrollments = append(record.PendingEnrollments, key)
+				}
+				sort.Strings(record.PendingEnrollments)
+				writeRecord = true
+			case len(record.PendingEnrollments) > 0:
+				record.PendingEnrollments = nil
+				writeRecord = true
+			}
+		}
 	}
 	if writeRecord {
 		data, err := json.Marshal(record)
@@ -160,21 +244,42 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
-	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 {
+	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 {
 		return
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
 	if err != nil {
 		return
 	}
+	// A session another warning of this run already names (the hot config
+	// path names those of a newly enabled connector) is not named twice.
+	var named []string
+	for _, warning := range result.Warnings {
+		if warning.Code == windowsAgentSessionsRestartCode {
+			named = append(named, warning.Message)
+		}
+	}
+	alreadyNamed := func(label string) bool {
+		for _, message := range named {
+			if strings.Contains(message, label) {
+				return true
+			}
+		}
+		return false
+	}
 	byUser := map[string][]string{}
 	connectorSessions := map[string]map[string][]string{}
+	enrollmentSessions := map[string]map[string][]string{}
+	sids := map[string]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
 		if user == "" || process.StartedAt.IsZero() || windowsServiceIdentity(user) {
 			continue
 		}
 		label := fmt.Sprintf("%s (pid %d)", process.Connector, process.PID)
+		if alreadyNamed(label) {
+			continue
+		}
 		if !activated.IsZero() && process.StartedAt.Before(activated) {
 			byUser[user] = append(byUser[user], label)
 			continue
@@ -183,14 +288,31 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		if currentErr != nil || !currentSet[name] {
 			continue
 		}
-		at, parseErr := time.Parse(time.RFC3339Nano, record.ConnectorActivatedAt[name])
-		if parseErr != nil || !process.StartedAt.Before(at) {
+		if at, parseErr := time.Parse(time.RFC3339Nano, record.ConnectorActivatedAt[name]); parseErr == nil && process.StartedAt.Before(at) {
+			if connectorSessions[user] == nil {
+				connectorSessions[user] = map[string][]string{}
+			}
+			connectorSessions[user][name] = append(connectorSessions[user][name], label)
 			continue
 		}
-		if connectorSessions[user] == nil {
-			connectorSessions[user] = map[string][]string{}
+		if len(record.EnrollmentActivatedAt) == 0 {
+			continue
 		}
-		connectorSessions[user][name] = append(connectorSessions[user][name], label)
+		sid, resolved := sids[user]
+		if !resolved {
+			sid = windowsEnterpriseAccountSID(user)
+			sids[user] = sid
+		}
+		if sid == "" {
+			continue
+		}
+		key := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: name})
+		if at, parseErr := time.Parse(time.RFC3339Nano, record.EnrollmentActivatedAt[key]); parseErr == nil && process.StartedAt.Before(at) {
+			if enrollmentSessions[user] == nil {
+				enrollmentSessions[user] = map[string][]string{}
+			}
+			enrollmentSessions[user][key] = append(enrollmentSessions[user][key], label)
+		}
 	}
 	users := make([]string, 0, len(byUser))
 	for user := range byUser {
@@ -219,11 +341,28 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				user, strings.Join(connectorSessions[user][name], ", "), record.ConnectorActivatedAt[name]))
 		}
 	}
+	users = users[:0]
+	for user := range enrollmentSessions {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		keys := make([]string, 0, len(enrollmentSessions[user]))
+		for key := range enrollmentSessions[user] {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+				"user %s runs %s, started before the account was enrolled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions",
+				user, strings.Join(enrollmentSessions[user][key], ", "), record.EnrollmentActivatedAt[key]))
+		}
+	}
 }
 
 func readWindowsEnterpriseActivation(path string) (windowsEnterpriseActivationRecord, time.Time) {
 	data, err := os.ReadFile(path)
-	if err != nil || len(data) > 4096 {
+	if err != nil || len(data) > windowsEnterpriseActivationMaxBytes {
 		return windowsEnterpriseActivationRecord{}, time.Time{}
 	}
 	var record windowsEnterpriseActivationRecord
