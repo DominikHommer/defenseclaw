@@ -47,3 +47,27 @@ func TestResolveHardLinkToAuthorizedKeys(t *testing.T) {
 		}
 	}
 }
+
+// A wrapper in front of apply_patch still runs it with a patch the hook
+// cannot read, so its targets are unknown; an unresolved wrapper that names
+// apply_patch fails closed too (GAP-1428).
+func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
+	for command, known := range map[string]bool{
+		"env apply_patch < draft.patch":              false,
+		"env FOO=1 apply_patch < draft.patch":        false,
+		"command apply_patch < draft.patch":          false,
+		"exec apply_patch < draft.patch":             false,
+		"nohup apply_patch < draft.patch":            false,
+		"time apply_patch < draft.patch":             false,
+		"nice -n 5 apply_patch < draft.patch":        false,
+		"sudo apply_patch < draft.patch":             false,
+		`sh -c "apply_patch < draft.patch"`:          false,
+		"sudo --user root apply_patch < draft.patch": false,
+		"time grep -rn apply_patch .":                true,
+		"env FOO=1 make test":                        true,
+	} {
+		if targets, ok := ApplyPatchWriteTargets("Bash", nil, command, "", ""); ok != known || len(targets) != 0 {
+			t.Errorf("%s: targets %v, known %v; want known %v", command, targets, ok, known)
+		}
+	}
+}

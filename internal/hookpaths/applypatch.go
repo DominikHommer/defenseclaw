@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 const (
@@ -174,16 +176,18 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 	return paths, envelopes, true
 }
 
-// invokesApplyPatch reports a shell text that runs apply_patch as a command
-// (first word of a line or after ; & | ( { or $( ). Its patch then comes from
-// a file or a pipe the hook cannot read.
+// invokesApplyPatch reports a shell text that may run apply_patch as a
+// command, also behind a wrapper (env, sudo, nice, nohup, time, exec,
+// command) or in a sh -c script. Its patch then comes from a file or a pipe
+// the hook cannot read. Each line is also read on its own, so a script fed
+// to a shell on stdin (a here-document body) counts too.
 func invokesApplyPatch(text string) bool {
-	segments := strings.FieldsFunc(text, func(r rune) bool {
-		return strings.ContainsRune("\n;&|(){}`", r)
-	})
-	for _, segment := range segments {
-		fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(segment), "$"))
-		if len(fields) != 0 && isApplyPatchToolName(strings.Trim(fields[0], `"'`)) {
+	names := []string{"apply_patch", "applypatch", "apply-patch"}
+	if tactics.RunsProgram(text, names...) {
+		return true
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if tactics.RunsProgram(line, names...) {
 			return true
 		}
 	}
