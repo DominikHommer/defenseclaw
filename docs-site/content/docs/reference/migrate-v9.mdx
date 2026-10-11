@@ -651,6 +651,26 @@ until you run `defenseclaw-gateway config migrate --ack`. Express those rules
 in `config.yaml` (`asset_policy`, `admission`) or in a module that reads
 `input`.
 
+If you edited `admission.rego` or `guardrail.rego`, the migration compares
+your copy with the module your 0.8.x release seeded. Rules you added to an
+otherwise unchanged copy, such as a block on a named skill, are kept in
+`custom-<name>-from-0.8.rego` beside the shipped module, in the same package.
+Their reads of `data.config.scan_on_install`,
+`data.config.allow_list_bypass_scan` and `data.actions` become the
+`input.admission` fields 1.0 fills with the same values. The upgrade and
+`config migrate` print one line for each such module:
+
+```text title="Upgrade output"
+✓ /home/<you>/.defenseclaw/policies/rego/admission.rego: the rules you added to the 0.8.x module (_is_blocked) are kept in /home/<you>/.defenseclaw/policies/rego/custom-admission-from-0.8.rego, which reads input.admission where they read data.json
+```
+
+A copy whose 0.8.x rules you changed or removed, or whose added rules read
+another `data.*` document or do not compile with the 1.0 module, is still
+replaced. The migration then lists it under `unenforced_rego_data` with the
+reason, and the upgrade, `config migrate` and doctor warn about it until you
+run `defenseclaw-gateway config migrate --ack`. Your copy stays as
+`<name>.rego.migrated-v9`.
+
 ### Custom providers
 
 The migration moves entries from a legacy `custom-providers.json` into
@@ -797,6 +817,7 @@ it with `defenseclaw config set` as shown above.
 | `config.generation.json` | The writer's record of the migration: actor `migration` and the reason `config_version 9 migration`. |
 | `.env` | Gains the VirusTotal key if `config.yaml` held it inline. |
 | `policies/rego/<name>.rego.migrated-v9` | A pre-9 Rego module that was replaced. |
+| `policies/rego/custom-<name>-from-0.8.rego` | The rules you added to a 0.8.x vendor module. This one is policy: the gateway loads it. |
 
 These are evidence, not policy: nothing reads them back. Keep them until you
 are sure you will not go back to 0.8.x, then delete them.
@@ -905,7 +926,8 @@ forward again. To stay on 0.8.x, go back by hand:
    ```
 
    The v9 migration can replace `admission.rego` and `guardrail.rego` and
-   retire `skill_actions.rego`. Move any module the upgrade saved in
+   retire `skill_actions.rego`. Remove any `custom-<name>-from-0.8.rego` it
+   wrote: your restored module already holds those rules. Move any module the upgrade saved in
    `~/.defenseclaw/backups/rego-<time>/` (such as `sandbox.rego`) back into
    `policies/rego` as well. If a saved copy is missing and the live
    module came from 1.0, restore that module from the matching 0.8.x policy

@@ -1,0 +1,295 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+package defenseclaw.admission
+
+import rego.v1
+
+# Admission gate: block → allow → scan_on_install bypass → scan → severity-based verdict.
+# Input fields:
+#   target_type   - "skill", "mcp", or "plugin"
+#   target_name   - name of the skill, MCP server, or plugin
+#   path          - filesystem path
+#   block_list    - array of {target_type, target_name, reason}
+#   allow_list    - array of {target_type, target_name, reason}
+#   scan_result   - optional {max_severity, total_findings, scanner_name, findings}
+#
+# Static data (data.json):
+#   config.allow_list_bypass_scan  - bool
+#   config.scan_on_install         - bool (when false, skip scan if no result present)
+#   actions.<SEVERITY>.runtime     - "block" or "allow"
+#   actions.<SEVERITY>.file        - "quarantine" or "none"
+#   actions.<SEVERITY>.install     - "block", "allow", or "none"
+#   scanner_overrides.<TYPE>.<SEVERITY> - per-scanner-type action overrides
+#   severity_ranking.<SEVERITY>    - int (CRITICAL=5 … INFO=1)
+
+default verdict := "scan"
+
+default reason := "awaiting scan"
+
+# --- Block list (highest priority) ---
+
+verdict := "blocked" if _is_blocked
+
+reason := sprintf("%s '%s' is on the block list", [input.target_type, input.target_name]) if {
+	verdict == "blocked"
+}
+
+# --- Explicit allow list (manual override; always skip scan) ---
+
+verdict := "allowed" if {
+	not _is_blocked
+	_is_explicit_allow_listed
+}
+
+reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
+	not _is_blocked
+	_is_explicit_allow_listed
+}
+
+# --- Policy-managed allow list (skip scan when configured) ---
+
+verdict := "allowed" if {
+	not _is_blocked
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
+	data.config.allow_list_bypass_scan == true
+}
+
+reason := sprintf("%s '%s' is on the allow list — scan skipped", [input.target_type, input.target_name]) if {
+	not _is_blocked
+	not _is_explicit_allow_listed
+	_is_policy_allow_listed
+	data.config.allow_list_bypass_scan == true
+}
+
+# --- scan_on_install disabled: skip scan when no result present ---
+
+verdict := "allowed" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	not _has_scan
+	data.config.scan_on_install == false
+}
+
+reason := "scan_on_install disabled — allowed without scan" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	not _has_scan
+	data.config.scan_on_install == false
+}
+
+# --- Scan: clean (no findings) ---
+
+verdict := "clean" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings == 0
+}
+
+reason := "scan clean" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings == 0
+}
+
+# --- Scan: rejected (severity triggers block) ---
+
+verdict := "rejected" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings > 0
+	_should_reject
+}
+
+reason := sprintf("max severity %s triggers block per policy", [input.scan_result.max_severity]) if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings > 0
+	_should_reject
+}
+
+# --- Scan: warning (findings present but below block threshold) ---
+
+verdict := "warning" if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings > 0
+	not _should_reject
+}
+
+reason := sprintf("findings present (max %s) — allowed with warning", [input.scan_result.max_severity]) if {
+	not _is_blocked
+	not _is_allow_bypassed
+	_has_scan
+	input.scan_result.total_findings > 0
+	not _should_reject
+}
+
+# --- Helper rules ---
+
+_is_blocked if {
+	some entry in input.block_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+}
+
+# F-0941: a manual allow entry must not be honored for a DIFFERENT on-disk
+# asset that merely reuses a previously-allowed NAME. When the stored entry
+# pins a ``source_path``, the request's ``input.path`` must match it (exact
+# normalised path, or a path-component containment so a re-rooted but
+# equivalent path still matches). A legacy entry with no ``source_path`` keeps
+# name+type matching so existing allows are not broken.
+_is_explicit_allow_listed if {
+	some entry in input.allow_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+	_allow_entry_path_matches(entry)
+}
+
+# No source_path pin on the entry → name+type match is sufficient (legacy).
+_allow_entry_path_matches(entry) if {
+	not entry.source_path
+}
+
+_allow_entry_path_matches(entry) if {
+	entry.source_path == ""
+}
+
+# Pinned entry: the presented path must equal the pinned path (normalised) ...
+_allow_entry_path_matches(entry) if {
+	entry.source_path != ""
+	_normalize_path(input.path) == _normalize_path(entry.source_path)
+}
+
+# ... or contain the pinned path as a contiguous run of components, so an
+# equivalent path that adds/strips a redundant leading segment still matches
+# while a wholly different path (the attack) does not.
+_allow_entry_path_matches(entry) if {
+	entry.source_path != ""
+	_provenance_prefix_matches(input.path, entry.source_path)
+}
+
+_normalize_path(value) := normalized if {
+	normalized := replace(lower(value), "\\", "/")
+}
+
+_is_policy_allow_listed if {
+	some entry in data.first_party_allow_list
+	entry.target_name == input.target_name
+	entry.target_type == input.target_type
+	_path_matches_provenance(entry)
+}
+
+_path_matches_provenance(entry) if {
+	not entry.source_path_contains
+}
+
+_path_matches_provenance(entry) if {
+	count(entry.source_path_contains) == 0
+}
+
+# F-0543: match provenance markers by whole path *components* (a contiguous
+# slice of components), not a bare substring. The old
+# `contains(lower(input.path), lower(prefix))` test accepted attacker paths
+# whose components merely embedded the marker (e.g. `.defenseclaw-evil`
+# satisfying a `.defenseclaw` allow, or `.codex-plugin/defenseclaw` placed
+# anywhere). This mirrors the Python `_matches_provenance` component matcher.
+_path_matches_provenance(entry) if {
+	some prefix in entry.source_path_contains
+	_provenance_prefix_matches(input.path, prefix)
+}
+
+_provenance_prefix_matches(path, prefix) if {
+	path_comps := _path_components(path)
+	prefix_comps := _path_components(prefix)
+	n := count(prefix_comps)
+	n > 0
+	count(path_comps) >= n
+	some i in numbers.range(0, count(path_comps) - n)
+	array.slice(path_comps, i, i + n) == prefix_comps
+}
+
+_path_components(value) := comps if {
+	normalized := replace(lower(value), "\\", "/")
+	comps := [part | some part in split(normalized, "/"); part != ""]
+}
+
+_is_allow_bypassed if {
+	_is_explicit_allow_listed
+}
+
+_is_allow_bypassed if {
+	_is_policy_allow_listed
+	data.config.allow_list_bypass_scan == true
+}
+
+_has_scan if input.scan_result
+
+# --- Per-scanner action resolution ---
+# Check scanner_overrides[target_type][severity] first, fall back to global actions.
+
+_effective_action := action if {
+	action := data.scanner_overrides[input.target_type][upper(input.scan_result.max_severity)]
+} else := action if {
+	action := data.actions[upper(input.scan_result.max_severity)]
+}
+
+_should_reject if {
+	_effective_action.runtime == "block"
+}
+
+_should_reject if {
+	_effective_action.install == "block"
+}
+
+# --- Structured output: file_action ---
+
+file_action := action if {
+	_has_scan
+	action := _effective_action.file
+}
+
+file_action := "none" if {
+	not _has_scan
+}
+
+# --- Structured output: install_action ---
+
+install_action := action if {
+	_has_scan
+	action := _effective_action.install
+}
+
+install_action := "none" if {
+	not _has_scan
+}
+
+# --- Structured output: runtime_action ---
+
+runtime_action := action if {
+	_has_scan
+	action := _effective_action.runtime
+}
+
+runtime_action := "allow" if {
+	not _has_scan
+}

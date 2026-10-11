@@ -204,6 +204,11 @@ type MigrationRecord struct {
 	// enforced. The upgrade, config migrate, the managed lifecycle and doctor
 	// print them until the record is acknowledged (GAP-1399).
 	UnenforcedRegoData []string `json:"unenforced_rego_data,omitempty"`
+	// CarriedRegoRules names each pre-9 vendor module whose added rules were
+	// kept in a custom module beside it when the module was replaced with
+	// the shipped one, and that module. The upgrade and config migrate print
+	// them (GAP-1498).
+	CarriedRegoRules []string `json:"carried_rego_rules,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
@@ -679,6 +684,10 @@ type v9Migrator struct {
 type v9RegoRefresh struct {
 	path string
 	data []byte
+	// carried is the custom module with the rules an operator added to the
+	// 0.8.x module, written to carriedPath first (GAP-1498).
+	carried     []byte
+	carriedPath string
 }
 
 func (m *v9Migrator) moved(source, from, to string, value any) {
@@ -1264,6 +1273,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 	for _, name := range names {
 		path := filepath.Join(dir, name)
 		var effect string
+		var edits v9RegoEdits
 		switch {
 		case !slices.Contains(v9VendorRegoModules, name):
 			m.note("%s reads %s, which config_version 9 no longer provides; the gateway refuses the Rego modules and "+
@@ -1274,7 +1284,17 @@ func (m *v9Migrator) planRegoRefresh() error {
 				"admission and thresholds until it is replaced with the shipped module", path)
 			effect = "the gateway refuses the module and uses the config-driven admission"
 		default:
-			m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+			edits = v9CarryRegoEdits(name, parsed[name], shipped[name])
+			refresh := v9RegoRefresh{path: path, data: shipped[name]}
+			if edits.module != nil {
+				refresh.carried = edits.module
+				refresh.carriedPath = v9CarriedRegoPath(path, edits.module)
+				line := fmt.Sprintf("%s: the rules you added to the 0.8.x module (%s) are kept in %s, which reads "+
+					"input.admission where they read data.json", path, strings.Join(edits.rules, ", "), refresh.carriedPath)
+				m.note("%s", line)
+				m.record.CarriedRegoRules = append(m.record.CarriedRegoRules, line)
+			}
+			m.rego = append(m.rego, refresh)
 			if shipped[name] == nil {
 				m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
 				effect = "the module is retired and kept as " + name + DataJSONMigratedSuffix
@@ -1283,6 +1303,12 @@ func (m *v9Migrator) planRegoRefresh() error {
 					path, name, DataJSONMigratedSuffix)
 				effect = "the module is kept as " + name + DataJSONMigratedSuffix + " and replaced with the shipped one"
 			}
+		}
+		if edits.lost != "" {
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s was edited, but %s, so your own decisions in it are not enforced (%s). "+
+					"Express them in config.yaml (asset_policy, admission) or in a module of another name that "+
+					"reads input, then run `defenseclaw-gateway config migrate --ack`", path, edits.lost, effect))
 		}
 		var lost []string
 		for _, doc := range reads[name] {
@@ -1417,6 +1443,11 @@ func seedShippedRulePack(dir, name string) error {
 func refreshV9RegoModule(module v9RegoRefresh) error {
 	info, err := os.Stat(module.path)
 	if err != nil {
+		return err
+	}
+	// The rules an operator added go first: a stop before the module is
+	// replaced leaves both, and the retry reuses the written copy.
+	if err := writeV9CarriedRego(module, info.Mode().Perm()); err != nil {
 		return err
 	}
 	if err := os.Rename(module.path, module.path+DataJSONMigratedSuffix); err != nil {

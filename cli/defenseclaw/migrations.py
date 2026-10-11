@@ -3428,6 +3428,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         for failure in record.get("rule_pack_rebase_failures") or []:
             if isinstance(failure, str) and failure.isprintable():
                 ux.warn(failure, indent="    ")
+        # GAP-1498: the rules an operator added to a 0.8.x vendor Rego module
+        # are kept in a custom module beside the shipped one.
+        for kept in record.get("carried_rego_rules") or []:
+            if isinstance(kept, str) and kept.isprintable():
+                ctx.changes.append(kept)
         # GAP-1399: a Rego module read a data.json key of the operator's that
         # 1.0 does not load; the rules that read it are no longer enforced.
         for lost in record.get("unenforced_rego_data") or []:
