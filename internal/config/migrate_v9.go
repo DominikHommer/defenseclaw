@@ -201,8 +201,10 @@ type MigrationRecord struct {
 	// UnenforcedRegoData names each Rego module that reads a data document
 	// 1.0 no longer provides and the migration did not move into config.yaml
 	// (an operator's own data.json key): its rules that read it are not
-	// enforced. The upgrade, config migrate, the managed lifecycle and doctor
-	// print them until the record is acknowledged (GAP-1399).
+	// enforced. It also names each 0.8.x vendor module the operator edited,
+	// which the shipped module replaced, with its saved .migrated-v9 copy
+	// (GAP-1498). The upgrade, config migrate, the managed lifecycle and
+	// doctor print them until the record is acknowledged (GAP-1399).
 	UnenforcedRegoData []string `json:"unenforced_rego_data,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
@@ -1210,6 +1212,27 @@ var v9DataJSONDocs = map[string]bool{
 // v9VendorRegoModules are the modules 0.8.x init seeded.
 var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_actions.rego"}
 
+// v9StockRegoDigests are the SHA-256 digests (CRLF read as LF) of the vendor
+// modules 0.5.0 to 0.8.10 shipped, which init seeded byte for byte. A module
+// that matches none holds edits of the operator, which the shipped module
+// that replaces it does not carry (GAP-1498). Remove this table with the v8
+// to v9 migration (1.1.0).
+var v9StockRegoDigests = map[string][]string{
+	"admission.rego": {
+		"67a1831178e23d6bf8a4dd6d95ea53402c6827c6b1dc0536c8e7667c7586a53b", // 0.5.0 to 0.7.2
+		"9dfe95603d4a738909795a4e77eb7315fc114768dee4f87ec9fab7759f8f30d5", // 0.8.0 to 0.8.10
+	},
+	"guardrail.rego":     {"18a563b37c0bec87a3743f566f4f4200bbac87977b783a290841d1aaeedfb753"},
+	"skill_actions.rego": {"c3cb1ab336b9799ccecaef453cd33d583aeada0571e87092e1491c2c8ded924a"},
+}
+
+// v9StockRegoModule reports whether raw is a copy of the vendor module name
+// that a 0.x release shipped.
+func v9StockRegoModule(name string, raw []byte) bool {
+	sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+	return slices.Contains(v9StockRegoDigests[name], hex.EncodeToString(sum[:]))
+}
+
 // planRegoRefresh finds the modules the gateway loads that read a data
 // document outside data.defenseclaw, which config_version 9 no longer
 // provides: the gateway refuses such a bundle and uses the config-driven
@@ -1243,7 +1266,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 	if err != nil {
 		return nil
 	}
-	parsed := map[string]*ast.Module{}
+	parsed, sources := map[string]*ast.Module{}, map[string][]byte{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Ext(name) != ".rego" || !entry.Type().IsRegular() {
@@ -1261,7 +1284,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 			}
 			continue
 		}
-		parsed[name] = mod
+		parsed[name], sources[name] = mod, raw
 	}
 	reads := map[string][]string{}
 	for _, read := range regodata.OutsideReads(parsed, "data.defenseclaw.admission", "data.defenseclaw.guardrail") {
@@ -1282,6 +1305,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 	for _, name := range names {
 		path := filepath.Join(dir, name)
 		var effect string
+		edited := false
 		switch {
 		case !slices.Contains(v9VendorRegoModules, name):
 			m.note("%s reads %s, which config_version 9 no longer provides; the gateway refuses the Rego modules and "+
@@ -1293,6 +1317,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 			effect = "the gateway refuses the module and uses the config-driven admission"
 		default:
 			m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+			edited = !v9StockRegoModule(name, sources[name])
 			if shipped[name] == nil {
 				m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
 				effect = "the module is retired and kept as " + name + DataJSONMigratedSuffix
@@ -1307,6 +1332,21 @@ func (m *v9Migrator) planRegoRefresh() error {
 			if !v9DataJSONDocs[doc] {
 				lost = append(lost, doc)
 			}
+		}
+		if edited {
+			// Rules added to a vendor module may read only the data.json
+			// documents the migration moves; the shipped module still has none
+			// of them (GAP-1498).
+			read := ""
+			if len(lost) > 0 {
+				read = "; it reads " + strings.Join(lost, ", ") + ", which 1.0 no longer loads (no data.json)"
+			}
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s differs from every copy 0.8.x shipped, so it holds rules added after install%s: %s, and those "+
+					"rules are not enforced. The saved copy is %s%s. Express them in config.yaml (asset_policy, "+
+					"admission) or in a module that reads input, then run `defenseclaw-gateway config migrate --ack`",
+				path, read, effect, path, DataJSONMigratedSuffix))
+			continue
 		}
 		if len(lost) > 0 {
 			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(

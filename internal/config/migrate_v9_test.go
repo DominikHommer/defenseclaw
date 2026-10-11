@@ -1891,7 +1891,7 @@ func TestMigrateV9RecordsCustomRegoDataKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	lost := strings.Join(result.Record.UnenforcedRegoData, "\n")
-	if !strings.Contains(lost, module+" reads data.operator_policy") {
+	if !strings.Contains(lost, module+" differs from every copy 0.8.x shipped") || !strings.Contains(lost, "it reads data.operator_policy") {
 		t.Fatalf("unenforced_rego_data = %q, want the data.operator_policy read of %s", lost, module)
 	}
 	if kept, _ := os.ReadFile(module + DataJSONMigratedSuffix); string(kept) != custom {
@@ -2505,5 +2505,57 @@ func TestMigrateV9RetryRefreshesPreNineRego(t *testing.T) {
 	result, err := MigrateV9(ctx, in)
 	if err != nil || len(result.Written) != 0 {
 		t.Fatalf("second retry: written %v, err %v", result.Written, err)
+	}
+}
+
+// A rule the operator added to a 0.8.x vendor module is not in the shipped
+// module that replaces it, even when it reads only the standard data.actions.
+// The record names the module and its saved copy; an unedited vendor copy is
+// replaced without a warning (GAP-1498).
+func TestMigrateV9NamesAnEditedVendorRegoModule(t *testing.T) {
+	stock := "package defenseclaw.admission\nimport rego.v1\nverdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	saved := v9StockRegoDigests
+	t.Cleanup(func() { v9StockRegoDigests = saved })
+	v9StockRegoDigests = map[string][]string{"admission.rego": {fmt.Sprintf("%x", sha256.Sum256([]byte(stock)))}}
+	added := "verdict := \"blocked\" if {\n\tinput.target_name == \"named-skill\"\n\tdata.actions.HIGH.install == \"block\"\n}\n"
+	for _, edited := range []bool{false, true} {
+		t.Run(fmt.Sprintf("edited=%v", edited), func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			module := filepath.Join(dir, "policies", "rego", "admission.rego")
+			body := stock
+			if edited {
+				body += added
+			}
+			if err := os.MkdirAll(filepath.Dir(module), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(module, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(dir, "config.yaml")
+			if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			warnings := strings.Join(result.Record.UnenforcedRegoData, "\n")
+			if !edited {
+				if warnings != "" {
+					t.Fatalf("an unedited vendor module was reported: %s", warnings)
+				}
+				return
+			}
+			kept := module + DataJSONMigratedSuffix
+			if !strings.Contains(warnings, module+" differs from every copy 0.8.x shipped") || !strings.Contains(warnings, kept) {
+				t.Fatalf("unenforced_rego_data = %q, want %s and %s named", warnings, module, kept)
+			}
+			if got, _ := os.ReadFile(kept); !strings.Contains(string(got), "named-skill") {
+				t.Errorf("%s does not hold the added rule: %q", kept, got)
+			}
+		})
 	}
 }
