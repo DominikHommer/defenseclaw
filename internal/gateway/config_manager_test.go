@@ -713,6 +713,28 @@ func TestConfigManagerCurrentReturnsDeepCopy(t *testing.T) {
 	}
 }
 
+// GAP-1483: the gateway publishes its configuration through cloneConfig and
+// the scanners read the AI Defense key from that copy. On a standalone
+// deployment the copy keeps the protected credential as the only key source:
+// an AI Defense key the gateway service inherited never stands in, and a
+// credential file that is missing or moved away yields no key.
+func TestPublishedStandaloneConfigIgnoresServiceAIDefenseKey(t *testing.T) {
+	t.Setenv("AI_DEFENSE_API_KEY", "service-env-key")
+	const doc = "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"  inspection:\n    ai_defense:\n      enabled: true\n      credential: aid-key\n" +
+		"cisco_ai_defense:\n  api_key_env: AI_DEFENSE_API_KEY\n"
+	loaded, err := config.LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "etc", "config.yaml"), []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar := &Sidecar{cfg: loaded}
+	for name, cfg := range map[string]*config.Config{"cloned": cloneConfig(loaded), "published": sidecar.publishConfig(loaded)} {
+		if got := cfg.CiscoAIDefense.ResolvedAPIKey(); got != "" {
+			t.Fatalf("%s standalone AI Defense key = %q, want none without the protected credential", name, got)
+		}
+	}
+}
+
 func TestSidecarConfigSnapshotsAreConcurrentSafe(t *testing.T) {
 	observe := config.DefaultConfig()
 	observe.Guardrail.Mode = "observe"
