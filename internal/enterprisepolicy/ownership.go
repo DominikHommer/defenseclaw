@@ -330,9 +330,13 @@ func ownershipRecordNames(opts Options, connector string) []string {
 }
 
 // verifyPublishedFiles reports, as drift, each policy file DefenseClaw
-// published for connector (named by an ownership record, and still what
-// DefenseClaw wrote) whose mode or owner changed since: agents may not be
-// able to read it, and the next publish restores it. Only ownership: merge
+// published for connector (named by an ownership record) whose mode or
+// owner changed since: agents may not be able to read it, and the next
+// publish restores it. A file an administrator also edited is checked too:
+// the publish merges into it and rewrites it with the published mode, and a
+// 0600 file hides intact hooks from every user (GAP-1485). Only the Claude
+// Code version floor drop-in is skipped once changed: it is then the
+// administrator's, and DefenseClaw no longer writes it. Only ownership: merge
 // publishes, so only it is checked.
 func verifyPublishedFiles(opts Options, connector string, state *State) {
 	if opts.PolicyFor(connector).Ownership != config.MachinePolicyOwnershipMerge {
@@ -345,7 +349,7 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 			continue
 		}
 		current, exists, err := readPolicyFile(opts, record.Path)
-		if err != nil || !exists || sha256Hex(current) != record.PostimageSHA256 {
+		if err != nil || !exists || (name == claudeVersionFloorRecord && sha256Hex(current) != record.PostimageSHA256) {
 			continue
 		}
 		if problem := publishedFileProblem(opts, record.Path); problem != "" {
