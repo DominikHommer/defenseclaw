@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // GAP-0132: the standalone Windows payload's embedded scanner runtime is
@@ -121,34 +122,46 @@ func TestScannerRuntimeCommandLines(t *testing.T) {
 	}
 }
 
-// GAP-1408: a variable only the gateway derives for the scanner runtime, or
-// an AWS endpoint, never reaches a plugin scan from the service environment,
-// even when the config sets no judge. The drop set must cover every variable
-// the judge environment derives.
-func TestPluginRuntimeEnvDropsServiceScannerVariables(t *testing.T) {
-	var base []string
-	dropped := []string{"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"}
-	for name := range scannerRuntimeOwnedEnv {
-		dropped = append(dropped, name)
+// GAP-1408, GAP-1437: a plugin scan under the runtime gets the scanner
+// allowlist and the config location from the service environment, and the
+// judge only as the gateway derived it from config. No other declared
+// DefenseClaw variable, provider key or endpoint, or AWS endpoint reaches
+// it, and a judge without a resolved key never gets an inherited one.
+func TestPluginRuntimeEnvAllowlist(t *testing.T) {
+	registry, err := envvars.Load()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range dropped {
+	t.Setenv(config.DefenseClawLLMKeyEnv, "")
+	base := []string{"PATH=/usr/bin", "AWS_PROFILE=credential-profile",
+		"OPENAI_API_KEY=from-service", "OPENAI_BASE_URL=http://127.0.0.1:9/marker",
+		"OPENAI_API_BASE=http://127.0.0.1:9/marker", "AWS_ENDPOINT_URL=http://127.0.0.1:9/marker",
+		"AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://127.0.0.1:9/marker"}
+	for _, name := range registry.Names() {
 		base = append(base, name+"=from-service")
 	}
-	base = append(base, "AWS_PROFILE=credential-profile")
-	plugin := &PluginScanner{}
-	got := strings.Join(plugin.runtimeEnv(base), "\n")
-	for _, name := range dropped {
-		if strings.Contains(got, name+"=") {
-			t.Errorf("%s from the service environment reached the plugin scan", name)
-		}
+	want := map[string]string{"PATH": "/usr/bin", "AWS_PROFILE": "credential-profile",
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true"}
+	for name := range pluginRuntimeConfigEnv {
+		want[name] = "from-service"
 	}
-	if !strings.Contains(got, "AWS_PROFILE=credential-profile") {
-		t.Error("an unrelated AWS variable was dropped")
-	}
-	for name := range runtimeJudgeEnv(config.LLMConfig{}) {
-		if !strings.HasPrefix(name, "AWS_") && !scannerRuntimeOwnedEnv[name] {
-			t.Errorf("runtimeJudgeEnv sets %s, which the plugin scan does not drop from the service environment", name)
+	envOf := func(llm config.LLMConfig) map[string]string {
+		vars := map[string]string{}
+		for _, kv := range (&PluginScanner{LLM: llm}).runtimeEnv(base) {
+			name, value, _ := strings.Cut(kv, "=")
+			vars[name] = value
 		}
+		return vars
+	}
+	keyless := envOf(config.LLMConfig{Provider: "openai", Model: "gpt-4o-mini"})
+	want["DEFENSECLAW_SCANNER_LLM_MODEL"] = "openai/gpt-4o-mini"
+	want["DEFENSECLAW_SCANNER_LLM_PROVIDER"] = "openai"
+	if !reflect.DeepEqual(keyless, want) {
+		t.Fatalf("plugin runtime env without a key = %v, want %v", keyless, want)
+	}
+	want["DEFENSECLAW_SCANNER_LLM_API_KEY"] = "protected"
+	if got := envOf(config.LLMConfig{Provider: "openai", Model: "gpt-4o-mini", APIKey: "protected"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("plugin runtime env = %v, want %v", got, want)
 	}
 }
 
