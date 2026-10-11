@@ -20,50 +20,37 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Oversized state must never leave an enrolled user's MCP calls unguarded.
+// An unreadable enrolled user's project inventory must not leave MCP calls unguarded.
 func TestOversizedClaudeMCPSpoolFailsClosed(t *testing.T) {
 	originalTrust := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = originalTrust })
 
 	root := t.TempDir()
-	home := filepath.Join(root, "alice")
-	project := filepath.Join(home, "project")
-	if err := os.MkdirAll(project, 0o700); err != nil {
+	cfg := &config.Config{DataDir: filepath.Join(root, "data")}
+	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	state, err := json.Marshal(map[string]any{
-		"projects": map[string]any{
-			project: map[string]any{
-				"mcpServers": map[string]any{
-					"local-server": map[string]any{"command": strings.Repeat("x", 4<<20)},
-				},
-			},
-		},
+	const sid = "S-1-5-21-1-1001"
+	projectFile := filepath.Join(root, "alice", "project", ".mcp.json")
+	record, err := enterprisehooks.MarshalClaudeMCPSpoolUnreadable(sid, enterprisehooks.ClaudeStateUnreadable{
+		User: "alice", Home: filepath.Join(root, "alice"), Path: projectFile,
+		Reason: "project MCP file exceeds the size limit",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"), state, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &config.Config{DataDir: filepath.Join(root, "data")}
-	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
-	const sid = "S-1-5-21-1-1001"
-	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{
-		{SID: sid, User: "alice", UserHome: home, Connector: "claudecode"},
-	}}
-	if err := enterprisehooks.WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	servers, unreadable := enrolledClaudeMCPServers(cfg, sid)
-	if len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(home, ".claude.json") {
-		t.Fatalf("oversized state: servers=%d unreadable=%+v", len(servers), unreadable)
+	if len(servers) != 0 || unreadable == nil || unreadable.Path != projectFile {
+		t.Fatalf("oversized project: servers=%d unreadable=%+v", len(servers), unreadable)
 	}
 
 	// A preexisting oversized or damaged spool must also fail closed.
-	if err := os.WriteFile(filepath.Join(dir, sid+".json"), state, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), []byte(strings.Repeat("x", 4<<20)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	servers, unreadable = enrolledClaudeMCPServers(cfg, sid)

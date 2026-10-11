@@ -73,6 +73,19 @@ func TestWriteWindowsClaudeMCPSpoolPublishesEveryScope(t *testing.T) {
 	if len(got) != 4 || got["user-srv"] != "" || got["local-srv"] != inside || got["shared-proj"] != inside || got["shared-"+filepath.Base(outside)] != outside {
 		t.Fatalf("published %v, want user, local and both project servers", got)
 	}
+
+	// Once the enrolled user can open a project, an oversized .mcp.json
+	// makes that user's whole inventory unreadable.
+	if err := os.WriteFile(filepath.Join(inside, ".mcp.json"), []byte(strings.Repeat("x", maxClaudeProjectMCPBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(inside, ".mcp.json") {
+		t.Fatalf("oversized project: servers=%v unreadable=%+v err=%v", servers, unreadable, err)
+	}
 }
 
 // GAP-0829: an unreadable or malformed state must not leave the previously
