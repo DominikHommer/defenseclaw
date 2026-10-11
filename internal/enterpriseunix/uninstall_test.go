@@ -348,9 +348,17 @@ func (p failingRemovePolicy) RemoveAll() (enterprisepolicy.Result, error) {
 // GAP-1321: a failed machine policy removal left the vendor policy calling a
 // hook binary the uninstall then deleted, so the agent ran unguarded. The
 // binaries, record and state stay until a rerun can withdraw the policy.
+// GAP-1500: the uninstall still stopped the gateway, so the hooks that policy
+// kept got no decisions; the deployment's services now keep running.
 func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	var running []string
+	for _, unit := range h.services.Units() {
+		if h.services.isActive(unit.Name) && unit.Kind != "oneshot" {
+			running = append(running, unit.Name)
+		}
+	}
 	fail := true
 	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
 	failed := h.run(Options{Action: ActionUninstall, Purge: true})
@@ -362,6 +370,11 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
 	if !exists(hook) || !exists(h.env.deploymentPath()) {
 		t.Fatal("the uninstall removed the hook binary the machine policy still names")
+	}
+	for _, name := range running {
+		if !h.services.isActive(name) {
+			t.Fatalf("the refused uninstall left %s stopped (running before: %v)", name, running)
+		}
 	}
 	fail = false
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))

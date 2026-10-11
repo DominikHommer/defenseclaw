@@ -2432,6 +2432,31 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
+// restartRepairers starts again the units an uninstall stopped before it
+// removed registrations (repairsRegistrations), when it stops before removing
+// the deployment: enabled is whether each one started at boot. A oneshot
+// that was running (this run, or a queued apply or verify run) is not
+// started again; the next trigger runs it.
+func (l *lifecycle) restartRepairers(ctx context.Context, active []Unit, enabled map[string]bool) {
+	env := l.env
+	units := env.Services.Units()
+	sort.SliceStable(units, func(i, j int) bool { return units[i].Stage < units[j].Stage })
+	for _, unit := range units {
+		if enabled[unit.Name] && unit.Activate && env.GOOS != "darwin" {
+			_ = env.Services.Enable(ctx, unit)
+		}
+	}
+	sort.SliceStable(active, func(i, j int) bool { return active[i].Stage < active[j].Stage })
+	for _, unit := range active {
+		if unit.Kind == "oneshot" || unit.Name == env.SelfUnit {
+			continue
+		}
+		if err := env.Services.Start(ctx, unit); err != nil {
+			l.result.AddWarning(codeUninstall, fmt.Sprintf("could not start %s again: %v; run `%s` to restore it", unit.Name, err, env.lifecycleCommand(ActionEnsure)))
+		}
+	}
+}
+
 // uninstall stops and removes the deployment, with its machine state (the
 // config, secrets, gateway and guardian state, logs and lifecycle state) and
 // the service account. Each account keeps its own ~/.defenseclaw and
@@ -2505,8 +2530,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removed hook back within its debounce and the users are left with
 	// registrations naming a binary this uninstall deletes. The gateway and
 	// its sockets keep answering hooks until the registrations are gone.
+	var repairersActive []Unit
+	repairersEnabled := map[string]bool{}
 	for _, unit := range ordered {
 		if repairsRegistrations(unit) {
+			if env.Services.Active(ctx, unit) {
+				repairersActive = append(repairersActive, unit)
+			}
+			repairersEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
 			stopUnit(unit)
 		}
 	}
@@ -2549,20 +2580,18 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
-	for _, unit := range ordered {
-		if !repairsRegistrations(unit) {
-			stopUnit(unit)
-		}
-	}
 	if perUserLeft || policyLeft {
-		disableKeptDefinitions()
 		// Some users' agents, or vendor machine policy that could not be
 		// withdrawn (GAP-1321), still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, so the agents run without enforcement and nothing is left
 		// to remove them: the binaries, the deployment record and the state
 		// stay, so a rerun of this uninstall removes the rest and ensure
-		// restores the deployment.
+		// restores the deployment. The gateway and its sockets were never
+		// stopped, and the units stopped above start again: stopped, the
+		// remaining hooks got no decisions until an administrator ran
+		// ensure (GAP-1500).
+		l.restartRepairers(ctx, repairersActive, repairersEnabled)
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
 		}
@@ -2573,8 +2602,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if policyLeft {
 			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; the gateway keeps answering their hooks. Fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
+	}
+	for _, unit := range ordered {
+		if !repairsRegistrations(unit) {
+			stopUnit(unit)
+		}
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
 	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
