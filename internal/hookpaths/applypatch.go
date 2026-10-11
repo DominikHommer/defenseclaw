@@ -181,12 +181,12 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 // supplied to that invocation. In particular, a quoted envelope printed by
 // another command cannot explain a later file-fed apply_patch.
 var (
-	patchProgramWord  = regexp.MustCompile("(?i)\\b(?:apply_patch|applypatch|apply-patch)\\b")
-	patchDirectInput  = regexp.MustCompile("\\b(?:apply_patch|applypatch|apply-patch)\\s*(?:<<<\\s*|<<\\s*|@)?['\"]")
-	patchHeredocInput = regexp.MustCompile("\\b(?:apply_patch|applypatch|apply-patch)\\s*<<-?\\s*[A-Za-z_][A-Za-z0-9_]*\\s*$")
-	patchPipedHeredoc = regexp.MustCompile("\\bcat\\s+<<[^\\n|]*\\|\\s*(?:apply_patch|applypatch|apply-patch)\\b")
-	patchPipeCall     = regexp.MustCompile("^\\s*['\\\"]?@?\\s*\\|\\s*(?:apply_patch|applypatch|apply-patch)\\b")
-	patchPrinter      = regexp.MustCompile("(?i)\\b(?:echo|printf|write-output)\\b|@['\"]")
+	patchProgramWord  = regexp.MustCompile(`(?i)\b(?:apply_patch|applypatch|apply-patch)\b`)
+	patchDirectInput  = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*(?:<<<\s*|<<\s*|@)?['"]`)
+	patchHeredocInput = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$`)
+	patchPipedHeredoc = regexp.MustCompile(`\bcat\s+<<[^\n|]*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPipeCall     = regexp.MustCompile(`^\s*['"]?@?\s*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPrinter      = regexp.MustCompile(`(?i)\b(?:echo|printf|write-output)\b|@['"]`)
 )
 
 func patchShellInvocationsKnown(text string) bool {
