@@ -63,8 +63,9 @@ func (g *Generation) published() bool {
 
 // ruleGenerationOf is the compiled rule set connector is scanned with under
 // g: the one g compiled for it, else one registered for it outside the
-// configuration (the connector setup at boot, a sandbox harness), else g's
-// active rules. Without compiled rules in g it is the process-wide set.
+// configuration (the connector setup at boot, a sandbox harness) while g was
+// live, else g's active rules. Without compiled rules in g it is the
+// process-wide set.
 func ruleGenerationOf(g *Generation, connector string) *compiledRulePackCategories {
 	if g == nil || g.activeRules == nil {
 		return snapshotRulePackGeneration(connector)
@@ -76,10 +77,7 @@ func ruleGenerationOf(g *Generation, connector string) *compiledRulePackCategori
 	if rules := g.connectorRules[name]; rules != nil {
 		return rules
 	}
-	ruleCategoriesMu.RLock()
-	registered := connectorRuleGenerations[name]
-	ruleCategoriesMu.RUnlock()
-	if registered != nil {
+	if registered := registeredRuleGenerationOf(g, name); registered != nil {
 		return registered
 	}
 	return g.activeRules
@@ -115,6 +113,15 @@ func judgeOf(g *Generation, fallback *LLMJudge) *LLMJudge {
 		return g.judge
 	}
 	return fallback
+}
+
+// decisionGeneration is the generation a request to a decides with: the one
+// pinned on ctx, else a's published one.
+func (a *APIServer) decisionGeneration(ctx context.Context) *Generation {
+	if g := pinnedGeneration(ctx); g != nil {
+		return g
+	}
+	return a.generation()
 }
 
 // requestGeneration is the generation a request decides with: the one

@@ -1168,11 +1168,7 @@ func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 // applies: the request's pinned generation, else the live one, else the
 // start-time configuration.
 func (a *APIServer) liveBaseConfig(ctx context.Context) *config.Config {
-	g := pinnedGeneration(ctx)
-	if g == nil {
-		g = a.generation()
-	}
-	if g != nil && g.Config != nil {
+	if g := a.decisionGeneration(ctx); g != nil && g.Config != nil {
 		return g.Config
 	}
 	return a.scannerCfg

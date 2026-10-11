@@ -838,11 +838,7 @@ func (a *APIServer) generation() *Generation {
 // generation's, or for an API server without one, queries prepared once
 // from its start-time policy_dir.
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
-	g := pinnedGeneration(ctx)
-	if g == nil {
-		g = a.generation()
-	}
-	return a.preparedPolicyForGeneration(ctx, g)
+	return a.preparedPolicyForGeneration(ctx, a.decisionGeneration(ctx))
 }
 
 // pinRequestGeneration pins the API server's published generation on r for
@@ -3511,7 +3507,7 @@ func (a *APIServer) policyConfigSnapshot(g *Generation) *config.Config {
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
-	generation := a.generation()
+	generation := a.decisionGeneration(ctx)
 	policyCfg := a.policyConfigSnapshot(generation)
 	// Avarice F-3288: when a policy bundle is configured but
 	// either the engine constructor or evaluation fails, the

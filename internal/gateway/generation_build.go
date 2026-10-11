@@ -364,6 +364,7 @@ func publishGeneration(g *Generation) {
 	publishGenerationMu.Lock()
 	defer publishGenerationMu.Unlock()
 	g.N = generationSeq.Add(1)
+	bindRegisteredConnectorRules(g)
 	liveGeneration.Store(g)
 	publishPackPostures()
 	liveReloadError.Store("")

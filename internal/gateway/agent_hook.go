@@ -2681,11 +2681,7 @@ func (a *APIServer) hookEnablementConfig(ctx context.Context) *config.Config {
 	if a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() {
 		return a.scannerCfg
 	}
-	g := pinnedGeneration(ctx)
-	if g == nil {
-		g = a.generation()
-	}
-	if g != nil && g.Config != nil {
+	if g := a.decisionGeneration(ctx); g != nil && g.Config != nil {
 		return g.Config
 	}
 	return a.scannerCfg

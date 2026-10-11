@@ -2191,6 +2191,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		appliedCfg = s.publishConfig(&next)
 	}
 	nextGen.Config = appliedCfg
+	// The connector rule sets are replaced before the generation is
+	// published, which binds them; a request pinned to the previous
+	// generation keeps that generation's sets (GAP-1466).
+	publishConnectorRulePackGeneration(
+		ruleManagedConnectors(current),
+		rulePackCandidate.connectorRules,
+	)
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
@@ -2217,10 +2224,6 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		// Judge verdicts were rendered under the previous pack.
 		InvalidateJudgeVerdictCache()
 	}
-	publishConnectorRulePackGeneration(
-		ruleManagedConnectors(current),
-		rulePackCandidate.connectorRules,
-	)
 	if api := s.apiSnapshot(); api != nil {
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
