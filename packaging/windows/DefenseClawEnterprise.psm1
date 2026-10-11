@@ -24973,11 +24973,13 @@ function Invoke-DefenseClawForcedUninstallPreparation {
         moves StateRoot aside, so the uninstall goes on as the state-absent
         exact-scope purge, which removes the exact services, their IPC grant,
         InstallRoot and the machine-wide hook files, and names what stays.
-        Returns the moved StateRoot, or an empty string when there was none.
-        When stopping the services or moving StateRoot fails (GAP-1438: a
-        process holds StateRoot open), the services get back the startup
-        mode and running state they had and the failure is rethrown, so a
-        refused forced uninstall does not leave the host unprotected.
+        Returns the preparation (StateRoot, where it was moved, empty when
+        there was none, and each service's prior state) for
+        Restore-DefenseClawForcedUninstallPreparation. When stopping the
+        services or moving StateRoot fails (GAP-1438: a process holds
+        StateRoot open), the services get back the startup mode and running
+        state they had and the failure is rethrown, so a refused forced
+        uninstall does not leave the host unprotected.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -25021,41 +25023,128 @@ function Invoke-DefenseClawForcedUninstallPreparation {
                 })
         }
     }
+    $preparation = [pscustomobject]@{
+        state_root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+        moved_state_root = ''
+        services = $prior.ToArray()
+        restored = $false
+    }
     try {
         foreach ($service in $prior) {
             Set-DefenseClawServiceStartMode -Name $service.name -StartMode 4
             Stop-DefenseClawService -Name $service.name
         }
-        $stateRoot = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $stateRoot -PathType Container)) {
-            return ''
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $preparation.state_root -PathType Container)) {
+            return $preparation
         }
-        Assert-DefenseClawNoReparsePath -Path $stateRoot
-        $moved = $stateRoot + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-        [IO.Directory]::Move($stateRoot, $moved)
-        return $moved
+        Assert-DefenseClawNoReparsePath -Path $preparation.state_root
+        $moved = $preparation.state_root + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+        [IO.Directory]::Move($preparation.state_root, $moved)
+        $preparation.moved_state_root = $moved
+        return $preparation
     }
     catch {
         $failure = $_
-        # Reverse order: the gateway needs its sensor helper running.
-        $notRestored = [Collections.Generic.List[string]]::new()
-        for ($index = $prior.Count - 1; $index -ge 0; $index--) {
-            $service = $prior[$index]
-            try {
-                Set-DefenseClawServiceStartMode -Name $service.name -StartMode $service.start_mode
-                if ($service.running) {
-                    Start-DefenseClawService -Name $service.name
-                }
-            }
-            catch {
-                $notRestored.Add($service.name + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
-            }
-        }
+        $notRestored = @(Restore-DefenseClawForcedUninstallPreparation -Preparation $preparation)
         if ($notRestored.Count -eq 0) {
             throw $failure
         }
         throw ('the forced uninstall stopped before StateRoot was moved aside (' + $failure.Exception.Message + '); these services were not restored: ' + ($notRestored -join '; '))
     }
+}
+
+function Restore-DefenseClawForcedUninstallPreparation {
+    <#
+        Undoes Invoke-DefenseClawForcedUninstallPreparation for a forced
+        uninstall that was refused: StateRoot moves back to its path, then
+        each service gets back the startup mode and running state it had.
+        It acts once per preparation; a second call does nothing. Returns
+        what could not be put back, so the caller rethrows the original
+        refusal with it rather than a restore error.
+    #>
+    param([Parameter(Mandatory)]$Preparation)
+    if ([bool]$Preparation.restored) {
+        return
+    }
+    $Preparation.restored = $true
+    $notRestored = [Collections.Generic.List[string]]::new()
+    $moved = [string]$Preparation.moved_state_root
+    if (-not [string]::IsNullOrEmpty($moved)) {
+        try {
+            [IO.Directory]::Move($moved, [string]$Preparation.state_root)
+            $Preparation.moved_state_root = ''
+        }
+        catch {
+            $notRestored.Add('StateRoot (still at ' + $moved + '): ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+        }
+    }
+    # Reverse order: the gateway needs its sensor helper running.
+    $services = @($Preparation.services)
+    for ($index = $services.Count - 1; $index -ge 0; $index--) {
+        $service = $services[$index]
+        try {
+            Set-DefenseClawServiceStartMode -Name $service.name -StartMode $service.start_mode
+            if ($service.running) {
+                Start-DefenseClawService -Name $service.name
+            }
+        }
+        catch {
+            $notRestored.Add($service.name + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+        }
+    }
+    return [string[]]$notRestored.ToArray()
+}
+
+function Invoke-DefenseClawForcedUninstall {
+    <#
+        Standalone Setup /uninstall FORCE=1: the preparation, then the
+        state-absent exact-scope purge. When anything after the preparation
+        is refused (GAP-1486: the purge's validate-only pass meets a sharing
+        violation under InstallRoot), StateRoot moves back, the services get
+        back the startup mode and running state they had, and the refusal is
+        rethrown, so the gateway and guardian keep enforcing. A forced
+        uninstall that completes restores nothing.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [hashtable]$Sources = @{},
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$Purge,
+        [string]$RequestedCertificationCodexHome,
+        [switch]$RequestedCoreHardeningCertification,
+        [int]$SelfUninstallCallerPID
+    )
+    $preparation = Invoke-DefenseClawForcedUninstallPreparation `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
+    try {
+        $recovery = Invoke-DefenseClawPreLayoutRecovery `
+            -Action Uninstall `
+            -Layout $Layout `
+            -Sources $Sources `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName `
+            -Purge:$Purge `
+            -RequestedCertificationCodexHome $RequestedCertificationCodexHome `
+            -RequestedCoreHardeningCertification:$RequestedCoreHardeningCertification `
+            -SelfUninstallCallerPID $SelfUninstallCallerPID
+        if (-not [bool]$recovery.handled) {
+            throw 'the forced uninstall did not reach the state-absent removal'
+        }
+    }
+    catch {
+        $failure = $_
+        $notRestored = @(Restore-DefenseClawForcedUninstallPreparation -Preparation $preparation)
+        if ($notRestored.Count -eq 0) {
+            throw $failure
+        }
+        throw ('the forced uninstall was refused (' + $failure.Exception.Message + '); these were not restored: ' + ($notRestored -join '; '))
+    }
+    return Complete-DefenseClawForcedUninstall `
+        -Result $recovery.result `
+        -MovedStateRoot $preparation.moved_state_root
 }
 
 function Complete-DefenseClawForcedUninstall {
@@ -26577,12 +26666,16 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # any managed layout directory is created. It is therefore sufficient
         # authority to resume a crash-interrupted purge after StateRoot itself
         # has been partially or completely deleted.
-        $forcedStateRoot = ''
         if ($Force) {
-            $forcedStateRoot = Invoke-DefenseClawForcedUninstallPreparation `
+            return Invoke-DefenseClawForcedUninstall `
                 -Layout $layout `
+                -Sources $sources `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName
+                -GuardianServiceName $GuardianServiceName `
+                -Purge:$Purge `
+                -RequestedCertificationCodexHome $resolvedCertificationCodexHome `
+                -RequestedCoreHardeningCertification:$CoreHardeningCertification `
+                -SelfUninstallCallerPID $SelfUninstallCallerPID
         }
         $preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action $Action `
@@ -26595,15 +26688,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -RequestedCoreHardeningCertification:$CoreHardeningCertification `
             -SelfUninstallCallerPID $SelfUninstallCallerPID
         if ([bool]$preLayoutRecovery.handled) {
-            if ($Force) {
-                return Complete-DefenseClawForcedUninstall `
-                    -Result $preLayoutRecovery.result `
-                    -MovedStateRoot $forcedStateRoot
-            }
             return $preLayoutRecovery.result
-        }
-        if ($Force) {
-            throw "the forced uninstall moved StateRoot aside but did not reach the state-absent removal; the moved state is $forcedStateRoot"
         }
 
         if ($Action -eq 'Reconcile') {

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -874,6 +875,95 @@ func TestMigrateV9MergesRuleFilesThatShareACategory(t *testing.T) {
 			}
 			if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "share a category") }) {
 				t.Errorf("no note names the merge: %q", result.Record.Notes)
+			}
+		})
+	}
+}
+
+func TestMigrateV9RebasesTheDefaultPackEditedInPlace(t *testing.T) {
+	// GAP-1479/GAP-1480: 0.8.x init selects policies/guardrail/default without
+	// a rule_pack_dir, and operators edit that folder in place. The upgrade
+	// keeps an edited folder, so the 1.0 gateway refused its two rule files of
+	// one category or only recorded its pattern-only rules: it gets a 1.0 copy
+	// like a custom pack. An unedited 0.8.x folder, which the upgrade
+	// refreshes, and a managed host's folder keep the preset name.
+	for _, digest := range slices.Concat(slices.Collect(maps.Values(v9Stock08PackDigests))...) {
+		python, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "guardrail_profiles.py"))
+		if err != nil || !strings.Contains(string(python), `"`+digest+`"`) {
+			t.Fatalf("stock 0.8.x digest %s is not in STOCK_PROFILE_DIGESTS (%v)", digest, err)
+		}
+	}
+	cases := []struct {
+		name           string
+		stock, managed bool
+		wantCopy       bool
+	}{
+		{name: "edited", wantCopy: true},
+		{name: "unedited 0.8.x pack", stock: true},
+		{name: "managed", managed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			pack := filepath.Join(dir, "policies", "guardrail", "default")
+			if err := os.MkdirAll(filepath.Join(pack, "rules"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pack, "rules", "u6-custom.yaml"), []byte("edited\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.stock {
+				digest, err := v9ProfileDigest(pack)
+				if err != nil {
+					t.Fatal(err)
+				}
+				previous := v9Stock08PackDigests
+				t.Cleanup(func() { v9Stock08PackDigests = previous })
+				v9Stock08PackDigests = map[string][]string{"default": {digest}}
+			}
+			source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: action\n  connectors:\n" +
+				"    claudecode:\n      rule_pack_dir: ''\nobservability: {}\n"
+			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			merged := `rules/u6-custom.yaml (category "command") merged into rules/commands.yaml; 1 rule(s) kept`
+			rebased := 0
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, Managed: tc.managed,
+				RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+				RebaseRulePack: func(got string) (*RulePackRebasePlan, error) {
+					rebased++
+					if got != pack {
+						t.Errorf("rebased %s, want %s", got, pack)
+					}
+					return &RulePackRebasePlan{
+						Files: map[string][]byte{"rules/commands.yaml": []byte("merged\n")}, Digest: strings.Repeat("b", 64),
+						Merged: []string{merged}, Expressed: []string{"CMD-U6-MARKER"},
+					}, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			got := string(result.Migrated)
+			if !tc.wantCopy {
+				if rebased != 0 || strings.Contains(got, "custom_packs") || strings.Contains(got, "rule_pack:") {
+					t.Fatalf("the folder did not keep the preset (rebased %d times):\n%s", rebased, got)
+				}
+				return
+			}
+			if !strings.Contains(got, "rule_pack: custom-default") || !strings.Contains(got, "path: "+pack+"-1.0") {
+				t.Fatalf("want the 1.0 copy of the edited default folder pinned and selected:\n%s", got)
+			}
+			if data, err := os.ReadFile(filepath.Join(pack+"-1.0", "rules", "commands.yaml")); err != nil || string(data) != "merged\n" {
+				t.Errorf("rebased pack file: %q, %v", data, err)
+			}
+			if !slices.Equal(result.Record.RuleFileMerges, []string{pack + "-1.0: " + merged}) ||
+				!slices.Equal(result.Record.ExpressedRules, []string{"CMD-U6-MARKER"}) {
+				t.Errorf("merges %q expressed %q", result.Record.RuleFileMerges, result.Record.ExpressedRules)
 			}
 		})
 	}

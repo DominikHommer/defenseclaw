@@ -64,6 +64,10 @@ func TestApplyPatchBehindWrapperIsUnknown(t *testing.T) {
 		// A body line that closes the feeding quote or here-document (GAP-1462).
 		"echo '*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n'; apply_patch < staged.patch; echo '\n*** End Patch' | apply_patch":             false,
 		"apply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\nP\napply_patch < staged.patch\napply_patch <<'Q'\n*** End Patch\nQ": false,
+		// Patch data inside the feed is not shell, the shell after it is (GAP-1489).
+		"apply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+apply_patch(\"x\")\n*** End Patch\nP\napply_patch < staged.patch":          false,
+		"cat <<'+A'\napply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+A\n+x; apply_patch < staged.patch\n*** End Patch\nP":           false,
+		"x=\"$(echo ')\"\napply_patch <<'P'\n*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+y'; apply_patch < staged.patch; echo '\n*** End Patch\nP": false,
 		"command apply_patch < draft.patch":          false,
 		"exec apply_patch < draft.patch":             false,
 		"nohup apply_patch < draft.patch":            false,
@@ -87,7 +91,11 @@ func TestApplyPatchBoundEnvelopeInputs(t *testing.T) {
 		cwd, want = "C:\\work", "C:\\tmp\\notes.txt"
 	}
 	envelope := "*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n+x\n*** End Patch"
+	// Patch lines that name apply_patch are data for the bound call (GAP-1489).
+	code := "*** Begin Patch\n*** Update File: /tmp/notes.txt\n@@\n apply_patch('ctx')\n-apply_patch(\"old\")\n+apply_patch(\"x\")\n*** End Patch"
 	for _, command := range []string{
+		"apply_patch <<'PATCH'\n" + code + "\nPATCH",
+		"@'\n" + code + "\n'@ | apply_patch",
 		"apply_patch <<'PATCH'\n" + envelope + "\nPATCH",
 		"apply_patch <<< '" + envelope + "'",
 		"apply_patch '" + envelope + "'",

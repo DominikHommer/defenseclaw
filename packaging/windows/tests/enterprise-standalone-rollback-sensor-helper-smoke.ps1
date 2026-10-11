@@ -14,7 +14,8 @@
 # helper, so SCM refused to start it ("Cannot start service
 # 'DefenseClawGateway'"), every such rollback failed, and the deployment was
 # left down with a pending transaction. A forced uninstall whose StateRoot move
-# fails (GAP-1438) gives the services back their startup mode and running state.
+# fails (GAP-1438), or whose purge after the move is refused (GAP-1486), gives
+# the services back their startup mode and running state.
 # The service-control calls are stubbed.
 
 [CmdletBinding()]
@@ -209,6 +210,65 @@ $failures = & $module {
         )
         if (-not $threw -or -not $stateKept -or (@($script:TestCalls) -join '|') -cne ($expected -join '|')) {
             $failures.Add("failed forced uninstall ($threw): kept=$stateKept calls $(@($script:TestCalls) -join ', ')")
+        }
+
+        # GAP-1486: the exact-scope purge after the preparation was refused
+        # (an open file under InstallRoot), and StateRoot stayed moved aside
+        # with the services stopped and disabled. Move it back, restore the
+        # services and rethrow the refusal; a completed purge restores nothing.
+        function Invoke-DefenseClawPreLayoutRecovery {
+            param($Action, $Layout, $Sources, $GatewayServiceName, $GuardianServiceName, [switch]$Purge,
+                $RequestedCertificationCodexHome, [switch]$RequestedCoreHardeningCertification, $SelfUninstallCallerPID)
+            $script:TestCalls.Add("purge:$([IO.Directory]::Exists($Layout.StateRoot))")
+            if ($script:TestPurgeRefuses) {
+                throw 'purge refused: marker sharing violation'
+            }
+            return [pscustomobject]@{ handled = $true; result = [pscustomobject]@{ ok = $true } }
+        }
+        $stopped = @(
+            "mode:$enumerator=4", "stop:$enumerator", "mode:$guardian=4", "stop:$guardian",
+            'mode:DefenseClawGateway=4', 'stop:DefenseClawGateway', "mode:$helper=4", "stop:$helper", 'purge:False'
+        )
+        foreach ($refuses in @($true, $false)) {
+            $script:TestPurgeRefuses = $refuses
+            $root = [IO.Path]::Combine([IO.Path]::GetFullPath($ScratchRoot), 'dc-forced-' + [Guid]::NewGuid().ToString('N'))
+            $stateRoot = [IO.Path]::Combine($root, 'DefenseClaw')
+            [void][IO.Directory]::CreateDirectory($stateRoot)
+            [IO.File]::WriteAllText([IO.Path]::Combine($stateRoot, 'audit.db'), 'kept')
+            $script:TestCalls.Clear()
+            $threw = ''
+            $result = $null
+            try {
+                $result = Invoke-DefenseClawForcedUninstall `
+                    -Layout @{
+                        StateRoot = $stateRoot
+                        GatewayPath = ''
+                        ManifestPath = ''
+                        SensorHelperPath = ''
+                        SensorHelperServiceName = $helper
+                    } `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName $guardian `
+                    -Purge
+            }
+            catch {
+                $threw = $_.Exception.Message
+            }
+            $stateBack = [IO.File]::Exists([IO.Path]::Combine($stateRoot, 'audit.db'))
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+            $calls = @($script:TestCalls) -join '|'
+            if ($refuses) {
+                $expected = $stopped + @(
+                    "mode:$helper=2", "start:$helper", 'mode:DefenseClawGateway=2', 'start:DefenseClawGateway',
+                    "mode:$guardian=2", "start:$guardian", "mode:$enumerator=3"
+                )
+                if ($threw -cne 'purge refused: marker sharing violation' -or -not $stateBack -or $calls -cne ($expected -join '|')) {
+                    $failures.Add("refused forced purge ($threw): StateRoot back=$stateBack calls $calls")
+                }
+            }
+            elseif ($threw -or $stateBack -or $null -eq $result -or -not [bool]$result.forced -or $calls -cne ($stopped -join '|')) {
+                $failures.Add("completed forced purge ($threw): StateRoot back=$stateBack calls $calls")
+            }
         }
 
         # A committed standalone uninstall retires bin with the ACP bridge and

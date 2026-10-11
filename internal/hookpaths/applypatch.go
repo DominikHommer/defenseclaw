@@ -188,12 +188,24 @@ var (
 	patchPipedHeredoc = regexp.MustCompile(`\bcat\s+<<[^\n|]*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
 	patchPipeCall     = regexp.MustCompile(`^\s*['"]?@?\s*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
 	patchPrinter      = regexp.MustCompile(`(?i)\b(?:echo|printf|write-output)\b|@['"]`)
+	heredocOperator   = regexp.MustCompile(`<<(-?)\s*(?:'([^'\s]+)'|"([^"\s]+)"|([A-Za-z_][A-Za-z0-9_]*))(?:[\s|;&)>]|$)`)
 )
 
+// patchShellInvocationsKnown reports whether every apply_patch that a shell
+// text may run reads an envelope in that text. Lines of an envelope body are
+// patch data, not shell, while the quote or here-document that feeds the
+// envelope is still open. That state is tracked from the top of the text: it
+// is known only while every line before the envelope's opener is plain shell
+// and every earlier envelope closed its feed on its End line (or the line
+// after it). A body line that may close or expand the feed, a body line that
+// is not a patch line, or any doubt about the state makes the rest of the
+// text shell, so an apply_patch in it counts as a call of its own.
 func patchShellInvocationsKnown(text string) bool {
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))
+	inert := make([]bool, len(lines))
+	known, cursor := true, 0
 	for start := 0; start < len(lines); start++ {
 		begin := strings.Index(lines[start], patchBeginMarker)
 		if begin < 0 || strings.TrimSpace(lines[start][begin+len(patchBeginMarker):]) != "" {
@@ -206,13 +218,23 @@ func patchShellInvocationsKnown(text string) bool {
 		if end == len(lines) {
 			continue // patchEnvelopePaths already rejects an open envelope
 		}
-		for i := start + 1; i < end; i++ {
-			body[i] = true
-		}
 		inputLine, opener := start, lines[start][:begin]
 		if strings.TrimSpace(opener) == "" && start > 0 {
 			inputLine, opener = start-1, lines[start-1]
 		}
+		for j := cursor; j < inputLine; j++ {
+			known = known && plainShellText(lines[j])
+		}
+		feed, fed := patchOpenerFeed(opener, inputLine < start)
+		fed = fed && known && inputLine >= cursor
+		for i := start + 1; i < end; i++ {
+			body[i] = true
+			line := strings.TrimRight(strings.TrimLeft(lines[i], "\t"), "\r")
+			fed = fed && patchBodyShape(line) && !feed.ends(line) && !feed.expands(line)
+			inert[i] = fed
+		}
+		cursor, known = feed.closeAfter(lines, end)
+		known = known && fed
 		close := strings.TrimSpace(lines[end])
 		if index := strings.Index(close, patchEndMarker); index >= 0 {
 			close = close[index+len(patchEndMarker):]
@@ -244,7 +266,7 @@ func patchShellInvocationsKnown(text string) bool {
 	}
 	calls := 0
 	for i, line := range lines {
-		if body[i] && inertPatchBodyLine(line) ||
+		if inert[i] ||
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
 			continue
 		}
@@ -258,18 +280,138 @@ func patchShellInvocationsKnown(text string) bool {
 	return calls > 0 || !invokesApplyPatch(text)
 }
 
-// inertPatchBodyLine reports an envelope body line that only a patch can
-// read: a patch line (+, -, context, @@ or ***) with no quote, expansion,
-// separator or redirect. Any other body line may close the quote or
-// here-document that feeds the envelope, or run a command inside it, so an
-// apply_patch in it counts as a call of its own.
-func inertPatchBodyLine(line string) bool {
-	line = strings.TrimLeft(line, "\t")
-	if strings.ContainsAny(line, "'\"`$;|&<>()") {
-		return false
+// patchFeed is the quote, here-document or PowerShell here-string that carries
+// an envelope to the command that reads it.
+type patchFeed struct {
+	quote      byte   // ' or " of a quoted argument or here-string
+	delim      string // here-document delimiter, or '@ / "@
+	powershell bool
+	expand     bool // $, ` and \ may run commands or join lines inside the feed
+}
+
+// patchOpenerFeed reads the feed that an envelope's opener leaves open: the
+// text before "*** Begin Patch" on its line, or the line before it (ownLine).
+// It fails for an opener whose quoting is unclear (escapes, several or nested
+// quotes and here-documents, PowerShell block comments).
+func patchOpenerFeed(opener string, ownLine bool) (patchFeed, bool) {
+	if ownLine {
+		trimmed := strings.TrimSpace(opener)
+		for _, open := range []string{"@'", `@"`} {
+			if head, found := strings.CutSuffix(trimmed, open); found {
+				feed := patchFeed{delim: open[1:] + "@", powershell: true, expand: open[1] == '"'}
+				return feed, plainShellText(head)
+			}
+		}
+		if strings.Count(opener, "<<") == 1 && !strings.Contains(opener, "<<<") {
+			match := heredocOperator.FindStringSubmatchIndex(opener)
+			if match == nil {
+				return patchFeed{}, false
+			}
+			feed := patchFeed{expand: match[8] >= 0}
+			for group := 2; group <= 4; group++ {
+				if match[2*group] >= 0 {
+					feed.delim = opener[match[2*group]:match[2*group+1]]
+					tail := match[2*group+1]
+					if group < 4 {
+						tail++ // the closing quote of a quoted delimiter
+					}
+					return feed, plainShellText(opener[:match[0]]) && plainShellText(opener[tail:])
+				}
+			}
+		}
 	}
+	head := strings.ReplaceAll(opener, "<<<", "")
+	if shellNesting(head) {
+		return patchFeed{}, false
+	}
+	quote := openQuote(head)
+	return patchFeed{quote: quote, expand: quote == '"'}, quote != 0
+}
+
+// ends reports a body line that may close the feed.
+func (f patchFeed) ends(line string) bool {
+	if f.quote != 0 {
+		return strings.IndexByte(line, f.quote) >= 0
+	}
+	line = strings.TrimSpace(line)
+	if f.powershell {
+		return strings.HasPrefix(line, f.delim)
+	}
+	return line == f.delim
+}
+
+// expands reports a body line that the shell may expand or join with the next.
+func (f patchFeed) expands(line string) bool {
+	return f.expand && strings.ContainsAny(line, "$`\\")
+}
+
+// closeAfter checks that the feed closes right after the envelope, on its End
+// line or the next line, and that the shell text after the close is plain. It
+// returns the first line after the close.
+func (f patchFeed) closeAfter(lines []string, end int) (int, bool) {
+	rest := strings.TrimSpace(strings.TrimSpace(lines[end])[len(patchEndMarker):])
+	if f.quote != 0 && rest != "" {
+		return end + 1, rest[0] == f.quote && plainShellText(rest[1:])
+	}
+	if rest != "" || end+1 >= len(lines) {
+		return end + 1, false
+	}
+	next := strings.TrimSpace(lines[end+1])
+	switch {
+	case f.quote != 0:
+		return end + 2, next != "" && next[0] == f.quote && plainShellText(next[1:])
+	case f.powershell:
+		tail, found := strings.CutPrefix(next, f.delim)
+		return end + 2, found && plainShellText(tail)
+	default:
+		return end + 2, f.delim != "" && next == f.delim
+	}
+}
+
+// patchBodyShape reports a line that apply_patch reads as patch text: an
+// added, removed or context line, a hunk or a "***" header, or an empty line.
+func patchBodyShape(line string) bool {
 	return line == "" || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") ||
 		strings.HasPrefix(line, " ") || strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "***")
+}
+
+// plainShellText reports shell text that leaves no quote open and has no
+// construct that nests quoting or reads later lines.
+func plainShellText(text string) bool {
+	return !shellNesting(text) && openQuote(text) == 0
+}
+
+// shellNesting reports an escape, a line continuation, a here-document or
+// here-string, a command or parameter substitution, a PowerShell block comment
+// or a stop-parsing token, in sh or PowerShell. Quotes inside or after those
+// do not follow the plain quote rules of openQuote.
+func shellNesting(text string) bool {
+	if strings.ContainsAny(text, "\\`") {
+		return true
+	}
+	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "--%"} {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// openQuote returns the quote character still open at the end of text, which
+// has no escapes, or 0.
+func openQuote(text string) byte {
+	var quote byte
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		}
+	}
+	return quote
 }
 
 // invokesApplyPatch reports a shell text that may run apply_patch as a

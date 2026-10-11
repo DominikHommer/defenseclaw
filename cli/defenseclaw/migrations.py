@@ -3742,16 +3742,63 @@ def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
             f"(previous copies in {result.backup_dir})",
             indent="    ",
         )
-    if result.kept_modified:
-        guardrail_dir = os.path.join(policy_dir, "guardrail")
+    guardrail_dir = os.path.join(policy_dir, "guardrail")
+    copies = _rebased_profile_copies(config_path, guardrail_dir)
+    kept = [name for name in result.kept_modified if name not in copies]
+    for name in result.kept_modified:
+        if name in copies:
+            # GAP-1480: the config_version 9 migration made the edited folder
+            # a 1.0 copy, which the config selects instead of the preset.
+            pack, path = copies[name]
+            ux.warn(
+                f"kept your edited guardrail rule pack {name} in {guardrail_dir} as it is for a rollback to 0.8.x; "
+                f"the config selects its 1.0 copy {path} (guardrail.custom_packs.{pack}), which carries your "
+                "edits over to this release's rules (the lines above name the rules of yours it changed). As a "
+                "custom pack it does not get the rule changes of later releases",
+                indent="    ",
+            )
+    if kept:
         ux.warn(
-            f"kept edited guardrail rule packs {', '.join(result.kept_modified)} in {guardrail_dir}; "
+            f"kept edited guardrail rule packs {', '.join(kept)} in {guardrail_dir}; "
             "they do not get this release's rule changes. To use the new rules, move the folder "
             "aside and run 'defenseclaw init' to seed it again",
             indent="    ",
         )
     for error in result.errors:
         ux.warn(f"guardrail rule pack was not updated ({error})", indent="    ")
+
+
+def _rebased_profile_copies(config_path: str, guardrail_dir: str) -> dict[str, tuple[str, str]]:
+    """The 1.0 copies of edited seeded rule packs the config pins (GAP-1480).
+
+    The config_version 9 migration writes ``<guardrail_dir>/<name>-1.0`` (or
+    ``-1.0-N``) and pins it as a custom pack. Returns ``{name: (custom pack,
+    path)}``.
+    """
+
+    try:
+        raw = yaml.safe_load(_read_config_text(config_path) or "") or {}
+    except yaml.YAMLError:
+        return {}
+    guardrail = raw.get("guardrail") if isinstance(raw, dict) else None
+    packs = guardrail.get("custom_packs") if isinstance(guardrail, dict) else None
+    if not isinstance(packs, dict):
+        return {}
+    root = os.path.normcase(os.path.normpath(guardrail_dir))
+    copies: dict[str, tuple[str, str]] = {}
+    for pack, entry in packs.items():
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not isinstance(path, str):
+            continue
+        path = os.path.normpath(os.path.expanduser(path))
+        if os.path.normcase(os.path.dirname(path)) != root:
+            continue
+        name, marker, suffix = os.path.basename(path).partition("-1.0")
+        if marker and name in ("default", "strict", "permissive") and (
+            not suffix or (suffix[0] == "-" and suffix[1:].isdigit())
+        ):
+            copies.setdefault(name, (str(pack), path))
+    return copies
 
 
 def _configured_policy_dir(data_dir: str, config_text: str) -> str:
