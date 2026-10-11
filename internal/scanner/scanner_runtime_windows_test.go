@@ -48,6 +48,34 @@ func TestManagedScannerRuntimeRejectionStopsPathFallback(t *testing.T) {
 	}
 }
 
+// GAP-1436: a machine-wide runtime root left behind (a standalone uninstall
+// that could not remove it) is never used by a per-user install, while the
+// standalone deployment still refuses the same unusable root.
+func TestPerUserScannerIgnoresLeftoverRuntimeRoot(t *testing.T) {
+	root := t.TempDir() // the leftover root, without its executable
+	oldRoot := scannerRuntimeRoot
+	scannerRuntimeRoot = func() (string, error) { return root, nil }
+	t.Cleanup(func() { scannerRuntimeRoot = oldRoot })
+
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	if got := resolveScannerRuntime("skill-scanner", "skill-scanner", "skill-scanner.exe"); got != "skill-scanner" {
+		t.Fatalf("per-user resolveScannerRuntime() = %q, want the configured command", got)
+	}
+	if err := scannerRuntimePreflight("skill-scanner", "skill-scanner", "skill-scanner.exe"); err != nil {
+		t.Fatalf("per-user scannerRuntimePreflight() = %v, want nil", err)
+	}
+	if err := scannerRuntimeProblem(); err != nil {
+		t.Fatalf("per-user scannerRuntimeProblem() = %v, want nil", err)
+	}
+
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	if err := scannerRuntimePreflight("skill-scanner", "skill-scanner", "skill-scanner.exe"); !errors.Is(err, ErrScannerRuntimeUnavailable) {
+		t.Fatalf("standalone scannerRuntimePreflight() = %v, want the runtime-not-ready error", err)
+	}
+}
+
 // GAP-1317: a server folder the enumerator verified is used only when the
 // gateway can open it, since the server process runs as the gateway; a
 // folder its DACL closes to the gateway is refused with that reason instead
