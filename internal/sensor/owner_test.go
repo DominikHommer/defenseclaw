@@ -310,3 +310,34 @@ func TestRecycledPIDNeverLendsTheEarlierHoldersOwner(t *testing.T) {
 			got.User, got.UserSID, got.Attribution)
 	}
 }
+
+// GAP-1464: alice's claude.exe exits and bob's claude.exe gets its pid one
+// second after alice's started, inside instanceStartTolerance. Whether or
+// not the host plane reported the exit, bob's process is a new instance:
+// bob's findings name bob and alice's keep naming alice.
+func TestPIDReusedWithinTheStartToleranceTakesTheNewOwner(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	alice := procprobe.Process{PID: 4120, Name: "claude.exe", User: `DCLAB\alice`, UserSID: aliceSID, StartedAt: base}
+	bob := procprobe.Process{PID: 4120, Name: "claude.exe", User: `DCFC-WIN2-RS1\bob`, UserSID: bobSID,
+		StartedAt: base.Add(time.Second)}
+	for _, exitHeard := range []bool{true, false} {
+		book := newOwnerBook(ownerTestLookups(), time.Hour)
+		book.observe([]procprobe.Process{alice}, base.Add(500*time.Millisecond))
+		if exitHeard {
+			book.heard(pidEvents{ByPID: map[int][]pidEvent{4120: {{At: base.Add(700 * time.Millisecond), Exit: true}}}})
+		}
+		book.observe([]procprobe.Process{bob}, base.Add(1500*time.Millisecond))
+		resolver := book.resolver()
+		for _, want := range []struct {
+			process procprobe.Process
+			at      time.Time
+			sid     string
+		}{{alice, base.Add(500 * time.Millisecond), aliceSID}, {bob, base.Add(1500 * time.Millisecond), bobSID}} {
+			ref := procRef{PID: 4120, Start: want.process.StartedAt, Name: "claude.exe", At: want.at}
+			if got := resolver.resolve([]procRef{ref}, nil); got.SID != want.sid {
+				t.Errorf("exit heard %v: finding of %s resolved to %+v, want %s", exitHeard, want.process.User, got, want.sid)
+			}
+		}
+	}
+}
