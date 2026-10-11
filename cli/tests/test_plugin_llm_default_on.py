@@ -136,3 +136,22 @@ class WindowsRuntimePluginScanJudgeTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as stop:
             self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": "openai/gpt-4o-mini"})
         self.assertIn("openai/gpt-4o-mini", str(stop.exception.code))
+
+    def test_windows_bedrock_judge_without_a_key_stops_the_scan(self):
+        """GAP-1444: a key-less Bedrock judge (api_key mode) only warned on Windows."""
+        from defenseclaw.config import BedrockKeyConfig, LLMConfig
+        from defenseclaw.scanner import _llm_env
+
+        model = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=True), \
+                patch.object(_llm_env, "_aws_credential_chain_found", return_value=False), \
+                patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": ""}):
+            with self.assertRaises(SystemExit) as stop:
+                self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model})
+            self.assertIn(model, str(stop.exception.code))
+            keyed = self._run({"DEFENSECLAW_SCANNER_LLM_MODEL": model, "DEFENSECLAW_SCANNER_LLM_API_KEY": "k"})
+            self.assertTrue(keyed["override"]["enabled"])
+            iam = LLMConfig(model=model, bedrock=BedrockKeyConfig(auth_mode="iam_credentials"))
+            self.assertTrue(_llm_env.llm_analyzer_ready(iam))
+        with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=False):
+            self.assertTrue(_llm_env.llm_analyzer_ready(LLMConfig(model=model)))

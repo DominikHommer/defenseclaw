@@ -158,6 +158,17 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 		}
 		result.Findings = findings
 	}
+	// A configured judge that failed at call time leaves an LLM-SCAN-ERROR
+	// finding: naming the judge on the result makes admission fail the scan
+	// closed rather than admit the plugin with a MEDIUM warning (GAP-1444).
+	if model := liteLLMModel(s.LLM); model != "" {
+		for _, f := range result.Findings {
+			if f.RuleID == RulePluginLLMScanError {
+				result.JudgeModel = model
+				break
+			}
+		}
+	}
 
 	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit even when stdout parsed cleanly. See the matching
