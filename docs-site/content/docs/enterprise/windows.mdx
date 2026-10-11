@@ -1104,7 +1104,9 @@ services after it checks they belong to this deployment, moves
 then deletes the moved folder. The result has a `forced_uninstall` warning, and
 `forced_state_root_kept` names the moved folder if it could not be deleted.
 If the folder cannot be moved aside, for example because a process holds a
-file in it open, Setup fails with that error and the services get back the
+file in it open, or the removal after the move is refused, for example because
+a process holds a file under `C:\Program Files\Cisco\DefenseClaw` open, Setup
+fails with that error, the folder moves back and the services get back the
 startup mode and running state they had. Close that process and run it again.
 Hook registrations in each account's profile cannot be attributed without the
 deployment state, so the result lists what stays. Keep the lifecycle log
