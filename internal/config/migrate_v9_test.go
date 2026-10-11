@@ -2431,3 +2431,79 @@ func TestMigrateV9ValidatesAssetsBesideARebasedPack(t *testing.T) {
 		})
 	}
 }
+
+// A migration that stopped right after config.yaml committed left the pre-9
+// admission.rego in place beside a pending record. The retry must refresh it
+// before it completes the record, keep the operator's input-based module and
+// stay pending while the refresh fails; a second retry changes nothing
+// (GAP-1497).
+func TestMigrateV9RetryRefreshesPreNineRego(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	rego := filepath.Join(dir, "policies", "rego")
+	admission, custom := filepath.Join(rego, "admission.rego"), filepath.Join(rego, "operator_block.rego")
+	legacy := "package defenseclaw.admission\nimport rego.v1\nverdict := \"blocked\" if { data.actions.HIGH.install == \"block\" }\n"
+	block := "package defenseclaw.operator\nimport rego.v1\ndenied if { input.target_name == \"marker-skill\" }\n"
+	if err := os.MkdirAll(rego, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{admission: legacy, custom: block} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, in := context.Background(), MigrateV9Input{ConfigPath: configPath}
+	if _, err := MigrateV9(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	// What a stop right after the config commit leaves.
+	if err := os.Rename(admission+DataJSONMigratedSuffix, admission); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok {
+		t.Fatal("no migration record")
+	}
+	record.Pending = true
+	if err := writeMigrationRecord(MigrationRecordPath(configPath), record); err != nil {
+		t.Fatal(err)
+	}
+	// A refresh that cannot keep the old module fails closed.
+	if err := os.MkdirAll(filepath.Join(admission+DataJSONMigratedSuffix, "obstruction"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(ctx, in); err == nil {
+		t.Fatal("the retry completed although admission.rego could not be refreshed")
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || !record.Pending {
+		t.Fatalf("the record completed with the pre-9 module active: %+v", record)
+	}
+	if err := os.RemoveAll(admission + DataJSONMigratedSuffix); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(ctx, in); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if got, _ := os.ReadFile(admission); strings.Contains(string(got), "data.actions") ||
+		!strings.Contains(string(got), "package defenseclaw.admission") {
+		t.Fatalf("the retry left the pre-9 admission.rego: %q", got)
+	}
+	if kept, _ := os.ReadFile(admission + DataJSONMigratedSuffix); string(kept) != legacy {
+		t.Errorf("the pre-9 admission.rego was not kept as %s: %q", DataJSONMigratedSuffix, kept)
+	}
+	if got, _ := os.ReadFile(custom); string(got) != block {
+		t.Errorf("the operator module changed: %q", got)
+	}
+	if record, ok := readMigrationRecord(configPath); !ok || record.Pending {
+		t.Fatalf("the retry did not complete the record: %+v", record)
+	}
+	result, err := MigrateV9(ctx, in)
+	if err != nil || len(result.Written) != 0 {
+		t.Fatalf("second retry: written %v, err %v", result.Written, err)
+	}
+}

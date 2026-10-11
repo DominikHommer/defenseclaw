@@ -318,7 +318,7 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
 			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
 			if !in.DryRun && !in.InMemory {
-				if err := finishPendingV9(ctx, abs, source, record); err != nil {
+				if err := m.finishPending(ctx, source, record); err != nil {
 					return result, err
 				}
 				result.Written = append(result.Written, MigrationRecordPath(abs))
@@ -379,10 +379,14 @@ func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
 	return CheckCandidateAssets(candidate)
 }
 
-// finishPendingV9 resumes the part after config commit under the config lock.
-// A missing cleanup snapshot cannot prove which operator rows were copied,
-// so it remains pending for an operator to resolve.
-func finishPendingV9(ctx context.Context, configPath string, source []byte, record MigrationRecord) error {
+// finishPending resumes the part after config commit under the config lock:
+// the audit.db row cleanup and the pre-9 Rego module refresh. A missing
+// cleanup snapshot cannot prove which operator rows were copied, so it
+// remains pending for an operator to resolve. So does a module the gateway
+// loads that still reads data.json (GAP-1497): the gateway refuses such a
+// bundle, and the input-based modules of the operator stop applying with it.
+func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord) error {
+	configPath := m.configPath
 	txn, err := cfgtxn.Begin(ctx, configPath, 0)
 	if err != nil {
 		return err
@@ -411,8 +415,42 @@ func finishPendingV9(ctx context.Context, configPath string, source []byte, reco
 			return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
 		}
 	}
+	unenforced, err := m.resumeRegoRefresh()
+	if err != nil {
+		return err
+	}
+	for _, line := range unenforced {
+		if !slices.Contains(latest.UnenforcedRegoData, line) {
+			latest.UnenforcedRegoData = append(latest.UnenforcedRegoData, line)
+		}
+	}
 	latest.Pending = false
 	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// resumeRegoRefresh runs the pre-9 Rego module refresh again for a commit that
+// stopped after config.yaml (GAP-1497), then checks that no module the gateway
+// loads still needs it. planRegoRefresh finds nothing once the modules are
+// current, so a later retry changes nothing. It returns the
+// unenforced_rego_data lines of the plan.
+func (m *v9Migrator) resumeRegoRefresh() ([]string, error) {
+	m.rego, m.record.Notes, m.record.UnenforcedRegoData = nil, nil, nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	unenforced := m.record.UnenforcedRegoData
+	if err := m.refreshRegoModules(nil); err != nil {
+		return nil, err
+	}
+	m.rego = nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	if len(m.rego) > 0 {
+		return nil, fmt.Errorf("config: the pre-9 Rego module %s still reads data.json after its refresh; "+
+			"the config_version 9 migration stays pending", m.rego[0].path)
+	}
+	return unenforced, nil
 }
 
 // NeedsMigrationV9 reports whether raw is a config_version 8 document.
@@ -999,13 +1037,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			}
 		}
 	}
-	for _, module := range m.rego {
-		if err := m.refreshRegoModule(module); err != nil {
-			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
-			continue
-		}
-		written = append(written, module.path+DataJSONMigratedSuffix)
-	}
+	refreshErr := m.refreshRegoModules(&written)
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
 	}
@@ -1026,12 +1058,13 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			return written, fmt.Errorf("config: commit audit.db cleanup: %w", err)
 		}
 	}
-	// Mark the record committed and refresh notes from post-commit cleanup.
-	m.record.Pending = false
+	// A pre-9 module left in place keeps the record pending, and a retry
+	// resumes its refresh (finishPending).
+	m.record.Pending = refreshErr != nil
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
-	return written, nil
+	return written, refreshErr
 }
 
 // migrationStamp names the copies a migration keeps beside an earlier one's
@@ -1399,16 +1432,46 @@ func seedShippedRulePack(dir, name string) error {
 	return nil
 }
 
+// refreshRegoModules replaces every planned pre-9 module. A failure is
+// returned once the others ran: the gateway refuses a bundle that still holds
+// a pre-9 module, so the migration must not be recorded as complete
+// (GAP-1497).
+func (m *v9Migrator) refreshRegoModules(written *[]string) error {
+	var errs []error
+	for _, module := range m.rego {
+		if err := m.refreshRegoModule(module); err != nil {
+			errs = append(errs, fmt.Errorf("replace the pre-9 Rego module %s: %w", module.path, err))
+			continue
+		}
+		if written != nil {
+			*written = append(*written, module.path+DataJSONMigratedSuffix)
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("config: %w; the gateway refuses a pre-9 module, so the config_version 9 migration stays "+
+		"pending: fix it and run `defenseclaw-gateway config migrate --to 9` again", errors.Join(errs...))
+}
+
+// refreshRegoModule keeps the pre-9 module as <name>.migrated-v9 and puts the
+// shipped one in its place (nil data retires it). The copy is written before
+// the module is replaced, so a stop leaves the module pre-9, which a retry
+// refreshes (finishPending), or replaced: never missing.
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
 	info, err := os.Stat(module.path)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(module.path, module.path+DataJSONMigratedSuffix); err != nil {
+	raw, err := os.ReadFile(module.path)
+	if err != nil {
+		return err
+	}
+	if err := cfgtxn.WriteFileDurable(module.path+DataJSONMigratedSuffix, raw, info.Mode().Perm()); err != nil {
 		return err
 	}
 	if module.data == nil {
-		return nil
+		return os.Remove(module.path)
 	}
 	return cfgtxn.WriteFileDurable(module.path, module.data, info.Mode().Perm())
 }
