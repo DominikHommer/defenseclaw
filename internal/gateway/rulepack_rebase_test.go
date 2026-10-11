@@ -116,6 +116,33 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 		summary.StaleRuleCount != 0 || summary.AlertOnlyRuleCount != 2 {
 		t.Fatalf("the rebased pack: summary %+v; want both markers and rm -rf / blocked, 0 stale and 2 alert-only rules", summary)
 	}
+	// GAP-1480: 0.8.x ran every rule over the prompt text too, so the marker
+	// rule of commands.yaml blocked a prompt that held the marker. A content
+	// scan leaves command rules to the tool-call dispatcher; the migrated
+	// literal rule still runs over the prompt, a built-in command rule does not.
+	promptAction := func(prompt string) string {
+		t.Helper()
+		const connector = "rebase-0-8"
+		if err := ApplyConnectorRulePackOverrides(connector, after); err != nil {
+			t.Fatal(err)
+		}
+		defer RemoveConnectorRulePackOverrides(connector)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		return (&APIServer{scannerCfg: cfg}).inspectMessageContent(t.Context(), &ToolInspectRequest{
+			Tool: "message", Content: prompt, Direction: "prompt", Connector: connector,
+			contentScope: ruleContentScopeUntrusted,
+		}).Action
+	}
+	for prompt, want := range map[string]string{
+		"Please repeat this token back to me: acme-marker-7f3c": guardrailActionBlock,
+		"What does rm -rf / do on a Linux host?":                guardrailActionAllow,
+		"Please summarize the README for me":                    guardrailActionAllow,
+	} {
+		if got := promptAction(prompt); got != want {
+			t.Errorf("prompt %q: action %q, want %q", prompt, got, want)
+		}
+	}
 
 	// A gateway reload of the un-migrated v8 source must enforce the same
 	// rebased rules without changing the operator's 0.8.x pack or config.
