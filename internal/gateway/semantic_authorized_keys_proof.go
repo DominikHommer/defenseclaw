@@ -750,12 +750,21 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
 	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
+	// The links the command creates, read as the hook reads them; set once
+	// the command is known, before the first writeTarget call.
+	var links hookpaths.Links
 	writeTarget := func(target string) bool {
 		if !filepath.IsAbs(target) {
 			return false
 		}
 		target = filepath.Clean(target)
 		if isProtected(target) {
+			return true
+		}
+		// A link the command creates that cannot be read makes every write
+		// target unknown, also where the gateway resolves targets itself and
+		// the link does not exist yet (GAP-1522).
+		if links.Opaque() {
 			return true
 		}
 		if request.ResolvedWriteTargets != nil {
@@ -779,6 +788,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if request.SkipLocalFilesystemResolution {
 			return false
+		}
+		// A name that a link earlier in the command makes an alias of a
+		// protected file (GAP-1505).
+		if linked, ok := links.Target(target); ok && isProtected(linked) {
+			return true
 		}
 		info, err := os.Lstat(target)
 		if err != nil && !os.IsNotExist(err) {
@@ -816,6 +830,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	links = hookpaths.CommandLinks(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome)
 	if input.Command != "" {
 		operands, parsed, dynamic := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		// A truncated client map is not complete, so a nonempty target in it
@@ -1136,12 +1151,27 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 		if len(call.Args) == 0 {
 			return false
 		}
+		// A word that is one literal, plain or quoted. Anything else (a
+		// parameter, a substitution) is not static; it used to dereference a
+		// nil literal, and the recovered panic allowed the call (GAP-1530).
 		word := func(value *syntax.Word) (string, bool) {
 			if len(value.Parts) != 1 {
 				return "", false
 			}
-			literal, ok := value.Parts[0].(*syntax.Lit)
-			return literal.Value, ok
+			switch part := value.Parts[0].(type) {
+			case *syntax.Lit:
+				return part.Value, true
+			case *syntax.SglQuoted:
+				return part.Value, !part.Dollar
+			case *syntax.DblQuoted:
+				if len(part.Parts) == 1 {
+					literal, ok := part.Parts[0].(*syntax.Lit)
+					if ok {
+						return literal.Value, true
+					}
+				}
+			}
+			return "", false
 		}
 		program, static := word(call.Args[0])
 		if static && (program == "cd" || program == "pushd") {

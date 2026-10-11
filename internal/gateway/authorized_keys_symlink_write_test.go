@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -669,4 +670,98 @@ func TestAuthorizedKeys2LinkWriteMatchesDirectWrite(t *testing.T) {
 func encodeTargets(t *testing.T, targets map[string]string) string {
 	t.Helper()
 	return base64.RawURLEncoding.EncodeToString(mustJSON(t, targets))
+}
+
+// A link the command creates and the hook cannot read makes the write
+// targets unknown. The per-user gateway, which resolves targets itself,
+// fails closed on it as the managed gateway does (GAP-1521, GAP-1522);
+// ordinary commands, also with a program word that is not static, stay
+// allowed (GAP-1523).
+func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook paths")
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	project := filepath.Join(home, "proj")
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, dir := range []string{filepath.Dir(keys), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	blocked := []string{
+		`env ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
+		`sudo ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
+		`sh -c "ln ~/.ssh/authorized_keys notes.txt" && echo k >> notes.txt`,
+		`eval ln ~/.ssh/authorized_keys notes.txt; echo k >> notes.txt`,
+		`ln ~/.ssh/authorized_keys n0.txt && mv n0.txt notes.txt && echo k >> notes.txt`,
+		`cd .. && ln -s .ssh/authorized_keys proj/notes.txt && cd proj && echo k >> notes.txt`,
+		`python3 -c "import os; os.link('../.ssh/authorized_keys', 'notes.txt')"; echo k >> notes.txt`,
+		`mklink /H notes.txt keys; echo k >> notes.txt`,
+		`pwsh -c "New-Item -ItemType HardLink -Path notes.txt -Target ../.ssh/authorized_keys"; echo k >> notes.txt`,
+		`busybox ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
+		`toybox ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
+		`rsync -a --link-dest=$HOME/.ssh $HOME/.ssh/ d/; echo k >> d/autho""rized_keys`,
+		`ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/notes.txt`,
+		`pax -rwl ~/.ssh d; echo k >> d/notes.txt`,
+		`"$PY" -V; ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
+	}
+	allowed := []string{
+		`ln a.txt b.txt && echo k >> b.txt`,
+		`rsync -a src/ d/ && echo k >> d/log.txt`,
+		`tar czf out.tgz src && echo k >> log.txt`,
+		`busybox ls > list.txt`,
+	}
+	// The managed gateway also fails closed on a program word that is not
+	// static, which this change leaves as it is.
+	allowedPerUser := []string{`"$PY" x.py > out.txt`, `bash -lc "cp a b" > out.txt`}
+	// "action" (not "raw_action") is the enforced decision.
+	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{true, false} {
+			post := func(t *testing.T, command string) string {
+				t.Helper()
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = "action"
+				cfg.Guardrail.Connector = connector
+				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+				body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
+					"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
+				req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+				if connector == "codex" {
+					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+				}
+				if managed {
+					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+				}
+				recorder := httptest.NewRecorder()
+				api.handleAgentHook(connector).ServeHTTP(recorder, req)
+				return recorder.Body.String()
+			}
+			name := fmt.Sprintf("%s managed=%v", connector, managed)
+			t.Run(name, func(t *testing.T) {
+				for _, command := range blocked {
+					if got := post(t, command); !strings.HasPrefix(got, block) ||
+						!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Errorf("%s = %.300s, want block", command, got)
+					}
+				}
+				expectAllowed := allowed
+				if !managed {
+					expectAllowed = append(slices.Clone(allowed), allowedPerUser...)
+				}
+				for _, command := range expectAllowed {
+					if got := post(t, command); !strings.HasPrefix(got, allow) {
+						t.Errorf("%s = %.300s, want allow", command, got)
+					}
+				}
+			})
+		}
+	}
 }

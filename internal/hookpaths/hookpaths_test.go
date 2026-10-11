@@ -161,6 +161,21 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
 		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
 		{"echo k >> notes.txt", "notes.txt", notes},
+		// A multicall binary runs its applet; archive and sync tools that
+		// link files make the write targets unknown (GAP-1521).
+		{"busybox ln ~/.ssh/autho\"\"rized_keys n1.txt && echo k >> n1.txt", "n1.txt", keys},
+		{"toybox ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
+		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"rsync -a --link-dest=$HOME/.ssh $HOME/.ssh/ d/; echo k >> d/autho\"\"rized_keys", "d/authorized_keys", ""},
+		{"rsync -aH ~/.ssh/ d/; echo k >> d/authorized_keys", "d/authorized_keys", ""},
+		{"ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/n1.txt", "d/n1.txt", ""},
+		{"pax -rwl ~/.ssh d; echo k >> d/n1.txt", "d/n1.txt", ""},
+		{"tar xf keys.tar; echo k >> n1.txt", "n1.txt", ""},
+		// Ordinary commands keep their targets.
+		{"ln notes.txt n2.txt && echo k >> n2.txt", "n2.txt", filepath.Join(home, "n2.txt")},
+		{"rsync -a src/ d/ && echo k >> d/log.txt", "d/log.txt", filepath.Join(home, "d", "log.txt")},
+		{"tar czf out.tgz src && echo k >> log.txt", "log.txt", filepath.Join(home, "log.txt")},
+		{"busybox ls > list.txt", "list.txt", filepath.Join(home, "list.txt")},
 	} {
 		payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": home,
 			"tool_input": map[string]any{"command": tc.command}})
