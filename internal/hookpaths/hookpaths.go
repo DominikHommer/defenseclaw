@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
@@ -470,13 +471,18 @@ func Decode(value string) (map[string]string, bool) {
 
 // Programs that create a link from their operands: ln and link always, cp
 // with --link or --symbolic-link. mv and rename move a link to another name;
-// cd changes what a relative link operand denotes.
+// cd changes what a relative link operand denotes. A multicall binary runs
+// its first operand as the program. An archive or sync tool can link files
+// that this package does not list: rsync --link-dest or -H, cpio and pax -l,
+// and tar extraction (GAP-1521).
 var (
-	linkPrograms   = []string{"ln", "gln", "link", "glink"}
-	copyPrograms   = []string{"cp", "gcp"}
-	renamePrograms = []string{"mv", "gmv", "rename"}
-	cdPrograms     = []string{"cd", "pushd", "popd"}
-	copyLinkOption = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
+	linkPrograms      = []string{"ln", "gln", "link", "glink"}
+	copyPrograms      = []string{"cp", "gcp"}
+	renamePrograms    = []string{"mv", "gmv", "rename"}
+	cdPrograms        = []string{"cd", "pushd", "popd"}
+	multicallPrograms = []string{"busybox", "toybox"}
+	archivePrograms   = []string{"rsync", "cpio", "pax", "tar", "gtar", "bsdtar"}
+	copyLinkOption    = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
 	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
 	// creates from text this package does not evaluate.
 	opaqueLink = regexp.MustCompile(`(?i)\bos\.(?:sym)?link\s*\(|\.(?:hardlink_to|symlink_to|link_to)\s*\(|` +
@@ -488,13 +494,23 @@ var (
 type linkAlias struct{ name, target string }
 
 // shellLinks are the links one shell command creates. known is false when a
-// link name or target is not a static word, or when a program that may
-// create a link cannot be read; the command's write targets are then
-// unknown.
+// link name or target is not a static word, when a program that may create a
+// link cannot be read, or when a program word is not static; the command's
+// write targets are then unknown. opaque records the first two only. A
+// program word that is not static may be any program, and failing closed on
+// it alone would block ordinary commands whose targets the gateway can
+// resolve itself (GAP-1523).
 type shellLinks struct {
 	aliases  []linkAlias
 	known    bool
+	opaque   bool
 	relative bool // a link operand is relative to the working directory
+}
+
+// unknown marks the links unknown, and opaque when a link may be created.
+func (l *shellLinks) unknown(opaque bool) {
+	l.known = false
+	l.opaque = l.opaque || opaque
 }
 
 // commandLinks lists the links that ln, link and cp --link or
@@ -503,7 +519,7 @@ type shellLinks struct {
 func commandLinks(command, cwd, home string) shellLinks {
 	links := shellLinks{known: true}
 	if opaqueLink.MatchString(command) {
-		links.known = false
+		links.unknown(true)
 		return links
 	}
 	file, parsed := parseShell(command)
@@ -515,27 +531,49 @@ func commandLinks(command, cwd, home string) shellLinks {
 	renames, cds := false, false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
-		if !isCall || len(call.Args) == 0 || !links.known {
-			return links.known
+		if !isCall || len(call.Args) == 0 || links.opaque {
+			return !links.opaque
 		}
-		words := make([]string, len(call.Args))
-		static := make([]bool, len(call.Args))
-		for i, arg := range call.Args {
+		args := call.Args
+		words := make([]string, len(args))
+		static := make([]bool, len(args))
+		for i, arg := range args {
 			words[i], static[i] = staticShellWord(arg, env, home != "")
 		}
-		program := ""
+		program, start := "", call.Pos()
 		if static[0] {
 			program = programBase(words[0])
+		}
+		// busybox ln and toybox ln are ln (GAP-1521).
+		for slices.Contains(multicallPrograms, program) && len(args) > 1 {
+			args, words, static, start = args[1:], words[1:], static[1:], args[1].Pos()
+			program = ""
+			if static[0] {
+				program = programBase(words[0])
+			}
 		}
 		switch {
 		case program == "":
 			// A program named by a parameter or a substitution may be ln.
-			links.known = false
+			links.unknown(false)
 		case slices.Contains(linkPrograms, program):
-			links.known = !slices.Contains(static, false) && links.add(program, words[1:], cwd)
+			if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
+				links.unknown(true)
+			}
 		case slices.Contains(copyPrograms, program):
-			if copyMayLink(call.Args[1:], words[1:], static[1:]) {
-				links.known = !slices.Contains(static, false) && links.add(program, words[1:], cwd)
+			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
+			switch {
+			case option:
+				if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
+					links.unknown(true)
+				}
+			case dynamic:
+				// A word that is not static may expand to a link option.
+				links.unknown(false)
+			}
+		case slices.Contains(archivePrograms, program):
+			if archiveMayLink(program, staticWords(words[1:], static[1:])) {
+				links.unknown(true)
 			}
 		case slices.Contains(renamePrograms, program):
 			renames = true
@@ -543,41 +581,132 @@ func commandLinks(command, cwd, home string) shellLinks {
 			cds = true
 		default:
 			// A wrapper (sudo, env, xargs, find -exec, sh -c) may run one.
-			text := command[call.Pos().Offset():call.End().Offset()]
-			if tactics.RunsProgram(text, linkPrograms...) ||
-				tactics.RunsProgram(text, copyPrograms...) && copyLinkOption.MatchString(text) {
-				links.known = false
+			text := command[start.Offset():call.End().Offset()]
+			switch {
+			case tactics.RunsProgram(text, linkPrograms...):
+				links.unknown(true)
+			case tactics.RunsProgram(text, copyPrograms...) && copyLinkOption.MatchString(text):
+				// The option may be the wrapper's own, as in bash -lc.
+				mayLink, copyWord := wrappedMayLink(text)
+				links.unknown(mayLink || !copyWord)
+			case tactics.RunsProgram(text, multicallPrograms...) || tactics.RunsProgram(text, archivePrograms...):
+				if mayLink, _ := wrappedMayLink(text); mayLink {
+					links.unknown(true)
+				}
 			}
 			renames = renames || tactics.RunsProgram(text, renamePrograms...)
 			cds = cds || tactics.RunsProgram(text, cdPrograms...)
 		}
-		return links.known
+		return !links.opaque
 	})
 	if len(links.aliases) > 0 && (renames || cds && links.relative) {
-		links.known = false
+		links.unknown(true)
 	}
 	return links
 }
 
-// copyMayLink reports a cp call that has a link option, or a dynamic word
-// that may expand to one.
-func copyMayLink(args []*syntax.Word, words []string, static []bool) bool {
+// copyLinkOptions reports a cp call with a static link option, and one with
+// a word that is not static and may expand to an option.
+func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option, dynamic bool) {
 	for i, word := range words {
 		if !static[i] {
 			lit, isLit := args[i].Parts[0].(*syntax.Lit)
-			if !isLit || strings.HasPrefix(lit.Value, "-") {
+			dynamic = dynamic || !isLit || strings.HasPrefix(lit.Value, "-")
+			continue
+		}
+		if word == "--" {
+			break
+		}
+		option = option || copyLinkOption.MatchString(word)
+	}
+	return option, dynamic
+}
+
+// staticWords keeps the words that are static.
+func staticWords(words []string, static []bool) []string {
+	kept := make([]string, 0, len(words))
+	for i, word := range words {
+		if static[i] {
+			kept = append(kept, word)
+		}
+	}
+	return kept
+}
+
+// archiveMayLink reports an archive or sync call that can link files: rsync
+// --link-dest, -H or --hard-links, cpio -l or --link (pass-through -pl), pax
+// -l (copy mode -rwl), and any tar extraction, whose archive may hold links.
+func archiveMayLink(program string, args []string) bool {
+	tar := strings.HasSuffix(program, "tar")
+	for i, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if long, ok := strings.CutPrefix(arg, "--"); ok {
+			name, _, _ := strings.Cut(long, "=")
+			switch {
+			case program == "rsync" && (name == "link-dest" || name == "hard-links"),
+				program == "cpio" && name == "link",
+				tar && (name == "get" || len(name) >= 3 && strings.HasPrefix("extract", name)):
 				return true
 			}
 			continue
 		}
-		if word == "--" {
-			return false
-		}
-		if copyLinkOption.MatchString(word) {
+		cluster, option := strings.CutPrefix(arg, "-")
+		switch {
+		case !option:
+			// tar reads its first word as options without a dash: tar xf.
+			if i == 0 && tar && tarExtracts(arg) {
+				return true
+			}
+		case program == "rsync" && strings.ContainsRune(cluster, 'H'),
+			(program == "cpio" || program == "pax") && strings.ContainsRune(cluster, 'l'),
+			tar && tarExtracts(cluster):
 			return true
 		}
 	}
 	return false
+}
+
+// tarExtracts reports x in a tar option cluster, before an option that takes
+// the rest of the word as its value.
+func tarExtracts(cluster string) bool {
+	for _, c := range cluster {
+		switch {
+		case c == 'x':
+			return true
+		case strings.ContainsRune("fCTXbIKNgVHFL", c):
+			return false
+		}
+	}
+	return false
+}
+
+// wrappedMayLink reads the words of a wrapper's text from the first ln, cp,
+// or archive program on as that program's arguments and reports one that can
+// link files; for cp a word with a parameter or a substitution counts as a
+// link option. copyWord reports that a cp program word was found.
+func wrappedMayLink(text string) (mayLink, copyWord bool) {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
+	})
+	for i, word := range words {
+		program, rest := programBase(word), words[i+1:]
+		switch {
+		case slices.Contains(linkPrograms, program):
+			return true, copyWord
+		case slices.Contains(copyPrograms, program):
+			for _, arg := range rest {
+				if strings.ContainsAny(arg, "$`") || copyLinkOption.MatchString(arg) {
+					return true, true
+				}
+			}
+			copyWord = true
+		case slices.Contains(archivePrograms, program) && archiveMayLink(program, rest):
+			return true, copyWord
+		}
+	}
+	return false, copyWord
 }
 
 // programBase is a program's lowercased basename without ".exe".
