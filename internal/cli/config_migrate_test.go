@@ -20,11 +20,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // The Windows standalone config step migrates a v8 config in place with the
@@ -179,5 +185,103 @@ func TestConfigMigrateReadsTildePolicyData(t *testing.T) {
 	}
 	if !strings.Contains(string(result.Migrated), "medium: block") {
 		t.Fatalf("migration missed policy data from %s", dataJSON)
+	}
+}
+
+// The default pack that 0.8.x init seeds is edited in place, and 0.8.x init
+// writes no rule_pack_dir. `config migrate` gives such a folder a 1.0 copy:
+// a rule file that repeats the category of commands.yaml is merged into it
+// instead of failing the upgrade (GAP-1479), and a pattern-only rule gets an
+// expression from its literal, which still matches the prompt (GAP-1480).
+func TestConfigMigrateRebasesTheDefaultPackEditedInPlace(t *testing.T) {
+	const marker = "u6-block-marker-7f3c"
+	cases := []struct {
+		name, file, rule, id string
+	}{
+		{name: "rule file repeating a category", file: "rules/u6-custom.yaml", id: "CMD-U6-CUSTOM",
+			rule: "version: 1\ncategory: command\nrules:\n  - id: CMD-U6-CUSTOM\n    pattern: u6-custom-marker-1d2e\n" +
+				"    title: U6 custom\n    severity: HIGH\n    confidence: 0.9\n    tags: [marker]\n"},
+		{name: "pattern-only rule in commands.yaml", file: "rules/commands.yaml", id: "CMD-U6-MARKER",
+			rule: "  - id: CMD-U6-MARKER\n    pattern: " + marker + "\n    title: U6 marker\n    severity: CRITICAL\n" +
+				"    confidence: 0.99\n    tags: [marker]\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			pack := filepath.Join(dir, "policies", "guardrail", "default")
+			files, err := policyassets.Files()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range files {
+				if rel, ok := strings.CutPrefix(file.Path, "guardrail/default/"); ok {
+					target := filepath.Join(pack, filepath.FromSlash(rel))
+					if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(target, file.Data, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			edited := filepath.Join(pack, filepath.FromSlash(tc.file))
+			old, _ := os.ReadFile(edited)
+			if err := os.WriteFile(edited, append(old, tc.rule...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "config.yaml")
+			v8 := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: action\n  connectors:\n" +
+				"    claudecode:\n      rule_pack_dir: ''\nobservability: {}\n"
+			if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input, err := configMigrateV9Input(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := config.MigrateV9(context.Background(), input)
+			if err != nil {
+				t.Fatalf("migrate the edited default pack: %v", err)
+			}
+			copyDir := pack + "-1.0"
+			if got := string(result.Migrated); !strings.Contains(got, "rule_pack: custom-default") ||
+				!strings.Contains(got, "path: "+copyDir) {
+				t.Fatalf("want the 1.0 copy of the edited folder selected:\n%s", got)
+			}
+			if _, err := guardrail.LoadRulePack(copyDir); err != nil {
+				t.Fatalf("the 1.0 copy does not load: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(copyDir, "rules", "u6-custom.yaml")); err == nil {
+				t.Errorf("the 1.0 copy still has rules/u6-custom.yaml")
+			}
+			if tc.file != "rules/commands.yaml" && len(result.Record.RuleFileMerges) != 1 {
+				t.Errorf("rule file merges %q, want the merge reported", result.Record.RuleFileMerges)
+			}
+			if !slices.Contains(result.Record.ExpressedRules, tc.id) {
+				t.Errorf("expressed rules %q, want %s", result.Record.ExpressedRules, tc.id)
+			}
+			raw, err := os.ReadFile(filepath.Join(copyDir, "rules", "commands.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var commands guardrail.RulesFileYAML
+			if err := yaml.Unmarshal(raw, &commands); err != nil {
+				t.Fatal(err)
+			}
+			i := slices.IndexFunc(commands.Rules, func(rule guardrail.RuleDefYAML) bool { return rule.ID == tc.id })
+			if i < 0 {
+				t.Fatalf("rules/commands.yaml of the 1.0 copy has no %s", tc.id)
+			}
+			rule := commands.Rules[i]
+			if !guardrail.MigratedLiteralRule(rule.Pattern, rule.Expression) {
+				t.Errorf("%s: expression %q is not the literal form of %q", tc.id, rule.Expression, rule.Pattern)
+			}
+			if tc.id == "CMD-U6-MARKER" && !regexp.MustCompile(rule.Pattern).MatchString("run: echo "+marker) {
+				t.Errorf("%s pattern %q no longer matches the prompt", tc.id, rule.Pattern)
+			}
+		})
 	}
 }
