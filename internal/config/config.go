@@ -1488,6 +1488,13 @@ type CiscoAIDefenseConfig struct {
 	// protectedCredentialRequired is set by Load on a standalone managed
 	// deployment, where only the protected credential carries the key.
 	protectedCredentialRequired bool
+	// protectedCredential names that credential while AI Defense is enabled
+	// (enterprise.inspection.ai_defense.credential) and protectedSecretsDir
+	// where it resolves. ResolvedAPIKey reads it, so the skill and MCP
+	// scanners' AI Defense analyzers get the key the gateway's inspector
+	// uses instead of an empty one (GAP-1483).
+	protectedCredential string
+	protectedSecretsDir string
 }
 
 // HookSurfaceEnabled reports whether the AID lane should fire on the
@@ -1504,12 +1511,20 @@ func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
 
 // ResolvedAPIKey returns the API key from the key store, env var, or inline
 // value. A standalone managed deployment ignores cisco_ai_defense.api_key_env:
-// its only key is the protected credential the gateway sets inline, so a
-// scanner's AI Defense analyzer never takes a key from the service
-// environment (GAP-1437).
+// its only key is the protected credential (enterprise.inspection.ai_defense),
+// read here or set inline by the gateway's inspector, so a scanner's AI
+// Defense analyzer never takes a key from the service environment
+// (GAP-1437) and still gets the protected one (GAP-1483).
 func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 	if c.protectedCredentialRequired {
-		return c.APIKey
+		if c.APIKey != "" || c.protectedCredential == "" {
+			return c.APIKey
+		}
+		value, err := resolveStandaloneLLMCredential(c.protectedCredential, c.protectedSecretsDir)
+		if err != nil {
+			return ""
+		}
+		return string(value)
 	}
 	if c.APIKeyEnv != "" {
 		if v, ok := GetKey(c.APIKeyEnv); ok && v != "" {
@@ -2844,6 +2859,10 @@ func loadConfigSourceChecked(
 	}
 	applySecureClientScannerDefaults(&cfg)
 	cfg.CiscoAIDefense.protectedCredentialRequired = cfg.StandaloneEnterprise()
+	if ai := cfg.Enterprise.Inspection.AIDefense; cfg.StandaloneEnterprise() && ai.Enabled {
+		cfg.CiscoAIDefense.protectedCredential = strings.TrimSpace(ai.Credential)
+		cfg.CiscoAIDefense.protectedSecretsDir = managed.StandaloneSecretsDirForConfig(runtime.GOOS, cfg.ConfigFilePath)
+	}
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
