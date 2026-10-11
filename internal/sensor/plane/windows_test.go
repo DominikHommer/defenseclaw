@@ -25,6 +25,7 @@ package plane
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -35,7 +36,11 @@ const security4688 = `<Event xmlns="http://schemas.microsoft.com/win/2004/08/eve
 <System><EventID>4688</EventID><EventRecordID>1033782</EventRecordID>
 <TimeCreated SystemTime="2026-09-09T23:16:25.3140000Z"/></System>
 <EventData>
+<Data Name="SubjectUserSid">S-1-5-21-1-2-3-500</Data>
 <Data Name="SubjectUserName">Administrator</Data>
+<Data Name="SubjectDomainName">DCLAB</Data>
+<Data Name="TargetUserSid">S-1-0-0</Data>
+<Data Name="TargetUserName">-</Data>
 <Data Name="NewProcessId">0x9d0</Data>
 <Data Name="NewProcessName">C:\Windows\System32\net.exe</Data>
 <Data Name="ProcessId">0x1918</Data>
@@ -83,6 +88,19 @@ func TestWindowsDecodes4688WithLineageAndArgv(t *testing.T) {
 	}
 	if event.At.IsZero() {
 		t.Error("At was not decoded")
+	}
+	// The new process runs as its creator unless the target names another
+	// account (GAP-1464).
+	if event.User != `DCLAB\Administrator` || event.UserSID != "S-1-5-21-1-2-3-500" {
+		t.Errorf("owner = %q %q, want the creator", event.User, event.UserSID)
+	}
+	record, err = decodeSecurityXML(strings.NewReplacer("S-1-0-0", "S-1-5-21-1-2-3-1104",
+		`<Data Name="TargetUserName">-</Data>`, `<Data Name="TargetUserName">alice</Data>`).Replace(security4688))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, _ = translateSecurityRecord(record); event.User != "alice" || event.UserSID != "S-1-5-21-1-2-3-1104" {
+		t.Errorf("owner = %q %q, want the target account", event.User, event.UserSID)
 	}
 }
 
@@ -162,7 +180,8 @@ func TestWindowsClassifiesObjectAccessWrites(t *testing.T) {
 		if event.Kind != tc.want {
 			t.Errorf("%s: Kind = %s, want %s", tc.name, event.Kind, tc.want)
 		}
-		if event.PID != 0x2f18 || event.Name != "claude.exe" || event.User != "dcw-rv16adm" || event.Path != tc.path {
+		if event.PID != 0x2f18 || event.Name != "claude.exe" || event.User != "dcw-rv16adm" || event.Path != tc.path ||
+			event.UserSID != "S-1-5-21-2566694559-2372738039-4094494201-1124" {
 			t.Errorf("%s: event = %+v; the process, user and path drive attribution", tc.name, event)
 		}
 	}

@@ -44,7 +44,7 @@ func TestSessionOwnerEvidenceKeepsDistinctClaudeProfiles(t *testing.T) {
 			Path: path, At: at,
 		})
 	}
-	refs, evidence := sessionOwnerEvidence(99, time.Time{}, "claude", at, session.Observations())
+	refs, evidence := sessionOwnerEvidence(procRef{PID: 99, Name: "claude", At: at}, session.Observations())
 	if len(evidence) != 2 ||
 		(evidence[0] != paths[0] && evidence[1] != paths[0]) ||
 		(evidence[0] != paths[1] && evidence[1] != paths[1]) {
@@ -176,7 +176,7 @@ func TestOwnerOfARecycledPIDStaysWithTheProcessTheFindingSaw(t *testing.T) {
 	}{
 		{"the instance the finding saw", procRef{PID: 7708, Start: base, Name: "uvx.exe", At: base.Add(time.Minute)},
 			aliceSID, AttributionProcessOwner},
-		{"no start: same image, started before last_seen",
+		{"no start: read from the poll that recorded it",
 			procRef{PID: 7708, Name: "uvx.exe", At: base.Add(time.Minute)}, aliceSID, AttributionProcessOwner},
 		{"the process that reused the pid", procRef{PID: 7708, Start: dwm.StartedAt, Name: "dwm.exe",
 			At: base.Add(5 * time.Minute)}, dwm.UserSID, AttributionProcessOwner},
@@ -213,8 +213,8 @@ func TestHostPlaneFindingsCarryTheSessionOwner(t *testing.T) {
 
 	service := &Service{hostPlane: host}
 	owners := resolverFor(ownerTestLookups(), []procprobe.Process{
-		{PID: 500, Name: "claude.exe", SessionID: 2},
-		{PID: 600, Name: "claude.exe"},
+		{PID: 500, Name: "claude.exe", SessionID: 2, StartedAt: base},
+		{PID: 600, Name: "claude.exe", StartedAt: base},
 	}, base)
 	findings := service.hostPlaneFindings(base.Add(time.Minute), 1, correlate.New(correlate.Snapshot{}), owners)
 	if len(findings) != 2 {
@@ -338,6 +338,100 @@ func TestPIDReusedWithinTheStartToleranceTakesTheNewOwner(t *testing.T) {
 			if got := resolver.resolve([]procRef{ref}, nil); got.SID != want.sid {
 				t.Errorf("exit heard %v: finding of %s resolved to %+v, want %s", exitHeard, want.process.User, got, want.sid)
 			}
+		}
+	}
+}
+
+// GAP-1464: a Windows process-creation event carries no creation time, so a
+// finding's process has no start until a poll sees it. alice's claude.exe
+// writes her settings and exits, bob's claude.exe gets its pid 150 ms after
+// hers started, and the next poll records bob's. Her finding is not tied to
+// bob's instance by pid, image and a nearby start: the exit between her
+// process's creation and that poll proves the polled process is another,
+// whether the book hears of the exit before the poll or after it.
+func TestRecycledPIDWithoutAStartIsNotTheNextHoldersProcess(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	const pid = 1204
+	for _, lateLifecycle := range []bool{false, true} {
+		host := newHostPlane(newFake(fullCoverage()), agentchain.NewTracker(),
+			tactics.IndicatorsFor("windows"), time.Hour, scoring.KillChainMinStages)
+		book := newOwnerBook(ownerTestLookups(), time.Hour)
+		write := func(user string, at time.Time) {
+			host.handle(plane.Event{Kind: plane.KindFileWrite, PID: pid, Name: "claude.exe",
+				Path: `C:\Users\` + user + `\.claude\settings.json`, User: user, At: at})
+		}
+		poll := func() {
+			book.heard(host.takeLifecycle())
+			book.observe([]procprobe.Process{{PID: pid, Name: "claude.exe", User: `DCFC-WIN2-RS1\bob`, UserSID: bobSID,
+				StartedAt: base.Add(150 * time.Millisecond)}}, base.Add(time.Minute))
+		}
+		host.handle(plane.Event{Kind: plane.KindExec, PID: pid, PPID: 900, Name: "claude.exe", Cmdline: "claude", At: base})
+		write("alice", base.Add(20*time.Millisecond))
+		if lateLifecycle {
+			poll()
+		}
+		host.handle(plane.Event{Kind: plane.KindExit, PID: pid, Name: "claude.exe", At: base.Add(100 * time.Millisecond)})
+		host.handle(plane.Event{Kind: plane.KindExec, PID: pid, PPID: 900, Name: "claude.exe", Cmdline: "claude",
+			At: base.Add(150 * time.Millisecond)})
+		write("bob", base.Add(170*time.Millisecond))
+		if !lateLifecycle {
+			poll()
+		}
+		findings := (&Service{hostPlane: host}).hostPlaneFindings(base.Add(61*time.Second), 1,
+			correlate.New(correlate.Snapshot{}), book.resolver())
+		if len(findings) != 2 {
+			t.Fatalf("late lifecycle %v: findings = %+v, want one per claude.exe", lateLifecycle, findings)
+		}
+		for _, finding := range findings {
+			want, attribution := bobSID, AttributionProcessOwner
+			if finding.FirstSeen.Before(base.Add(100 * time.Millisecond)) {
+				want, attribution = aliceSID, AttributionEnrolledProfile
+			}
+			if finding.UserSID != want || finding.Attribution != attribution {
+				t.Errorf("late lifecycle %v: finding first seen %s = %s %s (%s), want %s (%s)", lateLifecycle,
+					finding.FirstSeen.Sub(base), finding.User, finding.UserSID, finding.Attribution, want, attribution)
+			}
+		}
+	}
+}
+
+// GAP-1464: each Windows event names the account of the process that
+// produced it. alice's, bob's and again alice's claude.exe take one pid in
+// turn with neither exit logged, and write a project's Claude settings, a
+// path no profile holds. Each creation that names another account starts
+// its own instance, and each finding names the account its own events named,
+// not one the book holds for the pid.
+func TestRecycledPIDFindingsNameTheAccountTheirEventsNamed(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	const pid = 1204
+	host := newHostPlane(newFake(fullCoverage()), agentchain.NewTracker(),
+		tactics.IndicatorsFor("windows"), time.Hour, scoring.KillChainMinStages)
+	holders := []struct{ user, sid string }{
+		{`DCLAB\alice`, aliceSID}, {`DCFC-WIN2-RS1\bob`, bobSID}, {`DCLAB\alice`, aliceSID},
+	}
+	for index, holder := range holders {
+		at := base.Add(time.Duration(index) * 150 * time.Millisecond)
+		host.handle(plane.Event{Kind: plane.KindExec, PID: pid, PPID: 900, Name: "claude.exe", Cmdline: "claude",
+			User: holder.user, UserSID: holder.sid, At: at})
+		host.handle(plane.Event{Kind: plane.KindFileWrite, PID: pid, Name: "claude.exe",
+			Path: `C:\src\app\.claude\settings.json`, User: holder.user, UserSID: holder.sid, At: at.Add(20 * time.Millisecond)})
+	}
+	book := newOwnerBook(ownerTestLookups(), time.Hour)
+	book.heard(host.takeLifecycle())
+	book.observe([]procprobe.Process{{PID: pid, Name: "claude.exe", User: `DCLAB\alice`, UserSID: aliceSID,
+		StartedAt: base.Add(300 * time.Millisecond)}}, base.Add(time.Minute))
+	findings := (&Service{hostPlane: host}).hostPlaneFindings(base.Add(61*time.Second), 1,
+		correlate.New(correlate.Snapshot{}), book.resolver())
+	if len(findings) != len(holders) {
+		t.Fatalf("findings = %+v, want one per claude.exe", findings)
+	}
+	for _, finding := range findings {
+		holder := holders[int(finding.FirstSeen.Sub(base)/(150*time.Millisecond))]
+		if finding.UserSID != holder.sid || finding.Attribution != AttributionProcessOwner {
+			t.Errorf("finding first seen %s = %s %s (%s), want %s", finding.FirstSeen.Sub(base),
+				finding.User, finding.UserSID, finding.Attribution, holder.sid)
 		}
 	}
 }

@@ -544,6 +544,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			agentName = attribution.AgentName
 			instances = append(instances, procRef{
 				PID: attribution.RootPID, Start: attribution.RootStart, Name: attribution.RootName, At: now,
+				Born: attribution.RootBorn, Instance: attribution.RootInstance,
 			})
 		}
 		account := owners.resolve(instances, nil)

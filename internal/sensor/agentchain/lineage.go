@@ -23,6 +23,7 @@ package agentchain
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,7 +62,13 @@ type processRecord struct {
 	// firstSeen is when this instance was first observed. A process cannot
 	// be observed before it was created, so a start learnt later that falls
 	// after it belongs to another process that took the pid.
-	firstSeen      time.Time
+	firstSeen time.Time
+	// bornAt is when the creation or exec event that started this instance
+	// was logged, zero when a poll found it first, and ownerSID the account
+	// that event named, empty when it named none. They tie what the
+	// instance did to it and not to a later process on the pid (GAP-1464).
+	bornAt         time.Time
+	ownerSID       string
 	instance       uint64
 	ppid           int
 	responsiblePID int
@@ -107,15 +114,23 @@ func newTracker(ttl time.Duration, now func() time.Time) *Tracker {
 	return &Tracker{records: make(map[int]*processRecord), ttl: ttl, now: now}
 }
 
+// Creation is what an exec or process-creation event says about the
+// process beyond its image: when the event was logged, and the SID of the
+// account it names for the process, empty when it names none.
+type Creation struct {
+	At  time.Time
+	SID string
+}
+
 // ObserveExec records an exec event. This is the authoritative source: it
 // carries the parent at the moment of exec, which a later process-table poll
 // cannot recover once the parent has exited and the child is reparented.
-// start is the kernel creation time when the backend knows it, zero otherwise.
-// The event's timestamp is not the process creation time.
-func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
+// The event's time is not the kernel creation time: a process may exec long
+// after it forked.
+func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string, created Creation) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.recordLocked(pid, ppid, responsiblePID, false, name, cmdline, start)
+	t.recordLocked(pid, ppid, responsiblePID, false, name, cmdline, time.Time{}, created)
 }
 
 // instanceLocked is the instance recorded under pid, zero when there is none.
@@ -134,7 +149,7 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 	defer t.mu.Unlock()
 	learnt := make([]*processRecord, 0, len(rows))
 	for _, row := range rows {
-		if record := t.recordLocked(row.PID, row.PPID, 0, true, row.Name, row.Cmdline, row.Start); record != nil {
+		if record := t.recordLocked(row.PID, row.PPID, 0, true, row.Name, row.Cmdline, row.Start, Creation{}); record != nil {
 			learnt = append(learnt, record)
 		}
 	}
@@ -168,7 +183,7 @@ type ProcessRow struct {
 // already learnt for this instance is kept, because once the child is
 // reparented to launchd it is the only link left to the agent.
 func (t *Tracker) recordLocked(
-	pid, ppid, responsiblePID int, inferResponsible bool, name, cmdline string, start time.Time,
+	pid, ppid, responsiblePID int, inferResponsible bool, name, cmdline string, start time.Time, created Creation,
 ) *processRecord {
 	if pid <= 0 {
 		return nil
@@ -191,10 +206,13 @@ func (t *Tracker) recordLocked(
 	// Exec replaces an image, not a process. Only an observed exit or a
 	// different kernel start means the pid names a new process instance.
 	// A start after the instance was first seen is the same evidence for an
-	// instance first seen without one.
+	// instance first seen without one, and so is a creation that names
+	// another account: a Windows 4688 carries no creation time, so with the
+	// earlier holder's exit unseen it is all that tells them apart (GAP-1464).
 	recycled := !existing.exitedAt.IsZero() || differentStart(existing.start, start) ||
 		(existing.instance != 0 && existing.start.IsZero() && !start.IsZero() &&
-			start.After(existing.firstSeen.Add(startTolerance)))
+			start.After(existing.firstSeen.Add(startTolerance))) ||
+		(created.SID != "" && existing.ownerSID != "" && !strings.EqualFold(created.SID, existing.ownerSID))
 	reimaged := existing.name != name
 	if !existing.exitedAt.IsZero() {
 		t.exited--
@@ -206,10 +224,19 @@ func (t *Tracker) recordLocked(
 		existing.start = start
 		existing.keyStart = start
 		existing.firstSeen = now
-	} else if existing.start.IsZero() && !start.IsZero() {
-		// Learn the real start without changing the key of a live session
-		// first seen while its creation time was unavailable.
-		existing.start = start
+		existing.bornAt, existing.ownerSID = created.At, created.SID
+	} else {
+		if existing.start.IsZero() && !start.IsZero() {
+			// Learn the real start without changing the key of a live
+			// session first seen while its creation time was unavailable.
+			existing.start = start
+		}
+		if existing.bornAt.IsZero() {
+			existing.bornAt = created.At
+		}
+		if existing.ownerSID == "" {
+			existing.ownerSID = created.SID
+		}
 	}
 	if inferResponsible {
 		responsiblePID = ppid
@@ -303,15 +330,23 @@ func (t *Tracker) Reap() int {
 	return removed
 }
 
-// StartOf is when the process now recorded under pid was created, zero when
-// the tracker has no record of it or no source could say.
-func (t *Tracker) StartOf(pid int) time.Time {
+// Instance names the process instance the tracker records under a pid.
+type Instance struct {
+	// Start is when the kernel created it and Born when the event that
+	// started it was logged, each zero when unknown.
+	Start, Born time.Time
+	// ID tells the tracker's instances apart, zero when it has no record.
+	ID uint64
+}
+
+// InstanceOf is the process instance now recorded under pid.
+func (t *Tracker) InstanceOf(pid int) Instance {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	if record, ok := t.records[pid]; ok {
-		return record.start
+		return Instance{Start: record.start, Born: record.bornAt, ID: record.instance}
 	}
-	return time.Time{}
+	return Instance{}
 }
 
 // differentStart reports two known start times too far apart to be one
@@ -368,7 +403,7 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 		root := t.outermostSameAgentLocked(pid, record.agentName)
 		return Attribution{
 			RootPID: root, RootStart: t.records[root].start, RootKeyStart: t.records[root].keyStart,
-			RootInstance: t.records[root].instance, RootName: t.records[root].name,
+			RootBorn: t.records[root].bornAt, RootInstance: t.records[root].instance, RootName: t.records[root].name,
 			AgentName: record.agentName, Depth: 0,
 			Via: record.via, State: StateAttributed,
 		}, true
@@ -427,7 +462,7 @@ func (t *Tracker) walkAncestryLocked(
 				via = "responsible"
 			}
 			return Attribution{
-				RootPID: next, RootStart: parent.start, RootKeyStart: parent.keyStart,
+				RootPID: next, RootStart: parent.start, RootKeyStart: parent.keyStart, RootBorn: parent.bornAt,
 				RootInstance: parent.instance, RootName: parent.name, AgentName: parent.agentName, Depth: depth,
 				Via: via, State: StateAttributed,
 			}, true
