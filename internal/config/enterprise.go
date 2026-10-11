@@ -1023,7 +1023,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	}
 	serviceAccount := os.Getenv(managed.WindowsServiceAccountEnv)
 	seen := map[string]bool{}
-	check := func(label, dir string) error {
+	check := func(label, dir string, validate func(path, label, serviceAccount string) error) error {
 		dir = strings.TrimSpace(dir)
 		if dir == "" || seen[dir] {
 			return nil
@@ -1035,7 +1035,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 			}
 			return fmt.Errorf("config: inspect %s %s: %w", label, dir, err)
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label, serviceAccount); err != nil {
+		if err := validate(dir, label, serviceAccount); err != nil {
 			return fmt.Errorf("config: managed standalone %s is not administrator-controlled: %w", label, err)
 		}
 		if err := managed.ValidateServiceCanReadTree(dir, label, serviceAccount); err != nil {
@@ -1043,14 +1043,16 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		}
 		return nil
 	}
-	if err := check("policy_dir", cfg.PolicyDir); err != nil {
+	// The Rego modules in policy_dir are enforcement policy too, so the
+	// whole tree is checked, not only the folder (GAP-1499).
+	if err := check("policy_dir", cfg.PolicyDir, managed.ValidateTrustedServiceRuntimeTree); err != nil {
 		return err
 	}
 	// Every pack the gateway can load: the v9 rule_pack and custom_packs
 	// selections, profile packs and the v8 rule_pack_dir alike.
 	dirs := cfg.ReferencedRulePackDirs()
 	for _, label := range RulePackCheckOrder(dirs) {
-		if err := check(label, dirs[label]); err != nil {
+		if err := check(label, dirs[label], managed.ValidateTrustedServiceRuntimeDir); err != nil {
 			return err
 		}
 	}

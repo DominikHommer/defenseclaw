@@ -93,6 +93,50 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// readConfigChecked reads config.yaml for the transaction that applies it,
+// through a descriptor opened without following a symlink, and reports how
+// an account other than root could have written the bytes it returns: the
+// path is a symlink or not a regular file, the file is owned by another
+// account, or group or other may write it ("" when none could). The owner
+// and mode are those of the descriptor read (fstat), so they describe these
+// bytes and not a file another account renamed into place since.
+func (e *Env) readConfigChecked(path string) (data []byte, problem string, err error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, "it is a symlink", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() {
+		return nil, "it is not a regular file", nil
+	}
+	if info.Size() > maxInputBytes {
+		return nil, "", fmt.Errorf("%s exceeds %d bytes", path, maxInputBytes)
+	}
+	data, err = io.ReadAll(io.LimitReader(file, maxInputBytes+1))
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(data)) > maxInputBytes {
+		return nil, "", fmt.Errorf("%s exceeds %d bytes", path, maxInputBytes)
+	}
+	uid := int(st.Uid)
+	if owner, _, ownerErr := e.OwnerOf(path); ownerErr == nil && owner != 0 && owner != os.Geteuid() {
+		uid = owner
+	}
+	if info.Mode().Perm()&0o022 != 0 || (uid != 0 && uid != os.Geteuid()) {
+		return data, fmt.Sprintf("it was %04o and owned by uid %d", info.Mode().Perm(), uid), nil
+	}
+	return data, "", nil
+}
+
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil

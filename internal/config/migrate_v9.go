@@ -201,8 +201,10 @@ type MigrationRecord struct {
 	// UnenforcedRegoData names each Rego module that reads a data document
 	// 1.0 no longer provides and the migration did not move into config.yaml
 	// (an operator's own data.json key): its rules that read it are not
-	// enforced. The upgrade, config migrate, the managed lifecycle and doctor
-	// print them until the record is acknowledged (GAP-1399).
+	// enforced. It also names each 0.8.x vendor module the operator edited,
+	// which the shipped module replaced, with its saved .migrated-v9 copy
+	// (GAP-1498). The upgrade, config migrate, the managed lifecycle and
+	// doctor print them until the record is acknowledged (GAP-1399).
 	UnenforcedRegoData []string `json:"unenforced_rego_data,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
@@ -318,7 +320,7 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 		if record, ok := readMigrationRecord(abs); ok && record.Pending &&
 			strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source)) {
 			if !in.DryRun && !in.InMemory {
-				if err := finishPendingV9(ctx, abs, source, record); err != nil {
+				if err := m.finishPending(ctx, source, record); err != nil {
 					return result, err
 				}
 				result.Written = append(result.Written, MigrationRecordPath(abs))
@@ -379,10 +381,14 @@ func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
 	return CheckCandidateAssets(candidate)
 }
 
-// finishPendingV9 resumes the part after config commit under the config lock.
-// A missing cleanup snapshot cannot prove which operator rows were copied,
-// so it remains pending for an operator to resolve.
-func finishPendingV9(ctx context.Context, configPath string, source []byte, record MigrationRecord) error {
+// finishPending resumes the part after config commit under the config lock:
+// the audit.db row cleanup and the pre-9 Rego module refresh. A missing
+// cleanup snapshot cannot prove which operator rows were copied, so it
+// remains pending for an operator to resolve. So does a module the gateway
+// loads that still reads data.json (GAP-1497): the gateway refuses such a
+// bundle, and the input-based modules of the operator stop applying with it.
+func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord) error {
+	configPath := m.configPath
 	txn, err := cfgtxn.Begin(ctx, configPath, 0)
 	if err != nil {
 		return err
@@ -411,8 +417,42 @@ func finishPendingV9(ctx context.Context, configPath string, source []byte, reco
 			return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
 		}
 	}
+	unenforced, err := m.resumeRegoRefresh()
+	if err != nil {
+		return err
+	}
+	for _, line := range unenforced {
+		if !slices.Contains(latest.UnenforcedRegoData, line) {
+			latest.UnenforcedRegoData = append(latest.UnenforcedRegoData, line)
+		}
+	}
 	latest.Pending = false
 	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// resumeRegoRefresh runs the pre-9 Rego module refresh again for a commit that
+// stopped after config.yaml (GAP-1497), then checks that no module the gateway
+// loads still needs it. planRegoRefresh finds nothing once the modules are
+// current, so a later retry changes nothing. It returns the
+// unenforced_rego_data lines of the plan.
+func (m *v9Migrator) resumeRegoRefresh() ([]string, error) {
+	m.rego, m.record.Notes, m.record.UnenforcedRegoData = nil, nil, nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	unenforced := m.record.UnenforcedRegoData
+	if err := m.refreshRegoModules(nil); err != nil {
+		return nil, err
+	}
+	m.rego = nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	if len(m.rego) > 0 {
+		return nil, fmt.Errorf("config: the pre-9 Rego module %s still reads data.json after its refresh; "+
+			"the config_version 9 migration stays pending", m.rego[0].path)
+	}
+	return unenforced, nil
 }
 
 // NeedsMigrationV9 reports whether raw is a config_version 8 document.
@@ -999,13 +1039,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			}
 		}
 	}
-	for _, module := range m.rego {
-		if err := m.refreshRegoModule(module); err != nil {
-			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
-			continue
-		}
-		written = append(written, module.path+DataJSONMigratedSuffix)
-	}
+	refreshErr := m.refreshRegoModules(&written)
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
 	}
@@ -1026,12 +1060,13 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			return written, fmt.Errorf("config: commit audit.db cleanup: %w", err)
 		}
 	}
-	// Mark the record committed and refresh notes from post-commit cleanup.
-	m.record.Pending = false
+	// A pre-9 module left in place keeps the record pending, and a retry
+	// resumes its refresh (finishPending).
+	m.record.Pending = refreshErr != nil
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
-	return written, nil
+	return written, refreshErr
 }
 
 // migrationStamp names the copies a migration keeps beside an earlier one's
@@ -1177,6 +1212,27 @@ var v9DataJSONDocs = map[string]bool{
 // v9VendorRegoModules are the modules 0.8.x init seeded.
 var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_actions.rego"}
 
+// v9StockRegoDigests are the SHA-256 digests (CRLF read as LF) of the vendor
+// modules 0.5.0 to 0.8.10 shipped, which init seeded byte for byte. A module
+// that matches none holds edits of the operator, which the shipped module
+// that replaces it does not carry (GAP-1498). Remove this table with the v8
+// to v9 migration (1.1.0).
+var v9StockRegoDigests = map[string][]string{
+	"admission.rego": {
+		"67a1831178e23d6bf8a4dd6d95ea53402c6827c6b1dc0536c8e7667c7586a53b", // 0.5.0 to 0.7.2
+		"9dfe95603d4a738909795a4e77eb7315fc114768dee4f87ec9fab7759f8f30d5", // 0.8.0 to 0.8.10
+	},
+	"guardrail.rego":     {"18a563b37c0bec87a3743f566f4f4200bbac87977b783a290841d1aaeedfb753"},
+	"skill_actions.rego": {"c3cb1ab336b9799ccecaef453cd33d583aeada0571e87092e1491c2c8ded924a"},
+}
+
+// v9StockRegoModule reports whether raw is a copy of the vendor module name
+// that a 0.x release shipped.
+func v9StockRegoModule(name string, raw []byte) bool {
+	sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+	return slices.Contains(v9StockRegoDigests[name], hex.EncodeToString(sum[:]))
+}
+
 // planRegoRefresh finds the modules the gateway loads that read a data
 // document outside data.defenseclaw, which config_version 9 no longer
 // provides: the gateway refuses such a bundle and uses the config-driven
@@ -1210,7 +1266,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 	if err != nil {
 		return nil
 	}
-	parsed := map[string]*ast.Module{}
+	parsed, sources := map[string]*ast.Module{}, map[string][]byte{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if filepath.Ext(name) != ".rego" || !entry.Type().IsRegular() {
@@ -1228,7 +1284,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 			}
 			continue
 		}
-		parsed[name] = mod
+		parsed[name], sources[name] = mod, raw
 	}
 	reads := map[string][]string{}
 	for _, read := range regodata.OutsideReads(parsed, "data.defenseclaw.admission", "data.defenseclaw.guardrail") {
@@ -1249,6 +1305,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 	for _, name := range names {
 		path := filepath.Join(dir, name)
 		var effect string
+		edited := false
 		switch {
 		case !slices.Contains(v9VendorRegoModules, name):
 			m.note("%s reads %s, which config_version 9 no longer provides; the gateway refuses the Rego modules and "+
@@ -1260,6 +1317,7 @@ func (m *v9Migrator) planRegoRefresh() error {
 			effect = "the gateway refuses the module and uses the config-driven admission"
 		default:
 			m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+			edited = !v9StockRegoModule(name, sources[name])
 			if shipped[name] == nil {
 				m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
 				effect = "the module is retired and kept as " + name + DataJSONMigratedSuffix
@@ -1274,6 +1332,21 @@ func (m *v9Migrator) planRegoRefresh() error {
 			if !v9DataJSONDocs[doc] {
 				lost = append(lost, doc)
 			}
+		}
+		if edited {
+			// Rules added to a vendor module may read only the data.json
+			// documents the migration moves; the shipped module still has none
+			// of them (GAP-1498).
+			read := ""
+			if len(lost) > 0 {
+				read = "; it reads " + strings.Join(lost, ", ") + ", which 1.0 no longer loads (no data.json)"
+			}
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s differs from every copy 0.8.x shipped, so it holds rules added after install%s: %s, and those "+
+					"rules are not enforced. The saved copy is %s%s. Express them in config.yaml (asset_policy, "+
+					"admission) or in a module that reads input, then run `defenseclaw-gateway config migrate --ack`",
+				path, read, effect, path, DataJSONMigratedSuffix))
+			continue
 		}
 		if len(lost) > 0 {
 			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
@@ -1399,16 +1472,46 @@ func seedShippedRulePack(dir, name string) error {
 	return nil
 }
 
+// refreshRegoModules replaces every planned pre-9 module. A failure is
+// returned once the others ran: the gateway refuses a bundle that still holds
+// a pre-9 module, so the migration must not be recorded as complete
+// (GAP-1497).
+func (m *v9Migrator) refreshRegoModules(written *[]string) error {
+	var errs []error
+	for _, module := range m.rego {
+		if err := m.refreshRegoModule(module); err != nil {
+			errs = append(errs, fmt.Errorf("replace the pre-9 Rego module %s: %w", module.path, err))
+			continue
+		}
+		if written != nil {
+			*written = append(*written, module.path+DataJSONMigratedSuffix)
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("config: %w; the gateway refuses a pre-9 module, so the config_version 9 migration stays "+
+		"pending: fix it and run `defenseclaw-gateway config migrate --to 9` again", errors.Join(errs...))
+}
+
+// refreshRegoModule keeps the pre-9 module as <name>.migrated-v9 and puts the
+// shipped one in its place (nil data retires it). The copy is written before
+// the module is replaced, so a stop leaves the module pre-9, which a retry
+// refreshes (finishPending), or replaced: never missing.
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
 	info, err := os.Stat(module.path)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(module.path, module.path+DataJSONMigratedSuffix); err != nil {
+	raw, err := os.ReadFile(module.path)
+	if err != nil {
+		return err
+	}
+	if err := cfgtxn.WriteFileDurable(module.path+DataJSONMigratedSuffix, raw, info.Mode().Perm()); err != nil {
 		return err
 	}
 	if module.data == nil {
-		return nil
+		return os.Remove(module.path)
 	}
 	return cfgtxn.WriteFileDurable(module.path, module.data, info.Mode().Perm())
 }

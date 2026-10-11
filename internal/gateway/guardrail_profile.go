@@ -163,6 +163,9 @@ type guardrailProfileSet struct {
 	// missing holds the rule packs that did not load when the set was built
 	// at start, keyed like rules; requests retry them (GAP-0333).
 	missing map[string]*profileRulePackRetry
+	// lazy holds the scopes a request resolved that the start-time preload
+	// did not list (*profileLazyScope by key); they load on first use.
+	lazy sync.Map
 	// matches memoises match for repeated subjects.
 	matches *profileMatchCache
 	// groupSIDs holds the SIDs of the assignment group names on standalone
@@ -355,8 +358,18 @@ func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	}
 	if cfg.ApplicationProtection.Enabled {
 		// Disabled application protection selects no rule pack (GAP-0975).
-		if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
-			add(overlay)
+		// A connector it protects automatically scans with its connector
+		// scope: the overlay pack with application_protection.guardrail.rules
+		// layered in. The overlay scope listed here before carried no
+		// connector, so it lacked those rules and matched no request, and an
+		// auto-protected Claude Code or Codex request scanned with the base
+		// rule set (GAP-1508). List the scope of every connector it can
+		// protect, keyed as the request is (effectiveRulePackKey).
+		for _, name := range profileAutoProtectableConnectors() {
+			add(connectorRulePackScope(cfg, name))
+		}
+		for _, name := range cfg.ApplicationProtection.IncludeConnectors {
+			add(connectorRulePackScope(cfg, name))
 		}
 		for name := range cfg.ApplicationProtection.Connectors {
 			add(connectorRulePackScope(cfg, name))
@@ -365,6 +378,12 @@ func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	sort.Slice(scopes, func(i, j int) bool { return scopes[i].key() < scopes[j].key() })
 	return scopes
 }
+
+// profileAutoProtectableConnectors are the built-in connectors, each of which
+// application protection can pick up without a manual connector entry.
+var profileAutoProtectableConnectors = sync.OnceValue(func() []string {
+	return connector.NewDefaultRegistry().Names()
+})
 
 // profileConnectorNames returns every connector some profile tunes, so the
 // rule packs their connectors[c] entries select are preloaded too.
@@ -1235,13 +1254,53 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	if key == "" || key == effectiveRulePackKey(r.set.base, connectorName) {
 		return nil
 	}
-	if rules := r.set.rules[key]; rules != nil {
-		return rules
+	if rules, listed := r.set.rules[key]; listed {
+		if rules != nil {
+			return rules
+		}
+		if retry := r.set.missing[key]; retry != nil {
+			return retry.rules(time.Now())
+		}
+		return nil
 	}
-	if retry := r.set.missing[key]; retry != nil {
-		return retry.rules(time.Now())
+	return r.set.lazyRules(r.decision.Name, r.derived, connectorName, key)
+}
+
+// profileLazyScope is a profile rule-pack scope loaded on its first request.
+type profileLazyScope struct {
+	once  sync.Once
+	rules *compiledRulePackCategories
+	retry *profileRulePackRetry
+}
+
+// lazyRules loads a scope the start-time preload did not list (a plugin
+// connector under application protection, say) on its first request instead
+// of scanning that request with the base rule set (GAP-1508). Concurrent
+// first requests wait for the one load. A pack that does not load is retried
+// like one that did not load at start (GAP-0333).
+func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, connectorName, key string) *compiledRulePackCategories {
+	value, _ := set.lazy.LoadOrStore(key, &profileLazyScope{})
+	entry := value.(*profileLazyScope)
+	entry.once.Do(func() {
+		scope := connectorRulePackScope(cfg, connectorName)
+		rp, err := loadScopedRulePack(guardrail.NewRulePackCache(), cfg, scope, "guardrail profile "+profile)
+		var compiled *compiledRulePackCategories
+		if err == nil {
+			compiled, err = compileRulePackCategories(rp)
+		}
+		if err == nil {
+			entry.rules = compiled
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
+			profile, err, profileRulePackRetryInterval)
+		entry.retry = &profileRulePackRetry{profile: profile, cfg: cfg, scope: scope,
+			lastErr: err.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
+	})
+	if entry.rules != nil {
+		return entry.rules
 	}
-	return nil
+	return entry.retry.rules(time.Now())
 }
 
 // proxyProfileFor returns the profile resolution the guardrail proxy applies

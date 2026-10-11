@@ -300,3 +300,25 @@ func TestBuildGenerationDigestsEachRulePackOnce(t *testing.T) {
 		t.Fatalf("%d pack scopes, %d distinct packs, %d digests: want one digest per distinct pack", len(g.RulePacks), len(distinct), digests)
 	}
 }
+
+// A managed standalone policy_dir whose Rego a standard user can change is
+// not loaded: the build fails, so a reload keeps the previous generation
+// (GAP-1499).
+func TestBuildGenerationRefusesUntrustedManagedPolicyTree(t *testing.T) {
+	dir := t.TempDir()
+	rego := filepath.Join(dir, "rego")
+	if err := os.Mkdir(rego, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(rego, "guardrail.rego")
+	if err := os.WriteFile(module, []byte("package defenseclaw.guardrail\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(module, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: dir, Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
+		t.Fatalf("buildGeneration error = %v, want the untrusted policy tree refused", err)
+	}
+}

@@ -44,6 +44,11 @@ type PatternRule struct {
 	Severity     string
 	Confidence   float64
 	Tags         []string
+	// migratedLiteral is set by the generation compile for a migrated 0.8.x
+	// literal rule (guardrail.MigratedLiteralRule): a content scan runs its
+	// pattern over prompt and result text whatever its category, as 0.8.x
+	// did (GAP-1480).
+	migratedLiteral bool
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -273,8 +278,8 @@ func compileRulePackGenerationWithCompiler(
 	claimed := make(map[string]string)
 	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
-	for _, category := range ownedCategories {
-		for _, rule := range category.Rules {
+	for categoryIndex, category := range ownedCategories {
+		for ruleIndex, rule := range category.Rules {
 			ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
 			title := strings.TrimSpace(rule.Title)
 			if ruleID != "" && title != "" {
@@ -295,6 +300,7 @@ func compileRulePackGenerationWithCompiler(
 			if expression == "" {
 				continue
 			}
+			ownedCategories[categoryIndex].Rules[ruleIndex].migratedLiteral = migratedLiteralRule(rule)
 			program, code := compiler.Compile(expression)
 			if code != semantic.CompileOK {
 				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
@@ -844,9 +850,10 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 	if o.contentScope == ruleContentScopeAll {
 		return true
 	}
-	switch category {
-	case "command", "sensitive-path", "cognitive-file", "c2":
+	if ruleActionCategory(category) {
 		return false
+	}
+	switch category {
 	case "trust-exploit":
 		// Source-scope matches are retained and downgraded after matching rather
 		// than suppressed here, so telemetry still records the literal.
@@ -857,6 +864,30 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 	default:
 		return true
 	}
+}
+
+// ruleActionCategory reports whether category holds rules about what a tool
+// call does (a command, a path, a cognitive-file change, a C2 operation),
+// which a content scan leaves to the trusted tool-call dispatcher.
+func ruleActionCategory(category string) bool {
+	switch category {
+	case "command", "sensitive-path", "cognitive-file", "c2":
+		return true
+	}
+	return false
+}
+
+// allowsMigratedLiteralRule reports whether a content scan runs the migrated
+// 0.8.x literal rules (guardrail.MigratedLiteralRule) of an action category
+// that allowsCategory leaves out. 0.8.x ran every rule over prompt and result
+// text, so a rule the operator gave a literal of their own, such as a marker
+// in commands.yaml, blocked a prompt that held it. The literal is all such a
+// rule means; built-in action rules stay out of content scans (GAP-1480).
+func (o ruleScanOptions) allowsMigratedLiteralRule(category string) bool {
+	if o.onlyCategory != "" && category != o.onlyCategory {
+		return false
+	}
+	return o.contentScope != ruleContentScopeAll && ruleActionCategory(category)
 }
 
 // neutralizeKnownFixtureDataLiterals removes only canonical public examples.
@@ -958,11 +989,15 @@ func scanRuleCategoriesWithOptions(
 	// Scan raw text first
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		if !options.allowsCategory(cat.Name) {
+		categoryAllowed := options.allowsCategory(cat.Name)
+		if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
 			continue
 		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
+			if !categoryAllowed && !rule.migratedLiteral {
+				continue
+			}
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
@@ -1001,11 +1036,15 @@ func scanRuleCategoriesWithOptions(
 	if normalized != text {
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
-			if !options.allowsCategory(cat.Name) {
+			categoryAllowed := options.allowsCategory(cat.Name)
+			if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
 				continue
 			}
 			for ruleIndex := range cat.Rules {
 				rule := &cat.Rules[ruleIndex]
+				if !categoryAllowed && !rule.migratedLiteral {
+					continue
+				}
 				if !options.allows(rule.ID, rule.ToolCallOnly) {
 					continue
 				}

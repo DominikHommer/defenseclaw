@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1186,20 +1185,18 @@ func cloneConfig(in *config.Config) *config.Config {
 	if in == nil {
 		return nil
 	}
-	// JSON preserves the distinction between nil and explicitly empty slices
-	// and maps. YAML omitempty round-tripping collapsed those values, causing a
-	// freshly loaded snapshot to compare different from the same file on reload
-	// and spuriously classify unrelated security sections as changed.
-	data, err := json.Marshal(in)
+	// DeepCopy goes through JSON, which preserves the distinction between nil
+	// and explicitly empty slices and maps. YAML omitempty round-tripping
+	// collapsed those values, causing a freshly loaded snapshot to compare
+	// different from the same file on reload and spuriously classify
+	// unrelated security sections as changed. DeepCopy also keeps the state
+	// JSON drops, such as the standalone AI Defense credential binding the
+	// scanners read from the published config (GAP-1483).
+	out, err := in.DeepCopy()
 	if err != nil {
 		panic(fmt.Errorf("config manager: clone config: %w", err))
 	}
-	var out config.Config
-	if err := json.Unmarshal(data, &out); err != nil {
-		panic(fmt.Errorf("config manager: decode cloned config: %w", err))
-	}
-	out.RuntimeV8RulePackRebase = in.RuntimeV8RulePackRebase
-	return &out
+	return out
 }
 
 func (m *ConfigManager) matches(path string) bool {

@@ -103,7 +103,8 @@ func TestStandaloneKeysIgnoreServiceEnvironment(t *testing.T) {
 	}
 
 	// GAP-1483: with AI Defense enabled the scanners' analyzers get the
-	// protected credential, and an unreadable one never the environment key.
+	// protected credential, also from a copy of the configuration (the
+	// gateway publishes one), and an unreadable one never the environment key.
 	provisioned := true
 	prev := resolveStandaloneLLMCredential
 	t.Cleanup(func() { resolveStandaloneLLMCredential = prev })
@@ -119,12 +120,19 @@ func TestStandaloneKeysIgnoreServiceEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "from-credential" {
-		t.Fatalf("standalone AI Defense key = %q, want the protected credential", got)
+	copied, err := loaded.DeepCopy()
+	if err != nil {
+		t.Fatal(err)
 	}
-	provisioned = false
-	if got := loaded.CiscoAIDefense.ResolvedAPIKey(); got != "" {
-		t.Fatalf("unreadable AI Defense credential gave key %q, want none", got)
+	for name, cfg := range map[string]*Config{"loaded": loaded, "copied": copied} {
+		provisioned = true
+		if got := cfg.CiscoAIDefense.ResolvedAPIKey(); got != "from-credential" {
+			t.Fatalf("%s standalone AI Defense key = %q, want the protected credential", name, got)
+		}
+		provisioned = false
+		if got := cfg.CiscoAIDefense.ResolvedAPIKey(); got != "" {
+			t.Fatalf("%s unreadable AI Defense credential gave key %q, want none", name, got)
+		}
 	}
 
 	perUser := Config{LLM: LLMConfig{Model: "openai/gpt-4o-mini"}, CiscoAIDefense: CiscoAIDefenseConfig{APIKeyEnv: "P0_AID_KEY_ENV"}}
