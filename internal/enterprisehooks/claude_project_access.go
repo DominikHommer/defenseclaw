@@ -20,9 +20,17 @@ const (
 	claudeProjectUnreadable
 )
 
+// Only a project CreateFile or os.Open that returns ERROR_ACCESS_DENIED under
+// the validated user token may carry this marker. Token and session failures
+// must leave the whole account unreadable.
+var errClaudeProjectAccessDenied = errors.New("Claude Code project access denied")
+
 func decideClaudeProjectRead(accessErr, readErr error) claudeProjectReadDecision {
 	if accessErr != nil {
-		return claudeProjectRefused
+		if errors.Is(accessErr, errClaudeProjectAccessDenied) {
+			return claudeProjectRefused
+		}
+		return claudeProjectUnreadable
 	}
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return claudeProjectUnreadable

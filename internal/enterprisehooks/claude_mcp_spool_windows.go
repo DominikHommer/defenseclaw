@@ -172,25 +172,41 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 	var projectErr error
 	var projectPath string
 	refused := map[string]bool{}
-	servers, err := config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
-		data, accessErr, readErr := readWindowsClaudeProjectMCP(project, sid, home)
-		switch decideClaudeProjectRead(accessErr, readErr) {
-		case claudeProjectRefused:
-			refused[filepath.Clean(project)] = true
-			if logf != nil {
-				logf("[hook-enumerator] WARN skip Claude Code MCP project %s for %s: %v", project, sid, accessErr)
-			}
-			return nil, accessErr
-		case claudeProjectUnreadable:
-			if projectErr == nil {
-				projectPath = filepath.Join(project, ".mcp.json")
-				projectErr = fmt.Errorf("read Claude Code project MCP file %s: %w", projectPath, readErr)
-			}
-		}
-		return data, readErr
-	})
+	target, err := validateWindowsEnterpriseTargetSID(sid)
 	if err != nil {
 		return nil, statePath, err
+	}
+	var servers []config.MCPServerEntry
+	var parseErr error
+	err = windowsClaudeProjectWithUserToken(target, home, func() error {
+		servers, parseErr = config.ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+			data, accessErr, readErr := windowsClaudeProjectRead(project)
+			switch decideClaudeProjectRead(accessErr, readErr) {
+			case claudeProjectRefused:
+				refused[filepath.Clean(project)] = true
+				if logf != nil {
+					logf("[hook-enumerator] WARN skip Claude Code MCP project %s for %s: %v", project, sid, accessErr)
+				}
+				return nil, accessErr
+			case claudeProjectUnreadable:
+				if projectErr == nil {
+					projectPath = filepath.Join(project, ".mcp.json")
+					cause := readErr
+					if accessErr != nil {
+						cause = accessErr
+					}
+					projectErr = fmt.Errorf("read Claude Code project MCP file %s: %w", projectPath, cause)
+				}
+			}
+			return data, readErr
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %w", err)
+	}
+	if parseErr != nil {
+		return nil, statePath, parseErr
 	}
 	if projectErr != nil {
 		return nil, projectPath, projectErr
@@ -204,16 +220,21 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 	return out, "", nil
 }
 
-// The session token is resolved for the manifest SID and checked against its
-// profile before any project directory or file is opened for content.
-var windowsClaudeProjectWithUserToken = withWindowsEnterpriseTargetImpersonation
+// Resolve one validated token for all projects of this user. A disconnected
+// session remains signed in and must keep its MCP inventory visible.
+var windowsClaudeProjectWithUserToken = withWindowsEnterpriseSessionImpersonation
+
+// Tests replace the project open to exercise access decisions without relying
+// on the test runner's Windows token or project ACL.
+var windowsClaudeProjectRead = readWindowsClaudeProjectMCP
 
 // Project keys are user-controlled. Reject UNC, device, mapped and substituted
 // drives before any filesystem access to the project, since the enumerator
 // runs as LocalSystem and must never connect to a user-selected network path.
-// The directory and file are then opened as the enrolled user. A missing file
-// leaves local-scope servers intact; every access failure refuses the project.
-func readWindowsClaudeProjectMCP(project, sid, home string) (data []byte, accessErr, readErr error) {
+// The directory and file are then opened under the validated enrolled-user
+// token. A missing file leaves local-scope servers intact. Only an explicit
+// access denial refuses the project.
+func readWindowsClaudeProjectMCP(project string) (data []byte, accessErr, readErr error) {
 	project = filepath.Clean(project)
 	if _, err := winpath.ValidateFixedNTFSMountedPath(project); err != nil {
 		return nil, nil, err
@@ -221,41 +242,35 @@ func readWindowsClaudeProjectMCP(project, sid, home string) (data []byte, access
 	if err := rejectWindowsReparseChain(project); err != nil {
 		return nil, nil, err
 	}
-	target, err := validateWindowsEnterpriseTargetSID(sid)
+	ptr, err := winpath.UTF16Ptr(project)
 	if err != nil {
-		return nil, err, nil
+		return nil, nil, err
 	}
-	err = windowsClaudeProjectWithUserToken(target, home, func() error {
-		ptr, err := winpath.UTF16Ptr(project)
-		if err != nil {
-			accessErr = err
-			return nil
-		}
-		dir, err := windows.CreateFile(ptr, windows.FILE_LIST_DIRECTORY,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-		if err != nil {
-			accessErr = fmt.Errorf("open project directory as enrolled user: %w", err)
-			return nil
-		}
-		windows.CloseHandle(dir)
-		file, err := os.Open(filepath.Join(project, ".mcp.json"))
-		if errors.Is(err, os.ErrNotExist) {
-			readErr = err
-			return nil
-		}
-		if err != nil {
-			accessErr = fmt.Errorf("open project MCP file as enrolled user: %w", err)
-			return nil
-		}
-		file.Close()
-		data, readErr = readWindowsProfileFile(project, ".mcp.json", maxClaudeProjectMCPBytes)
-		return nil
-	})
+	dir, err := windows.CreateFile(ptr, windows.FILE_LIST_DIRECTORY,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		accessErr = err
+		wrapped := fmt.Errorf("open project directory as enrolled user: %w", err)
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, fmt.Errorf("%w: %w", errClaudeProjectAccessDenied, wrapped), nil
+		}
+		return nil, nil, wrapped
 	}
-	return data, accessErr, readErr
+	windows.CloseHandle(dir)
+	file, err := os.Open(filepath.Join(project, ".mcp.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	if err != nil {
+		wrapped := fmt.Errorf("open project MCP file as enrolled user: %w", err)
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, fmt.Errorf("%w: %w", errClaudeProjectAccessDenied, wrapped), nil
+		}
+		return nil, nil, wrapped
+	}
+	file.Close()
+	data, readErr = readWindowsProfileFile(project, ".mcp.json", maxClaudeProjectMCPBytes)
+	return data, nil, readErr
 }
 
 // readWindowsProfileFile reads home\rel when no element below home is a
