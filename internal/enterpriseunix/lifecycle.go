@@ -2461,6 +2461,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removed hook back within its debounce and the users are left with
 	// registrations naming a binary this uninstall deletes. The gateway and
 	// its sockets keep answering hooks until the registrations are gone.
+	// What ran and started at boot is recorded first: an uninstall that
+	// stops short of removing the deployment puts it back (GAP-1500).
+	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
+	for _, unit := range units {
+		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
+	}
 	for _, unit := range ordered {
 		if repairsRegistrations(unit) {
 			stopUnit(unit)
@@ -2511,16 +2518,20 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 	}
 	if perUserLeft || policyLeft {
-		disableKeptDefinitions()
 		// Some users' agents, or vendor machine policy that could not be
 		// withdrawn (GAP-1321), still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
 		// exists, so the agents run without enforcement and nothing is left
 		// to remove them: the binaries, the deployment record and the state
-		// stay, so a rerun of this uninstall removes the rest and ensure
-		// restores the deployment.
+		// stay, so a rerun of this uninstall removes the rest. The services
+		// the uninstall stopped start again as they were: left stopped, the
+		// gateway gave the retained hooks no decisions until an
+		// administrator ran ensure (GAP-1500).
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
+		}
+		if failed := l.restoreUninstallServices(ctx, units, wasActive, wasEnabled); len(failed) > 0 {
+			r.AddError(codeUninstall, "could not start the services this uninstall stopped again ("+strings.Join(failed, "; ")+"); run `"+env.lifecycleCommand(ActionEnsure)+"` to restore the deployment")
 		}
 		var holders []string
 		if perUserLeft {
@@ -2731,6 +2742,38 @@ func serviceAccountDeleteCommand(goos, name string) string {
 		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
 	}
 	return "`sudo userdel " + name + "`"
+}
+
+// restoreUninstallServices puts back the units an uninstall stopped, as
+// they were before it (wasActive, wasEnabled), in activation order, the way
+// a rollback does, and waits for the gateway. It returns what it could not
+// restore.
+func (l *lifecycle) restoreUninstallServices(ctx context.Context, units []Unit, wasActive, wasEnabled map[string]bool) []string {
+	env := l.env
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
+	var failed []string
+	for _, unit := range ordered {
+		if wasEnabled[unit.Name] {
+			if err := env.Services.Enable(ctx, unit); err != nil {
+				failed = append(failed, fmt.Sprintf("enable %s: %v", unit.Name, err))
+			}
+		}
+		// The run itself, and a queued apply run that waits for this one.
+		if !wasActive[unit.Name] || unit.Name == env.SelfUnit || unit.Name == unitApplyService {
+			continue
+		}
+		if err := env.Services.Start(ctx, unit); err != nil {
+			failed = append(failed, fmt.Sprintf("start %s: %v", unit.Name, err))
+			continue
+		}
+		if unit.Kind == "gateway" {
+			if err := l.waitGatewayReady(ctx, unit); err != nil {
+				failed = append(failed, err.Error())
+			}
+		}
+	}
+	return failed
 }
 
 // uninstallSummary says what a completed uninstall removed and kept, like
