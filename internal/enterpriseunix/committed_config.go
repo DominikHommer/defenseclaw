@@ -104,9 +104,10 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 	if current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath)); err == nil && current != nil {
 		if planned == nil {
 			rejected = current
-		} else if sha256Bytes(current) != sha256Bytes(planned) && problem == "" {
-			// Newer bytes another account could write are not put back for
-			// the apply trigger to apply (GAP-1501).
+		} else if sha256Bytes(current) != sha256Bytes(planned) && problem == "" && !l.configACLWritable {
+			// Newer bytes another account could write, by mode or through a
+			// macOS ACL entry the transaction removed, are not put back for
+			// the apply trigger to apply (GAP-1501, GAP-1518).
 			newer = current
 		}
 	}

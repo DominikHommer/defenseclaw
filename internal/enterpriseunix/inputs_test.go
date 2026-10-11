@@ -130,11 +130,19 @@ func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 // the edit as administrator policy (GAP-1501). Bytes written while another
 // account could write the file are refused when the run applies them and
 // never kept for a follow-up, for a --config run and for an in-place edit.
+// On macOS a write ACL entry does it without a mode change: the transaction
+// removes the entry, and the rollback must not keep the bytes written
+// through it as a newer config (GAP-1518).
 func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
-	for _, configFlag := range []bool{true, false} {
-		t.Run(fmt.Sprintf("config-flag-%v", configFlag), func(t *testing.T) {
-			h := newTestHost(t, "linux")
+	for _, tc := range []struct {
+		goos       string
+		configFlag bool
+	}{{"linux", true}, {"linux", false}, {"darwin", true}, {"darwin", false}} {
+		goos, configFlag := tc.goos, tc.configFlag
+		t.Run(fmt.Sprintf("%s-config-flag-%v", goos, configFlag), func(t *testing.T) {
+			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			installed := h.read(h.env.Layout.ConfigPath)
 			path := h.env.P(h.env.Layout.ConfigPath)
 			admin := append(DefaultConfig(h.env.Layout), "# pushed\n"...)
 			opts := Options{Action: ActionEnsure}
@@ -149,11 +157,15 @@ func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
 			edited := []byte(strings.Replace(string(admin), "mode: observe", "mode: action", 1))
 			done := false
 			h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
-				if name != unitOf("linux", "enumerator") || done {
+				if name != unitOf(goos, "enumerator") || done {
 					return
 				}
 				done = true
-				if err := os.Chmod(path, 0o666); err != nil {
+				if goos == "darwin" {
+					h.runner.mu.Lock()
+					h.runner.acls = map[string][]string{path: {"user:standard allow write"}}
+					h.runner.mu.Unlock()
+				} else if err := os.Chmod(path, 0o666); err != nil {
 					t.Error(err)
 				}
 				if err := os.WriteFile(path, edited, 0o640); err != nil {
@@ -161,11 +173,14 @@ func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
 				}
 			}}
 			requireError(t, h.run(opts), codeConfig)
+			if got := h.read(h.env.Layout.ConfigPath); got != installed {
+				t.Fatalf("after the rollback config.yaml is not the last applied config (edit kept: %v)", got == string(edited))
+			}
 			h.env.Services = h.services
 			_ = h.run(Options{Action: ActionEnsure})
 			record, _ := h.env.loadDeployment()
 			if h.read(h.env.Layout.ConfigPath) == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
-				t.Fatalf("the edit written while config.yaml was 0666 was kept or applied (%04o)", h.mode(h.env.Layout.ConfigPath))
+				t.Fatalf("the edit written while another account could write config.yaml was kept or applied (%04o)", h.mode(h.env.Layout.ConfigPath))
 			}
 		})
 	}

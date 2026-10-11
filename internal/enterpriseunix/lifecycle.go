@@ -1381,9 +1381,10 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// this transaction wrote its own (a push during activation) would
 			// be lost to the snapshot restore, so it is kept and put back
 			// after the restart like one applyFiles kept.
-			// Not one another account could write (GAP-1501).
+			// Not one another account could write (GAP-1501), also through
+			// a macOS ACL entry this transaction removed (GAP-1518).
 			current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath))
-			if err == nil && problem == "" && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
+			if err == nil && problem == "" && !l.configACLWritable && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
 				l.configWrittenDuringRun = current
 			}
 		}
