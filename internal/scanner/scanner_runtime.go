@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"gopkg.in/yaml.v3"
 )
 
@@ -74,20 +75,28 @@ func (s *MCPScanner) runtimeEnv() []string {
 	derived["TERM"] = "dumb"
 	derived["DEFENSECLAW_SCANNER_AID_API_KEY"] = s.CiscoAIDefense.ResolvedAPIKey()
 	derived["DEFENSECLAW_SCANNER_AID_ENDPOINT"] = strings.TrimSpace(s.CiscoAIDefense.Endpoint)
+	return scannerRuntimeEnv(os.Environ(), derived, nil)
+}
+
+// scannerRuntimeEnv is a scanner runtime child's environment: the variables
+// of base on the scanner allowlist (skillScannerEnvPassthrough) or in keep,
+// then the values the gateway derived from config. Nothing else from the
+// service environment reaches the scan: not DEFENSECLAW_LLM_KEY, which the
+// Python judge falls back to, and not a provider key or endpoint such as
+// OPENAI_BASE_URL, which LiteLLM uses when config names none (GAP-1437). An
+// AWS endpoint never passes, and a derived value replaces an inherited one.
+func scannerRuntimeEnv(base []string, derived map[string]string, keep map[string]bool) []string {
 	env := make([]string, 0, 32)
-	for _, kv := range os.Environ() {
+	for _, kv := range base {
 		name, _, ok := strings.Cut(kv, "=")
 		if !ok || name == "" {
 			continue
 		}
 		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") || derived[upper] != "" {
 			continue
 		}
-		if v, set := derived[upper]; set && v != "" {
-			continue
-		}
-		if skillScannerEnvPassthrough[upper] || hasAnyPrefix(upper, skillScannerEnvPassthroughPrefixes) {
+		if keep[upper] || skillScannerEnvPassthrough[upper] || hasAnyPrefix(upper, skillScannerEnvPassthroughPrefixes) {
 			env = append(env, kv)
 		}
 	}
@@ -120,46 +129,27 @@ func runtimeJudgeEnv(llm config.LLMConfig) map[string]string {
 	return derived
 }
 
-// scannerRuntimeOwnedEnv is every variable only the gateway sets for the
-// scanner runtime: the judge and the AI Defense settings it derives from
-// config. A value of these in the service environment never reaches a scan.
-// They are the scanner runtime names declared in the env-var registry, so no
-// name prefix is matched.
-var scannerRuntimeOwnedEnv = map[string]bool{
-	"DEFENSECLAW_SCANNER_LLM_MODEL":    true,
-	"DEFENSECLAW_SCANNER_LLM_PROVIDER": true,
-	"DEFENSECLAW_SCANNER_LLM_API_KEY":  true,
-	"DEFENSECLAW_SCANNER_LLM_BASE_URL": true,
-	"DEFENSECLAW_SCANNER_LLM_REGION":   true,
-	"DEFENSECLAW_SCANNER_AID_API_KEY":  true,
-	"DEFENSECLAW_SCANNER_AID_ENDPOINT": true,
+// pluginRuntimeConfigEnv are the DefenseClaw variables a plugin scan keeps
+// from the service environment: the plugin-scan program loads the managed
+// config for the rule-pack overlay, so it needs the config path, data
+// directory and deployment pins the service sets. Each is a name declared
+// in the env-var registry.
+var pluginRuntimeConfigEnv = map[string]bool{
+	managed.ConfigPathEnv:        true,
+	"DEFENSECLAW_HOME":           true,
+	managed.DeploymentModeEnv:    true,
+	managed.EnterpriseProfileEnv: true,
 }
 
 // runtimeEnv is a plugin scan's environment under the embedded runtime: the
-// gateway's own environment plus the scanners.plugin judge it resolved from
-// config. Before, the runtime got no judge and ran the plugin scan rules-only
-// although an administrator configured one (GAP-1408). A judge variable or an
-// AWS endpoint from the service environment never reaches the scan.
+// scanner allowlist and the config location from base, plus the
+// scanners.plugin judge the gateway resolved from config. Before, the
+// runtime got no judge and ran the plugin scan rules-only although an
+// administrator configured one (GAP-1408); then it got the whole service
+// environment, so an inherited DEFENSECLAW_LLM_KEY stood in for a missing
+// protected credential and OPENAI_BASE_URL moved the judge (GAP-1437).
 func (s *PluginScanner) runtimeEnv(base []string) []string {
-	derived := runtimeJudgeEnv(s.LLM)
-	env := make([]string, 0, len(base)+len(derived))
-	for _, kv := range base {
-		name, _, _ := strings.Cut(kv, "=")
-		upper := strings.ToUpper(name)
-		if scannerRuntimeOwnedEnv[upper] || strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
-			continue
-		}
-		if derived[upper] != "" {
-			continue
-		}
-		env = append(env, kv)
-	}
-	for name, value := range derived {
-		if value != "" {
-			env = append(env, name+"="+value)
-		}
-	}
-	return env
+	return scannerRuntimeEnv(base, runtimeJudgeEnv(s.LLM), pluginRuntimeConfigEnv)
 }
 
 // MCPRulePack is the guardrail rule pack an MCP scan lays over the server

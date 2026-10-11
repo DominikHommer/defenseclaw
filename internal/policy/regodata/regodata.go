@@ -88,10 +88,21 @@ func OutsideReads(modules map[string]*ast.Module, roots ...string) []Read {
 // package clause names the document of the module itself and a with target
 // replaces a document for one expression; neither reads one, so only a with
 // value is inspected. Comments and string literals are not references.
+//
+// A read of the data root itself (data, data[key], data[f(x)]) can reach any
+// document, a removed data.json one included, so it is reported in its
+// computed form ("data[key]") and also kept as a reference that reaches
+// every module.
 func ModuleReads(mod *ast.Module) ([]ast.Ref, []string) {
 	var refs []ast.Ref
 	var docs []string
 	seen := map[string]bool{}
+	addDoc := func(doc string) {
+		if !seen[doc] {
+			seen[doc] = true
+			docs = append(docs, doc)
+		}
+	}
 	var walk *ast.GenericVisitor
 	walk = ast.NewGenericVisitor(func(node any) bool {
 		if with, ok := node.(*ast.With); ok {
@@ -99,14 +110,15 @@ func ModuleReads(mod *ast.Module) ([]ast.Ref, []string) {
 			return true
 		}
 		ref, ok := node.(ast.Ref)
-		if !ok || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
+		if !ok || !ref[0].Equal(ast.DefaultRootDocument) {
 			return false
 		}
-		if key, ok := ref[1].Value.(ast.String); ok && string(key) != "defenseclaw" {
-			if doc := "data." + string(key); !seen[doc] {
-				seen[doc] = true
-				docs = append(docs, doc)
-			}
+		if len(ref) < 2 {
+			addDoc(ref.String())
+		} else if key, ok := ref[1].Value.(ast.String); !ok {
+			addDoc(ref[:2].String())
+		} else if string(key) != "defenseclaw" {
+			addDoc("data." + string(key))
 			return true
 		}
 		refs = append(refs, ref)

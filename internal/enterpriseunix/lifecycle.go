@@ -1129,30 +1129,43 @@ func (e *Env) installedConfigWritable(ctx context.Context) (string, error) {
 // applied config, so a later write through such a descriptor goes nowhere.
 // When config.yaml no longer holds the bytes this run read from it, that edit
 // is refused: the applied config is returned for the caller to revert to.
-func (l *lifecycle) replaceWritableConfig(record *Deployment, p *plan) ([]byte, error) {
+// The other account loses write access to the folder and the file (its mode
+// and, on macOS, its ACL entries) before config.yaml is read and replaced.
+// Replaced while a folder ACL entry still let a standard user write there,
+// another file that user put in its place before the transaction removed
+// the entry was kept and applied by the follow-up transaction (GAP-1441).
+func (l *lifecycle) replaceWritableConfig(ctx context.Context, record *Deployment, p *plan) ([]byte, error) {
 	env := l.env
+	// A folder another account can write lets it put another file there.
+	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	if err := l.removeConfigACLs(ctx); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	path := env.P(env.Layout.ConfigPath)
 	if record == nil {
-		return nil, nil // no applied config to put there; an installed one was refused
+		// No applied config to put there (an installed one was refused). A
+		// --config install writes its own bytes over whatever another
+		// account put there before it lost access.
+		p.installedConfigSHA, _ = sha256File(path)
+		return nil, nil
 	}
 	trusted, err := readBounded(env.committedConfigPath(), maxInputBytes)
 	if err != nil || sha256Bytes(trusted) != record.ConfigSHA256 {
 		trusted = nil
 	}
-	path := env.P(env.Layout.ConfigPath)
 	current, readErr := readBounded(path, maxInputBytes)
 	if trusted == nil && readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
 		trusted = current
 	}
-	if trusted == nil {
-		return nil, nil
-	}
-	// A folder another account can write lets it put another file there.
-	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
-		return nil, &codedError{code: codeApply, err: err}
-	}
 	if p.configFromInstalled && readErr == nil && sha256Bytes(current) != record.ConfigSHA256 {
 		return trusted, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
 			env.Layout.ConfigPath, p.configWritable, env.lifecycleCommand(ActionEnsure))}
+	}
+	if trusted == nil {
+		p.installedConfigSHA, _ = sha256File(path)
+		return nil, nil
 	}
 	// A refused edit stays current (status and verify report it) when the
 	// new file replaces the reverted one.
@@ -1161,6 +1174,9 @@ func (l *lifecycle) replaceWritableConfig(record *Deployment, p *plan) ([]byte, 
 	if err := env.writeFileAtomic(path, trusted, 0o640, fileOwner{UID: 0, GID: p.account.GID}); err != nil {
 		return nil, &codedError{code: codeApply, err: err}
 	}
+	// The file this run wrote is not one another writer put there during the
+	// run (applyFiles, GAP-0745), so a --config run still writes its own.
+	p.installedConfigSHA = sha256Bytes(trusted)
 	if replaced, err := os.Stat(path); keep && err == nil {
 		_ = os.Chtimes(env.rejectedConfigPath(), replaced.ModTime(), replaced.ModTime())
 	}
@@ -1213,7 +1229,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	p, err := l.buildPlan(ctx, record, account)
 	if err == nil && p.configWritable != "" {
 		var applied []byte
-		if applied, err = l.replaceWritableConfig(record, p); applied != nil {
+		if applied, err = l.replaceWritableConfig(ctx, record, p); applied != nil {
 			committedConfig = applied
 		}
 	}

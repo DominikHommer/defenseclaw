@@ -789,12 +789,8 @@ func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error 
 		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	}
 	defer windows.CloseHandle(final)
-	// The data folder of a per-user 1.0 install carries the same private
-	// DACL as a managed one, so the DACL checks below took it over and the
-	// first install enrolled the account (GAP-1047); what it holds tells it
-	// apart.
-	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
-		return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves", target.data, leftover)
+	if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+		return err
 	}
 	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 	if err == nil || windowsManagedRuntimePurgeKeptAdoptable(final, target) || windowsManagedRuntimeAccountCreatedBaseline(final, target) {
@@ -818,6 +814,17 @@ func windowsPerUserInstallLeftover(dataDir string) string {
 		}
 	}
 	return ""
+}
+
+// refuseWindowsPerUserInstallFolder refuses the data folder of a per-user
+// 1.0 install. It carries the same private DACL as a managed one, so the DACL
+// checks took it over and the install enrolled the account (GAP-1047, and
+// GAP-1434 for an explicit install); what it holds tells it apart.
+func refuseWindowsPerUserInstallFolder(target windowsManagedRuntimeTarget) error {
+	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
+		return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves", target.data, leftover)
+	}
+	return nil
 }
 
 // windowsManagedRuntimePurgeKeptAdoptable reports the folder shape
@@ -875,6 +882,13 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAl
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
+		// A standalone install plan, explicit or after the ensure preflight,
+		// never takes over a per-user install folder (GAP-1434).
+		if adoptPurgeKept {
+			if err := refuseWindowsPerUserInstallFolder(target); err != nil {
+				return WindowsManagedRuntimeRootPlan{}, err
+			}
+		}
 		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
 		if err != nil && adoptPurgeKept {
 			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)

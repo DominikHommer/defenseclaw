@@ -635,6 +635,56 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	}
 }
 
+// GAP-1433: an ensure or upgrade whose config is refused first recovers a
+// pending transaction with a repair that carries no sources, so the refusal
+// reports the restored deployment instead of leaving the services stopped.
+// Without a pending transaction only the refusal's status probe runs.
+func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T) {
+	configPath, _ := stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error {
+		return errors.New("a standard user can write to the pack")
+	})
+	originalPending := windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() { windowsEnterpriseStandaloneTransactionPending = originalPending })
+	for _, tc := range []struct {
+		action  string
+		pending bool
+		runs    string
+	}{
+		{"ensure", true, "Repair Status"},
+		{"upgrade", true, "Repair Status"},
+		{"ensure", false, "Status"},
+	} {
+		pending := tc.pending
+		windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+		stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+		if pending {
+			stub.replies = append([]map[string]any{installedStatus("repair")}, stub.replies...)
+		}
+		stub.install(t)
+		command := &cobra.Command{}
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		opts := ensureTestOptions()
+		opts.configPath = configPath
+		refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, tc.action, opts, `C:\stage\install-enterprise.ps1`)
+		var runs []string
+		for _, call := range stub.calls {
+			runs = append(runs, call[1])
+		}
+		if !refused || commandExitCode(err) != 1639 || strings.Join(runs, " ") != tc.runs ||
+			(pending && strings.Contains(strings.Join(stub.calls[0], " "), configPath)) {
+			t.Fatalf("%s pending=%v: refused=%v exit %d, installer runs %q", tc.action, pending, refused, commandExitCode(err), stub.calls)
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" || !result.Installed {
+			t.Fatalf("%s pending=%v: result %+v", tc.action, pending, result)
+		}
+	}
+}
+
 // On a host without the log folder the first run created it but still
 // reported it missing, so a first install carried lifecycle_log_failed.
 func TestWindowsEnterpriseLogDirectoryIsUsableOnFirstCreate(t *testing.T) {

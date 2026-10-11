@@ -28,9 +28,9 @@ var scannerRuntimePath = func() string {
 	return path
 }
 
-// scannerRuntimeProblem says why the scanner runtime of a host that has one
-// (its root folder exists: the standalone Windows enterprise install) cannot
-// be run; nil when it can or the host has none. Tests replace it.
+// scannerRuntimeProblem says why the scanner runtime of the standalone
+// Windows enterprise install cannot be run; nil when it can or this process
+// is not that install. Tests replace it.
 var scannerRuntimeProblem = func() error {
 	_, err := installedScannerRuntime()
 	if errors.Is(err, errNoScannerRuntime) {
@@ -41,20 +41,31 @@ var scannerRuntimeProblem = func() error {
 
 var errNoScannerRuntime = errors.New("this host has no scanner runtime")
 
+// scannerRuntimeRoot resolves the machine-wide scanner runtime root; tests
+// replace it.
+var scannerRuntimeRoot = managed.StandaloneWindowsScannerRuntimeDir
+
+// standaloneScannerRuntime reports whether this process runs the standalone
+// Windows enterprise deployment, the only one that has a scanner runtime.
+// Per-user and Secure Client installs keep their scanner commands even when
+// a machine-wide runtime root is left behind, for example by a standalone
+// uninstall that could not remove it (GAP-1436).
+func standaloneScannerRuntime() bool {
+	return managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
+}
+
 func installedScannerRuntime() (string, error) {
-	root, err := managed.StandaloneWindowsScannerRuntimeDir()
+	if !standaloneScannerRuntime() {
+		return "", errNoScannerRuntime
+	}
+	root, err := scannerRuntimeRoot()
 	if err != nil {
 		return "", errNoScannerRuntime
 	}
 	if _, err := os.Lstat(root); err != nil {
 		// A standalone managed service requires this runtime even when its
-		// whole folder has been removed. Per-user and Secure Client installs
-		// keep their existing scanner command resolution.
-		standalone := managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
-			managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv))
-		if os.IsNotExist(err) && !standalone {
-			return "", errNoScannerRuntime
-		}
+		// whole folder has been removed.
 		return "", fmt.Errorf("scanner runtime folder %s is unavailable: %w", root, err)
 	}
 	path := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
@@ -112,8 +123,7 @@ func admittedScannerRuntime(root, path string, info os.FileInfo) error {
 // scanner path in config stays authoritative, and every other install
 // (per-user, Secure Client) has no scanner runtime and keeps binary.
 func resolveScannerRuntime(binary string, defaults ...string) string {
-	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
-		!managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+	if !standaloneScannerRuntime() {
 		return binary
 	}
 	for _, name := range defaults {
@@ -131,8 +141,7 @@ func resolveScannerRuntime(binary string, defaults ...string) string {
 // command can be resolved through PATH. Recheck an already-resolved installed
 // runtime too: its admission can change after scanner construction.
 func scannerRuntimePreflight(binary string, defaults ...string) error {
-	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
-		!managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+	if !standaloneScannerRuntime() {
 		return nil
 	}
 	candidate := strings.TrimSpace(binary)
@@ -143,7 +152,7 @@ func scannerRuntimePreflight(binary string, defaults ...string) error {
 			break
 		}
 	}
-	if root, err := managed.StandaloneWindowsScannerRuntimeDir(); err == nil {
+	if root, err := scannerRuntimeRoot(); err == nil {
 		installed := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
 		if strings.EqualFold(filepath.Clean(candidate), installed) {
 			managedBinary = true
