@@ -230,13 +230,15 @@ func boolPtr(v bool) *bool { return &v }
 // data.json documents that no longer exist and would fail open, so the load
 // fails and the gateway uses the config-driven fallback.
 func TestPrepareRefusesPre9Modules(t *testing.T) {
-	dir := t.TempDir()
-	stale := "package defenseclaw.guardrail\n\nimport rego.v1\n\naction := \"block\" if input.severity_rank >= data.guardrail.block_threshold\n"
-	if err := os.WriteFile(filepath.Join(dir, "guardrail.rego"), []byte(stale), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Prepare(context.Background(), dir); err == nil {
-		t.Fatal("Prepare accepted a module that reads data.guardrail")
+	for _, read := range []string{"data.guardrail.block_threshold", "data[key].block_threshold"} {
+		dir := t.TempDir()
+		stale := "package defenseclaw.guardrail\n\nimport rego.v1\n\nkey := \"guardrail\"\n\naction := \"block\" if input.severity_rank >= " + read + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "guardrail.rego"), []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Prepare(context.Background(), dir); err == nil {
+			t.Fatalf("Prepare accepted a module that reads %s", read)
+		}
 	}
 }
 
