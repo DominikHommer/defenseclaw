@@ -491,7 +491,11 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 // private DACL, so the first-install preflight passed it and Setup enrolled
 // the account; what it holds (config.yaml) tells it apart, in seconds and
 // before anything changes.
+// GAP-1434: an explicit standalone install plan refuses it the same way.
 func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T) {
+	previous := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -499,8 +503,12 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 		t.Fatal(err)
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
+	manifestPath, digest := `C:\ProgramData\DefenseClaw\etc\targets.yaml`, strings.Repeat("6", 64)
 	if err := PreflightWindowsManagedRuntimeRoots(manifest); err != nil {
 		t.Fatalf("preflight refused a canonical managed folder: %v", err)
+	}
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err != nil {
+		t.Fatalf("install plan refused a canonical managed folder: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("gateway: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -509,6 +517,9 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 	if err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") ||
 		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
 		t.Fatalf("preflight = %v, want the per-user install folder refused", err)
+	}
+	if _, planErr := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); planErr == nil || planErr.Error() != err.Error() {
+		t.Fatalf("install plan = %v, want the preflight refusal %v", planErr, err)
 	}
 }
 
