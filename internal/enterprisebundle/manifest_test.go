@@ -92,6 +92,7 @@ func TestDecodeManifestRefuses(t *testing.T) {
 		"negative version":    edit(`"version": 7`, `"version": -7`),
 		"fractional version":  edit(`"version": 7`, `"version": 7.5`),
 		"string version":      edit(`"version": 7`, `"version": "7"`),
+		"version past 2^53":   mutate(func(m *Manifest) { m.Version = MaxVersion + 1 }),
 		"parent is self":      mutate(func(m *Manifest) { m.Parent = m.BundleID }),
 		"rollback of":         mutate(func(m *Manifest) { m.RollbackOf = "b-x" }),
 		"local time":          mutate(func(m *Manifest) { m.CreatedAt = "2026-10-12T08:30:00+02:00" }),

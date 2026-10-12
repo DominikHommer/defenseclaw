@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -75,6 +76,13 @@ func TestCheckInlineSecrets(t *testing.T) {
 		"password in a list":      {ConfigName: "config_version: 9\nx:\n  - password: hunter2\n"},
 		"access key in config":    {ConfigName: "config_version: 9\nblock_message: " + accessKey + "\n"},
 		"secret through an alias": {ConfigName: "config_version: 9\na: &v plain\ngateway:\n  token: *v\n"},
+		// The config loader matches keys case-insensitively and reads a
+		// dotted key as a path; a literal ${...} is not expanded.
+		"upper-case key":        {ConfigName: "config_version: 9\nllm:\n  API_KEY: hunter2\n"},
+		"dotted key":            {ConfigName: "config_version: 9\nllm.api_key: hunter2\n"},
+		"literal in braces":     {ConfigName: "config_version: 9\nllm:\n  api_key: ${hunter2 abc123}\n"},
+		"secret ref not a name": {ConfigName: "config_version: 9\nllm:\n  api_key: secret://hunter2/abc123\n"},
+		"static auth header":    {ConfigName: "config_version: 9\nobservability:\n  destinations:\n    - headers:\n        Authorization: Bearer abc123\n"},
 	}
 	for name, files := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -90,6 +98,7 @@ func TestCheckInlineSecrets(t *testing.T) {
 		"shape in regex": {ConfigName: "config_version: 9\n", "policies/guardrail/p/rules.yaml": "pattern: 'AKIA[0-9A-Z]{16}'\n"},
 		"placeholder":    {ConfigName: "config_version: 9\n", "policies/guardrail/p/rules.yaml": "example: AKIA" + strings.Repeat("X", 16) + "\n"},
 		"null value":     {ConfigName: "config_version: 9\ngateway:\n  token: null\n"},
+		"static header":  {ConfigName: "config_version: 9\nobservability:\n  destinations:\n    - headers:\n        X-Scope-OrgID: team-a\n"},
 	}
 	for name, files := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -154,5 +163,22 @@ func TestReachability(t *testing.T) {
 	}
 	if warnings := Reachability(cfg, []string{PlatformWindows}); len(warnings) != 4 {
 		t.Fatalf("windows only: %d warnings, want 4", len(warnings))
+	}
+	// A large fleet's warnings never make the manifest invalid: the list is
+	// cut at MaxWarnings with a closing count, and every subject stays
+	// display text.
+	groups := []string{"x\x01" + strings.Repeat("\x02", 200)}
+	for i := 0; i < MaxWarnings; i++ {
+		groups = append(groups, fmt.Sprintf("S-1-12-1-%d-1-1-1", i))
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "ml", Match: config.ProfileMatch{Groups: groups}}}
+	warnings := Reachability(cfg, Platforms)
+	if len(warnings) != MaxWarnings || warnings[MaxWarnings-1].Code != WarnTruncated {
+		t.Fatalf("%d warnings, last %+v; want %d ending in %s", len(warnings), warnings[len(warnings)-1], MaxWarnings, WarnTruncated)
+	}
+	m := validManifest()
+	m.Warnings = warnings
+	if err := m.Validate(); err != nil {
+		t.Fatalf("manifest with the reachability warnings: %v", err)
 	}
 }

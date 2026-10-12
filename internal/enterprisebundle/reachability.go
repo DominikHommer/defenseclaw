@@ -26,6 +26,9 @@ const (
 	WarnEntraGroupLinux       = "group_entra_linux_needs_directory_bridge"
 	WarnEntraGroupMacOS       = "group_entra_macos_unreachable"
 	WarnEntraObjectIDWindows  = "group_entra_object_id_windows"
+	// WarnTruncated replaces the warnings past MaxWarnings, so a large
+	// fleet's warning list never makes the manifest invalid.
+	WarnTruncated = "warnings_truncated"
 )
 
 // GroupKind classifies a guardrail.profile_assignments group identifier.
@@ -107,12 +110,19 @@ func Reachability(cfg *config.Config, platforms []string) []Warning {
 					warnings = append(warnings, Warning{
 						Code:     code,
 						Platform: platform,
-						Subject:  boundedSubject(group),
-						Message:  fmt.Sprintf("profile_assignments[%d] (profile %s): %s", i, assignment.Profile, message),
+						Subject:  boundedText(group, 256),
+						Message:  fmt.Sprintf("profile_assignments[%d] (profile %s): %s", i, boundedText(assignment.Profile, 64), message),
 					})
 				}
 			}
 		}
+	}
+	if len(warnings) > MaxWarnings {
+		dropped := len(warnings) - (MaxWarnings - 1)
+		warnings = append(warnings[:MaxWarnings-1], Warning{
+			Code:    WarnTruncated,
+			Message: fmt.Sprintf("%d more group reachability warnings are not listed", dropped),
+		})
 	}
 	return warnings
 }
@@ -157,9 +167,16 @@ func platformName(platform string) string {
 	return platform
 }
 
-func boundedSubject(group string) string {
-	if err := checkDisplayText(group, 256); err != nil {
-		return safePath(group)
+// boundedText is text as manifest display text of at most max characters:
+// itself when it passes checkDisplayText, else quoted and cut, so a warning
+// never makes the manifest invalid.
+func boundedText(text string, max int) string {
+	if checkDisplayText(text, max) == nil {
+		return text
 	}
-	return group
+	quoted := safePath(text) // ASCII
+	if len(quoted) > max {
+		quoted = quoted[:max-3] + "..."
+	}
+	return quoted
 }

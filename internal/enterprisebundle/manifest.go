@@ -114,6 +114,11 @@ var (
 	manifestKeyPattern  = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 )
 
+// MaxVersion is the highest manifest version: 2^53-1, the largest integer a
+// JSON reader that stores numbers as doubles (the console) reads exactly, so
+// every reader agrees on the version the rollback floor compares.
+const MaxVersion = 1<<53 - 1
+
 // maxManifestDepth bounds the nesting of manifest.json (its schema is three
 // levels deep).
 const maxManifestDepth = 8
@@ -278,8 +283,8 @@ func (m *Manifest) Validate() error {
 		}
 		seenPlatform[platform] = true
 	}
-	if m.Version == 0 {
-		return bad("version", "must be 1 or higher")
+	if m.Version == 0 || m.Version > MaxVersion {
+		return bad("version", "must be 1 to %d", uint64(MaxVersion))
 	}
 	for _, ref := range []struct{ field, id string }{{"parent", m.Parent}, {"rollback_of", m.RollbackOf}} {
 		field, id := ref.field, ref.id

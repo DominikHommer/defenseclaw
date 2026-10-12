@@ -8,14 +8,56 @@ package enterprisebundle
 
 import (
 	"bytes"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
+
+// envPlaceholderPattern is a ${NAME} environment placeholder. Nothing in the
+// config loader expands it, so only the name form counts as a reference: a
+// literal wrapped in ${...} is still a literal.
+var envPlaceholderPattern = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]{0,127}\}$`)
+
+// configKey is key as the config loader reads it. The loader matches keys
+// case-insensitively and reads a dotted key as a path (llm.api_key at the top
+// level sets llm.api_key), so a check on the YAML spelling alone misses
+// API_KEY or llm.api_key.
+func configKey(key string) string {
+	key = strings.ToLower(key)
+	return key[strings.LastIndex(key, ".")+1:]
+}
+
+// secretHeaderName reports whether an observability header carries a
+// credential by its name. A static (literal) value for such a header is a
+// secret in the bundle; it must be a {credential: NAME} reference.
+func secretHeaderName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "authorization", "proxy-authorization", "cookie":
+		return true
+	}
+	for _, part := range []string{"key", "token", "secret", "password", "auth"} {
+		if strings.Contains(name, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretReference reports whether text names a secret instead of holding
+// one: secret://<credential name> or a ${NAME} placeholder.
+func secretReference(text string) bool {
+	if name, ok := strings.CutPrefix(text, SecretRefScheme); ok {
+		return config.ValidEnterpriseCredentialName(name)
+	}
+	return envPlaceholderPattern.MatchString(text)
+}
 
 // configSecretKeys are config keys whose scalar value would be secret
 // material (the keys the effective digest drops). A bundle config may only
@@ -55,14 +97,25 @@ func CheckInlineSecrets(b *Bundle) error {
 	var bad *Error
 	walkMappings(root, "", func(path, key string, value *yaml.Node) bool {
 		value = resolveAlias(value)
-		if !configSecretKeys[key] || value.Kind != yaml.ScalarNode || value.Tag == "!!null" {
+		if configKey(key) == "headers" && value.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(value.Content); i += 2 {
+				header := resolveAlias(value.Content[i+1])
+				if header.Kind == yaml.ScalarNode && header.Tag == "!!str" && strings.TrimSpace(header.Value) != "" &&
+					secretHeaderName(value.Content[i].Value) {
+					bad = refuse(CodeInlineSecret, ConfigName, "%s.%s holds a literal value (line %d); use {credential: NAME} instead",
+						safePath(path), safePath(value.Content[i].Value), header.Line)
+					return false
+				}
+			}
+		}
+		if !configSecretKeys[configKey(key)] || value.Kind != yaml.ScalarNode || value.Tag == "!!null" {
 			return true
 		}
 		text := strings.TrimSpace(value.Value)
-		if text == "" || strings.HasPrefix(text, SecretRefScheme) || (strings.HasPrefix(text, "${") && strings.HasSuffix(text, "}")) {
+		if text == "" || secretReference(text) {
 			return true
 		}
-		bad = refuse(CodeInlineSecret, ConfigName, "%s holds a value (line %d); name an enterprise credential instead", path, value.Line)
+		bad = refuse(CodeInlineSecret, ConfigName, "%s holds a value (line %d); name an enterprise credential instead", safePath(path), value.Line)
 		return false
 	})
 	if bad != nil {
@@ -81,7 +134,7 @@ func ConfigCredentials(raw []byte) ([]string, error) {
 	seen := map[string]bool{}
 	walkMappings(root, "", func(_, key string, value *yaml.Node) bool {
 		value = resolveAlias(value)
-		if configCredentialKeys[key] && value.Kind == yaml.ScalarNode {
+		if configCredentialKeys[configKey(key)] && value.Kind == yaml.ScalarNode {
 			if name := strings.TrimSpace(value.Value); name != "" && value.Tag != "!!null" {
 				seen[name] = true
 			}
