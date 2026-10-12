@@ -8,6 +8,7 @@ package enterprisebundle
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,38 @@ func FuzzDecodeManifest(f *testing.F) {
 		twice, err := again.Marshal()
 		if err != nil || !bytes.Equal(once, twice) {
 			t.Fatalf("re-encoding is not stable: %v", err)
+		}
+	})
+}
+
+// FuzzDecodeSignature and FuzzDecodeAnchors: any input decodes or is
+// refused with the decoder's own code.
+func FuzzDecodeSignature(f *testing.F) {
+	f.Add([]byte(`{"schema_version":1,"key_id":"k1","alg":"ed25519","sig":"` + strings.Repeat("A", 86) + `=="}`))
+	f.Add([]byte(`{"schema_version":1,"key_id":"k1","alg":"ecdsa-p256-sha256","sig":"MAYCAQECAQE="}`))
+	f.Add([]byte(`{"sig":1,"sig":2}`))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		if _, err := DecodeSignature(raw); err != nil && CodeOf(err) != CodeSignatureInvalid {
+			t.Fatalf("refusal with code %q: %v", CodeOf(err), err)
+		}
+	})
+}
+
+func FuzzDecodeAnchors(f *testing.F) {
+	f.Add([]byte(`{"schema_version":1,"tenant_id":"acme","device_groups":[],"min_version":0,"keys":[{"key_id":"k1","alg":"ed25519","public_key":"MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","not_before":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z","status":"active"}]}`))
+	f.Add([]byte(`{"keys":[{}]}`))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		a, err := DecodeAnchors(raw)
+		if err != nil {
+			if CodeOf(err) != CodeAnchorInvalid {
+				t.Fatalf("refusal with code %q: %v", CodeOf(err), err)
+			}
+			return
+		}
+		for i := range a.Keys {
+			if a.Keys[i].Public() == nil {
+				t.Fatal("decoded key without a public key")
+			}
 		}
 	})
 }

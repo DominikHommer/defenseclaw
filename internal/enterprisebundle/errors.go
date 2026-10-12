@@ -34,6 +34,29 @@ const (
 	CodeFileHashMismatch Code = "file_hash_mismatch"
 	CodeInlineSecret     Code = "inline_secret"
 	CodeConfigInvalid    Code = "config_invalid"
+
+	// Trust: the anchor file, the signing key and the signature.
+	CodeAnchorMissing    Code = "anchor_missing"
+	CodeAnchorInsecure   Code = "anchor_insecure"
+	CodeAnchorInvalid    Code = "anchor_invalid"
+	CodeKeyUnknown       Code = "key_unknown"
+	CodeKeyRevoked       Code = "key_revoked"
+	CodeKeyExpired       Code = "key_expired"
+	CodeSignatureInvalid Code = "signature_invalid"
+
+	// Scope and order: tenant, target, version floor, product version.
+	CodeTenantMismatch  Code = "tenant_mismatch"
+	CodeTargetMismatch  Code = "target_mismatch"
+	CodeVersionNotNewer Code = "version_not_newer"
+	CodeProductTooOld   Code = "product_too_old"
+
+	// Device facts: secret presence and the effective policy digest.
+	CodeSecretRefMissing Code = "secret_ref_missing"
+	CodeDigestMismatch   Code = "digest_mismatch"
+
+	// CodeNotSupportedSecureClient refuses every bundle verb on a Secure
+	// Client computer before anything is read or written.
+	CodeNotSupportedSecureClient Code = "not_supported_secure_client"
 )
 
 // Limits of the readers and the manifest decoder. A bundle over any of them
@@ -44,6 +67,8 @@ const (
 	MaxEntries         = 512       // files and directories
 	MaxManifestBytes   = 256 << 10 // manifest.json
 	MaxSignatureBytes  = 16 << 10  // manifest.sig
+	MaxAnchorsBytes    = 64 << 10  // bundle-anchors.json
+	MaxAnchorKeys      = 32
 	MaxPathBytes       = 255
 	MaxPathDepth       = 16
 	MaxChangeSummary   = 512 // runes

@@ -89,8 +89,13 @@ func (r SecretRef) Name() string { return strings.TrimPrefix(r.Ref, SecretRefSch
 // computed, with the product version that computed it (the digest covers
 // the built-in packs of that version).
 type EffectivePolicy struct {
-	ProductVersion string            `json:"product_version"`
-	Digests        map[string]string `json:"digests"`
+	ProductVersion string `json:"product_version"`
+	// ComputedOn is the platform bundle sign ran on. The config is loaded
+	// once, on that host, so a device compares its own digest with the
+	// manifest only when it runs that platform and that product version
+	// (otherwise it reports digest_unverifiable and its own digest).
+	ComputedOn string            `json:"computed_on"`
+	Digests    map[string]string `json:"digests"`
 }
 
 // Warning is an informational finding (group reachability). It never
@@ -137,7 +142,7 @@ func DecodeManifest(raw []byte) (*Manifest, error) {
 	if !utf8.Valid(raw) || bytes.HasPrefix(raw, []byte("\xef\xbb\xbf")) {
 		return nil, refuse(CodeManifestInvalid, ManifestName, "not UTF-8 JSON without a byte-order mark")
 	}
-	if err := checkManifestKeys(raw); err != nil {
+	if err := checkJSONKeys(raw, CodeManifestInvalid, ManifestName); err != nil {
 		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -186,13 +191,13 @@ type jsonFrame struct {
 	wantKey bool
 }
 
-// checkManifestKeys walks the JSON tokens and refuses a document whose root
+// checkJSONKeys walks the JSON tokens and refuses (code, at name) a document whose root
 // is not an object, that nests deeper than maxManifestDepth, or that has an
 // object key that repeats or is not lower-case snake_case. encoding/json
 // matches keys case-insensitively and keeps the last duplicate; another
 // reader may not, and the signature covers the bytes, not one reading of
-// them.
-func checkManifestKeys(raw []byte) *Error {
+// them. The manifest, manifest.sig and the trust anchor file share it.
+func checkJSONKeys(raw []byte, code Code, name string) *Error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var stack []*jsonFrame
@@ -207,10 +212,10 @@ func checkManifestKeys(raw []byte) *Error {
 			return nil
 		}
 		if err != nil {
-			return refuse(CodeManifestInvalid, ManifestName, "invalid JSON")
+			return refuse(code, name, "invalid JSON")
 		}
 		if len(stack) == 0 && tok != json.Delim('{') {
-			return refuse(CodeManifestInvalid, ManifestName, "not a JSON object")
+			return refuse(code, name, "not a JSON object")
 		}
 		if n := len(stack); n > 0 && stack[n-1].object && stack[n-1].wantKey {
 			if tok == json.Delim('}') {
@@ -223,10 +228,10 @@ func checkManifestKeys(raw []byte) *Error {
 			}
 			key, _ := tok.(string)
 			if !manifestKeyPattern.MatchString(key) {
-				return refuse(CodeManifestInvalid, ManifestName, "key %s is not lower-case snake_case", safePath(key))
+				return refuse(code, name, "key %s is not lower-case snake_case", safePath(key))
 			}
 			if stack[n-1].keys[key] {
-				return refuse(CodeManifestInvalid, ManifestName, "key %s appears twice in one object", key)
+				return refuse(code, name, "key %s appears twice in one object", key)
 			}
 			stack[n-1].keys[key] = true
 			stack[n-1].wantKey = false
@@ -235,7 +240,7 @@ func checkManifestKeys(raw []byte) *Error {
 		switch tok {
 		case json.Delim('{'), json.Delim('['):
 			if len(stack) >= maxManifestDepth {
-				return refuse(CodeManifestInvalid, ManifestName, "nested deeper than %d levels", maxManifestDepth)
+				return refuse(code, name, "nested deeper than %d levels", maxManifestDepth)
 			}
 			object := tok == json.Delim('{')
 			stack = append(stack, &jsonFrame{object: object, keys: map[string]bool{}, wantKey: object})
@@ -318,6 +323,9 @@ func (m *Manifest) Validate() error {
 	}
 	if !productVersionRegex.MatchString(m.EffectivePolicy.ProductVersion) {
 		return bad("effective_policy.product_version", "want a version such as 1.2.3")
+	}
+	if !knownPlatform(m.EffectivePolicy.ComputedOn) {
+		return bad("effective_policy.computed_on", "want linux, darwin or windows")
 	}
 	if len(m.EffectivePolicy.Digests) != len(m.Target.Platforms) {
 		return bad("effective_policy.digests", "want one digest for each target platform")

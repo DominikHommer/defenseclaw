@@ -31,7 +31,7 @@ func validManifest() *Manifest {
 			{Path: "policies/guardrail/strict/rules.yaml", SHA256: strings.Repeat("b", 64), Size: 3},
 		},
 		SecretRefs:      []SecretRef{{Ref: "secret://ai-defense-api-key", Required: true}},
-		EffectivePolicy: EffectivePolicy{ProductVersion: "1.0.2", Digests: map[string]string{PlatformLinux: testDigest, PlatformDarwin: testDigest}},
+		EffectivePolicy: EffectivePolicy{ProductVersion: "1.0.2", ComputedOn: PlatformLinux, Digests: map[string]string{PlatformLinux: testDigest, PlatformDarwin: testDigest}},
 	}
 }
 
