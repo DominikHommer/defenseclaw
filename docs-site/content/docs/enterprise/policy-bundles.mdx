@@ -1,0 +1,98 @@
+---
+title: Policy bundles
+description: Sign and verify a policy bundle for the standalone enterprise profile, install the trust anchor file, and know the limits of the signature, key and version checks.
+keywords:
+  - DefenseClaw policy bundle
+  - bundle sign
+  - bundle verify
+  - trust anchors
+  - rollback protection
+---
+
+A policy bundle is one signed file (`.dcbundle`) that carries `config.yaml`, the
+policy files it names and a manifest with their SHA-256 hashes, the secret
+references and the effective policy digest per platform. A detached signature
+covers the manifest. The standalone enterprise profile only: Secure Client
+computers do not have the `enterprise bundle` commands.
+
+Both verbs run offline and change nothing on the computer.
+
+## Install the trust anchor file
+
+MDM installs `bundle-anchors.json` with the tenant, the device groups of the
+device (empty: any group), the lowest bundle version it accepts
+(`min_version`) and the signing public keys:
+
+| OS | Path |
+| --- | --- |
+| Linux | `/etc/defenseclaw/trust/bundle-anchors.json` |
+| macOS | `/opt/cisco/defenseclaw/etc/trust/bundle-anchors.json` |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\trust\bundle-anchors.json` |
+
+On a managed device the file and every folder above it must be owned by root
+(Windows: SYSTEM or Administrators) with no write access for other accounts and
+no links. Otherwise verify refuses with `anchor_insecure`.
+
+Each key has a `key_id`, an `alg` (`ed25519` or `ecdsa-p256-sha256`), a DER
+SubjectPublicKeyInfo `public_key` in base64, `not_before` and `not_after` in UTC
+and a `status`: `active`, `retired` (verifies only the bundle the device already
+applied) or `revoked` (verifies nothing).
+
+## Sign
+
+```bash
+defenseclaw-gateway enterprise bundle sign --in ./policy --out v12.dcbundle \
+  --key signing.pem --key-id acme-2026a --tenant acme --device-group eng-laptops \
+  --version 12 --created-by operator:alice
+```
+
+To sign with an HSM or KMS, run sign with `--emit-digest` (and `--tbs-out` for
+an Ed25519 HSM that signs the message itself), sign the printed SHA-256, then
+attach the signature:
+
+```bash
+defenseclaw-gateway enterprise bundle sign --attach-sig v12.sig --in v12-unsigned.dcbundle \
+  --out v12.dcbundle --key-id acme-2026a --public-key acme-2026a.pub.pem
+```
+
+Sign refuses a literal secret anywhere in the bundle (`inline_secret`): name an
+enterprise credential (`secret://NAME`) instead. Keep the signing key outside
+the bundle directory.
+
+## Verify
+
+```bash
+defenseclaw-gateway enterprise bundle verify --bundle v12.dcbundle --json
+```
+
+Verify checks, in order: the anchor file, the key, the signature, the manifest,
+tenant and target, the version floor, `min_product_version`, the file hashes,
+inline secrets, secret references (and on a managed device that each required
+credential exists), the config and the effective policy digest. The first
+failure is reported with a stable code and exit code 1 (1603 on Windows).
+
+## Known limits
+
+- **Version floor.** A device refuses a version at or below the higher of
+  `min_version` and its last confirmed bundle (`version_not_newer`), also a
+  different manifest that reuses the confirmed bundle id and version. A
+  rollback is a new, higher version with the old content. `bundle verify`
+  checks against `min_version` only; it does not read the last confirmed
+  bundle.
+- **Retired and expired keys.** A retired key verifies only the bundle already
+  applied, and only while the key is inside `not_before`..`not_after`. Once a
+  key expires, the bundle it signed no longer verifies (`key_expired`): publish
+  a bundle signed with the new key before the old one expires.
+- **Effective policy digest.** Sign loads the config once, on the signing host.
+  A device compares the manifest digest only when it runs the same product
+  version on the same platform as the signer; otherwise verify warns
+  `digest_unverifiable` and reports the digest the device computes. The file
+  hashes are always checked.
+- **Anchor file off a device.** `--anchors` on a computer that is not a managed
+  device skips the ownership check (warning `anchor_trust_unchecked`), so an
+  administrator can check a bundle on a workstation.
+- **Secret presence.** When the enterprise secret store cannot be read (a
+  standard account), verify warns `secret_presence_unchecked` instead of
+  checking each credential.
+- **Sizes.** A bundle is at most 4 MiB compressed, `manifest.sig` 16 KiB, the
+  anchor file 64 KiB with at most 32 keys and 256 device groups.

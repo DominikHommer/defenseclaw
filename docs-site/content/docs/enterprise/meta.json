@@ -17,6 +17,7 @@
     "---Configure---",
     "enrollment",
     "machine-policy",
+    "policy-bundles",
     "sandboxes",
     "identity-and-authentication",
     "identity-sources",
