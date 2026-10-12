@@ -8,6 +8,8 @@ package enterprisebundle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"slices"
 	"time"
 
@@ -25,17 +27,28 @@ const (
 type Confirmed struct {
 	Version  uint64
 	BundleID string
+	// ManifestSHA256 is the hex SHA-256 of the confirmed manifest.json
+	// bytes. A bundle is the confirmed one only when all three match, so a
+	// key retired since (which verifies only the applied bundle) cannot
+	// sign new content under the confirmed id and version.
+	ManifestSHA256 string
 }
 
-// CheckFloor is the rollback check. The floor is the higher of the last
-// confirmed version and the anchor min_version. The confirmed bundle itself
-// (same bundle_id and version, not below min_version) is already applied: a
-// no-op success. Any other version at or below the floor is
-// version_not_newer; a rollback is a new, higher version.
-func CheckFloor(m *Manifest, confirmed Confirmed, anchorMin uint64) (alreadyApplied bool, floor uint64, err error) {
+// CheckFloor is the rollback check of the manifest m whose bytes hash to
+// manifestSHA256 (hex). The floor is the higher of the last confirmed
+// version and the anchor min_version. The confirmed bundle itself (same
+// bundle_id, version and manifest bytes, not below min_version) is already
+// applied: a no-op success. Any other version at or below the floor is
+// version_not_newer, also another manifest under the confirmed id and
+// version; a rollback is a new, higher version.
+func CheckFloor(m *Manifest, manifestSHA256 string, confirmed Confirmed, anchorMin uint64) (alreadyApplied bool, floor uint64, err error) {
 	floor = max(confirmed.Version, anchorMin)
-	if confirmed.BundleID != "" && m.BundleID == confirmed.BundleID && m.Version == confirmed.Version && m.Version >= anchorMin {
+	same := confirmed.BundleID != "" && m.BundleID == confirmed.BundleID && m.Version == confirmed.Version
+	if same && confirmed.ManifestSHA256 != "" && confirmed.ManifestSHA256 == manifestSHA256 && m.Version >= anchorMin {
 		return true, floor, nil
+	}
+	if same && m.Version >= anchorMin {
+		return false, floor, refuse(CodeVersionNotNewer, "version", "the manifest differs from the confirmed bundle %s version %d", m.BundleID, m.Version)
 	}
 	if m.Version <= floor {
 		return false, floor, refuse(CodeVersionNotNewer, "version", "version %d is not above the floor %d", m.Version, floor)
@@ -151,7 +164,8 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	if !key.ValidAt(created) {
 		return res, refuse(CodeKeyExpired, "created_at", "the bundle was created outside the validity of key %s", sig.KeyID)
 	}
-	res.AlreadyApplied, res.Floor, err = CheckFloor(m, in.Confirmed, in.Anchors.MinVersion)
+	manifestSum := sha256.Sum256(b.Manifest)
+	res.AlreadyApplied, res.Floor, err = CheckFloor(m, hex.EncodeToString(manifestSum[:]), in.Confirmed, in.Anchors.MinVersion)
 	if err != nil {
 		return res, err
 	}

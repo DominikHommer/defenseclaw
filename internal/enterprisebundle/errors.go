@@ -12,8 +12,8 @@
 //
 // Everything here is a pure function of its inputs: nothing is written,
 // installed or published, and no bundle content ever appears in an error.
-// Signatures, trust anchors and the version floor are checked by the callers
-// (bundle verify and apply).
+// It also holds the trust layer: manifest.sig, the MDM-installed trust
+// anchors, the version floor and Verify, which runs every check in order.
 package enterprisebundle
 
 import (

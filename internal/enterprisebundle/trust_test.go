@@ -274,6 +274,7 @@ func TestLoadAnchorsPermissions(t *testing.T) {
 
 func TestCheckFloor(t *testing.T) {
 	id := "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A"
+	sum, other := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	for name, tc := range map[string]struct {
 		version   uint64
 		confirmed Confirmed
@@ -282,17 +283,19 @@ func TestCheckFloor(t *testing.T) {
 		floor     uint64
 		code      Code
 	}{
-		"first bundle":           {version: 1, floor: 0},
-		"above confirmed":        {version: 8, confirmed: Confirmed{Version: 7, BundleID: "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"}, floor: 7},
-		"equal to confirmed":     {version: 7, confirmed: Confirmed{Version: 7, BundleID: "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"}, floor: 7, code: CodeVersionNotNewer},
-		"older (replay)":         {version: 3, confirmed: Confirmed{Version: 7}, floor: 7, code: CodeVersionNotNewer},
-		"the confirmed bundle":   {version: 7, confirmed: Confirmed{Version: 7, BundleID: id}, applied: true, floor: 7},
-		"anchor min":             {version: 4, anchorMin: 5, floor: 5, code: CodeVersionNotNewer},
-		"anchor min above it":    {version: 7, confirmed: Confirmed{Version: 7, BundleID: id}, anchorMin: 9, floor: 9, code: CodeVersionNotNewer},
-		"above anchor min":       {version: 6, anchorMin: 5, floor: 5},
-		"same id, other version": {version: 8, confirmed: Confirmed{Version: 7, BundleID: id}, floor: 7},
+		"first bundle":            {version: 1, floor: 0},
+		"above confirmed":         {version: 8, confirmed: Confirmed{Version: 7, BundleID: "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"}, floor: 7},
+		"equal to confirmed":      {version: 7, confirmed: Confirmed{Version: 7, BundleID: "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"}, floor: 7, code: CodeVersionNotNewer},
+		"older (replay)":          {version: 3, confirmed: Confirmed{Version: 7}, floor: 7, code: CodeVersionNotNewer},
+		"the confirmed bundle":    {version: 7, confirmed: Confirmed{Version: 7, BundleID: id, ManifestSHA256: sum}, applied: true, floor: 7},
+		"other manifest, same id": {version: 7, confirmed: Confirmed{Version: 7, BundleID: id, ManifestSHA256: other}, floor: 7, code: CodeVersionNotNewer},
+		"no confirmed hash":       {version: 7, confirmed: Confirmed{Version: 7, BundleID: id}, floor: 7, code: CodeVersionNotNewer},
+		"anchor min":              {version: 4, anchorMin: 5, floor: 5, code: CodeVersionNotNewer},
+		"anchor min above it":     {version: 7, confirmed: Confirmed{Version: 7, BundleID: id, ManifestSHA256: sum}, anchorMin: 9, floor: 9, code: CodeVersionNotNewer},
+		"above anchor min":        {version: 6, anchorMin: 5, floor: 5},
+		"same id, other version":  {version: 8, confirmed: Confirmed{Version: 7, BundleID: id}, floor: 7},
 	} {
-		applied, floor, err := CheckFloor(&Manifest{BundleID: id, Version: tc.version}, tc.confirmed, tc.anchorMin)
+		applied, floor, err := CheckFloor(&Manifest{BundleID: id, Version: tc.version}, sum, tc.confirmed, tc.anchorMin)
 		if applied != tc.applied || floor != tc.floor || CodeOf(err) != tc.code {
 			t.Errorf("%s: applied=%v floor=%d err=%v", name, applied, floor, err)
 		}

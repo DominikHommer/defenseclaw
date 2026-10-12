@@ -13,8 +13,10 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"os"
@@ -230,9 +232,18 @@ func TestVerifyTamperMatrix(t *testing.T) {
 	// retired since; another product version cannot compare the digest.
 	retired := anchors(t, "acme", nil, 0, anchorKey{id: "k1", status: enterprisebundle.KeyRetired, notBefore: "2026-01-01T00:00:00Z", notAfter: "2027-01-01T00:00:00Z", public: public})
 	in := f.input(t, f.bundle, retired)
-	in.Confirmed = enterprisebundle.Confirmed{Version: 5, BundleID: tamperBundleID}
+	sum := sha256.Sum256(f.bundle.Manifest)
+	confirmed := enterprisebundle.Confirmed{Version: 5, BundleID: tamperBundleID, ManifestSHA256: hex.EncodeToString(sum[:])}
+	in.Confirmed = confirmed
 	if res, err := enterprisebundle.Verify(ctx, in); err != nil || !res.AlreadyApplied || res.Floor != 5 {
 		t.Fatalf("already applied: %+v %v", res, err)
+	}
+	// The retired key cannot sign other content under the confirmed id and
+	// version: that is not the applied bundle.
+	in = f.input(t, reSigned(func(m *enterprisebundle.Manifest) { m.ChangeSummary = "other content" }), retired)
+	in.Confirmed = confirmed
+	if _, err := enterprisebundle.Verify(ctx, in); enterprisebundle.CodeOf(err) != enterprisebundle.CodeVersionNotNewer {
+		t.Fatalf("retired key, other manifest under the confirmed id: %v", err)
 	}
 	in = f.input(t, f.bundle, good)
 	in.ProductVersion = "1.0.3"
