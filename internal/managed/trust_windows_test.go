@@ -13,6 +13,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,6 +105,71 @@ func TestWindowsVirtualServiceSIDRejectsBroadOrMalformedAccounts(t *testing.T) {
 		if _, err := windowsVirtualServiceSID(account); err == nil {
 			t.Fatalf("windowsVirtualServiceSID(%q) succeeded, want rejection", account)
 		}
+	}
+}
+
+func TestWindowsVirtualServiceSIDForDeletedService(t *testing.T) {
+	// This name has no SCM row, but sc.exe showsid computes a stable service
+	// SID. The exact expected value was independently recorded from Windows.
+	const name = "DefenseClawRecoveryNoSuchServiceProbe_48A6"
+	const expected = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
+	account := `NT SERVICE\` + name
+	if _, _, _, err := windows.LookupSID("", account); !errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		t.Fatalf("absent service LookupSID error = %v, want ERROR_NONE_MAPPED", err)
+	}
+	sid, err := windowsVirtualServiceSID(account)
+	if err != nil {
+		t.Fatalf("resolve absent service SID: %v", err)
+	}
+	if sid.String() != expected {
+		t.Fatalf("absent service SID = %s, want %s", sid, expected)
+	}
+	upper, err := windowsVirtualServiceSID(`NT SERVICE\` + strings.ToUpper(name))
+	if err != nil || upper.String() != expected {
+		t.Fatalf("case-folded absent service SID = %v, %v, want %s", upper, err, expected)
+	}
+	// The config loader calls this exact validator for managed data_dir. Its
+	// trusted Windows system directory has no service writer ACE, so this
+	// exercises the retired-account resolution without changing product ACLs.
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatalf("GetSystemDirectory: %v", err)
+	}
+	if err := ValidateTrustedServiceRuntimeDir(systemDir, "managed data_dir", account); err != nil {
+		t.Fatalf("config runtime trust check with absent service SID: %v", err)
+	}
+}
+
+func TestWindowsDeterministicServiceSIDMatchesInstalledService(t *testing.T) {
+	const name = "TrustedInstaller"
+	resolved, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
+	if err != nil {
+		t.Fatalf("LookupSID installed service: %v", err)
+	}
+	computed, err := windowsDeterministicServiceSID(name)
+	if err != nil {
+		t.Fatalf("compute installed service SID: %v", err)
+	}
+	if !resolved.Equals(computed) {
+		t.Fatalf("resolved SID %s differs from deterministic SID %s", resolved, computed)
+	}
+}
+
+func TestParseWindowsServiceSIDOutputRejectsAmbiguousOrPartial(t *testing.T) {
+	const sid = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
+	for _, output := range []string{
+		"no service SID",
+		sid + "\n" + sid,
+		"SERVICE SID: " + sid + "-1",
+		"SERVICE SID: " + sid + "1",
+	} {
+		if _, err := parseWindowsServiceSIDOutput(output); err == nil {
+			t.Fatalf("accepted ambiguous or partial SID output %q", output)
+		}
+	}
+	parsed, err := parseWindowsServiceSIDOutput("SERVICE SID: " + sid + "\r\nSTATUS: Inactive")
+	if err != nil || parsed.String() != sid {
+		t.Fatalf("valid service SID output = %v, %v", parsed, err)
 	}
 }
 
@@ -519,4 +585,161 @@ func unusedManagedTestDriveLetter() (string, bool) {
 		return "", false
 	}
 	return `O:`, true
+}
+
+type fakeServiceToken struct {
+	user   *windows.SID
+	groups []windows.SIDAndAttributes
+}
+
+func (token fakeServiceToken) GetTokenUser() (*windows.Tokenuser, error) {
+	return &windows.Tokenuser{User: windows.SIDAndAttributes{Sid: token.user}}, nil
+}
+
+func (token fakeServiceToken) GetTokenGroups() (*windows.Tokengroups, error) {
+	if len(token.groups) == 0 {
+		return &windows.Tokengroups{}, nil
+	}
+	if len(token.groups) != 1 {
+		panic("fakeServiceToken models at most one group")
+	}
+	return &windows.Tokengroups{GroupCount: 1, Groups: [1]windows.SIDAndAttributes{token.groups[0]}}, nil
+}
+
+func TestWindowsTokenRunsAsService(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherServiceSID, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
+	for _, test := range []struct {
+		name  string
+		token fakeServiceToken
+		want  bool
+	}{
+		{"legacy virtual account user", fakeServiceToken{user: serviceSID}, true},
+		{"localsystem with enabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, true},
+		{"localsystem without service group", fakeServiceToken{user: localSystem}, false},
+		{"localsystem with another service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: otherServiceSID, Attributes: enabled}},
+		}, false},
+		{"localsystem with disabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: windows.SE_GROUP_MANDATORY}},
+		}, false},
+		{"localsystem with deny-only service group", fakeServiceToken{
+			user: localSystem,
+			groups: []windows.SIDAndAttributes{{
+				Sid: serviceSID, Attributes: enabled | windows.SE_GROUP_USE_FOR_DENY_ONLY,
+			}},
+		}, false},
+		{"interactive user with service group", fakeServiceToken{
+			user:   user,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := windowsTokenRunsAsService(test.token, serviceSID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("windowsTokenRunsAsService = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if _, err := windowsTokenRunsAsService(fakeServiceToken{user: localSystem}, nil); err == nil {
+		t.Fatal("nil service SID was accepted")
+	}
+}
+
+func TestAdoptWindowsGatewayServiceDefaultOwner(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
+	gatewayGroup := []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}}
+	resolve := func() (*windows.SID, error) { return serviceSID, nil }
+	for _, test := range []struct {
+		name    string
+		token   fakeServiceToken
+		applied bool
+	}{
+		{"localsystem gateway takes service SID owner", fakeServiceToken{user: localSystem, groups: gatewayGroup}, true},
+		{"virtual account gateway is unchanged", fakeServiceToken{user: serviceSID}, false},
+		{"localsystem without gateway SID is unchanged", fakeServiceToken{user: localSystem}, false},
+		{"interactive user is unchanged", fakeServiceToken{user: user, groups: gatewayGroup}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var set *windows.SID
+			applied, err := adoptWindowsGatewayServiceDefaultOwner(test.token, resolve, func(owner *windows.SID) error {
+				set = owner
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if applied != test.applied || (set != nil) != test.applied {
+				t.Fatalf("applied=%v set=%v, want applied=%v", applied, set, test.applied)
+			}
+			if test.applied && !set.Equals(serviceSID) {
+				t.Fatalf("owner set to %v, want %v", set, serviceSID)
+			}
+		})
+	}
+
+	_, err = adoptWindowsGatewayServiceDefaultOwner(
+		fakeServiceToken{user: localSystem, groups: gatewayGroup},
+		resolve,
+		func(*windows.SID) error { return windows.ERROR_INVALID_OWNER },
+	)
+	if err == nil || !strings.Contains(err.Error(), "set token owner to service SID") {
+		t.Fatalf("setter failure error = %v", err)
+	}
+
+	// A pin that does not resolve must not stop a virtual-account gateway or
+	// an interactive process: the token user is checked first.
+	badPin := func() (*windows.SID, error) { return nil, errors.New("unresolvable pin") }
+	for _, token := range []fakeServiceToken{{user: serviceSID}, {user: user, groups: gatewayGroup}} {
+		applied, err := adoptWindowsGatewayServiceDefaultOwner(token, badPin, func(*windows.SID) error {
+			t.Fatal("owner set for a non-LocalSystem token")
+			return nil
+		})
+		if err != nil || applied {
+			t.Fatalf("non-LocalSystem token with bad pin: applied=%v err=%v", applied, err)
+		}
+	}
+	// For a LocalSystem process the resolution error is still reported.
+	if _, err := adoptWindowsGatewayServiceDefaultOwner(
+		fakeServiceToken{user: localSystem, groups: gatewayGroup},
+		badPin,
+		func(*windows.SID) error { return nil },
+	); err == nil || !strings.Contains(err.Error(), "unresolvable pin") {
+		t.Fatalf("LocalSystem bad pin error = %v", err)
+	}
 }

@@ -3081,6 +3081,45 @@ function Invoke-DefenseClawNative {
     }
 }
 
+# The gateway logs on as LocalSystem with a restricted service SID and a single
+# required privilege, so no "Log on as a service" grant is needed and Group
+# Policy cannot revoke its logon. Earlier releases logged it on as its own
+# virtual account; lifecycle reads accept both so those hosts upgrade, repair
+# and uninstall in place. The virtual service SID is still the gateway's ACL
+# identity either way.
+function Get-DefenseClawGatewayServiceAccount {
+    return 'LocalSystem'
+}
+
+function Get-DefenseClawLegacyGatewayServiceAccount {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return "NT SERVICE\$GatewayServiceName"
+}
+
+function Get-DefenseClawAcceptedGatewayServiceAccounts {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return @(
+        (Get-DefenseClawGatewayServiceAccount),
+        (Get-DefenseClawLegacyGatewayServiceAccount -GatewayServiceName $GatewayServiceName)
+    )
+}
+
+function Test-DefenseClawGatewayServiceAccount {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Account,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    foreach ($accepted in @(
+            (Get-DefenseClawAcceptedGatewayServiceAccounts -GatewayServiceName $GatewayServiceName) +
+            @('NT AUTHORITY\SYSTEM')
+        )) {
+        if ([string]::Equals($Account, $accepted, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-DefenseClawServiceSID {
     param([Parameter(Mandatory)][string]$ServiceName)
     $account = [Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")
@@ -5378,12 +5417,20 @@ function Set-DefenseClawManagedServices {
         # Enumerator existed without manufacturing new privileged services.
         # Ordinary Install/Repair/Upgrade callers never set them.
         [switch]$RestoreTransactionWithoutBroker,
-        [switch]$RestoreTransactionWithoutEnumerator
+        [switch]$RestoreTransactionWithoutEnumerator,
+        # Rollback-only: the gateway account recorded in the transaction
+        # preimage. Restored binaries from an earlier release expect the
+        # virtual account they were installed with.
+        [string]$RestoreGatewayAccount
     )
     if (($RestoreTransactionWithoutBroker -or
             $RestoreTransactionWithoutEnumerator) -and
         -not $DeferAutomaticStart) {
         throw 'legacy service topology can be restored only while transaction services remain disabled'
+    }
+    if (-not [string]::IsNullOrEmpty($RestoreGatewayAccount) -and
+        -not $DeferAutomaticStart) {
+        throw 'a recorded gateway account can be restored only while transaction services remain disabled'
     }
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
@@ -5393,7 +5440,17 @@ function Set-DefenseClawManagedServices {
     }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
-    $gatewayAccount = "NT SERVICE\$GatewayServiceName"
+    $gatewayAccount = if ([string]::IsNullOrEmpty($RestoreGatewayAccount)) {
+        Get-DefenseClawGatewayServiceAccount
+    }
+    elseif (Test-DefenseClawGatewayServiceAccount `
+            -Account $RestoreGatewayAccount `
+            -GatewayServiceName $GatewayServiceName) {
+        $RestoreGatewayAccount
+    }
+    else {
+        throw "refusing to restore unsupported gateway service account $RestoreGatewayAccount"
+    }
     $gatewayImage = '"{0}"' -f $GatewayPath
     # The rollback-only restore path manufactures no broker at all, so it
     # keeps its empty image. Everything else routes through the shared
@@ -5499,6 +5556,20 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GatewayServiceName `
         -ExpectedImage $gatewayImage
+    # Readers tolerate either gateway account so older installs stay
+    # servicable; the writer proves the account it just configured.
+    $writtenGatewayAccount = [string](
+        Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$GatewayServiceName" `
+            -Name ObjectName
+    )
+    if (-not [string]::Equals(
+            $writtenGatewayAccount,
+            $gatewayAccount,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "gateway service account is $writtenGatewayAccount after configuration, want $gatewayAccount"
+    }
     if (Test-DefenseClawServiceExists -Name $GuardianServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GuardianServiceName,
@@ -5909,6 +5980,39 @@ function Set-DefenseClawServiceActivationPhase {
         $timestampProperty.Value = $timestampValue
     }
     Write-DefenseClawJsonAtomic -Value $State -Path $Path
+}
+
+function Get-DefenseClawTransactionGatewayAccount {
+    <#
+        The gateway logon account recorded in a transaction preimage. A
+        preimage written by an earlier release has no account field and its
+        gateway ran as the virtual account, so that is the restore target.
+    #>
+    param([Parameter(Mandatory)]$Snapshot)
+    $gatewayServiceName = [string]$Snapshot.gateway_service
+    $entries = @($Snapshot.services |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                $gatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+    if ($entries.Count -ne 1) {
+        throw 'transaction has invalid prior gateway service metadata'
+    }
+    $property = $entries[0].PSObject.Properties['account']
+    if ($null -eq $property -or [string]::IsNullOrEmpty([string]$property.Value)) {
+        return Get-DefenseClawLegacyGatewayServiceAccount `
+            -GatewayServiceName $gatewayServiceName
+    }
+    $account = [string]$property.Value
+    if (-not (Test-DefenseClawGatewayServiceAccount `
+            -Account $account `
+            -GatewayServiceName $gatewayServiceName)) {
+        throw "transaction records an unsupported gateway service account $account"
+    }
+    return $account
 }
 
 function Get-DefenseClawTransactionServiceStartMode {
@@ -8330,7 +8434,7 @@ function New-DefenseClawDeploymentMetadata {
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
         guardian_service = $GuardianServiceName
-        gateway_account = "NT SERVICE\$GatewayServiceName"
+        gateway_account = (Get-DefenseClawGatewayServiceAccount)
         guardian_account = 'LocalSystem'
         broker_service = $Layout.BrokerServiceName
         broker_account = 'LocalSystem'
@@ -8597,8 +8701,22 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
             )
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
-    $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
-    if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    # A gateway installed by an earlier release still logs on as its virtual
+    # account; it is this deployment's own service and must not be treated as
+    # foreign while upgrade, repair, reinstall or uninstall moves it.
+    $expectedAccount = if ($Guardian -or $Enumerator) {
+        'LocalSystem'
+    }
+    else {
+        (Get-DefenseClawAcceptedGatewayServiceAccounts -GatewayServiceName $Name) -join ' or '
+    }
+    $ownedAccount = if ($Guardian -or $Enumerator) {
+        [string]::Equals($objectName, 'LocalSystem', [StringComparison]::OrdinalIgnoreCase)
+    }
+    else {
+        Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name
+    }
+    if (-not $ownedAccount) {
         if (Test-DefenseClawTrustStrictAncestors) {
             throw "refusing to replace service $Name owned by unexpected account $objectName"
         }
@@ -8769,6 +8887,18 @@ function New-DefenseClawTransaction {
         else {
             Get-DefenseClawServiceStartMode -Name $name
         }
+        # Rollback restores the logon account the preimage binaries expect.
+        # Preimages without this field predate the LocalSystem gateway.
+        $account = if ($null -eq $service) {
+            ''
+        }
+        else {
+            [string](
+                Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+                    -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$name" `
+                    -Name ObjectName
+            )
+        }
         $services.Add([ordered]@{
             name = $name
             existed = ($null -ne $service)
@@ -8778,6 +8908,7 @@ function New-DefenseClawTransaction {
                     [ServiceProcess.ServiceControllerStatus]::Running
             )
             start_mode = [int]$startMode
+            account = $account
         })
     }
     $quiescingIntentPublished = $false
@@ -10526,6 +10657,9 @@ function Restore-DefenseClawTransaction {
             ) `
             -RestoreTransactionWithoutEnumerator:(
                 -not [bool]$snapshotEnumeratorState.existed
+            ) `
+            -RestoreGatewayAccount (
+                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot
             )
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
@@ -10682,7 +10816,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
-        -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage
+        -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
+        -ExpectedGatewayAccount @(
+            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot
+        )
     return $true
 }
 
@@ -11464,6 +11601,15 @@ function New-DefenseClawInstallPreparationIntent {
     if ($null -ne $existing) {
         throw 'refusing to replace an authenticated install preparation receipt'
     }
+    # Codex, Claude, and Cursor machine hooks are shared across installation
+    # roots. A second live enterprise scope cannot safely capture or reclaim
+    # their ownership. Refuse before publishing the install receipt or creating
+    # either managed root; the shared lifecycle lock excludes another
+    # compliant install racing this SCM inventory.
+    Assert-DefenseClawInstallSharedHookScopeExclusive `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
     $intent = [ordered]@{
         schema_version = 2
         phase = 'preparing_layout'
@@ -14513,11 +14659,170 @@ function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive {
     }
 }
 
-function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
+function Get-DefenseClawSharedManagedHookOwners {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # These singleton machine policies are shared by production and every
+    # certification scope. Their protected state records bind the owning
+    # gateway service to the live policy bytes. A stopped service may still
+    # own the hooks and must not be mistaken for an orphan solely because SCM
+    # reports Stopped.
+    $cursorRoot = [IO.Path]::Combine($script:ProgramData, 'Cursor')
+    $claudeRoot = [IO.Path]::Combine(
+        $script:ProgramFiles, 'ClaudeCode', 'managed-settings.d'
+    )
+    $specifications = @(
+        @{
+            name = 'Codex'
+            state = [string]$Layout.CodexManagedHooksStatePath
+            limit = 4194304
+            bindings = @(@{
+                path = [string]$Layout.CodexMachinePolicyPath
+                field = 'requirements_sha256'
+                prefix = ''
+            })
+        },
+        @{
+            name = 'Cursor'
+            state = [IO.Path]::Combine(
+                $cursorRoot, '.defenseclaw-managed-hooks.state'
+            )
+            limit = 8388608
+            bindings = @(
+                @{
+                    path = [IO.Path]::Combine($cursorRoot, 'defenseclaw-hook.ps1')
+                    field = 'adapter_sha256'
+                    prefix = 'sha256:'
+                },
+                @{
+                    path = [IO.Path]::Combine(
+                        $cursorRoot, '.defenseclaw-managed-hooks.receipt'
+                    )
+                    field = 'receipt_sha256'
+                    prefix = 'sha256:'
+                }
+            )
+        },
+        @{
+            name = 'Claude'
+            state = [IO.Path]::Combine(
+                $claudeRoot, '.defenseclaw-managed-hooks.state'
+            )
+            limit = 65536
+            bindings = @(@{
+                path = [IO.Path]::Combine($claudeRoot, '90-defenseclaw.json')
+                field = 'policy_sha256'
+                prefix = 'sha256:'
+            })
+        }
+    )
+    $owners = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    foreach ($specification in $specifications) {
+        $statePath = [string]$specification.state
+        Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+        # Test-Path can report false for an ACL-denied protected file. The
+        # no-follow probe returns null only for a missing leaf/ancestor, and
+        # fails closed on access denial, reparse points, or hard links.
+        $stateSnapshot =
+            $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                $statePath
+            )
+        if ($null -eq $stateSnapshot) {
+            continue
+        }
+        Assert-DefenseClawNoReparsePath -Path $statePath
+        Assert-DefenseClawPathAcl `
+            -Path $statePath `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowUsersRead `
+            -AllowInheritance
+        $stateItem = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $statePath -Force
+        if ([int64]$stateItem.Length -gt [int64]$specification.limit) {
+            throw "$($specification.name) managed-hook ownership exceeds its limit"
+        }
+        try {
+            $state = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $statePath -Raw |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+        catch {
+            throw "$($specification.name) managed-hook ownership is invalid: $($_.Exception.Message)"
+        }
+        $owner = [string]$state.gateway_service_name
+        if ([string]::IsNullOrWhiteSpace($owner)) {
+            throw "$($specification.name) managed-hook ownership has no gateway service"
+        }
+        foreach ($binding in @($specification.bindings)) {
+            $boundPath = [string]$binding.path
+            $expectedHash = [string]$state.([string]$binding.field)
+            $prefix = [string]$binding.prefix
+            if ($expectedHash -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{64}$')) {
+                throw "$($specification.name) managed-hook ownership has an incomplete policy binding"
+            }
+            Assert-DefenseClawNoReparsePath -Path $boundPath -AllowMissingLeaf
+            $boundSnapshot =
+                $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                    $boundPath
+                )
+            if ($null -eq $boundSnapshot) {
+                throw "$($specification.name) managed-hook ownership has an incomplete policy binding"
+            }
+            Assert-DefenseClawNoReparsePath -Path $boundPath
+            Assert-DefenseClawPathAcl `
+                -Path $boundPath `
+                -AllowedWriterSIDs @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) `
+                -AllowUsersRead `
+                -AllowInheritance
+            $actualHash = $prefix + (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $boundPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($actualHash -cne $expectedHash) {
+                throw "$($specification.name) managed-hook ownership does not bind the live policy"
+            }
+        }
+        [void]$owners.Add($owner)
+    }
+    return @($owners)
+}
+
+function Assert-DefenseClawInstallSharedHookScopeExclusive {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $sharedHookOwners = @(Get-DefenseClawSharedManagedHookOwners -Layout $Layout)
+    Assert-DefenseClawNoForeignManagedService `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Services @(Microsoft.PowerShell.Management\Get-Service -ErrorAction Stop) `
+        -Operation 'managed-hook install' `
+        -ActiveOnly `
+        -SharedHookOwners $sharedHookOwners
+}
+
+function Assert-DefenseClawNoForeignManagedService {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Services,
+        [Parameter(Mandatory)][string]$Operation,
+        [switch]$ActiveOnly,
+        [string[]]$SharedHookOwners = @()
     )
     $excluded = @{}
     foreach ($name in @(
@@ -14529,9 +14834,17 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
     )) {
         $excluded[$name.ToUpperInvariant()] = $true
     }
-    $allServices = @(Microsoft.PowerShell.Management\Get-Service `
-        -ErrorAction Stop)
-    foreach ($service in @($allServices |
+    if ($ActiveOnly) {
+        foreach ($owner in @($SharedHookOwners)) {
+            if ($owner -ine $GatewayServiceName) {
+                throw (
+                    "refusing $Operation while another managed DefenseClaw " +
+                    "scope owns shared hooks: $owner"
+                )
+            }
+        }
+    }
+    foreach ($service in @($Services |
             Microsoft.PowerShell.Core\Where-Object {
                 ([string]$_.Name).StartsWith(
                     'DefenseClaw',
@@ -14540,12 +14853,29 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
             })) {
         $name = [string]$service.Name
         if (-not $excluded.ContainsKey($name.ToUpperInvariant())) {
+            if ($ActiveOnly -and [string]$service.Status -ceq 'Stopped') {
+                continue
+            }
             throw (
-                'refusing shared target runtime cleanup while another ' +
+                "refusing $Operation while another " +
                 "managed DefenseClaw scope exists: $name"
             )
         }
     }
+}
+
+function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    Assert-DefenseClawNoForeignManagedService `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Services @(Microsoft.PowerShell.Management\Get-Service -ErrorAction Stop) `
+        -Operation 'shared target runtime cleanup'
     foreach ($receipt in @(Microsoft.PowerShell.Management\Get-ChildItem `
             -LiteralPath ([string]$Layout.LifecycleLockDirectory) `
             -Filter 'install-rollback-*.json' `
@@ -16340,7 +16670,9 @@ function Assert-DefenseClawServiceConfiguration {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$ExpectedImage,
-        [Parameter(Mandatory)][string]$ExpectedAccount,
+        # Any listed account is accepted; the gateway accepts its current
+        # LocalSystem logon and the virtual account of earlier releases.
+        [Parameter(Mandatory)][string[]]$ExpectedAccount,
         [Parameter(Mandatory)][string]$ExpectedDisplayName,
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
@@ -16357,7 +16689,17 @@ function Assert-DefenseClawServiceConfiguration {
     if (-not [string]::Equals([string]$properties.ImagePath, $ExpectedImage, [StringComparison]::OrdinalIgnoreCase)) {
         throw "service $Name ImagePath drift: $($properties.ImagePath)"
     }
-    if (-not [string]::Equals([string]$properties.ObjectName, $ExpectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    $accountMatches = @(
+        $ExpectedAccount |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$properties.ObjectName,
+                    [string]$_,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($accountMatches.Count -eq 0) {
         throw "service $Name account drift: $($properties.ObjectName)"
     }
     if (-not [string]::Equals([string]$properties.DisplayName, $ExpectedDisplayName, [StringComparison]::Ordinal)) {
@@ -16447,8 +16789,15 @@ function Assert-DefenseClawManagedServiceConfigurations {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
-        [switch]$AnyStartMode
+        [switch]$AnyStartMode,
+        # Defaults to every supported gateway account so installs from earlier
+        # releases remain verifiable and removable before they are migrated.
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'service configuration assertion cannot be both pending-live and servicing'
     }
@@ -16511,7 +16860,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
@@ -16630,8 +16979,15 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
         [switch]$AllowTransactionRecordedBrokerAbsence,
-        [switch]$AllowTransactionRecordedEnumeratorAbsence
+        [switch]$AllowTransactionRecordedEnumeratorAbsence,
+        # Defaults to every supported gateway account; rollback narrows it to
+        # the account recorded in the transaction preimage.
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'deployment assertion cannot be both pending-live and servicing'
     }
@@ -17326,7 +17682,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
@@ -18858,6 +19214,33 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Committed Uninstall finalization'
+    # A crash can occur after the native finalizer durably changes the
+    # authenticated journal to finalized, but before self-uninstall retires
+    # the InstallRoot. Re-entering the native finalizer is unnecessary and
+    # may fail because SCM has already removed the gateway virtual account.
+    # Authenticate both journal and cleanup receipt before treating that
+    # completed phase as the retry boundary. Purge still needs the native
+    # contract-lock action unless its receipt was finalized as well.
+    $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+        -Layout $Layout `
+        -Metadata $metadata `
+        -GatewayServiceName $GatewayServiceName `
+        -AllowLegacyInactive
+    $contractReceipt = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $metadata `
+        -Required
+    if ($teardownPhase -ceq 'finalized' -and
+        (-not $Purge -or
+            [string]$contractReceipt.phase -ceq 'finalized')) {
+        return
+    }
+    if ($teardownPhase -cne 'prepared' -and
+        $teardownPhase -cne 'finalized') {
+        throw "managed-hook finalization requires a prepared or finalized journal: $teardownPhase"
+    }
     return Invoke-DefenseClawManagedHooksTeardownCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -24820,6 +25203,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
         Assert-DefenseClawLifecycleSourcesCurrent -Sources $sources
+
+        if ($Action -eq 'Install') {
+            # Pending and pre-layout recovery can restore shared hooks. Reject
+            # an active foreign owner before entering either recovery path.
+            Assert-DefenseClawInstallSharedHookScopeExclusive `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
 
         if ($recoverProductionUninstallAcl) {
             $untrustedEvidenceReason = ''
