@@ -94,6 +94,10 @@ type Generation struct {
 	// discovery confidence policy, the skill-scanner policy file, the MCP
 	// scanner's extra YARA rules and the custom providers' CA files.
 	assetFiles []string
+	// goos and bundleRoot are the platform and policy bundle root the
+	// digests were computed for ("" is this platform, no bundle), so a
+	// later comparison digests the same way.
+	goos, bundleRoot string
 }
 
 // ResolvedThresholds is the block and alert severity for one (profile,
