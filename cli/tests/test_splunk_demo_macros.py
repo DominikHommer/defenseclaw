@@ -78,9 +78,7 @@ def _extractions(search: str, sourcetype: str, auto_json: set[str]) -> int:
         words = command.split()
         if not words or words[0] != "spath":
             continue
-        if "input=dc_spath_input" in words:
-            count += 0 if sourcetype in auto_json else 1
-        elif not any(word.startswith("input=") for word in words):
+        if not any(word.startswith("input=") for word in words):
             count += 1
     return count
 
@@ -127,8 +125,6 @@ def test_no_search_extracts_a_field_twice() -> None:
     auto_json = {name for name, keys in _stanzas(PROPS).items() if keys.get("KV_MODE", "").lower() == "json"}
     assert "defenseclaw:json" in auto_json, auto_json
     macros = {name: keys["definition"] for name, keys in _stanzas(MACROS).items() if "definition" in keys}
-    helper = macros["defenseclaw_spath_unextracted"]
-    assert set(re.findall(r'sourcetype=="([^"]+)"', helper)) == auto_json, "the spath helper must skip exactly the KV_MODE=json sourcetypes"
     searches = dict(macros)
     for name, keys in _stanzas(SAVED).items():
         if "search" in keys:

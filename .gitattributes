@@ -56,3 +56,9 @@ internal/gateway/testdata/secure_client_evaluation/** text eol=lf
 # TestDigestIsPinned, the CHANGELOG digest line and tetragon verify); a CRLF
 # checkout changed the digest. Keep them LF on Windows checkouts too.
 policies/kernel/** text eol=lf
+
+# The sandbox golden texts are compared byte-for-byte; keep them LF on
+# Windows checkouts too.
+internal/config/testdata/*.golden text eol=lf
+internal/openshell/packs/testdata/*.golden text eol=lf
+internal/openshell/sandboxapi/testdata/*.golden text eol=lf
