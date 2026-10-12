@@ -77,9 +77,12 @@ func phaseText(sb sandboxapi.Sandbox) string {
 	return p
 }
 
+// profileText is the PROFILE cell: the profile the sandbox runs, and the
+// pack when it is another one, named as the pack: "balanced (open)" left the
+// reader to guess what the parenthesis held (GAP-0359).
 func profileText(sb sandboxapi.Sandbox) string {
 	if sb.Pack != "" && sb.Pack != sb.Profile {
-		return sb.Profile + " (" + sb.Pack + ")"
+		return sb.Profile + " (pack " + sb.Pack + ")"
 	}
 	return sb.Profile
 }
@@ -94,7 +97,9 @@ func hooksText(sb sandboxapi.Sandbox) string {
 		return "unreachable!"
 	case sb.Hooks.Silent:
 		return "silent!"
-	case sb.Hooks.LastHookAt.IsZero():
+	case sb.Hooks.HookRequests == 0 && sb.Hooks.ToolCalls == 0:
+		// No hook reached DefenseClaw yet. A restarted daemon keeps the
+		// counts, not the time of the last hook (GAP-0166).
 		return "-"
 	}
 	s := plural(sb.Hooks.ToolCalls, "call", "calls")
@@ -138,8 +143,11 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		return writeJSON(a.IO.Out, sb)
 	}
 	a.printSandbox(sb)
+	if sb.Phase == "ready" {
+		a.printDetachedRun(ctx, sb)
+	}
 	if sb.Phase == "stopped" {
-		if why := a.startRefusal(ctx, api, sb); why != "" {
+		if why := startRefusal(keptPolicy(ctx, api, sb), sb); why != "" {
 			a.warn(sb.Name + " cannot start under the current policy: " + why + "; delete it (`" + CommandName + " delete " + sb.Name +
 				"`) and run again")
 		}
@@ -147,9 +155,39 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 	return nil
 }
 
+// printDetachedRun says where a running sandbox's detached run is: one that
+// finished left the sandbox ready (and holding a mounted folder) with
+// nothing saying the job was done (GAP-0231).
+func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
+	gateway, err := a.gatewayName(ctx)
+	if err != nil {
+		return
+	}
+	run, err := a.detachedRun(ctx, a.cli(gateway), sb)
+	if err != nil {
+		return
+	}
+	logs := "`" + CommandName + " logs " + sb.Name + "`"
+	switch run.State {
+	case sandboxapi.RunRunning:
+		a.note("its detached run" + a.startedText(run.Started) + " is still going; " + logs + " -f follows it")
+	case sandboxapi.RunExited:
+		exit := ""
+		if run.Exit != "" {
+			exit = " (exit status " + run.Exit + ")"
+		}
+		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+	}
+}
+
 func (a *App) printStatus(st *sandboxapi.Status) {
 	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
 	state := "off (run `" + CommandName + " setup`)"
+	if st.GatewayElsewhere != "" {
+		// Setup would stop at the other account's gateway (GAP-0307).
+		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
+	}
 	if st.Enabled {
 		state = "on"
 	}
@@ -184,6 +222,10 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 	if st.PendingApprovals > 0 {
 		row("Asks", fmt.Sprintf("%d waiting (`%s approvals`)", st.PendingApprovals, CommandName))
 	}
+	if st.TelemetryFailures > 0 {
+		row("Telemetry", a.style(fmt.Sprintf("%s refused since the daemon started; last: %s",
+			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
+	}
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
@@ -194,7 +236,12 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	a.println(a.bold(sb.Name))
 	row("Harness", strings.TrimSpace(firstNonEmpty(sb.HarnessName, sb.Harness)+" "+sb.HarnessVersion))
-	row("Phase", phaseText(*sb))
+	phase := phaseText(*sb)
+	if sb.PhaseReason != "" && sb.Phase == "error" {
+		// Why, in words (GAP-0297): the phase alone said nothing.
+		phase += ": " + sb.PhaseReason
+	}
+	row("Phase", phase)
 	if sb.UptimeSeconds > 0 {
 		row("Uptime", humanDuration(time.Duration(sb.UptimeSeconds)*time.Second))
 	}
@@ -258,14 +305,35 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		row("Last blocked", truncate(sb.Hooks.LastBlocked, 100))
 	}
 	if sb.Hooks.LastHookFailure != "" {
-		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure
+		at := ""
 		if !sb.Hooks.LastHookFailureAt.IsZero() {
-			last += " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
+			at = " at " + sb.Hooks.LastHookFailureAt.Local().Format("15:04:05")
 		}
-		row("Hook error", last+" (the hook failed closed)")
+		last := "DefenseClaw answered " + sb.Hooks.LastHookFailure + at + " (the hook failed closed)"
+		if sb.Hooks.LastHookFailureCause == sandboxapi.ReasonPlaceholderRefused {
+			// OpenShell refused that conversation's requests, not DefenseClaw
+			// the hook (GAP-0377).
+			last = "a hook post of a conversation that held a sandbox credential placeholder failed" + at + " (" +
+				sb.Hooks.LastHookFailure + "; OpenShell refuses such a conversation's requests; the hook failed closed)"
+		}
+		if !sb.Hooks.HooksAnsweredAt.IsZero() {
+			last += "; hooks answered again since " + sb.Hooks.HooksAnsweredAt.Local().Format("15:04:05")
+		}
+		row("Hook error", last)
 	}
-	row("Egress", fmt.Sprintf("%s contacted, %d blocked, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
-		humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown)))
+	if sb.Hooks.ModelKeyRejected != "" {
+		row("Model key", a.style(sb.Hooks.ModelKeyRejected+" (last rejected "+sb.Hooks.ModelKeyRejectedAt.Local().Format("15:04:05")+")", ansiRed))
+	}
+	if at := sb.Hooks.PlaceholderRefusedAt; !at.IsZero() {
+		row("Conversation", a.style(sandboxapi.PlaceholderConversationText(sb.Name)+" (last refused "+at.Local().Format("15:04:05")+")", ansiRed))
+	}
+	failed := ""
+	if n := sb.Egress.UpstreamFailed; n > 0 {
+		// Allowed, and the host did not take them: an outage, not a block.
+		failed = fmt.Sprintf(", %d failed upstream", n)
+	}
+	row("Egress", fmt.Sprintf("%s contacted, %d blocked%s, %s up, %s down", plural(int64(sb.Egress.Destinations), "destination", "destinations"), sb.Egress.Blocked,
+		failed, humanBytes(sb.Egress.BytesUp), humanBytes(sb.Egress.BytesDown))+egressAIText(sb))
 	for _, ep := range sb.Endpoints {
 		row("Endpoint", ep.Host+" "+ep.Result)
 	}
@@ -285,6 +353,9 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
+	}
+	if !sb.UnflushedAt.IsZero() {
+		a.warn(sandboxapi.UnflushedText(sb.Name, sb.UnflushedAt))
 	}
 	if sb.Hooks.Unreachable {
 		a.warn(hooksWarningText(sb.Hooks.UnreachableReason))
@@ -394,7 +465,8 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell}
+	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
+		passArgs: len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {
@@ -422,10 +494,11 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// The policy the sandbox runs under, for the banner's Uploads line; a
 	// daemon that cannot say leaves the line out.
 	var policy []sandboxapi.Setting
+	var repo *sandboxapi.RepoPolicy
 	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name}); err == nil {
-		policy = ex.Settings
+		policy, repo = ex.Settings, ex.RepoPolicy
 	}
-	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy})
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy, repo: repo})
 	var code int
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness
@@ -453,8 +526,14 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
-	// The sandbox's own policy decides what is held back, as at its run.
-	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile}, s.sb.Name)
+	// The sandbox's own policy decides what is held back, as at its run,
+	// its repository policy (the one its run read) included.
+	repo, err := a.sandboxRepoPolicy(ctx, s.api, s.sb.Name)
+	if err != nil {
+		return err
+	}
+	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile,
+		RepoPolicy: repo}, s.sb.Name)
 	if err != nil {
 		return err
 	}
@@ -463,8 +542,16 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
 		hint := a.diskFullHint(err)
-		if errors.Is(err, workspace.ErrUploadNotArrived) {
+		switch {
+		case errors.Is(err, workspace.ErrUploadNotArrived):
 			hint = strayUploadHint
+		case errors.Is(err, workspace.ErrUnpulledChanges):
+			// One sentence: connect and run take no flag that discards it.
+			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
+				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+		case errors.Is(err, workspace.ErrUnappliedPull):
+			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
+				"or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}
@@ -544,9 +631,34 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return err
 	}
 	if code != 0 {
+		// OpenShell's own line ("exec relay closed before the command
+		// reported an exit status") does not say why: the sandbox stopped
+		// under the command, or the gateway restarted.
+		if after, err := api.Get(ctx, sb.Name); err == nil && after.Phase != "ready" {
+			a.warn(execEndedText(after))
+		}
 		return &ExitError{Code: code}
 	}
 	return nil
+}
+
+// execEndedText says why a command in sb ended with it: sb is not ready
+// any more.
+func execEndedText(sb *sandboxapi.Sandbox) string {
+	switch h := sb.Hooks; {
+	case h.Silent && h.OnSilence == packs.OnSilenceStop:
+		return "DefenseClaw stopped " + sb.Name + " while the command ran: its harness worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
+			" without a hook reaching DefenseClaw (hooks.on_silence: stop)"
+	case sb.Phase == "unknown" || sb.Phase == "provisioning" || sb.Phase == "starting":
+		return "the connection to " + sb.Name + " was lost while the command ran (the OpenShell gateway restarted, for one); `" +
+			CommandName + " status " + sb.Name + "` shows whether it runs"
+	}
+	// A session that started the sandbox stops it as it ends, a command in
+	// another terminal running or not; one that found it running leaves it
+	// running (GAP-0390).
+	return sb.Name + " is " + sb.Phase + ": it stopped while the command ran (an agent session that started it ended, or `" + CommandName +
+		" stop`, the TUI, or DefenseClaw stopped it); start it with `" + CommandName + " start " + sb.Name +
+		"` before the session and the command, and it keeps running when the session ends"
 }
 
 // StopOptions are the `sandbox stop` flags.
@@ -684,6 +796,14 @@ func (a *App) Delete(ctx context.Context, o DeleteOptions) error {
 				a.note(name + "'s work was last " + a.handoverText(h) + "; nothing newer is left in it")
 			}
 		}
+		if n := a.attachedSessions(name); n > 0 {
+			// Its sessions in other terminals end with it (GAP-0285).
+			what := attachedText(name, n) + "; deleting it ends " + them(n)
+			question = what + ". " + question
+			if o.Yes {
+				a.warn(what + " (--yes)")
+			}
+		}
 		yes, err := a.confirm(question, o.Yes)
 		if err != nil {
 			return err
@@ -815,6 +935,14 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 	// tail's inside the sandbox and exit runNoLog without a log.
 	code, err := a.Streamer.Stream(ctx, inv, out, a.IO.Err)
 	_ = flush()
+	if o.Follow && ctx.Err() == nil {
+		// A stop under the follower ends its stream: it says so, as a later
+		// `sandbox logs` does, where it ended without a word (GAP-0318).
+		if now, gerr := api.Get(ctx, o.Name); gerr == nil && now.Phase != "ready" {
+			a.stoppedUnderFollower(ctx, api, now)
+			return nil
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -866,9 +994,9 @@ func (a *App) runLogWriter(sb *sandboxapi.Sandbox) (io.Writer, func() error) {
 
 // keptLogs prints the run log DefenseClaw kept when it stopped the sandbox.
 func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int, out io.Writer, flush func() error) error {
-	kept, legacy, err := a.keptRunLog(ctx, api, sb, lines)
-	if err != nil {
-		return err
+	kept, err := api.RunLog(ctx, sb.Name, lines)
+	if err != nil && !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return apiError(err)
 	}
 	if kept == nil {
 		return fmt.Errorf("%s is %s, and no log of a detached run was kept when it stopped; its log is inside it (`%s start %s`, then `%s logs %s`)",
@@ -881,13 +1009,16 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 	// Which run it is of: a stop that could not look at the run keeps the
 	// log an earlier stop kept.
 	what := "the log"
-	switch {
-	case legacy:
-		what = "the log an earlier DefenseClaw CLI"
-	case !kept.StartedAt.IsZero():
+	if !kept.StartedAt.IsZero() {
 		what = "the log of its detached run started " + a.clock(kept.StartedAt) + ","
 	}
 	a.note(fmt.Sprintf("%s is %s; this is %s kept when it stopped (%s)", sb.Name, sb.Phase, what, a.clock(kept.KeptAt)))
+	a.keptRunState(kept)
+	return nil
+}
+
+// keptRunState says how the run of a kept log ended.
+func (a *App) keptRunState(kept *sandboxapi.RunLog) {
 	switch kept.State {
 	case sandboxapi.RunExited:
 		a.note("the run exited with status " + kept.Exit)
@@ -896,32 +1027,18 @@ func (a *App) keptLogs(ctx context.Context, api API, sb *sandboxapi.Sandbox, lin
 	case sandboxapi.RunRunning:
 		a.note("the run was still going when the log was kept")
 	}
-	return nil
 }
 
-// keptRunLog is the log of sb's latest detached run the daemon kept when it
-// stopped the sandbox, its last lines lines; failing that, one an earlier
-// CLI kept (legacyRunLog, legacy true) while it is still the log of the
-// latest stop. nil when neither kept one.
-func (a *App) keptRunLog(ctx context.Context, api API, sb *sandboxapi.Sandbox, lines int) (*sandboxapi.RunLog, bool, error) {
-	kept, err := api.RunLog(ctx, sb.Name, lines)
-	if err == nil {
-		return kept, false, nil
+// stoppedUnderFollower ends `sandbox logs -f` of a sandbox that stopped
+// while it followed: what stopped, and how the run ended, from the log
+// DefenseClaw kept.
+func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.Sandbox) {
+	kept, err := api.RunLog(ctx, sb.Name, 1)
+	if err != nil || kept == nil {
+		a.warn(sb.Name + " is " + sb.Phase + ", so its run log ends here")
+		return
 	}
-	if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
-		return nil, false, apiError(err)
-	}
-	if sb.Session > 0 {
-		// The daemon has seen the sandbox start since it began counting
-		// sessions, which is since it keeps run logs: every stop after that
-		// was its own, so a log an earlier CLI kept is older than the
-		// latest stop, which kept none.
-		return nil, false, nil
-	}
-	meta, log, err := a.legacyRunLog(sb)
-	if err != nil || meta == nil {
-		return nil, false, err
-	}
-	return &sandboxapi.RunLog{Name: sb.Name, State: meta.State, Exit: meta.Exit, KeptAt: meta.SavedAt,
-		Log: string(harness.LastLines(log, lines))}, true, nil
+	a.note(fmt.Sprintf("%s is %s (%s); DefenseClaw kept the log of its detached run (`%s logs %s` shows it)",
+		sb.Name, sb.Phase, a.clock(kept.KeptAt), CommandName, sb.Name))
+	a.keptRunState(kept)
 }

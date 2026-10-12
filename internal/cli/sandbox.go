@@ -43,6 +43,7 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
+			InTTY:  term.IsTerminal(int(os.Stdin.Fd())),
 			OutTTY: term.IsTerminal(int(os.Stdout.Fd())),
 			ErrTTY: term.IsTerminal(int(os.Stderr.Fd())),
 			Color:  ColorEnabled(),
@@ -61,8 +62,9 @@ const sandboxConfigDefault = "defenseclaw.sandbox.config-default"
 
 var sandboxCmd = &cobra.Command{
 	Use:   "sandbox",
-	Short: "Run coding agents in NVIDIA OpenShell sandboxes",
-	Long: `Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA OpenShell
+	Short: "Run coding agents in NVIDIA OpenShell sandboxes (Linux and macOS only)",
+	Long: `Sandboxes run on Linux and on macOS with Apple silicon; Windows and WSL2 are not
+supported. Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA OpenShell
 sandbox: the agent sees only your project folder (on Linux live, with secret files
 masked, git internals read-only and a snapshot for undo; on macOS, where sandboxes
 are OpenShell MicroVMs, a copy you pull the changes back from), reaches the web
@@ -139,6 +141,10 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 			return withExitCode(err, 1)
 		case errors.Is(err, context.Canceled):
 			return withExitCode(err, 130)
+		case sandboxcli.IsInterrupted(err):
+			// Ctrl-C at a question a command did not explain itself.
+			fmt.Fprintln(cmd.ErrOrStderr(), Style("✗", "fg=red", "bold")+" interrupted at a question: what it asked about was not done; run the command again to finish")
+			return withExitCode(err, 130)
 		}
 		var disabled *sandboxcli.DisabledError
 		if errors.As(err, &disabled) && sandboxJSONOutput(cmd) {
@@ -173,6 +179,52 @@ func outputFlag(cmd *cobra.Command) *string {
 		NoOptDefVal: "true",
 	})
 	return out
+}
+
+// onceString is a string flag given at most once: a second value is
+// refused, with more saying what to do instead, where a plain string flag
+// kept only the last one without a word (`policy test --host a --host b`
+// tested b alone, GAP-0168).
+type onceString struct {
+	p    *string
+	set  bool
+	more string
+}
+
+func (v *onceString) String() string {
+	if v.p == nil {
+		return ""
+	}
+	return *v.p
+}
+
+func (v *onceString) Set(s string) error {
+	if v.set {
+		return errors.New("it takes one value; " + v.more)
+	}
+	*v.p, v.set = s, true
+	return nil
+}
+
+func (v *onceString) Type() string { return "string" }
+
+// Replace, Append and GetSlice make it a pflag.SliceValue, which a caller
+// that reuses the command tree resets with Replace.
+func (v *onceString) Replace(vals []string) error {
+	*v.p, v.set = "", false
+	if len(vals) > 0 {
+		return v.Set(vals[0])
+	}
+	return nil
+}
+
+func (v *onceString) Append(s string) error { return v.Set(s) }
+
+func (v *onceString) GetSlice() []string {
+	if !v.set {
+		return nil
+	}
+	return []string{*v.p}
 }
 
 // jsonOutputValue is the --json switch: setting it selects --output json.
@@ -215,7 +267,7 @@ Then it records the harnesses, offers shell wrappers and builds the harness imag
 		}),
 	}
 	f := cmd.Flags()
-	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)")
+	f.BoolVar(&o.InstallOpenShell, "install-openshell", false, "install OpenShell, or upgrade an older supported release in place, with NVIDIA's pinned, sha256-verified installer (uses sudo on Linux)")
 	f.BoolVar(&o.NoMounts, "no-mounts", false, "leave bind mounts off (Linux); no Claude Code or Codex sandbox can then start, a --copy run included, and other harnesses run on a copy")
 	// A Secure Client computer keeps the usage of main (issue #1092, GAP-0270).
 	_ = f.SetAnnotation("no-mounts", secureClientUsageAnnotation, []string{"leave bind mounts off (Linux); every run then works on a copy"})
@@ -315,6 +367,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 	f.StringArrayVar(&o.Credentials, "credential", nil, "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against that host (repeatable)")
 	f.BoolVar(&o.GitHubWrite, "github-write", false, "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered")
 	f.BoolVar(&o.NoMCP, "no-mcp", false, "leave the harness's MCP servers behind")
+	f.BoolVar(&o.ProcessTree, "process-tree", false, "sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off")
 	f.BoolVarP(&o.Detach, "detach", "d", false, "run in the background (needs --prompt); follow with sandbox logs -f")
 	f.BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
 	f.BoolVar(&o.Keep, "keep", false, "keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when nothing is left in it to bring back or undo")
@@ -456,7 +509,7 @@ keeps its log, so "sandbox logs" still shows it.`,
 			return app.Stop(ctx, o)
 		}),
 	}
-	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run is still going")
+	cmd.Flags().BoolVarP(&o.Yes, "yes", "y", false, "stop without asking when a detached run or a session in another terminal is still going")
 	return cmd
 }
 
@@ -510,6 +563,23 @@ func newSandboxLogsCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVarP(&o.Follow, "follow", "f", false, "keep following the output")
 	cmd.Flags().IntVarP(&o.Lines, "lines", "n", 200, "lines to show")
+	return cmd
+}
+
+func newSandboxDestinationsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "destinations <name>",
+		Short: "List the hosts a sandbox reached or tried to reach, its model APIs and any shadow AI",
+		Args:  nameArg("sandbox"),
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
+			out, err := parseOutput(cmd.Flag("output").Value.String())
+			if err != nil {
+				return err
+			}
+			return app.Destinations(ctx, args[0], out)
+		}),
+	}
+	outputFlag(cmd)
 	return cmd
 }
 
@@ -635,7 +705,14 @@ func newSandboxUnblockCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unblock <host>",
 		Short: "Lift an egress block for one sandbox or for every sandbox",
-		Args:  cobra.ExactArgs(1),
+		Long: `Lifts a block of the blocklist feed or of the profile's default (IP addresses under
+open, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for
+every sandbox (--always). It cannot lift a block-list entry: remove your own with
+` + "`defenseclaw sandbox policy block --remove HOST`" + `; a pack's, the repository
+policy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open
+a private network (add the exact host to openshell.egress.allow), this machine (run
+the sandbox with --host-port PORT) or a cloud metadata or link-local address.`,
+		Args: cobra.ExactArgs(1),
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
 			o.Host = args[0]
 			return app.Unblock(ctx, o)
@@ -719,11 +796,51 @@ func newSandboxPolicyCmd() *cobra.Command {
 		policyFlags(sub, &o)
 		cmd.AddCommand(sub)
 	}
+	var to sandboxcli.PolicyTestOptions
+	test := &cobra.Command{
+		Use:   "test",
+		Short: "Show what the egress policy decides for a destination, the rule and where it comes from",
+		Long: `Show what the egress policy decides for a destination: allowed or blocked, the rule
+of the egress proxy's order that decides, and the setting that holds it. It asks the
+same decider the egress proxy uses. --sandbox tests that sandbox's policy (its
+unblocks included); otherwise --pack, --profile and --harness resolve the policy a
+run in this folder would get, without the daemon. --fixture checks a YAML or JSON
+list of {host, port, binary, expect: allow|block, rule} and exits 1 on any mismatch.`,
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{sandboxConfigDefault: "true"},
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
+			out, err := parseOutput(cmd.Flag("output").Value.String())
+			if err != nil {
+				return err
+			}
+			to.Output = out
+			return app.PolicyTest(ctx, to)
+		}),
+	}
+	outputFlag(test)
+	tf := test.Flags()
+	tf.StringVar(&to.Sandbox, "sandbox", "", "test this sandbox's policy (its unblocks included)")
+	tf.StringVar(&to.Pack, "pack", "", "resolve with this pack")
+	tf.StringVar(&to.Profile, "profile", "", "resolve with this profile")
+	tf.StringVar(&to.Harness, "harness", "", "resolve for this harness")
+	tf.Var(&onceString{p: &to.Host, more: "list several destinations with --fixture FILE"}, "host",
+		"the destination host (or host:port), given once (list several with --fixture)")
+	tf.IntVar(&to.Port, "port", 0, "the destination port (0: any port the policy carries)")
+	tf.StringVar(&to.Binary, "binary", "", "the program that connects (shown in the report)")
+	tf.StringVar(&to.Fixture, "fixture", "", "check every destination of this YAML or JSON list; exit 1 on a mismatch")
+	cmd.AddCommand(test)
 	var so sandboxcli.SuggestOptions
 	suggest := &cobra.Command{
 		Use:   "suggest",
-		Short: "Suggest an egress allowlist from the destinations sandboxes reached",
-		Args:  cobra.NoArgs,
+		Short: "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+		Long: `Record, then lock: read the destinations your sandboxes reached (kept across daemon
+restarts and stops) and suggest a pack that extends balanced with every host they
+reached that balanced's curated allowlist does not cover. Hosts only ever refused,
+shadow AI, hosts on the blocklist feed and the sandbox's own model provider and
+--credential endpoints are listed apart, not suggested. --pack-out writes the pack
+to a new file, --diff shows what it changes against the effective policy. Nothing
+is applied.`,
+		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, _ []string) error {
 			out, err := parseOutput(cmd.Flag("output").Value.String())
 			if err != nil {
@@ -735,6 +852,8 @@ func newSandboxPolicyCmd() *cobra.Command {
 	}
 	outputFlag(suggest)
 	suggest.Flags().StringVar(&so.Sandbox, "sandbox", "", "only this sandbox's destinations")
+	suggest.Flags().StringVar(&so.PackOut, "pack-out", "", "write the suggested pack (extends balanced) to this new file")
+	suggest.Flags().BoolVar(&so.Diff, "diff", false, "show what the suggested pack changes against the effective policy")
 	cmd.AddCommand(suggest)
 	for _, list := range []string{"allow", "block"} {
 		list := list
@@ -742,14 +861,20 @@ func newSandboxPolicyCmd() *cobra.Command {
 		if list == "block" {
 			short = "Add hosts to openshell.egress.block"
 		}
-		cmd.AddCommand(&cobra.Command{
+		var remove bool
+		edit := &cobra.Command{
 			Use:   list + " <host>...",
 			Short: short,
 			Args:  cobra.MinimumNArgs(1),
 			RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, args []string) error {
+				if remove {
+					return app.PolicyRemove(ctx, list, args)
+				}
 				return app.PolicyEdit(ctx, list, args)
 			}),
-		})
+		}
+		edit.Flags().BoolVar(&remove, "remove", false, "remove the hosts from openshell.egress."+list+" instead")
+		cmd.AddCommand(edit)
 	}
 	return cmd
 }
@@ -911,7 +1036,7 @@ func init() {
 	sandboxCmd.AddCommand(
 		newSandboxSetupCmd(), newSandboxDoctorCmd(), newSandboxRunCmd(), newSandboxListCmd(), newSandboxStatusCmd(),
 		newSandboxConnectCmd(), newSandboxExecCmd(), newSandboxStopCmd(), newSandboxStartCmd(), newSandboxDeleteCmd(),
-		newSandboxLogsCmd(), newSandboxActivityCmd(), newSandboxUndoCmd(), newSandboxReviewCmd(),
+		newSandboxLogsCmd(), newSandboxActivityCmd(), newSandboxDestinationsCmd(), newSandboxUndoCmd(), newSandboxReviewCmd(),
 		newSandboxApprovalsCmd(), newSandboxDecideCmd(true), newSandboxDecideCmd(false), newSandboxUnblockCmd(),
 		newSandboxPullCmd(), newSandboxPolicyCmd(), newSandboxPackCmd(), newSandboxImageCmd(),
 		newSandboxWrapperCmd(true), newSandboxWrapperCmd(false), newSandboxTeardownCmd(),

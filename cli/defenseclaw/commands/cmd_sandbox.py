@@ -23,9 +23,6 @@ and each stub replaces this process with the gateway binary, forwarding the
 arguments exactly as typed. The command tree is pinned in
 internal/cli/testdata/sandbox_commands.json; cli/tests/test_cmd_sandbox.py
 checks the stubs against it both ways.
-
-``legacy-cleanup`` stays Python-native: it undoes a legacy openshell-sandbox
-(0.0.x) install on hosts that may not have a current gateway binary yet.
 """
 
 from __future__ import annotations
@@ -39,7 +36,6 @@ from typing import Any, NoReturn
 import click
 
 from defenseclaw import ux
-from defenseclaw.context import AppContext, pass_ctx
 
 # The gateway refuses these platforms with exit status 3; the stub does the
 # same without starting it.
@@ -140,7 +136,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "install-openshell",
                 "bool",
-                "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)",
+                "install OpenShell, or upgrade an older supported release in place, with NVIDIA's "
+                "pinned, sha256-verified installer (uses sudo on Linux)",
             ),
             _Flag(
                 "no-mounts",
@@ -264,6 +261,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("no-mcp", "bool", "leave the harness's MCP servers behind"),
             _Flag(
+                "process-tree",
+                "bool",
+                "sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off",
+            ),
+            _Flag(
                 "detach",
                 "bool",
                 "run in the background (needs --prompt); follow with sandbox logs -f",
@@ -322,7 +324,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("connect",),
         "Resume a sandbox: start it if stopped and attach the harness",
-        long="Harness arguments go after --.",
+        long=(
+            "Resumes a sandbox: starts it when it is stopped and attaches the harness to your terminal, "
+            "or with --prompt (or the harness's own print flag after --) runs one prompt headless, which "
+            "needs no terminal. A sandbox this command started is stopped again when the session ends; "
+            "one that was already running, whose detached run is still going, or that another session is "
+            "attached to keeps running. --shell opens a login shell instead, reviewed at its end like a "
+            "harness session."
+        ),
         args=(_Arg("name"), _Arg("harness_args", required=False, many=True)),
         flags=(
             _Flag("shell", "bool", "open a shell in the sandbox instead of the harness"),
@@ -330,6 +339,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("rm", "bool", "delete the sandbox when the session ends"),
             _SESSION_YES,
             _Flag("prompt", "string", "run the harness headless with this prompt", short="p", metavar="TEXT"),
+        ),
+        example=(
+            "defenseclaw sandbox connect myapp-7f3a\n"
+            'defenseclaw sandbox connect myapp-7f3a --prompt "now add the tests"\n'
+            "defenseclaw sandbox connect myapp-7f3a --shell"
         ),
     ),
     _Cmd(
@@ -346,12 +360,32 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("stop",),
         "Stop a sandbox (it is kept for start or connect)",
+        long=(
+            "Stops a sandbox and keeps it for start or connect. When its detached run is still going, "
+            "the stop ends it: stop asks first on a terminal (--yes does not). Every stop, this one or "
+            "one from the TUI, the macOS app or undo, marks the run interrupted and keeps its log, so "
+            '"sandbox logs" still shows it.'
+        ),
         args=(_Arg("name"),),
-        flags=(_Flag("yes", "bool", "stop without asking when a detached run is still going", short="y"),),
+        flags=(
+            _Flag(
+                "yes",
+                "bool",
+                "stop without asking when a detached run or a session in another terminal is still going",
+                short="y",
+            ),
+        ),
     ),
     _Cmd(
         ("start",),
         "Start a stopped sandbox for a new session",
+        long=(
+            "Starts a stopped sandbox for a new session. A mounted project gets a fresh undo snapshot, "
+            "unless the folder still holds changes an earlier session made that were neither undone nor "
+            "kept at its end (a detached run, or one without a terminal to ask on): then the earlier undo "
+            'point stays, so "sandbox undo" still reverts them. --new-snapshot accepts those changes and '
+            "takes a fresh snapshot."
+        ),
         args=(_Arg("name"),),
         flags=(
             _Flag("no-snapshot", "bool", "keep the previous session's snapshot instead of taking a new one"),
@@ -393,8 +427,23 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("destinations",),
+        "List the hosts a sandbox reached or tried to reach, its model APIs and any shadow AI",
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
         ("undo",),
         "Restore the project folder to its pre-session snapshot",
+        long=(
+            "Restore a mounted project folder to its pre-session snapshot, after a preview. Files git "
+            "ignores (dependency directories, build output) have no copy in the snapshot: undo deletes "
+            "what the session wrote to Python bytecode caches and names the rest, with what to do about "
+            "them, unless openshell.workdir.undo_ignored has the snapshot keep a copy of node_modules, "
+            ".venv and the like, which undo then restores.\n\n"
+            "For a copy-mode sandbox (every sandbox on macOS), undo reverts its last `pull --apply` "
+            "instead; edits you made since stay."
+        ),
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
@@ -432,6 +481,15 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("unblock",),
         "Lift an egress block for one sandbox or for every sandbox",
+        long=(
+            "Lifts a block of the blocklist feed or of the profile's default (IP addresses under open, "
+            "hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for every "
+            "sandbox (--always). It cannot lift a block-list entry: remove your own with "
+            "`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository policy's "
+            "(.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open a private network "
+            "(add the exact host to openshell.egress.allow), this machine (run the sandbox with --host-port "
+            "PORT) or a cloud metadata or link-local address."
+        ),
         args=(_Arg("host"),),
         flags=(
             _Flag("sandbox", "string", "unblock for this sandbox only", metavar="NAME"),
@@ -441,6 +499,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("pull",),
         "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
+        long=(
+            "Brings a copy-mode sandbox's work back after a review: --apply merges it into your working "
+            "tree (3-way), --branch puts it on branch dc/<name>, --patch-out writes a patch. When --apply "
+            "cannot merge (a conflict, or git older than 2.38), your working tree is left as it was, the "
+            "changes go to branch dc/<name> and a patch instead, and pull exits with status 4."
+        ),
         args=(_Arg("name"),),
         flags=(
             _OUTPUT,
@@ -453,6 +517,35 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("accept-sensitive", "bool", "bring back changes that can run code on this machine"),
         ),
     ),
+    _Cmd(
+        ("discover",),
+        "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
+        long=(
+            "Reads what the agent installed and configured inside a running sandbox (MCP servers, skills, "
+            "rules, plugins, AI CLIs and agents, environment variable names, shell history mentions and, "
+            "for a copy, package manifests) and lists the AI components found. The daemon does this on "
+            "its own once the sandbox is ready and every ai_discovery.scan_interval_min while it runs; "
+            'the AI inventory ("defenseclaw agent usage --sandbox NAME") shows the result after its next '
+            "scan."
+        ),
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
+        ("ps",),
+        "List the processes of a sandbox whose process tree is on",
+        long=(
+            "Lists the processes running in a sandbox whose process tree is on (a pack's "
+            'observe.process_tree: true, or "sandbox run --process-tree"): pid, parent, uptime and '
+            "command line, the values of arguments that name secrets replaced. --tree shows each process "
+            "under its parent. The daemon samples the sandbox every 5 seconds while it runs (every 15 "
+            "seconds on a Mac when sampling its MicroVM is slow) and adds what OpenShell reports of "
+            "processes starting and exiting, so a process that starts and ends between two samples, "
+            "unreported, is not seen. The agent chooses its processes' names and arguments."
+        ),
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON, _Flag("tree", "bool", "show each process under its parent")),
+    ),
     _Cmd(("policy",), "Show, explain and adjust the sandbox policy"),
     _Cmd(("policy", "show"), "Show the effective sandbox policy", flags=_policy_flags()),
     _Cmd(
@@ -461,16 +554,70 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         flags=_policy_flags(),
     ),
     _Cmd(
+        ("policy", "test"),
+        "Show what the egress policy decides for a destination, the rule and where it comes from",
+        long=(
+            "Show what the egress policy decides for a destination: allowed or blocked, the rule of the "
+            "egress proxy's order that decides, and the setting that holds it. It asks the same decider "
+            "the egress proxy uses. --sandbox tests that sandbox's policy (its unblocks included); "
+            "otherwise --pack, --profile and --harness resolve the policy a run in this folder would get, "
+            "without the daemon. --fixture checks a YAML or JSON list of {host, port, binary, expect: "
+            "allow|block, rule} and exits 1 on any mismatch."
+        ),
+        flags=(
+            _OUTPUT,
+            _JSON,
+            _Flag("sandbox", "string", "test this sandbox's policy (its unblocks included)", metavar="NAME"),
+            _Flag("pack", "string", "resolve with this pack", metavar="PACK"),
+            _Flag("profile", "string", "resolve with this profile", metavar="PROFILE"),
+            _Flag("harness", "string", "resolve for this harness", metavar="HARNESS"),
+            _Flag(
+                "host",
+                "string",
+                "the destination host (or host:port), given once (list several with --fixture)",
+                metavar="HOST",
+            ),
+            _Flag("port", "int", "the destination port (0: any port the policy carries)", default="0", metavar="PORT"),
+            _Flag("binary", "string", "the program that connects (shown in the report)", metavar="PATH"),
+            _Flag(
+                "fixture",
+                "string",
+                "check every destination of this YAML or JSON list; exit 1 on a mismatch",
+                metavar="FILE",
+            ),
+        ),
+    ),
+    _Cmd(
         ("policy", "suggest"),
-        "Suggest an egress allowlist from the destinations sandboxes reached",
-        flags=(_OUTPUT, _JSON, _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME")),
+        "Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations",
+        long=(
+            "Record, then lock: read the destinations your sandboxes reached (kept across daemon restarts "
+            "and stops) and suggest a pack that extends balanced with every host they reached that "
+            "balanced's curated allowlist does not cover. Hosts only ever refused, shadow AI, hosts on the "
+            "blocklist feed and the sandbox's own model provider and --credential endpoints are listed "
+            "apart, not suggested. --pack-out writes the pack to a new file, --diff shows what it changes "
+            "against the effective policy. Nothing is applied."
+        ),
+        flags=(
+            _OUTPUT,
+            _JSON,
+            _Flag("sandbox", "string", "only this sandbox's destinations", metavar="NAME"),
+            _Flag("pack-out", "string", "write the suggested pack (extends balanced) to this new file", metavar="FILE"),
+            _Flag("diff", "bool", "show what the suggested pack changes against the effective policy"),
+        ),
     ),
     _Cmd(
         ("policy", "allow"),
         "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
         args=(_Arg("hosts", many=True),),
+        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.allow instead"),),
     ),
-    _Cmd(("policy", "block"), "Add hosts to openshell.egress.block", args=(_Arg("hosts", many=True),)),
+    _Cmd(
+        ("policy", "block"),
+        "Add hosts to openshell.egress.block",
+        args=(_Arg("hosts", many=True),),
+        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.block instead"),),
+    ),
     _Cmd(("pack",), "Inspect sandbox policy packs"),
     _Cmd(("pack", "list"), "List the built-in and custom packs with their sha256 digests", flags=(_OUTPUT, _JSON)),
     _Cmd(
@@ -682,7 +829,7 @@ def _forward(ctx: click.Context, **_params: Any) -> NoReturn:
 
 def exec_gateway(argv: Sequence[str]) -> NoReturn:
     """Replace this process with ``defenseclaw-gateway <argv>``."""
-    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.gateway import GATEWAY_NOT_FOUND_MESSAGE, resolve_gateway_binary
     from defenseclaw.platform_support import host_os
 
     if host_os() == "windows":
@@ -690,10 +837,7 @@ def exec_gateway(argv: Sequence[str]) -> NoReturn:
         raise SystemExit(UNSUPPORTED_EXIT_CODE)
     binary = resolve_gateway_binary()
     if not binary:
-        raise click.ClickException(
-            "defenseclaw-gateway is not installed; run 'defenseclaw upgrade' (or 'make gateway-install' "
-            "in a source checkout) and try again",
-        )
+        raise click.ClickException(GATEWAY_NOT_FOUND_MESSAGE)
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
@@ -726,17 +870,19 @@ def _build_group(cmd: _Cmd) -> click.Group:
 
 @click.group()
 def sandbox() -> None:
-    """Run coding agents in NVIDIA OpenShell sandboxes.
+    """Run coding agents in NVIDIA OpenShell sandboxes (Linux and macOS only).
 
-    Run Claude Code, Codex and other hooks-only harnesses inside an NVIDIA
-    OpenShell sandbox: the agent sees only your project folder (on Linux live,
-    with secret files masked, git internals read-only and a snapshot for undo;
-    on macOS, where sandboxes are OpenShell MicroVMs, a copy you pull the
-    changes back from), reaches the web through DefenseClaw's egress proxy,
-    and every tool call still goes through DefenseClaw.
+    Sandboxes run on Linux and on macOS with Apple silicon; Windows and WSL2
+    are not supported. Run Claude Code, Codex and other hooks-only harnesses
+    inside an NVIDIA OpenShell sandbox: the agent sees only your project
+    folder (on Linux live, with secret files masked, git internals read-only
+    and a snapshot for undo; on macOS, where sandboxes are OpenShell
+    MicroVMs, a copy you pull the changes back from), reaches the web through
+    DefenseClaw's egress proxy, and every tool call still goes through
+    DefenseClaw.
 
     Start with "defenseclaw sandbox setup", then run "defenseclaw sandbox run
-    claude" in a project folder. Linux, and macOS on Apple silicon, only.
+    claude" in a project folder.
     """
 
 
@@ -753,94 +899,3 @@ def _register(root: click.Group, commands: Sequence[_Cmd]) -> None:
 
 
 _register(sandbox, SANDBOX_COMMANDS)
-
-
-@sandbox.command("legacy-cleanup")
-@click.option("--dry-run", is_flag=True, help="Print the cleanup plan and exact commands; change nothing.")
-@click.option("--yes", "-y", is_flag=True, help="Apply the plan without asking for confirmation.")
-@click.option(
-    "--remove-user",
-    is_flag=True,
-    help=(
-        "Also delete the 'sandbox' user and its home (userdel -r); refused while it has processes or "
-        "until its ownership and ACLs are gone from the OpenClaw home."
-    ),
-)
-@click.option(
-    "--remove-binary",
-    is_flag=True,
-    help="Also remove /usr/local/bin/openshell-sandbox when it is a legacy 0.0.x build not owned by a package.",
-)
-@pass_ctx
-def legacy_cleanup(app: AppContext, dry_run: bool, yes: bool, remove_user: bool, remove_binary: bool) -> None:
-    """Undo a legacy openshell-sandbox (0.0.x) standalone install (Linux).
-
-    Detects each legacy artifact, prints every step with the exact command it
-    runs, and asks before changing anything unless --yes is given. Privileged
-    commands run through sudo with binaries resolved only from root-owned
-    system directories. Nothing after the systemd units step runs while any
-    part of the legacy sandbox is still running. Progress is recorded in
-    <data_dir>/legacy-sandbox-cleanup.json, so re-running only does what is
-    left.
-
-    \b
-    Example:
-      defenseclaw sandbox legacy-cleanup --dry-run
-      defenseclaw sandbox legacy-cleanup
-    """
-    from defenseclaw import sandbox_legacy
-    from defenseclaw.platform_support import host_os
-
-    if host_os() == "windows":
-        raise click.ClickException("sandbox legacy-cleanup is unsupported on native Windows")
-
-    if not app.cfg:
-        from defenseclaw.config import load, require_v8_config
-
-        require_v8_config()
-        app.cfg = load()
-    cfg = app.cfg
-
-    system = sandbox_legacy.System()
-    if system.is_root():
-        ux.warn(
-            "running as root: cleanup reads the root user's DefenseClaw config; "
-            "run it as the operator instead (it calls sudo itself)",
-        )
-    state = sandbox_legacy.detect(cfg, system=system, probe_binary=remove_binary)
-    steps = sandbox_legacy.plan(
-        state,
-        cfg,
-        remove_user=remove_user,
-        remove_binary=remove_binary,
-        system=system,
-    )
-    extra = sandbox_legacy.hints(state, remove_user=remove_user, remove_binary=remove_binary)
-
-    ux.section("Legacy sandbox cleanup")
-    if not steps:
-        if not dry_run and sandbox_legacy.complete_idle_receipt(state, system):
-            ux.ok("Nothing is left to clean up; the legacy cleanup is complete.")
-        else:
-            ux.ok("No legacy openshell-sandbox standalone install found; nothing to clean up.")
-        for hint in extra:
-            ux.subhead(hint, indent="  ")
-        return
-
-    result = sandbox_legacy.apply(steps, state, yes=yes, dry_run=dry_run, system=system)
-    for hint in extra:
-        ux.subhead(hint, indent="  ")
-    if dry_run:
-        return
-    if result.failed:
-        raise click.ClickException(
-            f"{len(result.failed)} cleanup step(s) failed; fix the reported problem and re-run "
-            "'defenseclaw sandbox legacy-cleanup' (completed steps are skipped)",
-        )
-    click.echo()
-    for note in sandbox_legacy.review_notes(state):
-        ux.warn(note)
-    ux.section("Next steps")
-    for index, (why, command) in enumerate(sandbox_legacy.NEXT_STEPS, 1):
-        click.echo(f"    {index}. {why}:")
-        click.echo(f"       {ux.accent(command)}")

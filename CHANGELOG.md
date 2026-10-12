@@ -63,6 +63,25 @@ stopped`. Nothing is changed; use the install command above.
   Sigstore signature on `checksums.txt` is verified when `cosign` 2.x is
   installed. Releases no longer download a pinned cosign.
 - The OpenClaw gateway is restarted only when the OpenClaw connector is active.
+- Interactive `defenseclaw init` offers `closed` as the hook fail mode on a
+  new install (Enter used to pick `open`), the default `--non-interactive`,
+  `quickstart` and the config already used; a re-run offers the saved value.
+- `defenseclaw guardrail use-pack` removes a `guardrail.custom_packs` pin that
+  no connector or profile selects after the switch (it used to stay, pointing
+  at the folder after it was deleted) and names it; `use-pack DIR` pins the
+  pack again.
+- `defenseclaw guardrail use-pack NAME` re-pins a custom pack that was edited
+  after it was pinned: it now runs while that stale pin fails the start-up
+  config check (its write still validates the whole config), and
+  `use-pack default` switches away. On a per-user install the mismatch error
+  from the config check and the gateway names the `config set` command that
+  pins the new digest.
+- After a Codex update on Windows, `defenseclaw doctor`'s **Hook contract**
+  and **Codex hooks** rows name `defenseclaw setup codex --yes`, which
+  selects the new Codex executable. The gateway's hook guard reports a
+  self-heal that keeps failing the same way once (it raised a HIGH
+  guardrail-degraded alert and a log line on every 30 s check) and, on a
+  per-user install, points at `defenseclaw doctor`.
 - `guardrail.block_at` and `guardrail.alert_at` now decide every guardrail
   verdict that carries a severity: hook tool calls, hook prompts, tool
   responses and message content, and the LLM proxy's prompts, completions and
@@ -79,6 +98,154 @@ stopped`. Nothing is changed; use the install command above.
 
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update.check: false`.
+- Before an upgrade, reinstall or rollback on macOS or Linux restarts the
+  gateway, the installer names the OpenShell sandboxes that are running: their
+  hooks fail closed until the gateway is back, so their agents' tool calls are
+  refused meanwhile.
+
+### Sandbox telemetry and destinations
+
+- `defenseclaw sandbox destinations NAME` (and `GET
+  /api/v1/sandbox/sandboxes/{name}/destinations`) lists every host a sandbox
+  reached or tried to reach, through the egress proxy or around it, with its
+  kind: model provider, the harness's vendor, shadow AI (another AI provider,
+  or an inference-shaped host), the egress category, blocked or other. It
+  shows the requests, refusals, bytes and the binary that connected (with
+  the opt-in process tree on, that process and its parents), survives
+  daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
+  sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
+  detail sum it up by the same kinds (`AI: 1 model provider, 1 harness
+  vendor host, 2 shadow AI`); the detail lists the hosts.
+- A sandbox's hook counts (`Hook traffic` and `Hook events` in `sandbox
+  status NAME`, the tool calls in the TUI's Sandboxes list) survive daemon
+  restarts like its destinations, so the end-of-session summary counts the
+  whole session across a restart; a daemon that did not stop cleanly loses
+  the last minute of them.
+- New finding `shadow_ai`, also on the activity feed: an AI provider that is
+  neither the sandbox's model provider nor its harness's vendor, once a
+  session when the policy refuses it (LOW) and once when the sandbox reaches
+  it (MEDIUM). A `--credential` binding's endpoint is its own `credential`
+  destination, never shadow AI.
+- New v8 records: `log.egress.completed` (bytes and duration) and
+  `log.egress.failed` (upstream failures and timeouts, and `cancelled` with
+  the bytes for a connection the proxy cut short) for every allowed proxy
+  connection; `log.sandbox.process`, `log.sandbox.ssh` and
+  `log.sandbox.inference` from OpenShell's PROC, SSH and API:INFERENCE
+  records (process records are paced per sandbox; command lines are content
+  class); allowed connections to host ports. Sandbox records now carry the
+  binding ID (`defenseclaw.sandbox.binding.id`), the launching host user and
+  the session the hooks last named (`gen_ai.conversation.id`); OpenShell's
+  egress records carry the connecting binary and PID.
+- `defenseclaw.egress.events` gains the `connector` label (the sandbox's
+  harness).
+- Refused proxy credentials are reported as degraded sandbox health
+  (`openshell_egress_auth_failed`: one record per streak, counted in the
+  gateway log at most once a minute, restored after a quiet minute), and refused
+  telemetry records are no longer silently dropped: they are logged, counted
+  on `sandbox status` and reported as degraded health
+  (`openshell_telemetry_failed`).
+- Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
+  which nothing produced.
+- OpenShell's repeats of one finding within 10 minutes of a session are one
+  sandbox finding and one feed line (the next one names how many were
+  folded); "Credential-bearing traffic cannot be inspected" names the
+  conversation's credential placeholder and the new-conversation step, and
+  `defenseclaw alerts --show`/`--json` print a sandbox finding's details and
+  next step.
+- New Grafana dashboard **Sandboxes** (`defenseclaw-sandboxes`), linked from
+  Overview: active sandboxes by connector, phase changes, egress by source
+  (OpenShell or the DefenseClaw egress proxy) and decision, top blocked and
+  allowed hosts, bytes up and down per destination, a destinations table,
+  shadow-AI and other sandbox findings, integration health and the opt-in
+  process starts, with Environment, Host and Sandbox variables. The local
+  Collector now adds the record's sandbox name as the `defenseclaw.sandbox.name`
+  log attribute (Loki structured metadata) so the variable and the filters never parse log bodies;
+  the body is unchanged and sandbox names stay out of metric labels. The
+  Splunk Observability bundle adds an Egress blocks by source chart to
+  Security and Policy, a Sandboxes dashboard and a sandbox egress-blocks
+  detector (and the local Prometheus rule
+  `DefenseClawSandboxEgressBlocksSustained`), which count the sandbox egress
+  sources (`openshell`, `dc-egress-proxy`) only, and drops the unused
+  "Egress blocks / min" tile.
+
+### Sandbox policy: extend packs, repository policy, record then lock, test
+
+- A custom sandbox pack can extend one parent with `extends:` (a built-in
+  pack, or a custom pack in `openshell.pack_dir` by name) and set only what
+  it changes: lists such as `egress.allow`, the masks and the review list add
+  to the parent's, other keys replace it. At most four ancestors; cycles are
+  refused. The digest covers the chain (the parent's digest, then the file),
+  so a pinned `required_pack_digest` follows a change anywhere in it. `pack
+  show`, `pack list`, `pack validate` and `policy explain` show the chain.
+  Packs without `extends` keep their digests.
+- A project can ask for a stricter sandbox with `.defenseclaw/sandbox.yaml`:
+  network and approvals floors, block entries, fewer ports, a lower
+  large-upload threshold or the large-upload block, copy mode, more masks
+  and review globs, the harness's prompts kept, MCP servers left behind,
+  blocked MCP tools, a stop on hook tamper or on silent hooks
+  (`hooks.on_silence: stop`), the process tree turned on
+  (`observe.process_tree: true`). It can only tighten: a key that would
+  loosen refuses the run, one line per key. The file is untrusted
+  input (16 KiB, no links, strict YAML, no includes), read when the sandbox
+  is created; the sandbox keeps that copy, so an edit applies to the next
+  new sandbox (`sandbox run` names a changed file among what resuming the
+  folder's sandbox ignores, and defaults to a new one), and the file is on
+  every session's review list. The banner, `policy show` and `policy
+  explain` (source `repo`) say what it tightened. It applies to runs
+  started in the folder that holds it; a run in a subfolder of the
+  repository warns that the root's file does not apply there.
+- `defenseclaw sandbox policy suggest` now works from each sandbox's kept
+  destinations (they survive daemon restarts) instead of the in-memory
+  activity buffer, and suggests a pack that extends `balanced` with the hosts
+  reached that balanced does not cover, each with the programs that reached
+  it. Hosts only ever refused, shadow AI, blocklist-feed hosts and the
+  sandbox's model provider and `--credential` endpoints are listed apart.
+  Ports beyond balanced's 80 and 443 that the allowed hosts used go in
+  `egress.ports`; past what a pack holds (1024 allow entries with
+  balanced's, 64 KiB) the most requested hosts stay and a warning names the
+  rest. `--pack-out FILE` writes the
+  pack (a new file, relative paths in the current folder, checked like
+  `pack validate`), `--diff` shows the
+  settings it changes and the reached hosts it would block. The old
+  `openshell.egress.allow` snippet output and its JSON shape are gone.
+- New `defenseclaw sandbox policy test --host H [--port P] [--binary B]`
+  (and `POST /api/v1/sandbox/policy/test`): the egress decision, the rule
+  that decides and the setting behind it, from the same decider the proxy
+  uses. `--sandbox NAME` asks the daemon (unblocks included); `--pack`,
+  `--profile` and `--harness` resolve locally, with no daemon, for CI.
+  `--fixture FILE` checks a YAML or JSON list of `{host, port, binary,
+  expect, rule}` and exits 1 on a mismatch.
+- `defenseclaw sandbox policy block --remove HOST` (and `policy allow
+  --remove`) takes an entry off `openshell.egress.block` (or `allow`); only
+  `config unset` could, for the whole list. An unblock refused by your own
+  block list names the command.
+
+### Sandbox documentation
+
+- New [Sandbox telemetry](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/sandbox-telemetry/)
+  page: the v8 records an OpenShell sandbox writes (lifecycle, egress decisions
+  with `log.egress.completed` bytes and duration, asks, policy changes,
+  findings, process and inference records), the attributes that name the
+  sandbox, the egress decision codes, the `openshell_*` health codes
+  (`openshell_egress_auth_failed`, `openshell_telemetry_failed`), the metrics,
+  what leaves the host, and how to reconstruct a session from the records.
+- `sandbox doctor --output json` documents `ready`, `openshell_install`,
+  `openshell_upgrade` and `openshell_install_version`; the guide's error table
+  names the two new health codes; the TUI page says that sandbox components are
+  their own AI Discovery rows and that an alert names its sandbox.
+- The sandboxes overview gains "What you can see, and how far to trust it": for
+  each signal (destinations, shadow AI, the program behind a connection, the
+  process tree, discovery, hooks, the repository policy) where it comes from and
+  what it cannot tell you.
+- Animated replays of real sessions for the sandbox setup, a whole first session,
+  the activity feed, an ask and its answer, applying and undoing a copy's work,
+  record-then-lock and `policy test`.
+- New or retaken screenshots from the 1.0.32 and 1.0.35 builds: the Grafana
+  Sandboxes board (current panel titles), the Linux and Mac Setup wizards, the
+  TUI's Activity view, sandbox details with the process tree and destinations on
+  both drivers, a sandbox in the AI Discovery panel, the Linux doctor, process
+  tree and status, a Linux session end with shadow AI, and a Splunk search of a
+  sandbox's records. The lab account name no longer appears in any shot.
 
 ### Removed
 
@@ -214,6 +381,111 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **The gateway prints the local Splunk sign-in only while its web UI
+  answers.** `defenseclaw-gateway start` and `restart` printed the "Splunk
+  Local Mode" block (Web UI, user, where the password is) whenever the
+  bridge's env file held a password, also after `setup splunk --disable`
+  stopped the container or after it was removed. The fallback that read
+  `DEFENSECLAW_LOCAL_USERNAME`/`DEFENSECLAW_LOCAL_PASSWORD` from
+  `~/.defenseclaw/.env` is gone: no supported release writes them there
+  (the local bridge reads them from its own env file).
+- **A PowerShell command with several statements reaches argv block rules.**
+  On Windows, where Codex runs its shell tool in PowerShell, a rule such as
+  `f.commands.exists(c, "<x>" in c.argv)` only reported a detection-only
+  finding for `Write-Output <x>; exit $LASTEXITCODE` or
+  `Get-Location; Write-Output <x>`: the second statement left the whole
+  command partial. Its statements are now judged one by one, up to the first
+  one that cannot be proved, as in the body of `pwsh -Command`.
+- **The `guardrail` commands confirm that the running gateway applied a
+  change.** `guardrail mode`, `block-at`, `alert-at`, `use-pack`,
+  `protection`, `rule` and `suppress` said the running gateway applies it now
+  while, after a 0.8.x upgrade, the gateway kept the previous setting. They
+  wait up to 10 seconds for it to report the saved config generation, and
+  otherwise say it did not apply it and name `defenseclaw-gateway restart`
+  (`mode` and the levels exit 1, `gateway: not_applied` in `--json`).
+  `defenseclaw doctor`'s stale Policy row names the generation it has not
+  applied.
+- **`setup guardrail --connector X` refuses a connector that is not set up.**
+  On an install whose `guardrail.connectors` roster lacked X it repointed the
+  guardrail connector without adding X, and the gateway restart dropped the
+  hooks of the connectors on the roster. It now changes nothing and names
+  `defenseclaw setup <x>`, which adds a connector (or `--replace`, which
+  switches).
+- **`defenseclaw setup rotate-token` after a 0.8.x upgrade on Windows.** The
+  upgrade gives the hook credential files 0.8.x wrote with an inherited DACL
+  the owner-only DACL 1.x writes, which rotation requires. A refusal now names
+  the file, the reason and the `icacls` (or `chmod`) command that fixes it.
+- **No `--from-version` warning on a downgrade.** `install.sh --local` of an
+  older build over a newer one printed `--from-version 1.0.31 is newer than
+  this DefenseClaw`, about a flag the user never typed. The warning remains
+  only where the value is read: a 0.x configuration without a migration
+  record.
+- **Local Splunk starts when the CLI was installed under a private umask.**
+  The package's files arrived 0600 and setup copied them so into
+  `~/.defenseclaw/splunk-bridge/splunk/`, which the container mounts and reads
+  as non-root users, so Splunk restarted on `Permission denied:
+  '/tmp/defaults/default.yml'` while `defenseclaw setup splunk --logs` waited
+  four minutes. Setup and init now make that folder readable to the
+  container (0755 folders, 0644 files, 0755 scripts; `env/.env` stays
+  private), and the bridge stops as soon as the container keeps restarting,
+  with its last log lines.
+- **`defenseclaw setup splunk --disable --logs` stops the local Splunk
+  container.** It ran the bridge's `down` without the env file the bridge
+  requires, ignored the failure and said the container stopped; it now passes
+  the file, checks the container is gone, and otherwise says why and how to
+  stop it. A setup re-run no longer takes DefenseClaw's own running Splunk
+  for a foreign holder of ports 8000 and 8088.
+- **Security: hooks keep the gateway token and the hook payload off process
+  command lines and out of child environments.** The Claude Code,
+  Antigravity, Copilot, Cursor, Devin, Hermes, Kiro and OpenHands shell
+  hooks, the shared `inspect-*` hooks and the OpenClaw and ZeptoClaw PATH
+  shims gave curl the per-user gateway token as `-H "Authorization: Bearer …"`,
+  and the connector hooks also gave it the whole hook payload (prompt or tool
+  input, session id, transcript path, cwd) as `-d`, on Linux and macOS. Other
+  local accounts could read both from the process list (`ps`,
+  `/proc/<pid>/cmdline`), and exec monitors such as auditd, Tetragon and EDR
+  agents recorded them. The enterprise standalone hooks, which send no token
+  over the hook socket, still put the payload there. Every host hook now
+  sends its request through one helper, `defenseclaw_gateway_post` in
+  `hooks/_hardening.sh` (helper schema v8): curl reads the Authorization
+  header as a config line and the body from file descriptors that the
+  shell's built-in `printf` writes, as the Codex hook already did, so its
+  command line carries only the descriptor paths (this works with curl
+  releases older than 7.55). The PATH shims and the Hermes foreign-hook
+  guard's session report do the same, and `inspect-tool` and
+  `inspect-tool-response` give `jq` the tool input or output on standard
+  input instead of as an argument, so an input over 128 KiB no longer stops
+  `jq` from starting.
+  - The hooks no longer hand the token to the programs they start (curl, jq,
+    or the gateway a hook starts after a reboot) in
+    `DEFENSECLAW_GATEWAY_TOKEN`, which the Codex hook already dropped, and
+    they drop inherited variables named like their own (`PAYLOAD`,
+    `API_TOKEN`, …), which copied the prompt or the token into the
+    environment of every program they started.
+  - The PATH shims keep their own values in private names. When the agent's
+    environment exported `API_TOKEN`, the real npm, pip, curl, wget, ssh or
+    nc, and every process it started, got the DefenseClaw gateway token in
+    place of the user's own value (and the shim's values in place of
+    `API_ADDR`, `ACTION`, `RESULT` and others).
+  - Every gateway request from a hook, a PATH shim or the Codex notify bridge
+    runs `curl -q`, so a `.curlrc` in the agent's `CURL_HOME` or
+    `XDG_CONFIG_HOME` can no longer write the token and the payload to a
+    trace file or turn an HTTP 401 into an allow.
+  - A connector hook refuses a token that contains CR or LF as `invalid
+    gateway token` and handles it like a token the gateway rejects; the
+    `inspect-*` hooks fail closed on it, as on a 401. A PATH shim exits 1
+    with `shim gateway token is malformed — refusing to exec <tool>`.
+  - `defenseclaw doctor` reports Claude Code and Codex hooks rendered before
+    this fix as stale.
+
+  Fail modes and timeouts are otherwise unchanged. In OpenShell sandboxes
+  the token transport is unchanged (it already used a descriptor); sandbox
+  `inspect-tool-response` now also reads the tool output from standard input
+  (no `jq` argument, no 128 KiB limit) and blocks when it cannot build the
+  request body. The gateway rewrites the hooks when it starts (on enterprise
+  installs the guardian does), so an upgrade applies the fix. Windows is not
+  affected: its hooks run natively and the PowerShell adapters pass only
+  fixed arguments.
 - **Uninstall removes the uv a 0.8.x installer added, or names it.** The
   0.8.x installer ran uv's own installer without a record, so after an
   upgrade `uninstall --all --binaries` left `uv`, `uvx`, `~/.cache/uv` and
@@ -509,6 +781,12 @@ rest also reach per-user installs.
   fallback. A command that blocks in Claude Code or Codex could then run in
   Amp with a detection-only finding, for example one that writes its output
   to `~/out.txt`. Amp commands are now analyzed like the other agents'.
+- **`defenseclaw alerts` says how many detection-only findings it leaves
+  out.** A rule that matched a call it could not decide is not an alert, so
+  the list could read `No alerts. All clear.` while such calls ran. It now
+  ends with how many detection-only findings the last 24 hours had, says
+  `No alerts.` without `All clear`, and names
+  `defenseclaw audit export --since 24h` to read them.
 - **AI discovery on macOS skips the folders macOS protects.** Without Full
   Disk Access, every model file scan counted each folder macOS privacy
   protection keeps it out of (for example other apps' containers under
@@ -823,6 +1101,9 @@ deleted.
   vendor account passes. Each image pins the harness at DefenseClaw's
   reviewed hook contract, installs root-owned hooks (managed or user tier, see
   the capability matrix) and must pass a hook-fire probe before use.
+- Hermes Agent on Bedrock runs `openai.gpt-oss-20b` unless `-- -m MODEL`
+  picks another, and the banner names it. The managed provider named no
+  model, so Hermes sent an empty one, which Mantle refuses.
 - Workspace: the project is mounted live by default, with secret files
   masked, `.git/hooks` and `.git/config` read-only, a pre-session snapshot and
   `sandbox undo`, an end-of-session review of changes that can run code on the
@@ -846,7 +1127,7 @@ deleted.
   from.
 - Commands: `sandbox setup|doctor|run|connect|list|status|exec|logs|activity|
   stop|start|delete|undo|review|pull|approvals|approve|reject|unblock|policy|
-  pack|image|enable|disable|teardown|legacy-cleanup`; the daemon serves them
+  pack|image|enable|disable|teardown`; the daemon serves them
   under `/api/v1/sandbox/*` (master token and CSRF). The TUI gains a
   Sandboxes panel (key `7`) and a Sandbox setup wizard; the macOS app gains
   sandbox views.
@@ -938,6 +1219,48 @@ deleted.
   OmniGent have no post-tool context field, so there only the terminal's
   live notice reports the block. Both drivers.
 
+### OpenShell 0.1.2
+
+- `defenseclaw sandbox setup` installs OpenShell 0.1.2 (NVIDIA's installer
+  from the v0.1.2 tag; the script is byte-identical to v0.1.1's, so its
+  pinned SHA-256 is unchanged). 0.1.2 fixes a supervisor bug on the path
+  every sandbox connection takes: a sandbox's first request through the
+  egress proxy, or a hook call, could stall until the client's own timeout.
+  It also stops idle sandboxes from using about 2% of a CPU core each.
+  DefenseClaw still drives OpenShell `>=0.1.1 <0.2.0`; the Go SDK pin is
+  unchanged (its code is identical in 0.1.2).
+- On OpenShell 0.1.1 the doctor's **OpenShell CLI** check warns (the machine
+  stays ready) and setup offers the upgrade to 0.1.2 in place:
+  ``Upgrade OpenShell 0.1.1 to 0.1.2 in place with NVIDIA's installer?``,
+  no by default, so `--yes` and `--non-interactive` keep 0.1.1;
+  `--install-openshell` upgrades. NVIDIA's installer restarts the gateway
+  once it has installed the release, and setup names the running sandboxes
+  first. On the docker driver they keep running and lose their connections,
+  and Docker first pulls the 0.1.2 supervisor images from `ghcr.io`, which
+  the restarted gateway needs to start: when it cannot, setup keeps 0.1.1
+  and changes nothing. On the MicroVM driver the restart would stop running
+  sandboxes without a flush, so setup keeps 0.1.1 while one runs and says to
+  stop them first. An OpenShell installed another way is not upgraded; the
+  check says to upgrade it the way you installed it. The TUI wizard shows the upgrade with **Install OpenShell** off.
+  `sandbox doctor --json` reports `openshell_upgrade` and
+  `openshell_install_version`.
+- The daemon reconnects when the gateway answers with another release, so
+  `sandbox status` and the doctor name the release after an upgrade.
+- On Linux kernels older than 5.19 (RHEL 9 runs 5.14), OpenShell 0.1 won't
+  tell a sandboxed program whom its connection goes to (`getpeername` fails
+  with `EOPNOTSUPP`), and Python's `ssl` module asks before every handshake,
+  so every HTTPS request of a Python program failed with
+  `[Errno 95] Operation not supported`: Hermes Agent, OpenHands and OmniGent
+  never reached their model. Their images now carry a workaround in the
+  harness's own interpreter. Other Python programs in the sandbox, such as
+  `pip`, keep failing until an OpenShell release after 0.1.2
+  (NVIDIA/OpenShell #4058).
+- On a Mac the first start of each harness image after the upgrade prepares
+  its MicroVM disk again (about a minute and 5 GB): the explain note and
+  the daemon's disk-room check count only disks the gateway's release
+  prepared. `sandbox image prune` removes the disks of another release,
+  which the gateway never boots.
+
 ### OpenShell sandboxes on macOS (MicroVM driver)
 
 - Apple-silicon Macs run sandboxes on OpenShell's MicroVM (`vm`) compute
@@ -960,7 +1283,10 @@ deleted.
   terminal, with `--yes` or after a skip, end with `N files changed; nothing
   was applied` and the `sandbox pull` command, and say when they keep a
   sandbox despite `--rm`. `sandbox review` of a copy-mode sandbox previews
-  its pull instead of failing. A copy above the upload cap names
+  its pull instead of failing. A git copy names, in one warning after the
+  upload, what it leaves out because git ignores it or it is a package cache
+  (`node_modules/`, `.venv/`, build output), and says to install the
+  dependencies inside the sandbox. A copy above the upload cap names
   `openshell.workdir.max_upload_mb`; on a Mac a full sandbox disk names the
   MicroVM's overlay (`overlay_disk_mib`).
 - Claude Code and Codex per-run managed settings are baked, root-owned and
@@ -1220,6 +1546,44 @@ deleted.
   `spawned-agent-tool-result`). A `PostToolBatch` is recorded as a
   `tool_batch` listing its calls. Both drivers.
 
+### OpenShell sandbox AI discovery and process tree
+
+- AI discovery now sees inside running sandboxes: the MCP servers, skills,
+  rules, plugins, AI CLIs and agents the agent installed or configured in a
+  sandbox, its environment variable names (never values), shell history
+  mentions and, for a copy, its package manifests. DefenseClaw reads the
+  sandbox with one read-only command it builds itself, checks every path and
+  file the sandbox sends back (absolute, printable, under the sandbox's home,
+  projects or harness install, within what was asked and within
+  `ai_discovery.max_file_bytes` a file, `max_files_per_scan` files read,
+  8,192 entries listed and a 4 MiB stream),
+  writes what passes as private regular files on this machine, scans them
+  there and removes them (only the scan record stays). It runs once a
+  sandbox is ready, every
+  `ai_discovery.scan_interval_min` while it runs, and on demand with
+  `defenseclaw sandbox discover NAME`; a stop keeps what was found (without
+  its processes) and a delete drops it. `defenseclaw agent usage --sandbox
+  NAME` shows one sandbox's components, every view tags them
+  "(sandbox NAME)", the TUI's AI discovery panel keeps them apart and names
+  the sandbox, and the `ai_component.*` telemetry records carry
+  `defenseclaw.sandbox.id` and `defenseclaw.sandbox.name`.
+- Claude Code skills and rules kept in a project (`.claude/skills`,
+  `.claude/rules`) are listed by name like the ones in `~/.claude`, in a
+  sandbox's project and in each `ai_discovery.scan_roots` folder.
+- The AI discovery Grafana board's Sandbox box narrows only the sandbox
+  signals table and the per-signal log; the sections and panels it does not
+  narrow say (all names) in their titles, as on the Sandboxes board.
+- Opt-in process tree: a pack's new `observe.process_tree: true` (off in
+  `open`, `balanced` and `strict`) or `sandbox run --process-tree` samples the
+  sandbox's processes every 5 seconds while it runs (every 15 seconds on a
+  Mac when sampling its MicroVM is slow) and adds OpenShell's process launch
+  and exit reports. `defenseclaw sandbox ps NAME [--tree]` and the TUI's
+  sandbox detail show it, with the values of arguments that name secrets
+  replaced, and new `sandbox.process_tree` records (`sandbox-process` audit
+  action) report each process's start and exit with its parent and
+  ancestry. Sampling misses a process that starts and ends between two
+  samples, and the agent chooses its processes' names and arguments.
+
 ### OpenShell sandbox lifecycle and configuration
 
 - `openshell.llm` (default `auto`) chooses the model credential a sandbox
@@ -1331,6 +1695,55 @@ deleted.
   administrator's switch; the TUI and app feeds name the threshold. Both
   drivers.
 
+### OpenShell sandbox hardening
+
+- **The check after ready runs on the docker driver too.** After every
+  create and start, one exec checks that the workload runs as the uid its
+  image was built for with no capabilities, that DefenseClaw's hooks,
+  launcher and managed settings are the root-owned files it delivered, and,
+  on docker, that the per-run settings files are on read-only mounts. A
+  sandbox that fails it is refused with `policy_rejected` and is deleted
+  (create) or stopped again (start), and the message now says which
+  (`…; DefenseClaw deleted it`, `…; DefenseClaw stopped it again (its work is
+  kept)`). It ran only on the MicroVM driver before.
+- **Silent hooks stop a user-tier sandbox in balanced and strict.** New pack
+  keys `hooks.on_silence` (`stop` or `alert`) and `hooks.silence_after` (a
+  duration from `1m` to `24h`, `10m` in every built-in pack). When the
+  harness of a user-tier sandbox (OpenCode, Kiro CLI, Amp, Devin CLI,
+  Antigravity, Hermes, OpenHands), whose hook registration the agent can
+  edit, works that long (an idle stretch that long starts the count over)
+  without one hook request reaching DefenseClaw,
+  `stop` (the default in `balanced` and `strict`) stops the sandbox the way
+  a hook tamper does, and `alert` (the default in `open`) keeps it running.
+  Both raise the HIGH `hook_silence` finding, whose evidence names the
+  response, and a feed line that says what follows. A managed-tier harness
+  only alerts. The banner's `Hooks` line, `sandbox policy explain` and the
+  sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
+  with `pack` locked, a run cannot switch to a pack that alerts or waits
+  longer. The threshold was a fixed 10 minutes and silence only alerted.
+  A harness with switched-off hooks that works in bursts shorter than
+  `silence_after`, idle at least that long between them, is not flagged;
+  the sandbox guide and the policy pack reference state this limit.
+- **The activity feed names its epoch.** Every activity event carries
+  `epoch`, which names the daemon's in-memory feed; a restarted daemon
+  numbers its events from one again under a new epoch. The TUI's Sandboxes
+  panel and the macOS app compare it when they resume (instead of guessing
+  from the event under the old number) and read a new feed from its start.
+- **macOS setup offers to turn OpenShell's usage telemetry off.** As on
+  Linux, `defenseclaw sandbox setup` asks before it sets
+  `OPENSHELL_TELEMETRY_ENABLED=false` in `~/.config/openshell/gateway.env`,
+  which the Homebrew service reads, in the same change and restart as the
+  MicroVM settings, and records the answer in
+  `openshell.upstream_telemetry`. The doctor's telemetry check runs on a Mac
+  too (it was skipped), and `--fix` repairs a mismatch. The TUI's and the
+  macOS app's Sandbox wizards ask it on a Mac too (**OpenShell Telemetry
+  Off**). A Mac gateway that no Homebrew service runs is still left alone.
+- **The banner says how the model hosts are reached.** A new line under
+  `Model` states that OpenShell opens them to the harness's own program
+  directly, around the egress proxy, and that for an npm or Python harness
+  that program is its `node` or `python`, so a script it runs reaches them
+  too. The sandbox guide and the network page say the same.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the
@@ -1364,53 +1777,31 @@ deleted.
   every platform. Earlier docs claimed Linux installed an enforced
   Landlock/seccomp OpenShell policy with shims as a supplement; that policy was
   never enforced.
-- Adds
-  `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]`.
-  Linux only; privileged steps run through `sudo` with binaries resolved only
-  from root-owned `/usr/sbin`, `/usr/bin`, `/sbin`, and `/bin`. It detects a
-  legacy install, prints every step with its exact commands, and asks for
-  confirmation unless `--yes`; `--dry-run` changes nothing. Each artifact is
-  handled idempotently and recorded in `<data_dir>/legacy-sandbox-cleanup.json`.
-  Steps: disable and remove the generated systemd units and root-owned,
-  DefenseClaw-generated launchers; stop unless nothing of the legacy sandbox
-  still runs (no active unit, no live PID from `sandbox.pids` or
-  `openshell.pid`, no process of the sandbox uid; the non-systemd
-  `run-sandbox.sh` launcher must be stopped by the operator first); delete the
-  recorded namespace and the veths whose peer is in it, remove the exact NAT
-  rules (checked with `iptables -C` first), and restore
-  `net.ipv4.conf.all.route_localnet`; remove the `sandbox` user's ACLs, then
-  restore the OpenClaw home's original ownership from the validated backup and
-  clear only the `o+x` legacy setup added to the home's ancestors, and remove
-  the `/home/sandbox/.openclaw` symlink (a host whose old `--disable` erased the
-  pin and backup still has its sandbox ACLs removed from `claw.home_dir` or
-  `~/.openclaw`); then, as the operator and refusing symlinks, restore the
-  `openclaw.json` gateway and provider settings to loopback; remove the
-  invoking user from the `sandbox` group; optionally `userdel -r sandbox`
-  (`--remove-user`, refused while that user has processes, until its
-  ownership and ACLs are gone from the OpenClaw home, or when the account's
-  home is not the configured sandbox home) and remove a non-package-owned
-  0.0.x `/usr/local/bin/openshell-sandbox` (`--remove-binary`); once the
-  ownership and `openclaw.json` restores are done, reset `openshell.mode`,
-  `gateway.host`, `gateway.port`, `guardrail.host`, `claw.home_dir`,
-  `claw.config_file`, and `claw.openclaw_home_original`; back up legacy
-  data-dir artifacts to `<data_dir>/backups/legacy-sandbox-<timestamp>/`
-  before removing them; and print next steps (scan the skills, plugins, and
-  MCP servers the sandboxed agent could have changed, then
-  `defenseclaw setup guardrail`, which restarts the gateway and OpenClaw).
-  The group and user steps only run on a host with legacy evidence.
-- Legacy bind shim: until cleanup runs on a host whose config still says
-  `openshell.mode: standalone` with a non-localhost `guardrail.host`, the
-  gateway API keeps binding to that host (an explicit `gateway.api_bind`
-  still wins) so `upgrade` health checks keep working. While
-  `openshell.mode: standalone` remains, `/health` reports the `sandbox`
-  subsystem as `degraded` with a `last_error` pointing at
-  `defenseclaw sandbox legacy-cleanup`; on every other host the subsystem is
-  absent. `defenseclaw doctor` and `defenseclaw status` point a detected
-  legacy install at the same command.
-- Config: the `openshell:` key stays in the v8 schema with no migration.
-  `mode` and `sandbox_home` are read only by the legacy shim and
-  `legacy-cleanup`; `binary`, `policy_dir`, `version`, `auto_pair`, and
-  `host_networking` are accepted and ignored.
+- **Breaking:** no cleanup command and no bind shim: the upgrade resets the
+  config instead. The `config_version` 9 migration (run by the upgrade, by
+  `defenseclaw migrate`, and in memory when the gateway loads a v8 file)
+  drops `openshell.mode`, `openshell.sandbox_home` and
+  `claw.openclaw_home_original` (the OpenClaw home pin, named in a migration
+  note when set) from every config and, on one that said
+  `openshell.mode: standalone`, the non-loopback
+  `guardrail.host` and `gateway.host` (the veth addresses), which take their
+  defaults. An upgraded standalone host's gateway API so binds on loopback,
+  where the upgrade, watchdog and status probes and the CLI dial it, instead
+  of on `10.200.0.1`; `migration-v9.json` lists the removed keys, and running
+  the migration again changes nothing. `/health` reports no `sandbox`
+  subsystem for such a host, and `doctor`, `status` and `status --json`
+  (whose `sandbox` object loses `legacy_standalone`) say nothing of it. The
+  root units, launchers, network namespace, NAT rules and `sandbox` user are
+  removed by hand: see
+  [remove a retired standalone sandbox](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox).
+  `defenseclaw init --sandbox`, `install.sh --sandbox` and the
+  `install-openshell-sandbox.sh` stub point there. A
+  `defenseclaw sandbox legacy-cleanup` command was in unreleased 1.0 builds
+  only and is gone.
+- Config: the `openshell:` legacy sub-keys `policy_dir`, `version`,
+  `auto_pair`, and `host_networking` stay accepted by the v8 schema and are
+  ignored; `mode` and `sandbox_home` are removed by the `config_version` 9
+  migration.
 - **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
   metric family (instrument `defenseclaw.openshell.exit`) and its
   `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit

@@ -76,6 +76,38 @@ TOAST_DEDUPE_SECONDS = 60.0
 BLOCK_BANNER_SECONDS = 15 * 60
 
 ADMIN_MESSAGE = "blocked by your organization's DefenseClaw policy"
+
+# A project's repository sandbox policy (packs.RepoPolicyPath).
+REPO_POLICY_PATH = ".defenseclaw/sandbox.yaml"
+
+
+def detached_run_text(run: Any, name: str) -> str:
+    """The detail's line for the detached run whose log a stop kept, or "" (GAP-0273).
+
+    ``run`` is ``GET .../logs`` (state, exit, started_at), which the daemon
+    keeps whenever it stops the sandbox.
+    """
+    data = _dict(run)
+    outcome = {
+        "exited": f"finished: exited with status {_text(data.get('exit')) or '?'}",
+        "interrupted": "did not finish: the sandbox stopped while it ran",
+        "running": "was still going when the sandbox stopped",
+    }.get(_text(data.get("state")), "")
+    if not outcome:
+        return ""
+    started = _time(data.get("started_at"))
+    when = f", started {started.astimezone().strftime('%H:%M')}" if started else ""
+    return f"{outcome}{when} · log: defenseclaw sandbox logs {name}"
+
+
+def branch_name_problem(value: str) -> str | None:
+    """Why the TUI's Pull cannot use a branch name, or None; git judges the rest (GAP-0266)."""
+    name = value.strip()
+    if not name:
+        return "Type a branch name."
+    if name.startswith("-") or any(ch.isspace() for ch in name):
+        return "A branch name has no spaces and does not start with -."
+    return None
 # The next step after an openshell.admin.allow_unblock refusal.
 ADMIN_UNBLOCK_NEXT = "ask your DefenseClaw administrator (openshell.admin.allow_unblock is off)"
 # A saved unblock (openshell.egress.unblocked) the organization's policy ignores.
@@ -93,15 +125,19 @@ HOOKS_UNREACHABLE_WARNING = "DefenseClaw hooks are not reaching the daemon; ever
 # decide on its own (triage.judgeEndpoint): a private-network address with
 # every pack, a host off the allowlist with balanced, and every new
 # destination with strict. A port on this machine drafts none (OpenShell
-# denies the mapping itself), so it is opened with --host-port instead.
+# denies the mapping itself): DefenseClaw raises the ask for a port the run
+# named with --host-port (manager.hostPortAsk), and refuses every other one.
 NO_ASKS_TEXT = (
     "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
     "to a private-network address with any pack, to a host off the allowlist with balanced, "
-    "and to every new destination with strict. Ports on this machine never ask; run with --host-port PORT."
+    "and to every new destination with strict. A port on this machine asks only if the run named it "
+    "with --host-port PORT."
 )
 
-# sandboxcli.reasonTexts, plus the triage reasons of rejected proposals: the
-# tokens a blocked destination's category or reason holds, in plain words.
+# sandboxapi.reasonTexts (internal/openshell/sandboxapi/reasons.go), word for
+# word, so the panel reads like `sandbox activity` and the alerts; a test
+# holds the two tables together (GAP-0155). host_local is triage's reason of
+# a host-port ask, which the Go feed shows as the daemon's sentence.
 REASON_LABELS: dict[str, str] = {
     "transparent_tcp_policy_denied": "no OpenShell rule allows it",
     "transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
@@ -112,23 +148,45 @@ REASON_LABELS: dict[str, str] = {
     "tunnel": "tunnel service",
     "anonymizer": "anonymizer",
     "host_internal": "this machine",
-    "host_local": "this machine",
     "private_network": "private network",
     "port_not_allowed": "port not allowed",
     "invalid_destination": "invalid destination",
     "admin_block": "blocked by your organization",
     "admin_allow_only": "not on your organization's allowed list",
-    "admin_violation": "blocked by your organization",
     "operator_block": "on your block list",
+    "pack_block": "on the pack's block list",
+    "repo_policy_block": "on the repository policy's block list, .defenseclaw/sandbox.yaml",
+    "firewall_block": "a deny rule of the host egress firewall",
     "not_allowlisted": "not on the allowlist",
     "rate_limited": "rate limited",
     "ip_literal": "IP address instead of a name",
-    "blocklisted": "on the egress blocklist",
+    "unsupported_rule": "no OpenShell rule allows it, and DefenseClaw does not approve the rule drafted for it",
+    "no_endpoints": "the rule drafted for it names no destination",
+    "wildcard_destination": "wildcard destination",
+    "policy_refused": "the sandbox policy refuses it",
+    "admin_violation": "blocked by your organization",
+    "blocklisted": "on the block list",
+    "agent_proposals_disabled": "no OpenShell rule allows it, and this sandbox takes no new rules",
     "resolves_to_host": "the name leads to this machine",
     "unresolved": "the name does not resolve",
-    "policy_refused": "the sandbox policy refuses it",
-    "wildcard_destination": "wildcard destination",
+    "multiple_hosts": "the rule drafted for it names several hosts",
+    "harness_background_fetch": "a background fetch of the harness, which it does without",
+    "rule_limit": "the sandbox added its limit of rules this session",
+    "too_many_pending": "too many approvals are waiting",
+    "model_host_side": "a connection outside the model channel, which stays open; no OpenShell rule allows it",
+    "host_local": "this machine",
 }
+
+# sandboxapi.metadataText: a cloud metadata or link-local destination, whatever
+# refused it (the proxy's host_internal or OpenShell's missing rule).
+METADATA_TEXT = "cloud metadata or link-local address, never reachable from a sandbox"
+
+# egress.neverReach: metadata and host-service addresses outside the
+# link-local range that the sandbox guard refuses as host-internal.
+_NEVER_REACH = tuple(
+    ipaddress.ip_network(prefix)
+    for prefix in ("168.63.129.16/32", "fd20:ce::254/128", "fd00:c1::a9fe:a9fe/128", "fec0::/10")
+)
 
 
 def _is_token(text: str) -> bool:
@@ -137,11 +195,38 @@ def _is_token(text: str) -> bool:
 
 
 def reason_label(text: str) -> str:
-    """A reason or category token in plain words (sandboxcli.reasonText); other text as is."""
+    """A reason or category token in plain words (sandboxapi.ReasonText); other text as is."""
     text = text.strip()
     if not _is_token(text):
         return text
     return REASON_LABELS.get(text, text.replace("_", " "))
+
+
+def metadata_or_link_local(host: str) -> bool:
+    """sandboxapi.metadataOrLinkLocal: a link-local or cloud metadata address, or metadata.google.internal."""
+    text = host.strip().lower().strip("[]").removesuffix(".")
+    if text == "metadata.google.internal":
+        return True
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_link_local or any(addr.version == net.version and addr in net for net in _NEVER_REACH)
+
+
+# A refused port 22 is git over SSH or ssh, which OpenShell never opens.
+SSH_PORT = 22
+
+# packs.OpenShellHostAlias: the name a sandbox reaches this machine by (a
+# --host-port service, a local model endpoint).
+OPENSHELL_HOST_ALIAS = "host.openshell.internal"
+
+
+def ssh_blocked_text(host: str) -> str:
+    """sandboxapi.SSHBlockedText: OpenShell opens no SSH out of a sandbox, which no unblock changes."""
+    return f"SSH does not leave a sandbox: use an HTTPS remote (https://{host}/…)"
 
 
 # sandboxapi.CategoryLargeUpload: the category of the egress.blocked events of
@@ -388,6 +473,12 @@ class SandboxRow:
     created_at: datetime | None = None
     destinations: int = 0
     blocked: int = 0
+    # The AI destinations by the kinds `sandbox destinations` names: the
+    # model provider, the harness's vendor, and shadow AI (other AI APIs,
+    # inference-shaped hosts).
+    model_providers: int = 0
+    harness_vendor: int = 0
+    shadow_ai: int = 0
     pending_approvals: int = 0
     tool_calls: int = 0
     tool_blocked: int = 0
@@ -404,10 +495,18 @@ class SandboxRow:
     hooks_unreachable: bool = False
     unreachable_reason: str = ""
     ingress_refused: int = 0
+    # OpenShell refused the session's requests because its conversation holds
+    # a credential placeholder (GAP-0354): a new conversation is the way on.
+    placeholder_refused: bool = False
     # Hook posts DefenseClaw answered with an error (a refused route, the
     # rate limit): each failed closed, so the harness did not do it.
     hook_failed: int = 0
     last_hook_failure: str = ""
+    # The last failure was a hook post of a conversation OpenShell refuses for
+    # its credential placeholder, not DefenseClaw's answer; hooks_answered_at
+    # is the first verdict after it (GAP-0377).
+    hook_failure_placeholder: bool = False
+    hooks_answered_at: datetime | None = None
     orphaned: bool = False
     undo_available: bool = False
     # The user kept the last session's changes (the daemon's accept): the
@@ -416,9 +515,26 @@ class SandboxRow:
     nested_repos: tuple[NestedRepoRow, ...] = ()
     warnings: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
-    # The image the sandbox runs when it is not the harness image: on the
-    # MicroVM (vm) driver, the image its per-run harness files are baked into.
-    run_image: str = ""
+    # The harness image, tagged as "sandbox image list" shows it. Not the
+    # run image a MicroVM boots (defenseclaw.invalid/sandbox-run:...), a
+    # name no other view shows (GAP-0188).
+    image: str = ""
+    # The sandbox's processes are sampled while it runs (observe.process_tree).
+    process_tree: bool = False
+    # The repository policy (.defenseclaw/sandbox.yaml) its posture includes,
+    # and the settings it made stricter; the banner names both (GAP-0244).
+    repo_policy: bool = False
+    repo_tightened: tuple[str, ...] = ()
+
+    @property
+    def repo_policy_text(self) -> str:
+        """The repository policy as the launch banner words it, or ""."""
+        if not self.repo_policy:
+            return ""
+        if not self.repo_tightened:
+            return f"{REPO_POLICY_PATH}: the policy is as strict already"
+        settings = "1 setting" if len(self.repo_tightened) == 1 else f"{len(self.repo_tightened)} settings"
+        return f"{REPO_POLICY_PATH}: tightened {settings} ({', '.join(self.repo_tightened)})"
 
     @property
     def running(self) -> bool:
@@ -465,7 +581,12 @@ class SandboxRow:
         else:
             line = f"{self.hook_failed} hook calls failed, so the harness's actions were blocked (hooks fail closed)"
             answered = "DefenseClaw last answered"
-        return line + (f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else "")
+        if self.hook_failure_placeholder:
+            answered = "the last was a hook post of a conversation OpenShell refuses for its credential placeholder:"
+        line += f"; {answered} {self.last_hook_failure}" if self.last_hook_failure else ""
+        if self.hooks_answered_at:
+            line += f"; hooks answered again since {self.hooks_answered_at.astimezone().strftime('%H:%M:%S')}"
+        return line
 
     @property
     def alerts(self) -> tuple[str, ...]:
@@ -479,6 +600,11 @@ class SandboxRow:
             out.append(f"{HOOKS_UNREACHABLE_WARNING}{why}. Run: defenseclaw sandbox doctor")
         elif self.ingress_refused:
             out.append(f"OpenShell refused {self.ingress_refused} hook request(s) to DefenseClaw")
+        if self.placeholder_refused:
+            out.append(
+                "OpenShell refuses this conversation's requests: it holds a sandbox credential placeholder; "
+                f"start a new conversation (defenseclaw sandbox connect {self.name}, without --continue)"
+            )
         if self.hook_failed:
             out.append(self.hook_failure_alert)
         if self.hooks_silent:
@@ -489,13 +615,17 @@ class SandboxRow:
 
     @property
     def alert_badge(self) -> str:
+        return self.badge()
+
+    def badge(self, *, short: bool = False) -> str:
+        """The Alerts cell; ``short`` (a narrow table) says unreachable as `sandbox list` does (GAP-0163)."""
         parts = []
         if self.tampered:
             parts.append("tamper")
         if self.nested_repos:
             parts.append("nested repo")
         if self.hooks_unreachable:
-            parts.append("hooks unreachable")
+            parts.append("unreachable" if short else "hooks unreachable")
         if self.hook_failed:
             parts.append("hook errors")
         if self.hooks_silent:
@@ -503,6 +633,24 @@ class SandboxRow:
         if self.orphaned:
             parts.append("orphaned")
         return ", ".join(parts) or "-"
+
+
+def _fit_last_cell(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Rows whose last cell (Alerts) ends in "…" where the other columns leave
+    it too little of ``width``: the screen edge cut "hooks unreachable" to
+    "hooks unre" at 80x24 (GAP-0163). DataTable pads every cell by one
+    column a side; the last column's right pad may be cut."""
+    if width <= 0 or not rows:
+        return rows
+    widths = [max(map(len, column)) for column in zip(columns, *rows, strict=True)]
+    room = max(len(columns[-1]), width - sum(cells + 2 for cells in widths[:-1]) - 1)
+    if widths[-1] <= room:
+        return rows
+    return tuple(
+        (*row[:-1], row[-1] if len(row[-1]) <= room else row[-1][: room - 1].rstrip(" ,") + "…") for row in rows
+    )
 
 
 def _tool_calls_text(row: SandboxRow) -> str:
@@ -551,6 +699,9 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         created_at=_time(item.get("created_at")),
         destinations=_int(egress.get("destinations")),
         blocked=_int(egress.get("blocked")),
+        model_providers=_int(egress.get("model_providers")),
+        harness_vendor=_int(egress.get("harness_vendor")),
+        shadow_ai=_int(egress.get("shadow_ai")),
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
         tool_blocked=_int(hooks.get("tool_blocked")),
@@ -563,16 +714,65 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         hooks_unreachable=bool(hooks.get("unreachable")),
         unreachable_reason=_text(hooks.get("unreachable_reason")),
         ingress_refused=_int(hooks.get("ingress_refused")),
+        placeholder_refused=bool(hooks.get("placeholder_refused_at")),
         hook_failed=_int(hooks.get("hook_failed")),
         last_hook_failure=_text(hooks.get("last_hook_failure")),
+        hook_failure_placeholder=_text(hooks.get("last_hook_failure_cause")) == "credential_placeholder_refused",
+        hooks_answered_at=_time(hooks.get("hooks_answered_at")),
         orphaned=bool(item.get("orphaned")),
         undo_available=bool(snapshot) and _time(snapshot.get("undone_at")) is None,
         undo_accepted=bool(snapshot) and _time(snapshot.get("accepted_at")) is not None,
         nested_repos=nested,
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
-        run_image=_text(item.get("run_image")),
+        image=_text(item.get("image")),
+        process_tree=bool(item.get("process_tree")),
+        repo_policy=bool(_dict(item.get("repo_policy"))),
+        repo_tightened=tuple(_text(s) for s in _list(_dict(item.get("repo_policy")).get("tightened")) if _text(s)),
     )
+
+
+# PROCESS_TREE_LINES bounds the process tree the sandbox detail shows.
+PROCESS_TREE_LINES = 12
+
+
+def process_tree_lines(payload: Any, *, limit: int = PROCESS_TREE_LINES, width: int = 72) -> tuple[str, ...]:
+    """The sandbox detail's process tree (``GET /sandboxes/{name}/processes``).
+
+    Each process sits under its parent; a process whose parent is not listed
+    starts a tree of its own. At most ``limit`` lines of ``width`` characters:
+    the agent chooses its processes' names and arguments.
+    """
+    procs = [p for p in (_dict(x) for x in _list(_dict(payload).get("processes"))) if _int(p.get("pid")) > 0]
+    by_pid = {_int(p.get("pid")): p for p in procs}
+    children: dict[int, list[dict[str, Any]]] = {}
+    roots: list[dict[str, Any]] = []
+    for proc in procs:
+        pid, ppid = _int(proc.get("pid")), _int(proc.get("ppid"))
+        if ppid in by_pid and ppid != pid:
+            children.setdefault(ppid, []).append(proc)
+        else:
+            roots.append(proc)
+    lines: list[str] = []
+    seen: set[int] = set()
+
+    def walk(proc: dict[str, Any], depth: int) -> None:
+        pid = _int(proc.get("pid"))
+        if pid in seen or depth > 32:
+            return
+        seen.add(pid)
+        command = _text(proc.get("cmdline")) or _text(proc.get("comm")) or "?"
+        line = f"{'  ' * depth}{pid} {command}"
+        lines.append(line if len(line) <= width else line[: width - 1] + "…")
+        for child in sorted(children.get(pid, []), key=lambda p: _int(p.get("pid"))):
+            walk(child, depth + 1)
+
+    for root in sorted(roots, key=lambda p: _int(p.get("pid"))):
+        walk(root, 0)
+    if len(lines) > limit:
+        more = len(lines) - limit
+        lines = lines[:limit] + [f"...and {more} more (defenseclaw sandbox ps --tree)"]
+    return tuple(lines)
 
 
 @dataclass(frozen=True)
@@ -583,6 +783,9 @@ class ActivityRow:
     time: datetime | None
     kind: str
     sandbox: str = ""
+    # The feed that numbered seq: a restarted daemon numbers from one again
+    # under another epoch.
+    epoch: str = ""
     host: str = ""
     port: int = 0
     category: str = ""
@@ -593,6 +796,8 @@ class ActivityRow:
     tool: str = ""
     severity: str = ""
     bytes_up: int = 0
+    # The refusals like this one folded into it ("(and N more like it)").
+    repeats: int = 0
     # An unblock (or an approved ask for the same host) lifted this block
     # since it happened; ``lifted_by`` says which.
     unblocked: bool = False
@@ -601,7 +806,7 @@ class ActivityRow:
     @property
     def key(self) -> tuple[Any, ...]:
         """What tells this event apart from every other, across daemon restarts too."""
-        return (self.seq, self.time, self.kind, self.sandbox, self.host, self.port)
+        return (self.epoch, self.seq, self.time, self.kind, self.sandbox, self.host, self.port)
 
     @property
     def blocked_destination(self) -> bool:
@@ -629,10 +834,17 @@ class ActivityRow:
 
     @property
     def why(self) -> str:
-        """The block's category or reason in plain words ("webhook catcher")."""
+        """The block's category or reason in plain words ("webhook catcher"), as
+        sandboxcli.activityLine words it: SSH first, then a large upload, then
+        a metadata or link-local host by name whatever refused it."""
+        if self.kind == "egress.blocked" and self.port == SSH_PORT and self.host:
+            return ssh_blocked_text(self.host)
         if self.category == LARGE_UPLOAD_CATEGORY:
             return large_upload_blocked_text(self.reason)
-        return reason_label(self.category or self.reason)
+        token = self.category or self.reason
+        if token.strip() and metadata_or_link_local(self.host):
+            return METADATA_TEXT
+        return reason_label(token)
 
     @property
     def explanation(self) -> str:
@@ -649,12 +861,16 @@ class ActivityRow:
         if text[:1] in {"✓", "✗", "⚠", "?", "↺", "⊘"}:
             text = text[1:].strip()
         if self.kind == "egress.allowed":
+            if self.host == OPENSHELL_HOST_ALIAS and self.port > 0:
+                # As sandboxcli.activityLine words it (GAP-0154, GAP-0182).
+                return f"{host_port(self.host, self.port)} (port {self.port} on this machine)"
             return host_port(self.host, self.port) or text
         if self.kind == "egress.blocked":
             if not self.host:
                 return text or reason_label(self.reason) or "a destination was blocked"
             why = self.why
-            return host_port(self.host, self.port) + (f" ({why})" if why else "")
+            more = f" (and {self.repeats} more like it)" if self.repeats > 0 else ""
+            return host_port(self.host, self.port) + (f" ({why})" if why else "") + more
         if self.kind == "approval.requested":
             # The daemon's message is a whole sentence ("the sandbox asks to
             # reach port 5432 on your machine"), as the Go CLI prints it; a
@@ -699,21 +915,25 @@ def decode_activity(raw: Any) -> ActivityRow | None:
     if kind == "sandbox.lifecycle" and not message:
         phase = _text(item.get("phase")).lower()
         message = f"now {phase}" if phase else ""
+    port = _int(item.get("port"))
     return ActivityRow(
         seq=_int(item.get("seq")),
         time=_time(item.get("time")),
         kind=kind,
         sandbox=_text(item.get("sandbox")),
+        epoch=_text(item.get("epoch")),
         host=_text(item.get("host")),
-        port=_int(item.get("port")),
+        port=port,
         category=_text(item.get("category")),
         reason=_text(item.get("reason")),
         message=message,
-        unblockable=bool(item.get("unblockable")),
+        # No unblock opens SSH out of a sandbox (sandboxcli.sshPort).
+        unblockable=bool(item.get("unblockable")) and not (kind == "egress.blocked" and port == SSH_PORT),
         approval_id=_text(item.get("approval_id")),
         tool=_text(item.get("tool")),
         severity=_text(item.get("severity")),
         bytes_up=_int(item.get("bytes_up")),
+        repeats=_int(item.get("repeats")),
     )
 
 
@@ -800,7 +1020,7 @@ _SHORT_ASK_REASONS: tuple[tuple[re.Pattern[str], str], ...] = (
 def _host_local(host: str) -> bool:
     """triage.IsHostLocal: this machine's names and loopback or unspecified addresses."""
     text = normalize_host(host)
-    if text in {"localhost", "host.openshell.internal", "host.docker.internal", "gateway.docker.internal"}:
+    if text in {"localhost", OPENSHELL_HOST_ALIAS, "host.docker.internal", "gateway.docker.internal"}:
         return True
     if text.endswith(".localhost"):
         return True
@@ -867,6 +1087,9 @@ class SandboxStatus:
     sandboxes: int = 0
     running: int = 0
     pending_approvals: int = 0
+    # What holds this machine's OpenShell gateway port while sandboxes are
+    # off for this account and another account's process holds it (GAP-0307).
+    gateway_elsewhere: str = ""
     # gateway.driver: the compute driver the gateway runs ("docker", "vm");
     # empty from a daemon older than the field, or before a gateway answered.
     driver: str = ""
@@ -898,6 +1121,7 @@ def decode_status(raw: Any) -> SandboxStatus:
         enabled=bool(item.get("enabled")),
         available=bool(item.get("available")),
         reason=_text(item.get("reason")),
+        gateway_elsewhere=_text(item.get("gateway_elsewhere")),
         gateway=gateway_text.strip(),
         driver=driver,
         ingress_addr=_text(item.get("ingress_addr")),
@@ -983,9 +1207,9 @@ class SandboxesPanelModel:
     error: str = ""
     fetched_at: datetime | None = None
     last_seq: int = 0
-    # The event last_seq names, which tells a daemon that started its feed
-    # over from one that stayed quiet (resume_point_lost).
-    _resume_event: ActivityRow | None = None
+    # The epoch of the feed last_seq is from, which tells a daemon that
+    # started its feed over from one that stayed quiet (resume_point_lost).
+    _epoch: str = ""
     stream_state: str = "idle"
     admin: AdminPolicy = field(default_factory=AdminPolicy)
     wrappers: tuple[str, ...] = ()
@@ -997,6 +1221,17 @@ class SandboxesPanelModel:
     # another item the operator did not pick, so the next action key there
     # is refused once.
     _selection_lost: set[str] = field(default_factory=set)
+    # The process tree of each sandbox whose detail was opened last
+    # (set_processes), as the detail shows it.
+    processes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # The Alerts panel's alerts raised in each sandbox, by severity
+    # (set_alert_events): the Alerts cell named only health alerts, so a
+    # sandbox whose tool call a rule blocked showed "-" (GAP-0311).
+    finding_alerts: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def set_processes(self, name: str, payload: Any) -> None:
+        """Keep a sandbox's process tree for its detail."""
+        self.processes[name] = process_tree_lines(payload)
 
     # ---- snapshot ---------------------------------------------------------
 
@@ -1027,6 +1262,44 @@ class SandboxesPanelModel:
     def set_error(self, message: str) -> None:
         """Record a failed refresh; the previous snapshot stays."""
         self.error = message
+
+    def set_alert_events(self, events: Any) -> None:
+        """Count the alerts (the Alerts panel's events) raised in each listed sandbox.
+
+        An alert older than the sandbox belongs to an earlier one of the same name.
+        """
+        created = {row.name: row.created_at for row in self.rows}
+        counts: dict[str, dict[str, int]] = {}
+        for event in events or ():
+            name = getattr(event, "sandbox", "")
+            if name not in created:
+                continue
+            since, at = created[name], getattr(event, "timestamp", None)
+            if since is not None and isinstance(at, datetime) and (at if at.tzinfo else at.replace(tzinfo=timezone.utc)) < since:
+                continue
+            severity = (getattr(event, "severity", "") or "INFO").upper()
+            by_severity = counts.setdefault(name, {})
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+        self.finding_alerts = counts
+
+    def alerts_cell(self, row: SandboxRow, *, short: bool = False) -> str:
+        """The Alerts cell: the row's health alerts, then how many alerts it raised."""
+        health = row.badge(short=short)
+        count = sum(self.finding_alerts.get(row.name, {}).values())
+        if not count:
+            return health
+        raised = "1 alert" if count == 1 else f"{count} alerts"
+        return raised if health == "-" else f"{health}, {raised}"
+
+    def alerts_text(self, row: SandboxRow) -> str:
+        """The detail's Alerts line, or "" when the sandbox raised none."""
+        by_severity = self.finding_alerts.get(row.name, {})
+        if not by_severity:
+            return ""
+        order = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+        ranked = sorted(by_severity.items(), key=lambda item: (order.index(item[0]) if item[0] in order else len(order), item[0]))
+        counts = ", ".join(f"{n} {severity}" for severity, n in ranked)
+        return f"{sum(by_severity.values())} ({counts}): Alerts (2), then / {row.name}, lists them; or run defenseclaw alerts"
 
     def set_config(self, cfg: object | None) -> None:
         self.admin = admin_policy_from_config(cfg)
@@ -1071,7 +1344,7 @@ class SandboxesPanelModel:
                 else:
                     self.last_seq = max(self.last_seq, row.seq)
                 if row.seq and row.seq == self.last_seq:
-                    self._resume_event = row
+                    self._epoch = row.epoch
             if row.kind == "egress.unblocked" and row.host:
                 # Scope "always" lifts the host in every sandbox.
                 self.mark_unblocked(row.sandbox, row.host, always=row.reason == "always")
@@ -1092,27 +1365,23 @@ class SandboxesPanelModel:
     def resume_point_lost(self, events: Any) -> bool:
         """Whether the daemon's feed started over, from a read of the events after ``last_seq - 1``.
 
-        The feed keeps the event ``last_seq`` names until newer events push it
-        out, so a feed that still counts on answers with it (or with newer
-        ones). An empty answer, or another event under that number, is a new
-        feed: the daemon restarted and numbers its events from one again, so
-        resuming after ``last_seq`` would skip its first events.
+        Every event names the feed (its epoch), and a daemon that restarted
+        numbers its events from one again in a new feed, so resuming after
+        ``last_seq`` would skip its first events. An answer from another
+        feed is a new one, and so is an empty answer: the feed keeps the
+        event ``last_seq`` names until newer events push it out.
         """
         if self.last_seq <= 0:
             return False
         rows = [row for row in (decode_activity(raw) for raw in _list(events)) if row and row.kind != "dropped"]
         if not rows:
             return True
-        same = next((row for row in rows if row.seq == self.last_seq), None)
-        if same is None:
-            # Only newer events: they pushed the resume point out of the feed.
-            return False
-        return self._resume_event is not None and same.key != self._resume_event.key
+        return rows[0].epoch != self._epoch
 
     def reset_resume_point(self) -> None:
         """Read the daemon's feed from its start again (after resume_point_lost)."""
         self.last_seq = 0
-        self._resume_event = None
+        self._epoch = ""
 
     def mark_unblocked(self, sandbox: str, host: str, *, always: bool = False, lifted_by: str = "unblocked") -> None:
         """Mark the feed's earlier blocks of ``host`` as lifted.
@@ -1160,7 +1429,7 @@ class SandboxesPanelModel:
             if last is not None and clock - last < TOAST_DEDUPE_SECONDS:
                 return None
             self._toasted[key] = clock
-            why = f" ({row.category or row.reason})" if (row.category or row.reason) else ""
+            why = f" ({row.why})" if row.why else ""
             where = f" in {row.sandbox}" if row.sandbox else ""
             # An unblockable block holds the host on every port: the port of
             # the first request would say it stops there.
@@ -1217,26 +1486,36 @@ class SandboxesPanelModel:
         newest event first), so an index alone would point at another item
         after a refresh. When the item itself is gone, the view is marked so
         its next action key is refused rather than applied to a neighbour.
+        A view left empty has no neighbour: a row that comes later is the one
+        on screen under the cursor, as in a view just opened (GAP-0328).
         """
         for view, key in before.items():
             keys = self._item_keys(view)
             if key in keys:
                 self.cursors[view] = keys.index(key)
-            else:
+            elif keys:
                 self._selection_lost.add(view)
+            else:
+                self._selection_lost.discard(view)
         self._clamp()
+
+    def shown(self) -> None:
+        """The panel came into view: the rows under the cursors are what the user sees now (GAP-0328)."""
+        self._selection_lost.clear()
 
     def _take_lost_selection(self) -> str:
         """The refusal for an action key whose selected item went away, once."""
         if self.view not in self._selection_lost:
             return ""
         self._selection_lost.discard(self.view)
+        # The cursor's row, not a choice the user made: it may never have
+        # moved (GAP-0261).
         gone = {
-            "sandboxes": "The sandbox you selected is gone",
-            "asks": "The ask you selected is no longer waiting",
-            "activity": "The event you selected has left the feed",
+            "sandboxes": "The sandbox the cursor was on is gone",
+            "asks": "The ask the cursor was on is no longer waiting",
+            "activity": "The event the cursor was on has left the feed",
         }[self.view]
-        return f"{gone}; nothing was done. Check the selection, then press the key again."
+        return f"{gone}; nothing was done. Select one, then press the key again."
 
     @property
     def cursor(self) -> int:
@@ -1366,6 +1645,10 @@ class SandboxesPanelModel:
         if key == "t":
             index = SANDBOX_VIEWS.index(self.view)
             self.view = SANDBOX_VIEWS[(index + 1) % len(SANDBOX_VIEWS)]
+            # The row under the cursor of the view just opened is what the
+            # user sees: one that went away while the view was hidden is no
+            # selection of theirs (GAP-0328).
+            self._selection_lost.discard(self.view)
             return SandboxPanelAction("view")
         if key == "enter":
             if self._view_len(self.view):
@@ -1511,6 +1794,15 @@ class SandboxesPanelModel:
             return "unavailable"
         return "ready"
 
+    def off_hint(self) -> str:
+        """What an action that needs sandboxes says while they are off."""
+        if self.status.gateway_elsewhere:
+            return (
+                "Sandboxes are off for this account: another account runs this machine's OpenShell gateway; "
+                "see: defenseclaw sandbox doctor"
+            )
+        return "Sandboxes are off; run the Sandbox wizard (0 Setup) first"
+
     def headline(self, max_width: int = 0) -> str:
         """The status line; ``max_width`` drops the gateway name first when short of room."""
         state = self.state()
@@ -1519,6 +1811,12 @@ class SandboxesPanelModel:
         if state == "unreachable":
             return f"The DefenseClaw daemon is not answering: {self.error}"
         if state == "off":
+            if self.status.gateway_elsewhere:
+                # Setup would stop at the other account's gateway (GAP-0307).
+                return (
+                    "Sandboxes are off for this account: another account runs this machine's OpenShell gateway. "
+                    "Run sandboxes from that account, or have it hand the gateway over; see: defenseclaw sandbox doctor"
+                )
             return "Sandboxes are off. Set them up in Setup (0) → Sandboxes (OpenShell), or run: defenseclaw sandbox setup"
         if state == "unavailable":
             reason = self.status.reason or "the daemon is not connected to OpenShell"
@@ -1581,7 +1879,8 @@ class SandboxesPanelModel:
             return f"  ({ADMIN_UNBLOCK_IGNORED})"
         return "  (u unblocks)" if row.unblockable else ""
 
-    def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, compact: bool = False, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """``width`` (cells the table may use, 0 = unknown) cuts the Sandboxes view's Alerts cells to fit."""
         if self.view == "activity":
             return tuple(
                 (row.time_text, row.sandbox or "-", row.glyph, row.summary + self._feed_suffix(row))
@@ -1612,7 +1911,7 @@ class SandboxesPanelModel:
                 for ask in self.asks
             )
         if compact:
-            return tuple(
+            rows = tuple(
                 (
                     row.name,
                     row.phase or "-",
@@ -1620,25 +1919,27 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
-                    row.alert_badge,
+                    self.alerts_cell(row, short=True),
                 )
                 for row in self.rows
             )
-        return tuple(
-            (
-                row.name,
-                row.phase or "-",
-                row.harness_label,
-                row.policy_label,
-                row.workdir_mode or "-",
-                row.uptime_text,
-                str(row.destinations),
-                str(row.blocked),
-                _tool_calls_text(row),
-                row.alert_badge,
+        else:
+            rows = tuple(
+                (
+                    row.name,
+                    row.phase or "-",
+                    row.harness_label,
+                    row.policy_label,
+                    row.workdir_mode or "-",
+                    row.uptime_text,
+                    str(row.destinations),
+                    str(row.blocked),
+                    _tool_calls_text(row),
+                    self.alerts_cell(row),
+                )
+                for row in self.rows
             )
-            for row in self.rows
-        )
+        return _fit_last_cell(self.data_table_columns(compact), rows, width)
 
     def empty_state(self) -> str:
         if self.view == "activity":
@@ -1704,8 +2005,14 @@ class SandboxesPanelModel:
         note = f"+{more} more · Enter" if more else "Enter for details"
         return f"⚠ {row.name}: {alert}", note
 
-    def detail_pairs(self) -> tuple[str, tuple[tuple[str, str], ...]]:
-        """Title and label/value pairs for the detail modal."""
+    def detail_pairs(self, destinations: Any = None, *, run: str = "") -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Title and label/value pairs for the detail modal.
+
+        ``destinations`` is the selected sandbox's ``GET .../destinations``
+        answer (the panel fetches it as the detail opens), or an error
+        string; ``None`` leaves the Destinations section out. ``run`` is the
+        kept detached run's line (detached_run_text).
+        """
         if self.view == "activity":
             event = self.selected_event()
             if event is None:
@@ -1736,6 +2043,8 @@ class SandboxesPanelModel:
                     unblock = f"{ADMIN_MESSAGE}; {ADMIN_UNBLOCK_NEXT}"
                 elif event.unblockable:
                     unblock = "press u"
+                elif event.port == SSH_PORT:
+                    unblock = "no unblock opens SSH: use an HTTPS remote"
                 else:
                     unblock = "not unblockable here (private networks, metadata and your organization's blocks)"
                 pairs.append(("Unblock", unblock))
@@ -1777,19 +2086,28 @@ class SandboxesPanelModel:
             ("Phase", row.phase or "-"),
             ("Up", row.uptime_text),
             ("Policy", row.policy_label),
+            *((("Repo policy", row.repo_policy_text),) if row.repo_policy else ()),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
-            ("Sites", f"{row.destinations} contacted, {row.blocked} blocked"),
+            ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
+        if run:
+            pairs.append(("Detached run", run))
         if row.hook_events_text:
             pairs.append(("Hook events", row.hook_events_text))
         if row.last_blocked:
             pairs.append(("Last tool block", verdict_reason(row.last_blocked)))
         if row.pending_approvals:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
-        if row.run_image:
-            pairs.append(("Run image", row.run_image))
+        if row.image:
+            pairs.append(("Image", row.image))
+        if row.process_tree:
+            tree = self.processes.get(row.name) if row.running else None
+            if tree:
+                pairs.append(("Processes", "\n".join(tree)))
+            else:
+                pairs.append(("Processes", "none sampled yet (every 5 s while it runs)" if row.running else "none while it is stopped"))
         if row.copy_mode:
             pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
             pairs.append(("Undo", "reverts the last pull --apply (U)"))
@@ -1798,6 +2116,12 @@ class SandboxesPanelModel:
             pairs.append(("Undo", f"available (U); {kept}"))
         else:
             pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
+        if isinstance(destinations, str):
+            pairs.append(("Destinations", destinations))
+        elif destinations is not None:
+            pairs.extend(destination_pairs(destinations, row.name))
+        if raised := self.alerts_text(row):
+            pairs.append(("Alerts", raised))
         for alert in row.alerts:
             pairs.append(("Alert", alert))
         for violation in row.violations:
@@ -1827,6 +2151,80 @@ class SandboxesPanelModel:
         if self.asks:
             line += f" · {len(self.asks)} ask(s) waiting (7)"
         return line
+
+
+def _ai_sites_text(row: SandboxRow) -> str:
+    """The AI part of the Sites line, by destination kind (GAP-0319): "" without AI destinations."""
+    parts = []
+    if row.model_providers:
+        parts.append(_plural(row.model_providers, "model provider", "model providers"))
+    if row.harness_vendor:
+        parts.append(_plural(row.harness_vendor, "harness vendor host", "harness vendor hosts"))
+    if row.shadow_ai:
+        parts.append(f"{row.shadow_ai} shadow AI")
+    return f" · AI: {', '.join(parts)}" if parts else ""
+
+
+# How a destination kind reads (sandboxapi Destination* kinds).
+_DESTINATION_KINDS = {
+    "model_provider": "model provider",
+    "harness_vendor": "harness vendor",
+    "other_ai_api": "shadow AI",
+    "unknown_ai": "shadow AI?",
+}
+
+# The destination rows the detail lists; the CLI shows them all.
+DETAIL_DESTINATIONS = 12
+
+
+def _destination_program(row: dict[str, Any]) -> str:
+    """sandboxcli.destinationBinary: the program that last connected; with the
+    process tree on, its lineage, the process first, then its parents."""
+    lineage = [_dict(p) for p in _list(row.get("lineage"))]
+    if len(lineage) >= 2:
+        return " ← ".join(
+            _text(p.get("comm")) or _text(p.get("exe")).rsplit("/", 1)[-1] or str(_int(p.get("pid")))
+            for p in lineage
+        )
+    binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
+    return binaries[-1] if binaries else ""
+
+
+def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS) -> tuple[tuple[str, str], ...]:
+    """The Destinations section of a sandbox's detail: one pair per host, shadow AI first, then the models."""
+    item = _dict(response)
+    rows = [_dict(r) for r in _list(item.get("destinations")) if _dict(r).get("host")]
+    models = [_dict(m) for m in _list(item.get("models"))]
+    if not rows and not models:
+        return (("Destinations", "none reached yet"),)
+    pairs: list[tuple[str, str]] = []
+    for row in rows[:limit]:
+        kind = _text(row.get("kind"))
+        what = _DESTINATION_KINDS.get(kind, kind.replace("_", " ") or "other")
+        # An AI provider, or why a refused host was refused, in words: the
+        # category of any other row repeats its kind (GAP-0177).
+        provider = _text(row.get("provider"))
+        if not provider and kind == "blocked":
+            provider = reason_label(_text(row.get("category")))
+        if provider:
+            what += f" ({provider})"
+        # Failed counts what the proxy allowed and the host did not take
+        # (sandboxcli.destinationRequests, GAP-0284).
+        failed = _int(row.get("failed"))
+        requests = _int(row.get("connections")) + _int(row.get("tunnels")) + failed
+        refused = _int(row.get("refused")) + _int(row.get("blocked"))
+        counts = _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")
+        parts = [what, counts + (f", {failed} failed upstream" if failed else "")]
+        if program := _destination_program(row):
+            parts.append(program)
+        pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))
+    if len(rows) > limit:
+        pairs.append(("Destinations", f"+{len(rows) - limit} more: defenseclaw sandbox destinations {name}"))
+    for model in models[:4]:
+        calls = _int(model.get("calls"))
+        label = " ".join(part for part in (_text(model.get("provider")), _text(model.get("model"))) if part) or "-"
+        pairs.append(("Model calls", f"{label}: {calls}" + (f" ({_int(model.get('failed'))} failed)" if model.get("failed") else "")))
+    return tuple(pairs)
 
 
 def review_pairs(response: Any) -> tuple[tuple[str, str], ...]:

@@ -37,11 +37,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 )
 
-// Approval actors.
+// Approval actors, the Reason of an applied approval's feed event.
 const (
-	actorAutomatic = "automatic"
-	actorOperator  = "operator"
-	actorPolicy    = "policy"
+	actorAutomatic = sandboxapi.ApprovedAutomatically
+	actorOperator  = sandboxapi.ApprovedByOperator
+	actorPolicy    = sandboxapi.ApprovedByPolicy
 )
 
 // maxPendingApprovals bounds asks per sandbox so a proposal flood cannot
@@ -276,8 +276,36 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 	}
 }
 
-// harnessFetches are the requests the sandbox's harness makes around the
-// egress proxy that it does without (harness.Spec.DirectFetches).
+// harnessFetchHost reports host (and port, 0 when unknown) as one of the
+// harness's own background requests it does without
+// (harness.Spec.DirectFetches). The egress proxy's refusal of one is
+// audited (at INFO, decision code audit.SandboxEgressCodeHarnessFetch, which
+// keeps it off the alerts) but, like OpenShell's (harnessFetchDenial),
+// neither shown on the feed nor counted as a blocked site, a destination or
+// shadow AI: the proxy cannot tell the harness's request from a tool's, so
+// the host decides.
+func harnessFetchHost(harnessName, host string, port int) bool {
+	host = triage.NormalizeHost(host)
+	for _, f := range harnessFetches(harnessName) {
+		if host == triage.NormalizeHost(f.Host) && (port == 0 || port == f.Port) {
+			return true
+		}
+	}
+	return false
+}
+
+// toolHostOf says what refusing host breaks for the harness harnessName,
+// when a tool of the harness calls it on every use (harness.ToolHost).
+func toolHostOf(harnessName, host string) (string, bool) {
+	spec, ok := harness.Get(harnessName)
+	if !ok {
+		return "", false
+	}
+	return spec.ToolHostOf(triage.NormalizeHost(host))
+}
+
+// harnessFetches are the requests the sandbox's harness makes on its own
+// that it does without (harness.Spec.DirectFetches).
 func harnessFetches(name string) []triage.HarnessFetch {
 	spec, ok := harness.Get(name)
 	if !ok {
@@ -561,6 +589,12 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 		m.storeApproval(a)
 		m.rejectChunk(ctx, gw, p.Sandbox, p.ChunkID, d.Message)
 		m.recordApproval(ctx, id, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorPolicy)
+		if d.Port == 22 {
+			// SSH out of a sandbox: OpenShell's denial is on the feed
+			// already, saying what to do instead; a second line for the
+			// one attempt, with another reason, would only confuse.
+			return
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{
 			Kind: sandboxapi.ActivityEgressBlocked, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port, Source: sandboxapi.SourceOpenShell,
 			Category: string(d.Reason), Reason: string(d.Reason), Message: blockedMessage(d),
@@ -573,6 +607,9 @@ func (m *Manager) applyTriage(ctx context.Context, gw *Gateway, b *box, bindingI
 			Kind: sandboxapi.ActivityApprovalRequested, Sandbox: p.Sandbox, Host: d.Host, Port: d.Port,
 			ApprovalID: a.id, Reason: string(d.Reason), Message: d.Message,
 		})
+		// The agent's next hook says the connection waits for the user
+		// (GAP-0268).
+		m.refusals.noteDirect(bindingID, p.Sandbox, triage.NormalizeHost(d.Host), d.Port, NoteAsked, now)
 	}
 }
 
@@ -634,9 +671,7 @@ func (m *Manager) recordApproval(ctx context.Context, id audit.SandboxIdentity, 
 			}
 		}
 	}
-	if err := m.tel.RecordSandboxApproval(ctx, ev); err != nil {
-		m.logf("approval telemetry %s: %v", a.id, err)
-	}
+	m.tel.RecordSandboxApproval(ctx, ev)
 }
 
 // approvalsApplied receives the batcher's results.
@@ -762,16 +797,15 @@ func (m *Manager) approvalsApplied(results []triage.Result) {
 			continue
 		}
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalApproved, a.actor)
-		if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 			Sandbox: ident, Operation: audit.SandboxPolicyRuleAdd, PolicyHash: r.PolicyHash, Actor: approvalActor(a.actor),
 			Origin: originFor(a.actor), Target: a.decision.Host, Reason: policyReasonApproval, ChangeCount: 1, Timestamp: m.now(),
-		}); err != nil {
-			m.logf("policy telemetry for approval %s: %v", a.id, err)
-		}
+		})
 		msg := "approved " + a.decision.Host
 		if r.Forced {
 			msg += " (applied while hooks were busy)"
 		}
+		m.refusals.forgetNote(r.Item.BindingID, triage.NormalizeHost(a.decision.Host), a.decision.Port, NoteAsked)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 			Host: a.decision.Host, Port: a.decision.Port, Reason: a.actor, Message: msg})
 	}
@@ -986,9 +1020,19 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 		decided = true
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorOperator)
+		// The feed names the port as the approval does, the reply says what
+		// the reject leaves, and the agent's next hook says the user
+		// declined, not a network error (GAP-0236, GAP-0260).
+		target := host
+		if local {
+			target = fmt.Sprintf("port %d on your machine (%s:%d)", port, host, port)
+		}
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
-			Host: host, Port: port, Reason: "rejected", Message: "rejected " + host})
-		res.Message = "rejected"
+			Host: host, Port: port, Reason: "rejected", Message: "rejected " + target})
+		res.Message = fmt.Sprintf("%s stays closed to %s; its attempts in the next %s are refused without a new ask, and the one after that asks again",
+			target, a.sandbox, packs.ShortDuration(collapseWindow))
+		m.refusals.forgetNote(bindingID, triage.NormalizeHost(host), port, NoteAsked)
+		m.refusals.noteDirect(bindingID, a.sandbox, triage.NormalizeHost(host), port, NoteDeclined, m.now())
 	default:
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "decision must be approve or reject")
 	}

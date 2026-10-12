@@ -18,8 +18,11 @@ package sandboxcli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"sort"
@@ -74,6 +77,19 @@ func (a *App) explain(ctx context.Context, o PolicyOptions) (*sandboxapi.Explain
 	return ex, nil
 }
 
+// folderRepoPolicyNote is parentRepoPolicyNote for `policy show` and
+// `policy explain` of a run in this folder (no --sandbox).
+func (a *App) folderRepoPolicyNote(o PolicyOptions, ex *sandboxapi.Explain) string {
+	if o.Sandbox != "" {
+		return ""
+	}
+	project, err := a.project()
+	if err != nil {
+		return ""
+	}
+	return a.parentRepoPolicyNote(project, ex.RepoPolicy)
+}
+
 // PolicyShow prints the effective sandbox policy.
 func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 	ex, err := a.explain(ctx, o)
@@ -84,9 +100,12 @@ func (a *App) PolicyShow(ctx context.Context, o PolicyOptions) error {
 		return writeJSON(a.IO.Out, ex)
 	}
 	rows := [][2]string{
-		{"Pack", ex.Pack + " (" + ex.PackSource + ") " + ex.PackDigest},
+		{"Pack", ex.Pack + " (" + ex.PackSource + ") " + ex.PackDigest + extendsText(packLinks(ex.PackChain))},
 		{"Profile", ex.Profile}, {"Network", ex.NetworkMode}, {"Approvals", ex.Approvals},
 		{"Organization", adminText(ex.Admin)},
+	}
+	if text := firstNonEmpty(repoPolicyText(ex.RepoPolicy), a.folderRepoPolicyNote(o, ex)); text != "" {
+		rows = append(rows, [2]string{"Repository", text})
 	}
 	for _, key := range []string{"yolo", "harness.allowed", "workdir.mode", "egress.feeds", "egress.block", "egress.admin_block",
 		"egress.allow", "egress.allow_only", "egress.ports", "mcp.import", "hooks.fail_mode"} {
@@ -231,6 +250,33 @@ func adminText(s sandboxapi.AdminStatus) string {
 	return s.Authority + ": " + s.Detail
 }
 
+// repoPolicyChangedNote says, in a sandbox's explain, that its repository
+// policy file changed on the host since the sandbox was created: nothing
+// said that the running sandbox keeps the policy it was created with, and
+// that the change applies to the next new run (GAP-0338). "" when the file
+// is as it was, or cannot be read.
+func repoPolicyChangedNote(name string, rp *sandboxapi.RepoPolicy) string {
+	if rp.Path == "" || !strings.HasPrefix(rp.Digest, "sha256:") {
+		return ""
+	}
+	keeps := name + " keeps the policy it was created with, and the change applies to the next new run (which refuses one that loosens it)"
+	info, err := os.Stat(rp.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "the repository policy file is gone since " + name + " was created; " + keeps
+	case err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20:
+		return ""
+	}
+	data, err := os.ReadFile(rp.Path)
+	if err != nil {
+		return ""
+	}
+	if sum := sha256.Sum256(data); "sha256:"+hex.EncodeToString(sum[:]) == rp.Digest {
+		return ""
+	}
+	return "the repository policy file changed since " + name + " was created; " + keeps
+}
+
 // PolicyExplain prints every resolved setting with its provenance.
 func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	ex, err := a.explain(ctx, o)
@@ -243,7 +289,21 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	head := "pack " + ex.Pack + " " + ex.PackDigest + " from "
 	a.line(a.bold("pack "+ex.Pack) + " " + ex.PackDigest + " from " +
 		truncate(ex.PackSource, max(explainWidth-2-utf8.RuneCountInString(head), 24)))
+	for _, link := range ex.PackChain {
+		a.line(truncate("  extends "+link.Name+" "+link.Digest+" from "+link.Source, explainWidth-2))
+	}
 	a.line(truncate("organization: "+adminText(ex.Admin), explainWidth-2))
+	if rp := ex.RepoPolicy; rp != nil {
+		a.line(truncate("repository: "+rp.Path+" "+rp.Digest, explainWidth-2))
+		a.line(truncate("  "+repoPolicyText(rp)+"; settings it decided have the source repo", explainWidth-2))
+		if o.Sandbox != "" {
+			if note := repoPolicyChangedNote(o.Sandbox, rp); note != "" {
+				a.note(note)
+			}
+		}
+	} else if note := a.folderRepoPolicyNote(o, ex); note != "" {
+		a.line("repository: " + note)
+	}
 	// Every line fits explainWidth columns: the key, source and origin
 	// columns take what they need (the origin cut to explainOriginWidth),
 	// and long values (the masks, the blocklist) get the rest, cut to the
@@ -356,84 +416,6 @@ func (a *App) adminConstraints() []string {
 	return out
 }
 
-// SuggestOptions are the `policy suggest` flags.
-type SuggestOptions struct {
-	Sandbox string
-	Output  OutputFormat
-}
-
-// PolicySuggest summarizes the destinations sandboxes reached into an
-// allowlist for the balanced profile.
-func (a *App) PolicySuggest(ctx context.Context, o SuggestOptions) error {
-	api, err := a.api()
-	if err != nil {
-		return err
-	}
-	counts := map[string]int{}
-	blocked := map[string]int{}
-	err = api.Activity(ctx, sandboxapi.ActivityQuery{Sandbox: o.Sandbox}, func(ev sandboxapi.ActivityEvent) error {
-		switch ev.Kind {
-		case sandboxapi.ActivityEgressAllowed:
-			if ev.Host != "" {
-				counts[strings.ToLower(ev.Host)]++
-			}
-		case sandboxapi.ActivityEgressBlocked:
-			if ev.Host != "" {
-				blocked[strings.ToLower(ev.Host)]++
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return apiError(err)
-	}
-	hosts := make([]string, 0, len(counts))
-	for h := range counts {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
-	if o.Output == OutputJSON {
-		type entry struct {
-			Host  string `json:"host"`
-			Count int    `json:"count"`
-		}
-		out := struct {
-			Allow   []entry  `json:"allow"`
-			Blocked []string `json:"blocked,omitempty"`
-		}{Allow: []entry{}}
-		for _, h := range hosts {
-			out.Allow = append(out.Allow, entry{h, counts[h]})
-		}
-		for h := range blocked {
-			out.Blocked = append(out.Blocked, h)
-		}
-		sort.Strings(out.Blocked)
-		return writeJSON(a.IO.Out, out)
-	}
-	if len(hosts) == 0 {
-		a.note("no allowed destinations in the activity buffer yet; run a session first")
-		return nil
-	}
-	a.println("# Destinations your sandboxes reached (" + CommandName + " policy suggest).")
-	a.println("# Add them to config.yaml, then switch to the default-deny profile with --profile balanced.")
-	a.println("openshell:")
-	a.println("  egress:")
-	a.println("    allow:")
-	for _, h := range hosts {
-		a.printf("      - %s  # %d\n", h, counts[h])
-	}
-	if len(blocked) > 0 {
-		var list []string
-		for h := range blocked {
-			list = append(list, h)
-		}
-		sort.Strings(list)
-		a.println("# Blocked (not suggested): " + strings.Join(list, ", "))
-	}
-	a.println("# Or one at a time: " + CommandName + " policy allow HOST")
-	return nil
-}
-
 // PolicyEdit adds hosts to openshell.egress.allow or openshell.egress.block.
 func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error {
 	if len(hosts) == 0 {
@@ -470,6 +452,57 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	a.ok("added " + strings.Join(added, ", ") + " to " + key)
 	if list == "allow" {
 		a.note("allow entries matter in the balanced and strict profiles; open allows everything not blocked")
+	}
+	a.note("the daemon applies it to running sandboxes within a few seconds")
+	return nil
+}
+
+// PolicyRemove removes hosts from openshell.egress.allow or
+// openshell.egress.block (`sandbox policy allow|block --remove`), entries
+// matched as written, letter case aside: before it, only `config unset`
+// emptied a whole list, and a block entry stays a block no unblock lifts
+// (GAP-0151).
+func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) error {
+	if len(hosts) == 0 {
+		return errors.New("name at least one host")
+	}
+	key := "openshell.egress." + list
+	var current []string
+	if a.Cfg != nil {
+		switch list {
+		case "allow":
+			current = a.Cfg.OpenShell.Egress.Allow
+		case "block":
+			current = a.Cfg.OpenShell.Egress.Block
+		default:
+			return fmt.Errorf("unknown egress list %q", list)
+		}
+	}
+	var next, removed, missing []string
+	for _, have := range current {
+		if slices.ContainsFunc(hosts, func(h string) bool { return strings.EqualFold(config.NormalizeOpenShellEgressPattern(h), have) }) {
+			removed = append(removed, have)
+		} else {
+			next = append(next, have)
+		}
+	}
+	for _, h := range hosts {
+		if !slices.ContainsFunc(removed, func(r string) bool { return strings.EqualFold(r, config.NormalizeOpenShellEgressPattern(h)) }) {
+			missing = append(missing, h)
+		}
+	}
+	if len(removed) == 0 {
+		return fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), key, CommandName)
+	}
+	if next == nil {
+		next = []string{}
+	}
+	if err := a.patchConfig(map[string]any{key: next}); err != nil {
+		return err
+	}
+	a.ok("removed " + strings.Join(removed, ", ") + " from " + key)
+	if len(missing) > 0 {
+		a.warn(strings.Join(missing, ", ") + " is not in " + key)
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
 	return nil
@@ -649,8 +682,11 @@ func (a *App) PackList(o PackOptions) error {
 			invalid = append(invalid, e)
 		}
 		kind := "custom"
-		if e.Builtin {
+		switch {
+		case e.Builtin:
 			kind = "built-in"
+		case e.Extends != "":
+			kind = "custom, extends " + e.Extends
 		}
 		rows = append(rows, []string{e.Name, kind, e.Profile, digest})
 	}
@@ -677,6 +713,12 @@ func (a *App) PackShow(ref string, o PackOptions) error {
 	}
 	a.println("# pack " + p.Name + " (" + p.Source + ")")
 	a.println("# digest " + p.Digest + "  (pin it with openshell.admin.required_pack_digest)")
+	for _, link := range p.Chain {
+		a.println("# extends " + link.Name + " (" + link.Source + ") " + link.Digest)
+	}
+	if len(p.Chain) > 0 {
+		a.println("# the settings below are the merged result; the file sets only what it changes")
+	}
 	_, err = a.IO.Out.Write(data)
 	return err
 }
@@ -684,10 +726,34 @@ func (a *App) PackShow(ref string, o PackOptions) error {
 // PackValidate strictly loads a pack file.
 func (a *App) PackValidate(path string) error {
 	a.defaults()
-	p, err := packs.Validate(path)
+	p, err := packs.Validate(path, a.packDir())
 	if err != nil {
 		return err
 	}
-	a.ok("valid pack " + p.Name + " (profile " + p.Profile() + ") " + p.Digest)
+	a.ok("valid pack " + p.Name + " (profile " + p.Profile() + ") " + p.Digest + extendsText(p.Chain))
 	return nil
+}
+
+// packLinks is an explain's pack chain as the packs package names it.
+func packLinks(chain []sandboxapi.PackLink) []packs.PackLink {
+	out := make([]packs.PackLink, 0, len(chain))
+	for _, l := range chain {
+		out = append(out, packs.PackLink{Name: l.Name, Builtin: l.Builtin, Source: l.Source, Digest: l.Digest})
+	}
+	return out
+}
+
+// extendsText names the packs a pack extends (" extends a, which extends
+// b"), or "".
+func extendsText(chain []packs.PackLink) string {
+	var b strings.Builder
+	for i, link := range chain {
+		if i == 0 {
+			b.WriteString(" extends ")
+		} else {
+			b.WriteString(", which extends ")
+		}
+		b.WriteString(link.Name)
+	}
+	return b.String()
 }

@@ -117,10 +117,12 @@ var (
 	// on a change (Write). Rollback returns it once it has restored the
 	// files.
 	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
-	// ErrBrewNeedsTerminal means Homebrew refused `brew services` because
-	// the shell runs under tmux: it answers nothing about the gateway
-	// service there (GAP-0274).
-	ErrBrewNeedsTerminal = errors.New("openshell: brew services needs a normal terminal: Homebrew refuses to run it under tmux")
+	// ErrGatewayServiceStopped means the gateway service is installed but
+	// not running. Rollback returns it once it has restored the files,
+	// without the restart, which would start the service: it loads them when
+	// it starts. With another account's gateway on the port, a restart left
+	// the service restarting forever (GAP-0149).
+	ErrGatewayServiceStopped = errors.New("openshell: the gateway service is not running")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -435,6 +437,18 @@ type GatewayConfigState struct {
 	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
 	server gatewayServer
+	// docker holds the images the docker driver starts with
+	// (RuntimeImages).
+	docker dockerRuntime
+}
+
+// dockerRuntime is what [openshell.drivers.docker] in gateway.toml says
+// about the images OpenShell's docker driver starts with: each one set
+// replaces a default image of the gateway's release.
+type dockerRuntime struct {
+	// SupervisorImage is supervisor_image, SandboxRuntimeImage
+	// sandbox_runtime_image and SupervisorBin supervisor_bin.
+	SupervisorImage, SandboxRuntimeImage, SupervisorBin string
 }
 
 // Driver is the compute driver the configuration selects, and false when
@@ -606,6 +620,9 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 						ResourceAdmission struct {
 							Enabled *bool `toml:"enabled"`
 						} `toml:"resource_admission"`
+						SupervisorImage     string `toml:"supervisor_image"`
+						SandboxRuntimeImage string `toml:"sandbox_runtime_image"`
+						SupervisorBin       string `toml:"supervisor_bin"`
 					} `toml:"docker"`
 					VM struct {
 						SandboxUID     *int64 `toml:"sandbox_uid"`
@@ -629,6 +646,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 		if d.ResourceAdmission.Enabled != nil {
 			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
 		}
+		st.docker = dockerRuntime{SupervisorImage: d.SupervisorImage, SandboxRuntimeImage: d.SandboxRuntimeImage, SupervisorBin: d.SupervisorBin}
 		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
 	st.overrideFromEnv()
@@ -806,7 +824,7 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
 		for _, s := range f.Summary {
-			fmt.Fprintf(&b, "    set %s\n", s)
+			fmt.Fprintf(&b, "    %s\n", summaryLine(s))
 		}
 		if !f.TOML {
 			// gateway.env may hold credentials: show only the summary.
@@ -837,6 +855,20 @@ func (p *GatewayPlan) String() string {
 		fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
 	}
 	return b.String()
+}
+
+// summaryLine is one change of a plan's file: "set KEY = VALUE", or
+// "remove KEY" for a gateway.env variable it drops (editEnvFile's
+// "unset KEY"), saying what that leaves.
+func summaryLine(s string) string {
+	k, ok := strings.CutPrefix(s, "unset ")
+	switch {
+	case !ok:
+		return "set " + s
+	case k == EnvTelemetryEnabled:
+		return "remove " + k + " (OpenShell's usage telemetry stays on, its default)"
+	}
+	return "remove " + k
 }
 
 // Plan computes the changes without touching anything. On Linux it first
@@ -1240,20 +1272,9 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	if a := s.Auth.AllowUnauthenticatedUsers; a != nil && *a {
 		issues = append(issues, "[openshell.gateway.auth] allow_unauthenticated_users is on")
 	}
-	host, port := "127.0.0.1", strconv.Itoa(defaultGatewayPort)
-	if s.BindAddress != "" {
-		h, p, err := net.SplitHostPort(s.BindAddress)
-		if err != nil {
-			return fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, s.BindAddress, st.TOMLPath)
-		}
-		host, port = h, p
-	}
-	// An empty variable counts as unset, as it does for the gateway.
-	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
-		host = v
-	}
-	if v := strings.TrimSpace(env[envServerPort]); v != "" {
-		port = v
+	host, port, err := st.listenAddress(env)
+	if err != nil {
+		return err
 	}
 	if !isLoopbackHost(host) {
 		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
@@ -1275,6 +1296,26 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 		return fmt.Errorf("%w: registration %s reaches %s, but the %s service listens on port %s", ErrGatewayMismatch, reg.Name, reg.Endpoint, GatewayService, port)
 	}
 	return nil
+}
+
+// listenAddress is where the gateway listens: gateway.toml's bind_address
+// (default 127.0.0.1:17670), then OPENSHELL_BIND_ADDRESS and
+// OPENSHELL_SERVER_PORT in env.
+func (s *GatewayConfigState) listenAddress(env map[string]string) (host, port string, err error) {
+	host, port = "127.0.0.1", strconv.Itoa(defaultGatewayPort)
+	if b := s.server.BindAddress; b != "" {
+		if host, port, err = net.SplitHostPort(b); err != nil {
+			return "", "", fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, b, s.TOMLPath)
+		}
+	}
+	// An empty variable counts as unset, as it does for the gateway.
+	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(env[envServerPort]); v != "" {
+		port = v
+	}
+	return host, port, nil
 }
 
 // envFlag reads a boolean flag variable the way the gateway's command
@@ -1316,7 +1357,8 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 // Rollback restores the files an Apply (or a Write) wrote and restarts the
 // gateway. With no gateway service to restart it through, it restores the
 // files and returns ErrNoGatewayService: the gateway, run another way,
-// loads them once its operator restarts it.
+// loads them once its operator restarts it. With a service that is not
+// running, it restores them and returns ErrGatewayServiceStopped.
 func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyResult) error {
 	if err := g.defaults(); err != nil {
 		return err
@@ -1329,6 +1371,17 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 			return err
 		}
 		return ErrNoGatewayService
+	}
+	// A stopped systemd service starts on the restored files (Homebrew's
+	// state is not asked: `brew services info` is slow).
+	if g.GOOS != "darwin" {
+		if svc, err := g.ServiceState(ctx); err == nil && svc.Installed && !svc.Active {
+			if err := g.restore(res); err != nil {
+				return err
+			}
+			g.clearRestartPending()
+			return ErrGatewayServiceStopped
+		}
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
 	// the restart.
@@ -1869,10 +1922,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	}
 	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
-		if bytes.Contains(out, []byte("cannot run under tmux")) {
-			return nil, ErrBrewNeedsTerminal
-		}
-		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, brewErrorLine(out))
+		return nil, brewServicesError(err, out)
 	}
 	var infos []struct {
 		Running    bool   `json:"running"`
@@ -1881,45 +1931,68 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.NewDecoder(bytes.NewReader(jsonArrayFrom(out))).Decode(&infos); err != nil || len(infos) == 0 {
+	// Homebrew may print warnings and hints first ("Warning: running
+	// through sudo, using user/* instead of gui/* domain!" in a shell from
+	// sudo -iu): the answer is the JSON array after them.
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayStart(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
-	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
+	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, brewStatusText(i.Status)
 	return st, nil
 }
 
-// brewErrorLine is the error brew printed, without the usage text it
-// prints after an error: its first "Error:" line, else its first line.
-func brewErrorLine(out []byte) string {
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "Error:") {
-			return strings.TrimSpace(line)
-		}
-	}
-	return strings.TrimSpace(lines[0])
-}
+// ErrBrewServicesTmux marks `brew services` refusing to run in a tmux
+// session that has no access to the account's macOS login session (a tmux
+// server started over ssh, for one): Homebrew checks that with pbpaste.
+var ErrBrewServicesTmux = errors.New("`brew services` refuses to run in a tmux session that has no access to this account's macOS login session")
 
 // brewQuietEnv turns off the warning Homebrew prints before the JSON of
 // `brew services info --json` when it runs through sudo (an administrator
 // who switched to the user with sudo -u) and its environment hints.
 var brewQuietEnv = []string{"HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1", "HOMEBREW_NO_ENV_HINTS=1"}
 
-// jsonArrayFrom is out from the first line that starts a JSON array: the
-// command's output is its stdout and stderr together, so a warning or a
-// hint can come before the JSON (and after it, which a decoder ignores).
-func jsonArrayFrom(out []byte) []byte {
-	for rest := out; len(rest) > 0; {
-		if bytes.HasPrefix(bytes.TrimLeft(rest, " \t"), []byte("[")) {
-			return rest
+// brewServicesError is a failed `brew services info` in one line:
+// Homebrew's own "Error:" line, not the usage text it prints first
+// (GAP-0192).
+func brewServicesError(err error, out []byte) error {
+	msg := strings.TrimSpace(string(out))
+	for _, line := range strings.Split(msg, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Error:"); ok {
+			msg = strings.TrimSpace(rest)
 		}
-		nl := bytes.IndexByte(rest, '\n')
-		if nl < 0 {
-			break
+	}
+	if strings.Contains(msg, "cannot run under tmux") {
+		return fmt.Errorf("openshell: brew services info %s: %w", GatewayFormula, ErrBrewServicesTmux)
+	}
+	return fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, msg)
+}
+
+// brewStatusText says a `brew services` status in words: "none" is a
+// service launchd has not loaded, so not running.
+func brewStatusText(status string) string {
+	switch status {
+	case "none", "":
+		return "not running (not loaded)"
+	case "error":
+		return "failing (see `brew services info " + GatewayFormula + "`)"
+	}
+	return status
+}
+
+// jsonArrayStart is out from its first line that starts a JSON array (all
+// of out when none does).
+func jsonArrayStart(out []byte) []byte {
+	for i := 0; i < len(out); {
+		line := out[i:]
+		if j := bytes.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j+1]
 		}
-		rest = rest[nl+1:]
+		if t := bytes.TrimLeft(line, " \t"); len(t) > 0 && t[0] == '[' {
+			return out[i:]
+		}
+		i += len(line)
 	}
 	return out
 }
@@ -2001,11 +2074,25 @@ func readGatewayFileOf(path string, foreign bool) ([]byte, fs.FileInfo, error) {
 		return nil, nil, fmt.Errorf("openshell: %s %w", path, errForeignGatewayFile)
 	}
 	data, err := safefile.ReadRegularFileBounded(path, maxGatewayFileBytes)
+	if foreign && errors.Is(err, fs.ErrPermission) {
+		// The Homebrew prefix's copy of the account that set the prefix
+		// up, private to it (GAP-0191): its gateway is that account's.
+		owner := ownerName(info)
+		if owner == "" {
+			owner = "another account"
+		}
+		return nil, nil, fmt.Errorf("openshell: %s belongs to %s: %w", path, owner, ErrForeignGatewayConfig)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("openshell: read %s: %w", path, err)
 	}
 	return data, info, nil
 }
+
+// ErrForeignGatewayConfig marks a gateway configuration of another account
+// that this one may not read: on a Mac whose Homebrew prefix that account
+// set up, the gateway (one runs on a machine) is that account's.
+var ErrForeignGatewayConfig = errors.New("this account may not read another account's gateway configuration")
 
 var envAssignment = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$`)
 

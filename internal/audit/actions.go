@@ -154,6 +154,8 @@ const (
 	ActionSandboxPolicy    Action = "sandbox-policy"
 	ActionSandboxHealth    Action = "sandbox-health"
 	ActionSandboxFinding   Action = "sandbox-finding"
+	ActionSandboxActivity  Action = "sandbox-activity"
+	ActionSandboxProcess   Action = "sandbox-process"
 
 	// Sidecar lifecycle and bootstrap instrumentation. These actions
 	// describe gateway-side startup, shutdown, WebSocket connectivity,
@@ -402,6 +404,8 @@ func AllActions() []Action {
 		ActionSandboxPolicy,
 		ActionSandboxHealth,
 		ActionSandboxFinding,
+		ActionSandboxActivity,
+		ActionSandboxProcess,
 		ActionSidecarStart,
 		ActionSidecarStop,
 		ActionSidecarConnected,

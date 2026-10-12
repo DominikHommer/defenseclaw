@@ -67,11 +67,15 @@ type API interface {
 	Review(ctx context.Context, name string, req sandboxapi.ReviewRequest) (*sandboxapi.ReviewResponse, error)
 	Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error)
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
+	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
+	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
+	Processes(ctx context.Context, name string) (*sandboxapi.ProcessList, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
 	Activity(ctx context.Context, q sandboxapi.ActivityQuery, fn func(sandboxapi.ActivityEvent) error) error
 }
 
@@ -83,6 +87,9 @@ type IO struct {
 	Out, Err io.Writer
 	// TTY reports that In and Out are a terminal (prompts and attach).
 	TTY bool
+	// InTTY reports that In is a terminal: someone can answer a prompt
+	// although Out is piped (`sandbox setup | tee setup.log`).
+	InTTY bool
 	// OutTTY and ErrTTY report that Out and Err are terminals: what a
 	// sandbox prints there (a run log, a headless harness's output) cannot
 	// drive them (sandboxOutput).
@@ -175,6 +182,9 @@ type App struct {
 	pager func(text string) bool
 	// intr is the interrupt state of the running command (interrupt.go).
 	intr *interruption
+	// asked is the last question ask showed, to the question mark: what a
+	// Ctrl-C there interrupted.
+	asked string
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run
@@ -483,8 +493,10 @@ func apiError(err error) error {
 	}
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:
-		if strings.Contains(e.Message, "daemon is not reachable") {
-			return fmt.Errorf("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`): %s", e.Detail)
+		if daemonUnreachable(e) {
+			// The HTTP client's error, with the loopback API port, is no
+			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}
 	case sandboxapi.CodeDisabled:
 		return &DisabledError{Message: e.Message}
@@ -496,6 +508,13 @@ func apiError(err error) error {
 		}
 	}
 	return e
+}
+
+// daemonUnreachable reports the client's error for a daemon that does not
+// answer at all (sandboxapi.Client).
+func daemonUnreachable(err error) bool {
+	var e *sandboxapi.Error
+	return errors.As(err, &e) && e.Code == sandboxapi.CodeUnavailable && strings.Contains(e.Message, "daemon is not reachable")
 }
 
 // adminLimitMessage opens an organization's clamp: the run goes ahead with

@@ -53,9 +53,13 @@ func NewClient(baseURL, token string) *Client {
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token}
 }
 
-// ErrNoGatewayToken is returned by ClientForConfig before the gateway is set
-// up (no gateway token is configured yet).
-var ErrNoGatewayToken = errors.New("the DefenseClaw gateway is not set up yet; run `defenseclaw setup gateway`, then `defenseclaw-gateway start`")
+// ErrNoGatewayToken is returned by ClientForConfig while no gateway token
+// exists: the daemon writes one at its first start (EnsureGatewayToken), so
+// a configured daemon that never started has none, and starting it is the
+// fix (GAP-0145; it said to set the gateway up first, which init had done).
+// Setting it up stays the step for an account init did not set up (GAP-1918).
+var ErrNoGatewayToken = errors.New("the DefenseClaw gateway has not started on this account yet; start it with `defenseclaw-gateway start` " +
+	"(first `defenseclaw setup gateway` if `defenseclaw init` did not set it up)")
 
 // ClientForConfig returns a client for the daemon cfg describes: its API
 // bind host and port and the resolved gateway token.
@@ -282,6 +286,15 @@ func (c *Client) RunLog(ctx context.Context, name string, lines int) (*RunLog, e
 	return &out, nil
 }
 
+// Destinations returns what the sandbox reached or tried to reach.
+func (c *Client) Destinations(ctx context.Context, name string) (*Destinations, error) {
+	var out Destinations
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name, "destinations"), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ParseRunLogLines reads the ?lines query of GET /sandboxes/{name}/logs
 // (0: the whole kept log).
 func ParseRunLogLines(v url.Values) (int, error) {
@@ -338,6 +351,15 @@ func (c *Client) Decide(ctx context.Context, id string, d ApprovalDecision) (*Ap
 func (c *Client) Unblock(ctx context.Context, req UnblockRequest) (*UnblockResponse, error) {
 	var out UnblockResponse
 	if err := c.do(ctx, http.MethodPost, PathEgressUnblock, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// PolicyTest judges destinations with a sandbox's egress policy.
+func (c *Client) PolicyTest(ctx context.Context, req PolicyTestRequest) (*PolicyTestResult, error) {
+	var out PolicyTestResult
+	if err := c.do(ctx, http.MethodPost, PathPolicyTest, nil, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

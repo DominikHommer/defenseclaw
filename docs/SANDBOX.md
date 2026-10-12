@@ -11,7 +11,7 @@ The operator guide for the sandbox commands is the
 [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 (`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
-servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
+servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
 [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 
@@ -193,10 +193,12 @@ not the driver's name or `runtime.GOOS`.
   an admin `max_resources` it also counts the processors and reads the
   memory the MicroVM got, since the running gateway can take other values
   than its files say (launchd's environment, a change since its restart). A
-  mismatch rolls the create back or stops the started sandbox. It runs on
-  the vm driver, where the workload's identity is the gateway's
-  configuration. On docker it is off (`SkipWorkloadCheck` in the driver
-  table) until a Linux live run has passed it.
+  mismatch rolls the create back or stops the started sandbox, and the
+  refusal says which (`policy_rejected`, "... DefenseClaw deleted it" or
+  "... DefenseClaw stopped it again"). It runs on every driver: on vm the
+  workload's identity is the gateway's configuration, on docker it is the
+  policy's `process.run_as_user`, and the run files docker bind-mounts must
+  be on a read-only mount.
 - **Resources.** vm has no per-sandbox limits: every MicroVM gets the
   gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
   `--memory` are warned about and dropped, the record keeps the gateway-wide
@@ -343,7 +345,10 @@ never reaches the main listener.
    |                    raw relay to 127.0.0.1:18972, the proxy decides
    |
    |-- LLM API -----> provider host, for example api.anthropic.com:443
-   |                    (NO_PROXY) provider rule swaps the key placeholder
+   |                    (NO_PROXY) provider rule swaps the key placeholder;
+   |                    open to the harness's network binaries only (for an
+   |                    npm or Python harness its node/python interpreter,
+   |                    which runs any script), around the egress proxy
    |
    '-- anything else: denied by OpenShell, which files a draft proposal
 ```
@@ -831,8 +836,12 @@ decider holds the administrator's lists as they were then. Instead:
   pack), every triaged rule is removed.
 
 The feed, the log (`OPENSHELL_PACK_INVALID`) and a degraded health record
-say so once. The credential comes back with a rebuilt decider as soon as
-the policy resolves again.
+say so once. The record says what to do (restore the pack or the
+configuration, or `defenseclaw sandbox delete NAME`), and is a HIGH alert
+only while the sandbox runs: a stopped one gets a MEDIUM record, since
+nothing runs under the policy and its start refuses with the reason. The
+credential comes back with a rebuilt decider as soon as the policy
+resolves again.
 
 ### Request handling
 
@@ -897,8 +906,10 @@ that decides wins:
    administrator lifts either. The block message says "blocked by your organization's
    DefenseClaw policy".
 3. **The block list**: the pack's `egress.block` plus `openshell.egress.block`
-   (`operator_block`). It is checked before unblock decisions, so a host on
-   it is not one-click unblockable. Reaching it takes removing the entry.
+   and the project's repository policy's (`.defenseclaw/sandbox.yaml`)
+   entries (`operator_block`). It is checked before unblock decisions, so a
+   host on it is not one-click unblockable. Reaching it takes removing the
+   entry.
 4. **Unblock decisions**, for one sandbox or for every sandbox ("always",
    saved to `openshell.egress.unblocked`). They are ignored when
    `openshell.admin.allow_unblock` is `false`.
@@ -918,6 +929,18 @@ that decides wins:
 
 `Decision.Unblockable`, the 403 body's `unblockable` and `how_to_unblock`,
 blocked events and the feed's unblock action all follow steps 6 and 8.
+
+`sandbox policy test` (`packs.Effective.CheckEgress`) asks the same decider
+for a destination and names the setting behind the step that decided: for a
+sandbox the daemon answers with the sandbox's own decider and principal
+(`POST /api/v1/sandbox/policy/test`), so its unblocks count; for a pack the
+CLI resolves the policy itself, without the daemon.
+
+Policy resolution (`packs.Resolve`) layers the pack (a custom pack may
+`extends:` one parent, merged before anything else), the user's `openshell`
+keys, the run flags, the repository policy (`packs.RepoPolicy`, tighten-only:
+a loosening key is a fatal violation, one per key; the sandbox record keeps
+the copy the create read) and the administrator's clamps.
 
 `sandbox unblock` refuses with the reason that applies, checked in this
 order: a host on the administrator's lists or the block list (only the
@@ -1161,15 +1184,13 @@ providers (`<sandbox>-ingress`, `<sandbox>-llm`, `<sandbox>-cred-<n>`) carry
 the data dir's owner label, and a create never replaces a provider of that
 name that another data dir (or a user) owns. Policy rules, `defenseclaw_egress`
 among them, belong to one sandbox's policy, and the overlay image tags hash
-the owner and the ingress port. Earlier releases imported one gateway-wide
-`defenseclaw-ingress` profile, holding one daemon's port, and single-region
-`defenseclaw-claude-bedrock-mantle` and `defenseclaw-codex-bedrock-mantle`
-profiles. Sandboxes created then keep using them, and nothing updates them
-any more.
+the owner and the ingress port. The ingress and Bedrock Mantle templates are
+only ever imported under ids naming their inputs (`defenseclaw-ingress-<port>`,
+`<template>-<region>`), never under the bare template ID.
 
 `defenseclaw sandbox teardown` deletes this data dir's own ingress profiles
-(the configured listener's and any its providers used), the legacy
-`defenseclaw-ingress`, and the shared LLM and credential profiles, each only
+(the configured listener's and any its providers used) and the shared LLM
+and credential profiles, each only
 when no other provider uses it. It never deletes another daemon's ingress
 profile, and OpenShell refuses to delete a profile a provider still uses.
 
@@ -1346,9 +1367,7 @@ only while that count is unchanged: the next start takes a fresh snapshot,
 and any session after the acceptance ends it (a `--no-snapshot` start's,
 or one that ran although its start failed on DefenseClaw's side), while a
 start that never ran the sandbox leaves it in place. `sandbox start --new-snapshot` accepts the changes and takes a
-fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
-earlier CLI recorded in `cli/accepted.json` is honoured once, as
-`--new-snapshot`.
+fresh one; `--no-snapshot` always keeps the previous one.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
 preview mode. A stop of a ready sandbox first sends SIGTERM to the harness's
@@ -1377,10 +1396,8 @@ stop's interrupted mark goes through a descriptor checked to be a regular
 file, after it has said how the run stands, so a FIFO swapped in for
 `latest.exit` gets no write. The CLI
 only asks first, on a terminal, before `sandbox stop` ends a run still
-going. `sandbox logs` names the run a kept log is of (its start), and still
-shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,
-until the daemon sees the sandbox start again (its `session` count): every
-stop after that is the daemon's. In a git project undo:
+going. `sandbox logs` names the run a kept log is of (its start). In a git
+project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;
@@ -1538,10 +1555,13 @@ Nothing is applied without a review: a session without a terminal, or with
 1. **Stage.** A git project becomes a sanitized shallow clone (depth
    `openshell.workdir.git_depth`, 200 by default; no hooks, config written by
    DefenseClaw, remotes without credentials) with the current working tree on
-   top. A plain folder is copied with a hidden git directory kept at
-   `/sandbox/.dc/git`. Secrets are held back by the mask rules, tracked files
-   included, and the committed versions of held-back files are removed from
-   the shipped history: the copy becomes a partial clone whose promisor
+   top. What git ignores and package caches (`node_modules/`, `.venv/`, build
+   output) are not copied; one warning after the upload names them, so the
+   dependencies are installed inside. A plain folder is copied with a hidden
+   git directory kept at `/sandbox/.dc/git`. Secrets are held back by the
+   mask rules, tracked files included, and the committed versions of
+   held-back files are removed from the shipped history: the copy becomes a
+   partial clone whose promisor
    remote has no URL, so asking git for one of those blobs fails instead of
    reading it. The size is checked first (`max_upload_mb`, 500 MiB in the
    `open` pack).
@@ -1632,6 +1652,8 @@ whose last pull was never applied. Host git must be 2.29 or newer.
 <data_dir>/sandboxes/<name>/copy/            copy record, base.git, pulls
 <data_dir>/sandboxes/<name>/runlog/          the log of the last detached run, kept at a stop
 <data_dir>/sandboxes/<name>/cli/             the CLI's: run options, copy hand-over
+<data_dir>/sandboxes/<name>/discovery/       AI discovery: scan.json (what was found); root/, the
+                                             collected tree, only while a scan runs; removed at delete
 <data_dir>/sandboxes/bindings.json           ingress bindings
 <data_dir>/sandboxes/images.json             overlay image records
 <data_dir>/sandboxes/manager/<name>.json     the daemon's sandbox record
@@ -1643,8 +1665,8 @@ phase `deleted`, `undo` and `review` still work on it, and `delete` drops the
 snapshot. Until then its name cannot be reused.
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
-digits and `-`, starting and ending with a letter or digit), and `git` is
-reserved. OpenShell 0.1.1 creates sandboxes of at most 19 characters, so a
+digits and `-`, starting and ending with a letter or digit). OpenShell 0.1.1
+creates sandboxes of at most 19 characters, so a
 new name is held to that; the default is `<folder>-<rand4>`, the folder name
 cut to fit, with the harness and DefenseClaw ownership carried as labels.
 
@@ -1843,14 +1865,34 @@ verdict. The file and egress boundaries are enforced outside the sandbox and
 do not depend on the hooks. The manager watches for the two ways a
 compromised hook shows:
 
-- **Hook silence** (`hook_silence`): the harness is active (OCSF process or
-  network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included) for `HookSilence` without
-  a single hook request. The native OTLP an idle harness exports at its prompt
-  is not activity. Commands the harness did not
-  start, such as the CLI's probe, a copy-mode upload or pull, or your own
+- **Hook silence** (`hook_silence`): the harness is active (OCSF network
+  events of the harness's own binaries under its install root, their
+  connections to the egress proxy included, but not the native OTLP an idle
+  harness exports at its prompt; OCSF process
+  events of those binaries count too, but OpenShell 0.1 reports only the
+  processes its supervisor starts, never the ones a harness runs, so work
+  without network traffic goes unseen) for the
+  pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
+  to 24 hours) without a single hook request: one run of activity since the
+  last hook (or the session's start) that no idle stretch of `silence_after`
+  breaks (`noteActiveLocked`), so a harness that wakes up after a long idle
+  stretch, before its first hook, is no alarm. Residual: the same reset lets
+  a harness with switched-off hooks that works in runs shorter than
+  `silence_after`, each after an idle stretch at least that long (for
+  example a tool call that sleeps), go unflagged, at the cost of being idle
+  more than half of the time; there is no cumulative-activity alarm. The
+  file and egress boundaries do not depend on hooks. Commands the harness
+  did not start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
-  events, which cannot tell the harness's requests from theirs.
+  events, which cannot tell the harness's requests from theirs. For a
+  user-tier harness (its hook registration is in the image HOME, the
+  agent's to edit) the pack's `hooks.on_silence` picks the response: `stop`
+  (balanced, strict) stops the sandbox once per session through the tamper
+  stop path (`stopForAlarm`; the stop keeps no run log), `alert` (open)
+  reports and leaves it running. A managed-tier harness only alerts. The
+  finding's evidence names the response, the threshold and the tier, and
+  `hooks.on_silence` / `hooks.silence_after` in the sandbox's `hooks` view
+  feed the banner's `Hooks` line.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Per binding, the manager records each
   pre-tool decision and pairs it with the call's post-tool event. A
@@ -1996,7 +2038,13 @@ Requests`). `sandbox list` ("4 calls, 1 blocked, 2 failed"), `sandbox status`
 hook call failed (blocked)") show them, and the feed gets a `hook.failed`
 entry at once and then at most one every 10 seconds per sandbox, summing up
 the failures in between. Tool calls and blocks count only verdicts, so a
-failed pre-tool hook is not among them.
+failed pre-tool hook is not among them. A failure within 5 seconds of
+OpenShell refusing a request that carried a credential placeholder is a hook
+post of that conversation (`last_hook_failure_cause:
+credential_placeholder_refused`), and the "Hook error" row says so instead of
+"DefenseClaw answered". `hooks_answered_at` is DefenseClaw's first verdict
+after the last failure, outside such a conversation, and the row adds "hooks
+answered again since".
 
 The hook coverage also counts the verdicts per hook event, under the name
 the harness sends (`PreToolUse`, `preToolUse`, `tool.execute.before`,
@@ -2010,8 +2058,9 @@ hook contract has fewer events (Claude Code's, the largest, has 29). The
 sum can be lower than `hook_requests`: a post refused before a verdict
 (malformed, outside the contract) or a retried post answered from its first
 answer has no event. The counts live as long as the other hook counters:
-they survive a stop and start, and start over for a new sandbox of the name
-and when the daemon restarts.
+they survive a stop and start and a daemon restart (the sandbox's record
+keeps them; a daemon that did not stop cleanly loses the last minute of
+them), and start over for a new sandbox of the name.
 
 **Claude Code.** `/etc/claude-code/managed-settings.d/50-defenseclaw.json`
 sets `allowManagedHooksOnly`, the hooks, an `otelHeadersHelper` that sends
@@ -2248,7 +2297,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Cursor Agent | 2026.07.23-e383d2b (release archive, sha256 measured by DefenseClaw) | Enterprise `/etc/cursor/hooks.json`, every event `failClosed` | managed | `--force` | Cursor API key (endpoints unverified), or `cursor-launch login` inside the sandbox (the session is readable by the workload) | unverified |
 | Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
 | Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
-| Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
+| Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (default model `openai.gpt-oss-20b`; the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | OpenHands CLI | 1.16.0 (PyPI, root-owned uv tool on a private CPython) | User-owned `~/.openhands/hooks.json`, restored from a root-owned copy on every start; a project hooks file or a non-file hooks path is refused | user | `--always-approve` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
 | OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |
@@ -2741,19 +2790,41 @@ on metrics.
 | Source | Producer | Family |
 | --- | --- | --- |
 | Phase changes (initiated or watched) | `RecordSandboxLifecycle` | `log.sandbox.lifecycle`, `metric.defenseclaw.sandbox.transitions`, `metric.defenseclaw.sandbox.active` |
-| Proxy and OpenShell network decisions | `RecordSandboxEgress` | `log.egress.allowed`, `log.egress.blocked`, `metric.defenseclaw.egress.events` |
+| Proxy and OpenShell network decisions, and the end of each allowed proxy connection | `RecordSandboxEgress` | `log.egress.allowed`, `log.egress.blocked`, `log.egress.completed`, `log.egress.failed`, `metric.defenseclaw.egress.events` (labelled with the connector) |
 | Draft proposals and host-port consents | `RecordSandboxApproval` | `log.approval.requested`, `log.approval.resolved` |
 | Policy applies, rule changes, unblocks | `RecordSandboxPolicy` | `log.policy.updated` |
-| Integration health | `RecordSandboxHealth` | `log.subsystem.*`, subsystem `openshell` |
-| OCSF findings, binary drift, tamper, hook silence, large uploads | `RecordSandboxFinding` | `log.finding.observed` |
+| Integration health, refused proxy credentials, refused telemetry records | `RecordSandboxHealth` | `log.subsystem.*`, subsystem `openshell` |
+| OCSF findings, hook silence and tamper, large uploads, nested repositories, shadow AI | `RecordSandboxFinding` | `log.finding.observed` |
 | Snapshot, undo, mask, review, upload, pull | `RecordSandboxWorkspace` | `log.sandbox.workspace` |
+| OpenShell `PROC`, `SSH` and `API:INFERENCE` records | `RecordSandboxActivity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` |
+| Process tree starts and exits (opt-in, `observe.process_tree`) | `RecordSandboxProcess` | `log.sandbox.process_tree` |
 
 Hook decisions from a sandbox carry the sandbox ID and name taken from the
-binding that authenticated them. Nothing calls the producers yet. The manager
-must build one `audit.NewSandboxRecorder` for the process and share it with
-the watcher, the egress proxy sink, approvals and workspace code, and on
-daemon start emit a lifecycle event for every existing sandbox so the active
-gauge is republished.
+binding that authenticated them. The gateway sidecar builds one
+`audit.NewSandboxRecorder` for the process and hands it to the manager,
+which wraps it (`manager/telemetry.go`): every record of a sandbox gets
+its binding ID; egress, approval, finding and activity records the
+launching host account; egress, approval, process and inference records
+the session its hooks last named; and a refused record is logged, counted
+on `sandbox status` and
+recorded as degraded health once per streak, so no producer swallows a
+failure. On daemon start the reconcile pass records a lifecycle event for
+every existing sandbox, so the active gauge is republished. The field-level
+reference is [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
+
+Each sandbox's destinations (`manager/destinations.go`, `GET
+/api/v1/sandbox/sandboxes/{name}/destinations`, `defenseclaw sandbox
+destinations NAME`) merge the egress proxy counter's rows with OpenShell's
+NET, HTTP and API records per host, classify each host (model provider or
+a `--credential` endpoint by their provider rules and the record's
+`ProviderEndpoints`, the harness's vendor, shadow AI by the AI provider
+catalog in `internal/sensor/catalog` or an inference-shaped name, else the
+proxy's category, blocked or other), keep at most 512 hosts in
+`<data_dir>/sandboxes/<name>/destinations.json` across restarts. The proxy
+counter's first-seen check does not read them: the counter starts over with
+the daemon, so every host is first-seen again after a restart (a host
+reached before is no exemption). A delete removes them and the counter's
+rows for the binding (`Counter.Forget`).
 
 The watcher side exists. `internal/openshell/stream` follows one sandbox
 through the raw `WatchSandbox` RPC on its own connection (the SDK's watch
@@ -2896,13 +2967,15 @@ These were not measured, so the design does not rely on a result for them:
 ### macOS and Docker Desktop
 
 Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
-29.1.5) and OpenShell 0.1.1 in September 2026.
+29.1.5) and OpenShell 0.1.1 in September 2026. OpenShell 0.1.2 changes
+nothing of the vm driver, but the names of its caches carry the release
+(see the prepared rootfs below).
 
 | Behaviour | Design consequence |
 | --- | --- |
 | Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver. `sandbox run` on a Mac whose gateway runs the Docker driver on Docker Desktop (one `docker info`, no probe) refuses before it builds an image or makes a sandbox, and names the switch on a line of its own; a run that fails the probe on another Docker VM names it too. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
-| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
+| The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. The directory name carries the driver's release (`…-openshell-0.1.1-…-sha256-<image ID>`): after an in-place upgrade the driver prepares each image again and keeps the old release's disks. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note, counting only a disk of the gateway's release (`image.VMDisk.PreparedBy`), and so does the daemon's disk-room check at create; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. `image prune` also removes every prepared rootfs of another release than the gateway's (`image.StaleVMDisks`), which that gateway never boots. |
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Without a fix interactive Copilot CLI would wait out its 30-second hook timeout on every hook on both drivers; its image preloads a `pidfd_open` fallback into the pinned CLI (see GitHub Copilot CLI under [harness facts](#harness-facts)). |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
@@ -2913,9 +2986,30 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.1 tag only after checking it against a pinned SHA-256. Releases before
-  0.0.37 must be cleaned up with the old CLI first; later ones upgrade in
-  place.
+  v0.1.2 tag (`InstallerVersion`) only after checking it against a pinned
+  SHA-256 (the v0.1.1 and v0.1.2 scripts are byte-identical; the release
+  comes from `OPENSHELL_VERSION`). Releases before 0.0.37 must be cleaned up
+  with the old CLI first; later ones upgrade in place. A supported release
+  older than `InstallerVersion` (0.1.1) still works: the doctor's
+  `openshell-cli` check warns, and setup upgrades it in place only with
+  consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
+  question, whose default is no). NVIDIA's script restarts the gateway only
+  after its downloads and the package's (formula's) install, so
+  `PrepareUpgrade` runs right before the script, after consent. The docker
+  driver keeps its running sandboxes (their connections drop), and the
+  restarted gateway does not start without its release's supervisor and
+  sandbox runtime images (upstream `ensure_runtime_image` pulls one that is
+  not local), so Docker pulls them first (`PullRuntimeImages`; images
+  `[openshell.drivers.docker]` replaces are left alone) and a failed pull
+  refuses the upgrade (`ErrRuntimeImages`). The vm driver stops its running
+  sandboxes without a flush, and a flush before the script would leave
+  minutes of writes unsynced, so a running or starting sandbox refuses the
+  upgrade (`ErrSandboxesRunning`); setup checks first and says to stop
+  them. Either refusal ran nothing, and setup keeps the old release. It
+  never downgrades, and refuses an OpenShell installed another way than
+  NVIDIA's installer (`ErrUnmanagedUpgrade`).
+  The daemon's periodic gateway recheck reconnects when the gateway answers
+  with another release.
 - A local gateway only, registered with mTLS. Remote gateways and plaintext,
   unauthenticated, OIDC or Cloudflare registrations are refused. So are a
   private key other users can access, world-writable or foreign-owned mTLS
@@ -2931,7 +3025,8 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
-  host networking, file sharing, disk), systemd linger, the gateway service,
+  host networking, file sharing, disk), systemd linger (the `Login session`
+  row on macOS), the gateway service,
   CLI, ssh connection sharing, registration, mTLS files, gateway version and
   driver, global policy, bind mounts, OpenShell telemetry and the sandbox
   ports; on a vm gateway also `vm-driver` (e2fsprogs, the Hypervisor
@@ -2964,11 +3059,11 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | `sandbox` commands (setup, run, lifecycle, pull, policy, images, teardown) | [`../internal/openshell/sandboxcli/`](../internal/openshell/sandboxcli/), [`../internal/cli/sandbox.go`](../internal/cli/sandbox.go) |
 | Shell wrappers (`sandbox enable`/`disable`) | [`../internal/openshell/wrapper/`](../internal/openshell/wrapper/) |
 | Nested-repository guard | [`../internal/openshell/nestguard/`](../internal/openshell/nestguard/), [`../internal/openshell/manager/guard.go`](../internal/openshell/manager/guard.go) |
-| Python `sandbox` stubs and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Python `sandbox` stubs | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
 | Python sandbox API client (REST and the activity stream) | [`../cli/defenseclaw/gateway.py`](../cli/defenseclaw/gateway.py) |
 | TUI Sandboxes panel, launch dialog and setup wizard | [`../cli/defenseclaw/tui/sandbox_panel.py`](../cli/defenseclaw/tui/sandbox_panel.py), [`../cli/defenseclaw/tui/services/sandbox_state.py`](../cli/defenseclaw/tui/services/sandbox_state.py), [`../cli/defenseclaw/tui/panels/setup.py`](../cli/defenseclaw/tui/panels/setup.py) |
 | macOS app sandboxes (menu bar, Overview, panel) | [`../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift`](../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift), [`../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift`](../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift) |
-| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
+| Reset of a retired standalone install (config_version 9 migration) | [`../internal/config/migrate_v9.go`](../internal/config/migrate_v9.go) (`migrateRetiredStandaloneSandbox`) |
 
 ## Testing
 
@@ -3005,24 +3100,22 @@ them.
 
 The legacy standalone integration targeted the `openshell-sandbox` 0.0.x
 binary on Linux, for OpenClaw only, and its generated sandbox policy was never
-enforced. It was removed. OpenClaw and ZeptoClaw use the `shims` subprocess
-policy on every platform. Review the cleanup plan, then run it:
+enforced. It was removed, with its cleanup command and the bind shim that
+kept the gateway API on the veth host. OpenClaw and ZeptoClaw use the `shims`
+subprocess policy on every platform.
 
-```bash
-defenseclaw sandbox legacy-cleanup --dry-run
-defenseclaw sandbox legacy-cleanup
-```
-
-Cleanup stops the systemd units itself but changes nothing else while any part
-of the legacy sandbox still runs. Stop the non-systemd launcher first with
-`sudo <data_dir>/scripts/run-sandbox.sh stop`. The
-[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
-and the follow-up commands.
-
-Until cleanup runs, a config that still says `openshell.mode: standalone` with
-a non-localhost `guardrail.host` keeps the gateway API bound to that host (an
-explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
-remains, `/health` reports the `sandbox` subsystem as `degraded`, and
-`defenseclaw doctor` and `defenseclaw status` point at
-`defenseclaw sandbox legacy-cleanup`.
+The upgrade to 1.0 resets what it left in DefenseClaw's config: the
+`config_version` 9 migration (`migrateRetiredStandaloneSandbox` in
+`internal/config/migrate_v9.go`, which the gateway's in-memory load of a v8
+file runs too) drops `openshell.mode`, `openshell.sandbox_home` and the
+OpenClaw home pin `claw.openclaw_home_original` (named in a migration note
+when set) from every config and, on one that said
+`openshell.mode: standalone`, the non-loopback
+`guardrail.host` and `gateway.host` (the veth addresses), which take their
+defaults. So the gateway binds its API on loopback and every probe (upgrade,
+watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
+migration record lists the removed keys. Running it again changes nothing.
+The root systemd units, launchers, network namespace, NAT rules and `sandbox`
+user are removed by hand, as the
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+lists.

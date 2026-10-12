@@ -1356,6 +1356,12 @@ def validate_config() -> ValidationResult:
     if damage := config_module.config_damage_message(cfg_path):
         res.errors.append(damage)
         return res
+    # A file that does not parse is not an older schema: name its line, not
+    # migrate, which refuses it too (GAP-0240).
+    raw = _bounded_source(cfg_path)
+    if raw is not None and (syntax := _yaml_syntax_detail(raw)):
+        res.errors.append(syntax)
+        return res
     res.errors.append(_not_current_message(cfg_path))
     return res
 

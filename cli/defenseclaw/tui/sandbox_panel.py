@@ -46,6 +46,7 @@ from textual import events
 from defenseclaw.gateway import SandboxAPIError
 from defenseclaw.platform_support import openshell_sandboxes_supported
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.screens.sandbox_detail import SandboxDetailScreen
 from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunch,
@@ -59,6 +60,8 @@ from defenseclaw.tui.services.sandbox_state import (
     VIEW_TITLES,
     SandboxesPanelModel,
     SandboxPanelAction,
+    branch_name_problem,
+    detached_run_text,
     fit,
     harness_command,
     review_pairs,
@@ -236,6 +239,19 @@ def fetch_sandbox_snapshot(config: object | None) -> SandboxFetch:
         client.close()
 
 
+def fetch_sandbox_processes(config: object | None, name: str) -> dict[str, Any] | None:
+    """Blocking read of a sandbox's process tree (run in a thread); None when it fails."""
+    client = sandbox_client(config)
+    if client is None:
+        return None
+    try:
+        return client.sandbox_processes(name)
+    except SandboxAPIError:
+        return None
+    finally:
+        client.close()
+
+
 def probe_sandbox_machine() -> Any:
     """Blocking ``defenseclaw-gateway sandbox doctor --json`` for the Sandbox wizard (run in a thread)."""
     from defenseclaw.commands.cmd_doctor import sandbox_doctor_report
@@ -271,6 +287,14 @@ class SandboxPanelMixin:
     def _sandbox_supported(self) -> bool:
         return openshell_sandboxes_supported()
 
+    def _sandbox_keys_line(self) -> str:
+        """The hint bar's keys; on Windows the panel only says why, so no sandbox keys (GAP-0073)."""
+        if not self._sandbox_supported():
+            # The quit key too: q only closes a drawer, so a Windows user who
+            # opened the TUI to read this panel was stuck (GAP-0256).
+            return "KEYS  Tab next panel | : commands | ? help | Ctrl+C quit"
+        return self.sandbox_model.keys_line()
+
     def _sandbox_mount(self) -> None:
         """Start the periodic refresh (called from on_mount)."""
         if self._sandbox_model_injected or not self._sandbox_supported():
@@ -300,6 +324,8 @@ class SandboxPanelMixin:
 
     def _schedule_sandbox_poll(self) -> None:
         if getattr(self, "_app_shutting_down", False) or self._sandbox_model_injected:
+            return
+        if not self._sandbox_supported():
             return
         if self._sandbox_poll_running:
             return
@@ -398,8 +424,9 @@ class SandboxPanelMixin:
                 resume = self.sandbox_model.last_seq
                 if resume:
                     # Read from one event early: a daemon that restarted
-                    # numbers its events from one again, and resuming after
-                    # the old number would skip its first events.
+                    # numbers its events from one again in a feed of another
+                    # epoch, and resuming after the old number would skip
+                    # its first events.
                     probe = client.sandbox_activity(since=resume - 1)
                     if not self._deliver_from_thread(self._on_sandbox_resume, probe):
                         return
@@ -715,9 +742,44 @@ class SandboxPanelMixin:
             return ("a", "x"), "Keys: a approve once · x reject · Esc close"
         return keys, keys_hint
 
+    async def _fetch_sandbox_destinations(self, name: str) -> Any:
+        """The sandbox's destinations for its detail, or why they are unavailable.
+
+        One call as the detail opens, never on the 2 s render path.
+        """
+        try:
+            return await self._sandbox_call("sandbox_destinations", name)
+        except SandboxAPIError as exc:
+            return f"unavailable: {exc.plain()}"
+
+    async def _fetch_sandbox_run(self, row: Any) -> str:
+        """How a stopped sandbox's last detached run ended, from the log its stop kept, or "".
+
+        One call as the detail opens (GAP-0273); a sandbox without a kept log
+        has no line.
+        """
+        if row is None or row.running:
+            return ""
+        try:
+            kept = await self._sandbox_call("sandbox_run_log", row.name, lines=1)
+        except SandboxAPIError:
+            return ""
+        return detached_run_text(kept, row.name)
+
     async def _open_sandbox_detail(self) -> None:
         model = self.sandbox_model
-        title, pairs = model.detail_pairs()
+        selected = model.selected_sandbox() if model.view == "sandboxes" else None
+        if selected is not None and selected.process_tree:
+            # A stopped sandbox has no live processes, and a failed fetch has
+            # none to show: the last tree is never shown as current.
+            payload = None
+            if selected.running:
+                payload = await asyncio.to_thread(fetch_sandbox_processes, getattr(self, "config", None), selected.name)
+            model.set_processes(selected.name, payload)
+        destinations = await self._fetch_sandbox_destinations(selected.name) if selected is not None else None
+        run = await self._fetch_sandbox_run(selected)
+        model.set_alert_events(getattr(getattr(self, "alerts_model", None), "audit_events", ()))
+        title, pairs = model.detail_pairs(destinations, run=run)
         keys, keys_hint = self._sandbox_detail_keys()
         key: str | None = None
         try:
@@ -756,6 +818,10 @@ class SandboxPanelMixin:
                 f"Unblock {host}",
                 tuple(actions),
                 subtitle=subtitle,
+                # Cancel is focused, as for the other confirmations: a stray
+                # u then Enter (a command line typed into the TUI) lifted a
+                # paste-site block at once (GAP-0164).
+                selected_index=len(actions) - 1,
                 show_descriptions=True,
             )
         )
@@ -929,6 +995,12 @@ class SandboxPanelMixin:
                         f"Put it on branch dc/{name}",
                         f"Your working tree stays as it is: defenseclaw sandbox pull {name} --branch",
                     ),
+                    # The command line takes any name (GAP-0266).
+                    MenuAction(
+                        "branch_name",
+                        "Put it on a branch you name",
+                        f"Asks for the name: defenseclaw sandbox pull {name} --branch-name BRANCH",
+                    ),
                     MenuAction("cancel", "Cancel"),
                 ),
                 # The menu shows the subtitle as plain text: the path needs no escaping.
@@ -937,6 +1009,20 @@ class SandboxPanelMixin:
                 show_descriptions=True,
             )
         )
+        if choice == "branch_name":
+            branch = await self.push_screen_wait(  # type: ignore[attr-defined]
+                FieldEditorScreen(
+                    f"Branch for {name}'s work",
+                    value=f"dc/{name}",
+                    hint="A new branch in the project's repository; your working tree stays as it is.",
+                    validator=branch_name_problem,
+                )
+            )
+            if not branch:
+                self._set_status("Pull cancelled; nothing changed.")  # type: ignore[attr-defined]
+                return
+            self._run_sandbox_cli("pull", name, "--branch-name", branch.strip())
+            return
         flags = {"review": (), "apply": ("--apply",), "branch": ("--branch",)}.get(choice or "")
         if flags is None:
             self._set_status("Pull cancelled; nothing changed.")  # type: ignore[attr-defined]
@@ -951,6 +1037,9 @@ class SandboxPanelMixin:
             f"DefenseClaw keeps its log for `defenseclaw sandbox logs {name}`. The sandbox is kept: connect (c) "
             "resumes it.",
             MenuAction("stop", "Stop", variant="warning"),
+            # Ending a live agent session takes a deliberate choice: s then a
+            # stray Enter stopped a running Codex session (GAP-0261).
+            cancel_first=True,
         )
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
@@ -983,7 +1072,7 @@ class SandboxPanelMixin:
         # A wrapper runs `sandbox run`, so while sandboxes cannot run the
         # plain command would fail in every new shell; enable refuses then.
         blocked = {
-            "off": "Sandboxes are off; run the Sandbox wizard (0 Setup) first",
+            "off": model.off_hint(),
             "unavailable": "Sandboxes are unavailable; see: defenseclaw sandbox doctor",
             # Before the first snapshot the state is unknown; offering "Turn
             # on" then ran an enable the command refused (GAP-1371).
@@ -1025,7 +1114,7 @@ class SandboxPanelMixin:
             return
         model = self.sandbox_model
         if model.state() == "off":
-            self.notify_toast("info", "Sandboxes are off; run the Sandbox wizard (0 Setup) first.")  # type: ignore[attr-defined]
+            self.notify_toast("info", f"{model.off_hint()}.")  # type: ignore[attr-defined]
             return
         choices = harness_choices(model.harnesses, model.admin.allowed_harnesses)
         if not choices:

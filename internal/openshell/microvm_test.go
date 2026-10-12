@@ -135,6 +135,17 @@ func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	}
 }
 
+// TestDoctorNamesTheMacLoginSession (GAP-0193): on a Mac the row Linux
+// calls systemd linger is named for what keeps the gateway running there.
+func TestDoctorNamesTheMacLoginSession(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.onMicroVMs()
+	c := expectCheck(t, f.run(), openshell.CheckIDLinger, openshell.StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in")
+	if c.Title != "Login session" {
+		t.Fatalf("title = %q, want Login session", c.Title)
+	}
+}
+
 // TestDoctorOnAMacWithoutBuildx: DefenseClaw builds a MicroVM's images in
 // Docker too, so on a Mac whose docker does not find its buildx plugin (a
 // HOME without Docker Desktop's ~/.docker/cli-plugins) the BuildKit check
@@ -401,7 +412,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
-			"DefenseClaw changes it on Linux only; the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with")
+			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
@@ -583,7 +594,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		// The user starts it: setup stops here, where it would have to.
 		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, fail, "nvidia/openshell/openshell is not installed"), startYourself)
 		// Not `brew services start` of the formula that is not installed.
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not answering"), startYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayVersion, fail, "the gateway is not running"), startYourself)
 		if r.OK() {
 			t.Fatalf("a Mac whose gateway does not answer is ready:\n%s", r)
 		}

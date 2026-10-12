@@ -23,21 +23,36 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
 	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
+
+// killedByInterrupt reports an error of a command a Ctrl-C ended: the
+// terminal sends SIGINT to its whole foreground group, the git that a pull
+// runs included.
+func killedByInterrupt(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return errors.Is(err, errInterrupted) || errors.Is(err, openshell.ErrInterrupted)
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGINT
+}
 
 // RunDir is where detached runs keep their output inside the sandbox.
 const RunDir = harness.RunDir
@@ -51,6 +66,9 @@ type session struct {
 	sb   *sandboxapi.Sandbox
 	rm   bool
 	yes  bool
+	// cliErr holds the OpenShell CLI's own standard error of the session's
+	// interactive harness or shell (holdCLIErr).
+	cliErr *heldOutput
 	// autoRm marks an rm the run did not ask for: a headless run's sandbox,
 	// which goes by the rules of --rm unless --keep or
 	// openshell.keep_headless keeps it (App.headlessRm). The end of the
@@ -70,6 +88,25 @@ type session struct {
 	// harness or shell still runs in the sandbox (attachedSessions):
 	// nothing may stop the sandbox, or undo the folder, under them.
 	others int
+	// lost is set when the session's connection to the sandbox broke (the
+	// OpenShell gateway restarted under it, for one) while the sandbox
+	// went on running: it is left running for a reattach.
+	lost bool
+	// unanswered is set when the sandbox ran no command at the end of a
+	// session whose harness failed, though OpenShell still read it ready
+	// after settlePhaseWait (settledPhase): its container may be gone (a
+	// Docker restart), so nothing may say it keeps running (GAP-0333).
+	unanswered bool
+	// placeholder is set when OpenShell refused a request of the session's
+	// conversation that carried a credential placeholder
+	// (sandboxapi.PlaceholderRefusal): the conversation cannot go on, so the
+	// end offers a new one instead of --continue (GAP-0354).
+	placeholder bool
+	// diskFull is set when a copy's pull at the end of the session failed
+	// on the sandbox's own full disk (App.ownDiskFull): a MicroVM stopped
+	// like that cannot start again, so it is left running for a pull once
+	// some space is freed (GAP-0339).
+	diskFull bool
 	// headless marks a one-prompt session (the resume hint says how to
 	// run the next prompt).
 	headless bool
@@ -84,13 +121,15 @@ type session struct {
 	before *sandboxapi.Sandbox
 	// daemonStarted is when the daemon the session ends with started
 	// (sandboxapi.Status.StartedAt; zero when it does not say): after the
-	// session's start, the daemon restarted during it, and its counters
-	// cover only the time since.
+	// session's start, the daemon restarted during it.
 	daemonStarted time.Time
 
 	// shell marks a `connect --shell` session: no harness, so no hooks to
 	// expect.
 	shell bool
+	// passArgs is set when the command was given arguments for the harness
+	// (after --), which it may answer without a session (--version).
+	passArgs bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time
@@ -105,6 +144,10 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
+	// notAccepted is set when the daemon did not record that the user kept
+	// the session's changes (acceptChanges): another terminal may have
+	// started the sandbox again meanwhile.
+	notAccepted bool
 	// unmasked are the files that look like secrets the session left in
 	// the project and the sandbox does not mask: its next start refuses
 	// while they stay there (the review's UnmaskedSecrets).
@@ -144,6 +187,17 @@ type session struct {
 	// unblocked since, whose summary line offers no unblock.
 	blockedHosts   map[string]bool
 	unblockedHosts map[string]bool
+	// refused are the host:port destinations of OpenShell's own refusals
+	// the session announced, with their host; otherBlocks the hosts blocked
+	// another way too; approved the destinations an approval opened since
+	// (GAP-0196): no longer blocked, and not counted as such.
+	refused     map[string]string
+	otherBlocks map[string]bool
+	approved    map[string]bool
+	// gatewayDown is set when the daemon, at the end of the session, could
+	// not reach the OpenShell gateway; errored when the sandbox ended in
+	// OpenShell's error phase.
+	gatewayDown, errored bool
 }
 
 // probe runs a trivial command in workdir until the sandbox answers; ""
@@ -217,9 +271,71 @@ func (s *session) attach(ctx context.Context, opts harness.LaunchOptions, headle
 	if err != nil {
 		return -1, err
 	}
-	code, err := s.app.Terminal.Run(ctx, inv)
+	code, err := s.app.Terminal.Run(ctx, s.holdCLIErr(inv))
+	if err != nil {
+		s.printCLIErr(false)
+	}
 	s.harnessCode = code
 	return code, err
+}
+
+// maxHeldCLIErr bounds what holdCLIErr keeps of the OpenShell CLI's own
+// standard error during a session.
+const maxHeldCLIErr = 64 << 10
+
+// heldOutput keeps what is written to it, up to maxHeldCLIErr bytes.
+type heldOutput struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (h *heldOutput) Write(p []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room := maxHeldCLIErr - h.b.Len(); room > 0 {
+		h.b.Write(p[:min(len(p), room)])
+	}
+	return len(p), nil
+}
+
+func (h *heldOutput) take() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := h.b.String()
+	h.b.Reset()
+	return out
+}
+
+// holdCLIErr has the OpenShell CLI's own standard error of an interactive
+// session held until the session ends (printCLIErr): written into the
+// harness's screen it corrupts it, and its relay error when the gateway
+// restarted ("Error: × code: The service is currently unavailable,
+// message: exec relay closed before the command reported an exit status")
+// came before DefenseClaw's account of what ended the session (GAP-0279).
+func (s *session) holdCLIErr(inv openshell.Invocation) openshell.Invocation {
+	s.cliErr = &heldOutput{}
+	inv.Stderr = s.cliErr
+	return inv
+}
+
+// printCLIErr prints what the OpenShell CLI wrote on its own standard
+// error during the session, after DefenseClaw's lines. Its relay error is
+// left out when explained: DefenseClaw said what ended the session.
+func (s *session) printCLIErr(explained bool) {
+	if s.cliErr == nil {
+		return
+	}
+	text := strings.TrimRight(s.cliErr.take(), "\r\n")
+	if text == "" || explained && relayClosed(text) {
+		return
+	}
+	fmt.Fprintln(s.app.IO.Err, terminalText(text))
+}
+
+// relayClosed reports whether the OpenShell CLI's error is its exec relay
+// that closed under the session (the gateway restarted or went away).
+func relayClosed(text string) bool {
+	return strings.Contains(text, "exec relay closed") || strings.Contains(text, "The service is currently unavailable")
 }
 
 // loginShell starts the sandbox user's login shell (bash where the image
@@ -238,6 +354,7 @@ func (s *session) attachShell(ctx context.Context) (int, error) {
 	stop := s.beginSession(ctx)
 	defer stop()
 	inv, err := s.cli.Exec(s.sb.Name, loginShell, openshell.CLIExecOptions{TTY: true, WorkDir: s.sb.Workdir})
+	inv = s.holdCLIErr(inv)
 	if err != nil {
 		return -1, err
 	}
@@ -361,6 +478,10 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.blockNotice(ev)
 	case sandboxapi.ActivityEgressUnblocked:
 		s.onUnblock(ev.Host)
+	case sandboxapi.ActivityApprovalResolved:
+		if sandboxapi.ApprovalApplied(ev) {
+			s.onApproved(ev)
+		}
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
 	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookBlocked, sandboxapi.ActivityHookFailed:
@@ -459,7 +580,9 @@ func (s *session) askNotice(ctx context.Context, ev sandboxapi.ActivityEvent) {
 // apart. Where the port is what is blocked (portBlock), it shows, once per
 // port.
 func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
-	if ev.Host == "" || ev.Reason == harnessFetchReason {
+	// A refusal of a request that carried a credential placeholder blocks no
+	// site: its finding says what it is (GAP-0354).
+	if ev.Host == "" || ev.Reason == harnessFetchReason || sandboxapi.PlaceholderRefusal(ev.Reason) {
 		return
 	}
 	where, key := ev.Host, "block "+ev.Host
@@ -469,6 +592,8 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 	}
 	text := "✗ DefenseClaw blocked " + where
 	switch why := firstNonEmpty(ev.Category, ev.Reason); {
+	case sshPort(ev):
+		text += " (" + sandboxapi.SSHBlockedText(ev.Host) + ")"
 	case ev.Category == sandboxapi.CategoryLargeUpload:
 		// The large-upload block (egress.block_large_uploads) cut an
 		// upload there (its event counts what went up), or refused a
@@ -479,29 +604,81 @@ func (s *session) blockNotice(ev sandboxapi.ActivityEvent) {
 		if clause := sandboxapi.LargeUploadReason(ev.Reason); clause != "" {
 			text += " (" + clause + ")"
 		}
+	case hostPortClosedWhy(ev) != "":
+		text += ": " + hostPortClosedWhy(ev)
 	case why != "":
-		text += " (" + reasonText(why) + ")"
+		text += " (" + sandboxapi.BlockedText(why, ev.Host) + ")"
 	}
 	host := strings.ToLower(ev.Host)
 	n := sessionNotice{summary: text}
-	if ev.Unblockable {
+	if ev.Unblockable && !sshPort(ev) {
 		// Once the host is unblocked the summary gives the block without
 		// the command (onUnblock).
 		n.host, n.unblocked = host, text+"; unblocked since"
 		text += " → unblock: " + CommandName + " unblock " + ev.Host + " --sandbox " + s.sb.Name
 		n.summary = text
 	}
+	// OpenShell refuses a connection no rule allows yet; an approval
+	// (triage's own, under the open profile) opens it: its line then says
+	// so instead of a block (onApproved).
+	direct := ev.Source == sandboxapi.SourceOpenShell && ev.Category == ""
+	if direct {
+		n.dest = strings.ToLower(where)
+		n.approved = "⚠ " + where + ": a connection was refused before a rule allowed it; approved since"
+	}
 	s.noticeMu.Lock()
 	if s.blockedHosts == nil {
-		s.blockedHosts = map[string]bool{}
+		s.blockedHosts, s.refused, s.otherBlocks = map[string]bool{}, map[string]string{}, map[string]bool{}
 	}
 	if len(s.blockedHosts) < maxSeenEvents {
 		s.blockedHosts[host] = true
+		if direct {
+			s.refused[n.dest] = host
+		} else {
+			s.otherBlocks[host] = true
+		}
 	}
-	// Blocked again after an unblock: the command applies again.
+	// Blocked again after an unblock or approval: the block applies again.
 	delete(s.unblockedHosts, host)
+	delete(s.approved, n.dest)
 	s.noticeMu.Unlock()
 	s.noticeWith(key, text, n)
+}
+
+// onApproved records that an approval opened a destination during the
+// session.
+func (s *session) onApproved(ev sandboxapi.ActivityEvent) {
+	dest := strings.ToLower(askDestination(ev))
+	if dest == "" {
+		return
+	}
+	s.noticeMu.Lock()
+	defer s.noticeMu.Unlock()
+	if s.approved == nil {
+		s.approved = map[string]bool{}
+	}
+	if len(s.approved) < maxSeenEvents {
+		s.approved[dest] = true
+	}
+}
+
+// liftedBlocks counts the hosts the session announced blocked only by
+// OpenShell refusals of destinations an approval opened since. Under
+// noticeMu.
+func (s *session) liftedBlocks() int {
+	open := map[string]bool{}
+	for dest, host := range s.refused {
+		if _, seen := open[host]; !seen || !s.approved[dest] {
+			open[host] = s.approved[dest] && !s.otherBlocks[host]
+		}
+	}
+	n := 0
+	for _, lifted := range open {
+		if lifted {
+			n++
+		}
+	}
+	return n
 }
 
 // largeUploadNotice announces a large upload only the report saw (the
@@ -684,6 +861,10 @@ func (a *App) copyWarnings(rec *workspace.CopyRecord) {
 	if n := len(rec.HeldBack); n > 0 {
 		a.warn(plural(int64(n), "secret file", "secret files") + " held back from the copy: " + strings.Join(firstN(rec.HeldBack, 8), ", "))
 	}
+	if n := len(rec.Unmasked); n > 0 {
+		a.warn(plural(int64(n), "file that looks like a secret is", "files that look like secrets are") + " in the copy (--unmask), so the agent can read " +
+			itThem(rec.Unmasked) + ": " + strings.Join(firstN(rec.Unmasked, 8), ", "))
+	}
 	for _, w := range rec.Warnings {
 		a.warn(w)
 	}
@@ -704,23 +885,51 @@ func firstN(list []string, n int) []string {
 func (s *session) end(ctx context.Context) error {
 	ctx = context.WithoutCancel(ctx)
 	a := s.app
+	deleted := func() error {
+		a.println()
+		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() +
+			"; there is nothing left to review, and its undo point went with it")
+		s.printCLIErr(true)
+		return nil
+	}
 	after, err := s.settled(ctx)
 	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
+	}
+	if daemonUnreachable(err) {
+		// The session's end needs the daemon: say what did not run and the
+		// way to it, where it said only that the daemon was down (GAP-0336).
 		a.println()
-		a.warn(s.sb.Name + " was deleted from outside this session, which ended " + s.harnessName() + "; there is nothing left to review")
-		return nil
+		later := "`" + CommandName + " review " + s.sb.Name + "` shows its changes and `" + CommandName + " undo " + s.sb.Name +
+			"` reverts them; " + s.sb.Name + " and its undo point are kept"
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			later = "`" + CommandName + " pull " + s.sb.Name + "` brings its work back; " + s.sb.Name + " keeps it"
+		}
+		a.warn("the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with " +
+			"`defenseclaw-gateway start`, then " + later)
+		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the DefenseClaw daemon is not running")}}
 	}
 	if err != nil {
 		return apiError(err)
 	}
+	// A delete from another terminal stops the sandbox first: it reads as
+	// deleting, then is gone (GAP-0170).
+	if after, err = s.settledPhase(ctx, after); sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
+	}
 	a.println()
 	if st, err := s.api.Status(ctx); err == nil {
 		s.daemonStarted = st.StartedAt
+		s.gatewayDown = st.Enabled && !st.Available
 	}
 	elsewhere := s.endedElsewhere(after)
 	if elsewhere != "" {
 		a.warn(elsewhere)
 	}
+	if at := after.Hooks.PlaceholderRefusedAt; !at.IsZero() && !s.startedAt.IsZero() && !at.Before(s.startedAt) {
+		s.placeholder = true
+	}
+	s.printCLIErr(elsewhere != "")
 	// While the sandbox still runs: the review may stop it.
 	s.diagnoseStart(ctx, after, elsewhere != "")
 	if !s.started && after.Phase == "ready" {
@@ -739,27 +948,46 @@ func (s *session) end(ctx context.Context) error {
 	// What the agent left running keeps writing to the mounted folder: a
 	// sandbox the session owns stops before the review, so the review, the
 	// keep/undo answer and the undo point cover everything it changed.
-	stopped := false
+	stopped, stopFailed := false, false
 	switch {
 	case after.Phase != "ready":
 		// Stopped from elsewhere: nothing runs in it any more.
 		stopped = true
 	case s.others > 0:
 		a.note(s.sb.Name + " keeps running: " + s.othersText() + ", so what changes after this review is not in it")
+	case s.lost:
+		a.note(s.sb.Name + " keeps running for a reattach, so what changes after this review is not in it")
 	case s.started && !s.liveRun:
 		if sb, err := s.api.Stop(ctx, s.sb.Name); err != nil {
-			a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
-				"); what still runs in it can change the folder after this review")
+			if now, gerr := s.api.Get(ctx, s.sb.Name); gerr == nil && now.Phase == "error" {
+				// Docker stopped the container as the session ended: the stop
+				// met that, in whatever words; the line says what happened,
+				// and nothing runs in it any more (GAP-0337).
+				after, stopped = now, true
+				if text := s.endedElsewhere(after); text != "" {
+					a.warn(text)
+				}
+			} else {
+				stopFailed = true
+				a.warn("could not stop " + s.sb.Name + " before reviewing its changes (" + apiError(err).Error() +
+					"); what still runs in it can change the folder after this review")
+			}
 		} else {
 			stopped = true
 			if sb != nil {
 				after = sb
 			}
 		}
+	case s.unanswered:
+		a.warn(s.sb.Name + " does not answer, though OpenShell still reads it as running: its container may have stopped under the session " +
+			"(a Docker restart, for one), which OpenShell reports once Docker is back (`" + CommandName + " status " + s.sb.Name + "` shows it)")
 	case !s.liveRun:
 		a.note(s.sb.Name + " is still running (it was running when you connected); changes it makes after this point are not in this review")
 	}
 	rev, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{})
+	if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		return deleted()
+	}
 	reviewed := err == nil
 	if !reviewed {
 		a.warn("could not review the session's changes: " + apiError(err).Error())
@@ -778,6 +1006,7 @@ func (s *session) end(ctx context.Context) error {
 		}
 	}
 	if rev != nil && rev.Report != nil {
+		a.printCommits(rev.Report)
 		if line := riskLine(rev.Report); line != "" {
 			a.println(a.style(line, ansiYellow))
 		}
@@ -812,6 +1041,19 @@ func (s *session) end(ctx context.Context) error {
 		}
 		decision, accepted = s.onExit(changed)
 	}
+	if changed && (decision == "u" || accepted) {
+		// The question may have waited while the sandbox was deleted, or a
+		// new sandbox took its name: the answer is not for that one
+		// (GAP-0170).
+		now, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return deleted()
+		}
+		if err == nil && s.sb.ID != "" && now.ID != "" && now.ID != s.sb.ID {
+			a.warn(s.sb.Name + " was deleted while this question waited, and a new sandbox took its name; the answer does not apply to it")
+			return nil
+		}
+	}
 	switch {
 	case decision == "u":
 		wasRunning := after.Phase == "ready"
@@ -845,7 +1087,18 @@ func (s *session) end(ctx context.Context) error {
 		} else {
 			// The warning said the undo point stays.
 			a.ok("kept: the changes stay in the folder")
+			s.notAccepted = true
 		}
+	case accepted && reviewed && s.unanswered:
+		a.ok("kept: the changes stay in the folder")
+		a.note("the undo point stays, since " + s.sb.Name + " does not answer: `" + CommandName + " undo " + s.sb.Name +
+			"` still reverts this session's changes")
+	case accepted && reviewed && stopFailed:
+		// Not running, but not stopped either (OpenShell's error state after
+		// a Docker restart): "keeps running" was false there (GAP-0333).
+		a.ok("kept: the changes stay in the folder")
+		a.note("the undo point stays, since " + s.sb.Name + " could not be stopped: `" + CommandName + " undo " + s.sb.Name +
+			"` still reverts this session's changes")
 	case accepted && reviewed:
 		// The sandbox keeps running: what it changes after this review was
 		// not reviewed, so it must not become the base either.
@@ -878,11 +1131,139 @@ func (s *session) endedElsewhere(after *sandboxapi.Sandbox) string {
 		return name + " was undone from outside this session (`" + CommandName + " undo` or the TUI): the folder is back at its undo point, " +
 			"and that stopped " + s.harnessName()
 	}
+	if after.Phase == "error" {
+		// Not a stop of anyone's: OpenShell lost the sandbox (GAP-0278).
+		s.errored = true
+		return name + "'s container stopped under the session (Docker restarted, or its workload failed), which ended " + s.harnessName() +
+			"; OpenShell now holds it in its error state, where it can be neither stopped nor started"
+	}
 	if after.Phase != "ready" {
+		if h := after.Hooks; h.Silent && h.OnSilence == packs.OnSilenceStop {
+			// DefenseClaw's own stop (raiseSilence), not someone else's.
+			return "DefenseClaw stopped " + name + ": " + s.harnessName() + " worked for " + firstNonEmpty(h.SilenceAfter, "a while") +
+				" without a hook reaching DefenseClaw (hooks.on_silence: stop). Check its hook configuration in the sandbox before you start it again"
+		}
+		if s.gatewayDown {
+			// Not a stop of DefenseClaw's (GAP-0202): the gateway that runs
+			// the sandbox went away under it.
+			return "the OpenShell gateway is not available (it was stopped, or another account's gateway took its port; `" + CommandName +
+				" doctor` says which), which ended " + s.harnessName()
+		}
 		return name + " was stopped from outside this session (`" + CommandName + " stop` or the TUI), which ended " + s.harnessName()
+	}
+	if s.lost {
+		return "the connection to " + name + " was lost (the OpenShell gateway restarted, for one), which ended " + s.harnessName() +
+			"; " + name + " is still running → reattach: " + CommandName + " connect " + name
 	}
 	return ""
 }
+
+// settledPhase waits, at most settlePhaseWait, while the sandbox's phase
+// is passing (the OpenShell gateway restarting under it reads as unknown
+// or provisioning), and returns it as it then is. A session whose harness
+// failed while the sandbox passed through such a phase and came back
+// ready lost its connection to the sandbox, not the sandbox (lost).
+//
+// A sandbox being deleted (from another terminal or the TUI) is passing
+// too: once it is gone, settledPhase returns the not-found error.
+func (s *session) settledPhase(ctx context.Context, after *sandboxapi.Sandbox) (*sandboxapi.Sandbox, error) {
+	passing := passingPhase
+	if !passing(after.Phase) {
+		// A harness that failed while its sandbox still reads ready may
+		// have lost the sandbox a moment ago (a Docker restart stops its
+		// container, and OpenShell says so a few seconds later): look
+		// again shortly before calling it running (GAP-0278).
+		if after.Phase != "ready" || s.harnessCode == 0 || s.before == nil || s.before.Phase != "ready" {
+			return after, nil
+		}
+		for range 2 {
+			if s.app.Sleep(ctx, settlePhaseInterval) != nil {
+				break
+			}
+			next, err := s.api.Get(ctx, s.sb.Name)
+			if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+				return nil, err
+			}
+			if err != nil {
+				break
+			}
+			if after = next; after.Phase != "ready" {
+				break
+			}
+		}
+		if after.Phase == "ready" && !s.answers(ctx) {
+			// Still read ready, but it runs no command: its container is
+			// gone, and OpenShell says so once Docker is back, which can take
+			// longer than the look above (GAP-0333, GAP-0337).
+			after, err := s.waitPhase(ctx, after, func(phase string) bool { return phase == "ready" || passing(phase) })
+			if err == nil && after.Phase == "ready" {
+				s.unanswered = true
+			}
+			return after, err
+		}
+		if !passing(after.Phase) {
+			return after, nil
+		}
+	}
+	after, err := s.waitPhase(ctx, after, passing)
+	if err != nil {
+		return nil, err
+	}
+	s.lost = after.Phase == "ready" && s.harnessCode != 0 && s.before != nil && s.before.Phase == "ready"
+	return after, nil
+}
+
+// passingPhase reports a phase a sandbox passes through: being created,
+// started or deleted, or unknown while the OpenShell gateway restarts.
+func passingPhase(phase string) bool {
+	switch phase {
+	case "unknown", "provisioning", "starting", "creating", "deleting":
+		return true
+	}
+	return false
+}
+
+// waitPhase reads the sandbox every settlePhaseInterval, for at most
+// settlePhaseWait, while wait holds for its phase, and returns it as it then
+// is; the not-found error once it is gone.
+func (s *session) waitPhase(ctx context.Context, after *sandboxapi.Sandbox, wait func(string) bool) (*sandboxapi.Sandbox, error) {
+	for range int(settlePhaseWait / settlePhaseInterval) {
+		if !wait(after.Phase) || s.app.Sleep(ctx, settlePhaseInterval) != nil {
+			break
+		}
+		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			return nil, err
+		}
+		if err != nil {
+			break
+		}
+		after = next
+	}
+	return after, nil
+}
+
+// answers reports whether the sandbox runs a trivial command now (one try,
+// within answerTimeout); a command that cannot be prepared counts as an
+// answer, which leaves the phase as OpenShell reports it.
+func (s *session) answers(ctx context.Context) bool {
+	inv, err := s.cli.Exec(s.sb.Name, []string{"true"}, openshell.CLIExecOptions{Timeout: answerTimeout})
+	if err != nil {
+		return true
+	}
+	var out bytes.Buffer
+	code, err := s.app.Streamer.Stream(ctx, inv, &out, &out)
+	return err == nil && code == 0
+}
+
+// answerTimeout bounds answers.
+const answerTimeout = 10 * time.Second
+
+// settlePhaseWait and settlePhaseInterval pace settledPhase.
+const (
+	settlePhaseWait     = 20 * time.Second
+	settlePhaseInterval = 2 * time.Second
+)
 
 // onExit returns k (keep), u (undo), d (diff) or i (the user pressed
 // Ctrl-C), and whether keeping was the user's choice (an answer, --yes,
@@ -967,6 +1348,11 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	}
 	if !stopped {
 		switch {
+		case s.diskFull:
+			a.note("Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
+				"free some space in it (`" + CommandName + " exec " + name + " -- df -h /` shows it; `" + CommandName + " connect " + name +
+				" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + "`; stop it after that: `" + CommandName + " stop " + name + "`")
+			return nil
 		case s.liveRun:
 			a.note("Sandbox " + name + " keeps running: its detached run is still going → follow: " + CommandName + " logs " + name + " -f   stop: " +
 				CommandName + " stop " + name)
@@ -974,7 +1360,20 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		case s.others > 0:
 			a.note("Sandbox " + name + " keeps running: " + s.othersText() + " → stop it once they end: " + CommandName + " stop " + name)
 			return nil
+		case s.lost:
+			a.note("Sandbox " + name + " keeps running → reattach: " + CommandName + " connect " + name + "   stop: " + CommandName + " stop " + name)
+			return nil
+		case s.unanswered:
+			a.note("Sandbox " + name + " does not answer → `" + CommandName + " status " + name + "` shows its state; in OpenShell's error state (after a Docker restart) `" +
+				CommandName + " delete " + name + " --keep-snapshot` keeps the undo point, then run again")
+			return nil
 		case !s.started:
+			if now, err := s.api.Get(ctx, name); err == nil && now.Phase != "ready" {
+				// Stopped while the session ended (another terminal, the
+				// TUI): the line read "keeps running → stop" (GAP-0366).
+				a.note("Sandbox " + name + " is " + now.Phase + " now (stopped from outside this session) → resume: " + CommandName + " connect " + name)
+				return nil
+			}
 			a.note("Sandbox " + name + " keeps running (it was running when you connected) → stop: " + CommandName + " stop " + name)
 			s.continueHint()
 			return nil
@@ -985,6 +1384,16 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		}
 		s.markStopped()
 	}
+	if s.errored {
+		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
+			a.note("Sandbox " + name + " is in OpenShell's error state, and its copy's work that was not pulled cannot be read any more → `" +
+				CommandName + " delete " + name + "`, then run again")
+			return nil
+		}
+		a.note("Sandbox " + name + " is in OpenShell's error state → `" + CommandName + " delete " + name +
+			" --keep-snapshot` keeps the undo point and the folder's changes, then run again")
+		return nil
+	}
 	next := "resume: " + CommandName + " connect " + name
 	if s.headless {
 		next += " --prompt TEXT"
@@ -993,6 +1402,16 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 		// connect refuses while they are in the project.
 		next = "to resume, first move " + strings.Join(shownFiles(s.unmasked), ", ") + " out of the project, then: " +
 			strings.TrimPrefix(next, "resume: ")
+	}
+	if s.notAccepted {
+		if now, err := s.api.Get(ctx, name); err == nil && now.Phase == "ready" {
+			// Started again from outside this session while its question was
+			// open (another terminal, the TUI): "kept (stopped)" was false
+			// (GAP-0389).
+			a.note("Sandbox " + name + " is running again (started from outside this session) → reattach: " + CommandName + " connect " + name +
+				"   stop: " + CommandName + " stop " + name)
+			return nil
+		}
 	}
 	kept := "Sandbox kept (stopped)"
 	if s.undoStopped {
@@ -1082,11 +1501,17 @@ func (s *session) continueHint() {
 		// conversation may be there.
 		return
 	}
+	a := s.app
+	if s.placeholder {
+		// --continue would resume the conversation OpenShell refuses.
+		a.line(a.style("→", ansiCyan, ansiBold) + " start a new conversation: " + CommandName + " connect " + s.sb.Name +
+			" (this one holds a sandbox credential placeholder, so OpenShell refuses its requests; --continue would resume it)")
+		return
+	}
 	args, ok := continueArgs[s.spec.Name]
 	if !ok {
 		return
 	}
-	a := s.app
 	line := "continue this conversation: " + CommandName + " connect " + s.sb.Name + " -- " + args
 	if own, ok := ownResumeHint[s.spec.Name]; ok {
 		wrapped := strings.Fields(own)[0] == s.spec.Command && a.Cfg != nil && slices.Contains(a.Cfg.OpenShell.Wrappers, s.spec.Name)
@@ -1120,6 +1545,10 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 			break
 		}
 		next, err := s.api.Get(ctx, s.sb.Name)
+		if sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			// Deleted while the session ended (GAP-0170).
+			return nil, err
+		}
 		if err != nil {
 			break
 		}
@@ -1147,33 +1576,30 @@ const (
 // the sandbox reached for the first time, and the sites blocked those the
 // session announced blocked (its ✗ lines, which the summary repeats), or
 // the daemon's count of newly blocked ones when that is higher (a late
-// denial, or a flood the feed paced). A daemon restart during the session
-// starts its counters from zero (nothing keeps them): the session's then
-// count from zero too, and the line says they cover only the time since
-// the restart.
+// denial, or a flood the feed paced). A daemon restart keeps the hook
+// counts and the destinations (GAP-0156), up to the last minute's when the
+// daemon did not stop cleanly: counters below the session's start mean
+// they started again, and the line says they cover only the time since the
+// restart.
 func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewResponse) string {
 	before := s.before
 	if before == nil {
 		before = &sandboxapi.Sandbox{}
 	}
 	hooksBefore, egressBefore := before.Hooks, before.Egress
-	// since qualifies the counts a daemon restart started again; sitesReset
-	// marks the egress counts among them.
+	// since qualifies the hook counts a daemon restart started again;
+	// sitesReset marks the egress counts that started again.
+	restarted := "since the daemon restarted"
+	if s.restartedDuring() {
+		restarted += " at " + s.app.clock(s.daemonStarted)
+	}
 	since, sitesReset := "", false
-	switch {
-	case s.restartedDuring():
-		hooksBefore, egressBefore = sandboxapi.HookCoverage{}, sandboxapi.EgressStats{}
-		since, sitesReset = "since the daemon restarted at "+s.app.clock(s.daemonStarted), true
-	default:
-		// A daemon that does not say when it started: counters below the
-		// session's start mean it restarted.
-		if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
-			hooksBefore, since = sandboxapi.HookCoverage{}, "since the daemon restarted"
-		}
-		if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
-			after.Egress.BlockedRequests < egressBefore.BlockedRequests {
-			egressBefore, sitesReset = sandboxapi.EgressStats{}, since != ""
-		}
+	if after.Hooks.HookRequests < hooksBefore.HookRequests || after.Hooks.ToolCalls < hooksBefore.ToolCalls {
+		hooksBefore, since = sandboxapi.HookCoverage{}, restarted
+	}
+	if after.Egress.Destinations < egressBefore.Destinations || after.Egress.Blocked < egressBefore.Blocked ||
+		after.Egress.BlockedRequests < egressBefore.BlockedRequests {
+		egressBefore, sitesReset = sandboxapi.EgressStats{}, true
 	}
 	calls := after.Hooks.ToolCalls - hooksBefore.ToolCalls
 	blocked := after.Hooks.ToolBlocked - hooksBefore.ToolBlocked
@@ -1208,12 +1634,16 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 	}
 	sites := after.Egress.Destinations - egressBefore.Destinations
 	contacted := plural(int64(max(sites, 0)), "new site contacted", "new sites contacted")
-	if sitesReset {
+	switch {
+	case sitesReset && since != "":
 		contacted += " since then"
+	case sitesReset:
+		contacted += " " + restarted
 	}
 	parts = append(parts, contacted)
 	s.noticeMu.Lock()
-	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked)
+	lifted := s.liftedBlocks()
+	sitesBlocked := max(len(s.blockedHosts), after.Egress.Blocked-egressBefore.Blocked) - lifted
 	s.noticeMu.Unlock()
 	if sitesBlocked > 0 {
 		parts = append(parts, plural(int64(sitesBlocked), "site blocked", "sites blocked"))
@@ -1233,10 +1663,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 }
 
 // restartedDuring reports that the daemon the session ended with started
-// after the session did: it restarted during the session, and nothing kept
-// its counters, so they cover only the time since (PR 1022 live retest N1:
-// "0 tool calls · 0 new sites contacted" after 7 tool calls and two
-// restarts, which left no counter below the session's start).
+// after the session did: it restarted during the session, and a restart that
+// was not clean may have lost its last minute of hook counts
+// (hookReachUnknown).
 func (s *session) restartedDuring() bool {
 	return s.startedBefore(s.daemonStarted)
 }
@@ -1336,8 +1765,18 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(s.summaryLine(after, nil))
 		s.printHookReach(after, endedElsewhere)
 		s.printNotices()
-		a.warn("could not pull the sandbox's changes: " + err.Error())
-		a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
+		if killedByInterrupt(err) {
+			// The Ctrl-C reached the git the pull runs (GAP-0221): not a
+			// bundle that does not apply.
+			s.interrupted = true
+			a.warn("interrupted: nothing was brought back, and the work is still in the sandbox")
+		} else {
+			a.warn("could not pull the sandbox's changes: " + err.Error())
+			s.diskFull = a.ownDiskFull(ctx, s.api, err) != ""
+		}
+		if !s.diskFull {
+			a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
+		}
 		s.keepUnpulled()
 		return s.finish(ctx, false)
 	}
@@ -1350,6 +1789,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		a.println(a.style(rev.RiskLine, ansiYellow))
 	}
 	s.printAsks(after)
+	a.printReviewDetail(&pull.Review)
 	for _, b := range pull.Blocking {
 		a.warn(b)
 	}
@@ -1369,8 +1809,18 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			// A plain folder has no branches to put the work on.
 			choices = append(choices, choice{"b", "branch dc/" + after.Name})
 		}
-		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"})
+		choices = append(choices, choice{"p", "patch file"}, choice{"s", "skip"}, choice{"d", "show diff"})
 		ans, err := a.choose("Bring the changes back?", choices, "a")
+		for err == nil && ans == "d" {
+			// Read the work before choosing, as a mounted project's end
+			// offers (GAP-0207).
+			if diff, derr := a.Workspace.Diff(ctx, a.dataDir(), after.Name); derr != nil {
+				a.warn("diff: " + derr.Error())
+			} else {
+				a.page(diff)
+			}
+			ans, err = a.choose("Bring the changes back?", choices, "a")
+		}
 		switch {
 		case errors.Is(err, errInterrupted):
 			// Ctrl-C: nothing comes back; the changes wait in the sandbox.
@@ -1400,7 +1850,12 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		opts.PatchOut = after.Name + ".patch"
 	}
 	// A branch that holds this work already takes nothing new: nothing to
-	// confirm.
+	// confirm; nor does a branch or a patch file, which change nothing that
+	// runs until merged or applied (GAP-0262, GAP-0267).
+	if sensitive && writesElsewhere(opts.applyMode(), &pull.Review) {
+		a.note(elsewhereNote(opts.applyMode()))
+		opts.AcceptSensitive, sensitive = true, false
+	}
 	if sensitive && !a.branchHolds(ctx, after, opts) {
 		yes, err := a.ask(a.bringBackQuestion(&pull.Review), false, false)
 		if err != nil {
@@ -1408,6 +1863,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 		}
 		opts.AcceptSensitive = yes
 		if !yes {
+			a.note(notBroughtBack(after.Name, pull.Kind))
 			s.keepUnpulled()
 			return s.finish(ctx, false)
 		}

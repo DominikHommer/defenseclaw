@@ -204,6 +204,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		MCP:                mcp,
 		Telemetry:          s.sandboxTelemetry(),
 		Persist:            sandboxConfigPersister{api: api},
+		SyncConfig:         api.syncSandboxConfig,
 		Quiesce:            inflight,
 		ForgetBinding:      api.ForgetSandboxBinding,
 		IngressPort:        ingressPort,
@@ -216,6 +217,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
+		DiscoveryRemoved:   func(string) { api.rescanAIDiscovery() },
 	})
 	if err != nil {
 		return nil, err
@@ -230,6 +232,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {
@@ -246,7 +249,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 			out := make([]SandboxEgressRefusal, 0, len(refused))
 			for _, r := range refused {
 				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
-					Cut: r.Cut, Sent: r.Sent})
+					Cut: r.Cut, Sent: r.Sent, Note: r.Note})
 			}
 			return out
 		},
@@ -354,12 +357,14 @@ func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause e
 	fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, cause)
 	report(part, fmt.Errorf("%w (running sandboxes are stopped until DefenseClaw holds this port again)", cause))
 	if rt.tel != nil {
-		_ = rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+		if err := rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 			State:        audit.SandboxHealthFailed,
 			ErrorCode:    strings.ToLower(string(gatewaylog.ErrCodeOpenShellListenerFailed)),
 			ErrorSummary: "the sandbox " + part + " listener is not running: " + cause.Error(),
 			Timestamp:    time.Now(),
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox] %s: record the lost %s listener: %v\n", gatewaylog.ErrCodeOpenShellTelemetryFailed, part, err)
+		}
 	}
 	if rt.fleet == nil {
 		<-ctx.Done()
@@ -513,6 +518,16 @@ func (p sandboxConfigPersister) AllowAlways(ctx context.Context, host string) er
 
 func (p sandboxConfigPersister) BlockAlways(ctx context.Context, host string) error {
 	return p.api.appendSandboxConfigList(ctx, "openshell.egress.block", host)
+}
+
+// syncSandboxConfig reloads config.yaml through the central reload
+// transaction, so a sandbox decision sees a change the CLI wrote a moment
+// ago instead of waiting for the reload watcher (manager.Options.SyncConfig).
+func (a *APIServer) syncSandboxConfig(ctx context.Context) error {
+	if a.configReloader == nil {
+		return nil
+	}
+	return a.configReloader(ctx, "sandbox_decision")
 }
 
 func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host string) error {

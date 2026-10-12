@@ -74,6 +74,14 @@ readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
 readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 
+# DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
+# answer, worded for the agent and for the user who reads its screen: what is
+# down, and how the user brings it back. "sandbox ingress unreachable" alone
+# left both guessing when the daemon stopped mid-session (GAP-0272). A
+# daemon that was just started can take a minute to answer: the agent told
+# the user to start the daemon they had just started (GAP-0332).
+readonly DC_SANDBOX_UNREACHABLE="DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs \`defenseclaw-gateway start\` there if it is stopped, and after a start retries in a minute (\`defenseclaw sandbox doctor\` says what is wrong)"
+
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
 #
 # The binding token is the only credential a sandbox hook may present. A
@@ -123,6 +131,32 @@ defenseclaw_sandbox_idempotency_key() {
     esac
   fi
   printf '%s' "$key"
+}
+
+# defenseclaw_response_failure_reason REASON replaces _hardening.sh's for the
+# sandbox hooks, whose answer body the hook holds in RESULT. A 403 whose body
+# is OpenShell's own refusal of a post that carries a credential placeholder
+# from the conversation (an env output shows them) is named as that: the
+# token, the ingress and DefenseClaw are fine, and a new conversation works
+# (GAP-0355). Another 401 or 403 is the ingress refusing the request, which
+# the host's advice (token drift, doctor --fix, gateway restart) does not
+# reach from inside a sandbox.
+defenseclaw_response_failure_reason() {
+  case "$1" in
+    *"HTTP 401"*|*"HTTP 403"*)
+      case "${RESULT:-}" in
+        *"credential placeholder"*)
+          printf '%s (OpenShell refused it: this conversation holds a sandbox credential placeholder, which an env output shows, and OpenShell forwards no request that carries one; the user starts a new conversation)' "$1"
+          ;;
+        *)
+          printf '%s (DefenseClaw on the user'"'"'s machine refused the sandbox'"'"'s request: the user runs `defenseclaw sandbox doctor` there)' "$1"
+          ;;
+      esac
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
 }
 
 # defenseclaw_sandbox_post PATH BODY MAX_TIME RETRY_MAX_TIME [CURL_ARGS...]

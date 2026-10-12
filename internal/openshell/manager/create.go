@@ -99,6 +99,10 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	repo, err := m.repoPolicy(project, req.RepoPolicyDigest)
+	if err != nil {
+		return nil, err
+	}
 	// What the sandbox is sent depends on the driver the gateway runs
 	// now, which a restart since the connection may have changed.
 	gw, err := m.driverGateway(ctx)
@@ -108,7 +112,8 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	flags := runFlags{
 		Pack: req.Pack, Profile: req.Profile, Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo,
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
-		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
+		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
+		RepoPolicy: repo,
 	}
 	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
@@ -317,6 +322,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		// The harness's name for the credential (a template ID); the
 		// provider's gateway profile may be a regional one.
 		rec.CredentialProfile, rec.BedrockRegion = llm.profile.Template, in.req.LLM.BedrockRegion
+		rec.LLMDigest = credentialDigest(llm.credentials)
 	}
 	for _, c := range creds {
 		rec.Credentials = append(rec.Credentials, sandboxapi.CredentialGrant{Name: c.binding.Name, Host: c.binding.Host, Port: c.binding.Port})
@@ -472,7 +478,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if ri := delivered.runImage; ri != nil {
 		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
 	}
-	if err := m.vmDiskRoom(ctx, gw.Driver, img, rec.RunImageID); err != nil {
+	if err := m.vmDiskRoom(ctx, gw.Driver, gw.Version, img, rec.RunImageID); err != nil {
 		return nil, err
 	}
 
@@ -555,7 +561,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellPolicyRejected, name, rejected.Message)
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected, Message: "OpenShell rejected the sandbox configuration", Detail: rejected.Message}
 		}
-		return nil, upstream("wait for sandbox "+name, err)
+		return nil, provisioningFailure(gw.Driver, upstream("wait for sandbox "+name, err))
 	}
 	if _, err := m.opts.Bindings.Update(binding.ID, func(s *sandboxauth.Spec) error { s.SandboxID = sb.ID; return nil }); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "record the sandbox id on its binding: %v", err)
@@ -568,18 +574,14 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	// Before the sandbox is saved and watched: one that does not run as
 	// prepared is rolled back like one OpenShell rejected.
-	var hostname string
-	if !gw.Driver.SkipWorkloadCheck {
-		facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify)
-		if err != nil {
-			return nil, err
-		}
-		hostname = facts.Hostname
+	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, "DefenseClaw deleted it")
+	if err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
 	b.rec.ID = sb.ID
-	b.rec.Hostname = hostname
+	b.rec.Hostname = facts.Hostname
 	b.sb = sb
 	b.creating = false
 	m.mu.Unlock()
@@ -588,6 +590,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	m.recordMountTelemetry(ctx, b, plan, !in.req.NoSnapshot)
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerCreate, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.refreshEgress()
 	view := m.viewOf(b)
@@ -597,13 +600,15 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 // vmDiskRoom refuses a create on a driver that prepares a disk from each
 // image it boots (the vm driver's ImageCache) when the image the sandbox
 // boots, id (its run image or alias; the overlay image img's own ID when
-// empty), has no disk prepared for img's workload identity yet and the
-// volume of the driver's image cache lacks the room for one
-// (openshell.VMDiskShortage): the preparation would fill the disk. The CLI
+// empty), has no disk prepared for img's workload identity by the
+// gateway's release yet (a disk of the release before an in-place upgrade
+// is not booted: image.VMDisk.PreparedBy) and the volume of the driver's
+// image cache lacks the room for one (openshell.VMDiskShortage): the
+// preparation would fill the disk. The CLI
 // refuses such a run before it stages a copy, and warns when the room is
 // short of the recommended; this covers every other client. Nothing is
 // refused when the space cannot be measured.
-func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.Record, id string) error {
+func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release string, img image.Record, id string) error {
 	if d.ImageCache == "" || m.opts.VMDiskFree == nil {
 		return nil
 	}
@@ -615,7 +620,7 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 		return nil
 	}
 	for _, disk := range image.VMDisks(dir, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return nil
 		}
 	}
@@ -623,7 +628,8 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 	if s, ok := m.opts.Images.(imageSizer); ok {
 		size, _ = s.ImageSize(ctx, id)
 	}
-	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"); err != nil {
+	free, inFlight := image.FreeAfterStaging(dir, free, size, m.now())
+	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"+image.UnderWay(inFlight)); err != nil {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error()}
 	}
 	return nil
@@ -785,7 +791,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 	if emitted {
 		m.lifecycle(context.WithoutCancel(ctx), b, audit.SandboxPhaseDeleted, audit.SandboxTriggerCreate, false, nil, nil)
 	}
-	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
 		ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
@@ -1147,6 +1153,29 @@ func (m *Manager) release(name string, b *box) {
 	_ = m.removeRecord(b)
 }
 
+// repoPolicy reads a project's repository policy (packs.LoadRepoPolicy)
+// for a new sandbox. want is the digest the client resolved the run with
+// (sandboxapi.NoRepoPolicy when the project had none, "" when the client
+// does not say): a policy that changed since refuses the create, since the
+// client staged a copy with the one it read.
+func (m *Manager) repoPolicy(project, want string) (*packs.RepoPolicy, error) {
+	rp, err := packs.LoadRepoPolicy(project)
+	if err != nil {
+		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid,
+			Message: "the repository policy " + packs.RepoPolicyPath + " of this project cannot be used", Detail: err.Error()}
+	}
+	got := sandboxapi.NoRepoPolicy
+	if rp != nil {
+		got = rp.Digest
+	}
+	if want != "" && want != got {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the repository policy %s of this project changed while the run started; run it again", packs.RepoPolicyPath)
+	}
+	return rp, nil
+}
+
 func realProject(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || !filepath.IsAbs(p) {
@@ -1176,6 +1205,20 @@ func workspaceError(err error) error {
 	default:
 		return &sandboxapi.Error{Code: sandboxapi.CodeInternal, Message: "prepare the project folder", Detail: err.Error()}
 	}
+}
+
+// provisioningFailure adds what to check to a first start OpenShell gave
+// up provisioning (ProvisioningTimedOut) on a driver that prepares a disk
+// from each image (the vm driver): on a volume that ran full the error
+// named neither the disk nor what frees it (GAP-0219).
+func provisioningFailure(d openshell.Driver, err error) error {
+	var e *sandboxapi.Error
+	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
+		return err
+	}
+	e.Detail += ". The first start of an image prepares a MicroVM disk of about 5 GB, and a full volume stops it: check Disk space in " +
+		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
+	return e
 }
 
 func upstream(op string, err error) error {
@@ -1267,7 +1310,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	m.mu.Unlock()
 	if len(plan.Masked) > 0 {
 		n := int64(len(plan.Masked))
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
 			Sandbox: id, Operation: audit.SandboxWorkspaceMask, Initiator: "operator", FileCount: &n,
 			Paths: plan.MaskedRels(), Timestamp: m.now(),
 		})
@@ -1284,7 +1327,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	if snap.Git != nil {
 		ev.SnapshotRef = snap.Git.Ref
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
 func snapshotKind(k workspace.SnapshotKind) string {

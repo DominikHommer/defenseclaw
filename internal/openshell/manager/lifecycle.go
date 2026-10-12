@@ -18,8 +18,11 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,13 +126,16 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	}
 	st.LastReconcile = m.lastReconcile
 	st.StartedAt = m.startedAt.UTC()
+	st.TelemetryFailures, st.TelemetryError = m.tel.failureStatus()
 	return st, nil
 }
 
 // List returns every sandbox, refreshed from OpenShell when it is reachable.
 func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
+	live := false
 	if gw, err := m.gateway(ctx); err == nil {
 		if sbs, err := m.listManaged(ctx, gw); err == nil {
+			live = true
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
@@ -145,21 +151,23 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	out := make([]sandboxapi.Sandbox, 0, len(m.boxes))
 	bindings := make([]string, 0, len(m.boxes))
 	shared := make([]openshell.ComputeDriver, 0, len(m.boxes))
-	blocked := make([][]string, 0, len(m.boxes))
 	accepted := make([]*acceptedSnapshot, 0, len(m.boxes))
 	for _, b := range m.boxes {
 		if !b.deleted {
-			out = append(out, m.view(b))
+			v := m.view(b)
+			if !live {
+				unconfirmedPhase(&v)
+			}
+			out = append(out, v)
 			bindings = append(bindings, b.rec.BindingID)
 			shared = append(shared, sharedLimitsOf(b))
-			blocked = append(blocked, b.blockedHostList())
 			accepted = append(accepted, b.rec.Accepted)
 		}
 	}
 	proxy := m.proxy
 	m.mu.Unlock()
 	for i := range out {
-		m.decorate(&out[i], proxy, bindings[i], blocked[i], accepted[i])
+		m.decorate(&out[i], proxy, bindings[i], accepted[i])
 	}
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -175,6 +183,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	m.mu.Lock()
 	retained := b.retained
 	m.mu.Unlock()
+	live := retained
 	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
@@ -186,12 +195,28 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 			b.missing = true
 		}
 		m.mu.Unlock()
-		if err != nil && !openshell.IsNotFound(err) {
+		live = err == nil || openshell.IsNotFound(err)
+		if !live {
 			m.dropGateway(gw, err)
 		}
 	}
 	v := m.viewOf(b)
+	if !live {
+		unconfirmedPhase(&v)
+	}
 	return &v, nil
+}
+
+// unconfirmedPhase is the phase of a sandbox the OpenShell gateway could not
+// be asked about: a running or starting phase last seen is not known to hold
+// any more (the gateway stopped, or another account's took its port), so it
+// reads unknown, not provisioning or ready for as long as the gateway is
+// down (GAP-0202). A stopped or missing sandbox stays so.
+func unconfirmedPhase(v *sandboxapi.Sandbox) {
+	switch v.Phase {
+	case "ready", "provisioning":
+		v.Phase = string(audit.SandboxPhaseUnknown)
+	}
 }
 
 // Stop stops a sandbox and keeps it (and its mounts and binding) for a
@@ -210,6 +235,80 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	}
 	v := m.viewOf(b)
 	return &v, nil
+}
+
+// refreshModelCredential gives the sandbox's model provider the credential
+// the caller's environment holds now (StartRequest.LLM): a provider keeps
+// what its sandbox was created with, so once that key expired (a Bedrock
+// API key lasts hours) every model call of a later session failed until
+// the sandbox was deleted and run again. Only for the profile the sandbox
+// was created with, and only the variables that profile delivers.
+//
+// OpenShell never hands a provider's credential values back (the SDK's
+// provider has none after a get), so whether the key changed is judged
+// against rec.LLMDigest, the digest of the one DefenseClaw last gave the
+// provider. It returns the digest the provider's credential has now.
+func (m *Manager) refreshModelCredential(ctx context.Context, gw *Gateway, rec record, llm *sandboxapi.LLMCredential) (string, error) {
+	if llm == nil || llm.Profile == "" || llm.Profile != rec.CredentialProfile || len(llm.Credentials) == 0 {
+		return rec.LLMDigest, nil
+	}
+	pname := providerName(rec.Name, roleLLM, 0)
+	p, err := gw.Client.GetProvider(ctx, pname)
+	switch {
+	case openshell.IsNotFound(err):
+		return rec.LLMDigest, nil
+	case err != nil:
+		return "", upstream("get provider "+pname, err)
+	case !managedBy(p.Labels, rec.Owner) || p.Labels[LabelSandbox] != rec.Name:
+		return "", sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the OpenShell provider %s is not the one DefenseClaw created for sandbox %s; delete the sandbox and run a new one", pname, rec.Name)
+	}
+	profile, err := gw.Client.GetProfile(ctx, p.Type)
+	switch {
+	case openshell.IsNotFound(err):
+		// Nothing says which variables the provider delivers: it keeps its key.
+		m.logf("sandbox %s: provider profile %s is gone; the model credential is not renewed", rec.Name, p.Type)
+		return rec.LLMDigest, nil
+	case err != nil:
+		return "", upstream("get provider profile "+p.Type, err)
+	}
+	delivered := map[string]bool{}
+	for _, c := range profile.Credentials {
+		for _, env := range c.EnvVars {
+			delivered[env] = true
+		}
+	}
+	creds := map[string]string{}
+	for k, v := range llm.Credentials {
+		if delivered[k] && validSecretValue(v) {
+			creds[k] = v
+		}
+	}
+	digest := credentialDigest(creds)
+	if len(creds) == 0 || digest == rec.LLMDigest {
+		return rec.LLMDigest, nil
+	}
+	// The gateway merges the keys an update names into the provider's.
+	p.Spec.Credentials = creds
+	if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
+		return "", upstream("update provider "+pname, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Reason: "model_credential_updated",
+		Message: "sandbox " + rec.Name + " takes the model credential your environment holds now"})
+	return digest, nil
+}
+
+// credentialDigest is the SHA-256 of a provider's credentials (names and
+// values), which the record keeps in place of the values.
+func credentialDigest(creds map[string]string) string {
+	if len(creds) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, k := range slices.Sorted(maps.Keys(creds)) {
+		fmt.Fprintf(h, "%s\x00%s\n", k, creds[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // refuseRetained refuses what needs a live sandbox on a retained box (a
@@ -233,7 +332,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name := b.rec.Name
+	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -248,6 +347,17 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
+		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
+			return e
+		}
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
+		if connectionClosed(err) {
+			// gRPC's own words reached the user's session end (GAP-0337).
+			return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the connection to the OpenShell gateway closed while %s was stopping "+
+				"(a restart of Docker or of the gateway does that); `defenseclaw sandbox status %s` shows where it stands", name, name)
+		}
 		return upstream("stop sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
@@ -293,7 +403,16 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	b.sb = sb
 	m.mu.Unlock()
 	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
-		m.lifecycle(ctx, b, phase, trigger, false, nil, sb.Status.ExitCode)
+		// A failing condition explains an error phase (statusEvent), which
+		// the status then names (GAP-0297).
+		var cond *audit.SandboxCondition
+		for _, c := range sb.Status.Conditions {
+			if phase == audit.SandboxPhaseError && !strings.EqualFold(c.Status, "true") {
+				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+				break
+			}
+		}
+		m.lifecycle(ctx, b, phase, trigger, false, cond, sb.Status.ExitCode)
 	}
 }
 
@@ -409,7 +528,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// variable of the sandbox spec, which OpenShell cannot change after
 	// create: it is kept for the sandbox's life (the agent can read it
 	// either way) rather than rotated into a token no hook presents.
-	if tokenDelivery(rec) == config.OpenShellTokenDeliveryProvider {
+	if rec.TokenDelivery == config.OpenShellTokenDeliveryProvider {
 		var token string
 		if binding, token, err = m.opts.Bindings.Rotate(rec.BindingID); err != nil {
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "rotate the sandbox binding: %v", err)
@@ -422,7 +541,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		if err != nil {
 			return upstream("get provider "+pname, err)
 		}
-		if !managedBy(p.Labels, m.ownerOf(rec)) || p.Labels[LabelSandbox] != rec.Name {
+		if !managedBy(p.Labels, rec.Owner) || p.Labels[LabelSandbox] != rec.Name {
 			// Provider names are gateway-global: the new token must never
 			// go into a provider another sandbox took the name of.
 			return sandboxapi.Errorf(sandboxapi.CodeConflict,
@@ -434,6 +553,20 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		p.Spec.Credentials[openshell.EnvSandboxToken] = token
 		if _, err := gw.Client.UpdateProvider(ctx, p); err != nil {
 			return upstream("rotate provider "+pname, err)
+		}
+	}
+	digest, err := m.refreshModelCredential(ctx, gw, rec, req.LLM)
+	if err != nil {
+		return err
+	}
+	if digest != rec.LLMDigest {
+		m.mu.Lock()
+		b.rec.LLMDigest = digest
+		// The rejection was of the old key.
+		b.hooks.forgetModelRejection()
+		m.mu.Unlock()
+		if err := m.saveRecord(b); err != nil {
+			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
 	if rec.WorkdirMode == config.OpenShellWorkdirMount && !req.NoSnapshot && rec.Project != "" {
@@ -495,20 +628,25 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+			return e
+		}
 		return upstream("start sandbox "+rec.Name, err)
 	}
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+		if e := overlayDiskRefusal(rec.Name, err); e != nil {
+			m.logf("sandbox %s: %v", rec.Name, err)
+			return e
+		}
 		return upstream("wait for sandbox "+rec.Name, err)
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return err
 	}
-	if !gw.Driver.SkipWorkloadCheck {
-		if err := m.verifyStarted(ctx, gw, b, rec); err != nil {
-			return err
-		}
+	if err := m.verifyStarted(ctx, gw, b, rec); err != nil {
+		return err
 	}
 	m.mu.Lock()
 	b.sb = sb
@@ -516,6 +654,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
 	return nil
@@ -558,18 +697,6 @@ func stoppedPhase(p openshell.SandboxPhase) bool {
 		return true
 	}
 	return false
-}
-
-// tokenDelivery is how a sandbox received its ingress token. Records from
-// before the field existed tell by their ingress provider.
-func tokenDelivery(rec record) string {
-	if rec.TokenDelivery != "" {
-		return rec.TokenDelivery
-	}
-	if slices.Contains(rec.Providers, providerName(rec.Name, roleIngress, 0)) {
-		return config.OpenShellTokenDeliveryProvider
-	}
-	return config.OpenShellTokenDeliveryEnv
 }
 
 // checkNewSecrets refuses to start a mounted sandbox whose project now
@@ -839,6 +966,14 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	}
 	warn(m.removeRunConfig(rec.Name))
 	warn(m.removeRunLog(rec.Name))
+	// A sandbox kept for its snapshot reaches nothing any more.
+	warn(m.dropDestinations(rec.Name, rec.BindingID))
+	// A discovery that overlaps the release (an on-demand one) ends first,
+	// and none writes the folder again.
+	b.discoverMu.Lock()
+	b.discoveryReleased = true
+	warn(m.removeDiscovery(rec.Name))
+	b.discoverMu.Unlock()
 	if !retained {
 		warn(m.removeRecord(b))
 		m.removeSandboxDir(rec.Name)
@@ -858,7 +993,7 @@ func (m *Manager) sandboxProviders(ctx context.Context, gw *Gateway, rec record)
 	}
 	profileOf := map[string]string{}
 	if list, err := gw.Client.ListProviders(ctx); err == nil {
-		owner := m.ownerOf(rec)
+		owner := rec.Owner
 		for _, p := range list {
 			ours := managedBy(p.Labels, owner) && p.Labels[LabelSandbox] == rec.Name
 			switch {
@@ -953,10 +1088,18 @@ func (m *Manager) retire(b *box) {
 func (m *Manager) forget(b *box) {
 	m.mu.Lock()
 	b.deleted = true
-	if m.boxes[b.rec.Name] == b {
-		delete(m.boxes, b.rec.Name)
+	name, gone := b.rec.Name, m.boxes[b.rec.Name] == b
+	if gone {
+		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
+	if gone {
+		m.tel.forgetSandbox(name)
+		// A sandbox created under the name later starts with no destinations.
+		m.destMu.Lock()
+		delete(m.dests, name)
+		m.destMu.Unlock()
+	}
 	m.refreshEgress()
 }
 
@@ -1040,7 +1183,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 	id := b.identity()
 	m.mu.Unlock()
 	if err != nil {
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: audit.SandboxWorkspaceFailed, FailureClass: "undo_failed", Initiator: "operator", Timestamp: m.now()})
 		if errors.Is(err, workspace.ErrSnapshotNotFound) {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "sandbox %s has no undo point", name)
@@ -1054,7 +1197,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		if n == 0 {
 			result = audit.SandboxWorkspaceNoChange
 		}
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{Sandbox: id, Operation: audit.SandboxWorkspaceUndo,
 			Result: result, Initiator: "operator", FileCount: &n, Timestamp: m.now()})
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityWorkspace, Sandbox: name, Reason: "undo",
 			Message: "the project folder was restored to its undo point"})
@@ -1120,7 +1263,7 @@ func (m *Manager) Review(ctx context.Context, name string, req sandboxapi.Review
 	for _, f := range report.Flags {
 		ev.Paths = append(ev.Paths, f.Path)
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 	return resp, nil
 }
 
@@ -1139,7 +1282,7 @@ func (m *Manager) recordSnapshot(ctx context.Context, b *box) {
 	if snap.Git != nil {
 		ev.SnapshotRef = snap.Git.Ref
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
 // ReportWorkspace records a copy-mode workspace step the CLI ran (upload,

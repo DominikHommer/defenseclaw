@@ -47,7 +47,7 @@ What happens:
     **Docker preflight.** Verifies Docker is running and that ports `8000` (Splunk Web) and `8088` (HEC) are free.
   </Step>
   <Step>
-    **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, waits for `/services/server/info`, and provisions an HEC token.
+    **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, provisions an HEC token, and waits up to four minutes for HEC to accept an event. If the Splunk container keeps restarting, it stops at once and prints the container's last log lines.
   </Step>
   <Step>
     **Destination wiring.** Writes a logs-capable `kind: splunk_hec` v8 destination pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`. The reviewed private-network opt-in applies only to this local destination.
@@ -218,6 +218,35 @@ must not receive full content.
 Do not pass `--logs` here: in this command `--logs` starts the local Splunk
 container.
 
+### Splunk Observability dashboards and detectors
+
+`defenseclaw setup splunk dashboards apply` creates eight dashboards and a set
+of detectors from the bundled Terraform. Two parts cover OpenShell sandboxes.
+They use metrics only, because the dashboards read no logs.
+
+- **Security and Policy.** A new **Egress blocks by source** chart splits the
+  blocked egress rate by source: `go` and `ts` (the guardrail's own egress
+  checks), and for sandboxes `openshell` (OpenShell's own network boundary) and
+  `dc-egress-proxy` (the DefenseClaw egress proxy). The **Egress blocks** tile
+  still shows one total.
+- **Sandboxes.** Active sandboxes (the `defenseclaw.sandbox.active` gauge),
+  phase changes, sandbox egress allowed and blocked, and charts of the sandbox
+  egress rate by source and decision, phase changes by the phase entered, and
+  blocks by source and by harness connector, with a table of connector, source
+  and decision totals. Its egress tiles, charts and table count the two sandbox
+  sources only (`openshell`, `dc-egress-proxy`), not the guardrail's own egress.
+  The dashboard filters on harness connector, egress source and decision.
+  Sandbox names are never metric dimensions; hosts, bytes, findings and health
+  are in the
+  [Grafana Sandboxes board](/docs/observability/grafana-dashboards#sandboxes-board).
+- **Detector.** `DefenseClaw - Sandbox egress blocks sustained` (warning) fires
+  when blocked sandbox egress (sources `openshell` and `dc-egress-proxy`) stays
+  above 30 a minute for 10 minutes, for either source. The local Prometheus rule
+  `DefenseClawSandboxEgressBlocksSustained` has the same threshold and sources.
+
+The dashboard variable named `source` on Security and Policy also matches the
+egress source, because both use the dimension name `source`.
+
 ## Disable
 
 ```bash
@@ -227,7 +256,8 @@ defenseclaw setup splunk --disable --o11y
 ```
 
 `--disable` disables the matching named destination (and stops the local container
-if you ran `--logs`). It does not touch other destinations.
+if you ran `--logs`; when it cannot, it says why and prints the `docker compose`
+command that stops it). It does not touch other destinations.
 
 ## Verify
 
@@ -248,7 +278,10 @@ of the Splunk projection.
 
 <Accordions>
   <Accordion title="Local Splunk container won't start (port 8000 in use)">
-    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot.
+    Stop the conflicting service or run `defenseclaw setup splunk --disable --logs` and re-run after freeing the port. There's no `--port` flag today; ports `8000` and `8088` are checked at boot. DefenseClaw's own local Splunk holding them (an earlier setup that was interrupted) is no conflict: setup restarts it.
+  </Accordion>
+  <Accordion title="Setup stops: the splunk container keeps restarting">
+    The container exits during its own setup, so Splunk never gets ready, and setup shows the container's last log lines. Fix what they name; `docker logs defenseclaw-splunk-local-splunk-1` shows all of them. Setup makes the files it mounts into the container (`~/.defenseclaw/splunk-bridge/splunk/`) readable to the container's own users on every run, whatever your umask; `defenseclaw setup splunk --logs` again repairs a folder an earlier build left private (`Permission denied: '/tmp/defaults/default.yml'` in the log).
   </Accordion>
   <Accordion title="HEC rejects an index">
     Run `defenseclaw observability destination test <name> --write-probe` after

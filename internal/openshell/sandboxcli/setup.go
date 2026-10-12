@@ -34,10 +34,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
-// Installer installs OpenShell, and on a Mac what its MicroVM driver
-// needs (openshell.Installer).
+// Installer installs or upgrades OpenShell, and on a Mac what its MicroVM
+// driver needs (openshell.Installer).
 type Installer interface {
 	Install(ctx context.Context) (*openshell.InstallResult, error)
+	Upgrade(ctx context.Context) (*openshell.InstallResult, error)
 	InstallE2fsprogs(ctx context.Context) error
 	ResignVMDriver(ctx context.Context) error
 }
@@ -52,10 +53,10 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 		ConfirmBreakingUpgrade: func(*openshell.InstallPlan) (bool, error) {
 			// Only a person can say the old runtime is backed up: --yes
 			// does not answer this.
-			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up (`defenseclaw sandbox legacy-cleanup`)?", false, false)
+			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up?", false, false)
 			if errors.Is(err, ErrNoTerminal) {
 				return false, errors.New("an OpenShell 0.0.x runtime is installed and 0.1 cannot use its state; back it up, clean it up " +
-					"(`defenseclaw sandbox legacy-cleanup`) and run setup again on a terminal")
+					"and run setup again on a terminal")
 			}
 			return ok, err
 		},
@@ -88,8 +89,29 @@ type SetupOptions struct {
 // Setup is the one-time `sandbox setup` flow: host checks, the consented
 // OpenShell install, bind mounts on the local gateway, the upstream
 // telemetry choice, harnesses, credentials, shell wrappers and images.
-func (a *App) Setup(ctx context.Context, o SetupOptions) error {
+func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	a.defaults()
+	defer func() {
+		if errors.Is(retErr, errInterrupted) {
+			// Ctrl-C at a question: say which, and that a new run finishes
+			// what is left (GAP-0286).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = &ExitError{Code: exitInterrupted, Err: fmt.Errorf("setup interrupted at %s: that step was not done, and the steps before it are kept; "+
+				"run `%s setup` again to finish", at, CommandName)}
+		}
+		if errors.Is(retErr, errNoAnswer) {
+			// Ctrl-D said only "no answer (end of input)" (GAP-0343).
+			at := "a question"
+			if a.asked != "" {
+				at = fmt.Sprintf("%q", a.asked+"?")
+			}
+			retErr = fmt.Errorf("setup stopped at %s, whose input ended before an answer (end of input): that step was not done, "+
+				"and the steps before it are kept; run `%s setup` again to finish", at, CommandName)
+		}
+	}()
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
@@ -99,9 +121,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// Setup asks before it changes the OpenShell gateway (and restarts it),
 	// the configuration and the shell rc files. Without a terminal nothing
 	// answers, and a question further on would fail with the earlier steps
-	// done: the user says up front which answers to take.
+	// done: the user says up front which answers to take. The answers come
+	// from standard input: with only the output piped (to tee, to keep a
+	// copy) the questions still reach the terminal through the pipe.
+	if !a.IO.TTY && a.IO.InTTY {
+		a.IO.TTY = true
+	}
 	if !a.IO.TTY && !o.Yes && !o.NonInteractive {
-		return errors.New("`sandbox setup` asks before it changes the OpenShell gateway, the configuration and your shell, and there is no terminal; " +
+		return errors.New("`sandbox setup` asks before it changes the OpenShell gateway, the configuration and your shell, and its standard input is not a terminal; " +
 			"pass --yes to accept the defaults, or --non-interactive to skip what needs an answer")
 	}
 	assume := o.Yes || o.NonInteractive
@@ -140,8 +167,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("Landlock: " + c.Detail + "; MicroVMs have their own kernel, which enforces it")
 		}
 		a.listDockerSandboxes(ctx, rep)
-		where := openshell.GatewayTOMLFile
-		if st, err := a.Gateway.State(); err == nil && st.TOMLPath != "" {
+		// Which gateway.toml the service reads is known once OpenShell is
+		// installed: on a Mac the formula brings its own, under the
+		// Homebrew prefix.
+		where := "the gateway's " + openshell.GatewayTOMLFile
+		if st, err := a.Gateway.State(); err == nil && st.TOMLPath != "" && !rep.OpenShellInstallNeeded() {
 			where = a.tildePath(st.TOMLPath)
 		}
 		restarts := " and restarts the gateway"
@@ -216,19 +246,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if rep.OpenShellInstallNeeded() {
 		install := o.InstallOpenShell
 		if !install && !o.NonInteractive {
-			// On macOS the installer installs a Homebrew formula, without sudo.
-			how := "sudo"
-			if a.GOOS == "darwin" {
-				how = "Homebrew"
-			}
 			var err error
-			install, err = a.ask("Install OpenShell "+openshell.SupportedMin+" with NVIDIA's installer? ("+how+"; sha256 verified)", false, o.Yes)
+			install, err = a.ask("Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? ("+a.installerHow()+"; sha256 verified)", false, o.Yes)
 			if err != nil {
 				return err
 			}
 		}
 		if !install {
-			return fmt.Errorf("OpenShell %s is needed; rerun with --install-openshell, or install it yourself and rerun setup", openshell.SupportedMin)
+			return fmt.Errorf("OpenShell %s is needed; rerun with --install-openshell, or install it yourself and rerun setup", openshell.InstallerVersion)
 		}
 		inst := a.Installer(func(*openshell.InstallPlan) (bool, error) {
 			if o.InstallOpenShell || o.Yes {
@@ -242,8 +267,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		var hb *openshell.HomebrewInstallError
 		switch {
-		case errors.Is(err, openshell.ErrBrewNeedsTerminal):
-			a.bad("Gateway service: " + openshell.ErrBrewNeedsTerminal.Error())
+		case errors.Is(err, openshell.ErrBrewServicesTmux):
+			a.bad("Gateway service: " + openshell.ErrBrewServicesTmux.Error())
 			a.note("→ run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux")
 			return &Silent{Err: err}
 		case errors.As(err, &hb) && hb.FormulaInstalled:
@@ -256,6 +281,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		case errors.Is(err, openshell.ErrHomebrewPrefix):
+			a.bad("install OpenShell: " + strings.TrimPrefix(err.Error(), "openshell: "))
+			a.note("→ " + homebrewPrefixHint(err))
+			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+		case errors.Is(err, openshell.ErrSudo):
+			a.bad("install OpenShell: " + strings.TrimPrefix(err.Error(), "openshell: ") + "; nothing was installed")
+			a.note("→ an administrator installs the openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then run `" +
+				CommandName + " setup` here")
+			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 		case err != nil:
 			return fmt.Errorf("install OpenShell: %w", err)
 		case res.Installed:
@@ -264,18 +298,23 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
-	}
-	// A stopped service leaves the gateway not answering, whose fix (start
-	// it) comes first; with the gateway answering, the service's own fix.
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
-		openshell.CheckIDGatewayService} {
-		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
-			a.bad(c.Title + ": " + c.Detail)
-			if c.Fix != nil {
-				a.note("→ " + c.Fix.Line())
-			}
-			return &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
+	} else if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
+		// A supported OpenShell older than the release DefenseClaw
+		// installs works, and setup offers the upgrade once its gateway is
+		// usable (settleGateway, which may start it first).
+		var err error
+		if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+			return err
 		}
+		if c := rep.Get(openshell.CheckIDCLI); c != nil && c.Status == openshell.StatusWarn {
+			if rep, err = a.offerOpenShellUpgrade(ctx, o, rep, *c); err != nil {
+				return err
+			}
+		}
+	}
+	var err error
+	if rep, err = a.settleGateway(ctx, rep, assume); err != nil {
+		return err
 	}
 	if unmanaged = rep.GatewayUnmanaged(); unmanaged {
 		// Its gateway answers (the Gateway check passed).
@@ -319,19 +358,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	// keep it, which setup does not ask again.
 	keepTelemetry := o.UpstreamTelemetry || a.Cfg.OpenShell.UpstreamTelemetry
 	telemetryOff := !keepTelemetry
-	if a.GOOS == "darwin" {
-		// Setup changes the telemetry only through the systemd unit, whose
-		// environment files it can check (the doctor skips the telemetry
-		// check here). The Homebrew service's wrapper sources gateway.env
-		// too, so say how to turn it off by hand.
-		switch {
-		case telemetryOff && unmanaged:
-			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, start the gateway with " +
+	if a.GOOS == "darwin" && unmanaged {
+		// No Homebrew service: whoever starts the gateway gives it its
+		// environment, which DefenseClaw cannot change.
+		if telemetryOff {
+			a.note("OpenShell's anonymous usage telemetry stays on: no Homebrew service runs this gateway. To turn it off, start the gateway with " +
 				openshell.EnvTelemetryEnabled + "=false in its environment")
-		case telemetryOff:
-			a.note("OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
-				openshell.EnvTelemetryEnabled + "=false in " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-				", which the Homebrew service reads, and restart the gateway (`brew services restart " + openshell.GatewayFormula + "`)")
 		}
 	} else {
 		switch {
@@ -339,16 +371,19 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			a.note("OpenShell's anonymous usage telemetry stays on (openshell.upstream_telemetry is true in " + a.tildePath(a.ConfigPath) + ")")
 		case !keepTelemetry && state.TelemetryEnabled():
 			// Say what a yes costs before it is given: an edit of
-			// gateway.env and a restart of the shared gateway.
+			// gateway.env (which the Homebrew service's wrapper sources on
+			// a Mac) and a restart of the shared gateway.
+			envFile := a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env"))
+			if a.GOOS == "darwin" {
+				envFile += ", which the Homebrew service reads,"
+			}
 			question := "Disable OpenShell's anonymous usage telemetry?"
 			switch {
 			case assume:
 			case unmanaged:
-				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-					"; you restart the gateway yourself, with its variables in the gateway's environment, to apply it)"
+				question += " (edits " + envFile + "; you restart the gateway yourself, with its variables in the gateway's environment, to apply it)"
 			default:
-				question += " (edits " + a.tildePath(firstNonEmpty(state.EnvPath, "gateway.env")) +
-					" and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
+				question += " (edits " + envFile + " and restarts the OpenShell gateway" + a.restartImpact(ctx) + ")"
 			}
 			yes, err := a.ask(question, true, assume)
 			if err != nil {
@@ -621,7 +656,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if onMicroVMs {
 		driver = openshell.DriverVM
 	}
-	ready, noDockerGroup := a.waitDaemon(ctx, driver)
+	ready, noDockerGroup, down := a.waitDaemon(ctx, driver)
 	for _, s := range skipped {
 		a.note("skipped: " + s)
 	}
@@ -631,23 +666,27 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.warn("not ready for sandboxes yet: the gateway change was not written, so a restart alone leaves the gateway on the docker driver. Rerun `" +
 			CommandName + " setup` and let it write the change, then restart the OpenShell gateway yourself, the way you started it; then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case stuck && unmanaged:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway yourself, the way you started it, so it runs the MicroVM driver; then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
+	case down:
+		a.warn("not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, then `" +
+			CommandName + " run " + cmd + "`")
+		return errSetupNotReady()
 	case noDockerGroup:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon started before you joined the docker group, so it cannot reach Docker. " +
 			"Restart it so it picks up the group: `defenseclaw-gateway restart`; then `" + CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case !ready:
 		a.warn("not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `" + CommandName +
 			" doctor --fix`, then `" + CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	case restartYourself:
 		// No flush comes first, as with a restart of DefenseClaw's
 		// (consentGatewayRestart): the sandboxes are the user's to stop.
@@ -658,10 +697,198 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		a.warn("not ready for sandboxes yet: no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
 			" sandbox can start without bind mounts; enable them with `" + CommandName + " doctor --fix`, then `cd <project> && " +
 			CommandName + " run " + cmd + "`")
-		return nil
+		return errSetupNotReady()
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// errSetupNotReady ends a setup whose last line says it is not ready for
+// sandboxes yet (and what to do) with status 1, as `sandbox doctor` ends
+// one whose checks failed: it exited 0, so a script or the TUI's Setup form
+// that ran it saw success (GAP-0165).
+func errSetupNotReady() error {
+	return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox setup is not ready for sandboxes yet")}}
+}
+
+// gatewayStops are the checks setup stops on, in this order, once
+// OpenShell is installed: the gateway must be usable before setup goes on.
+// A stopped gateway service comes right after the CLI (gatewayStop).
+var gatewayStops = []string{openshell.CheckIDCLI, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion,
+	openshell.CheckIDGatewayService}
+
+// gatewayStop is the first check of gatewayStops that fails, nil when none
+// does. A gateway service that is installed but stopped comes before the
+// registration and the gateway: its gateway does not answer, and one that
+// never started has not written the client certificates a registration
+// takes.
+func gatewayStop(rep *openshell.DoctorReport) *openshell.Check {
+	order := gatewayStops
+	if svc := rep.Service; svc != nil && svc.Installed && !svc.Active {
+		order = []string{openshell.CheckIDCLI, openshell.CheckIDGatewayService, openshell.CheckIDRegistration, openshell.CheckIDMTLS, openshell.CheckIDGatewayVersion}
+	}
+	for _, id := range order {
+		if failed(rep, id) {
+			return rep.Get(id)
+		}
+	}
+	return nil
+}
+
+// settleGateway returns once no check in gatewayStops fails. The first
+// that fails stops setup with its fix, unless the doctor applies that fix
+// without restarting a gateway that runs (it starts a stopped gateway
+// service, and registers a gateway that never was): setup offers it, as
+// `doctor --fix` does, and checks again. It returns the doctor report of
+// the machine as it is then.
+func (a *App) settleGateway(ctx context.Context, rep *openshell.DoctorReport, assume bool) (*openshell.DoctorReport, error) {
+	tried := map[string]bool{}
+	for {
+		c := gatewayStop(rep)
+		if c == nil {
+			return rep, nil
+		}
+		a.bad(c.Title + ": " + c.Detail)
+		if f := c.Fix; f != nil && f.Apply != nil && !f.RestartsGateway && !tried[c.ID] {
+			tried[c.ID] = true
+			yes, err := a.ask(fmt.Sprintf("Fix %q now: %s?", c.Title, f.Summary), true, assume)
+			if err != nil {
+				return nil, err
+			}
+			if yes {
+				a.note(fmt.Sprintf("fixing %q…", c.Title))
+				if err := f.Apply(ctx); err != nil {
+					a.bad(fmt.Sprintf("could not fix %q: %s", c.Title, err))
+				} else {
+					a.ok(fmt.Sprintf("fixed %q", c.Title))
+				}
+				rep = a.runDoctor(ctx)
+				continue
+			}
+		}
+		if c.Fix != nil {
+			a.note("→ " + c.Fix.Line())
+		}
+		return nil, &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
+	}
+}
+
+// installerHow says how NVIDIA's installer installs OpenShell here: on
+// macOS a Homebrew formula, without sudo.
+func (a *App) installerHow() string {
+	if a.GOOS == "darwin" {
+		return "Homebrew"
+	}
+	return "sudo"
+}
+
+// offerOpenShellUpgrade offers a supported OpenShell older than the
+// release DefenseClaw installs, whose CLI check (cli) warns, the in-place
+// upgrade (DoctorReport.OpenShellUpgradeAvailable). The question's default
+// is no, so --yes and --non-interactive keep the installed release, which
+// goes on working; --install-openshell upgrades it. NVIDIA's installer
+// restarts the gateway once it has installed the release, of every owner:
+// on the docker driver that drops the connections of the running
+// sandboxes, after Docker pulls the release's supervisor images; on the
+// MicroVM driver it would stop them without a flush, so while one runs
+// the upgrade is not offered, and openshell.PrepareUpgrade checks again
+// before the script. A refused upgrade ran nothing: setup warns and goes
+// on with the release installed. An OpenShell installed another way is
+// its user's to upgrade: the check's fix says how. It returns the doctor
+// report of the machine as it is then.
+func (a *App) offerOpenShellUpgrade(ctx context.Context, o SetupOptions, rep *openshell.DoctorReport, cli openshell.Check) (*openshell.DoctorReport, error) {
+	keep := func() (*openshell.DoctorReport, error) {
+		a.note("OpenShell " + cli.Detail)
+		if cli.Fix != nil {
+			a.note("→ " + cli.Fix.Line())
+		}
+		return rep, nil
+	}
+	if !rep.OpenShellUpgradeAvailable() {
+		return keep()
+	}
+	microVM := rep.Driver == openshell.DriverVM
+	running, known := a.runningSandboxes(ctx)
+	if microVM && known && len(running) > 0 {
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the " +
+			plural(int64(len(running)), "MicroVM sandbox", "MicroVM sandboxes") + " running on it (" + shortList(running) + ") without a flush")
+		a.note("→ stop them first (`" + CommandName + " stop NAME` flushes their disks), then upgrade: `" + CommandName + " setup --install-openshell`")
+		return rep, nil
+	}
+	// What the restart does to the sandboxes on the gateway, of every
+	// owner.
+	how := a.installerHow() + "; sha256 verified; "
+	if !microVM {
+		how += "pulls OpenShell's " + openshell.InstallerVersion + " supervisor images from ghcr.io; "
+	}
+	stops := "it drops the connections of every sandbox on it"
+	switch {
+	case microVM && !known:
+		stops = "it does not run while a MicroVM sandbox does, and the sandboxes on it could not be listed"
+	case known && len(running) > 0:
+		stops = "it drops the connections of the " + plural(int64(len(running)), "sandbox", "sandboxes") + " running on it (" + shortList(running) + ")"
+	case known:
+		stops = "no sandbox runs on it now"
+	}
+	upgrade := o.InstallOpenShell
+	if !upgrade && !o.NonInteractive {
+		var err error
+		upgrade, err = a.ask("Upgrade OpenShell "+rep.CLIVersion+" to "+openshell.InstallerVersion+" in place with NVIDIA's installer? ("+
+			how+"restarts the gateway: "+stops+")", false, o.Yes)
+		if err != nil {
+			return nil, err
+		}
+	} else if upgrade {
+		a.warn("upgrading OpenShell " + rep.CLIVersion + " to " + openshell.InstallerVersion + " restarts the gateway: " + stops)
+	}
+	if !upgrade {
+		return keep()
+	}
+	inst := a.Installer(func(*openshell.InstallPlan) (bool, error) {
+		if o.InstallOpenShell {
+			return true, nil
+		}
+		return a.ask("Run this plan?", false, false)
+	})
+	res, err := inst.Upgrade(ctx)
+	switch {
+	case errors.Is(err, openshell.ErrInstallDeclined):
+		return keep()
+	case errors.Is(err, openshell.ErrSandboxesRunning), errors.Is(err, openshell.ErrRuntimeImages):
+		// Nothing ran (openshell.PrepareUpgrade): the release installed
+		// goes on working.
+		a.warn("OpenShell " + rep.CLIVersion + " is kept: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		return rep, nil
+	case errors.Is(err, openshell.ErrSudo):
+		// Nothing ran: the release installed goes on working.
+		a.warn("OpenShell " + rep.CLIVersion + " is kept, the upgrade did not run: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		a.note("→ an administrator upgrades the machine's openshell package (`" + CommandName + " setup --install-openshell` from an account with sudo), then `" +
+			CommandName + " doctor --fix` here restarts your gateway on it")
+		return rep, nil
+	case errors.Is(err, openshell.ErrHomebrewPrefix):
+		a.warn("OpenShell " + rep.CLIVersion + " is kept, the upgrade did not run: " + strings.TrimPrefix(err.Error(), "openshell: "))
+		a.note("→ " + homebrewPrefixHint(err))
+		return rep, nil
+	case errors.Is(err, openshell.ErrHomebrewInstall):
+		a.bad("upgrade OpenShell: Homebrew could not install the nvidia/openshell formula")
+		a.note("→ " + homebrewInstallHint(err))
+		return nil, &Silent{Err: fmt.Errorf("upgrade OpenShell: %w", err)}
+	case err != nil:
+		return nil, fmt.Errorf("upgrade OpenShell: %w", err)
+	case res.Installed:
+		a.ok("OpenShell upgraded to " + res.CLIVersion.String() + ", gateway running")
+	default:
+		a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
+	}
+	rep = a.runDoctor(ctx)
+	if c := rep.Get(openshell.CheckIDGatewayVersion); c != nil && c.Status == openshell.StatusWarn {
+		// The gateway did not come back on the new release.
+		a.warn(c.Title + ": " + c.Detail)
+		if c.Fix != nil {
+			a.note("→ " + c.Fix.Line())
+		}
+	}
+	return rep, nil
 }
 
 // daemonPathDirs are the folders a daemon is taken to find the OpenShell
@@ -711,6 +938,18 @@ func homebrewInstallHint(err error) string {
 	return fmt.Sprintf("Homebrew says why above. The Command Line Tools %s, which xcode-select selects, are current for macOS %s, "+
 		"but Homebrew checks Xcode %s at %s even so: update that Xcode (from the App Store) or delete it, as Homebrew says; "+
 		"updating the Command Line Tools does not help. Then %s", openshell.ShortVersion(t.CLT), t.MacOS, t.Xcode, t.XcodeApp, again)
+}
+
+// homebrewPrefixHint is the way on when this account cannot write to the
+// Homebrew prefix (openshell.HomebrewPrefixError).
+func homebrewPrefixHint(err error) string {
+	owner := "the account that owns it"
+	var pe *openshell.HomebrewPrefixError
+	if errors.As(err, &pe) && pe.Owner != "" {
+		owner = pe.Owner
+	}
+	return "Homebrew installs formulas only as the account that owns its prefix (" + owner + "): install OpenShell from that account (`" +
+		CommandName + " setup --install-openshell` there), or have it give this account the prefix, then run `" + CommandName + " setup` here"
 }
 
 // consentGatewayRestart decides whether setup restarts the OpenShell
@@ -976,8 +1215,14 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 // landlockLater leaves out the Landlock check, which the question that
 // switches a Mac to MicroVMs decides.
 func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) error {
-	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
+	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDUser, openshell.CheckIDGatewayService, openshell.CheckIDLandlock, openshell.CheckIDDocker} {
 		if id == openshell.CheckIDLandlock && landlockLater {
+			continue
+		}
+		if id == openshell.CheckIDGatewayService && !rep.GatewayPortElsewhere {
+			// Only another account's gateway on the port stops setup
+			// here, before the machine checks it decides: this account
+			// cannot set up a gateway of its own (GAP-0296).
 			continue
 		}
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
@@ -1050,6 +1295,9 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 				if rep.CLIVersion != "" {
 					label = "OpenShell " + rep.CLIVersion + " unsupported"
 				}
+			case c.Status == openshell.StatusWarn && rep.CLIVersion != "":
+				// Older than the release setup installs (offered next).
+				label, mark = "OpenShell "+rep.CLIVersion+" ("+openshell.InstallerVersion+" available)", a.style("⚠", ansiYellow)
 			case rep.CLIVersion != "":
 				label = "OpenShell " + rep.CLIVersion
 			}
@@ -1223,12 +1471,14 @@ func undrivenGatewayDriver(rep *openshell.DoctorReport, state *openshell.Gateway
 // waitDaemon waits briefly for the daemon to turn sandboxes on and, when
 // driver is set, to drive the gateway on it: the daemon learns a driver
 // switch when it next asks the gateway. It reports false when the daemon
-// answers but has not turned sandboxes on, and noDockerGroup when the
-// daemon started before its user joined the docker group (GAP-2137).
-func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (ready, noDockerGroup bool) {
+// answers but has not turned sandboxes on, noDockerGroup when the daemon
+// started before its user joined the docker group (GAP-2137), and down
+// when it does not answer, or never started (no gateway token yet): setup
+// then is not done either (GAP-0145).
+func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (ready, noDockerGroup, down bool) {
 	api, err := a.api()
 	if err != nil {
-		return true, false
+		return false, false, true
 	}
 	const wait, poll = 30 * time.Second, 2 * time.Second
 	deadline := a.Now().Add(wait)
@@ -1241,24 +1491,23 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		}
 		switch {
 		case err != nil:
-			a.warn("the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`")
-			return true, false
+			return false, false, true
 		case st.Enabled && st.Available && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
-			return true, st.DockerGroupMissing
+			return true, st.DockerGroupMissing, false
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))
-				return true, false
+				return true, false, false
 			}
 			a.warn("the daemon has not turned sandboxes on yet: " + firstNonEmpty(st.Reason, "see `"+CommandName+" doctor`"))
-			return false, false
+			return false, false, false
 		}
 		if a.Sleep(ctx, poll) != nil {
-			return true, false
+			return true, false, false
 		}
 	}
 }

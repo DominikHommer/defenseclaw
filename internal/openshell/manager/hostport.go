@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
@@ -82,41 +84,96 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 	}
 	name, id, eff := b.rec.Name, b.identity(), b.eff
 	declared := slices.Contains(b.rec.Flags.HostPorts, port)
-	b.blockedRequests++
-	explained := b.closedPorts[port]
 	m.mu.Unlock()
 	replayed := at.Before(m.startedAt)
-	_ = m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
-		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
-		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
-		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at,
-		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
-	})
 	refusal := errors.New("the sandbox policy is not resolved")
 	if eff != nil {
 		refusal = eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: port})
 	}
-	if declared && refusal == nil && !replayed {
+	ask := declared && refusal == nil && !replayed
+	ev := audit.SandboxEgressEvent{
+		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
+		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(openshellReason(r, openshellHostAlias), 512),
+		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+	}
+	if ask {
+		// The refusal reads as the ask it raises (GAP-0138).
+		ev.DecisionCode = "SANDBOX_EGRESS_HOST_PORT_ASK"
+		ev.Reason = truncate(fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals (%s)",
+			port, port, firstNonEmpty(r.Reason, r.Message)), 512)
+	}
+	m.tel.RecordSandboxEgress(ctx, ev)
+	if ask {
 		// An ask, not a blocked destination (until it is answered).
 		m.hostPortAsk(ctx, b, port, r.Binary)
 		return
 	}
+	if !replayed {
+		// The agent sees only a connection error: its next post-tool hook
+		// says the port is closed and what opens it, as the feed line does
+		// (GAP-0326).
+		note := NotePortClosed
+		if refusal != nil {
+			note = NotePortRefused
+		}
+		m.refusals.noteDirect(id.BindingID, name, openshellHostAlias, port, note, m.now())
+	}
+	// The feed names it blocked (now, or when the port was first denied),
+	// and so do the sandbox's destinations and its egress counts.
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: port, at: at, denied: true,
+		binary: r.Binary, pid: ocsfPID(r)})
 	m.mu.Lock()
-	// The feed names it blocked (now, or when the port was first denied).
-	b.noteBlockedHost(openshellHostAlias)
+	news := b.newPortLine(port, false)
 	m.mu.Unlock()
-	if explained {
+	if !news {
 		return
 	}
-	m.mu.Lock()
-	if b.closedPorts == nil {
-		b.closedPorts = map[int]bool{}
-	}
-	b.closedPorts[port] = true
-	m.mu.Unlock()
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name,
 		Host: openshellHostAlias, Port: port, Source: sandboxapi.SourceOpenShell, Reason: sandboxapi.ReasonHostPortClosed,
 		Message: hostPortClosedMessage(port, declared, refusal), Replayed: replayed})
+}
+
+// hostPortAllowed records OpenShell's allowed connection to a host port
+// other than DefenseClaw's own listeners: a --host-port service the user
+// approved, or a local model endpoint the sandbox policy opens. It is an
+// allowed egress record (server.address host.openshell.internal) and a row
+// of the sandbox's destinations. The feed shows the session's first
+// connection to the port, as it shows a host's first request through the
+// proxy: the ask, its approval and the use read as one story (GAP-0154).
+func (m *Manager) hostPortAllowed(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	m.mu.Lock()
+	id, name := b.identity(), b.rec.Name
+	news := b.newPortLine(r.Port, true)
+	m.mu.Unlock()
+	if !m.connectionRequest(b, r, openshellHostAlias, at) {
+		m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: r.Port,
+			DecisionCode: "SANDBOX_EGRESS_ALLOWED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
+			PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+		})
+	}
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: r.Port, at: at, rule: r.Policy,
+		binary: r.Binary, pid: ocsfPID(r)})
+	if news {
+		m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: name,
+			Host: openshellHostAlias, Port: r.Port, Source: sandboxapi.SourceOpenShell, Rule: truncate(r.Policy, 256),
+			Message: fmt.Sprintf("✓ %s:%d (port %d on this machine)", openshellHostAlias, r.Port, r.Port), Replayed: at.Before(m.startedAt)})
+	}
+}
+
+// newPortLine records that the feed says host port port is reached or
+// closed, and reports whether that is news: the feed's last line about the
+// port this session said otherwise, or there was none. Callers hold
+// Manager.mu.
+func (b *box) newPortLine(port int, reached bool) bool {
+	if said, ok := b.portLines[port]; ok && said == reached {
+		return false
+	}
+	if b.portLines == nil {
+		b.portLines = map[int]bool{}
+	}
+	b.portLines[port] = reached
+	return true
 }
 
 // hostPortClosedMessage is the feed line of a denied connection to host
@@ -175,10 +232,42 @@ func (m *Manager) hostPortAsk(ctx context.Context, b *box, port int, binary stri
 	a := &approval{id: id, sandbox: name, decision: d, proposal: p, status: sandboxapi.ApprovalPending, createdAt: now.UTC(), local: true}
 	m.storeApproval(a)
 	m.recordApproval(ctx, ident, a, audit.SandboxApprovalRequested, "", "")
+	// The connection that asked failed at once: the agent's next hook
+	// says it waits for the user (GAP-0268).
+	m.refusals.noteDirect(ident.BindingID, name, openshellHostAlias, port, NoteAsked, now)
 	m.feed.Publish(sandboxapi.ActivityEvent{
 		Kind: sandboxapi.ActivityApprovalRequested, Sandbox: name, Host: openshellHostAlias, Port: port,
 		ApprovalID: id, Reason: string(d.Reason), Message: d.Message,
 	})
+}
+
+// declaredHostPortAsk turns the egress proxy's refusal of a --host-port the
+// run declared (host.openshell.internal, or its synthetic address, on that
+// port) into the ask a direct connection to it raises. After a daemon
+// restart lost the pending ask, the agent's retries of 198.18.0.2:8765
+// through the proxy read "✗ … (this machine)", and the agent told the user
+// to relaunch with the --host-port it had (GAP-0233). It reports whether it
+// did.
+func (m *Manager) declaredHostPortAsk(ctx context.Context, b *box, e egress.Event) bool {
+	if triage.NormalizeHost(m.namedHost(b, e.Host, e.Port)) != openshellHostAlias {
+		return false
+	}
+	m.mu.Lock()
+	declared, eff, ident, name := slices.Contains(b.rec.Flags.HostPorts, e.Port), b.eff, b.identity(), b.rec.Name
+	m.mu.Unlock()
+	if !declared || eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: e.Port}) != nil {
+		return false
+	}
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_HOST_PORT_ASK", Timestamp: e.Time,
+		Reason: fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals", e.Port, e.Port),
+	})
+	// The agent hears of the ask, not of "this machine".
+	m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
+	m.hostPortAsk(ctx, b, e.Port, "")
+	m.refusals.noteDirect(e.BindingID, name, openshellHostAlias, e.Port, NoteAsked, m.now())
+	return true
 }
 
 // hostPortApplyTimeout bounds applying an approved host port.
@@ -285,9 +374,8 @@ func (m *Manager) hostPortApplied(ctx context.Context, a *approval, res *openshe
 	if res != nil {
 		ev.PolicyHash = res.PolicyHash
 	}
-	if perr := m.tel.RecordSandboxPolicy(ctx, ev); perr != nil {
-		m.logf("policy telemetry for approval %s: %v", a.id, perr)
-	}
+	m.tel.RecordSandboxPolicy(ctx, ev)
+	m.refusals.forgetNote(ident.BindingID, openshellHostAlias, port, NoteAsked)
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
 		Host: openshellHostAlias, Port: port, Reason: a.actor,
 		Message: fmt.Sprintf("approved port %d on your machine (%s:%d)", port, openshellHostAlias, port)})

@@ -288,7 +288,10 @@ _FLEET_WIDE_LOG_PANELS = {
         "Relationship evidence and conflict chronology",
     },
     "defenseclaw-agent-identity.json": {"Discovery runs ($__range)"},
-    "defenseclaw-ai-discovery.json": {"AI discovery summary log"},
+    "defenseclaw-ai-discovery.json": {
+        "AI discovery summary log (all names)",
+        "AI components inside sandboxes (records in range)",
+    },
     "defenseclaw-policy-decisions.json": {"Recent OPA + egress events"},
 }
 
@@ -886,6 +889,20 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
                 "targets": [{"expr": "sum(increase(defenseclaw_agent_token_usage_total[1h])) or vector(0)", "instant": True}],
             },
             {
+                "type": "bargauge",
+                "title": "Top hosts",
+                "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+                "targets": [
+                    {
+                        "expr": (
+                            'topk(10, sum by (dest) (count_over_time({service_name="defenseclaw"} '
+                            '| json | __error__="" [$__range])))'
+                        ),
+                        "instant": True,
+                    }
+                ],
+            },
+            {
                 "type": "traces",
                 "title": "Selected trace",
                 "description": "Trace waterfall.",
@@ -918,6 +935,7 @@ def test_static_audit_rejects_dashboard_semantic_contract_regressions(
     assert any("latest-value discovery gauges" in error for error in errors)
     assert any("optional token/cost absence" in error for error in errors)
     assert any("blank trace selection" in error for error in errors)
+    assert any(error.startswith("semantic-fixture/Top hosts:") and "reduced by rows" in error for error in errors)
     assert any("scope_label must be defined before" in error for error in errors)
     assert any("agent variable must enumerate" in error for error in errors)
     assert any("persisted options must match" in error for error in errors)
@@ -1026,6 +1044,119 @@ def test_low_risk_dashboard_labels_match_their_queries() -> None:
     vendors = _panel(identity, "Top vendors / products ($__range)")
     assert "$__range" in vendors["targets"][0]["expr"]
     assert vendors["transformations"][0]["options"]["renameByName"]["Value"] == "signals/$__range"
+
+
+def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
+    # GAP-0109, GAP-0114: what discovery found inside a sandbox is told apart
+    # from the host's signals, by the sandbox name the records carry.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    assert any(variable["name"] == "sandbox" for variable in board["templating"]["list"])
+    expr = _panel(board, "AI components inside sandboxes (records in range)")["targets"][0]["expr"]
+    assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
+
+
+def test_ai_discovery_board_marks_what_ignores_the_sandbox_box() -> None:
+    # GAP-0342: with one sandbox picked, the headline and metric panels kept
+    # their fleet-wide values with nothing to say so. What does not follow the
+    # Sandbox box is marked (all names) in its title or its row's, as on the
+    # Sandboxes board, and what follows it is not.
+    board = _dashboard("defenseclaw-ai-discovery.json")
+    row = ""
+    for panel in board["panels"]:
+        if panel.get("type") == "row":
+            row = panel["title"]
+        for child in ([] if panel.get("type") == "row" else [panel]) + panel.get("panels", []):
+            follows = any("$sandbox" in target.get("expr", "") for target in child.get("targets", []))
+            marked = "(all names)" in child["title"] or "(all names)" in row
+            assert follows != marked, (row, child["title"])
+
+
+def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
+    # GAP-0141: with one row in range (one finding kind) Grafana drops the
+    # series name of a Loki instant bar gauge; each bar takes its label.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    gauges = [panel for panel in board["panels"] if panel.get("type") == "bargauge"]
+    assert gauges
+    for panel in gauges:
+        label = panel["targets"][0]["legendFormat"].strip("{}")
+        assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
+
+
+def test_merged_loki_tables_name_their_value_columns() -> None:
+    # GAP-0178: a Loki instant query has no table format, so a table that
+    # merges several shows each value column as "Value #<refId>" until
+    # organize renames it by that name. The Sandboxes Destinations table
+    # renamed "ALLOWED" (the Prometheus tables' renameByRegex before the
+    # merge), so its headers read Value #ALLOWED and its unit, colour and
+    # sort settings matched nothing.
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        panels = [*board.get("panels", []), *(child for row in board.get("panels", []) for child in row.get("panels", []))]
+        for panel in panels:
+            steps = panel.get("transformations", [])
+            targets = panel.get("targets", [])
+            if panel.get("type") != "table" or not any(step["id"] == "merge" for step in steps):
+                continue
+            if not targets or any((target.get("datasource") or {}).get("type") != "loki" for target in targets):
+                continue
+            renames = next(step for step in steps if step["id"] == "organize")["options"]["renameByName"]
+            for target in targets:
+                assert f"Value #{target['refId']}" in renames, (path.name, panel["title"], target["refId"])
+            checked += 1
+    assert checked
+
+
+def test_sandboxes_blocked_egress_leaves_out_audit_only_refusals() -> None:
+    # GAP-0134: a refused name lookup is audited before the refused
+    # connection it precedes, and a harness's own request is expected
+    # (GAP-0130): neither counts as blocked egress, as on `sandbox status`.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    exprs = [
+        target["expr"]
+        for panel in board["panels"]
+        for target in panel.get("targets", [])
+        if "egress.blocked" in target.get("expr", "") or "egress[.]blocked" in target.get("expr", "")
+    ]
+    assert exprs
+    for expr in exprs:
+        assert 'body_defenseclaw_network_decision_code!~"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)"' in expr, expr
+
+
+def test_equal_sandbox_names_on_two_hosts_stay_apart() -> None:
+    # GAP-0298: two hosts ran sandboxes named inc-ua06 and the boards read
+    # them as one: Sandboxes seen counts host and name, and the AI discovery
+    # board's metric and log panels follow a Host box too.
+    sandboxes = _dashboard("defenseclaw-sandboxes.json")
+    seen = _panel(sandboxes, "Sandboxes seen")["targets"][0]["expr"]
+    assert seen.startswith("count(sum by (host_name, defenseclaw_sandbox_name) (")
+    discovery = _dashboard("defenseclaw-ai-discovery.json")
+    assert discovery["templating"]["list"][0]["name"] == "host"
+    panels = [*discovery["panels"], *(child for row in discovery["panels"] for child in row.get("panels", []))]
+    for panel in panels:
+        for target in panel.get("targets", []):
+            if (target.get("datasource") or panel.get("datasource") or {}).get("type") in ("prometheus", "loki"):
+                assert 'host_name=~"$host"' in target["expr"], panel["title"]
+
+
+def test_sandboxes_board_scopes_to_one_computer() -> None:
+    # GAP-0195: every panel follows Environment and Host; a metric panel,
+    # which cannot follow the Sandbox box, says so in its title; the active
+    # count adds hosts up instead of taking one maximum per connector; and
+    # Health degraded no longer counts gateway-wide records as the sandbox's.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    assert [variable["name"] for variable in board["templating"]["list"]][:2] == ["environment", "host"]
+    for panel in board["panels"]:
+        for target in panel.get("targets", []):
+            expr = target["expr"]
+            assert 'deployment_environment_name=~"$environment"' in expr and 'host_name=~"$host"' in expr, panel["title"]
+            if target["datasource"]["type"] == "prometheus":
+                assert "all names)" in panel["title"], panel["title"]
+    active = _panel(board, "Active (all names)")["targets"][0]["expr"]
+    assert active.startswith("sum(max by (deployment_environment_name, host_name, connector) (")
+    health = [target["expr"] for target in _panel(board, "Health degraded")["targets"]]
+    assert ['body_defenseclaw_sandbox_name=~"$sandbox"' in e for e in health] == [True, False]
+    assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:

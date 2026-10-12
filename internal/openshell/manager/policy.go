@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,7 +109,7 @@ func errUnrecorded(name string) error {
 
 // checkPolicySources refuses a policy the sandbox could rewrite. In mount
 // mode the agent writes the project as the host user, and a custom pack is
-// trusted because that user owns it (packs.LoadFile), so a pack file or
+// trusted because that user owns it (packs.Validate), so a pack file or
 // pack directory inside the project (or holding it) would let the agent
 // change its own policy on the next resolution: add allow entries that
 // lift the blocklist feed or open private networks, drop block entries,
@@ -157,6 +159,12 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	name, bindingID, skip := b.rec.Name, b.rec.BindingID, b.creating || b.deleted
 	cred, sandboxID := b.cred, scopeID(b.rec.ID, b.rec.Name)
 	id := b.identity()
+	// A sandbox that is not running sends nothing under the policy, and its
+	// start refuses with the reason: its record is no alert (GAP-0160).
+	severity := ""
+	if cmp.Or(b.phase, audit.SandboxPhase(b.rec.Phase)) != audit.SandboxPhaseReady {
+		severity = "MEDIUM"
+	}
 	m.mu.Unlock()
 	if skip {
 		return
@@ -176,12 +184,11 @@ func (m *Manager) policyUnresolved(b *box, err error) {
 	}
 	m.logf("%s: sandbox %s: its policy cannot be resolved; its egress is blocked until it can: %s",
 		gatewaylog.ErrCodeOpenShellPackInvalid, name, detail)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
-		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid),
-		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+detail, 512), Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+		Sandbox: id, State: audit.SandboxHealthDegraded, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellPackInvalid), Severity: severity,
+		ErrorSummary: truncate("the sandbox policy cannot be resolved: "+truncate(detail, 320)+". Restore the pack or the configuration, "+
+			"or delete the sandbox: defenseclaw sandbox delete "+name, 512), Timestamp: m.now(),
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Source: sandboxapi.SourceProxy,
 		Reason: policyUnresolvedReason, Message: truncate("✗ all web egress: the sandbox policy cannot be resolved ("+detail+
 			"); fix the pack or the configuration, or delete the sandbox", 512)})
@@ -203,11 +210,9 @@ func (m *Manager) policyRestored(b *box, eff *packs.Effective) {
 	}
 	m.syncCredential(b, eff)
 	m.logf("sandbox %s: its policy resolves again; its egress follows it", name)
-	if err := m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.Background(), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthRestored, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("health telemetry for %s: %v", name, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "policy_restored",
 		Message: "the sandbox policy resolves again; its egress follows it"})
 }
@@ -497,9 +502,7 @@ func (m *Manager) enforceApprovedRules(ctx context.Context, gw *Gateway, b *box,
 			if res != nil {
 				ev.PolicyHash = res.PolicyHash
 			}
-			if err := m.tel.RecordSandboxPolicy(ctx, ev); err != nil {
-				m.logf("policy telemetry for %s of %s: %v", rule, name, err)
-			}
+			m.tel.RecordSandboxPolicy(ctx, ev)
 		}
 	}
 	if len(removed) > 0 {
@@ -577,10 +580,8 @@ func (m *Manager) enforceProviderEndpoints(ctx context.Context, gw *Gateway, b *
 		if serr := m.saveRecord(b); serr != nil {
 			m.logf("record the detached provider of %s: %v", rec.Name, serr)
 		}
-		if terr := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
-			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()}); terr != nil {
-			m.logf("policy telemetry for %s of %s: %v", provider, rec.Name, terr)
-		}
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove,
+			Actor: "policy", Origin: "internal", Target: provider, Reason: reason, ChangeCount: 1, Timestamp: m.now()})
 		msg := "detached provider " + provider + ": its direct endpoint is on the egress block list now"
 		if admin {
 			msg = "detached provider " + provider + " " + sandboxapi.AdminMessage
@@ -753,12 +754,10 @@ func (m *Manager) recordAdminRefusal(ctx context.Context, sandbox string, op aud
 	if len(target) > 1024 || !policyTarget.MatchString(target) {
 		target = ""
 	}
-	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 		Sandbox: id, Operation: op, Actor: "operator", Origin: "api", Target: target, Reason: policyReasonAdminRefused,
 		NoChange: true, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("policy telemetry for the refusal of %s: %v", sandbox, err)
-	}
+	})
 }
 
 func wireViolation(v packs.Violation) sandboxapi.Violation {
@@ -803,10 +802,14 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 				project = real
 			}
 		}
+		repo, err := m.repoPolicy(project, "")
+		if err != nil {
+			return nil, err
+		}
 		flags = packs.Flags{
 			Harness: config.NormalizeConnectorName(req.Harness), Pack: req.Pack, Profile: req.Profile, Project: project,
 			Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo, Unmask: req.Unmask, OpenShellGatewayPort: m.gatewayPort(),
-			MountUnsupported: m.gatewayDriver().MountRefusal,
+			MountUnsupported: m.gatewayDriver().MountRefusal, RepoPolicy: repo,
 		}
 	}
 	eff, violations, err := m.resolve(cfg, flags)
@@ -819,6 +822,12 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 	}
 	if eff.Pack != nil {
 		out.Pack, out.PackSource, out.PackDigest = eff.Pack.Name, eff.Pack.Source, eff.Pack.Digest
+		for _, link := range eff.Pack.Chain {
+			out.PackChain = append(out.PackChain, sandboxapi.PackLink{Name: link.Name, Builtin: link.Builtin, Source: link.Source, Digest: link.Digest})
+		}
+	}
+	if rp := eff.RepoPolicy; rp != nil {
+		out.RepoPolicy = &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: eff.RepoTightened, Content: rp.Content}
 	}
 	for _, s := range eff.Explain() {
 		out.Settings = append(out.Settings, sandboxapi.Setting{
@@ -830,6 +839,91 @@ func (m *Manager) Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*
 		out.VMFirstBoot = m.vmFirstBoot(ctx, cfg, m.gatewayDriver(), flags, eff, req.Run)
 	}
 	return out, nil
+}
+
+// PolicyTest judges destinations with a sandbox's egress policy as its
+// proxy does: the policy resolved against the current configuration, with
+// the sandbox's own decider and principal, so its unblocks count. The
+// decision walks the proxy's order (packs.Effective.CheckEgress, which asks
+// the egress decider). A destination one of the sandbox's providers opens
+// directly, around the proxy, is named as well.
+func (m *Manager) PolicyTest(_ context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
+	switch {
+	case len(req.Checks) == 0:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name at least one destination to test")
+	case len(req.Checks) > sandboxapi.MaxPolicyChecks:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a policy test takes at most %d destinations", sandboxapi.MaxPolicyChecks)
+	}
+	for _, c := range req.Checks {
+		if c.Port < 0 || c.Port > 65535 {
+			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "port %d must be between 1 and 65535 (0: any port)", c.Port)
+		}
+	}
+	b, err := m.box(req.Sandbox)
+	if err != nil {
+		return nil, err
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		return nil, err
+	}
+	pol := m.triagePolicy(b, eff)
+	m.mu.Lock()
+	rec := b.rec
+	m.mu.Unlock()
+	out := &sandboxapi.PolicyTestResult{Sandbox: rec.Name, Profile: eff.Profile, NetworkMode: eff.NetworkMode}
+	if eff.Pack != nil {
+		out.Pack = eff.Pack.Name
+	}
+	for _, c := range req.Checks {
+		if d, ok := hostPortTest(rec, eff, c); ok {
+			out.Decisions = append(out.Decisions, d)
+			continue
+		}
+		chk := eff.CheckEgress(pol.Decider, pol.Principal, c.Host, c.Port)
+		out.Decisions = append(out.Decisions, sandboxapi.PolicyDecision{
+			PolicyCheck: c, Allowed: chk.Allowed, Rule: string(chk.Rule), Match: chk.Match, Source: chk.Source,
+			Reason: chk.Reason, Unblockable: chk.Unblockable, Direct: directProvider(rec.ProviderEndpoints, c.Host, c.Port),
+		})
+	}
+	return out, nil
+}
+
+// hostPortTest is what a policy test says of a --host-port the sandbox was
+// started with: approved, the user opened it; otherwise its first
+// connection raises an ask (hostPortDenied), not the plain host_internal
+// block the egress check reads (GAP-0265). ok is false for any other
+// destination.
+func hostPortTest(rec record, eff *packs.Effective, c sandboxapi.PolicyCheck) (d sandboxapi.PolicyDecision, ok bool) {
+	if triage.NormalizeHost(c.Host) != openshellHostAlias || c.Port <= 0 || !slices.Contains(rec.Flags.HostPorts, c.Port) ||
+		eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: c.Port}) != nil {
+		return d, false
+	}
+	port := strconv.Itoa(c.Port)
+	d = sandboxapi.PolicyDecision{PolicyCheck: c, Rule: "host_port", Source: "--host-port " + port}
+	if _, approved := rec.ApprovedRules[hostPortRule(c.Port)]; approved {
+		d.Allowed, d.Reason = true, "you approved the sandbox's --host-port "+port
+		return d, true
+	}
+	d.Ask = true
+	d.Reason = "port " + port + " is a --host-port of this sandbox: its first connection raises an ask you answer with `defenseclaw sandbox approvals`, and is allowed once approved"
+	return d, true
+}
+
+// directProvider names the provider of the sandbox whose OpenShell rule
+// opens host (on port, 0 any) around the egress proxy, or "".
+func directProvider(endpoints []providerEndpoint, host string, port int) string {
+	host = triage.NormalizeHost(host)
+	for _, ep := range endpoints {
+		if ep.Host != host || (port != 0 && ep.Port != 0 && ep.Port != port) {
+			continue
+		}
+		if ep.Role == roleCredential {
+			return "the --credential " + ep.Name + " provider (" + ep.Provider + ") opens it directly for the programs it binds"
+		}
+		return "the model provider (" + ep.Provider + ") opens it directly for the harness's own programs"
+	}
+	return ""
 }
 
 // baseEffective is the configured posture without run flags; the egress

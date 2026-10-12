@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -58,7 +60,6 @@ const (
 	// start, which closes in-flight connections ~10-12 s in (FINDINGS P1).
 	DefaultSettleDelay       = 15 * time.Second
 	DefaultReconcileInterval = 5 * time.Minute
-	DefaultHookSilence       = 10 * time.Minute
 	DefaultTriageInterval    = 30 * time.Second
 	defaultConnectRetry      = 30 * time.Second
 	// connectBackoff bounds how often API requests redial a gateway that
@@ -128,6 +129,10 @@ type Options struct {
 	Telemetry audit.SandboxTelemetry
 	// Persist keeps "always" decisions in config.yaml; nil refuses them.
 	Persist triage.Persister
+	// SyncConfig loads config.yaml into the snapshot Config returns before
+	// a decision that must see the user's latest write (the reload watcher
+	// follows the file a second or so later); nil decides on the snapshot.
+	SyncConfig func(context.Context) error
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
@@ -168,9 +173,6 @@ type Options struct {
 	// (DefaultSettleDelay); negative skips it.
 	SettleDelay       time.Duration
 	ReconcileInterval time.Duration
-	// HookSilence is how long a harness may be active without hook
-	// traffic before a hook_silence finding (DefaultHookSilence).
-	HookSilence time.Duration
 	// HookReachWindow is how long a session's harness may work before its
 	// first authenticated hook is overdue and the session is flagged as
 	// not reaching DefenseClaw (DefaultHookReachWindow; see reach.go).
@@ -193,6 +195,11 @@ type Options struct {
 	// token, so while it returns an error Create and Start are refused.
 	// Nil assumes the caller holds them.
 	Listeners func() error
+	// DiscoveryRemoved is told the name of a sandbox whose AI discovery
+	// record a delete removed, so the AI inventory drops its signals now
+	// instead of at its next scan (GAP-0184). It must not block; nil does
+	// nothing.
+	DiscoveryRemoved func(name string)
 	// Guard runs the nested-repository guard of a mounted project while
 	// its sandbox is ready (default: package nestguard). GuardGitlinks
 	// lists a project's index gitlinks (default: the host git through
@@ -208,7 +215,7 @@ type Manager struct {
 	// from before it are replays (see ocsfEvent).
 	startedAt time.Time
 	ws        Workspace
-	tel       audit.SandboxTelemetry
+	tel       *telemetryGuard
 	records   recordStore
 	now       func() time.Time
 	logf      func(string, ...any)
@@ -226,6 +233,8 @@ type Manager struct {
 	// (EgressRefusals).
 	refusals  *refusalMemory
 	toolCalls *hookTamperTracker
+	// signatures is the AI signature catalog of the sandbox discoveries.
+	signatures discoveryCatalog
 	// tamperStops tracks the stops hook tamper started.
 	tamperStops sync.WaitGroup
 
@@ -265,6 +274,25 @@ type Manager struct {
 	// profileMu serializes this daemon's provider profile imports, so
 	// concurrent creates do not race each other to import the same one.
 	profileMu sync.Mutex
+	// destMu guards dests, each sandbox's destinations (destinations.go).
+	// It is never taken with mu held, nor mu with it.
+	destMu sync.Mutex
+	dests  map[string]*destTable
+	// catalog classifies destinations (destinationCatalog); procs gives
+	// their lineage: the manager's own process tree (Lineage), which knows
+	// a sandbox's processes only while its process tree is on.
+	catalogOnce sync.Once
+	catalog     *catalog.Catalog
+	procs       ProcessLookup
+	// procGate paces each sandbox's process and SSH records.
+	procGate *rateGate
+	// ownExecs are DefenseClaw's own execs, whose SSH OPEN records are
+	// dropped.
+	ownExecs ownExecs
+	// authFails paces the proxy's refusals of invalid credentials into
+	// health records (authFailed).
+	authFails authFailures
+
 	// credentialGC keeps a delete from removing a --credential profile
 	// between a create's import of it and the provider that uses it:
 	// creates hold it shared from import to provider, the collection of
@@ -308,9 +336,6 @@ func New(opts Options) (*Manager, error) {
 	if opts.ReconcileInterval <= 0 {
 		opts.ReconcileInterval = DefaultReconcileInterval
 	}
-	if opts.HookSilence <= 0 {
-		opts.HookSilence = DefaultHookSilence
-	}
 	if opts.HookReachWindow <= 0 {
 		opts.HookReachWindow = DefaultHookReachWindow
 	}
@@ -336,7 +361,7 @@ func New(opts Options) (*Manager, error) {
 	m := &Manager{
 		opts:       opts,
 		ws:         opts.Workspace,
-		tel:        opts.Telemetry,
+		tel:        newTelemetryGuard(opts.Telemetry, host, opts.Logf, opts.Now),
 		records:    newRecordStore(opts.DataDir),
 		now:        opts.Now,
 		logf:       opts.Logf,
@@ -350,10 +375,10 @@ func New(opts Options) (*Manager, error) {
 		boxes:      map[string]*box{},
 		approvals:  map[string]*approval{},
 		startedAt:  opts.Now(),
+		dests:      map[string]*destTable{},
+		procGate:   newRateGate(activityBurst, activityRate),
 	}
-	if m.tel == nil {
-		m.tel = nopTelemetry{}
-	}
+	m.procs = m
 	m.sink = newEgressSink(m)
 	debounce := time.Duration(config.DefaultOpenShellApprovalDebounceMs) * time.Millisecond
 	if cfg := opts.Config(); cfg != nil && cfg.OpenShell.Approvals.DebounceMs > 0 {
@@ -440,6 +465,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer func() {
 		m.stopWatchers()
 		m.closeGateway()
+		m.feed.closeSubscribers()
 		m.runMu.Lock()
 		m.runCtx = nil
 		m.runMu.Unlock()
@@ -455,16 +481,23 @@ func (m *Manager) Run(ctx context.Context) error {
 	startup := true
 	reconcile := time.NewTimer(0)
 	defer reconcile.Stop()
-	silence := time.NewTicker(minDuration(m.opts.HookSilence/4, time.Minute))
+	silence := time.NewTicker(hookSilenceInterval)
 	defer silence.Stop()
 	reach := time.NewTicker(hookReachInterval)
 	defer reach.Stop()
 	drafts := time.NewTicker(m.opts.TriageInterval)
 	defer drafts.Stop()
+	destinations := time.NewTicker(destinationFlushEvery)
+	defer destinations.Stop()
+	defer m.flushDestinations("")
+	defer m.keepHookCounts()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-destinations.C:
+			m.flushDestinations("")
+			m.keepHookCounts()
 		case <-silence.C:
 			m.checkHookSilence(ctx)
 			m.pruneToolCalls()
@@ -490,13 +523,6 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-func minDuration(a, b time.Duration) time.Duration {
-	if a <= 0 || a > b {
-		return b
-	}
-	return a
-}
-
 // gateway returns the live connection, connecting when there is none.
 func (m *Manager) gateway(ctx context.Context) (*Gateway, error) {
 	gw, _, err := m.connection(ctx)
@@ -519,7 +545,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		return m.gw, m.gwGone, nil
 	}
 	if m.gwErr != nil && m.now().Sub(m.gwErrAt) < connectBackoff {
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", m.gwErr)
+		return nil, nil, gatewayUnavailableError(m.gwErr)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -527,13 +553,13 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	if err != nil {
 		if m.gwErr == nil || m.gwErr.Error() != err.Error() {
 			m.logf("OpenShell gateway unavailable: %v", err)
-			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, err.Error())
+			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, gatewayUnavailableSummary(err))
 		}
 		m.gwErr, m.gwErrAt = err, m.now()
 		if m.opts.OnGateway != nil {
 			m.opts.OnGateway(err)
 		}
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the OpenShell gateway is not available: %v", err)
+		return nil, nil, gatewayUnavailableError(err)
 	}
 	if m.gwErr != nil {
 		m.health(ctx, audit.SandboxHealthRestored, "", "")
@@ -566,29 +592,71 @@ func (m *Manager) driverGateway(ctx context.Context) (*Gateway, error) {
 	return m.recheckDriver(ctx, gw)
 }
 
-// recheckDriver asks a connection's gateway which compute driver it runs
-// now. A connection outlives a restart of its gateway (gRPC dials again on
-// its own), and `sandbox setup` or `sandbox doctor --fix` restart the
-// gateway on another driver: a connection whose gateway now runs another
-// driver, or does not say which, is dropped, and the connection that
-// replaces it reads the driver the gateway runs.
+// recheckDriver asks a connection's gateway which compute driver and
+// release it runs now. A connection outlives a restart of its gateway
+// (gRPC dials again on its own), and `sandbox setup` or `sandbox doctor
+// --fix` restart the gateway on another driver, or (setup's in-place
+// upgrade) on another release: a connection whose gateway now runs
+// another driver or release, or does not say which driver, is dropped, and
+// the connection that replaces it reads them, and checks the release
+// against the supported window.
 func (m *Manager) recheckDriver(ctx context.Context, gw *Gateway) (*Gateway, error) {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	d, err := connectedDriver(cctx, gw.Client)
+	info, err := gw.Client.GatewayInfo(cctx)
 	cancel()
-	if err == nil && d.Name == gw.Driver.Name {
+	var d openshell.Driver
+	if err != nil {
+		err = fmt.Errorf("ask the OpenShell gateway which compute driver it runs: %w", err)
+	} else {
+		d, err = openshell.GatewayDriver(info)
+	}
+	release := otherRelease(gw.Version, info)
+	if err == nil && d.Name == gw.Driver.Name && release == "" {
 		m.gwCheckedAt.Store(m.now().UnixNano())
 		return gw, nil
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if err == nil {
+	switch {
+	case err == nil && d.Name != gw.Driver.Name:
 		err = fmt.Errorf("the OpenShell gateway now runs the %s compute driver, not %s", d.Name, gw.Driver.Name)
+		m.logf("%v; connecting to it again", err)
+	case err == nil:
+		err = fmt.Errorf("the OpenShell gateway now runs release %s, not %s", release, gw.Version)
 		m.logf("%v; connecting to it again", err)
 	}
 	m.forgetGateway(gw, err)
 	return m.gateway(ctx)
+}
+
+// otherRelease is the release info reports when it is another than the
+// connection's (version, as the gateway's health reported it at connect):
+// "" when they agree or either cannot be read.
+func otherRelease(version string, info *openshell.GatewayInfo) string {
+	if info == nil {
+		return ""
+	}
+	was, err := openshell.ParseVersion(version)
+	if err != nil {
+		return ""
+	}
+	now, err := openshell.ParseVersion(info.Version)
+	if err != nil || now.Compare(was) == 0 {
+		return ""
+	}
+	return info.Version
+}
+
+// gatewayRelease is the release of the connected gateway as its health
+// reported it, without dialing; "" with no connection.
+func (m *Manager) gatewayRelease() string {
+	m.gwMu.RLock()
+	defer m.gwMu.RUnlock()
+	if m.gw == nil {
+		return ""
+	}
+	return m.gw.Version
 }
 
 // gatewayUp reports whether a gateway connection is held, without dialing.
@@ -639,9 +707,58 @@ func (m *Manager) goneLocked() {
 }
 
 func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, code gatewaylog.ErrorCode, summary string) {
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
 		State: state, ErrorCode: errorToken(code), ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
+}
+
+// gatewayUnavailableSummary is the degraded health record of a failed
+// connection to the OpenShell gateway: what happened in words and the next
+// step (GAP-0169). The client's text alone ("tls: failed to verify
+// certificate: x509: certificate signed by unknown authority" while another
+// account's gateway held the port) said neither. Only a failure it cannot
+// name keeps the client's error last; the daemon log has it either way
+// (GAP-0317).
+func gatewayUnavailableSummary(err error) string {
+	what, known := gatewayUnavailableText(err)
+	if !known {
+		return what + "; run `defenseclaw sandbox doctor` (" + err.Error() + ")"
+	}
+	return what + "; run `defenseclaw sandbox doctor`"
+}
+
+// gatewayUnavailableError is the API's answer while the OpenShell gateway
+// does not answer: what happened in words, which `sandbox run`, status and
+// the TUI print. A stopped gateway read "the OpenShell gateway is not
+// available: openshell: health: Unavailable: connection error: desc =
+// \"transport: Error while dialing: ...\"" (GAP-0317).
+func gatewayUnavailableError(err error) error {
+	what, known := gatewayUnavailableText(err)
+	if !known {
+		what = "the OpenShell gateway is not available: " + err.Error()
+	}
+	return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "%s", what)
+}
+
+// dialAddress is the address a gRPC "Error while dialing: dial tcp ADDR:"
+// failure names.
+var dialAddress = regexp.MustCompile(`dial tcp ([^\s"]+?):\s`)
+
+// gatewayUnavailableText says in words why the OpenShell gateway does not
+// answer; known is false for a failure it cannot name.
+func gatewayUnavailableText(err error) (what string, known bool) {
+	raw := err.Error()
+	switch {
+	case strings.Contains(raw, "certificate signed by unknown authority"):
+		return "the OpenShell gateway on this account's port is not this account's (its certificate is not from this account's " +
+			"OpenShell CA; another account's gateway may hold the port)", true
+	case strings.Contains(raw, "connection refused"):
+		if m := dialAddress.FindStringSubmatch(raw); m != nil {
+			return "the OpenShell gateway is not running: nothing listens on " + m[1], true
+		}
+		return "the OpenShell gateway is not running (nothing listens on its port)", true
+	}
+	return "the OpenShell gateway does not answer", false
 }
 
 // errorToken is a gateway error code as audit records carry it: a stable
@@ -750,24 +867,6 @@ func (m *Manager) running() context.Context {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
 	return m.runCtx
-}
-
-type nopTelemetry struct{}
-
-func (nopTelemetry) RecordSandboxLifecycle(context.Context, audit.SandboxLifecycleEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxEgress(context.Context, audit.SandboxEgressEvent) error { return nil }
-func (nopTelemetry) RecordSandboxApproval(context.Context, audit.SandboxApprovalEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxPolicy(context.Context, audit.SandboxPolicyEvent) error { return nil }
-func (nopTelemetry) RecordSandboxHealth(context.Context, audit.SandboxHealthEvent) error { return nil }
-func (nopTelemetry) RecordSandboxFinding(context.Context, audit.SandboxFindingEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspaceEvent) error {
-	return nil
 }
 
 // truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so

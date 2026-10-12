@@ -830,7 +830,7 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		note("exec")
 		return openshelltest.ExecResponse{Stdout: []byte("exited\n")}
 	})
@@ -847,12 +847,12 @@ func TestStopEndsTheHarnessFirst(t *testing.T) {
 	if len(got) < 2 || got[0] != "exec" || !slices.Contains(got, "stop") {
 		t.Fatalf("calls = %v, want the harness asked to exit before the stop", got)
 	}
-	if calls := e.fake.ExecCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
+	if calls := e.execCalls(); len(calls) != 1 || !slices.Contains(calls[0].Command, harness.ClaudeCode.InstallRoot()) ||
 		!slices.Contains(calls[0].Command, harness.RunDir) || calls[0].Timeout <= harnessExitWait {
 		t.Fatalf("exec calls = %+v", calls)
 	}
 	e.startBox("stopbox", sandboxapi.StartRequest{})
-	e.fake.HandleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(context.Context, openshelltest.ExecCall) openshelltest.ExecResponse {
 		return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 	})
 	e.stopBox("stopbox")
@@ -1183,7 +1183,8 @@ func TestGatewayUnavailable(t *testing.T) {
 	e.connErr = errors.New("connection refused")
 	_, err := e.tryCreate(sandboxapi.CreateRequest{})
 	wantCode(t, err, sandboxapi.CodeUnavailable)
-	if st, err := e.m.Status(t.Context()); err != nil || st.Available || !strings.Contains(st.Reason, "connection refused") || !st.Enabled {
+	// The reason is in words (GAP-0317), the client's text in the log.
+	if st, err := e.m.Status(t.Context()); err != nil || st.Available || st.Reason != "the OpenShell gateway is not running (nothing listens on its port)" || !st.Enabled {
 		t.Fatalf("status = %+v, %v", st, err)
 	}
 	e.connErr = nil
@@ -1363,4 +1364,47 @@ func findWarning(warnings []string, prefix string) string {
 		}
 	}
 	return ""
+}
+
+// TestStartRenewsTheModelCredential (GAP-0080): a sandbox kept the model
+// key it was created with, so after a Bedrock key expired every model call
+// of the next session failed (401) until the sandbox was deleted. A start
+// gives the provider the key the caller's environment holds now, for the
+// profile the sandbox was created with only, and only its own variables.
+// The gateway never returns a provider's values (the first fix compared
+// with them and so never updated anything live), so the fake withholds
+// them as well, and the key the provider already holds changes nothing.
+func TestStartRenewsTheModelCredential(t *testing.T) {
+	e := newEnv(t, nil)
+	e.fake.WithholdProviderCredentials()
+	e.live(sandboxapi.CreateRequest{Name: "keybox", LLM: anthropicLLM})
+	key := func() map[string]string {
+		p, err := e.fake.SDK().Providers().Get(t.Context(), e.client.Workspace(), "keybox-llm")
+		must(t, err)
+		return p.Spec.Credentials
+	}
+	// start reports the provider updates the start made.
+	start := func(profile string, creds map[string]string) int {
+		e.stopBox("keybox")
+		before := e.fake.Calls(openshelltest.MethodUpdateProvider)
+		e.startBox("keybox", sandboxapi.StartRequest{LLM: &sandboxapi.LLMCredential{Profile: profile, Credentials: creds}})
+		return e.fake.Calls(openshelltest.MethodUpdateProvider) - before
+	}
+	start(profiles.OpenAIID, map[string]string{"ANTHROPIC_API_KEY": "sk-other"})
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-test-secret" {
+		t.Fatalf("another profile's credential replaced the key: %v", got)
+	}
+	unchanged := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"})
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed", "OTHER_KEY": "x"}); n != unchanged+1 {
+		t.Fatalf("a renewed key made %d provider updates, a start %d", n, unchanged)
+	}
+	if got := key(); got["ANTHROPIC_API_KEY"] != "sk-renewed" || got["OTHER_KEY"] != "" {
+		t.Fatalf("provider credentials = %v", got)
+	}
+	if n := start(profiles.AnthropicID, map[string]string{"ANTHROPIC_API_KEY": "sk-renewed"}); n != unchanged {
+		t.Fatalf("the key the provider holds made %d provider updates, a start %d", n, unchanged)
+	}
+	if ev := e.events("keybox", sandboxapi.ActivityLifecycle, "model_credential_updated"); len(ev) != 1 {
+		t.Fatalf("feed = %+v", ev)
+	}
 }

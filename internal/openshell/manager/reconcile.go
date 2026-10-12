@@ -35,6 +35,13 @@ func (m *Manager) loadRecords() error {
 	for _, err := range errs {
 		m.logf("%v", err)
 	}
+	m.destMu.Lock()
+	for _, r := range recs {
+		if t := m.loadDestinations(r.Name); t != nil && !r.Retained {
+			m.dests[r.Name] = t
+		}
+	}
+	m.destMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range recs {
@@ -49,6 +56,11 @@ func (m *Manager) loadRecords() error {
 				"DefenseClaw keeps managing it under %s", r.Name, r.Owner, m.opts.Owner, "sandboxes/images.json", r.Owner)
 		}
 		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
+		b.hooks.restore(r.HookCounts)
+		if c := r.HookCounts; c != nil {
+			b.reach.since, b.reach.reason, b.reach.noHookYet = c.UnreachableSince, c.UnreachableReason, c.NoHookYet
+			b.silentSince = c.SilentSince
+		}
 		m.boxes[r.Name] = b
 		for _, pattern := range r.Unblocks {
 			_ = m.unblocks.Add(egress.Unblock{Pattern: pattern, SandboxID: scopeID(r.ID, r.Name)})
@@ -130,7 +142,12 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		b.op.Unlock()
 	}
 
-	// Bindings without a sandbox.
+	// Bindings without a sandbox. The bindings are listed before the boxes
+	// are: a create reserves its box (creating) before it mints its
+	// binding, so each binding listed belongs to a box seen below, known or
+	// creating. Listed after, a binding minted between the two reads looked
+	// vanished and was revoked under the create.
+	bindings := m.opts.Bindings.List()
 	m.mu.Lock()
 	known := map[string]bool{}
 	creating := map[string]bool{}
@@ -141,7 +158,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		}
 	}
 	m.mu.Unlock()
-	for _, binding := range m.opts.Bindings.List() {
+	for _, binding := range bindings {
 		if known[binding.ID] || creating[binding.SandboxName] {
 			continue
 		}
@@ -290,17 +307,25 @@ func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
 	needCred := b.cred.Username == "" && b.rec.BindingID != "" && !b.orphaned
 	username := b.rec.EgressUser
 	m.mu.Unlock()
-	eff, err := m.resolveBox(b)
-	if err != nil {
-		m.logf("resolve the policy of %s: %v", sb.Name, err)
-	} else if needCred {
-		if cred, ok := recoverCredential(sb, username); ok {
+	if needCred {
+		// The credential comes back before the policy resolves: a sandbox
+		// whose policy does not resolve then has it suspended (the proxy's
+		// 403 names why, next to the degraded record that says what to do)
+		// rather than unknown to the proxy, whose 407s read as a stale or
+		// revoked credential in a second alert (GAP-0180).
+		cred, ok := recoverCredential(sb, username)
+		if needCred = ok; ok {
 			m.mu.Lock()
 			b.cred = cred
 			b.rec.EgressUser = cred.Username
 			m.mu.Unlock()
-			m.syncCredential(b, eff)
 		}
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		m.logf("resolve the policy of %s: %v", sb.Name, err)
+	} else if needCred {
+		m.syncCredential(b, eff)
 	}
 	if b.orphaned {
 		m.logf("sandbox %s has DefenseClaw labels but no binding; its hooks cannot authenticate", sb.Name)
@@ -395,7 +420,7 @@ func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) boo
 			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
 	}
 	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
 	return true
 }

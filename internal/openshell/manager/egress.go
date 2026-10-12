@@ -21,10 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -309,6 +309,11 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if req.Sandbox == "" && !req.Always {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name a sandbox or ask for always")
 	}
+	// `sandbox policy block HOST` writes config.yaml, and the snapshot
+	// follows the file only after the reload watcher: an unblock in that
+	// second must not be decided, and reported done, against the block
+	// list from before the write (GAP-0173).
+	m.syncConfig(ctx)
 	var (
 		b   *box
 		eff *packs.Effective
@@ -388,15 +393,25 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 	if ident.Name == "" {
 		ident = audit.SandboxIdentity{Name: "all", Runtime: audit.SandboxRuntimeOpenShell}
 	}
-	if err := m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
+	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
 		Sandbox: ident, Operation: audit.SandboxEgressUnblock, Actor: "operator", Origin: "api", Target: host,
 		Reason: policyReasonUnblock, ChangeCount: 1, Timestamp: m.now(),
-	}); err != nil {
-		m.logf("policy telemetry for the unblock of %s: %v", host, err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
 	return resp, nil
+}
+
+// syncConfig loads config.yaml into the configuration snapshot
+// (Options.SyncConfig). A file the reload refuses keeps the snapshot as it
+// is; the reload reports why in the daemon's health.
+func (m *Manager) syncConfig(ctx context.Context) {
+	if m.opts.SyncConfig == nil {
+		return
+	}
+	if err := m.opts.SyncConfig(ctx); err != nil {
+		m.logf("load config.yaml before the decision: %v", err)
+	}
 }
 
 // EgressUnblock reports whether a sandbox's egress proxy reaches host
@@ -467,6 +482,132 @@ type egressSink struct {
 	overflow []egress.Event
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
+	// openshell folds OpenShell's own refusals like recent folds the
+	// proxy's (foldOpenShell), and openshellLines their feed lines.
+	openshell      map[openshellRefusalKey]*openshellRefusal
+	openshellLines map[openshellLineKey]*openshellLine
+}
+
+// openshellRefusalKey is what makes OpenShell's refusals repeats of one
+// another: the sandbox, the destination and the program.
+type openshellRefusalKey struct {
+	sandbox, host, binary string
+	port                  int
+}
+
+// openshellRefusal is the fold of one openshellRefusalKey's repeats since
+// its first record: the last repeat stands for them all.
+type openshellRefusal struct {
+	since   time.Time
+	repeats int
+	last    audit.SandboxEgressEvent
+}
+
+// openshellLineKey is what makes OpenShell refusals' feed lines repeats of
+// one another: the sandbox and the line, which names neither the program
+// nor a web port. Folded by the record's key, one retry loop's refusals by
+// two programs (or of a host's address and its name) printed identical
+// lines in pairs (GAP-0329).
+type openshellLineKey struct {
+	sandbox, message string
+}
+
+// openshellLine is the fold of one openshellLineKey's repeats since its
+// first line.
+type openshellLine struct {
+	since   time.Time
+	repeats int
+	last    sandboxapi.ActivityEvent
+}
+
+// maxOpenShellRefusals bounds the refusals foldOpenShell keeps windows for.
+const maxOpenShellRefusals = 4096
+
+// foldOpenShell reports whether an OpenShell refusal of sandbox (its record
+// ev, its feed line feed when the feed shows it) repeats one recorded within
+// blockCoalesceWindow: then it only counts, and flush records the count in
+// one record and one feed line. A retry loop refused seven times in seven
+// seconds made seven MEDIUM alerts and seven feed lines (GAP-0199).
+//
+// The record folds by destination and program, the feed line by its text
+// (openshellLineKey) within feedFoldWindow: record and line report whether
+// each only counted.
+func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, feed *sandboxapi.ActivityEvent) (record, line bool) {
+	now := s.m.now()
+	k := openshellRefusalKey{sandbox: sandbox, host: ev.Host, binary: ev.Executable, port: ev.Port}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.openshell[k]; r != nil && now.Sub(r.since) < blockCoalesceWindow {
+		r.repeats++
+		r.last, record = ev, true
+	} else {
+		if s.openshell == nil {
+			s.openshell = map[openshellRefusalKey]*openshellRefusal{}
+		}
+		if len(s.openshell) < maxOpenShellRefusals {
+			s.openshell[k] = &openshellRefusal{since: now}
+		}
+	}
+	if feed == nil {
+		return record, false
+	}
+	lk := openshellLineKey{sandbox: sandbox, message: feed.Message}
+	if l := s.openshellLines[lk]; l != nil && now.Sub(l.since) < feedFoldWindow {
+		l.repeats++
+		l.last, line = *feed, true
+	} else {
+		if s.openshellLines == nil {
+			s.openshellLines = map[openshellLineKey]*openshellLine{}
+		}
+		if len(s.openshellLines) < maxOpenShellRefusals {
+			s.openshellLines[lk] = &openshellLine{since: now}
+		}
+	}
+	return record, line
+}
+
+// flushOpenShell records, for each OpenShell refusal whose window ended,
+// the repeats folded into it, and forgets the ended windows.
+func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
+	var folded []*openshellRefusal
+	var lines []*openshellLine
+	s.mu.Lock()
+	for k, r := range s.openshell {
+		if now.Sub(r.since) < blockCoalesceWindow {
+			continue
+		}
+		if r.repeats > 0 {
+			folded = append(folded, r)
+		}
+		delete(s.openshell, k)
+	}
+	for k, l := range s.openshellLines {
+		if now.Sub(l.since) < feedFoldWindow {
+			continue
+		}
+		// A single repeat says nothing the first line did not: printed, it
+		// read as the same line twice (GAP-0329).
+		if l.repeats > 1 {
+			lines = append(lines, l)
+		}
+		delete(s.openshellLines, k)
+	}
+	s.mu.Unlock()
+	sort.Slice(folded, func(i, j int) bool { return folded[i].last.Timestamp.Before(folded[j].last.Timestamp) })
+	for _, r := range folded {
+		ev := r.last
+		if r.repeats > 1 {
+			ev.Reason = truncate(ev.Reason+fmt.Sprintf(" (and %d more like it)", r.repeats-1), 512)
+		}
+		s.m.tel.RecordSandboxEgress(ctx, ev)
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].last.Time.Before(lines[j].last.Time) })
+	for _, l := range lines {
+		line := l.last
+		line.Message += fmt.Sprintf(" (and %d more like it)", l.repeats-1)
+		line.Repeats = l.repeats - 1
+		s.m.publishEgress(line)
+	}
 }
 
 // sinkItem is one queued proxy event; repeats counts the refusals like it
@@ -610,6 +751,8 @@ func (s *egressSink) drainOverflow(ctx context.Context) {
 // reports the refusals and feed events each sandbox's pacing held back.
 func (s *egressSink) flush(ctx context.Context) {
 	now := s.m.now()
+	s.m.reportAuthFailures(ctx, now)
+	s.flushOpenShell(ctx, now)
 	var folded []sinkItem
 	s.mu.Lock()
 	for k, r := range s.recent {
@@ -646,6 +789,13 @@ func (s *egressSink) flush(ctx context.Context) {
 	for _, h := range s.m.egressFeed.drain(now) {
 		s.m.publishHeldBack(h.key, h.n, "egress events were not shown one by one")
 	}
+	for _, h := range s.m.procGate.drain(now) {
+		name, what := h.key, "process"
+		if n, ok := strings.CutSuffix(h.key, "\x00ssh"); ok {
+			name, what = n, "SSH"
+		}
+		s.m.logf("sandbox %s: %d %s records were not recorded one by one (more than %d a second)", name, h.n, what, activityRate)
+	}
 }
 
 // publishHeldBack tells the feed how many of a sandbox's egress events its
@@ -665,11 +815,35 @@ func (m *Manager) publishEgress(ev sandboxapi.ActivityEvent) {
 	m.feed.Publish(ev)
 }
 
+// firstToolHostRefusal reports whether host's refusal is the first the
+// box's sandbox got since the daemon started, and marks it.
+func (m *Manager) firstToolHostRefusal(b *box, host string) bool {
+	host = triage.NormalizeHost(host)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b.toolHostsSaid == nil {
+		b.toolHostsSaid = map[string]bool{}
+	}
+	if b.toolHostsSaid[host] {
+		return false
+	}
+	b.toolHostsSaid[host] = true
+	return true
+}
+
 func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) {
+	if e.Kind == egress.EventAuthFailed {
+		// No principal: the credential is what failed.
+		m.authFailed(ctx, e)
+		return
+	}
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
+	var harnessName string
+	var eff *packs.Effective
 	if b != nil {
+		harnessName, eff = b.rec.Harness, b.eff
 		// The proxy's requests are no sign of the harness at work (hook
 		// silence): the proxy cannot tell the harness's from a tool's or a
 		// `sandbox exec` command's. OpenShell's record of the connection
@@ -684,6 +858,9 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 	switch e.Kind {
 	case egress.EventAllowed, egress.EventBlocked:
 		blocked := e.Kind == egress.EventBlocked
+		if blocked && e.Category == egress.CategoryHostInternal && m.declaredHostPortAsk(ctx, b, e) {
+			return
+		}
 		reason, more := e.Reason, ""
 		if repeats > 0 {
 			// Refusals folded into this one (egressSink.admitBlocked).
@@ -695,11 +872,30 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: blocked,
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
-			UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 		}
-		if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
-			m.logf("egress telemetry: %v", err)
+		category, text := string(e.Category), categoryText(e)
+		if blocked && e.Category == egress.CategoryOperatorBlock && eff != nil {
+			// The block list merges the pack's, the repository policy's
+			// and the user's own: the line, the destination and the audit
+			// record (an alert) say whose entry it was, where it is removed
+			// (GAP-0136).
+			if c, t := blockOriginText(eff.BlockOrigin(e.Host)); c != "" {
+				category, text = c, t
+				ev.DecisionCode, ev.Reason = "SANDBOX_EGRESS_"+strings.ToUpper(c), truncate(t+more, 512)
+			}
 		}
+		fetch := blocked && harnessFetchHost(harnessName, e.Host, e.Port)
+		if fetch {
+			// The harness's own background request, which it does without:
+			// audited, but no alert.
+			ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+		}
+		m.tel.RecordSandboxEgress(ctx, ev)
+		if fetch {
+			return
+		}
+		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
+			category: category})
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
 			// The port tells an HTTPS request from a plain-HTTP one to
@@ -708,14 +904,26 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			msg := "✓ " + where
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
-				msg = "✗ " + where + " (" + categoryText(e) + ")" + more
+				msg = "✗ " + where + " (" + text + ")" + more
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
-				Source: sandboxapi.SourceProxy, Category: string(e.Category), Rule: e.Rule, Unblockable: blocked && e.Unblockable,
-				Reason: truncate(e.Reason, 300), Message: msg,
+				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
+				Reason: truncate(e.Reason, 300), Message: msg, Repeats: repeats,
 			})
 		}
+		if what, ok := toolHostOf(harnessName, e.Host); ok && blocked && m.firstToolHostRefusal(b, e.Host) {
+			// The refusal of a host a harness tool calls for every site
+			// read as the site's own (GAP-0234, GAP-0263).
+			line := "⚠ " + e.Host + " is refused: " + what
+			if e.Unblockable {
+				line += "; `defenseclaw sandbox unblock " + e.Host + " --sandbox " + e.SandboxName + "` opens it for this sandbox"
+			}
+			m.publishEgress(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityFinding, Sandbox: e.SandboxName, Host: e.Host,
+				Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonToolHostRefused, Message: line})
+		}
+	case egress.EventClosed, egress.EventFailed:
+		m.egressEnded(ctx, b, ident, e)
 	case egress.EventLargeUpload:
 		if e.Terminated {
 			m.largeUploadBlocked(ctx, ident, e)
@@ -736,7 +944,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		if e.Threshold > 0 {
 			size = "more than " + egress.FormatThreshold(e.Threshold)
 		}
-		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
 			Title: "Large upload to a first-seen destination",
 			Description: fmt.Sprintf("%s sent %s to %s, which it had not contacted before (%d bytes as it crossed the threshold).",
@@ -748,6 +956,121 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, BytesUp: e.BytesUp, Threshold: e.Threshold, Severity: "MEDIUM",
 			Reason:  truncate(e.Reason, 300),
 			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", sandboxapi.HostPort(e.Host, e.Port), size)})
+	}
+}
+
+// egressEnded records the end of an allowed tunnel or forwarded request:
+// what it sent and received and how long it took (completed, or cancelled
+// when the proxy cut it short), or the upstream failure the sandbox got a
+// 502 or 504 for (failed; timed out on a 504). The decision was recorded
+// when it opened.
+func (m *Manager) egressEnded(ctx context.Context, b *box, ident audit.SandboxIdentity, e egress.Event) {
+	ev := audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port, Scheme: egressScheme(e),
+		ResolvedIP: remoteIP(e.RemoteAddr), DecisionCode: "SANDBOX_EGRESS_ALLOWED", PolicyOutcome: policyOutcome(e),
+		Duration: e.Duration, Timestamp: e.Time,
+	}
+	switch {
+	case e.Kind == egress.EventClosed && e.Terminated:
+		// The large-upload block (its finding says so), the idle timeout, a
+		// refused TLS server name or content, or a recheck, whose reason
+		// says why (its credential was revoked).
+		ev.End, ev.Terminated, ev.BytesUp, ev.BytesDown = audit.SandboxEgressFailed, true, e.BytesUp, e.BytesDown
+		ev.DecisionCode = "SANDBOX_EGRESS_TERMINATED"
+		ev.Reason = truncate(firstNonEmpty(e.Reason, "the egress proxy cut it short"), 512)
+	case e.Kind == egress.EventClosed:
+		ev.End, ev.BytesUp, ev.BytesDown = audit.SandboxEgressCompleted, e.BytesUp, e.BytesDown
+	default:
+		ev.End, ev.TimedOut = audit.SandboxEgressFailed, e.Status == http.StatusGatewayTimeout
+		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
+		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
+	}
+	m.tel.RecordSandboxEgress(ctx, ev)
+	if ev.DecisionCode != "SANDBOX_EGRESS_UPSTREAM_FAILED" {
+		// The counter counted it: the destinations view keeps its totals.
+		m.touchDestinations(e.SandboxName)
+		return
+	}
+	if m.destinationFailed(b, e) {
+		where := sandboxapi.HostPort(e.Host, e.Port)
+		m.publishEgress(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityFinding, Sandbox: e.SandboxName,
+			Host: e.Host, Port: e.Port, Source: sandboxapi.SourceProxy, Severity: "INFO", Reason: sandboxapi.ReasonUpstreamFailed,
+			Message: "⚠ " + where + ": the connection failed upstream, not blocked by DefenseClaw (" + upstreamFailure(e) +
+				"); `defenseclaw sandbox destinations " + e.SandboxName + "` counts the failures"})
+	}
+}
+
+// authFailures counts the egress proxy's refusals of invalid credentials
+// (authFailed): count since the last report, the last at lastAt, and
+// whether a streak is reported as degraded health.
+type authFailures struct {
+	mu                        sync.Mutex
+	count                     int
+	since, reportedAt, lastAt time.Time
+	last                      string
+	degraded                  bool
+}
+
+// authFailedEvery paces the reports of refused credentials.
+const authFailedEvery = time.Minute
+
+// authFailed counts a request the egress proxy refused for an invalid proxy
+// credential (malformed, unknown, revoked or wrong; a request without one
+// is the normal first leg of the handshake and no event). It names no
+// sandbox, so it is health of the integration (reportAuthFailures): a
+// sandbox that keeps a stale or revoked credential (an environment from
+// before a restart) or another program on this machine trying the proxy
+// must not flood the records.
+func (m *Manager) authFailed(ctx context.Context, e egress.Event) {
+	now := m.now()
+	a := &m.authFails
+	a.mu.Lock()
+	if a.count == 0 {
+		a.since = now
+	}
+	a.count++
+	a.lastAt = now
+	a.last = truncate(sandboxapi.DisplayText(sandboxapi.HostPort(e.Host, e.Port)), 256)
+	a.mu.Unlock()
+	m.reportAuthFailures(ctx, now)
+}
+
+// reportAuthFailures reports the refused credentials: the first of a streak
+// at once, as one degraded health record; then their count in the log at
+// most every authFailedEvery; and the streak's end, once authFailedEvery
+// passes without a refusal, as one restored record. The sink's flush calls
+// it too, so a burst's count and its end are reported.
+func (m *Manager) reportAuthFailures(ctx context.Context, now time.Time) {
+	a := &m.authFails
+	a.mu.Lock()
+	var state audit.SandboxHealthState
+	switch {
+	case a.count > 0 && !a.degraded:
+		state, a.degraded = audit.SandboxHealthDegraded, true
+	case a.count > 0 && now.Sub(a.reportedAt) >= authFailedEvery:
+		// Logged only: the streak is reported degraded already.
+	case a.count == 0 && a.degraded && now.Sub(a.lastAt) >= authFailedEvery:
+		state, a.degraded = audit.SandboxHealthRestored, false
+	default:
+		a.mu.Unlock()
+		return
+	}
+	n, since, last := a.count, a.since, a.last
+	if n > 0 {
+		a.count, a.reportedAt = 0, now
+	}
+	a.mu.Unlock()
+	code := gatewaylog.ErrCodeOpenShellEgressAuthFailed
+	msg := fmt.Sprintf("the sandbox egress proxy refused %d request(s) with an invalid proxy credential since %s (the last to %s): "+
+		"a sandbox may use a stale or revoked credential, or another program on this machine tries the proxy",
+		n, since.UTC().Format(time.RFC3339), firstNonEmpty(last, "-"))
+	if state == audit.SandboxHealthRestored {
+		msg = fmt.Sprintf("the sandbox egress proxy refused no proxy credential for %s", authFailedEvery)
+	}
+	m.logf("%s: %s", code, msg)
+	if state != "" {
+		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{State: state, ErrorCode: errorToken(code),
+			ErrorSummary: truncate(msg, 512), Timestamp: now})
 	}
 }
 
@@ -764,7 +1087,7 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 		remediation = "Review what the agent tried to upload. Your organization does not allow unblocks; " +
 			"ask your administrator if the destination is expected."
 	}
-	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 		Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "HIGH",
 		Title: "Large upload to a first-seen destination blocked",
 		Description: fmt.Sprintf("%s tried to send more than %s to %s, which it had not contacted before; "+
@@ -772,15 +1095,12 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 			e.SandboxName, threshold, e.Host, e.BytesUp),
 		Evidence: truncate(e.Reason, 512), TargetRef: e.Host, Remediation: remediation, Timestamp: e.Time,
 	})
-	if err := m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
 		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port,
 		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
 		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
 		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
-		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
-	}); err != nil {
-		m.logf("egress telemetry: %v", err)
-	}
+	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: e.SandboxName,
 		Host: e.Host, Port: e.Port, Method: e.Method, Source: sandboxapi.SourceProxy, Category: sandboxapi.CategoryLargeUpload,
 		Unblockable: e.Unblockable, BytesUp: e.BytesUp, Severity: "HIGH", Reason: truncate(e.Reason, 300),
@@ -828,6 +1148,21 @@ func policyOutcome(e egress.Event) string {
 		out += " feed " + e.Feed + "@" + e.FeedVersion
 	}
 	return truncate(out, 256)
+}
+
+// blockOriginText is the feed category and text of a block-list refusal
+// whose entry came from origin (packs.Effective.BlockOrigin); "" for the
+// user's own list, which operator_block already names.
+func blockOriginText(origin string) (category, text string) {
+	switch origin {
+	case packs.BlockFromPack:
+		return sandboxapi.CategoryPackBlock, "on the pack's block list"
+	case packs.BlockFromRepoPolicy:
+		return sandboxapi.CategoryRepoPolicyBlock, "on the repository policy's block list, " + packs.RepoPolicyPath
+	case packs.BlockFromFirewall:
+		return sandboxapi.CategoryFirewallBlock, "a deny rule of the host egress firewall"
+	}
+	return "", ""
 }
 
 func categoryText(e egress.Event) string {
