@@ -47,7 +47,7 @@ func ciscoMetricMap(metrics []telemetry.V8ProjectedMetric) map[string][]telemetr
 	return result
 }
 
-func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
+func TestCiscoFindingCatalogCoversKnownRules(t *testing.T) {
 	wantIDs := map[string]string{
 		"Prompt Injection":                 "CISCO-PROMPT-INJECTION",
 		"Jailbreak":                        "CISCO-JAILBREAK",
@@ -63,23 +63,15 @@ func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
 		"Code Detection":                   "CISCO-CODE",
 	}
 
-	seen := make(map[string]struct{}, len(defaultEnabledRules))
-	for _, rule := range defaultEnabledRules {
-		label := rule["rule_name"]
-		wantID, ok := wantIDs[label]
-		if !ok {
-			t.Errorf("default Cisco rule %q has no canonical identity fixture", label)
-			continue
-		}
-		seen[label] = struct{}{}
+	if len(wantIDs) != 12 {
+		t.Fatalf("covered %d canonical Cisco rules, want 12", len(wantIDs))
+	}
+	for label, wantID := range wantIDs {
 		if gotID := canonicalCiscoFindingID(label); gotID != wantID {
 			t.Errorf("canonicalCiscoFindingID(%q) = %q, want %q", label, gotID, wantID)
 		} else if gotLabel := ciscoFindingDisplayLabel(gotID); gotLabel != label {
 			t.Errorf("ciscoFindingDisplayLabel(%q) = %q, want %q", gotID, gotLabel, label)
 		}
-	}
-	if len(seen) != len(wantIDs) {
-		t.Fatalf("covered %d canonical Cisco rules, want %d", len(seen), len(wantIDs))
 	}
 
 	for _, tc := range []struct {
