@@ -566,6 +566,12 @@ def group_mail_nickname(name: str) -> str:
 def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
     if not args.name and not args.add_device:
         raise SystemExit("error: name at least one --name GROUP or --add-device DEVICE:GROUP")
+    requested_devices: list[tuple[str, str]] = []
+    for pair in args.add_device:
+        device_name, sep, group_name = pair.partition(":")
+        if not sep or not device_name or not group_name:
+            raise SystemExit(f"error: --add-device wants DEVICE:GROUP, got {pair!r}")
+        requested_devices.append((device_name, group_name))
     # Resolve and validate every requested group before changing the tenant.
     planned_groups: list[tuple[str, dict | None, str | None]] = []
     for name in args.name:
@@ -602,10 +608,7 @@ def cmd_groups(graph: Graph, args: argparse.Namespace) -> int:
             made = graph.request("POST", f"{V1}/groups", body)
             known_groups[name] = graph.get_after_create(f"{V1}/groups/{made['id']}?$select=id")
             print(f"group {name}: created")
-    for pair in args.add_device:
-        device_name, sep, group_name = pair.partition(":")
-        if not sep or not device_name or not group_name:
-            raise SystemExit(f"error: --add-device wants DEVICE:GROUP, got {pair!r}")
+    for device_name, group_name in requested_devices:
         devices = graph.get_all(f"{V1}/devices?$filter={odata_eq('displayName', device_name)}&$select=id,displayName")
         if len(devices) != 1:
             raise SystemExit(f"error: {len(devices)} Entra devices are named {device_name!r}; need exactly one")
