@@ -472,6 +472,60 @@ func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 	}
 }
 
+// #1156: while the reconciler keeps a replaced controls policy for the
+// sessions only it marked, a session started from a binary in both anchors
+// is marked by both policies, and Tetragon reports each denied open twice.
+// The stream delivers, and taps, one event per open; two real opens stay two,
+// and other processes, files and policies are untouched.
+func TestTetragonSourceDeliversOneEventPerDeniedOpen(t *testing.T) {
+	h := newHarness(t)
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- feed
+	var mu sync.Mutex
+	tapped := 0
+	source := NewTetragonSource(nil, TetragonOptions{Mode: "enforce", Dial: h.dial,
+		Tap: func(batch KernelBatch) { mu.Lock(); tapped += len(batch.Events); mu.Unlock() }})
+	if err := source.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	at := time.Unix(1791336304, 0)
+	deny := func(policy, exec, path string, offset time.Duration) Event {
+		return Event{Kind: KindFileRead, PID: 7, ExecID: exec, Path: path, Policy: policy, PolicyOwner: PolicyOwnerDefenseClaw,
+			Outcome: OutcomeBlocked, Control: "kernel.ssh_private_key_read", Source: SourceTetragon, At: at.Add(offset)}
+	}
+	const kept, replacement, key = "defenseclaw-controls-0a1b2c3d", "defenseclaw-controls-4e5f6a7b", "/home/dcr-std1/.ssh/id_ed25519"
+	feed.batches <- KernelBatch{Events: []Event{
+		deny(kept, "e1", key, 0), deny(replacement, "e1", key, time.Microsecond), // one open, two reports
+		deny(kept, "e1", key, 10*time.Millisecond), // the same process opens it again
+	}}
+	feed.batches <- KernelBatch{Events: []Event{
+		deny(replacement, "e1", key, 10*time.Millisecond+time.Microsecond),  // the second open's twin, in the next batch
+		deny(replacement, "e2", key, 20*time.Millisecond),                   // another process
+		deny(kept, "e1", "/home/dcr-std1/.ssh/id_rsa", 30*time.Millisecond), // another file
+		{Kind: KindFileRead, PID: 7, ExecID: "e1", Path: key, Policy: "customer-ssh", PolicyOwner: PolicyOwnerCustomer,
+			Outcome: OutcomeBlocked, Source: SourceTetragon, At: at.Add(time.Microsecond)}, // the host's own policy
+	}}
+	var got []Event
+	for i := 0; i < 5; i++ {
+		got = append(got, next(t, source))
+	}
+	select {
+	case extra := <-source.Events():
+		t.Fatalf("a twin was delivered: %+v (after %+v)", extra, got)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got[0].Policy != kept || got[1].Policy != kept || got[2].ExecID != "e2" || got[3].Path != "/home/dcr-std1/.ssh/id_rsa" ||
+		got[4].PolicyOwner != PolicyOwnerCustomer {
+		t.Fatalf("delivered %+v", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if tapped != 5 {
+		t.Fatalf("tapped %d events, want 5", tapped)
+	}
+}
+
 // TestTetragonSourceTapsTheStreamForTheReconciler: the reconciler sees every
 // Tetragon batch (its hit and loss tally) and the stream going up and down.
 func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {

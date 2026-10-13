@@ -777,6 +777,9 @@ type TetragonPolicy struct {
 	State       string `json:"state,omitempty"`
 	Error       string `json:"error,omitempty"`
 	ChangedAt   string `json:"changed_at,omitempty"`
+	// retainedSessions are the running sessions a replaced controls policy
+	// still denies for (#1156); the text view names them.
+	retainedSessions int
 }
 
 // TetragonUser is one enrolled user's place in the rollout.
@@ -1010,6 +1013,7 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 		rep.Policies = append(rep.Policies, TetragonPolicy{
 			Name: policy.Name, Family: string(policy.Family), DesiredMode: string(policy.DesiredMode),
 			Mode: string(policy.ObservedMode), State: string(policy.State), Error: policy.Error, ChangedAt: formatTime(policy.ChangedAt),
+			retainedSessions: policy.RetainedSessions,
 		})
 	}
 	sort.Slice(rep.Policies, func(i, j int) bool { return rep.Policies[i].Name < rep.Policies[j].Name })
@@ -1586,6 +1590,12 @@ func WriteTetragonReport(w io.Writer, rep *TetragonReport, asJSON bool) error {
 				defaultStr(policy.DesiredMode, "-"), defaultStr(policy.State, "-"), defaultStr(policy.Error, "-"))
 		}
 		_ = table.Flush()
+		for _, policy := range rep.Policies {
+			if n := policy.retainedSessions; n > 0 {
+				fmt.Fprintf(w, "    %s keeps denying for %d %s its replacement\n", policy.Name, n,
+					plural(n, "session that predates", "sessions that predate"))
+			}
+		}
 	}
 	if len(rep.Users) > 0 {
 		writeStatusUsers(w, rep)

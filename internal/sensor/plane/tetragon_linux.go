@@ -65,7 +65,14 @@ var (
 	// switchBackWindow is how long after Tetragon returns an exec it
 	// reports for a pid cn_proc just delivered is taken as the same exec.
 	switchBackWindow = 2 * time.Second
+	// twinWindow is how far apart in event time two DefenseClaw controls
+	// policies may report the same process opening the same file and
+	// still be one open.
+	twinWindow = 250 * time.Millisecond
 )
+
+// maxTwinKeys bounds the opens remembered for the twin check.
+const maxTwinKeys = 4096
 
 // maxCmdlineBytes bounds a forwarded command line, as the sandbox process
 // tree does.
@@ -172,6 +179,24 @@ type tetragonSource struct {
 	dedupeMu      sync.Mutex
 	tetragonFiles map[fileKey]time.Time
 	held          []heldEvent
+	// twins are the recent control events of DefenseClaw's policies, for
+	// dropTwins. Guarded by dedupeMu.
+	twins map[twinKey][]twinSeen
+}
+
+// twinKey is one open as a controls event reports it.
+type twinKey struct {
+	execID, path, control string
+	kind                  Kind
+	outcome               KernelOutcome
+}
+
+// twinSeen is one delivered controls event, and the policies whose report
+// of the same open it already stood for.
+type twinSeen struct {
+	policy   string
+	at, seen time.Time
+	absorbed map[string]bool
 }
 
 type fileKey struct {
@@ -363,10 +388,11 @@ func (s *tetragonSource) readFeed(ctx context.Context, feed KernelFeed) {
 }
 
 func (s *tetragonSource) handleBatch(batch KernelBatch) {
+	now := s.now()
+	batch.Events = s.dropTwins(batch.Events, now)
 	if s.options.Tap != nil {
 		s.options.Tap(batch)
 	}
-	now := s.now()
 	if batch.ThrottleStart || batch.ThrottleStop || batch.Dropped > 0 {
 		s.mu.Lock()
 		if batch.ThrottleStart {
@@ -390,6 +416,63 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 		}
 		s.buffer.Push(event)
 	}
+}
+
+// dropTwins removes the second report of one open. Two of DefenseClaw's
+// controls policies can mark the same session: a replaced policy the
+// reconciler keeps for the sessions only it marked, and its replacement,
+// both mark a session started from a binary in both anchors (#1156). Each
+// reports, and denies, the same open; the reconciler's tally and the
+// gateway's denial records count it once. A twin is the same process (exec
+// id), file, control and outcome from another DefenseClaw policy within
+// twinWindow; each delivered event stands for at most one report per other
+// policy, so two real opens stay two.
+func (s *tetragonSource) dropTwins(events []Event, now time.Time) []Event {
+	kept := events[:0:0]
+	s.dedupeMu.Lock()
+	defer s.dedupeMu.Unlock()
+	for key, seen := range s.twins {
+		fresh := seen[:0]
+		for _, entry := range seen {
+			if now.Sub(entry.seen) <= 2*twinWindow {
+				fresh = append(fresh, entry)
+			}
+		}
+		if len(fresh) == 0 {
+			delete(s.twins, key)
+		} else {
+			s.twins[key] = fresh
+		}
+	}
+	for _, event := range events {
+		if event.PolicyOwner != PolicyOwnerDefenseClaw || event.Control == "" || event.ExecID == "" || event.Policy == "" ||
+			(event.Outcome != OutcomeBlocked && event.Outcome != OutcomeWouldBlock) {
+			kept = append(kept, event)
+			continue
+		}
+		at := event.At
+		if at.IsZero() {
+			at = now
+		}
+		key := twinKey{execID: event.ExecID, path: event.Path, control: event.Control, kind: event.Kind, outcome: event.Outcome}
+		twin := false
+		for i := range s.twins[key] {
+			entry := &s.twins[key][i]
+			if entry.policy != event.Policy && !entry.absorbed[event.Policy] && absDuration(entry.at.Sub(at)) <= twinWindow {
+				entry.absorbed[event.Policy], twin = true, true
+				break
+			}
+		}
+		if twin {
+			continue
+		}
+		if s.twins == nil || len(s.twins) >= maxTwinKeys {
+			s.twins = map[twinKey][]twinSeen{}
+		}
+		s.twins[key] = append(s.twins[key], twinSeen{policy: event.Policy, at: at, seen: now, absorbed: map[string]bool{}})
+		kept = append(kept, event)
+	}
+	return kept
 }
 
 // duplicateOfNative reports whether an exec Tetragon reports just after it

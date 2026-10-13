@@ -1345,6 +1345,28 @@ func TestHitLinesNameTheTopBinariesWithTheirCounts(t *testing.T) {
 	}
 }
 
+// #1156: a controls policy the plan replaced stays loaded for the running
+// sessions only it marked; status names it under the policies table, and
+// the JSON report keeps its shape.
+func TestTetragonStatusTextNamesAKeptControlsPolicy(t *testing.T) {
+	state := publishedState(kernelpolicy.ModeEnforce)
+	state.Policies = []kernelpolicy.PolicyStatus{
+		{Name: "defenseclaw-controls-0a1b2c3d", Family: kernelpolicy.FamilyControls, DesiredMode: kernelpolicy.PolicyEnforce,
+			ObservedMode: kernelpolicy.LoadedEnforce, State: kernelpolicy.StateEnabled, RetainedSessions: 2},
+		{Name: "defenseclaw-controls-4e5f6a7b", Family: kernelpolicy.FamilyControls, DesiredMode: kernelpolicy.PolicyEnforce,
+			ObservedMode: kernelpolicy.LoadedEnforce, State: kernelpolicy.StateEnabled},
+	}
+	h := statusHost(t, "    mode: enforce\n    enforce_ack: "+kernelpolicy.Digest()+"\n", state, nil)
+	rep := RunTetragon(context.Background(), h.env, TetragonOptions{Action: TetragonActionStatus})
+	validateTetragonReport(t, compileTetragonStatusSchema(t), rep)
+	got := statusText(t, rep)
+	if !strings.Contains(got, "    defenseclaw-controls-0a1b2c3d keeps denying for 2 sessions that predate its replacement\n") ||
+		strings.Contains(got, "defenseclaw-controls-4e5f6a7b keeps") {
+		t.Fatalf("text:\n%s", got)
+	}
+	assertStatusColumns(t, got)
+}
+
 func TestConnectorsWordsMarkMachinePolicy(t *testing.T) {
 	for _, tc := range []struct {
 		user TetragonUser

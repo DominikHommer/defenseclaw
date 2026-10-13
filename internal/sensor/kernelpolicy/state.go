@@ -43,6 +43,11 @@ type PolicyStatus struct {
 	State        LoadedState `json:"state,omitempty"`
 	Error        string      `json:"error,omitempty"`
 	ChangedAt    time.Time   `json:"changed_at"`
+	// RetainedSessions counts, for an enforcing controls policy the plan
+	// replaced, the live agent sessions only it marked (they started
+	// before its replacement loaded): it stays loaded and enforcing until
+	// the last of them exits (#1156).
+	RetainedSessions int `json:"retained_sessions,omitempty"`
 }
 
 // Applied is the write-ahead record of a call the helper made (or is about to
@@ -61,6 +66,12 @@ type Applied struct {
 	// loaded it. An agent session that started no later is not marked by
 	// the binaries anchor, so it is reported as predating the controls.
 	LoadTicks uint64 `json:"load_ticks,omitempty"`
+	// BinaryUID and Binaries are, for a controls-family policy, the
+	// binaries anchor it was loaded with. A replaced enforcing policy is
+	// kept while a session it marked runs, and a restarted helper decides
+	// that from this record (#1156).
+	BinaryUID int      `json:"binary_uid,omitempty"`
+	Binaries  []string `json:"binaries,omitempty"`
 }
 
 // OverrideKind is what an operator did to a family.
