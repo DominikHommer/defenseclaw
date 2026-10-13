@@ -123,6 +123,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if opts.bundlePath != "" && strings.TrimSpace(opts.configPath) != "" {
 		return refuse("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
 	}
+	if opts.trustAnchors != "" && strings.TrimSpace(opts.configPath) != "" {
+		// Installing the anchors puts the computer in bundle mode, which
+		// refuses CONFIG=; installing them first would let this one run
+		// apply an unsigned config past that check.
+		return refuse("invalid_arguments", "TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")
+	}
 	if !windowsEnterpriseMutationAction(action) {
 		return false, nil
 	}
@@ -165,6 +171,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 			Message: fmt.Sprintf("%d earlier bundle run(s) ended before they applied; the last good bundle kept enforcing", len(report.Interrupted))})
 	}
 	if len(rollback) > 0 {
+		// The installed config is a bundle that was never confirmed, not a
+		// last good config: a rollback of this run must not report it as one.
+		run.previous = nil
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeNotConfirmed),
 			Message: "an earlier bundle was installed but never confirmed; this run installs the new bundle over it"})
 	}
