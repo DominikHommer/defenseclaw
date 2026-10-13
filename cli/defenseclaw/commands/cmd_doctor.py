@@ -11418,7 +11418,7 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
         # cannot stop a background server's attempts (GAP-0313).
         remediation = (
             "attempts are recent. An agent that was already running when its DefenseClaw token "
-            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
             "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
@@ -12313,6 +12313,7 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    _check_orphaned_hook_entries(cfg, active_connector, r)
     # Surface a dead-end asset_policy.plugin.registry_required flag, which can
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
     # blocks all plugins under enforcement. (OTHER-5)
@@ -13777,12 +13778,10 @@ def _run_fixers(
     # this list. Doctor is a diagnostic — it *reports* inactive-connector
     # residue (a WARN from _check_connector_residue) but must never run
     # ``connector teardown`` as a side effect of ``--fix``, which on a
-    # multi-connector install could destroy a live connector. The
-    # _fix_connector_residue helper is retained (and still excludes the full
-    # active set) for the tracked follow-up that promotes teardown to a
-    # first-class ``defenseclaw connector teardown`` CLI surface; until then,
-    # operators run ``defenseclaw-gateway connector teardown --connector
-    # <name>`` explicitly.
+    # multi-connector install could destroy a live connector. Operators run
+    # ``defenseclaw-gateway connector teardown --connector <name>`` for
+    # residue, and ``defenseclaw setup remove <name>`` for hook entries a
+    # connector that is not configured left in its agent settings.
     specs = _doctor_repair_specs()
     known_ids = {spec.repair_id for spec in specs}
     explicit_ids = set(fix_ids)
@@ -15301,6 +15300,123 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
+
+
+def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
+    """Flag DefenseClaw hook entries of a connector that is not configured (GAP-0009).
+
+    A rollback restores the data directory from before a connector was set
+    up, but the agent settings keep that connector's DefenseClaw hook
+    entries. They run a hook script of this data directory that the restored
+    install does not have: Claude Code then blocks every prompt. The next
+    upgrade removes them, and so does ``defenseclaw setup remove <name>``.
+    Windows registers the native launcher, not a script, so the hook entry
+    check is a POSIX one. A plugin-file connector (OpenCode, Amp) is
+    registered by DefenseClaw's managed plugin instead, which reads its
+    credential from this data directory: without it the plugin refuses every
+    tool call. That check runs on every OS. A clean install prints no row.
+    """
+    from defenseclaw import hook_integrity
+    from defenseclaw.connector_paths import connector_config_files
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return
+    hooks_dir = os.path.join(data_dir, "hooks")
+    active_set = _residue_active_set(cfg, active)
+    found: list[tuple[str, str, str]] = []  # (connector, agent config file, hook script)
+    for name, script_name in sorted(hook_integrity.HOOK_SCRIPT_NAMES.items()):
+        if os.name == "nt" or name in active_set:
+            continue
+        script = os.path.join(hooks_dir, script_name)
+        pattern = re.compile(re.escape(script) + r"(?![A-Za-z0-9._/-])")
+        for path in connector_config_files(name):
+            document = hook_integrity._read_agent_config(Path(path))
+            if document is None:
+                continue
+            if any(pattern.search(command) for command in hook_integrity._registered_commands(document)):
+                found.append((name, path, script))
+                break
+    # Nothing to say when there are none, as for ACP bindings.
+    for name, path, script in found:
+        if os.path.lexists(script):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured, and they run "
+                f"{script}, which does not exist, so the agent cannot run them (Claude Code blocks every "
+                "prompt); a rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+    plugins = {
+        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
+        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+    }
+    for name, path in sorted(plugins.items()):
+        token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
+        if not token:
+            continue
+        if os.path.lexists(token):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured, and it reads its "
+                f"credential from {token}, which does not exist, so {name} refuses every tool call; a "
+                "rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+
+
+_MANAGED_PLUGIN_MARKER = re.compile(r"// defenseclaw-managed-plugin v[1-9][0-9]*")
+_MANAGED_PLUGIN_CREDENTIAL = re.compile(r'^const DC_TOKEN_FILE = ("(?:[^"\\\r\n]|\\.)*");?\r?$', re.MULTILINE)
+_MANAGED_PLUGIN_LIMIT = 4 << 20
+
+
+def _managed_plugin_credential(path: str, hooks_dir: str) -> str:
+    """Return the credential file DefenseClaw's managed plugin at *path* reads.
+
+    Only when the plugin is DefenseClaw's (a regular file whose first line is
+    the ownership marker, the test its teardown removes it by) and the
+    credential is a file of *hooks_dir*; "" otherwise, so the operator's own
+    plugins and another data directory's plugin are never named.
+    """
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MANAGED_PLUGIN_LIMIT:
+            return ""
+        with open(path, "rb") as handle:
+            text = handle.read(_MANAGED_PLUGIN_LIMIT).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _MANAGED_PLUGIN_CREDENTIAL.search(text)
+    if match is None or not _MANAGED_PLUGIN_MARKER.fullmatch(text.split("\n", 1)[0].rstrip("\r")):
+        return ""
+    try:
+        token = json.loads(match.group(1))
+    except ValueError:
+        return ""
+    if not isinstance(token, str) or not os.path.isabs(token):
+        return ""
+    folder = os.path.normcase(os.path.normpath(os.path.dirname(token)))
+    return token if folder == os.path.normcase(os.path.normpath(os.path.abspath(hooks_dir))) else ""
 
 
 def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
@@ -17233,84 +17349,3 @@ def _fix_acp_guard_pins(
     return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
 
 
-def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Run ``defenseclaw-gateway connector teardown`` for every inactive
-    connector that still has artifacts on disk.
-
-    Inactive-connector residue is detected with the same logic as
-    :func:`_check_connector_residue`, then this fixer shells out to the
-    S7.2 sentinel for each residual connector. The sentinel is the
-    canonical place to do this — ``Connector.Teardown`` knows about
-    hook scripts, env files, and config patches that the residue check
-    can't reasonably enumerate. We never call the OpenClaw Python
-    helpers here because the gateway sentinel handles every connector
-    uniformly.
-    """
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if not data_dir:
-        return ("skip", "no data dir configured")
-
-    # Exclude the FULL active set so the teardown sentinel can never fire
-    # against a live connector (D7) — the same rule the residue *check* uses.
-    active_set = _residue_active_set(cfg, _active_connector(cfg))
-    inactive_residue: list[str] = []
-    for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
-        if name in active_set:
-            continue
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
-            inactive_residue.append(name)
-
-    if "openclaw" not in active_set:
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
-            inactive_residue.append("openclaw")
-        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
-        oc_path = os.path.expanduser(oc_path)
-        if oc_path and os.path.isfile(oc_path + ".pristine"):
-            inactive_residue.append("openclaw")
-
-    if not inactive_residue:
-        return ("skip", "no inactive-connector residue detected")
-
-    inactive_residue = sorted(set(inactive_residue))
-
-    if not assume_yes and not click.confirm(
-        f"    Run 'defenseclaw-gateway connector teardown' for {', '.join(inactive_residue)}?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    # The custody-checked gateway, run through the file that was checked
-    # (#643): never whatever `defenseclaw-gateway` PATH resolves first.
-    gw = _watchdog_lifecycle_executable()
-    if not gw:
-        return ("warn", "no verified defenseclaw-gateway executable is installed — install it and re-run")
-
-    cleaned: list[str] = []
-    failed: list[str] = []
-
-    for name in inactive_residue:
-        try:
-            proc = run_pinned_executable(
-                [gw, "connector", "teardown", "--connector", name],
-                capture_output=True,
-                text=True,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            failed.append(f"{name}: {exc}")
-            continue
-        if proc.returncode == 0:
-            cleaned.append(name)
-        else:
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()
-            tail = err[-1] if err else f"rc={proc.returncode}"
-            failed.append(f"{name}: {tail}")
-
-    if cleaned and not failed:
-        return ("pass", f"teardown ran for: {', '.join(cleaned)}")
-    if cleaned and failed:
-        return ("warn", f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
-    return ("warn", f"teardown failed: {'; '.join(failed)}")

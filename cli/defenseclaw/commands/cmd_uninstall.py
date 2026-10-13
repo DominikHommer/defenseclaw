@@ -2823,10 +2823,20 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
+    # GAP-1073: with the data directory removed, --skip-sandbox-teardown also
+    # deletes the receipt a later teardown restores the OpenShell gateway
+    # configuration from, so the way on keeps the data instead.
+    later = (
+        "rerun uninstall with --skip-sandbox-teardown and without --all or --binaries (that keeps the data "
+        "directory, with the receipt teardown restores the OpenShell gateway configuration from, and the gateway), "
+        "then run `defenseclaw-gateway sandbox teardown` once Docker and OpenShell work, and uninstall again"
+        if plan.remove_data_dir or plan.remove_binaries
+        else "rerun uninstall with --skip-sandbox-teardown"
+    )
     for line in (proc.stdout or "").splitlines():
         if line.strip():
             # The gateway hint is for its teardown command, not uninstall.
-            hint = line.replace("rerun with --keep-images", "rerun uninstall with --skip-sandbox-teardown")
+            hint = line.replace("rerun with --keep-images", later)
             ux.echo(f"  {ux.dim('·')} {hint.strip()}")
     detail = (proc.stderr or "").strip().splitlines()
     # GAP-0282: teardown goes on past a failed step, so the last line is the
@@ -2847,8 +2857,12 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
             "aborting uninstall: sandbox teardown failed"
             + (f" ({reason})" if reason else "")
             + (f"; {undone} step(s) listed above already ran and stay done" if undone else "")
-            + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, "
-            + "or rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
+            + "; fix it and rerun, run `defenseclaw-gateway sandbox teardown` yourself first, or "
+            + (
+                later
+                if plan.remove_data_dir or plan.remove_binaries
+                else "rerun with --skip-sandbox-teardown to leave the sandboxes for a later teardown"
+            )
         )
     ux.ok("sandbox teardown complete")
 

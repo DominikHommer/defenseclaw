@@ -62,6 +62,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# -Local "" (an empty value) binds like no -Local at all (GAP-1336).
+$LocalGiven = [bool](Get-Variable -Name PSBoundParameters -Scope 1 -ValueOnly -ErrorAction SilentlyContinue |
+    Where-Object { $_.ContainsKey("Local") })
 try {
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -370,7 +373,13 @@ function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {
 }
 
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    # A file this account cannot read printed PowerShell's raw ReadError and
+    # "The property 'Hash' cannot be found" before the sentence that said what
+    # happened (GAP-0007): say once which file could not be read.
+    try { $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Path -ErrorAction Stop } catch {
+        throw "Could not read $Path; restore read access to it, then try again"
+    }
+    return $hash.Hash.ToLowerInvariant()
 }
 
 function Get-ListedSha256([string]$Checksums, [string]$Name) {
@@ -1345,6 +1354,9 @@ function Install-New {
         if (Test-Path -LiteralPath $oldGuard) {
             Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") @("acp", "refresh", "--from-sha256", (Get-Sha256 $oldGuard)) | Out-Null
         }
+        # A rollback by an earlier release left hook entries of a connector
+        # this install does not configure (GAP-0009). Best effort.
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"))
     }
     return $true
 }
@@ -1778,6 +1790,23 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     }
 }
 
+function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
+    # GAP-0009: remove the DefenseClaw hook entries of every connector the
+    # live install does not configure, with the first gateway that has the
+    # command: a connector set up after an upgrade kept its entries after the
+    # rollback, and its agent ran a hook the restored install cannot serve.
+    # Only DefenseClaw-owned entries go. An older gateway prints its
+    # connector help for the unknown command, so the help is checked first.
+    foreach ($gateway in $Gateways) {
+        if (-not (Test-Path -LiteralPath $gateway)) { continue }
+        if ((Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")) -notmatch "connector prune-orphans") { continue }
+        if ((Invoke-Native $gateway @("connector", "prune-orphans", "--data-dir", $DataDir)) -ne 0) {
+            Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+        }
+        return
+    }
+}
+
 function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
     # Put back the install the rollback replaced, and return 1 (GAP-1388): a
     # restored 0.x release whose gateway is not running leaves agents
@@ -1855,6 +1884,9 @@ function Invoke-Rollback {
     }
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
+    if (-not $toLegacy) {
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe"))
+    }
     $quarantined = ""
     if ($auditDamaged) {
         try { $quarantined = Move-DamagedAuditStore $backTo } catch {
@@ -1929,6 +1961,7 @@ function Invoke-Install {
         if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
             # -Name=value is the same option as -Name value (GAP-0361).
             Set-Variable -Name $Matches[1] -Value $Matches[2]
+            if ($Matches[1] -eq "Local") { $LocalGiven = $true }
         } elseif ($RunByUpgrade) {
             Write-Warn "Ignoring unknown option: $argument"
         } else {
@@ -1945,6 +1978,7 @@ function Invoke-Install {
     $TargetVersion = $Version -replace '^v', ''
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
+    if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {
         if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Stop-Usage "-Local: directory not found: $Local" }
         $LocalDir = (Resolve-Path -LiteralPath $Local).ProviderPath

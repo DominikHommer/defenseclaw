@@ -891,7 +891,9 @@ BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
 # argument (no shell re-parsing / eval).
-BUNDLE_LDFLAGS := -X main.version=$(VERSION)
+# The commit and build time too: the bundle's gateway --version showed an
+# unknown commit (#1249).
+BUNDLE_LDFLAGS := -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)
 # BUNDLE_TAGS is the comma-separated `go build -tags` value applied to
 # the packaged gateway binary. The macOS bundle ships as the managed
 # distribution and pulls the managed cloud auth provider via

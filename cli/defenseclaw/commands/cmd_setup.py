@@ -12125,6 +12125,47 @@ def _connector_not_shipped(cfg, name: str) -> bool:
     return normalized not in declared and name.strip().lower() not in declared
 
 
+def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str]:
+    """Remove the DefenseClaw hook entries of *connector*, which is not configured.
+
+    Runs ``defenseclaw-gateway connector prune-orphans`` for this data
+    directory, which removes only DefenseClaw-owned entries and never
+    touches a connector config.yaml or the runtime state names. Returns the
+    agent config files it cleaned and a problem, "" when there was none.
+    """
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return [], "no verified defenseclaw-gateway executable is installed"
+    data_dir = str(cfg.data_dir)
+    # The gateway reads config.yaml of this data directory, not of $HOME.
+    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    try:
+        result = run_pinned_executable(
+            [executable, "connector", "prune-orphans", "--connector", connector, "--data-dir", data_dir, "--json"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+            env=env,
+        )
+    except (UnsafePathError, subprocess.TimeoutExpired, OSError) as exc:
+        return [], str(exc)
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        payload = _json.loads(lines[-1]) if lines else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        tail = ((result.stderr or result.stdout or "").strip().splitlines() or [f"exit status {result.returncode}"])[-1]
+        return [], tail
+    failed = payload.get("failed") or {}
+    if failed:
+        return [], "; ".join(str(reason) for reason in failed.values())
+    removed = payload.get("removed") or {}
+    return [str(path) for path in removed.get(connector) or []], ""
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -12171,7 +12212,26 @@ def _remove_connector(
     match = next((c for c in configured if normalize_connector(c) == requested_norm), None)
     if match is None:
         if requested_norm in _CONNECTOR_META:
+            # A rollback can leave DefenseClaw hook entries of a connector the
+            # restored install never configured; they ran a missing hook
+            # script and Claude Code blocked every prompt (GAP-0009).
+            cleaned, problem = _prune_orphaned_connector_hooks(cfg, requested_norm)
+            if cleaned:
+                ux.echo(
+                    f"  ✓ Connector {requested_norm!r} is not configured; removed the DefenseClaw hook "
+                    f"entries it had left in {', '.join(cleaned)}."
+                )
+                return True
+            if problem and not problem.startswith("no verified"):
+                ux.echo(
+                    f"  ✗ Connector {requested_norm!r} is not configured, but the DefenseClaw hook entries "
+                    f"it may have left could not be removed: {problem}",
+                    err=True,
+                )
+                return False
             ux.echo(f"  ✓ Connector {requested_norm!r} is already absent; no changes made.")
+            if problem:
+                ux.echo(f"    Its agent settings were not checked for DefenseClaw hook entries: {problem}.")
             return True
         configured_label = ", ".join(configured) if configured else "(none configured)"
         ux.echo(
