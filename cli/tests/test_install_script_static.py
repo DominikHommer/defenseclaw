@@ -1850,3 +1850,12 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     )
     swap = text[text.index("swap_in() {") : text.index("swap_app() {")]
     assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
+
+
+def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:
+    # rel-1-0-1:GAP-0008: the rollback said the data comes back "if you roll
+    # forward", but 'defenseclaw upgrade' after it parks that data in backups/.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert "comes back if you roll forward" not in text
+    assert "'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in text
+    assert "keep_rolled_back_data" in text[text.index("finish_swap() {") :][:600]

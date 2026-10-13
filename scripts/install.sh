@@ -621,7 +621,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
-        info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        info "Data written since the upgrade is kept in ${PREVIOUS}; 'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
         [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
             && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
