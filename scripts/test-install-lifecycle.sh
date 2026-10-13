@@ -18,7 +18,7 @@
 # End-to-end install/upgrade/rollback test for scripts/install.sh.
 #
 #   scripts/test-install-lifecycle.sh --assets DIR [--previous-assets DIR]
-#       [--lanes "fresh upgrade-previous upgrade-0.8.10 handoff drills macos-app"] [--keep]
+#       [--lanes "fresh upgrade-previous sandbox-rollback upgrade-0.8.10 handoff drills macos-app"] [--keep]
 #
 # upgrade-0.X.Y upgrades from any published 0.x release (upgrade-0.8.4 imports
 # a pre-v8 configuration).
@@ -359,6 +359,61 @@ upgrade_lane() {
 
 install_previous() { install_candidate "${PREVIOUS_ASSETS}"; }
 
+# plant_sandbox_setup: what 'sandbox setup' and a running sandbox leave in the
+# data dir: sandboxes on in config.yaml and the sandbox state. No OpenShell is
+# needed: the gateway opens the sandbox ingress for it and reports OpenShell
+# itself through its health.
+plant_sandbox_setup() {
+    "${DC_HOME}/.venv/bin/python" -I - "${DC_HOME}/config.yaml" <<'PY' || return 1
+import sys, yaml
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    config = yaml.safe_load(stream)
+config.setdefault("openshell", {}).update({"enabled": True, "harnesses": ["codex"]})
+with open(path, "w", encoding="utf-8") as stream:
+    yaml.safe_dump(config, stream, sort_keys=False)
+PY
+    mkdir -p "${DC_HOME}/sandboxes" && echo lifecycle-sandbox > "${DC_HOME}/sandboxes/lifecycle-marker.txt"
+}
+
+assert_sandbox_setup_kept() {
+    local enabled
+    enabled="$("${DC_HOME}/.venv/bin/python" -I -c 'import sys, yaml; print((yaml.safe_load(open(sys.argv[1])).get("openshell") or {}).get("enabled"))' "${DC_HOME}/config.yaml")"
+    [[ "${enabled}" == True ]] || fail "$1 turned sandboxes off (openshell.enabled: ${enabled:-unset}, GAP-0483)"
+    [[ "$(cat "${DC_HOME}/sandboxes/lifecycle-marker.txt" 2>/dev/null)" == lifecycle-sandbox ]] \
+        || fail "$1 lost the sandbox state (GAP-0483)"
+}
+
+# rel-1-0-2:GAP-0483: sandboxes set up after the upgrade keep running through
+# 'defenseclaw rollback' and the next 'defenseclaw upgrade'. Both brought back
+# data from before the setup: sandboxes off, every hook of a running sandbox
+# blocked as "gateway unreachable". Needs a previous release of 1.0.1 or later.
+lane_sandbox_rollback() {
+    local from="$1"
+    enter_lane sandbox-rollback
+    log "sandbox-rollback: install ${from}, upgrade to ${TARGET}, set up sandboxes"
+    must install_previous || return 1
+    must init_and_start || return 1
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    must plant_sandbox_setup || return 1
+    log "sandbox-rollback: defenseclaw rollback keeps the sandbox setup"
+    must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
+    assert_versions "${from}"
+    assert_healthy
+    assert_data_kept
+    assert_sandbox_setup_kept "the rollback"
+    [[ "$(cat "${DC_HOME}/previous/data/sandboxes/lifecycle-marker.txt" 2>/dev/null)" == lifecycle-sandbox ]] \
+        || fail "the rollback took the sandbox state out of previous/, which a roll forward brings back"
+    log "sandbox-rollback: the next upgrade keeps it too"
+    must install_candidate "${ASSETS}" || return 1
+    assert_versions "${TARGET}"
+    assert_healthy
+    assert_data_kept
+    assert_sandbox_setup_kept "the upgrade after the rollback"
+    stop_lane
+}
+
 lane_handoff() {
     enter_lane handoff
     log "handoff: 0.8.x 'defenseclaw upgrade' runs defenseclaw-upgrade.sh"
@@ -533,6 +588,10 @@ for lane in ${LANES}; do
             [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "upgrade-previous needs --previous-assets" >&2; exit 2; }
             prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
             upgrade_lane upgrade-previous "${prev}" install_previous || true ;;
+        sandbox-rollback)
+            [[ -n "${PREVIOUS_ASSETS}" ]] || { echo "sandbox-rollback needs --previous-assets" >&2; exit 2; }
+            prev="$(version_of "$(basename "$(ls "${PREVIOUS_ASSETS}"/defenseclaw-*-py3-none-any.whl | head -1)")")"
+            lane_sandbox_rollback "${prev}" || true ;;
         upgrade-0.*)
             LEGACY_VERSION="${lane#upgrade-}"
             upgrade_lane "${lane}" "${LEGACY_VERSION}" install_legacy || true
