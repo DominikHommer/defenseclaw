@@ -717,6 +717,9 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if isAbsoluteSemanticPath(facts.ActiveHome) && !filepath.IsAbs(facts.ActiveHome) {
+		return trustedWindowsLiteralWriterWrite(request.Input, facts.ActiveHome)
+	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
@@ -898,7 +901,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+		literalOperands, literalUnknown := hookpaths.LiteralWriteAnalysis(input.Command, input.CWD, input.ActiveHome)
+		if literalUnknown {
+			return true
+		}
+		for _, operand := range literalOperands {
 			if writeTarget(operand, false, false) {
 				return true
 			}
@@ -979,6 +986,32 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	for _, target := range patchTargets {
 		if writeTarget(target, false, false) {
 			return true
+		}
+	}
+	return false
+}
+
+func trustedWindowsLiteralWriterWrite(input actionfacts.Input, home string) bool {
+	if input.Command == "" {
+		input.Command, _ = trustedBashCommandInput(input)
+	}
+	if input.Command == "" || len(input.Command) > 64<<10 {
+		return false
+	}
+	project := func(value string) string {
+		return path.Clean("/" + strings.ReplaceAll(value, `\`, "/"))
+	}
+	projectedHome := project(home)
+	projectedCWD := project(input.CWD)
+	operands, unknown := hookpaths.LiteralWriteAnalysis(input.Command, projectedCWD, projectedHome)
+	if unknown {
+		return true
+	}
+	for _, operand := range operands {
+		for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(projectedHome) {
+			if strings.EqualFold(path.Clean(operand), path.Clean(protected)) {
+				return true
+			}
 		}
 	}
 	return false

@@ -13,12 +13,6 @@ import (
 )
 
 var (
-	literalOpenCall    = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open)\s*\(`)
-	literalWriteCall   = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|createWriteStream|File\.write|File\.binwrite)\s*\(`)
-	literalPathWrite   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen    = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(`)
-	literalPerlOpen    = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalPerlOpen2   = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)([^'"]+)['"]`)
 	literalAwkRedirect = regexp.MustCompile(`(?:>>|>)\s*['"]([^'"]+)['"]`)
 )
 
@@ -26,6 +20,13 @@ var (
 // interpreter, awk program, or sed in-place command. The shell and gateway
 // call this same extractor before resolving each operand through links.
 func LiteralWriteOperands(command, cwd, home string) (operands []string) {
+	operands, _ = LiteralWriteAnalysis(command, cwd, home)
+	return operands
+}
+
+// LiteralWriteAnalysis also reports a write whose destination is not a
+// literal path, so both hook and gateway can treat that decision as unknown.
+func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown bool) {
 	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	add := func(name, base string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
@@ -40,9 +41,11 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		cwd := context.cwd
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
-				cmdCWD, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
+				cmdCWD, language, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
 				if ok {
-					for _, name := range literalInterpreterWrites(code) {
+					paths, dynamic := literalInterpreterWrites(language, code)
+					unknown = unknown || dynamic
+					for _, name := range paths {
 						add(name, cmdCWD)
 					}
 				}
@@ -58,7 +61,8 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 					return true
 				}
 				program := programBase(programWords[0])
-				if !literalInterpreterProgram(program) || !literalReadsStdin(programWords) {
+				language := literalLanguage(program)
+				if language == "" || !literalReadsStdin(programWords) {
 					return true
 				}
 				for _, redirect := range stmt.Redirs {
@@ -69,7 +73,9 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 					if start < 0 || end > len(command) || end <= start {
 						continue
 					}
-					for _, name := range literalInterpreterWrites(command[start:end]) {
+					paths, dynamic := literalInterpreterWrites(language, command[start:end])
+					unknown = unknown || dynamic
+					for _, name := range paths {
 						add(name, cmdCWD)
 					}
 				}
@@ -81,7 +87,9 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 					if !static {
 						continue
 					}
-					for _, name := range literalInterpreterWrites(code) {
+					paths, dynamic := literalInterpreterWrites(language, code)
+					unknown = unknown || dynamic
+					for _, name := range paths {
 						add(name, cmdCWD)
 					}
 				}
@@ -101,12 +109,11 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 			program := programBase(programWords[0])
 			switch {
 			case literalInterpreterProgram(program):
-				for i := 1; i+1 < len(programWords); i++ {
-					if programWords[i] == "-c" || programWords[i] == "-e" {
-						for _, name := range literalInterpreterWrites(programWords[i+1]) {
-							add(name, cmdCWD)
-						}
-						break
+				if code, ok := literalInterpreterCode(program, programWords); ok {
+					paths, dynamic := literalInterpreterWrites(literalLanguage(program), code)
+					unknown = unknown || dynamic
+					for _, name := range paths {
+						add(name, cmdCWD)
 					}
 				}
 			case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
@@ -127,7 +134,7 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 			return true
 		})
 	}
-	return operands
+	return operands, unknown
 }
 
 func literalProgramWords(call *syntax.CallExpr, cwd, home string) (string, []string, bool) {
@@ -147,14 +154,33 @@ func literalProgramWords(call *syntax.CallExpr, cwd, home string) (string, []str
 }
 
 func literalInterpreterProgram(program string) bool {
-	return program == "python" || strings.HasPrefix(program, "python3") ||
-		program == "perl" || program == "ruby" || program == "node"
+	return literalLanguage(program) != ""
+}
+
+func literalInterpreterCode(program string, words []string) (string, bool) {
+	language := literalLanguage(program)
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if word == "-c" && language == "python" ||
+			(word == "-e" || word == "-E") && (language == "perl" || language == "ruby" || language == "node") ||
+			(word == "-p" || word == "--eval" || word == "--print") && language == "node" {
+			if i+1 < len(words) {
+				return words[i+1], true
+			}
+			return "", false
+		}
+		if language == "node" && strings.HasPrefix(word, "--eval=") {
+			return strings.TrimPrefix(word, "--eval="), true
+		}
+	}
+	return "", false
 }
 
 func literalReadsStdin(words []string) bool {
 	sawOperand := false
 	for _, word := range words[1:] {
-		if word == "-c" || word == "-e" {
+		if word == "-c" || word == "-e" || word == "-E" || word == "-p" || word == "--eval" ||
+			strings.HasPrefix(word, "--eval=") {
 			return false
 		}
 		if word == "-" {
@@ -177,21 +203,21 @@ func literalReadsStdin(words []string) bool {
 
 func literalPipelineInterpreterInput(
 	pipe *syntax.BinaryCmd, command, cwd, home string,
-) (string, string, bool) {
+) (string, string, string, bool) {
 	if pipe == nil || pipe.X == nil || pipe.Y == nil {
-		return "", "", false
+		return "", "", "", false
 	}
 	call, ok := pipe.Y.Cmd.(*syntax.CallExpr)
 	if !ok || len(call.Args) == 0 {
-		return "", "", false
+		return "", "", "", false
 	}
 	cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
 	if !ok || len(programWords) == 0 || !literalInterpreterProgram(programBase(programWords[0])) ||
 		!literalReadsStdin(programWords) {
-		return "", "", false
+		return "", "", "", false
 	}
 	code, ok := literalProducerCode(pipe.X, command, home)
-	return cmdCWD, code, ok
+	return cmdCWD, literalLanguage(programBase(programWords[0])), code, ok
 }
 
 func literalProducerCode(stmt *syntax.Stmt, command, home string) (string, bool) {
@@ -340,107 +366,6 @@ func sedInPlaceFiles(words []string) []string {
 		return nil
 	}
 	return files
-}
-
-func literalInterpreterWrites(code string) []string {
-	if len(code) > 16<<10 {
-		return nil
-	}
-	var paths []string
-	for _, loc := range literalOpenCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
-			continue
-		}
-		call, ok := literalBoundedCall(code, loc[1]-1)
-		if !ok {
-			continue
-		}
-		args := literalCallArgs(call)
-		name := strings.TrimSpace(code[loc[0] : loc[1]-1])
-		switch {
-		case name == "os.open" && len(args) >= 2 && literalOSWriteFlags(args[1]):
-			if path, ok := literalString(args[0]); ok {
-				paths = append(paths, path)
-			}
-		case name == "open" && len(args) >= 3 && perlRedirectMode(args[1]):
-			if mode, ok := literalString(args[1]); ok && (mode == ">" || mode == ">>") {
-				if path, ok := literalString(args[2]); ok {
-					paths = append(paths, path)
-				}
-			}
-		case len(args) >= 1:
-			modeArg := ""
-			if len(args) >= 2 {
-				modeArg = args[1]
-			}
-			for _, arg := range args[1:] {
-				if strings.HasPrefix(strings.TrimSpace(arg), "mode=") {
-					modeArg = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "mode="))
-				}
-			}
-			if mode, ok := literalString(modeArg); ok && literalWriteMode(mode) {
-				if path, ok := literalString(args[0]); ok {
-					paths = append(paths, path)
-				}
-			}
-		}
-	}
-	for _, match := range literalPathOpen.FindAllStringSubmatchIndex(code, -1) {
-		if !literalCodePosition(code, match[0]) {
-			continue
-		}
-		call, ok := literalBoundedCall(code, match[1]-1)
-		if !ok {
-			continue
-		}
-		args := literalCallArgs(call)
-		modeArg := ""
-		if len(args) >= 1 {
-			modeArg = args[0]
-		}
-		for _, arg := range args {
-			if strings.HasPrefix(strings.TrimSpace(arg), "mode=") {
-				modeArg = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "mode="))
-			}
-		}
-		if mode, ok := literalString(modeArg); ok && literalWriteMode(mode) {
-			paths = append(paths, code[match[2]:match[3]])
-		}
-	}
-	for _, loc := range literalWriteCall.FindAllStringIndex(code, -1) {
-		if !literalCodePosition(code, loc[0]) {
-			continue
-		}
-		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
-			args := literalCallArgs(call)
-			if len(args) > 0 {
-				if path, ok := literalString(args[0]); ok {
-					paths = append(paths, path)
-				}
-			}
-		}
-	}
-	for _, match := range literalPathWrite.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) {
-			paths = append(paths, code[match[2]:match[3]])
-		}
-	}
-	for _, match := range literalPerlOpen.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) {
-			paths = append(paths, code[match[2]:match[3]])
-		}
-	}
-	for _, match := range literalPerlOpen2.FindAllStringSubmatchIndex(code, -1) {
-		if literalCodePosition(code, match[0]) {
-			paths = append(paths, code[match[2]:match[3]])
-		}
-	}
-	return paths
-}
-
-func perlRedirectMode(arg string) bool {
-	mode, ok := literalString(arg)
-	return ok && (mode == ">" || mode == ">>")
 }
 
 func literalWriteMode(mode string) bool {

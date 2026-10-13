@@ -1480,7 +1480,9 @@ func Resolve(payload []byte) string {
 				if dynamic {
 					dynamicOperands, dynamicUnknown = ShellDynamicWriteOperands(command, cwd, home)
 				}
-				literalOperands = LiteralWriteOperands(command, cwd, home)
+				var literalUnknown bool
+				literalOperands, literalUnknown = LiteralWriteAnalysis(command, cwd, home)
+				truncated = truncated || literalUnknown
 				extraOperands = ShellExtraWriteOperands(command, cwd, home)
 				sedOperands = SedReplacedOperands(command, cwd, home)
 				for path, safe := range sedOperands {
