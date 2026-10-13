@@ -83,6 +83,18 @@ STREAM_DISABLED_WAIT = 60.0
 # Under this many columns the panel drops its button bar: the KEYS line
 # names the same keys, and the rows need the room.
 SANDBOX_BUTTON_BAR_MIN_WIDTH = 100
+# Exit status of a `sandbox stop` that kept the sandbox running because
+# stopping it would lose work (sandboxcli.ExitStopKept, #1144).
+SANDBOX_STOP_KEPT_EXIT = 5
+
+
+def sandbox_stop_kept_text(name: str) -> str:
+    """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk is full and holds unpulled work."""
+    return (
+        f"{name} keeps running: its MicroVM disk is full, and a MicroVM stopped like that cannot start again, "
+        f"so its work that was not pulled would be lost. Free some space in it (defenseclaw sandbox exec {name} "
+        f"-- df -h /), pull its work (P), then stop it; delete it (d) to give that work up."
+    )
 
 # Buttons of the panel's control bar, mapped to the key they press.
 SANDBOX_BUTTON_KEYS: dict[str, str] = {
@@ -1095,7 +1107,13 @@ class SandboxPanelMixin:
         if not confirmed:
             self._set_status("Stop cancelled.")  # type: ignore[attr-defined]
             return
-        self._run_sandbox_cli("stop", name)
+        code = self._run_sandbox_terminal(SandboxLaunch(("sandbox", "stop", name), os.getcwd(), f"sandbox stop {name}"))
+        if code == SANDBOX_STOP_KEPT_EXIT:
+            # #1144: the command line kept a copy-mode MicroVM with a full
+            # disk running, because stopping it would lose its unpulled work.
+            message = sandbox_stop_kept_text(name)
+            self._set_status(message)  # type: ignore[attr-defined]
+            self.notify_toast("warn", message)  # type: ignore[attr-defined]
 
     async def _sandbox_delete(self, name: str) -> bool:
         """Delete ``name`` through the command line, which asks; whether it is gone.

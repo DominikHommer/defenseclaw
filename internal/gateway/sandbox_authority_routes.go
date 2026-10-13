@@ -777,6 +777,10 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	// Every live registration's daemon polls once a minute: the fleet's
+	// active-sandbox gauge is exported again on them, so a sandbox that runs
+	// quietly does not go stale on the Sandboxes board (#1241).
+	a.refreshManagedSandboxActive(r.Context())
 	if report && reg.State != sandboxreg.StateRevoked {
 		next, err := auth.store.Report(peer.UID, reg.ID, state.Running)
 		switch {
@@ -788,6 +792,9 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
+	// A running sandbox counts again on its daemon's first poll after a
+	// gateway restart, not only at its next phase change (#1241).
+	a.trackManagedSandboxActive(r.Context(), auth, peer.UID, reg)
 	cfg := a.liveBaseConfig(r.Context())
 	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
 	if err != nil {
@@ -796,7 +803,7 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	}
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
+		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)

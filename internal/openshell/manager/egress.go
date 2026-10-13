@@ -527,7 +527,10 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		resp.Scope, resp.Persisted = string(audit.SandboxApprovalScopeAlways), true
 		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.unblocked)"
 		if m.managedMode() {
-			resp.Message = "unblocked " + host + " for every sandbox (kept by your organization's DefenseClaw gateway)"
+			// Where it is kept, in terms the person can use: no
+			// configuration key they could edit (#1205).
+			resp.Message = "unblocked " + host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway " +
+				"while your organization's policy allows it)"
 		}
 	} else {
 		// The managed gateway re-checks a session unblock against the
