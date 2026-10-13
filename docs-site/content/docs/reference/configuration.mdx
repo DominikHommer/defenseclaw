@@ -536,6 +536,15 @@ When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. See
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
 
+### Cisco AI Defense API-key rule selection
+
+For an API-key inspection sent to `/api/v1/inspect/chat`, an unset, null or
+empty `cisco_ai_defense.enabled_rules` sends no `config` or `enabled_rules` in
+the request. The AI Defense connection's own policy then applies. A nonempty
+list sends only the named cloud rules, in the configured order. If you relied
+on the earlier implicit rule list, put those cloud rule names explicitly in
+`cisco_ai_defense.enabled_rules`.
+
 ### Guardrail profiles and identity keys
 
 | Key | Default | Meaning |
