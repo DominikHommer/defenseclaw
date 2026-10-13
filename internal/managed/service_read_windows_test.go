@@ -101,6 +101,25 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	}
 }
 
+// GAP-1492: a JSONL destination folder whose DACL Setup cannot read is not
+// a folder the gateway service can write: the preflight refuses it and
+// names the folder, instead of counting the unread DACL as access.
+func TestValidateServiceCanWriteFileRefusesAnUnreadableDACL(t *testing.T) {
+	folder := t.TempDir()
+	previous := serviceReadDACL
+	t.Cleanup(func() { serviceReadDACL = previous })
+	serviceReadDACL = func(path string) (*windows.ACL, error) {
+		if strings.EqualFold(filepath.Clean(path), filepath.Clean(folder)) {
+			return nil, windows.ERROR_ACCESS_DENIED
+		}
+		return previous(path)
+	}
+	err := ValidateServiceCanWriteFile(filepath.Join(folder, "audit.jsonl"), `NT SERVICE\TrustedInstaller`)
+	if err == nil || !strings.Contains(err.Error(), "cannot read the permissions of "+folder) {
+		t.Fatalf("unreadable destination folder DACL: %v", err)
+	}
+}
+
 // A service may append and create files but still be unable to rotate or
 // prune them (GAP-1123). Rotation needs FILE_DELETE_CHILD on the folder or
 // DELETE on the files, which the documented Modify (OI)(CI) grant gives.
