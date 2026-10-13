@@ -40,7 +40,11 @@ type Generation struct {
 	// ConfigGenRecorded is false when config.yaml's sha256 differs from the
 	// one config.generation.json recorded (a hand edit).
 	ConfigGenRecorded bool
-	Config            *config.Config
+	// BundleID and BundleVersion name the signed policy bundle whose config
+	// config.generation.json records for these bytes (empty otherwise).
+	BundleID      string
+	BundleVersion uint64
+	Config        *config.Config
 	// RulePacks are the composed packs keyed by resolution key: global,
 	// conn:<c>, prof:<p> or prof:<p>/<c>.
 	RulePacks map[string]*guardrail.RulePack
@@ -140,8 +144,12 @@ type PolicyHealth struct {
 	Generation               uint64 `json:"generation"`
 	ConfigGeneration         uint64 `json:"config_generation"`
 	ConfigGenerationRecorded bool   `json:"config_generation_recorded"`
-	BuiltAt                  string `json:"built_at"`
-	LastReloadError          string `json:"last_reload_error,omitempty"`
+	// BundleID and BundleVersion name the signed policy bundle whose config
+	// the generation runs (standalone enterprise bundle mode only).
+	BundleID        string `json:"bundle_id,omitempty"`
+	BundleVersion   uint64 `json:"bundle_version,omitempty"`
+	BuiltAt         string `json:"built_at"`
+	LastReloadError string `json:"last_reload_error,omitempty"`
 	// OPAUnavailable says why the live generation runs without Rego, so the
 	// config-driven admission and thresholds apply. The generation was built
 	// and applied: a LastReloadError of "opa: " + OPAUnavailable is this

@@ -174,7 +174,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	}
 
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
-	g.ConfigGen, g.ConfigGenRecorded = readConfigGeneration(cfg.ConfigFilePath, in.raw)
+	record := readConfigGenerationRecord(cfg.ConfigFilePath, in.raw)
+	g.ConfigGen, g.ConfigGenRecorded = record.Generation, record.Recorded
+	g.BundleID, g.BundleVersion = record.BundleID, record.BundleVersion
 
 	scope := newDigestScope(cfg, in.goos, in.bundleRoot)
 	configComponent, err := configDigest(cfg, scope)
@@ -290,22 +292,43 @@ func effectivePolicyDigest(components, profiles map[string]string) string {
 // and whether it recorded the current config bytes (false for a hand edit or
 // a missing state file).
 func readConfigGeneration(configPath string, raw []byte) (uint64, bool) {
+	record := readConfigGenerationRecord(configPath, raw)
+	return record.Generation, record.Recorded
+}
+
+// configGenerationRecord is what config.generation.json says about the
+// config bytes a generation runs.
+type configGenerationRecord struct {
+	Generation uint64
+	// Recorded is true when the record names these bytes.
+	Recorded bool
+	// BundleID and BundleVersion name the policy bundle the lifecycle
+	// installed in this generation; set only when Recorded.
+	BundleID      string
+	BundleVersion uint64
+}
+
+func readConfigGenerationRecord(configPath string, raw []byte) configGenerationRecord {
 	if strings.TrimSpace(configPath) == "" {
-		return 0, false
+		return configGenerationRecord{}
 	}
 	state, err := configwrite.ReadGenerationState(configPath)
 	if err != nil {
-		return 0, false
+		return configGenerationRecord{}
 	}
 	if raw == nil {
 		raw, err = os.ReadFile(configPath)
 		if err != nil {
-			return state.Generation, false
+			return configGenerationRecord{Generation: state.Generation}
 		}
 	}
 	sum := sha256.Sum256(raw)
 	recorded := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(state.ConfigSHA256)), "sha256:")
-	return state.Generation, recorded == hex.EncodeToString(sum[:])
+	out := configGenerationRecord{Generation: state.Generation, Recorded: recorded == hex.EncodeToString(sum[:])}
+	if out.Recorded {
+		out.BundleID, out.BundleVersion = state.BundleID, state.BundleVersion
+	}
+	return out
 }
 
 // generationAssetDirs lists the directories the config watcher follows for
@@ -411,12 +434,14 @@ func refreshConfigGeneration(raw []byte) {
 	if current == nil || current.Config == nil {
 		return
 	}
-	gen, recorded := readConfigGeneration(current.Config.ConfigFilePath, raw)
-	if gen == current.ConfigGen && recorded == current.ConfigGenRecorded {
+	record := readConfigGenerationRecord(current.Config.ConfigFilePath, raw)
+	if record.Generation == current.ConfigGen && record.Recorded == current.ConfigGenRecorded &&
+		record.BundleID == current.BundleID && record.BundleVersion == current.BundleVersion {
 		return
 	}
 	next := *current
-	next.ConfigGen, next.ConfigGenRecorded = gen, recorded
+	next.ConfigGen, next.ConfigGenRecorded = record.Generation, record.Recorded
+	next.BundleID, next.BundleVersion = record.BundleID, record.BundleVersion
 	liveGeneration.Store(&next)
 }
 
@@ -457,6 +482,8 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		Generation:               g.N,
 		ConfigGeneration:         g.ConfigGen,
 		ConfigGenerationRecorded: g.ConfigGenRecorded,
+		BundleID:                 g.BundleID,
+		BundleVersion:            g.BundleVersion,
 		BuiltAt:                  g.BuiltAt.Format(time.RFC3339),
 		ComponentCount:           len(g.Components),
 	}

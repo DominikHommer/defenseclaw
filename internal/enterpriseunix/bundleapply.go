@@ -83,8 +83,6 @@ type bundleRun struct {
 	receipt *enterprisebundle.Receipt
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
-	// summary is the manifest change_summary, the generation reason.
-	summary string
 }
 
 // bundleAnchorsPath is <etc>/trust/bundle-anchors.json (rooted).
@@ -153,16 +151,12 @@ func (e *Env) currentBundleConfig(store *enterprisebundle.Store) ([]byte, *enter
 // in config.generation.json: as the lifecycle, or for a bundle as its
 // principal with the bundle change summary and the bundle fields.
 func (l *lifecycle) configWriteOptions() configwrite.Options {
-	if l.bundle == nil || l.bundle.receipt.Principal == "" {
-		return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action}
+	if l.bundle != nil {
+		if opt, ok := enterprisebundle.GenerationOptions(l.bundle.receipt); ok {
+			return opt
+		}
 	}
-	rc := l.bundle.receipt
-	reason := fmt.Sprintf("policy bundle %s version %d", rc.BundleID, rc.Version)
-	if l.bundle.summary != "" {
-		reason += ": " + l.bundle.summary
-	}
-	return configwrite.Options{Actor: rc.Principal, Reason: reason, Lifecycle: true,
-		Bundle: configwrite.BundleRef{ID: rc.BundleID, Version: rc.Version, SignerKeyID: rc.SignerKeyID}}
+	return configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action}
 }
 
 // useBundleConfig makes raw the config this run applies, as a root-only
@@ -439,6 +433,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	m := res.Manifest
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
+		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Bytes(staged.Manifest), res.ExpectedDigest
 	}); err != nil {
 		return refuse(err)
@@ -459,7 +454,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	if err := l.useBundleConfig(rendered); err != nil {
 		return refuse(err)
 	}
-	run.configSHA, run.summary = sha256Bytes(rendered), m.ChangeSummary
+	run.configSHA = sha256Bytes(rendered)
 	l.bundle = run
 	code := l.ensureInstalled(ctx, record, l.applyBundleTransaction)
 	// ensure ended before the transaction (a refusal) or found nothing to

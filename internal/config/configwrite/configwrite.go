@@ -292,6 +292,30 @@ func CurrentActor(prefix string) string {
 	return prefix + name
 }
 
+// BundleReason is the generation reason the enterprise lifecycle records
+// for the config of a signed policy bundle:
+// "policy bundle <id> version <n>[: <change summary>]".
+func BundleReason(id string, version uint64, summary string) string {
+	reason := fmt.Sprintf("policy bundle %s version %d", id, version)
+	if summary = strings.TrimSpace(summary); summary != "" {
+		reason += ": " + summary
+	}
+	return reason
+}
+
+// BundleChangeSummary is the change summary BundleReason put into the
+// reason of state ("" when state names no bundle or no summary).
+func BundleChangeSummary(state GenerationState) string {
+	if state.BundleID == "" {
+		return ""
+	}
+	prefix := BundleReason(state.BundleID, state.BundleVersion, "") + ": "
+	if !strings.HasPrefix(state.Reason, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(state.Reason, prefix)
+}
+
 // IsPrincipalActor reports whether actor is a bundle principal
 // (control-plane:<tenant>/<admin> or operator:<os-admin>).
 func IsPrincipalActor(actor string) bool {

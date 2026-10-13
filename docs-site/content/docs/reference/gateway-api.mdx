@@ -280,6 +280,8 @@ gateway is enforcing. It is omitted on a Secure Client device.
   "generation": 9,
   "config_generation": 19,
   "config_generation_recorded": true,
+  "bundle_id": "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7",
+  "bundle_version": 7,
   "built_at": "2026-10-06T18:20:23Z",
   "component_count": 6
 }
@@ -289,6 +291,8 @@ gateway is enforcing. It is omitted on a Secure Client device.
 `config_generation` is the writer's counter from `config.generation.json`;
 `component_count` is the number of inputs the digest covers (config, the Rego
 modules, the providers, every rule pack in use and each guardrail profile).
+`bundle_id` and `bundle_version` appear on a standalone managed device whose
+config a signed [policy bundle](/docs/enterprise/policy-bundles) installed.
 Their digests are not on `/health`, so the object stays small with thousands
 of profiles; `defenseclaw-gateway policy digest` lists each one.
 When a change fails to build, the previous generation keeps running and the

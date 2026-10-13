@@ -167,14 +167,16 @@ type Transition struct {
 // not be read. BundleID and Version are what the manifest claims until the
 // receipt reaches verified.
 type Receipt struct {
-	SchemaVersion         int          `json:"schema_version"`
-	ReceiptID             string       `json:"receipt_id"`
-	BundleID              string       `json:"bundle_id,omitempty"`
-	Version               uint64       `json:"version,omitempty"`
-	TenantID              string       `json:"tenant_id,omitempty"`
-	DeviceGroup           string       `json:"device_group,omitempty"`
-	SignerKeyID           string       `json:"signer_key_id,omitempty"`
-	Principal             string       `json:"principal,omitempty"`
+	SchemaVersion int    `json:"schema_version"`
+	ReceiptID     string `json:"receipt_id"`
+	BundleID      string `json:"bundle_id,omitempty"`
+	Version       uint64 `json:"version,omitempty"`
+	TenantID      string `json:"tenant_id,omitempty"`
+	DeviceGroup   string `json:"device_group,omitempty"`
+	SignerKeyID   string `json:"signer_key_id,omitempty"`
+	Principal     string `json:"principal,omitempty"`
+	// ChangeSummary is the manifest change_summary, set at verified.
+	ChangeSummary         string       `json:"change_summary,omitempty"`
 	ManifestSHA256        string       `json:"manifest_sha256,omitempty"`
 	State                 string       `json:"state"`
 	Transitions           []Transition `json:"transitions"`
@@ -331,7 +333,61 @@ func (s *Store) writeReceipt(r *Receipt) error {
 	if err := os.MkdirAll(s.receiptsDir(), 0o700); err != nil {
 		return err
 	}
-	return configwrite.WriteFileDurable(s.receiptPath(r.ReceiptID), append(data, '\n'), 0o600)
+	if err := configwrite.WriteFileDurable(s.receiptPath(r.ReceiptID), append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	if Finished(r.State) {
+		// Reporting only: the gateway reads receipt.json for the audit
+		// event and the metrics. A failed write must not fail the apply,
+		// whose outcome the root-only receipt and status already record.
+		_ = s.writePublicReceipt(r)
+	}
+	return nil
+}
+
+// PublicReceiptPath is <etc>/bundles/receipt.json.
+func (s *Store) PublicReceiptPath() string {
+	return filepath.Join(s.BundlesDir, enterprisestatus.PublicReceiptName)
+}
+
+// writePublicReceipt replaces receipt.json with the finished receipt r and
+// the bundle that enforces now. It leaves out the error message (it can
+// quote loader detail), the manifest hash and the version directory.
+func (s *Store) writePublicReceipt(r *Receipt) error {
+	out := enterprisestatus.PublicReceipt{
+		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
+		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal,
+		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
+		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
+		ConfigGeneration: r.ConfigGeneration, AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
+		RolledBack: r.RolledBack, Restart: r.Restart,
+	}
+	if n := len(r.Transitions); n > 0 {
+		out.FinishedAt = r.Transitions[n-1].At
+	}
+	if st, err := s.LoadState(); err == nil && st.Current != nil {
+		out.CurrentBundleID, out.CurrentVersion = st.Current.BundleID, st.Current.Version
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.BundlesDir, 0o755); err != nil {
+		return err
+	}
+	return configwrite.WriteFileDurable(s.PublicReceiptPath(), append(data, '\n'), 0o644)
+}
+
+// GenerationOptions is how the lifecycle records the config of the bundle
+// receipt r in config.generation.json: as the bundle principal with the
+// bundle change summary and the bundle fields. ok is false when r names no
+// principal; the caller then records as the lifecycle.
+func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
+	if r == nil || r.Principal == "" {
+		return configwrite.Options{}, false
+	}
+	return configwrite.Options{Actor: r.Principal, Reason: configwrite.BundleReason(r.BundleID, r.Version, r.ChangeSummary),
+		Lifecycle: true, Bundle: configwrite.BundleRef{ID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID}}, true
 }
 
 // Receive starts the receipt of a bundle in state received. bundleID and

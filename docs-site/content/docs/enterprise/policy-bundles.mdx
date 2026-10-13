@@ -155,6 +155,28 @@ that fails or whose run is interrupted never becomes current: the last good
 bundle keeps enforcing, and the next lifecycle run ends an interrupted receipt
 as `failed` with `interrupted`.
 
+## Audit and telemetry
+
+Every receipt that ends, `confirmed` or `failed`, is also written to the public
+summary `<etc>/bundles/receipt.json` (mode 0644): the receipt id, bundle id,
+version, signing key id, principal (`created_by`), change summary, state,
+error code, effective and enforcing policy digests, config generation, the
+times, `rolled_back`, `restart` and the bundle that enforces now. It never
+carries a secret or the error message. The gateway of a standalone managed
+device reads it within about 5 seconds and reports each terminal receipt once:
+
+| Signal | What it carries |
+|---|---|
+| Log `config.bundle.receipt` (`compliance.activity`, outcome `applied` or `failed`) | `defenseclaw.policy.bundle.receipt_id`, `.state`, `.id`, `.version`, `.signer_key_id`, `.change_summary`, `.error_code`, `.rolled_back`, `.restart`, `.enforcing_digest`, `defenseclaw.policy.effective_digest`, `defenseclaw.config.generation`; the principal is `defenseclaw.admin.principal_ref` |
+| Log `config.change.applied` | for a config a bundle installed: the bundle principal and `defenseclaw.policy.bundle.id`, `.version`, `.signer_key_id`, `.change_summary` |
+| Counter `defenseclaw.policy.bundle.applies` | one per terminal receipt, labels `bundle.result` (`confirmed`, `failed`) and `bundle.error_code` |
+| Gauge `defenseclaw.policy.bundle.version` | the version of the bundle the device enforces |
+| `/health` and `/status` `policy` object | `bundle_id` and `bundle_version` of the config the live generation runs |
+
+Both log events are control-plane records: they keep their mandatory floor
+when a destination drops ordinary records. All of it is reporting only;
+enforcement does not depend on it.
+
 ## Known limits
 
 - **Version floor.** A device refuses a version at or below the higher of
@@ -167,6 +189,24 @@ as `failed` with `interrupted`.
   `bundle-state.json`: a purge or reinstall that removes it starts again from
   `min_version`, so raise `min_version` in the anchor file as you retire old
   bundles.
+- **Receipt telemetry timing.** The gateway reports a receipt when it next
+  looks at `receipt.json` (about every 5 seconds), so the audit event can
+  follow the lifecycle result by a few seconds. A gateway that is down when a
+  receipt ends reports it when it starts. Only the last finished receipt is
+  public: two receipts that end within one poll report the later one; the
+  root-only receipts and `bundle status` keep all 20. The gateway records the
+  key of the last receipt it reported in `bundle-receipt.reported` in its
+  data directory; removing that file reports the current receipt once more.
+- **Version gauge.** `defenseclaw.policy.bundle.version` is recorded when the
+  gateway starts, when the bundle the live generation runs changes and with
+  each receipt; between those it is not re-sent. A device that has never
+  confirmed a bundle records none.
+- **Windows restart path.** On Windows, a bundle config applied without a
+  gateway restart is recorded as the bundle principal with the bundle fields.
+  A bundle config that needs the restart path is installed by the upgrade
+  transaction, so `config.change.applied` and `config.generation.json` name
+  the lifecycle and not the bundle; the `config.bundle.receipt` event and the
+  receipt still name the bundle and its principal.
 - **Status needs root.** The bundle state and receipts are readable only by
   root or an administrator; `bundle status` as a standard account refuses with
   `not_root`. The device keeps the 20 newest receipts.

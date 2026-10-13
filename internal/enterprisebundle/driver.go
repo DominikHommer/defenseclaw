@@ -146,6 +146,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	m := res.Manifest
 	if err := d.Store.Advance(receipt, StateVerified, func(rc *Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
+		rc.ChangeSummary = m.ChangeSummary
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Hex(staged.Manifest), res.ExpectedDigest
 	}); err != nil {
 		return refuse(err)
