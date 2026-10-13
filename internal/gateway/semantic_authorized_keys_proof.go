@@ -884,7 +884,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			(!parsed || dynamic && dynamicUnknown) {
 			return true
 		}
-		if dynamicUnknown {
+		if dynamicUnknown && (truncated || request.ResolvedWriteTargets[hookpaths.OperandFactsKey] != "1") {
 			return true
 		}
 		for i, operand := range operands {
