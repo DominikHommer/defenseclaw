@@ -62,3 +62,12 @@ func TestLiteralGlobRedirectCandidates(t *testing.T) {
 		})
 	}
 }
+
+func TestMissingGlobParent(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "missing", "project")
+	paths, unknown := ShellDynamicWriteOperands(`echo ok > out-*.txt`, cwd, home)
+	if unknown || len(paths) != 0 {
+		t.Fatalf("paths = %v, unknown = %v", paths, unknown)
+	}
+}

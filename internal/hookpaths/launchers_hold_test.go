@@ -42,3 +42,16 @@ func TestLauncherProgramFamilies(t *testing.T) {
 		})
 	}
 }
+
+func TestTerminalProgramOperands(t *testing.T) {
+	for _, words := range [][]string{
+		{"groupmems", "-g", "sudo", "-a", "agent"},
+		{"usermod", "-g", "tee", "agent"},
+		{"groupadd", "--", "cp"},
+	} {
+		result := resolveLauncherWords(words, makeStatic(len(words)), "/repo")
+		if !result.ok || result.noExec || len(result.words) != len(words) || result.words[0] != words[0] {
+			t.Fatalf("program operands changed for %q", words[0])
+		}
+	}
+}

@@ -101,6 +101,9 @@ func shellLiteralGlobCandidates(word *syntax.Word, cwd, home string, file *synta
 		return nil, false
 	}
 	if len(matches) == 0 {
+		if _, err := os.Stat(filepath.Dir(pattern)); os.IsNotExist(err) {
+			return nil, true
+		}
 		return []string{pattern}, true
 	}
 	return matches, true

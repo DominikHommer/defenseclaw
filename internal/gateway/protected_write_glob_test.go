@@ -59,3 +59,28 @@ func TestProtectedWriteGlobDecisions(t *testing.T) {
 		}
 	}
 }
+
+func TestProtectedWriteMissingProjectGlob(t *testing.T) {
+	const connector = "protected-write-glob-test"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	project := filepath.Join(t.TempDir(), "missing", "project")
+	input := actionfacts.Input{
+		Tool:       "shell",
+		Command:    "groupmems -g sudo -a agent > out-*.txt",
+		CWD:        project,
+		ActiveHome: filepath.Join(t.TempDir(), "home"),
+	}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:              input,
+		LegacyText:         input.Command,
+		Connector:          connector,
+		EnforcementCapable: true,
+	})
+	if buildVerdict(findings, "tool_call").Action == guardrailActionBlock {
+		var ids []string
+		for _, finding := range findings {
+			ids = append(ids, finding.RuleID)
+		}
+		t.Fatalf("ordinary project target blocked by %v", ids)
+	}
+}

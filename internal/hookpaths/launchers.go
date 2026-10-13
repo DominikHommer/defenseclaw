@@ -81,6 +81,10 @@ type launcherResult struct {
 	replace string
 }
 
+// These commands take account names as operands and do not run a child
+// command named by one of those operands.
+var terminalAccountPrograms = []string{"groupadd", "groupdel", "groupmems", "groupmod", "useradd", "userdel", "usermod"}
+
 func resolveLauncherWords(words []string, static []bool, cwd string) launcherResult {
 	result := launcherResult{words: words, static: static, cwd: cwd, ok: true}
 	for depth := 0; depth < 16 && len(result.words) > 0; depth++ {
@@ -91,7 +95,7 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		program := programBase(result.words[0])
 		spec, found := launcherSpecs[program]
 		if !found {
-			if slices.Contains(dataPrograms, program) || launcherWriterProgram(program) {
+			if slices.Contains(dataPrograms, program) || slices.Contains(terminalAccountPrograms, program) || launcherWriterProgram(program) {
 				return result
 			}
 			child := launcherChildIndex(result.words, result.static)
