@@ -2,8 +2,11 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "packaging/mdm/intune/linux/sync-local-group.sh"
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 
 
 def test_primary_group_member_is_reported_and_not_removed_by_gpasswd(tmp_path: Path) -> None:

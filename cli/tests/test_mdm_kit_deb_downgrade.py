@@ -4,8 +4,11 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 WRAPPER = ROOT / "packaging/mdm/linux/defenseclaw-enterprise.sh"
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 
 
 def function(source: str, name: str) -> str:

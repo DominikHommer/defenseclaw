@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 ENTRA = ROOT / "packaging/identity/entra"
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 
 
 @pytest.mark.parametrize("mode", ["extension-fails", "role-fails", "extension-missing"])

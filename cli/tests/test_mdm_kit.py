@@ -828,6 +828,21 @@ def test_intune_config_change_docs_explain_the_version_pin() -> None:
     assert "installed hash would differ from the hash pinned" in section
 
 
+def test_posix_kit_modules_skip_on_windows() -> None:
+    modules = (
+        "test_mdm_kit_cancel.py",
+        "test_mdm_kit_config_origin.py",
+        "test_mdm_kit_deb_downgrade.py",
+        "test_mdm_kit_primary_group.py",
+        "test_mdm_kit_secret_nul.py",
+        "test_mdm_kit_staging_full.py",
+        "test_identity_kit_entra_fg13.py",
+    )
+    for name in modules:
+        source = _text(ROOT / "cli/tests" / name)
+        assert 'pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")' in source, name
+
+
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.
 PS7_ONLY = [
     (re.compile(r"\?\?"), "null-coalescing ??"),
@@ -1160,8 +1175,7 @@ def test_remediate_fix_does_not_report_a_missing_scanner_runtime_as_healthy() ->
     text, which names Setup /repair."""
 
     text = (MDM / "intune" / "windows" / "Remediate-Fix.ps1").read_text(encoding="utf-8")
-    branch = text[text.index("$runtime = @($document.warnings)") :]
-    branch = branch[: branch.index("elseif ($document.ok -and $document.noop)")]
-    assert "$_.code -eq 'scanner_runtime_unavailable'" in branch
-    assert "$code = 1603" in branch
-    assert "$($runtime.message)" in branch
+    block = text.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
+    assert "$_.code -eq 'scanner_runtime_unavailable'" in block
+    assert block.index("$code = 1603") < block.index("$recovered =")
+    assert "not repaired (scanner_runtime_unavailable)" in block
