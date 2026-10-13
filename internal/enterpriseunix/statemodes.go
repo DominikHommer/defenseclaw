@@ -66,6 +66,10 @@ type stateMode struct {
 	mode  os.FileMode
 	owner fileOwner
 	mask  bool
+	// need are the bits the entry must have for the account that reads it
+	// (the gateway, through the group); verify reports an entry without
+	// them, also a root-owned one.
+	need os.FileMode
 }
 
 // wanted returns the mode the entry gets in place of current.
@@ -91,7 +95,7 @@ func (e *Env) drift(info os.FileInfo, uid, gid int, want stateMode, strict bool)
 		return mode, true
 	}
 	if !strict {
-		return mode, info.Mode().Perm()&^mode != 0
+		return mode, info.Mode().Perm()&^mode != 0 || info.Mode().Perm()&want.need != want.need
 	}
 	return mode, info.Mode().Perm() != mode || (mode&0o070 != 0 && gid != want.owner.GID)
 }
@@ -158,6 +162,11 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				rel == managed.HookGuardianReconcileLockFile, rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName,
 				rel == "unix_target_bindings.json":
 				return stateMode{mode: 0o600, owner: rootService} // root-only guardian records
+			case rel == managed.HookGuardianAuthorizationFile:
+				// The gateway reads the authorization ledger through its group:
+				// under the 0640 mask a 0600 ledger passed verify and repair
+				// while the gateway could not read it (GAP-1443).
+				return stateMode{mode: 0o640, owner: rootService, need: 0o040}
 			}
 			return stateMode{mode: 0o640, owner: rootService, mask: true}
 		}},
