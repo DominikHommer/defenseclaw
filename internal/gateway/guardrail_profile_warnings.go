@@ -261,6 +261,12 @@ func assignmentWildcard(entry string) bool {
 	return strings.ContainsAny(entry, "*?")
 }
 
+// entraGroupSID reports whether s is an Entra ID group or user SID
+// (S-1-12-1-...), which only a host joined to that tenant can name.
+func entraGroupSID(s string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(s)), "S-1-12-1-")
+}
+
 // validSIDString reports whether s has the SID string form: S-1, an
 // identifier authority, and one to fifteen sub-authorities, all decimal.
 func validSIDString(s string) bool {
@@ -530,9 +536,13 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
 			group = strings.TrimSpace(group)
-			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") ||
+			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") && (platform != "windows" || !validSIDString(group) || entraGroupSID(group)) ||
 				strings.Trim(group, "0123456789") == "" || assignmentWildcard(group) {
-				// staticGroupWarnings names these.
+				// staticGroupWarnings names these. An Entra group SID is left to
+				// the sign-in token: the LSA cannot map it on a host outside that
+				// tenant, yet the token still carries it, so a failed lookup does
+				// not show that the assignment selects nobody. Other SIDs the LSA
+				// cannot map (a deleted domain group) are still reported.
 				continue
 			}
 			_, domain := useridentity.SplitQualifiedName(group)

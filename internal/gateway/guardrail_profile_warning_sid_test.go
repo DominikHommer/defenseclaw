@@ -17,6 +17,12 @@ func TestProfileWarningDoesNotCallAWindowsGroupSIDUnknown(t *testing.T) {
 	if strings.Contains(strings.Join(warnings, "\n"), "not known to this host") {
 		t.Fatalf("a configured SID can match the sign-in token: %v", warnings)
 	}
+	deleted := []config.ProfileAssignment{{Match: config.ProfileMatch{Groups: []string{"S-1-5-21-1-2-3-1104"}}}}
+	warnings = unknownAssignmentGroupsForOS(context.Background(), deleted,
+		func(context.Context, string) (bool, error) { return false, nil }, nil, nil, "windows")
+	if !strings.Contains(strings.Join(warnings, "\n"), "not known to this host") {
+		t.Fatalf("a domain SID the LSA cannot map must still be reported: %v", warnings)
+	}
 	unknown := []config.ProfileAssignment{{Match: config.ProfileMatch{Groups: []string{"missing-group"}}}}
 	warnings = unknownAssignmentGroupsForOS(context.Background(), unknown,
 		func(context.Context, string) (bool, error) { return false, nil }, nil, nil, "windows")
