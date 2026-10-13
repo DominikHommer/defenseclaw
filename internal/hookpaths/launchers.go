@@ -632,6 +632,8 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			queue[i].handled = map[int]bool{}
 		}
 		context := queue[i]
+		writtenScripts := map[string]shellWrittenScript{}
+		callStatements := map[int]*syntax.Stmt{}
 		functions := map[string]*syntax.FuncDecl{}
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if function, ok := node.(*syntax.FuncDecl); ok {
@@ -645,6 +647,11 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if _, declared := node.(*syntax.FuncDecl); declared {
 				return false
+			}
+			if stmt, ok := node.(*syntax.Stmt); ok {
+				if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+					callStatements[int(call.Pos().Offset())] = stmt
+				}
 			}
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
 				appendXargsInputScript(&queue, pipe, context, home)
@@ -662,6 +669,19 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 				}
 			}
 			if !static[0] {
+				return true
+			}
+			stmt := callStatements[int(call.Pos().Offset())]
+			recordShellScriptWrite(writtenScripts, stmt, context.source, context.cwd, home)
+			if script, handled, known := shellTextCallScript(stmt, words, static, context.source, context.cwd, home, writtenScripts); handled {
+				if !known {
+					unknown = true
+				} else if inner, parsed := parseShell(script); parsed {
+					queue = append(queue, shellScriptContext{file: inner, cwd: context.cwd, source: script})
+					context.handled[int(call.Pos().Offset())] = true
+				} else {
+					unknown = true
+				}
 				return true
 			}
 			if function := functions[words[0]]; function != nil {
