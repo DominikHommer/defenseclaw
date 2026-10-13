@@ -12,6 +12,11 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg01_failed_uninstall_teardown_keeps_receipt(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("without either flag so the data\ndirectory and gateway binary stay", text)
+        self.assertIn("`defenseclaw-gateway sandbox teardown`, then uninstall again", text)
+
     def test_fg06_guide_uses_private_home_probe_directory(self):
         text = page("sandboxes/guide.mdx")
         self.assertIn("`~/Library/Caches/defenseclaw/hookfire` directory under your home", text)

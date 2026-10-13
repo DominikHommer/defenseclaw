@@ -1708,6 +1708,10 @@ Windows, it skips it). When Docker or OpenShell are
 gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the
 sandboxes in place; `defenseclaw sandbox teardown` removes them later, as
 long as the data directory is kept (no `--all`).
+If teardown failed during an uninstall with `--all` or `--binaries`, rerun
+uninstall with `--skip-sandbox-teardown` and without either flag so the data
+directory and gateway binary stay. Once Docker and OpenShell work, run
+`defenseclaw-gateway sandbox teardown`, then uninstall again.
 
 When the DefenseClaw daemon isn't running (or has sandboxes off), teardown
 deletes the sandboxes on the OpenShell gateway itself. It then also removes
