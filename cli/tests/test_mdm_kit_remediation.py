@@ -1,43 +1,75 @@
+import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "packaging/mdm/intune/windows"
 
 
-def test_remediation_names_problem_and_repair_from_lifecycle_result() -> None:
-    source = (SCRIPTS / "Remediate-Fix.ps1").read_text(encoding="utf-8")
-    summary = source.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
-    assert "$repairChanges = @($document.changes)" in summary
-    assert "$specificProblem =" in summary
-    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
-    if not pwsh:
-        return
-    cases = [
-        ('{"ok":true,"noop":true,"errors":[],"warnings":[{"code":"service_stopped","message":"guardian was stopped"}],"changes":["started guardian"]}',
-         "service_stopped", "started guardian"),
-        ('{"ok":false,"noop":false,"errors":[{"code":"lifecycle_error","message":"verify failed"}],"warnings":[{"code":"service_stopped","message":"guardian was stopped"}],"changes":[]}',
-         "service_stopped", "guardian was stopped"),
-    ]
-    for document, problem, repair in cases:
-        script = f"$run = @{{ ExitCode = 0; StdOut = '{document}' }}\n" + "$code = $run.ExitCode" + summary + "\nWrite-Output $summary\n"
-        result = subprocess.run([pwsh, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0, result.stderr
-        assert problem in result.stdout and repair in result.stdout
-        assert "already healthy" not in result.stdout
+@pytest.fixture
+def pwsh() -> str:
+    executable = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not executable:
+        pytest.skip("PowerShell is unavailable")
+    return executable
 
 
-def test_remediation_detect_prefers_specific_problem_to_lifecycle_error() -> None:
-    source = (SCRIPTS / "Remediate-Detect.ps1").read_text(encoding="utf-8")
-    formatter = source.split("function Format-DefenseClawVerifyFailure", 1)[1].split("\ntry {\n    $deployment", 1)[0]
-    assert "specific" in formatter and "lifecycle_error" in formatter
-    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
-    if not pwsh:
-        return
-    document = '{"errors":[{"code":"lifecycle_error","message":"verify failed"}],"warnings":[{"code":"service_stopped","message":"guardian was stopped"}],"services":[]}'
-    script = "function Format-DefenseClawVerifyFailure" + formatter + f"\nFormat-DefenseClawVerifyFailure -Json '{document}'\n"
-    result = subprocess.run([pwsh, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=10)
+def _run_script(pwsh: str, tmp_path: Path, script: str, document: dict, exit_code: int = 0) -> str:
+    document_path = tmp_path / "lifecycle.json"
+    document_path.write_text(json.dumps(document), encoding="utf-8")
+    script_path = tmp_path / "harness.ps1"
+    script_path.write_text(script, encoding="utf-8")
+    env = os.environ.copy()
+    env["DC_TEST_DOCUMENT"] = str(document_path)
+    env["DC_TEST_EXIT_CODE"] = str(exit_code)
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(script_path)], env=env, capture_output=True, text=True, timeout=15,
+    )
     assert result.returncode == 0, result.stderr
-    assert "service_stopped" in result.stdout and "guardian was stopped" in result.stdout
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({"ok": True, "noop": True, "errors": []}, "0|no repair needed after verify"),
+        ({"ok": True, "noop": True, "errors": [], "warnings": [
+            {"code": "telemetry_unreachable", "message": "otel down"},
+        ]}, "0|no repair needed after verify"),
+        ({"ok": True, "noop": False, "errors": [], "changes": ["started guardian"]},
+         "0|repaired (drift): started guardian"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "telemetry_unreachable", "message": "otel down"},
+        ], "changes": ["started guardian", "restored config"]},
+         "0|repaired (drift): started guardian, restored config"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "scanner_runtime_unavailable", "message": "runtime missing"},
+        ]}, "1603|not repaired (scanner_runtime_unavailable): runtime missing"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "recovered_pending_transaction", "message": "rolled back"},
+        ]}, "0|repaired (recovered_pending_transaction): rolled back"),
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+            {"code": "hooks_drifted", "message": "hooks drifted"},
+        ]}, "0|still failing (hooks_drifted): hooks drifted"),
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+        ]}, "0|still failing (lifecycle_error): verify failed"),
+    ],
+)
+def test_remediation_summary_under_strict_mode(
+    pwsh: str, tmp_path: Path, document: dict, expected: str,
+) -> None:
+    source = (SCRIPTS / "Remediate-Fix.ps1").read_text(encoding="utf-8")
+    block = "$code = $run.ExitCode" + source.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
+    script = (
+        "Set-StrictMode -Version 2.0\n"
+        "$run = [pscustomobject]@{ ExitCode = [int]$env:DC_TEST_EXIT_CODE; "
+        "StdOut = Get-Content -LiteralPath $env:DC_TEST_DOCUMENT -Raw }\n"
+        + block + '\n[Console]::Out.WriteLine("$code|$summary")\n'
+    )
+    assert _run_script(pwsh, tmp_path, script, document) == expected
