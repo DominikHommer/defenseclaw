@@ -366,11 +366,15 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	}
 	add("Egress", strings.Join(egress, "; "), egressKeys...)
 
+	// What the managed gateway's check of each answer allows
+	// (sandboxreg.CheckApprovals): under allow_unblock: false an answer is
+	// kept for this session only, and `approve --always` is refused; the
+	// row said "for good" there (#1200).
 	var approvals string
-	switch m.UserApprovals {
-	case "none":
+	switch {
+	case m.UserApprovals == "none":
 		approvals = "you can't approve asks; they are refused"
-	case "session":
+	case m.UserApprovals == "session" || !m.AllowUnblock:
 		approvals = "you may approve asks for this session only"
 	default:
 		approvals = "you may approve asks for a session or for good"
