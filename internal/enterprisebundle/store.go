@@ -144,7 +144,9 @@ func (s State) Confirmed() Confirmed {
 	if s.Current == nil {
 		return Confirmed{Version: s.Floor}
 	}
-	return Confirmed{Version: s.Current.Version, BundleID: s.Current.BundleID, ManifestSHA256: s.Current.ManifestSHA256}
+	// A floor above the current version (a state no confirm writes) still
+	// holds: the current bundle then no longer counts as already applied.
+	return Confirmed{Version: max(s.Floor, s.Current.Version), BundleID: s.Current.BundleID, ManifestSHA256: s.Current.ManifestSHA256}
 }
 
 // held reports whether name is the version directory of the current or the
@@ -333,11 +335,13 @@ func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
 	at := s.now()
 	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived,
 		Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
-	if ValidBundleID(bundleID) && !s.confirmedReceipt(bundleID) {
+	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version
 	} else {
-		// An unreadable manifest, or a bundle id whose confirmed receipt
-		// must stay (the bundle delivered again): a receipt of its own.
+		// An unreadable manifest, or a bundle id whose receipt must stay:
+		// confirmed (the bundle delivered again) or not finished (an
+		// applied bundle the installed config may point at, which settle
+		// still has to confirm or roll back): a receipt of its own.
 		if ValidBundleID(bundleID) {
 			r.BundleID, r.Version = bundleID, version
 		}
@@ -353,14 +357,19 @@ func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
 	return r, s.prune()
 }
 
-// confirmedReceipt reports whether the receipt of bundleID is confirmed.
-func (s *Store) confirmedReceipt(bundleID string) bool {
+// receiptReusable reports whether a new receipt may take the id bundleID:
+// there is no receipt of that id, or it failed. A confirmed, unfinished or
+// unreadable receipt is never overwritten.
+func (s *Store) receiptReusable(bundleID string) bool {
 	raw, err := readStoreFile(s.receiptPath(bundleID))
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	if err != nil {
 		return false
 	}
 	var r Receipt
-	return json.Unmarshal(raw, &r) == nil && r.State == StateConfirmed
+	return json.Unmarshal(raw, &r) == nil && r.State == StateFailed
 }
 
 // Advance moves r one state forward (CheckTransition), applies update to
@@ -474,6 +483,18 @@ func (s *Store) Promote(r *Receipt) (string, error) {
 	if st.held(name) {
 		return "", fmt.Errorf("bundle %s version %d is already in the store", r.BundleID, r.Version)
 	}
+	// An applied receipt that is not confirmed yet names a directory the
+	// installed config may point at: removing it to rename this copy into
+	// place would leave the enforcing config without its files.
+	receipts, err := s.Receipts()
+	if err != nil {
+		return "", err
+	}
+	for _, other := range receipts {
+		if other.ReceiptID != r.ReceiptID && other.Dir == name && !Finished(other.State) {
+			return "", fmt.Errorf("bundle %s version %d is in use by the %s receipt %s", r.BundleID, r.Version, other.State, other.ReceiptID)
+		}
+	}
 	staging, target := s.stagingPath(r.ReceiptID), s.VersionDir(name)
 	if err := removeTree(target); err != nil {
 		return "", err
@@ -506,9 +527,18 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	if err := ref.validate(); err != nil {
 		return State{}, fmt.Errorf("bundle receipt %s: %w", r.ReceiptID, err)
 	}
+	if !digestPattern.MatchString(r.EffectivePolicyDigest) {
+		return State{}, fmt.Errorf("bundle receipt %s has no effective policy digest to confirm", r.ReceiptID)
+	}
 	st, err := s.LoadState()
 	if err != nil {
 		return State{}, err
+	}
+	// The floor never goes down: only a version above it, or the current
+	// bundle itself (same id and manifest) at it, becomes current.
+	sameAsCurrent := st.Current != nil && st.Current.BundleID == ref.BundleID && st.Current.ManifestSHA256 == ref.ManifestSHA256
+	if r.Version < st.Floor || (r.Version == st.Floor && !sameAsCurrent) {
+		return State{}, refuse(CodeVersionNotNewer, "version", "bundle %s version %d is not above the confirmed floor %d", r.BundleID, r.Version, st.Floor)
 	}
 	at := stamp(s.now())
 	ref.ConfirmedAt = at

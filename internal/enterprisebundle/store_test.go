@@ -407,3 +407,48 @@ func containsReceipt(receipts []*Receipt, id, state string) bool {
 	}
 	return false
 }
+
+// A bundle delivered again while its applied receipt waits for settle gets a
+// receipt of its own and cannot replace the version directory the installed
+// config may point at; a confirm never lowers the floor.
+func TestStoreKeepsAnAppliedBundleAndTheFloorOnARetry(t *testing.T) {
+	s := testStore(t)
+	applyThrough(t, s, 1, 4, StateConfirmed)
+	applied := applyThrough(t, s, 5, 6, StateApplied)
+
+	again, err := s.Receive(applied.BundleID, applied.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ReceiptID == applied.ReceiptID || !strings.HasPrefix(again.ReceiptID, "r-") {
+		t.Fatalf("redelivery took receipt id %s", again.ReceiptID)
+	}
+	if _, err := s.Stage(again, storeBundle()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Advance(again, StateVerified, func(r *Receipt) { r.ManifestSHA256 = applied.ManifestSHA256 }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Promote(again); err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("promote over the applied bundle: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.VersionDir(applied.Dir), ConfigName)); err != nil {
+		t.Fatalf("applied version directory lost its config: %v", err)
+	}
+	if report, err := s.Settle(); err != nil || len(report.Unconfirmed) != 1 || report.Unconfirmed[0].ReceiptID != applied.ReceiptID {
+		t.Fatalf("settle = %+v, %v", report, err)
+	}
+
+	older := applyThrough(t, s, 7, 3, StateApplied)
+	var refusal *Error
+	if _, err := s.Confirm(older); !errors.As(err, &refusal) || refusal.Code != CodeVersionNotNewer {
+		t.Fatalf("confirm below the floor: %v", err)
+	}
+	if st, _ := s.LoadState(); st.Floor != 4 || st.Current.BundleID != testBundleID(1) {
+		t.Fatalf("state after a refused confirm = %+v", st)
+	}
+	st := State{Current: &Ref{BundleID: testBundleID(1), Version: 4}, Floor: 9}
+	if got := st.Confirmed().Version; got != 9 {
+		t.Fatalf("confirmed version = %d, want the floor 9", got)
+	}
+}
