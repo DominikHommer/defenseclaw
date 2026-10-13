@@ -99,6 +99,10 @@ class _GatewayConfigRecorder:
             self._emit_with_token(payload, gateway, refreshed)
             self._runtime_token = refreshed
 
+    def keep_token(self, token: str) -> None:
+        """Send the next facts with *token* first (:meth:`Logger.keep_gateway_token`)."""
+        self._runtime_token = token or None
+
     def _emit_with_token(
         self,
         payload: Mapping[str, Any],
@@ -219,6 +223,20 @@ class Logger:
         if cfg is None or getattr(cfg, "gateway", None) is None:
             raise CanonicalObservabilityError("gateway configuration is unavailable")
         return cls(_GatewayConfigRecorder(cfg))
+
+    def keep_gateway_token(self, token: str) -> None:
+        """Authenticate this process's facts with *token*, the one the running gateway loaded.
+
+        A setup step that saves a new gateway token without restarting the
+        gateway leaves the gateway on the old token until it starts again.
+        The setup audit event sent with the new token got 401, so the command
+        failed after saving the change (GAP-0464). A gateway that restarted on
+        the new token still admits the event: a 401 retries once with the
+        token saved in the data directory.
+        """
+        keep = getattr(self._recorder, "keep_token", None)
+        if token and callable(keep):
+            keep(token)
 
     @classmethod
     def no_runtime(cls) -> Logger:
