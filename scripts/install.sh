@@ -237,7 +237,8 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
             TARGET_VERSION="${2#v}"; shift ;;
         --local)
-            [[ $# -ge 2 ]] || usage_error "--local needs a directory"
+            # An empty --local= ran from the current folder (GAP-1336).
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "--local needs a directory"
             LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || usage_error "--local: directory not found: $2"
             shift ;;
         --rollback) ROLLBACK=true ;;
@@ -579,6 +580,13 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
+    # GAP-0009: a connector set up after the upgrade is not configured in the
+    # install now back, whose data has no hook script for it: its agent ran a
+    # hook that no longer exists (Claude Code blocked every prompt). The
+    # newer gateway of the two knows the entries; only DefenseClaw's go.
+    if ! version_lt "${back_to}" 1.0.0; then
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+    fi
     rollback_rc=0
     QUARANTINED=""
     if [[ -n "${AUDIT_DAMAGED}" ]] && ! quarantine_rolled_back_audit; then
@@ -614,7 +622,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
-        info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        info "Data written since the upgrade is kept in ${PREVIOUS}; 'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
         [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
             && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
@@ -1045,9 +1053,11 @@ install_uv() {
 # installer and the venv: the Python check, the release policy and Cosign,
 # the connector menu and the gateway download.
 #   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
-#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
-#     cache, and nothing in it is older than that window or newer than the
-#     venv, so no other Cosign has used it.
+#   ~/.sigstore: only with that uv, no cosign on PATH, it holds only the
+#     public Sigstore TUF cache, and everything in it is newer than uv's
+#     receipt and none of it newer than the venv: the 0.8.x installer ran its
+#     temporary Cosign after uv, so no other Cosign has used it. A ten-minute
+#     window alone claimed a cache the user had made just before (GAP-1262).
 readonly LEGACY_WINDOW=600
 LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
@@ -1094,7 +1104,7 @@ legacy_uv_from_0_8() {
     done
 }
 find_legacy_leftovers() {
-    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
+    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore receipt
     [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
     venv_t="$(mtime_of "${cfg}")" || return 0
     if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
@@ -1102,8 +1112,9 @@ find_legacy_leftovers() {
         LEGACY_LEFTOVERS="uv-cache"
     fi
     sigstore="${HOME}/.sigstore"
-    if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
-        && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    if [[ -n "${LEGACY_UV_RECORD}" && -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
+        && [[ -z "$(find "${sigstore}" ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
             ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \
@@ -1465,6 +1476,9 @@ swap_in() {
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
             "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
         fi
+        # A rollback by an earlier release left hook entries of a connector
+        # this install does not configure (GAP-0009). Best effort.
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"
     fi
 }
 
@@ -1546,8 +1560,19 @@ restore_snapshot() {
         rm -f "${BIN_DIR:?}/${link}" || restored=false
         if [[ -L "${SNAP}/bin/${link}" ]]; then cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}" || restored=false; fi
     done
-    rm -rf "${INSTALLER_DIR}" || restored=false
-    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
+    # INSTALLER_BACK marks the installer as put back, as VENV_BACK does the
+    # venv: a second run deleted the installer the first had restored (GAP-0922).
+    if [[ ! -f "${SNAP}/INSTALLER_BACK" ]]; then
+        moved=true
+        if [[ -d "${SNAP}/installer" ]]; then
+            : > "${SNAP}/INSTALLER_RESTORING" 2>/dev/null || moved=false
+        fi
+        if [[ "${moved}" == true && ! ( -f "${SNAP}/INSTALLER_RESTORING" && ! -d "${SNAP}/installer" ) ]]; then
+            rm -rf "${INSTALLER_DIR}" || moved=false
+            if [[ "${moved}" == true && -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || moved=false; fi
+        fi
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/INSTALLER_BACK" 2>/dev/null || restored=false; else restored=false; fi
+    fi
     if [[ ! -f "${SNAP}/DATA_ASIDE" ]]; then
         moved=true
         while IFS= read -r name; do
@@ -1931,14 +1956,20 @@ check_rollback_data() {
 # aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
 # time>), so the restored release starts on a new one.
 quarantine_rolled_back_audit() {
-    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix
+    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix back
     [[ -f "${db}" ]] || return 0
     moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
     [[ ! -e "${moved}" ]] || moved="${moved}-$$"
-    for suffix in -wal -shm -journal; do
-        [[ ! -e "${db}${suffix}" ]] || mv "${db}${suffix}" "${moved}${suffix}" || return 1
+    # GAP-1397: a move that fails puts back what moved, so the store is never
+    # separated from its WAL (SQLite would drop the WAL's transactions).
+    for suffix in "" -wal -shm -journal; do
+        [[ -e "${db}${suffix}" ]] || continue
+        mv "${db}${suffix}" "${moved}${suffix}" && continue
+        for back in "" -wal -shm -journal; do
+            if [[ -e "${moved}${back}" && ! -e "${db}${back}" ]]; then mv "${moved}${back}" "${db}${back}" || true; fi
+        done
+        return 1
     done
-    mv "${db}" "${moved}" || return 1
     QUARANTINED="${moved}"
     warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
 }
@@ -1947,7 +1978,7 @@ quarantine_rolled_back_audit() {
 # (GAP-1388). The restored 0.x gateway is not running, and the connector
 # registrations of this install were removed for it: agents would be unguarded.
 undo_rollback() {
-    local left="${current}" undone=0 kept suffix
+    local left="${current}" undone=0 kept suffix fresh
     warn "$1, so the rollback is being undone"
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
     # The same swap the other way: previous/ holds the install just left.
@@ -1962,11 +1993,22 @@ undo_rollback() {
     # previous/ is again the install this rollback started from, as it was.
     rm -f "${PREVIOUS}/ROLLED_BACK" "${PREVIOUS}/START_AFTER"
     printf '%s\n' "${saved_was_running:-false}" > "${PREVIOUS}/GATEWAY_WAS_RUNNING"
-    if [[ -n "${QUARANTINED}" && ! -e "${PREVIOUS}/data/audit.db" ]]; then
-        kept="${PREVIOUS}/data/$(basename "${QUARANTINED}")"
-        for suffix in "" -wal -shm -journal; do
-            [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
-        done
+    kept="${PREVIOUS}/data/$(basename "${QUARANTINED:-none}")"
+    if [[ -n "${QUARANTINED}" && -f "${kept}" ]]; then
+        # GAP-1398: the failed start of ${back_to} made a new, empty audit.db
+        # here, which a later rollback then used without a word. The saved
+        # store goes back, so that rollback checks it again.
+        if [[ -e "${PREVIOUS}/data/audit.db" ]]; then
+            fresh="${PREVIOUS}/data/audit.db.failed-start-$(date -u +%Y%m%dT%H%M%SZ)"
+            for suffix in "" -wal -shm -journal; do
+                [[ ! -e "${PREVIOUS}/data/audit.db${suffix}" ]] || mv "${PREVIOUS}/data/audit.db${suffix}" "${fresh}${suffix}" || true
+            done
+        fi
+        if [[ ! -e "${PREVIOUS}/data/audit.db" ]]; then
+            for suffix in "" -wal -shm -journal; do
+                [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
+            done
+        fi
     fi
     if start_gateway; then
         ok "DefenseClaw ${current:-1.x} is back, with its gateway and agent hooks"
@@ -2003,6 +2045,22 @@ convert_hooks_for_rollback() {
     [[ -x "${gateway}" ]] || return 0
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
+# prune_orphaned_hooks GATEWAY...: with the first GATEWAY that has the
+# command, remove the DefenseClaw hook entries of every connector the live
+# install does not configure (GAP-0009). Only DefenseClaw-owned entries go;
+# it says which.
+prune_orphaned_hooks() {
+    local gateway
+    for gateway in "$@"; do
+        # An older gateway prints the connector help for an unknown subcommand.
+        [[ -x "${gateway}" ]] && "${gateway}" connector prune-orphans --help 2>/dev/null | grep "connector prune-orphans" >/dev/null || continue
+        "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+            || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
+        return 0
+    done
+    return 0
 }
 
 remove_connector_registrations_for_legacy() {
