@@ -2322,14 +2322,21 @@ func copyDestination(args []string, static []bool, cwd string) string {
 }
 
 // cpOperands reads the options that can change source and destination
-// positions. Unknown or dynamic options make the destination unbounded.
+// positions. A dynamic source can keep the final static destination bounded
+// when no possible target-directory option can name a protected basename.
 func cpOperands(args []string, static []bool) (sources []string, destination string, preserves bool, ok bool) {
 	var operands []string
 	targetDir := ""
 	options := true
+	dynamicOption := false
+	dynamicSource := false
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return nil, "", true, false
+			operands = append(operands, "")
+			preserves = true
+			dynamicSource = true
+			dynamicOption = dynamicOption || options
+			continue
 		}
 		arg := args[i]
 		if options && arg == "--" {
@@ -2396,14 +2403,21 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'f', 'H', 'i', 'L', 'l', 'n', 'p', 's', 'T', 'u', 'v', 'x':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'l', 'n', 'N', 'p', 's', 'T', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return nil, "", true, false
 			}
 		}
 	}
+	if dynamicOption {
+		for _, operand := range operands {
+			if operand != "" && shellAuthorizedKeysBase(operand) {
+				return nil, "", true, false
+			}
+		}
+	}
 	if targetDir != "" {
-		if len(operands) == 0 {
+		if len(operands) == 0 || dynamicSource {
 			return nil, "", preserves, false
 		}
 		return operands, targetDir, preserves, true
