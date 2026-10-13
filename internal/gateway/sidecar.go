@@ -3790,7 +3790,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	if !wcfg.Enabled {
 		// No watcher admits a project skill folder now, so hooks stop
 		// registering them and holding their skills, as at a cold start
-		// with this config (GAP-1377).
+		// with this config (GAP-1377). Nor does one admit the enrolled
+		// users' MCP servers: the refusal of the ones whose state it could
+		// not read goes with it (GAP-1510).
+		publishMCPStatesUnreadable(nil)
 		s.projectSkills.start(false)
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
@@ -3866,6 +3869,12 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				pluginDirs = set.pluginDirs
 			}
 		}
+	}
+	if enrolled == nil {
+		// A watcher that does not watch the enrolled users' folders (the
+		// config no longer makes this a managed Windows gateway) keeps no
+		// refusal from the one that did (GAP-1510).
+		publishMCPStatesUnreadable(nil)
 	}
 	skillDirs = filterWatchDirs(skillDirs)
 	pluginDirs = filterWatchDirs(pluginDirs)
