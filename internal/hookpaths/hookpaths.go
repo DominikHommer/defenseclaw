@@ -80,6 +80,7 @@ const MaxPayloadBytes = 1 << 20
 // reports a redirect target that is not a static word (a parameter other
 // than HOME, a substitution or a glob), which is not listed.
 func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
+	defer recoverAnalysisPanic(func() { operands, ok, dynamic = nil, false, true })
 	contexts, unknown := shellAnalysisScripts(command, cwd, home)
 	if len(contexts) == 0 {
 		return nil, false, false
@@ -147,8 +148,10 @@ type ExtraWriteOperand struct {
 
 // ShellExtraWriteOperands lists destinations that the command-link proof
 // understands but ActionFacts does not emit as write PathFacts.
-func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
-	var operands []ExtraWriteOperand
+func ShellExtraWriteOperands(command, cwd, home string) (operands []ExtraWriteOperand) {
+	defer recoverAnalysisPanic(func() {
+		operands = []ExtraWriteOperand{{Path: filepath.Join(home, ".ssh", "authorized_keys")}}
+	})
 	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	for _, context := range contexts {
 		poison := shellVariablePoisonForFile(context.file, home)
@@ -175,6 +178,7 @@ func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
 // redirect targets. unknown reports a dynamic target whose value has no bounded
 // literal candidate, so the caller must fail closed when the target matters.
 func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, unknown bool) {
+	defer recoverAnalysisPanic(func() { operands, unknown = nil, true })
 	contexts, scriptUnknown := shellAnalysisScripts(command, cwd, home)
 	if len(contexts) == 0 {
 		return nil, true
@@ -1733,7 +1737,8 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 // link to one of the user's authorized-keys files. An operand
 // is never dropped silently: when one cannot be listed (over a bound, or the command exceeds
 // the shell analysis limits) the map carries TruncatedKey.
-func Resolve(payload []byte) string {
+func Resolve(payload []byte) (result string) {
+	defer recoverAnalysisPanic(func() { result = incompleteEvidence("") })
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
@@ -2491,7 +2496,10 @@ type Links struct {
 }
 
 // CommandLinksWithFacts uses copy-source link evidence from the user-side hook.
-func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
+func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) (result Links) {
+	defer recoverAnalysisPanic(func() {
+		result = Links{links: shellLinks{opaque: true, globalOpaque: true}}
+	})
 	if command == "" || isApplyPatchToolName(tool) {
 		return Links{links: shellLinks{known: true}}
 	}

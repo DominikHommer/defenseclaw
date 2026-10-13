@@ -833,7 +833,8 @@ func launcherQuotedWords(words []string) string {
 // ShellStdinWriteUnknown reports a child write whose destination comes from
 // an input stream that the command text does not determine. Reader operands
 // and copy sources do not become write targets.
-func ShellStdinWriteUnknown(command, cwd, home string) bool {
+func ShellStdinWriteUnknown(command, cwd, home string) (result bool) {
+	defer recoverAnalysisPanic(func() { result = true })
 	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	for _, context := range contexts {
 		unknown := false

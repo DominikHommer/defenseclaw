@@ -27,6 +27,7 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 // LiteralWriteAnalysis also reports a write whose destination is not a
 // literal path, so both hook and gateway can treat that decision as unknown.
 func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown bool) {
+	defer recoverAnalysisPanic(func() { operands, unknown = nil, true })
 	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	add := func(name, base string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {

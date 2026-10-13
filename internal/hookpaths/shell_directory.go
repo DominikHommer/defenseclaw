@@ -46,6 +46,7 @@ func (s *shellDirectoryState) merge(branch shellDirectoryState) {
 // bodies. A branch or subshell gets its own directory state. unknown reports a
 // write that may name authorized_keys after an unresolved directory change.
 func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
+	defer recoverAnalysisPanic(func() { operands, unknown = nil, true })
 	file, parsed := parseShell(command)
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil, false
@@ -389,6 +390,8 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			return
 		}
 		switch cmd := stmt.Cmd.(type) {
+		case nil:
+			write(stmt, s)
 		case *syntax.BinaryCmd:
 			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
 				left, right := s.clone(), s.clone()
