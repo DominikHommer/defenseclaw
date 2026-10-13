@@ -452,10 +452,15 @@ func secureClientStoreOptions(opts []StoreOption) bool {
 	return probe.secureClientSchema
 }
 
+// renameAuditStoreFile is os.Rename; tests make one step fail.
+var renameAuditStoreFile = os.Rename
+
 // quarantineCorruptAuditDB renames the database and its sidecars to
 // "<db>.corrupt-<UTC time>" plus the same suffixes, so the set still opens as
 // one database for recovery. Sidecars move first: a new store must never
-// replay the old WAL.
+// replay the old WAL. The set moves as one unit: a rename that fails puts
+// back what moved, so the database is never separated from its WAL
+// (rel-1-0-2:GAP-0491, as the installers' rollback quarantine).
 func quarantineCorruptAuditDB(dbPath string) (string, error) {
 	absolute, err := filepath.Abs(filepath.Clean(dbPath))
 	if err != nil {
@@ -468,12 +473,21 @@ func quarantineCorruptAuditDB(dbPath string) (string, error) {
 	if _, err := os.Lstat(moved); err == nil {
 		moved += fmt.Sprintf("-%d", os.Getpid())
 	}
-	for _, suffix := range auditDBSQLiteSidecarSuffixes {
-		if err := os.Rename(absolute+suffix, moved+suffix); err != nil && !os.IsNotExist(err) {
-			return "", err
+	var done []string
+	for _, suffix := range append(auditDBSQLiteSidecarSuffixes[:], "") {
+		err := renameAuditStoreFile(absolute+suffix, moved+suffix)
+		if err == nil {
+			done = append(done, suffix)
+			continue
 		}
-	}
-	if err := os.Rename(absolute, moved); err != nil {
+		if suffix != "" && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		for i := len(done) - 1; i >= 0; i-- {
+			if backErr := renameAuditStoreFile(moved+done[i], absolute+done[i]); backErr != nil {
+				err = fmt.Errorf("%w; %s could not be moved back: %v", err, moved+done[i], backErr)
+			}
+		}
 		return "", err
 	}
 	return moved, nil
