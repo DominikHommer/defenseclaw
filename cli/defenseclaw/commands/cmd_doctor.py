@@ -13778,12 +13778,10 @@ def _run_fixers(
     # this list. Doctor is a diagnostic — it *reports* inactive-connector
     # residue (a WARN from _check_connector_residue) but must never run
     # ``connector teardown`` as a side effect of ``--fix``, which on a
-    # multi-connector install could destroy a live connector. The
-    # _fix_connector_residue helper is retained (and still excludes the full
-    # active set) for the tracked follow-up that promotes teardown to a
-    # first-class ``defenseclaw connector teardown`` CLI surface; until then,
-    # operators run ``defenseclaw-gateway connector teardown --connector
-    # <name>`` explicitly.
+    # multi-connector install could destroy a live connector. Operators run
+    # ``defenseclaw-gateway connector teardown --connector <name>`` for
+    # residue, and ``defenseclaw setup remove <name>`` for hook entries a
+    # connector that is not configured left in its agent settings.
     specs = _doctor_repair_specs()
     known_ids = {spec.repair_id for spec in specs}
     explicit_ids = set(fix_ids)
@@ -17288,84 +17286,3 @@ def _fix_acp_guard_pins(
     return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
 
 
-def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Run ``defenseclaw-gateway connector teardown`` for every inactive
-    connector that still has artifacts on disk.
-
-    Inactive-connector residue is detected with the same logic as
-    :func:`_check_connector_residue`, then this fixer shells out to the
-    S7.2 sentinel for each residual connector. The sentinel is the
-    canonical place to do this — ``Connector.Teardown`` knows about
-    hook scripts, env files, and config patches that the residue check
-    can't reasonably enumerate. We never call the OpenClaw Python
-    helpers here because the gateway sentinel handles every connector
-    uniformly.
-    """
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if not data_dir:
-        return ("skip", "no data dir configured")
-
-    # Exclude the FULL active set so the teardown sentinel can never fire
-    # against a live connector (D7) — the same rule the residue *check* uses.
-    active_set = _residue_active_set(cfg, _active_connector(cfg))
-    inactive_residue: list[str] = []
-    for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
-        if name in active_set:
-            continue
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
-            inactive_residue.append(name)
-
-    if "openclaw" not in active_set:
-        if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
-            inactive_residue.append("openclaw")
-        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
-        oc_path = os.path.expanduser(oc_path)
-        if oc_path and os.path.isfile(oc_path + ".pristine"):
-            inactive_residue.append("openclaw")
-
-    if not inactive_residue:
-        return ("skip", "no inactive-connector residue detected")
-
-    inactive_residue = sorted(set(inactive_residue))
-
-    if not assume_yes and not click.confirm(
-        f"    Run 'defenseclaw-gateway connector teardown' for {', '.join(inactive_residue)}?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    # The custody-checked gateway, run through the file that was checked
-    # (#643): never whatever `defenseclaw-gateway` PATH resolves first.
-    gw = _watchdog_lifecycle_executable()
-    if not gw:
-        return ("warn", "no verified defenseclaw-gateway executable is installed — install it and re-run")
-
-    cleaned: list[str] = []
-    failed: list[str] = []
-
-    for name in inactive_residue:
-        try:
-            proc = run_pinned_executable(
-                [gw, "connector", "teardown", "--connector", name],
-                capture_output=True,
-                text=True,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            failed.append(f"{name}: {exc}")
-            continue
-        if proc.returncode == 0:
-            cleaned.append(name)
-        else:
-            err = (proc.stderr or proc.stdout or "").strip().splitlines()
-            tail = err[-1] if err else f"rc={proc.returncode}"
-            failed.append(f"{name}: {tail}")
-
-    if cleaned and not failed:
-        return ("pass", f"teardown ran for: {', '.join(cleaned)}")
-    if cleaned and failed:
-        return ("warn", f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
-    return ("warn", f"teardown failed: {'; '.join(failed)}")
