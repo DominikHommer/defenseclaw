@@ -149,12 +149,16 @@ func (a *APIServer) sandboxEgressUnblockSource(ctx context.Context) func(sandbox
 // managed gateway keeps every unblock a managed user makes, for one
 // sandbox or for every sandbox (handleSandboxDecide stores each one after
 // checking it against the floor), so the lift is decided here, from that
-// record alone: an unblock of the host for reg's own registration, or for
-// every sandbox of the caller, that reg's floor still allows now
-// (allow_unblock, the organization's block and allowed lists). A user
-// block of the host wins. Nothing the daemon or the sandbox sends decides
-// it, so no process of the user can make the gateway lift a destination
-// rule the user could not lift with `defenseclaw sandbox unblock` (#1192).
+// record alone: an unblock of the host for reg's own registration in the
+// session its sandbox runs now (sandboxreg.SessionStart), or for every
+// sandbox of the caller, that reg's floor still allows now (allow_unblock,
+// the organization's block and allowed lists). The registration outlives
+// a stop and start, and its daemon then ends its own session unblocks
+// (es:GAP-0676), so a session unblock made before that start lifts
+// nothing (GAP-0009). A user block of the host wins. Nothing the daemon
+// or the sandbox sends decides it, so no process of the user can make the
+// gateway lift a destination rule the user could not lift with
+// `defenseclaw sandbox unblock` (#1192).
 // Nil when the record or the floor can't be read: nothing is lifted.
 func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Registration) func(sandboxauth.Binding, string) (string, bool) {
 	auth, err := a.sandboxAuth()
@@ -169,6 +173,7 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 	if err != nil || len(saved) == 0 {
 		return nil
 	}
+	sessionStart := sandboxreg.SessionStart(reg)
 	return func(b sandboxauth.Binding, host string) (string, bool) {
 		if b.RegistrationID != reg.ID {
 			return "", false
@@ -186,6 +191,10 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 			case sandboxrelay.DecisionEgressBlock:
 				return "", false
 			case sandboxrelay.DecisionUnblock:
+				if d.Scope == sandboxrelay.DecisionScopeSession && d.CreatedAt.Before(sessionStart) {
+					// An earlier session's: it ended when the sandbox stopped.
+					continue
+				}
 				check := sandboxrelay.DecisionRequest{V: sandboxrelay.WireVersion, Registration: reg.ID, Kind: d.Kind, Host: d.Host, Scope: d.Scope}
 				if sandboxCheckDecision(floor, check) != nil {
 					continue

