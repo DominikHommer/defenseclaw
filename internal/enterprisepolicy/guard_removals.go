@@ -156,7 +156,7 @@ func EncodeForeignHookRemovals(existing, added []ForeignHookRemoval, now time.Ti
 
 // ForeignHookRemovalConnectors returns connector and each of candidates
 // whose agent loads the user file path from its default location under
-// home: Copilot, Cursor and Devin also load Claude Code's ~/.claude/settings.json. A
+// home: Cursor and Devin also load Claude Code's ~/.claude/settings.json. A
 // pass removes an entry once, for the first connector it cleans, so the
 // removal is recorded for every agent that may have loaded it.
 func ForeignHookRemovalConnectors(home, path, connector string, candidates []string) []string {

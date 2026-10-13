@@ -396,8 +396,10 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 	}
 	// Cursor, Copilot and Devin also load Claude-format hook files by
 	// default (third-party extensibility), so those run inside the agent too.
-	claudeFormat := func() {
-		user(formatGrouped, home, ".claude", "settings.json")
+	claudeFormat := func(includeUser bool) {
+		if includeUser {
+			user(formatGrouped, home, ".claude", "settings.json")
+		}
 		project(formatGrouped, ".claude", "settings.json")
 		project(formatGrouped, ".claude", "settings.local.json")
 	}
@@ -405,7 +407,7 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 	case ConnectorCursor:
 		user(formatFlat, home, ".cursor", "hooks.json")
 		project(formatFlat, ".cursor", "hooks.json")
-		claudeFormat()
+		claudeFormat(true)
 	case ConnectorCopilot:
 		copilotHome := req.getenv("COPILOT_HOME")
 		if copilotHome == "" {
@@ -416,7 +418,7 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 		project(formatFlatDir, ".github", "hooks")
 		project(formatFlat, ".github", "copilot", "settings.json")
 		project(formatFlat, ".github", "copilot", "settings.local.json")
-		claudeFormat()
+		claudeFormat(false)
 		user(formatCopilotPlugins, copilotHome, "installed-plugins")
 		copilotVSCodeSources(req, home, userWith, project)
 	case "devin":
@@ -438,7 +440,7 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 		project(formatHooksObject, ".devin", "hooks.v1.json")
 		project(formatGrouped, ".devin", "config.json")
 		project(formatGrouped, ".devin", "config.local.json")
-		claudeFormat()
+		claudeFormat(true)
 		for _, store := range devinPluginStores(req, home) {
 			user(formatDevinPlugins, store)
 		}
