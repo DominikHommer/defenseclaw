@@ -412,6 +412,13 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 		rt.reportMu.Unlock()
 	}()
 
+	if active, ok := rt.tel.(sandboxActiveExporter); ok {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			exportSandboxActive(ctx, active, audit.SandboxActiveExportInterval)
+		}()
+	}
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
@@ -438,6 +445,31 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 	rt.api.SetSandboxController(nil)
 	rt.health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// sandboxActiveExporter is the recorder that exports the active-sandbox
+// gauge (audit.SandboxRecorder).
+type sandboxActiveExporter interface {
+	RecordActiveSandboxes(ctx context.Context) error
+}
+
+// exportSandboxActive exports the active-sandbox gauge every interval until
+// ctx ends: lifecycle records export it only when a phase changes, and a
+// running sandbox must not read as none once Prometheus marks the last point
+// stale (#1241).
+func exportSandboxActive(ctx context.Context, active sandboxActiveExporter, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			if err := active.RecordActiveSandboxes(ctx); err != nil && ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "[sandbox] %s: export the active-sandbox gauge: %v\n", gatewaylog.ErrCodeOpenShellTelemetryFailed, err)
+			}
+		}
+	}
 }
 
 // sandboxEgressRefusalsOf is the manager's refusals as the ingress tells

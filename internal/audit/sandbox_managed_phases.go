@@ -111,6 +111,7 @@ func (recorder *SandboxRecorder) ForgetManagedSandbox(ctx context.Context, regis
 	event := recorder.newEvent(ctx, ActionSandboxLifecycle, SandboxIdentity{Connector: tracked.connector}, "", "", time.Now())
 	_ = recorder.logger.recordRuntimeV8GeneratedMetricBatch(ctx, binding,
 		[]RuntimeV8GeneratedMetric{newSandboxActiveMetric(event, tracked.connector, recorder.activeLocked(tracked.connector))})
+	recorder.noteExportedLocked(tracked.connector)
 	return true
 }
 

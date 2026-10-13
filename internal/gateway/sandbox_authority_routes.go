@@ -777,6 +777,10 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	// Every live registration's daemon polls once a minute: the fleet's
+	// active-sandbox gauge is exported again on them, so a sandbox that runs
+	// quietly does not go stale on the Sandboxes board (#1241).
+	a.refreshManagedSandboxActive(r.Context())
 	if report && reg.State != sandboxreg.StateRevoked {
 		next, err := auth.store.Report(peer.UID, reg.ID, state.Running)
 		switch {

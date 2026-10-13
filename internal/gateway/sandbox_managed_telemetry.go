@@ -68,6 +68,20 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 	return r.(*audit.SandboxRecorder)
 }
 
+// refreshManagedSandboxActive exports the managed recorder's active-sandbox
+// gauge again when its last export is SandboxActiveExportInterval old
+// (audit.SandboxRecorder.RecordActiveSandboxesIfDue); nothing before the
+// recorder tracked anything.
+func (a *APIServer) refreshManagedSandboxActive(ctx context.Context) {
+	r, ok := managedSandboxRecorders.Load(a)
+	if !ok {
+		return
+	}
+	if err := r.(*audit.SandboxRecorder).RecordActiveSandboxesIfDue(context.WithoutCancel(ctx), audit.SandboxActiveExportInterval); err != nil {
+		sandboxRecordFailed("sandbox active", err)
+	}
+}
+
 // sandboxRegistrationGone stops tracking the phase of reg's sandbox. The
 // registration store calls it (sandboxreg.FileStore.OnGone) whenever a
 // registration is revoked, removed or evicted, by any path, so a sandbox
