@@ -1871,13 +1871,6 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 	return forms, ok
 }
 
-// commandLinks lists the links that ln, link and cp --link or
-// --symbolic-link create in command, in any order: a link made after a write
-// only makes the result more conservative.
-func commandLinks(command, cwd, home string) shellLinks {
-	return commandLinksWithFacts(command, cwd, home, nil, false)
-}
-
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	links := shellLinks{known: true}
 	contexts, unknown := shellAnalysisScripts(command, cwd, home)
@@ -2136,13 +2129,6 @@ type RedirectOccurrence struct {
 	Offset int
 }
 
-// SafeShellRedirectOccurrences reports redirects opened before any command
-// in the line can create a link. An extracting command's own redirect opens
-// before extraction begins.
-func SafeShellRedirectOccurrences(command, cwd, home string) []RedirectOccurrence {
-	return SafeShellRedirectOccurrencesWithFacts(command, cwd, home, nil)
-}
-
 // SafeShellRedirectOccurrencesWithFacts uses client source facts when the
 // gateway cannot inspect a copy source in the user home.
 func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[string]string) []RedirectOccurrence {
@@ -2240,12 +2226,6 @@ func ArchiveBeforeWrite(command, home string) bool {
 type Links struct {
 	links     shellLinks
 	protected protectedFiles
-}
-
-// CommandLinks reads the links that the shell command of a tool call
-// creates. The command of an apply_patch tool is a patch envelope, not shell.
-func CommandLinks(tool, command, cwd, home string) Links {
-	return CommandLinksWithFacts(tool, command, cwd, home, nil)
 }
 
 // CommandLinksWithFacts uses copy-source link evidence from the user-side hook.

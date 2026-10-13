@@ -658,27 +658,3 @@ func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd,
 		context.handled[int(call.Pos().Offset())] = true
 	}
 }
-
-// LauncherAnalysisUnknown reports a prefix whose child cannot be read from
-// the command text.
-func LauncherAnalysisUnknown(command, cwd, home string) bool {
-	_, unknown := shellAnalysisScripts(command, cwd, home)
-	return unknown
-}
-
-// NestedShellDynamicWrite reports an unresolved redirect in a literal child
-// shell script.
-func NestedShellDynamicWrite(command, cwd, home string) bool {
-	contexts, _ := shellAnalysisScripts(command, cwd, home)
-	if len(contexts) < 2 {
-		return false
-	}
-	for _, context := range contexts[1:] {
-		for _, occurrence := range shellWriteOccurrences(context.file, context.cwd, home) {
-			if !occurrence.Static {
-				return true
-			}
-		}
-	}
-	return false
-}
