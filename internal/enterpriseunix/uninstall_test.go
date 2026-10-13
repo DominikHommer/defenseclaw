@@ -300,6 +300,7 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 			}}
 			failed := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, failed, codePerUserHooks)
+			requireError(t, failed, codeUninstallIncomplete)
 			got := messagesOf(failed.Errors, codePerUserHooks)
 			if !strings.Contains(got, "devin hooks for user alice were not removed: devin teardown: remove hook entries: permission denied") ||
 				!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
@@ -364,9 +365,14 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
 	failed := h.run(Options{Action: ActionUninstall, Purge: true})
 	requireError(t, failed, codeUninstall)
-	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "operation not permitted") ||
-		!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
-		t.Fatalf("the uninstall does not name the policy failure and the rerun: %s", got)
+	// GAP-1519: the stop has its own code, which the package removal keeps
+	// the package files on.
+	requireError(t, failed, codeUninstallIncomplete)
+	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "operation not permitted") {
+		t.Fatalf("the uninstall does not name the policy failure: %s", got)
+	}
+	if got := messagesOf(failed.Errors, codeUninstallIncomplete); !strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
+		t.Fatalf("the uninstall does not name the rerun: %s", got)
 	}
 	hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
 	if !exists(hook) || !exists(h.env.deploymentPath()) {

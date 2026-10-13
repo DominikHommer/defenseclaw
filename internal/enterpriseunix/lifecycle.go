@@ -115,6 +115,12 @@ const (
 	codeRecovered           = "recovered_interrupted_transaction"
 	codeUninstall           = "uninstall_failed"
 	codeUninstallPrecheck   = "uninstall_precheck_refused"
+	// codeUninstallIncomplete: the uninstall stopped before removing the
+	// binaries, because per-user hook registrations or vendor machine policy
+	// still name them, and started the services again. The package removal
+	// (preremove.sh) matches this code exactly and keeps the package files
+	// (GAP-1519).
+	codeUninstallIncomplete = "uninstall_incomplete"
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
@@ -2809,7 +2815,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if policyLeft {
 			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		// Its own code: the package removal must keep the binaries these
+		// registrations call, which an uninstall_failed result does not ask
+		// for (GAP-1519).
+		r.AddError(codeUninstallIncomplete, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
