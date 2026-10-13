@@ -414,7 +414,16 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 		check.running = done
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
-			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify, silent)
+			known := exists
+			if set.groupSIDs != nil {
+				known = func(ctx context.Context, name string) (bool, error) {
+					if sid, ok := set.groupSIDs.sid(name); ok && validSIDString(sid) {
+						return true, nil
+					}
+					return exists(ctx, name)
+				}
+			}
+			warnings := unknownAssignmentGroups(ctx, set.assignments, known, qualify, silent)
 			warnings = append(warnings, unmatchedUserEntries(ctx, set.assignments, unmatchedUser)...)
 			cancel()
 			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
@@ -521,7 +530,7 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 	for i, assignment := range assignments {
 		for _, group := range assignment.Match.Groups {
 			group = strings.TrimSpace(group)
-			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") && (platform != "windows" || !validSIDString(group)) ||
+			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") ||
 				strings.Trim(group, "0123456789") == "" || assignmentWildcard(group) {
 				// staticGroupWarnings names these.
 				continue
