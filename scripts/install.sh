@@ -1952,24 +1952,34 @@ check_rollback_data() {
     done < <("${python}" -I -c "${ROLLBACK_DB_CHECK_PY}" "${PREVIOUS}"/data/*.db 2>>"${LOG}" || true)
 }
 
+# move_audit_store FROM TO: move an SQLite store with its -wal, -shm and
+# -journal as one unit. A move that fails (or would replace a file) puts back
+# what moved and returns 1, so a store is never separated from its WAL (SQLite
+# would drop the WAL's transactions; GAP-1397, rel-1-0-2:GAP-0491).
+move_audit_store() {
+    local from=$1 to=$2 suffix moved_suffixes=()
+    for suffix in "" -wal -shm -journal; do
+        [[ -e "${from}${suffix}" ]] || continue
+        if [[ ! -e "${to}${suffix}" ]] && mv "${from}${suffix}" "${to}${suffix}"; then
+            moved_suffixes=("${suffix}" ${moved_suffixes[@]+"${moved_suffixes[@]}"})
+            continue
+        fi
+        for suffix in ${moved_suffixes[@]+"${moved_suffixes[@]}"}; do
+            mv "${to}${suffix}" "${from}${suffix}" || warn "Could not move ${to}${suffix} back to ${from}${suffix}"
+        done
+        return 1
+    done
+}
+
 # quarantine_rolled_back_audit: after the swap, move the damaged audit store
 # aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
 # time>), so the restored release starts on a new one.
 quarantine_rolled_back_audit() {
-    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix back
+    local db="${DEFENSECLAW_HOME}/audit.db" moved
     [[ -f "${db}" ]] || return 0
     moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
     [[ ! -e "${moved}" ]] || moved="${moved}-$$"
-    # GAP-1397: a move that fails puts back what moved, so the store is never
-    # separated from its WAL (SQLite would drop the WAL's transactions).
-    for suffix in "" -wal -shm -journal; do
-        [[ -e "${db}${suffix}" ]] || continue
-        mv "${db}${suffix}" "${moved}${suffix}" && continue
-        for back in "" -wal -shm -journal; do
-            if [[ -e "${moved}${back}" && ! -e "${db}${back}" ]]; then mv "${moved}${back}" "${db}${back}" || true; fi
-        done
-        return 1
-    done
+    move_audit_store "${db}" "${moved}" || return 1
     QUARANTINED="${moved}"
     warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
 }
@@ -1978,7 +1988,7 @@ quarantine_rolled_back_audit() {
 # (GAP-1388). The restored 0.x gateway is not running, and the connector
 # registrations of this install were removed for it: agents would be unguarded.
 undo_rollback() {
-    local left="${current}" undone=0 kept suffix fresh
+    local left="${current}" undone=0 kept fresh audit="${PREVIOUS}/data/audit.db"
     warn "$1, so the rollback is being undone"
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
     # The same swap the other way: previous/ holds the install just left.
@@ -1996,18 +2006,19 @@ undo_rollback() {
     kept="${PREVIOUS}/data/$(basename "${QUARANTINED:-none}")"
     if [[ -n "${QUARANTINED}" && -f "${kept}" ]]; then
         # GAP-1398: the failed start of ${back_to} made a new, empty audit.db
-        # here, which a later rollback then used without a word. The saved
-        # store goes back, so that rollback checks it again.
-        if [[ -e "${PREVIOUS}/data/audit.db" ]]; then
-            fresh="${PREVIOUS}/data/audit.db.failed-start-$(date -u +%Y%m%dT%H%M%SZ)"
-            for suffix in "" -wal -shm -journal; do
-                [[ ! -e "${PREVIOUS}/data/audit.db${suffix}" ]] || mv "${PREVIOUS}/data/audit.db${suffix}" "${fresh}${suffix}" || true
-            done
+        # here, which a later rollback then used without a word. It goes
+        # aside, and the saved store goes back with its WAL (each as one unit,
+        # rel-1-0-2:GAP-0492), so that rollback checks it again.
+        if [[ -e "${audit}" ]]; then
+            fresh="${audit}.failed-start-$(date -u +%Y%m%dT%H%M%SZ)"
+            [[ ! -e "${fresh}" ]] || fresh="${fresh}-$$"
+            move_audit_store "${audit}" "${fresh}" || warn "Could not move aside the new audit store the failed start of ${back_to} made"
         fi
-        if [[ ! -e "${PREVIOUS}/data/audit.db" ]]; then
-            for suffix in "" -wal -shm -journal; do
-                [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
-            done
+        if [[ ! -e "${audit}" ]]; then
+            move_audit_store "${kept}" "${audit}" || warn "Could not put back the saved ${back_to} audit store"
+        fi
+        if [[ -e "${kept}" ]]; then
+            warn "The saved ${back_to} audit store is still ${kept}; before 'defenseclaw rollback' again, move it and its -wal and -shm files to ${audit}"
         fi
     fi
     if start_gateway; then
