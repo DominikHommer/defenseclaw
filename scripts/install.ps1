@@ -62,6 +62,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# -Local "" (an empty value) binds like no -Local at all (GAP-1336).
+$LocalGiven = [bool](Get-Variable -Name PSBoundParameters -Scope 1 -ValueOnly -ErrorAction SilentlyContinue |
+    Where-Object { $_.ContainsKey("Local") })
 try {
     [Net.ServicePointManager]::SecurityProtocol =
         [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -1958,6 +1961,7 @@ function Invoke-Install {
         if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
             # -Name=value is the same option as -Name value (GAP-0361).
             Set-Variable -Name $Matches[1] -Value $Matches[2]
+            if ($Matches[1] -eq "Local") { $LocalGiven = $true }
         } elseif ($RunByUpgrade) {
             Write-Warn "Ignoring unknown option: $argument"
         } else {
@@ -1974,6 +1978,7 @@ function Invoke-Install {
     $TargetVersion = $Version -replace '^v', ''
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
+    if ($LocalGiven -and -not $Local.Trim()) { Stop-Usage "-Local needs the folder that holds the release assets" }
     if ($Local) {
         if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Stop-Usage "-Local: directory not found: $Local" }
         $LocalDir = (Resolve-Path -LiteralPath $Local).ProviderPath

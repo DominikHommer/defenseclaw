@@ -237,7 +237,8 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
             TARGET_VERSION="${2#v}"; shift ;;
         --local)
-            [[ $# -ge 2 ]] || usage_error "--local needs a directory"
+            # An empty --local= ran from the current folder (GAP-1336).
+            [[ $# -ge 2 && -n "$2" ]] || usage_error "--local needs a directory"
             LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || usage_error "--local: directory not found: $2"
             shift ;;
         --rollback) ROLLBACK=true ;;

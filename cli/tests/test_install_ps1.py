@@ -912,3 +912,30 @@ def test_an_unreadable_file_is_named_once_without_the_raw_hash_error(tmp_path: P
     out = completed.stdout + completed.stderr
     assert f"caught: Could not read {missing}; restore read access to it, then try again" in out
     assert "Hash" not in out and "CategoryInfo" not in out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("arguments", [["-Local="], ["-Local", ""]])
+def test_an_empty_local_stops_with_exit_2(tmp_path: Path, arguments: list[str]) -> None:
+    # #1096/GAP-1336: an empty -Local was taken as no -Local, so the install
+    # went online instead of using the assets folder that was meant.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert "-Local needs the folder that holds the release assets" in completed.stdout + completed.stderr
+    assert not (tmp_path / "home").exists()

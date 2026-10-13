@@ -1859,3 +1859,10 @@ def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_bac
     assert "comes back if you roll forward" not in text
     assert "'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in text
     assert "keep_rolled_back_data" in text[text.index("finish_swap() {") :][:600]
+
+
+def test_an_empty_local_value_is_a_usage_error(tmp_path: Path) -> None:
+    # #1096/GAP-1336: an empty --local= ran with the current folder as the assets.
+    proc = _run([str(_stamped(tmp_path)), "--local="], tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "--local needs a directory; nothing was changed" in proc.stderr
