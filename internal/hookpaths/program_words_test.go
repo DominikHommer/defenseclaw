@@ -16,11 +16,13 @@ func TestUnresolvedProgramWordProof(t *testing.T) {
 	for _, command := range []string{
 		`P=ln; $P -s ~/.ssh/authorized_keys next.txt && echo ok >> next.txt`,
 		`P=ln; "$P" -s ~/.ssh/authorized_keys next.txt && echo ok >> next.txt`,
-		`$(printf ln) -s ~/.ssh/authorized_keys next.txt && echo ok >> next.txt`,
 	} {
-		if !CommandLinksWithFacts("Bash", command, cwd, home, nil).OpaqueTarget(linked) {
-			t.Errorf("unresolved program has no later-write scope: %q", command)
+		if target, ok := CommandLinksWithFacts("Bash", command, cwd, home, nil).Target(linked); !ok || target != filepath.Join(home, ".ssh", "authorized_keys") {
+			t.Errorf("known program link target = %q, known = %v", target, ok)
 		}
+	}
+	if !CommandLinksWithFacts("Bash", `$(printf ln) -s ~/.ssh/authorized_keys next.txt && echo ok >> next.txt`, cwd, home, nil).OpaqueTarget(linked) {
+		t.Error("unresolved program has no later-write scope")
 	}
 	paths, unknown := LiteralWriteAnalysis(`P=python3; "$P" -c 'open("disklink","a").write("ok")'`, cwd, home)
 	if unknown || !slices.Contains(paths, filepath.Join(cwd, "disklink")) {

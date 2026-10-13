@@ -106,10 +106,11 @@ var literalWriterRules = map[string][]literalWriterRule{
 
 var (
 	literalCallName          = regexp.MustCompile(`\b[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*\s*\(`)
-	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib|builtins)\s+as\s+([A-Za-z_]\w*)`)
+	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib|builtins|subprocess)\s+as\s+([A-Za-z_]\w*)`)
 	literalFromImport        = regexp.MustCompile(`\bfrom\s+(os|io|shutil|pathlib|builtins)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?`)
 	literalPythonBinding     = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b`)
 	literalNodeRequire       = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?fs(?:/promises)?['"]\s*\)`)
+	literalNodeProcess       = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?child_process['"]\s*\)`)
 	literalNodeBinding       = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeDestructure   = regexp.MustCompile(`\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeNamedImport   = regexp.MustCompile(`\bimport\s*\{([^}]+)\}\s*from\s*['"](?:node:)?fs(?:/promises)?['"]`)
@@ -120,6 +121,19 @@ var (
 	literalPerlOpen2         = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)([^'"]+)['"]`)
 	literalPerlCopyUse       = regexp.MustCompile(`\buse\s+File::Copy(?:\s+qw\(([^)]*)\))?`)
 )
+
+type literalShellRunnerRule struct {
+	callee string
+	arg    int
+	flag   string
+}
+
+var literalShellRunnerRules = map[string][]literalShellRunnerRule{
+	"python": {{"os.system", 0, ""}, {"subprocess.run", 0, "shell=True"}, {"subprocess.call", 0, "shell=True"}, {"subprocess.check_call", 0, "shell=True"}, {"subprocess.check_output", 0, "shell=True"}},
+	"node":   {{"child_process.exec", 0, ""}, {"child_process.execSync", 0, ""}},
+	"perl":   {{"system", 0, ""}},
+	"awk":    {{"system", 0, ""}},
+}
 
 func literalLanguage(program string) string {
 	switch {
@@ -165,6 +179,7 @@ func literalWriterBindings(language, code string) (string, map[string]string) {
 			}
 			return "fs"
 		})
+		code = literalNodeProcess.ReplaceAllString(code, "child_process")
 		for _, match := range literalNodeBinding.FindAllStringSubmatch(code, -1) {
 			aliases[match[1]] = match[2]
 		}
@@ -340,6 +355,36 @@ func literalInterpreterWrites(language, code string) ([]string, bool) {
 					continue
 				}
 				unknown = true
+			}
+		}
+		for _, rule := range literalShellRunnerRules[language] {
+			if name != rule.callee {
+				continue
+			}
+			if rule.flag != "" {
+				found := false
+				for _, arg := range args[1:] {
+					if strings.ReplaceAll(arg, " ", "") == rule.flag {
+						found = true
+					}
+				}
+				if !found {
+					continue
+				}
+			}
+			if rule.arg >= len(args) {
+				continue
+			}
+			script, ok := literalString(args[rule.arg])
+			if !ok {
+				unknown = true
+				continue
+			}
+			writes, parsed, dynamic := ShellWriteOperands(script, ".", "")
+			paths = append(paths, writes...)
+			unknown = unknown || !parsed || dynamic
+			for _, operand := range ShellExtraWriteOperands(script, ".", "") {
+				paths = append(paths, operand.Path)
 			}
 		}
 		if language == "python" && name == "pathlib.Path" {

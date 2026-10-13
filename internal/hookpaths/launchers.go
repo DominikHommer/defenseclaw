@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"bytes"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -552,8 +553,13 @@ func resolveShellString(result *launcherResult) {
 
 func resolveFindCommand(result *launcherResult) {
 	var searchPaths []string
+	namePattern := ""
 	for i := 1; i < len(result.words); i++ {
 		switch result.words[i] {
+		case "-name", "-iname":
+			if i+1 < len(result.words) && result.static[i+1] {
+				namePattern = result.words[i+1]
+			}
 		case "-exec", "-execdir", "-ok", "-okdir":
 			start := i + 1
 			for i = start; i < len(result.words); i++ {
@@ -570,6 +576,16 @@ func resolveFindCommand(result *launcherResult) {
 				return
 			}
 			result.words, result.static = result.words[start:i], result.static[start:i]
+			if len(searchPaths) == 1 && namePattern != "" {
+				searchPath := searchPaths[0]
+				searchPaths = nil
+				pattern := OperandPath(filepath.Join(searchPath, namePattern), result.cwd)
+				if matches, err := filepath.Glob(pattern); err == nil && len(matches) == 1 {
+					if relative, err := filepath.Rel(result.cwd, matches[0]); err == nil {
+						searchPaths = []string{relative}
+					}
+				}
+			}
 			for j, word := range result.words {
 				if !strings.Contains(word, "{}") {
 					continue
@@ -612,7 +628,20 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			queue[i].handled = map[int]bool{}
 		}
 		context := queue[i]
+		functions := map[string]*syntax.FuncDecl{}
 		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if function, ok := node.(*syntax.FuncDecl); ok {
+				if function.Name != nil {
+					functions[function.Name.Value] = function
+				}
+				return false
+			}
+			return true
+		})
+		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if _, declared := node.(*syntax.FuncDecl); declared {
+				return false
+			}
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
 				appendXargsInputScript(&queue, pipe, context, home)
 			}
@@ -629,6 +658,19 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 				}
 			}
 			if !static[0] {
+				return true
+			}
+			if function := functions[words[0]]; function != nil {
+				if source, ok := shellFunctionSource(function, words[1:], static[1:]); ok {
+					if inner, parsed := parseShell(source); parsed {
+						queue = append(queue, shellScriptContext{file: inner, cwd: context.cwd, source: source})
+						context.handled[int(call.Pos().Offset())] = true
+					} else {
+						unknown = true
+					}
+				} else {
+					unknown = true
+				}
 				return true
 			}
 			result := resolveLauncherWords(words, static, context.cwd)
@@ -648,6 +690,78 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 		})
 	}
 	return queue, unknown
+}
+
+func shellFunctionSource(function *syntax.FuncDecl, args []string, static []bool) (string, bool) {
+	if function == nil || function.Body == nil || !allStatic(static) {
+		return "", false
+	}
+	for _, arg := range args {
+		if strings.ContainsAny(arg, "*?[]\x00\r\n \t") {
+			return "", false
+		}
+	}
+	var rendered bytes.Buffer
+	if err := syntax.NewPrinter().Print(&rendered, function.Body); err != nil {
+		return "", false
+	}
+	file, ok := parseShell(rendered.String())
+	if !ok {
+		return "", false
+	}
+	valid := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		word, ok := node.(*syntax.Word)
+		if !ok {
+			return true
+		}
+		var replace func([]syntax.WordPart, bool) []syntax.WordPart
+		replace = func(parts []syntax.WordPart, quoted bool) []syntax.WordPart {
+			for i, part := range parts {
+				switch part := part.(type) {
+				case *syntax.DblQuoted:
+					part.Parts = replace(part.Parts, true)
+				case *syntax.ParamExp:
+					if part.Param == nil || part.Exp != nil || part.Index != nil {
+						continue
+					}
+					name := part.Param.Value
+					index := 0
+					switch {
+					case name == "@" || name == "*":
+						if len(args) != 1 {
+							valid = false
+							continue
+						}
+					case len(name) == 1 && name[0] >= '1' && name[0] <= '9':
+						index = int(name[0] - '1')
+					default:
+						continue
+					}
+					value := ""
+					if index < len(args) {
+						value = args[index]
+					}
+					if quoted {
+						parts[i] = &syntax.Lit{Value: value}
+					} else {
+						parts[i] = &syntax.SglQuoted{Value: value}
+					}
+				}
+			}
+			return parts
+		}
+		word.Parts = replace(word.Parts, false)
+		return true
+	})
+	if !valid {
+		return "", false
+	}
+	rendered.Reset()
+	if err := syntax.NewPrinter().Print(&rendered, file); err != nil {
+		return "", false
+	}
+	return rendered.String(), true
 }
 
 func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd, context shellScriptContext, home string) {

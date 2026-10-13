@@ -219,6 +219,57 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 	return "", shellValueUnknown
 }
 
+func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars shellVariables, poison shellVariablePoison) (string, bool) {
+	if value, ok := staticShellWordWithVars(word, home, vars, poison); ok {
+		return value, true
+	}
+	if word == nil {
+		return "", false
+	}
+	known := vars.clone()
+	if filepath.IsAbs(cwd) {
+		known["PWD"] = cwd
+	}
+	var value strings.Builder
+	var appendParts func([]syntax.WordPart) bool
+	appendParts = func(parts []syntax.WordPart) bool {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				if strings.ContainsAny(part.Value, "*?[]") {
+					return false
+				}
+				value.WriteString(part.Value)
+			case *syntax.SglQuoted:
+				value.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				if !appendParts(part.Parts) {
+					return false
+				}
+			case *syntax.ParamExp:
+				piece, ok := staticShellWordWithVars(&syntax.Word{Parts: []syntax.WordPart{part}}, home, known, poison)
+				if !ok {
+					return false
+				}
+				value.WriteString(piece)
+			case *syntax.CmdSubst:
+				piece, kind := shellKnownAssignmentValue(&syntax.Word{Parts: []syntax.WordPart{part}}, home, cwd, known)
+				if kind != shellValueExact || strings.ContainsAny(piece, "*?[]\x00\r\n") {
+					return false
+				}
+				value.WriteString(piece)
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	if !appendParts(word.Parts) || strings.ContainsAny(value.String(), "\x00\r\n") {
+		return "", false
+	}
+	return value.String(), true
+}
+
 func shellSimpleCallWords(stmt *syntax.Stmt, home string, vars shellVariables) ([]string, bool) {
 	if stmt == nil {
 		return nil, false

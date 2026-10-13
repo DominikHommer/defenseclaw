@@ -108,6 +108,9 @@ func shellWriteOccurrences(file *syntax.File, cwd, home string) []shellWriteOccu
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, declared := node.(*syntax.FuncDecl); declared {
+			return false
+		}
 		redirect, ok := node.(*syntax.Redirect)
 		if !ok || redirect.Word == nil {
 			return true
@@ -121,7 +124,7 @@ func shellWriteOccurrences(file *syntax.File, cwd, home string) []shellWriteOccu
 		if redirect.Word != nil {
 			offset = int(redirect.Word.Pos().Offset())
 		}
-		name, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison)
+		name, static := shellStaticWordWithKnownCalls(redirect.Word, home, cwd, states.varsFor(redirect.Word), poison)
 		if !static || name == "" {
 			occurrences = append(occurrences, shellWriteOccurrence{Offset: offset, Static: false})
 			return true
@@ -150,6 +153,9 @@ func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
 		poison := shellVariablePoisonForFile(context.file, home)
 		states := shellWordStates(context.file, home, poison)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if _, declared := node.(*syntax.FuncDecl); declared {
+				return false
+			}
 			call, ok := node.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
 				return true
@@ -191,6 +197,9 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 		states := shellWordStates(context.file, home, poison)
 		candidates := shellVariableCandidates(context.file, home, context.cwd)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if _, declared := node.(*syntax.FuncDecl); declared {
+				return false
+			}
 			redirect, ok := node.(*syntax.Redirect)
 			if !ok || redirect.Word == nil {
 				return true
@@ -200,7 +209,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			default:
 				return true
 			}
-			if _, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison); static {
+			if _, static := shellStaticWordWithKnownCalls(redirect.Word, home, context.cwd, states.varsFor(redirect.Word), poison); static {
 				return true
 			}
 			if paths, glob := shellLiteralGlobCandidates(redirect.Word, context.cwd, home, context.file, redirect, links); glob {
@@ -272,13 +281,25 @@ func shellCallExtraWriteOperands(
 	words := make([]string, len(call.Args))
 	staticWords := make([]bool, len(call.Args))
 	for i, arg := range call.Args {
-		words[i], staticWords[i] = staticShellWordWithVars(arg, home, vars, poison)
+		words[i], staticWords[i] = shellStaticWordWithKnownCalls(arg, home, cwd, vars, poison)
 		if !staticWords[i] {
 			words[i] = launcherAssignmentPrefix(arg)
 		}
 	}
+	if !staticWords[0] && len(call.Args[0].Parts) == 1 {
+		if param, ok := call.Args[0].Parts[0].(*syntax.ParamExp); ok && param.Param != nil && param.Exp == nil {
+			if value, known := vars[param.Param.Value]; known && !poison.poisoned(param.Param.Value) &&
+				!strings.ContainsAny(value, "*?[]\x00\r\n") {
+				fields := strings.Fields(value)
+				if len(fields) > 0 {
+					words = append(fields, words[1:]...)
+					staticWords = append(makeStatic(len(fields)), staticWords[1:]...)
+				}
+			}
+		}
+	}
 	resolved := resolveLauncherWords(words, staticWords, cwd)
-	if !resolved.ok || len(resolved.words) == 0 || !allStatic(resolved.static) {
+	if !resolved.ok || len(resolved.words) == 0 || !resolved.static[0] {
 		return nil
 	}
 	cmdCWD, programWords := resolved.cwd, resolved.words
@@ -289,6 +310,23 @@ func shellCallExtraWriteOperands(
 		operands = append(operands, ExtraWriteOperand{
 			Path: path, OwnCopy: program == "cp" || program == "gcp" || program == "rsync",
 		})
+	}
+	if program == "tee" && len(programWords) == len(call.Args) {
+		for i, word := range programWords[1:] {
+			if resolved.static[i+1] || !shellHasLiteralGlob(call.Args[i+1]) || strings.HasPrefix(word, "-") {
+				continue
+			}
+			if pattern := call.Args[i+1].Lit(); pattern != "" {
+				if matches, err := filepath.Glob(OperandPath(pattern, cmdCWD)); err == nil && len(matches) <= 256 {
+					for _, match := range matches {
+						add(match)
+					}
+				}
+			}
+		}
+	}
+	if !allStatic(resolved.static) {
+		return operands
 	}
 	switch program {
 	case "ln", "gln":
@@ -598,6 +636,9 @@ func shellExpandedCallWords(file *syntax.File, home string) map[int]string {
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, declared := node.(*syntax.FuncDecl); declared {
+			return false
+		}
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
@@ -696,8 +737,13 @@ func shellStraightStmt(stmt *syntax.Stmt) bool {
 
 func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoison {
 	allowed, allowedUnsets := shellAllowedStraightMutations(file, home)
+	states := shellWordStates(file, home, shellVariablePoison{})
+	functions := shellFunctionMutations(file, home)
 	poison := shellVariablePoison{}
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, declared := node.(*syntax.FuncDecl); declared {
+			return false
+		}
 		switch node := node.(type) {
 		case *syntax.Assign:
 			name := shellAssignName(node)
@@ -720,9 +766,16 @@ func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoi
 			if allowedUnsets[node] || len(node.Args) == 0 {
 				return true
 			}
-			program, static := shellStaticProgram(node, home)
+			program, static := shellKnownProgram(node, home, states.varsFor(node.Args[0]))
 			if !static {
 				poison.all = true
+				return true
+			}
+			if mutation, exists := functions[program]; exists {
+				poison.all = poison.all || mutation.all
+				for name := range mutation.names {
+					poison.add(name)
+				}
 				return true
 			}
 			shellPoisonCallMutation(node, programBase(program), home, &poison)
@@ -730,6 +783,39 @@ func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoi
 		return true
 	})
 	return poison
+}
+
+func shellFunctionMutations(file *syntax.File, home string) map[string]shellVariablePoison {
+	functions := map[string]shellVariablePoison{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		function, ok := node.(*syntax.FuncDecl)
+		if !ok {
+			return true
+		}
+		if function.Name == nil || function.Body == nil {
+			return false
+		}
+		mutation := shellVariablePoison{}
+		syntax.Walk(function.Body, func(inner syntax.Node) bool {
+			switch inner := inner.(type) {
+			case *syntax.Assign:
+				mutation.add(shellAssignName(inner))
+			case *syntax.CallExpr:
+				if len(inner.Args) == 0 {
+					return true
+				}
+				if program, static := StaticWord(inner.Args[0], home); static {
+					shellPoisonCallMutation(inner, programBase(program), home, &mutation)
+				} else {
+					mutation.all = true
+				}
+			}
+			return true
+		})
+		functions[function.Name.Value] = mutation
+		return false
+	})
+	return functions
 }
 
 type shellVariableCandidateSet struct {
@@ -753,8 +839,12 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 		candidates.add("PWD", cwd)
 	}
 	_, allowedUnsets := shellAllowedStraightMutations(file, home)
+	functions := shellFunctionMutations(file, home)
 	states := shellWordStates(file, home, shellVariablePoison{})
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, declared := node.(*syntax.FuncDecl); declared {
+			return false
+		}
 		switch node := node.(type) {
 		case *syntax.Assign:
 			name := shellAssignName(node)
@@ -822,9 +912,16 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 			if len(node.Args) == 0 || allowedUnsets[node] {
 				return true
 			}
-			program, static := shellStaticProgram(node, home)
+			program, static := shellKnownProgram(node, home, states.varsFor(node.Args[0]))
 			if !static {
 				candidates.allUnknown = true
+				return true
+			}
+			if mutation, exists := functions[program]; exists {
+				candidates.allUnknown = candidates.allUnknown || mutation.all
+				for name := range mutation.names {
+					candidates.unknown[name] = true
+				}
 				return true
 			}
 			shellCandidateCallMutation(node, programBase(program), home, states, &candidates)
@@ -1028,11 +1125,30 @@ func shellAssignName(assign *syntax.Assign) string {
 	return assign.Name.Value
 }
 
-func shellStaticProgram(call *syntax.CallExpr, home string) (string, bool) {
+func shellKnownProgram(call *syntax.CallExpr, home string, vars shellVariables) (string, bool) {
 	if call == nil || len(call.Args) == 0 {
 		return "", false
 	}
-	return StaticWord(call.Args[0], home)
+	if value, ok := staticShellWordWithVars(call.Args[0], home, vars, shellVariablePoison{}); ok {
+		return value, true
+	}
+	word := call.Args[0]
+	if len(word.Parts) != 1 {
+		return "", false
+	}
+	param, ok := word.Parts[0].(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Exp != nil || param.Index != nil {
+		return "", false
+	}
+	value, ok := vars[param.Param.Value]
+	if !ok || strings.ContainsAny(value, "*?[]\x00\r\n") {
+		return "", false
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return "", false
+	}
+	return fields[0], true
 }
 
 func shellUnsetNames(
@@ -1905,6 +2021,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		callCWD := context.cwd
 		expandedWords := shellExpandedCallWords(context.file, home)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if _, declared := node.(*syntax.FuncDecl); declared {
+				return false
+			}
 			call, isCall := node.(*syntax.CallExpr)
 			if !isCall || len(call.Args) == 0 {
 				return true

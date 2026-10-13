@@ -41,6 +41,9 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 		cwd := context.cwd
 		states := shellWordStates(context.file, home, shellVariablePoison{})
 		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if _, declared := node.(*syntax.FuncDecl); declared {
+				return false
+			}
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
 				cmdCWD, language, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
 				if ok {
@@ -127,12 +130,20 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 			case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
 				for _, arg := range programWords[1:] {
 					if strings.Contains(arg, "{") {
+						paths, dynamic := literalInterpreterWrites("awk", arg)
+						unknown = unknown || dynamic
+						for _, name := range paths {
+							add(name, cmdCWD)
+						}
 						for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
 							add(match[1], cmdCWD)
 						}
 					}
 				}
 			case program == "sed" || program == "gsed":
+				for _, name := range sedWriteFiles(programWords) {
+					add(name, cmdCWD)
+				}
 				for _, name := range sedInPlaceFiles(programWords) {
 					if sedFollowsInPlaceLinks(programWords) || sedParentProtected(name, cmdCWD, home) {
 						add(name, cmdCWD)
@@ -176,7 +187,7 @@ func literalProgramWordsWithVars(call *syntax.CallExpr, cwd, home string, vars s
 	words := make([]string, len(call.Args))
 	staticWords := make([]bool, len(call.Args))
 	for i, arg := range call.Args {
-		words[i], staticWords[i] = staticShellWordWithVars(arg, home, vars, shellVariablePoison{})
+		words[i], staticWords[i] = shellStaticWordWithKnownCalls(arg, home, cwd, vars, shellVariablePoison{})
 		if !staticWords[i] {
 			words[i] = launcherAssignmentPrefix(arg)
 		}
@@ -410,6 +421,65 @@ func sedInPlaceFiles(words []string) []string {
 		return nil
 	}
 	return files
+}
+
+func sedWriteFiles(words []string) []string {
+	var scripts []string
+	options := true
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case options && (word == "-e" || word == "--expression"):
+			i++
+			if i < len(words) {
+				scripts = append(scripts, words[i])
+			}
+		case options && strings.HasPrefix(word, "-e") && len(word) > 2:
+			scripts = append(scripts, word[2:])
+		case options && strings.HasPrefix(word, "--expression="):
+			scripts = append(scripts, strings.TrimPrefix(word, "--expression="))
+		case options && word == "--":
+			options = false
+		case options && strings.HasPrefix(word, "-"):
+			continue
+		case len(scripts) == 0:
+			scripts = append(scripts, word)
+		}
+	}
+	var paths []string
+	for _, script := range scripts {
+		for _, segment := range strings.FieldsFunc(script, func(r rune) bool { return r == ';' || r == '\n' }) {
+			segment = strings.TrimSpace(segment)
+			if strings.HasPrefix(segment, "w ") {
+				if name := strings.TrimSpace(segment[2:]); name != "" {
+					paths = append(paths, name)
+				}
+				continue
+			}
+			if len(segment) < 4 || segment[0] != 's' {
+				continue
+			}
+			delim := segment[1]
+			count := 0
+			for i := 2; i < len(segment); i++ {
+				if segment[i] == '\\' {
+					i++
+					continue
+				}
+				if segment[i] != delim {
+					continue
+				}
+				count++
+				if count == 2 {
+					if rest := strings.TrimSpace(segment[i+1:]); strings.HasPrefix(rest, "w ") {
+						paths = append(paths, strings.TrimSpace(rest[2:]))
+					}
+					break
+				}
+			}
+		}
+	}
+	return paths
 }
 
 func literalWriteMode(mode string) bool {
