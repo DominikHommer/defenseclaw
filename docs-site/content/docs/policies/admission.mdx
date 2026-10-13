@@ -607,9 +607,10 @@ allowed for C, denied for any connector, allowed for any connector, then the
 normal guardrail checks. An allow skips the rule, pattern and judge checks, but
 a tool that writes files still goes through CodeGuard.
 
-On managed Windows, the Claude Code and Codex hooks receive the native tool
-names `Bash` for shell calls and `Read` for file reads. Their skill hooks also
-receive `Skill`. Write these exact names, including capitals, in
+On managed Windows, Claude Code reports `Bash` for shell calls, `Read` for
+file reads, and `Skill` for skill calls. Codex reports `Bash` for shell
+commands and `apply_patch` for file edits. Codex has no `Read` or `Skill` tool
+name. Write these exact names, including capitals, in
 `asset_policy.tool.denied`; a lower-case spelling does not match.
 
 ## Change the lists

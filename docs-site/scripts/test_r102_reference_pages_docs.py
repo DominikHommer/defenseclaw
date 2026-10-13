@@ -48,9 +48,12 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         self.assertIn("use your own account paths", text)
 
     def test_gap_0297_managed_windows_tool_names_are_exact(self):
-        text = page("policies/admission.mdx")
-        self.assertIn("names `Bash` for shell calls and `Read` for file reads", text)
-        self.assertIn("receive `Skill`. Write these exact names", text)
+        text = " ".join(page("policies/admission.mdx").split())
+        self.assertIn("Claude Code reports `Bash` for shell calls, `Read` for file reads, and `Skill` for skill calls", text)
+        self.assertIn("Codex reports `Bash` for shell commands and `apply_patch` for file edits", text)
+        self.assertIn("Codex has no `Read` or `Skill` tool name", text)
+        self.assertIn("Write these exact names, including capitals", text)
+        self.assertNotIn("the Claude Code and Codex hooks receive the native tool names", text)
 
     def test_gap_0300_mcp_scan_verdict_survives_runtime_toggle(self):
         text = page("policies/admission.mdx")
