@@ -115,7 +115,9 @@ bundle and whenever you rotate keys. It must sit in a folder only
 administrators can change. `BUNDLE=` may come from any local folder: Setup
 copies it into the bundle store under `C:\ProgramData\Cisco\DefenseClaw\etc\bundles\`
 and verifies that copy. `BUNDLE=` is not combined with `CONFIG=` (the bundle
-carries the config; exit code 1639). The ordinary ensure then installs the
+carries the config; exit code 1639), and neither is `TRUSTANCHORS=`: once
+the anchors are installed the computer takes its policy only from signed
+bundles. The ordinary ensure then installs the
 bundle config, with the same transaction and rollback as `CONFIG=`. The bundle
 becomes current only when the running gateway reports the effective policy of
 the installed config with no reload error; otherwise Setup installs the last
@@ -193,7 +195,12 @@ as `failed` with `interrupted`.
   bundle config before the gateway confirms it. Until then the gateway keeps
   enforcing its previous policy generation; a bundle that is not confirmed is
   replaced by the last good config in the same run (or, for the first
-  bundle, by the config installed before it). Windows has no bundle inbox:
+  bundle, by the config installed before it). A run that stops after the
+  commit and before the confirm (an MDM timeout, a reboot) is settled by the
+  next bundle run: the bundle becomes current when the gateway enforces its
+  config, and otherwise its receipt fails `not_confirmed` while its config
+  stays installed until the new bundle of that run (or a later one) replaces
+  it. Windows has no bundle inbox:
   deliver each bundle with Setup or `bundle apply --bundle`.
 - **Windows: credentials.** The wrapper stores `-SecretName` after the
   ensure, so a bundle that requires a credential the computer does not hold
