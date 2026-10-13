@@ -57,9 +57,19 @@ checks the installed config's SHA-256.
 
 | Format | Exit | Output |
 | --- | --- | --- |
-| `exit` (default) | 0 detected, 1 not | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR |
-| `value` | always 0 | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`) |
+| `exit` (default) | 0 detected, 1 not, 75 busy | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR; a held lifecycle lock exits 75 for retry |
+| `value` | always 0 | The installed version, or one of the states below |
 | `jamf` | always 0 | The same values inside `<result>...</result>` |
+
+| Value state | Meaning for the MDM |
+| --- | --- |
+| `<version>` | The assigned deployment was detected. |
+| `not-installed` | No trusted installed deployment was found. |
+| `outdated` | The installed version is below `--min-version`. |
+| `unhealthy` | The deployment failed a required health check. |
+| `unknown` | Detection could not assess the host; run the script as root. |
+| `tetragon-not-ready:<check>` | The host is not ready for the requested Tetragon mode. |
+| `busy` | A lifecycle run holds the lock. Retry later; this is neither healthy nor unhealthy. In `exit` format the script exits 75. |
 
 In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.
