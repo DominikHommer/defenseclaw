@@ -53,14 +53,17 @@ var (
 	bundleSecretPresent  = managedBundleSecretPresent
 	bundleSecureClient   = func() bool { return secureClientHost() }
 	bundleDefaultAnchors = func() (string, error) { return enterprisebundle.AnchorsPath(runtime.GOOS) }
+	// bundleAnchorTrust is the anchor file trust check on a device.
+	bundleAnchorTrust = enterprisebundle.TrustCheck(enterprisebundle.TrustAnchorFile)
 )
 
-const enterpriseBundleLong = `Sign and verify signed policy bundles for the standalone enterprise
-profile. A bundle carries config.yaml and the policy files it names, a
-manifest with their hashes and the effective policy digest per platform, and
-a detached signature. Devices trust the keys in their MDM-installed anchor
-file (<etc>/trust/bundle-anchors.json). Both verbs run offline and change
-nothing; Secure Client computers do not have them.`
+const enterpriseBundleLong = `Sign, verify and report signed policy bundles for the standalone
+enterprise profile. A bundle carries config.yaml and the policy files it
+names, a manifest with their hashes and the effective policy digest per
+platform, and a detached signature. Devices trust the keys in their
+MDM-installed anchor file (<etc>/trust/bundle-anchors.json). sign and verify
+run offline; status reports the bundle state of a managed device. None of
+them changes anything; Secure Client computers do not have them.`
 
 func init() {
 	enterpriseCmd.AddCommand(newEnterpriseBundleCommand())
@@ -73,7 +76,7 @@ func init() {
 func newEnterpriseBundleCommand() *cobra.Command {
 	group := &cobra.Command{
 		Use:          "bundle",
-		Short:        "Sign and verify signed policy bundles (standalone enterprise)",
+		Short:        "Sign, verify and report signed policy bundles (standalone enterprise)",
 		Long:         enterpriseBundleLong,
 		Annotations:  map[string]string{secureClientAbsentAnnotation: "true"},
 		SilenceUsage: true,
@@ -81,7 +84,7 @@ func newEnterpriseBundleCommand() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
-	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand())
+	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand(), newEnterpriseBundleStatusCommand())
 	return group
 }
 
@@ -478,7 +481,7 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 		return bundleUsage("--bundle is required")
 	}
 	device := bundleManagedDevice()
-	path, trust := opts.anchors, enterprisebundle.TrustCheck(enterprisebundle.TrustAnchorFile)
+	path, trust := opts.anchors, bundleAnchorTrust
 	res.AnchorTrust = "checked"
 	if path == "" {
 		var err error
@@ -507,6 +510,22 @@ func bundleVerify(ctx context.Context, opts *bundleVerifyOptions, res *bundleVer
 	}
 	if device {
 		in.SecretPresent = bundleSecretPresent
+		// The version floor is the confirmed bundle of bundle-state.json. A
+		// standard account cannot read it (apply checks it again as root);
+		// a state that cannot be parsed refuses, so it never lowers the floor.
+		store, err := bundleStore()
+		if err != nil {
+			return err
+		}
+		switch st, err := store.LoadState(); {
+		case err == nil:
+			in.Confirmed = st.Confirmed()
+		case errors.Is(err, fs.ErrPermission):
+			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "floor_unchecked",
+				Message: "the bundle state is readable only by root or an administrator, so only the anchor min_version floor was checked"})
+		default:
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		}
 	}
 	var cleanup func()
 	in.Stage = func(b *enterprisebundle.Bundle) (string, error) {

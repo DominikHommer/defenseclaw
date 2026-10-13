@@ -1,0 +1,72 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"fmt"
+	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
+
+const (
+	codeBundleStateUnreadable = "bundle_state_unreadable"
+	codeBundleInterrupted     = "bundle_interrupted"
+	codeBundleUnconfirmed     = "bundle_unconfirmed"
+)
+
+// bundleStore is the signed policy bundle store of this deployment
+// (<etc>/bundles, state and receipts in the lifecycle directory).
+func (e *Env) bundleStore() *enterprisebundle.Store {
+	s := enterprisebundle.NewStore(e.P(filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName)), e.P(e.Layout.LifecycleDir))
+	s.Now = e.Now
+	return s
+}
+
+// settleBundles runs after recoverInterrupted on every changing run: a
+// bundle a previous run received but did not apply ends as
+// failed(interrupted) and its staging copy goes; the last good bundle keeps
+// enforcing. An applied bundle that was not confirmed is reported; the
+// apply path re-checks and confirms or rolls it back.
+func (l *lifecycle) settleBundles() {
+	report, err := l.env.bundleStore().Settle()
+	if err != nil {
+		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
+		return
+	}
+	if n := len(report.Interrupted); n > 0 {
+		l.result.AddWarning(codeBundleInterrupted, fmt.Sprintf(
+			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
+	}
+	for _, r := range report.Unconfirmed {
+		l.result.AddWarning(codeBundleUnconfirmed, fmt.Sprintf("policy bundle %s version %d was applied but not confirmed", r.BundleID, r.Version))
+	}
+}
+
+// describeBundle fills Result.Bundle from the store; nil when this device
+// never received a bundle or the store cannot be read (status as a
+// standard user).
+func (l *lifecycle) describeBundle() {
+	summary, err := l.env.bundleStore().Summary()
+	if err == nil {
+		l.result.Bundle = summary
+	}
+}
+
+// withBundleFields adds the bundle the lifecycle installed in the recorded
+// config generation to a policy-state record.
+func (e *Env) withBundleFields(record enterprisestatus.PolicyStateRecord) enterprisestatus.PolicyStateRecord {
+	state, err := configwrite.ReadGenerationState(e.P(e.Layout.ConfigPath))
+	if err == nil && state.Generation == record.ConfigGeneration && state.BundleID != "" {
+		record.BundleID, record.BundleVersion = state.BundleID, state.BundleVersion
+	}
+	return record
+}

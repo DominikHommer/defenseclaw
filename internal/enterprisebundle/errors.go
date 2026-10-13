@@ -54,6 +54,17 @@ const (
 	CodeSecretRefMissing Code = "secret_ref_missing"
 	CodeDigestMismatch   Code = "digest_mismatch"
 
+	// Apply and the receipt state machine (spec section 7).
+	CodeApplyFailed    Code = "apply_failed"
+	CodeNotConfirmed   Code = "not_confirmed"
+	CodeInterrupted    Code = "interrupted"
+	CodeLifecycleBusy  Code = "lifecycle_busy"
+	CodeBundleRequired Code = "bundle_required"
+	CodeNotManaged     Code = "not_managed"
+	// CodeStateInvalid: bundle-state.json cannot be read. Nothing is
+	// applied: an unreadable state must not lower the version floor.
+	CodeStateInvalid Code = "state_invalid"
+
 	// CodeNotSupportedSecureClient refuses every bundle verb on a Secure
 	// Client computer before anything is read or written.
 	CodeNotSupportedSecureClient Code = "not_supported_secure_client"

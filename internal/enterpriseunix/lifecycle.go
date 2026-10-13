@@ -319,6 +319,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// deployment either way, so it proceeds.
 		return 0
 	}
+	if l.opts.Action != ActionUninstall {
+		l.settleBundles()
+	}
 	record, err := env.loadDeployment()
 	if err != nil {
 		r.AddError(codeState, err.Error())
