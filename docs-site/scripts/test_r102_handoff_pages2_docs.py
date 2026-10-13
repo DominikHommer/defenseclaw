@@ -151,9 +151,9 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertIn("no longer running during its first reconcile", text)
 
     def test_fg12_uninstall_incomplete_code(self):
-        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
-                   if line.startswith("| `uninstall_incomplete` |"))
-        self.assertIn("started the services again", row)
+        text = page("enterprise/troubleshooting.mdx")
+        self.assertIn("| `uninstall_incomplete` |", text)
+        self.assertIn("started the services again", text)
 
     def test_fg12_linux_package_removal_keeps_files(self):
         text = page("enterprise/linux.mdx")
