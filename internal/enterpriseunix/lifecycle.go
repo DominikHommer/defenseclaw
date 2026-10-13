@@ -2731,7 +2731,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// stops short of removing the deployment puts it back (GAP-1500).
 	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
 	for _, unit := range units {
-		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasActive[unit.Name] = unitStarted(ctx, env.Services, unit)
 		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
 	}
 	for _, unit := range ordered {

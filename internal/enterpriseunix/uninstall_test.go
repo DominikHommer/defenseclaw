@@ -734,3 +734,41 @@ func TestPackageUninstallLeavesNoEmptyPolicyFoldersSoTheReenableWorks(t *testing
 		})
 	}
 }
+
+// spawnScheduledServices reports label loaded but not running, as launchd
+// reports a KeepAlive job between two runs ("spawn scheduled").
+type spawnScheduledServices struct {
+	*fakeServices
+	label string
+}
+
+func (s spawnScheduledServices) Active(ctx context.Context, unit Unit) bool {
+	if unit.Name == s.label {
+		return false
+	}
+	return s.fakeServices.Active(ctx, unit)
+}
+
+func (s spawnScheduledServices) Loaded(_ context.Context, unit Unit) bool {
+	return s.fakeServices.isActive(unit.Name)
+}
+
+// GAP-1520: an uninstall that stops short of removing the deployment puts
+// back the services it stopped (GAP-1500), but on macOS it put back only the
+// jobs that were "running" when it looked: a KeepAlive gateway launchd was
+// about to respawn stayed unloaded. A loaded job is loaded again.
+func TestRefusedUninstallLoadsASpawnScheduledJobAgain(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	if !h.services.isActive(labelGateway) {
+		t.Fatal("the gateway job is not loaded after install")
+	}
+	h.env.Services = spawnScheduledServices{fakeServices: h.services, label: labelGateway}
+	fail := true
+	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	refused := h.run(Options{Action: ActionUninstall})
+	requireError(t, refused, codeUninstallIncomplete)
+	if !h.services.isActive(labelGateway) {
+		t.Fatalf("the refused uninstall left the spawn-scheduled gateway job unloaded; calls: %v", h.services.calls)
+	}
+}
