@@ -93,9 +93,8 @@ func runSessionStop(t *testing.T, cause sessionStopCause, ev sessionStopEvent, s
 // Claude Code, Codex, Devin and Copilot continue when a stop hook blocks, and
 // Cursor submits a stop hook's followup_message as the next prompt. So a
 // standalone outage, or a session the foreign-hook guard blocked, would loop
-// every turn. Stop and session-end events get the connector's neutral allow,
-// logged as fail mode open; tool, prompt and session-start events keep the
-// connector's native block.
+// every turn. Stop and session-end events get the connector's neutral allow;
+// tool, prompt and session-start events keep the connector's native block.
 func TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) {
 	stops := []struct {
 		sessionStopEvent
@@ -137,8 +136,12 @@ func TestManagedSessionStopEventsAllowWhileOtherEventsStayBlocked(t *testing.T) 
 			if r.code != 0 || strings.TrimSpace(r.stdout) != tc.stdout {
 				t.Fatalf("%s: want the neutral allow %q, got code=%d stdout=%q stderr=%q", name, tc.stdout, r.code, r.stdout, r.stderr)
 			}
-			if !strings.Contains(log, `"fail_mode":"open"`) {
-				t.Fatalf("%s: the denial must be logged with the allow it got: %s", name, log)
+			loggedMode := "closed"
+			if cause.foreign {
+				loggedMode = "open"
+			}
+			if !strings.Contains(log, `"fail_mode":"`+loggedMode+`"`) {
+				t.Fatalf("%s: the failure must be logged with its configured mode: %s", name, log)
 			}
 			if cause.foreign && (!strings.Contains(log, `"category":"policy"`) || !strings.Contains(r.stderr, "/repo/.claude/settings.local.json")) {
 				t.Fatalf("%s: the foreign-hook block must stay logged and explained: stderr=%q log=%s", name, r.stderr, log)

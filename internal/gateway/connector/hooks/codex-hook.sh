@@ -125,7 +125,20 @@ case "${BOUND_CONTRACT}:${BOUND_EVENT}" in
   *) fail_binding "registered event is not part of the bound Codex hook contract" ;;
 esac
 
-# Bail early when neither the companion .token file nor the env var
+{{if and (not .Sandbox) (not .SecureClient)}}codex_failed_stop_event() {
+  [ "$BOUND_EVENT" = "Stop" ] || return 1
+}
+
+codex_allow_failed_stop() {
+  local reason="$1" category="$2" already_logged="${3:-0}"
+  if [ "$already_logged" != "1" ]; then
+    defenseclaw_log_hook_failure codex codex-hook "$reason" "$category" "$FAIL_MODE"
+  fi
+  echo "DefenseClaw is not blocking the Stop event because it could not get a gateway verdict: $reason. Prompt and tool calls keep their configured fail mode." >&2
+  exit 0
+}
+
+{{end}}# Bail early when neither the companion .token file nor the env var
 # carries a token: without one the gateway will reject every request
 # with 401, so the historical default is exit-0 (don't brick the
 # agent). The helper preserves that default and additionally lets an
@@ -137,11 +150,17 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  if codex_failed_stop_event; then
+    codex_allow_failed_stop "missing gateway token: ${HOOK_DIR}/{{.TokenFile}} not found" transport
+  fi
   defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi{{end}}
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
-  echo "defenseclaw: codex hook refusing oversized payload" >&2
+{{if and (not .Sandbox) (not .SecureClient)}}  if codex_failed_stop_event; then
+    codex_allow_failed_stop "stdin body exceeded cap" transport 1
+  fi
+{{end}}  echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
@@ -185,7 +204,10 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Sandbox) (not .SecureClient)}}  if codex_failed_stop_event; then
+    codex_allow_failed_stop "$1" transport
+  fi
+{{end}}  defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Codex shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
   case "$PAYLOAD_EVENT" in
@@ -213,7 +235,10 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+{{if and (not .Sandbox) (not .SecureClient)}}  if codex_failed_stop_event; then
+    codex_allow_failed_stop "$reason" response
+  fi
+{{end}}  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
@@ -365,10 +390,10 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if or .Sandbox .SecureClient}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
-
+{{end}}
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
@@ -378,7 +403,10 @@ case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
-
+{{if and (not .Sandbox) (not .SecureClient)}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  echo "$OUTPUT"
+fi
+{{end}}
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2
 # with the reason on stderr (Codex blocks with stderr as the
