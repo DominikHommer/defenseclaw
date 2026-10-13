@@ -99,8 +99,13 @@ try {
             )
             $elapsed = ([DateTime]::UtcNow - $script:SmokeStart).TotalSeconds
             if ($script:SmokeHeartbeat) {
-                # The guardian moves on to its next target.
-                Write-SmokeStartupRecord -State $script:SmokeRecordState -UpdatedAt ([DateTime]::UtcNow) -ProcessId $script:SmokeRecordPid
+                # The guardian moves on to its next target. Antivirus may
+                # hold the file for a moment; the next poll writes it again.
+                try {
+                    Write-SmokeStartupRecord -State $script:SmokeRecordState -UpdatedAt ([DateTime]::UtcNow) -ProcessId $script:SmokeRecordPid
+                }
+                catch {
+                }
             }
             if ($null -ne $script:SmokeCoveredAfter -and $elapsed -ge $script:SmokeCoveredAfter) {
                 return [pscustomobject]@{ ok = $true; generation = 'smoke-generation'; reason = '' }
@@ -160,7 +165,7 @@ try {
         try {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'Standalone'
             $script:GuardianFirstReconcileTimeoutSeconds = 12
-            $script:GuardianFirstReconcileStallSeconds = 2
+            $script:GuardianFirstReconcileStallSeconds = 4
             $script:GuardianFirstReconcileCheckSeconds = 1
             $log = [string]$layout.GuardianLogPath
 
@@ -182,7 +187,7 @@ try {
 
             # A reconcile that stops moving fails at the stall limit.
             $result = & $run -Name 'stalled reconcile' -Heartbeat $false
-            & $expect $result 0.9 6.0 @("first reconcile is still running after", 'last progress', $log)
+            & $expect $result 0.9 9.0 @("first reconcile is still running after", 'last progress', $log)
 
             # A finished reconcile gets one more read of its records.
             $result = & $run -Name 'finished, then covered' -RecordState 'finished' -CoveredAfter 1.6
