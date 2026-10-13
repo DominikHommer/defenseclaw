@@ -91,6 +91,11 @@ readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp defenseclaw-senso
 # The sandbox kernel feed's unit and its root copy of the helper.
 readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
 readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
+# The oldest release that keeps the sandbox setup (the openshell: settings and
+# the sandboxes, snapshots and shadows folders) as this one does. A rollback
+# carries that setup between two releases from here on (GAP-0483); a release
+# that changes how it is kept raises this.
+readonly SANDBOX_STATE_SINCE="1.0.1"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # The first line of the defenseclaw script the swap puts in place of the link.
@@ -491,7 +496,15 @@ warn_running_sandboxes() {
     # A running sandbox's hooks fail closed while the gateway restarts, so its
     # agent's tool calls are refused until the gateway is back. Name them
     # before the question, not only in the session's end summary (GAP-0352).
-    local gateway="${BIN_DIR}/defenseclaw-gateway" names
+    # With a version: a rollback to that release, which cannot take over the
+    # sandbox setup, so they stay refused until the user rolls forward.
+    local gateway="${BIN_DIR}/defenseclaw-gateway" names stranded="${1:-}"
+    local one="while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back"
+    local many="while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back"
+    if [[ -n "${stranded}" ]]; then
+        one="DefenseClaw ${stranded} cannot take over its sandbox setup, so its hooks fail closed and its agent's tool calls are refused until you run 'defenseclaw rollback' again"
+        many="DefenseClaw ${stranded} cannot take over their sandbox setup, so their hooks fail closed and their agents' tool calls are refused until you run 'defenseclaw rollback' again"
+    fi
     [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
     names="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
 import json, re, subprocess, sys
@@ -510,9 +523,15 @@ PY
     set -- ${names}
     case $# in
         0) ;;
-        1) warn "Sandbox $1 is running: while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back" ;;
-        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back" ;;
+        1) warn "Sandbox $1 is running: ${one}" ;;
+        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): ${many}" ;;
     esac
+}
+
+# sandbox_state_carries V1 V2: both releases keep the sandbox setup as this one does.
+sandbox_state_carries() {
+    is_version "$1" && is_version "$2" \
+        && ! version_lt "$1" "${SANDBOX_STATE_SINCE}" && ! version_lt "$2" "${SANDBOX_STATE_SINCE}"
 }
 
 APP_PATH=""
@@ -552,7 +571,11 @@ if [[ "${ROLLBACK}" == true ]]; then
         step "Rolling back to DefenseClaw ${back_to}"
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
-    warn_running_sandboxes
+    # Sandboxes keep running across the swap, and the data it brings back has
+    # none of the setup made for them since (GAP-0483): it comes along.
+    stranded=""
+    sandbox_state_carries "${current}" "${back_to}" || stranded="${back_to}"
+    warn_running_sandboxes "${stranded}"
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     # GAP-1388: a 0.x release cannot start on a damaged audit store, so check
     # the saved data before anything of this install changes.
@@ -586,6 +609,17 @@ if [[ "${ROLLBACK}" == true ]]; then
     # newer gateway of the two knows the entries; only DefenseClaw's go.
     if ! version_lt "${back_to}" 1.0.0; then
         prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+    fi
+    # GAP-0483: the install now back had sandboxes off and none of the
+    # running sandboxes' hook bindings, so their hooks failed closed as
+    # "gateway unreachable" here and after the next upgrade. The newer
+    # gateway of the two copies the setup; previous/ keeps its own.
+    if [[ -z "${stranded}" ]]; then
+        if version_lt "${back_to}" "${current}"; then
+            carry_sandbox_state "${PREVIOUS}" always "${PREVIOUS}/bin/defenseclaw-gateway" "${BIN_DIR}/defenseclaw-gateway"
+        else
+            carry_sandbox_state "${PREVIOUS}" always "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+        fi
     fi
     rollback_rc=0
     QUARANTINED=""
@@ -1465,6 +1499,14 @@ swap_in() {
         local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
+        # GAP-0483: a rollback by an earlier release left the sandbox setup
+        # made after its upgrade only in previous/, which this upgrade parks
+        # in backups/; bring it back unless this install has one of its own.
+        local rolled
+        rolled="$(cat "${PREVIOUS}/VERSION" 2>/dev/null || true)"
+        if [[ -f "${PREVIOUS}/ROLLED_BACK" ]] && sandbox_state_carries "${rolled}" "${VERSION}" && ! version_lt "${VERSION}" "${rolled}"; then
+            carry_sandbox_state "${PREVIOUS}" if-unset "${BIN_DIR}/defenseclaw-gateway"
+        fi
         # The previous version's agent discovery is absent or stale. Refresh
         # it (bounded --version probes, no telemetry) before the gateway
         # starts, so the gateway records each agent's version in the hook
@@ -2058,6 +2100,41 @@ prune_orphaned_hooks() {
         [[ -x "${gateway}" ]] && "${gateway}" connector prune-orphans --help 2>/dev/null | grep "connector prune-orphans" >/dev/null || continue
         "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
             || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
+        return 0
+    done
+    return 0
+}
+
+# carry_sandbox_state SLOT MODE GATEWAY...: copy the sandbox setup (the
+# openshell: settings and the sandboxes, snapshots and shadows folders) of the
+# install in SLOT (previous/) into the live one, with the first GATEWAY that
+# has the command. Sandboxes keep running across a swap; the install a
+# rollback brought back had sandboxes off and none of their hook bindings, so
+# every hook of a running sandbox failed closed until the user set sandboxes
+# up again, also after the next upgrade (GAP-0483). MODE if-unset leaves an
+# install that has a sandbox setup of its own. SLOT keeps its copy, for a roll
+# forward by an installer that carries nothing. Best effort.
+carry_sandbox_state() {
+    local slot="$1" mode="$2" gateway out from_config
+    shift 2
+    case "${DEFENSECLAW_CONFIG:-}" in
+        "") from_config="${slot}/data/config.yaml" ;;
+        "${DEFENSECLAW_HOME}"/*) from_config="${slot}/data/${DEFENSECLAW_CONFIG#"${DEFENSECLAW_HOME}"/}" ;;
+        *) from_config="${slot}/external-config.yaml" ;;
+    esac
+    [[ -d "${slot}/data" && -f "${from_config}" ]] || return 0
+    local args=(sandbox carry-state --from-data "${slot}/data" --from-config "${from_config}"
+        --data-dir "${DEFENSECLAW_HOME}" --config "${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}")
+    [[ "${mode}" != if-unset ]] || args+=(--only-if-unset)
+    for gateway in "$@"; do
+        # An older gateway prints the sandbox help for an unknown subcommand.
+        [[ -x "${gateway}" ]] || continue
+        "${gateway}" sandbox carry-state --help 2>/dev/null | grep "sandbox carry-state" >/dev/null || continue
+        if out="$("${gateway}" "${args[@]}" 2>>"${LOG}")"; then
+            [[ -z "${out}" ]] || info "${out}"
+        else
+            warn "Could not keep the sandbox setup of the install just replaced (see ${LOG}); a sandbox still running from it stays blocked until you return to that install ('defenseclaw rollback') or delete the sandbox and run it again"
+        fi
         return 0
     done
     return 0
