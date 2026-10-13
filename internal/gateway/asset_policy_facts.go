@@ -157,8 +157,11 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 }
 
 // maxDeclaredNameScan bounds the skill folders of one root whose SKILL.md
-// a name-only call reads to find the folders that declare that name.
-const maxDeclaredNameScan = 256
+// a name-only call reads to find the folders that declare that name. It
+// counts folders, not entries: at 256 entries a disabled skill renamed into
+// a folder that sorts late was never read, so its runtime disable did not
+// apply (GAP-1197).
+const maxDeclaredNameScan = 4096
 
 // foldersDeclaringSkill lists the folders in root, other than root/name,
 // whose SKILL.md declares name. Codex selects a skill ($name, or by plain
@@ -174,12 +177,13 @@ func foldersDeclaringSkill(root, name string) []string {
 		return nil
 	}
 	var folders []string
-	for i, entry := range entries {
-		if i >= maxDeclaredNameScan {
-			break
-		}
+	scanned := 0
+	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
 			continue
+		}
+		if scanned++; scanned > maxDeclaredNameScan {
+			break
 		}
 		dir := filepath.Join(root, entry.Name())
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) != nil {
