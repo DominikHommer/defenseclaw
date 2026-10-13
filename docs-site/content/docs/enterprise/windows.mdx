@@ -1321,29 +1321,29 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. So does the empty,
-administrator-only lock file
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, and with it
-`C:\ProgramData\Cisco`: the lock serializes every lifecycle run, including
-the next install's, so the uninstall keeps it in place. To leave nothing,
-delete `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`, and
-`C:\ProgramData\Cisco` if it is then empty, after the uninstall. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
+also keeps the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
+lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
+cleanup; do not delete a lock while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
 such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
 anything, because a running binary keeps its own folder in use. If an
-uninstall reports that it committed but could not finish, run the same
-`defenseclaw.exe` uninstall (or the MDM `uninstall.ps1`) again: it finishes
-the cleanup.
+uninstall reports that it committed but could not finish, run Setup again as
+LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original run was a
+purge). Setup carries its own verified gateway and can finish cleanup after
+the installed CLI has been removed.
 
 ### Per-user registrations at uninstall
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
 Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
-hook file and plugin folder) from the agent configuration of every signed-in user, running as that
-user. Only DefenseClaw's entries are removed; the user's own hooks and
+hook file and plugin folder) from the agent configuration of users with an
+active, connected session, running as each user. Disconnected or signed-out
+sessions remain pending. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
 
