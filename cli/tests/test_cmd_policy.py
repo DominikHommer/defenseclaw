@@ -429,6 +429,89 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
             [entry.name for entry in self.app.cfg.admission.plugin.first_party_allow_list], ["acme"]
         )
 
+    def test_activate_skips_first_party_entry_without_string_path_pins(self):
+        import yaml
+
+        self.assertEqual(self.invoke(["create", "invalid-pins"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "invalid-pins.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        for pins in ([None], [False], [0], [""], ["   "], [None, None], [1.5], [["nested"]], [{"path": "acme"}]):
+            with self.subTest(pins=pins):
+                data["first_party_allow_list"] = [
+                    {"target_type": "plugin", "target_name": "acme", "source_path_contains": pins},
+                ]
+                with open(path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(data, f)
+
+                result = self.invoke(["activate", "invalid-pins", "--no-reload"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                entries = self.app.cfg.admission.plugin.first_party_allow_list
+                self.assertEqual(entries, [], result.output)
+                self.assertIn("Skipped first-party entry 'acme'", result.output)
+                self.assertIn("source_path_contains needs at least one path pin", result.output)
+                self.assertEqual(result.output.count("ignored source_path_contains item"), len(pins))
+                self.assertFalse(any(
+                    pin in {"None", "False", "0"}
+                    for entry in entries for pin in entry.source_path_contains
+                ))
+
+    def test_activate_keeps_string_pin_and_notes_dropped_item(self):
+        import yaml
+
+        self.assertEqual(self.invoke(["create", "mixed-pins"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "mixed-pins.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data["first_party_allow_list"] = [
+            {"target_type": "plugin", "target_name": "acme", "source_path_contains": [None, "plugins/acme"]},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+        result = self.invoke(["activate", "mixed-pins", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        entries = self.app.cfg.admission.plugin.first_party_allow_list
+        self.assertEqual([entry.name for entry in entries], ["acme"])
+        self.assertEqual(entries[0].source_path_contains, ["plugins/acme"])
+        self.assertIn("First-party entry 'acme': ignored source_path_contains item None", result.output)
+        self.assertNotIn("Skipped first-party entry", result.output)
+
+    def test_activate_non_string_pin_cannot_bypass_plugin_scan(self):
+        from types import SimpleNamespace
+
+        import yaml
+        from defenseclaw.enforce.admission import compile_admission, evaluate_admission
+
+        self.assertEqual(self.invoke(["create", "scan-invalid-pin"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "scan-invalid-pin.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data["admission"]["allow_list_bypass_scan"] = True
+        data["admission"]["scan_on_install"] = True
+        data["first_party_allow_list"] = [
+            {"target_type": "plugin", "target_name": "acme", "source_path_contains": [None]},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+        result = self.invoke(["activate", "scan-invalid-pin", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        pe = SimpleNamespace(
+            cfg=self.app.cfg,
+            is_blocked=lambda *_args: False,
+            is_quarantined=lambda *_args: False,
+        )
+        decision = evaluate_admission(
+            pe,
+            target_type="plugin",
+            name="acme",
+            source_path="/home/u/.openclaw/extensions/None/acme",
+        )
+        self.assertEqual((decision.verdict, decision.source), ("scan", "scan-required"))
+        self.assertNotIn("acme", compile_admission(self.app.cfg, "plugin").first_party_allow)
+
     def test_activate_valid_first_party_entries_print_no_skip_note(self):
         result = self.invoke(["activate", "default", "--no-reload"])
         self.assertEqual(result.exit_code, 0, result.output)

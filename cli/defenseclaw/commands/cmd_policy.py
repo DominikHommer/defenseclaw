@@ -803,9 +803,10 @@ def _admission_from_policy(data: dict, skipped: list[str] | None = None):  # noq
             getattr(adm, target_type).first_party_allow_list = []
     else:
         entries = []
-    def note(label: str, reason: str) -> None:
+    def note(label: str, reason: str, *, skipped_entry: bool = True) -> None:
         if skipped is not None:
-            skipped.append(f"Skipped first-party entry {label}: {reason}")
+            prefix = "Skipped first-party entry" if skipped_entry else "First-party entry"
+            skipped.append(f"{prefix} {label}: {reason}")
 
     for index, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
@@ -815,7 +816,18 @@ def _admission_from_policy(data: dict, skipped: list[str] | None = None):  # noq
         name = str(entry.get("target_name", "") or "")
         label = repr(name) if name.strip() else f"#{index}"
         raw_paths = entry.get("source_path_contains")
-        paths = [str(p) for p in raw_paths if str(p).strip()] if isinstance(raw_paths, list) else []
+        paths: list[str] = []
+        if isinstance(raw_paths, list):
+            for item in raw_paths:
+                if isinstance(item, str) and item.strip():
+                    paths.append(item)
+                else:
+                    note(
+                        label,
+                        f"ignored source_path_contains item {item!r}; "
+                        "each pin must be a non-empty string (quote numbers and booleans)",
+                        skipped_entry=False,
+                    )
         if target_type not in ("skill", "mcp", "plugin"):
             note(label, "target_type must be skill, mcp or plugin; add a supported type")
             continue
