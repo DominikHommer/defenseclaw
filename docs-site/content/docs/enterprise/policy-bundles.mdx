@@ -71,14 +71,40 @@ inline secrets, secret references (and on a managed device that each required
 credential exists), the config and the effective policy digest. The first
 failure is reported with a stable code and exit code 1 (1603 on Windows).
 
+## Status
+
+```bash
+sudo defenseclaw-gateway enterprise bundle status --json
+```
+
+Status changes nothing. It reports bundle mode (whether the trust anchor file
+is installed), the current and last good bundle, the version floor, the last
+receipt (`received`, `verified`, `staged`, `applied`, `confirmed` or `failed`
+with its error code and times) and whether the running gateway enforces the
+effective policy digest of the current bundle. On Linux and macOS the
+enterprise status (`--json`) carries the same summary in its `bundle` block. A bundle
+that fails or whose run is interrupted never becomes current: the last good
+bundle keeps enforcing, and the next lifecycle run ends an interrupted receipt
+as `failed` with `interrupted`.
+
 ## Known limits
 
 - **Version floor.** A device refuses a version at or below the higher of
   `min_version` and its last confirmed bundle (`version_not_newer`), also a
   different manifest that reuses the confirmed bundle id and version. A
-  rollback is a new, higher version with the old content. `bundle verify`
-  checks against `min_version` only; it does not read the last confirmed
-  bundle.
+  rollback is a new, higher version with the old content. `bundle verify` run
+  as root on a managed device also checks the last confirmed bundle; as a
+  standard account it cannot read the bundle state, checks `min_version` only
+  and warns `floor_unchecked`. The floor lives in the root-only
+  `bundle-state.json`: a purge or reinstall that removes it starts again from
+  `min_version`, so raise `min_version` in the anchor file as you retire old
+  bundles.
+- **Status needs root.** The bundle state and receipts are readable only by
+  root or an administrator; `bundle status` as a standard account refuses with
+  `not_root`. The device keeps the 20 newest receipts.
+- **Windows gateway check.** On Windows `bundle status` does not query the
+  running gateway yet and warns `gateway_unchecked`; use the Windows
+  enterprise status command for the enforced digest.
 - **Retired and expired keys.** A retired key verifies only the bundle already
   applied, and only while the key is inside `not_before`..`not_after`. Once a
   key expires, the bundle it signed no longer verifies (`key_expired`): publish

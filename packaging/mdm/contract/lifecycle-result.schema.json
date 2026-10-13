@@ -206,7 +206,7 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
-        "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for a failed receipt of a bundle whose manifest could not be read." },
+        "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Bundle error code of a failed receipt." },
@@ -220,7 +220,7 @@
       "allOf": [
         { "if": { "properties": { "state": { "const": "failed" } } }, "then": { "required": ["error_code"] }, "else": { "not": { "required": ["error_code"] } } },
         { "if": { "properties": { "state": { "const": "confirmed" } } }, "then": { "required": ["effective_policy_digest", "confirmed_at"] } },
-        { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "const": "failed" } } } }
+        { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "enum": ["received", "failed"] } } } }
       ]
     },
     "message": {
