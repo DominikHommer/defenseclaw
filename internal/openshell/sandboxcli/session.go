@@ -1425,10 +1425,7 @@ type sessionDeleteError struct {
 }
 
 func (e *sessionDeleteError) Error() string {
-	why := apiError(e.err).Error()
-	if strings.Contains(why, "client connection is closing") {
-		why = "the connection to the OpenShell gateway closed"
-	}
+	why := gatewayTransportText(apiError(e.err).Error())
 	retry := CommandName + " delete " + e.name
 	if e.keepSnapshot {
 		retry += " --keep-snapshot"
@@ -1518,8 +1515,9 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 				return nil
 			}
 			s.stopFailed = true
-			a.warn("could not stop " + name + ": " + apiError(err).Error() + " → it may still be running: `" + CommandName + " status " + name +
-				"` shows where it stands, `" + CommandName + " stop " + name + "` stops it")
+			// No raw gRPC transport text (#1202): the steps after it work.
+			a.warn("could not stop " + name + ": " + gatewayTransportText(apiError(err).Error()) + " → it may still be running: `" +
+				CommandName + " status " + name + "` shows where it stands, `" + CommandName + " stop " + name + "` stops it")
 			return nil
 		}
 		s.markStopped()

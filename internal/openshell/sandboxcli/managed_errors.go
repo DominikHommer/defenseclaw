@@ -304,6 +304,28 @@ func managedSentence(e *sandboxapi.Error) (sentence, code string) {
 	return strings.TrimRight(msg, ". ") + " (" + strings.TrimRight(detail, ". ") + ")", code
 }
 
+// gatewayTransportErrors are the words of the OpenShell gateway's gRPC
+// transport failures as its client library prints them.
+var gatewayTransportErrors = []string{
+	"client connection is closing", "transport is closing", "code = unavailable", "connection error: desc",
+	"error reading from server", "grpc: ",
+}
+
+// gatewayTransportText is why with a raw gRPC transport failure of the
+// OpenShell gateway ("Cancelled: grpc: the client connection is closing")
+// put in words: such text named nothing the user could act on, and the
+// message around it gives the recovery step (#1202). Any other why is
+// returned unchanged.
+func gatewayTransportText(why string) string {
+	lower := strings.ToLower(why)
+	for _, raw := range gatewayTransportErrors {
+		if strings.Contains(lower, raw) {
+			return "the connection to the OpenShell gateway closed"
+		}
+	}
+	return why
+}
+
 // reasonCode reports a bare snake_case reason code ("sandbox_not_allowed"):
 // lowercase letters, digits and at least one underscore, at most 64 bytes.
 func reasonCode(s string) bool {
