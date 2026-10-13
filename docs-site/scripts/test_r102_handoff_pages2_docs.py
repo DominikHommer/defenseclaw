@@ -12,6 +12,11 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg01_rollback_restores_data_and_prunes_hooks(self):
+        text = page("get-started/upgrade.mdx")
+        self.assertIn("comes back when you run `defenseclaw rollback`\nagain", text)
+        self.assertIn("on every `defenseclaw upgrade`, DefenseClaw removes only\nits own hook entries", text)
+
     def test_fg16_linked_macos_scan_root_is_partial(self):
         discovery = page("ai-discovery.mdx")
         macos = page("enterprise/macos.mdx")

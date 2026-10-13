@@ -223,7 +223,8 @@ For other installs, `defenseclaw rollback` swaps the live install with the
 one the last upgrade replaced: binaries, Python environment, and the
 configuration and data as they
 were at upgrade time. Anything written since then moves into
-`~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
+`~/.defenseclaw/previous` and comes back when you run `defenseclaw rollback`
+again; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
 Each install shows only its own audit events, so after a rollback the
 events the other install recorded are not in `defenseclaw-gateway audit export`.
@@ -264,6 +265,10 @@ rewrite fails, the rollback still completes and warns that the uninstall may
 leave those entries; remove them from the agent's settings by hand. Every 1.x
 release keeps to this rule: a hook entry it writes is in a form every earlier
 1.x release removes, or its rollback converts the entry first.
+
+After a rollback to a 1.x release, and on every `defenseclaw upgrade`, DefenseClaw removes only
+its own hook entries for connectors the installed release does not configure.
+It prints the files it changed; other hook entries stay.
 
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
