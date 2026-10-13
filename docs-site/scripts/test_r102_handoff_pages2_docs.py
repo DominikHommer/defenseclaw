@@ -125,12 +125,15 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertIn("comes back when you run `defenseclaw rollback`\nagain", text)
         self.assertIn("on every `defenseclaw upgrade`, DefenseClaw removes only\nits own hook entries", text)
 
-    def test_fg16_linked_macos_scan_root_is_partial(self):
-        discovery = page("ai-discovery.mdx")
-        macos = page("enterprise/macos.mdx")
-        self.assertIn("a root reached through a link into a protected folder is skipped", discovery)
-        self.assertIn("package scan root reached through\na link into one of these folders", macos)
+    def test_macos_protected_folder_skip_is_partial(self):
+        discovery = " ".join(page("ai-discovery.mdx").split())
+        macos = " ".join(page("enterprise/macos.mdx").split())
+        self.assertNotIn("a root reached through a link into a protected folder is skipped", discovery)
+        self.assertNotIn("a package scan root reached through a link into one of them is skipped too", discovery)
+        self.assertNotIn("A package scan root reached through a link into one of these folders is skipped too", macos)
         self.assertIn("`detector_errors.macos_privacy`", macos)
+        self.assertIn("protected folders were not scanned", macos)
+        self.assertNotIn("`detector_errors.macos_privacy` naming the skipped protected folders", macos)
         self.assertNotIn("the scan stays complete", macos)
 
     def test_fg04a_windows_plugin_refusal_is_structured(self):
