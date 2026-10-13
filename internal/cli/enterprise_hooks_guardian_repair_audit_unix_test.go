@@ -52,11 +52,18 @@ func TestStandaloneGuardianReportsRepairedHookToAuditSocket(t *testing.T) {
 	t.Cleanup(func() { _ = listener.Close() })
 	requests := make(chan struct {
 		path, user, connector string
+		uid                   int
 	}, 1)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var report struct{ User, Connector string }
+		var report struct {
+			User, Connector string
+			UID             int
+		}
 		_ = json.NewDecoder(r.Body).Decode(&report)
-		requests <- struct{ path, user, connector string }{r.URL.Path, report.User, report.Connector}
+		requests <- struct {
+			path, user, connector string
+			uid                   int
+		}{r.URL.Path, report.User, report.Connector, report.UID}
 		w.WriteHeader(http.StatusNoContent)
 	})}
 	t.Cleanup(func() { _ = server.Close() })
@@ -72,7 +79,7 @@ func TestStandaloneGuardianReportsRepairedHookToAuditSocket(t *testing.T) {
 	}
 	select {
 	case got := <-requests:
-		if got.path != "/api/v1/managed/guardian-repair" || got.user != "alice" || got.connector != "opencode" {
+		if got.path != "/api/v1/managed/guardian-repair" || got.user != "alice" || got.uid != uid || got.connector != "opencode" {
 			t.Fatalf("audit report = %+v", got)
 		}
 	default:

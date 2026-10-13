@@ -18,7 +18,15 @@ import (
 
 const enterpriseHookGuardianRepairAuditPath = "/api/v1/managed/guardian-repair"
 
-func reportEnterpriseHookGuardianRepairs(ctx context.Context, socket string, repaired []enterpriseHookGuardianRepair) {
+// The HTTP report includes the account uid. The lifecycle repair record has
+// its own stable user/connector shape and is not sent to the gateway.
+type enterpriseHookGuardianAuditReport struct {
+	User      string `json:"user"`
+	UID       int    `json:"uid"`
+	Connector string `json:"connector"`
+}
+
+func reportEnterpriseHookGuardianRepairs(ctx context.Context, socket string, repaired []enterpriseHookGuardianAuditReport) {
 	if socket == "" || len(repaired) == 0 {
 		return
 	}

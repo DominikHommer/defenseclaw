@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // The root guardian has no audit database writer. It reports a successful
@@ -20,6 +22,7 @@ const managedGuardianRepairAuditPath = "/api/v1/managed/guardian-repair"
 
 type managedGuardianRepairRequest struct {
 	User      string `json:"user"`
+	UID       *int   `json:"uid"`
 	Connector string `json:"connector"`
 }
 
@@ -45,6 +48,7 @@ func (a *APIServer) handleManagedGuardianRepairAudit(w http.ResponseWriter, r *h
 	if err := decoder.Decode(&report); err != nil || decoder.Decode(&extra) != io.EOF ||
 		!utf8.ValidString(report.User) || !utf8.ValidString(report.Connector) ||
 		len(report.User) > 256 || len(report.Connector) > 64 ||
+		report.UID == nil || *report.UID < 0 || *report.UID > 1<<31-1 ||
 		strings.TrimSpace(report.User) == "" || strings.TrimSpace(report.Connector) == "" {
 		http.Error(w, "invalid repair report", http.StatusBadRequest)
 		return
@@ -55,8 +59,13 @@ func (a *APIServer) handleManagedGuardianRepairAudit(w http.ResponseWriter, r *h
 		http.Error(w, "invalid repair report", http.StatusBadRequest)
 		return
 	}
-	if err := a.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookRepaired), connectorName,
-		fmt.Sprintf("re-installed hook entries after deletion for user %s", user), "HIGH", connectorName); err != nil {
+	structured := map[string]any{}
+	(auditCaller{ID: strconv.Itoa(*report.UID), IDKind: useridentity.KindPOSIXUID, Name: auditUserName(user)}).addTo(structured)
+	if err := a.logger.LogEvent(audit.Event{
+		Action: string(audit.ActionConnectorHookRepaired), Target: connectorName,
+		Actor: "defenseclaw", Details: fmt.Sprintf("re-installed hook entries after deletion for user %s", user),
+		Severity: "HIGH", Connector: connectorName, Structured: structured,
+	}); err != nil {
 		http.Error(w, "audit emission failed", http.StatusServiceUnavailable)
 		return
 	}

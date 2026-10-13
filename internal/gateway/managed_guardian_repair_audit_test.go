@@ -25,12 +25,15 @@ func TestManagedGuardianRepairAuditRequiresRootAndWritesRepairRow(t *testing.T) 
 		handler.ServeHTTP(response, request)
 		return response.Code
 	}
-	valid := `{"user":"alice","connector":"opencode"}`
+	valid := `{"user":"alice","uid":1001,"connector":"opencode"}`
 	if status := send(1001, valid); status != http.StatusForbidden {
 		t.Fatalf("standard user report status=%d, want 403", status)
 	}
 	for _, invalid := range []string{
 		`{"user":"","connector":"opencode"}`,
+		`{"user":"alice","connector":"opencode"}`,
+		`{"user":"alice","uid":-1,"connector":"opencode"}`,
+		`{"user":"alice","uid":2147483648,"connector":"opencode"}`,
 		`{"user":"alice","connector":"opencode","action":"allow"}`,
 		valid + `{}`,
 	} {
@@ -52,7 +55,10 @@ func TestManagedGuardianRepairAuditRequiresRootAndWritesRepairRow(t *testing.T) 
 		}
 	}
 	if len(repairEvents) != 1 || repairEvents[0].Target != "opencode" || repairEvents[0].Connector != "opencode" ||
-		repairEvents[0].Severity != "HIGH" || !strings.Contains(repairEvents[0].Details, "alice") {
+		repairEvents[0].Severity != "HIGH" || !strings.Contains(repairEvents[0].Details, "alice") ||
+		repairEvents[0].Structured[auditUserIDKey] != "1001" ||
+		repairEvents[0].Structured[auditUserIDKindKey] != "posix_uid" ||
+		repairEvents[0].Structured[auditUserNameKey] != "alice" {
 		t.Fatalf("repair audit events = %+v", repairEvents)
 	}
 }
