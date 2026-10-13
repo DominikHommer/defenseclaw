@@ -492,8 +492,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14523,
-      "sha256": "7e42f1574518c746852fa4a29a98141047a68aa8958694a03abe94a892a8823c"
+      "size": 15397,
+      "sha256": "85432b344c0aeeee17e871db04615f847e9192b888070427434682b8c3849715"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -539,8 +539,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14519,
-      "sha256": "f817b8dba4a44be4d68beb27aac64f204c495b629624d5c21664f6ca178f9529"
+      "size": 15393,
+      "sha256": "d18078c4c3e030838f092188dbf5ed757be71ded373606441c687e0102e50974"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -586,8 +586,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14589,
-      "sha256": "eb9fa3ff6a5a32f4a67c10c7a925666962bb5ce0e96c95e8dca7f07363c7fc55"
+      "size": 15474,
+      "sha256": "db3e0e12dd58318e19979b1e2be75678d2b71019f89740d3246383eff76b2ef6"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -633,8 +633,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14585,
-      "sha256": "28f7a36ed756cf98b73e2e2ae09f6e275eb5375891bbdff2b3b542229f728afc"
+      "size": 15470,
+      "sha256": "bab179e0f289037867b8427bb389e89c6718b7187bbd60da718451638985693c"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -680,8 +680,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 15214,
-      "sha256": "9e092e36ad574fde81cac5bb80ece093b5fef2e31816ff77a308fc714733791a"
+      "size": 16088,
+      "sha256": "cb8d7a97e67504da6ec3f62caf37c53de94ed41e07c16de605798d224251af01"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -727,8 +727,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 15212,
-      "sha256": "8f95c5f1581bd116416353aba90cfe7708a7e8c492866d1cbb0d50890f00b288"
+      "size": 16086,
+      "sha256": "93cf5bfa59042258d340228b34f02ec02b2db958131c509c540c45e1886af9a0"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -774,8 +774,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 15280,
-      "sha256": "1af53ed2cc72a95d8dabb64792a5131e8f800e4d99c1277987a06ee7774e5c70"
+      "size": 16165,
+      "sha256": "16b25e57b3d5c3164b8d85f2011755206998b2367102540867c56efbd2918291"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -821,8 +821,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 15278,
-      "sha256": "d2df6958e0c71b879667e297555d4705b9854b4013c0e3abaeb93c939e885777"
+      "size": 16163,
+      "sha256": "f66b9f5cf10fd1715b2aef505764de878598fdc968b09a309c440868d938d8a2"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1404,8 +1404,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14411,
-      "sha256": "07f7095966fdda7aca013a795f55d517ec0d6561af57ed655ebc57eca773cb7a"
+      "size": 15285,
+      "sha256": "944f0aaa35d4ef1ed2ff28d227bdbcb710d6a29029362a2fbe05bc64d3a7a90a"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
@@ -1491,8 +1491,8 @@
     },
     "codex-hook.sh": {
       "mode": "-rwx------",
-      "size": 14411,
-      "sha256": "d460d506c4764774bfb334146aa58f8710a559e26e2b5217c1a29c171c307780"
+      "size": 15285,
+      "sha256": "8d386b660e73ae670ece2ce62d74ccedc0b4d2649e3f8cc9b3acad159f780d69"
     },
     "copilot-hook.sh": {
       "mode": "-rwx------",
