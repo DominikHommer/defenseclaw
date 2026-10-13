@@ -418,6 +418,16 @@ true` and `credential: ai-defense-api-key` in the config.
 | `2` | Invalid settings, such as a missing or malformed value (`mdm_invalid_arguments`). A config that does not validate exits `1` (`config_invalid`). | **Failed**; fix the settings block |
 | `75` | Another lifecycle run or the installer holds a lock | **Failed** for this run; the next periodic run retries |
 
+## Deliver signed policy bundles
+
+[Signed bundles](/docs/enterprise/policy-bundles) use the same wrappers: on Windows, a second app that
+runs Setup `/ensure BUNDLE=<absolute path> TRUSTANCHORS=<absolute path> JSON=1`
+(the bundle carries the config, so no `CONFIG=`) with `detect.ps1
+-RequireBundle <version>` as its detection; on macOS and Linux, the wrapper
+with `--trust-anchor-file` and `--bundle-file`, or the inline settings for a
+script-only delivery. Report with `detect.sh --bundle-status`. See
+[Deliver with MDM](/docs/enterprise/policy-bundles#deliver-with-mdm).
+
 ## Linux
 
 Workspace ONE's Linux App Management installs, removes and versions `.deb` and

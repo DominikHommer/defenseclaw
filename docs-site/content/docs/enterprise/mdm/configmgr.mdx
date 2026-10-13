@@ -226,6 +226,17 @@ and [AI Defense key](/docs/enterprise/ai-defense-key).
 
 See [Upgrades, rollback and config changes](/docs/enterprise/mdm#upgrades-rollback-and-config-changes).
 
+## Deliver signed policy bundles
+
+For [signed bundles](/docs/enterprise/policy-bundles), create one application per bundle version that
+depends on the DefenseClaw application. Its content holds the Setup, the
+bundle, the anchor file and an `install.cmd` that passes absolute paths
+(`"%~dp0DefenseClawSetup-Enterprise-Standalone-x64.exe" /ensure JSON=1
+BUNDLE="%~dp0v12.dcbundle" TRUSTANCHORS="%~dp0bundle-anchors.json"`). Use
+`detect.ps1 -RequireBundle 12` as its detection script; it passes for version
+12 or newer. `1618` is the busy code to retry. See
+[Deliver with MDM](/docs/enterprise/policy-bundles#deliver-with-mdm).
+
 ## Uninstall
 
 Deploy the application with the **Uninstall** action. The uninstall program,

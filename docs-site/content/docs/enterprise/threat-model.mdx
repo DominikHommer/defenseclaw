@@ -320,6 +320,26 @@ These rules hold on every OS:
 - A running service is not proof of protection. Status reports partial
   coverage as incomplete.
 
+## Signed policy bundles
+
+With [signed policy bundles](/docs/enterprise/policy-bundles) on a standalone device the policy arrives
+from MDM as a signed file. These rows hold for every delivery path.
+
+| Threat | Control |
+| --- | --- |
+| A planted or edited bundle, or inbox file | The signature covers the manifest, the manifest pins every file's SHA-256, and the apply verifies its own copy in the bundle store, never the drop path |
+| Replay or downgrade | The version floor: a version at or below the last confirmed one (or `min_version`) is refused `version_not_newer`; a signed rollback is a new, higher version |
+| A standard user swaps the trust anchor file | The anchor file and its folders must be root-owned (Windows: SYSTEM or Administrators) and not writable by others, else `anchor_insecure`; the MDM wrapper puts back the previous anchor file when an apply fails |
+| Archive tricks: traversal, links, bombs, case collisions | Reader limits (size, entries, names, regular files only) refuse `archive_invalid` |
+| Secrets leak through a bundle | Bundles hold no secret values: sign and verify refuse an inline secret, and config names credentials by `secret://` reference |
+| A crash or power loss mid-apply | A pending transaction, a snapshot and the receipt state machine; the next run settles it and the last good bundle keeps enforcing |
+| The gateway rejects the new policy | The running generation keeps enforcing; the receipt fails `not_confirmed` and the transaction rolls back |
+| A bundle for another tenant, device group or platform | Tenant, target and platform checks |
+| A device that never applied the bundle | Detection keys on the confirmed receipt and the gateway digest (`detect.sh --require-bundle`, `detect.ps1 -RequireBundle`) |
+| Root on the device | Trusted, as everywhere on this page. A reinstall resets the floor unless the anchor file sets `min_version` |
+| A Secure Client computer | Every bundle verb refuses before it changes anything; the Secure Client path is unchanged |
+
+
 ## Scope
 
 ### Inspected

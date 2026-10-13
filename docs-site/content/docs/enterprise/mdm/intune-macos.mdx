@@ -254,6 +254,26 @@ Run it before the config and pkg steps. In `config.yaml`, set
 `guardrail.custom_packs.<name>` to that absolute path and its
 `sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
 
+## Deliver signed policy bundles
+
+[Signed bundles](/docs/enterprise/policy-bundles) follow the two routes above. Route A: paste the anchor
+file JSON into `dc_inline_trust_anchors` and the base64 of the bundle into
+`dc_inline_bundle`, and empty `dc_inline_config`; the script must stay under
+1 MB, so this suits bundles up to a few hundred KB. Route B, for any size:
+a pkg that installs `v12.dcbundle` and `bundle-anchors.json` into a root-only
+folder such as `/Library/Management/DefenseClaw` and runs, from its
+postinstall,
+
+```bash
+/Library/Management/DefenseClaw/defenseclaw-enterprise.sh \
+  --trust-anchor-file /Library/Management/DefenseClaw/bundle-anchors.json \
+  --bundle-file /Library/Management/DefenseClaw/v12.dcbundle
+```
+
+Either way a failed apply keeps the bundle in force and the previous anchor
+file. Use `detect.sh --require-bundle 12` for a custom attribute with
+`--format value`, or `--bundle-status`. See [Detection](/docs/enterprise/policy-bundles#detection).
+
 ## Remove DefenseClaw
 
 First remove the Macs from the install script's assignment. Wait until

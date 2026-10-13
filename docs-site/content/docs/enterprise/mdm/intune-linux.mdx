@@ -232,6 +232,24 @@ applies it.
 - **Roll back**: `rpm -U` refuses an older rpm. See
   [Roll back](/docs/enterprise/lifecycle#roll-back).
 
+## Deliver signed policy bundles
+
+Intune delivers only the script to Linux, so a [signed bundle](/docs/enterprise/policy-bundles) travels
+inside it. In your copy of the wrapper, paste the JSON of
+`bundle-anchors.json` between the `DEFENSECLAW_TRUST_ANCHORS` markers in
+`dc_inline_trust_anchors`, the output of `base64 v12.dcbundle` between the
+`DEFENSECLAW_BUNDLE` markers in `dc_inline_bundle`, and empty
+`dc_inline_config` (a bundle carries its config). The wrapper installs the
+anchor file, applies the bundle with `enterprise bundle apply`, and puts the
+previous anchor file back when the apply fails. Upload one script per bundle
+version; an unchanged script is a no-op (`already_applied`).
+
+Base64 adds a third to the size, so keep the script small (the macOS limit is
+1 MB; plan for the same on Linux) and use configuration management for larger
+bundles. Report the result with `detect.sh` and `DC_BUNDLE_STATUS=1`, which
+prints `<bundle id> <version> <state>`, or `DC_REQUIRE_BUNDLE=12`. See
+[Detection](/docs/enterprise/policy-bundles#detection).
+
 ## Remove DefenseClaw
 
 If the config names a custom rule pack, run and confirm the pack-delivery

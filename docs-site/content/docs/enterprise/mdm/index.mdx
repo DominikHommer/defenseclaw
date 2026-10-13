@@ -287,6 +287,8 @@ exit $LASTEXITCODE
 | `--allowed-team-id ID` (macOS), `--gpg-keyring FILE` with `--signature FILE` or `--signature-url URL` (Linux) | `-AllowedSigners THUMBPRINT[,...]` | Signer pins for signed trust. |
 | `--config-file`, `--config-stdin` | `-ConfigPath`, `-ConfigFromStdin` | The config. |
 | `--secret-name` with `--secret-file` or `--secret-stdin` | `-SecretName` with `-SecretPath` or `-SecretFromStdin` | The optional key. |
+| `--bundle-file FILE` | `-BundlePath FILE` | A [signed policy bundle](/docs/enterprise/policy-bundles#deliver-with-mdm), applied with `enterprise bundle apply` after the package step and the key. It carries the config, so it excludes `--config-file` and `--config-stdin`. At most 4 MiB. |
+| `--trust-anchor-file FILE` | `-TrustAnchorPath FILE` | The bundle trust anchor file, root-owned like a config. Installed before the bundle applies; a failed apply puts the previous file back. |
 | `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
 | `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
 | `--log FILE` | — | Wrapper log path. |
@@ -296,8 +298,11 @@ Script-only MDMs that cannot pass arguments set the same values in the
 settings block at the top of `defenseclaw-enterprise.sh` (`DC_SOURCE`,
 `DC_SOURCE_URL`, `DC_SOURCE_SHA256`, `DC_TRUST_MODE`, `DC_ALLOWED_TEAM_IDS`,
 `DC_GPG_KEYRING`, `DC_SIGNATURE`, `DC_SIGNATURE_URL`, `DC_PRODUCT_VERSION`,
-`DC_CONFIG_FILE`, `DC_SECRET_NAME`, `DC_SECRET_FILE`, `DC_HTTPS_PROXY`,
-`DC_LOG`, `DC_STAGING_DIR`). Flags override the settings block. The wrapper refuses any argument
+`DC_CONFIG_FILE`, `DC_SECRET_NAME`, `DC_SECRET_FILE`, `DC_BUNDLE_FILE`,
+`DC_TRUST_ANCHOR_FILE`, `DC_HTTPS_PROXY`, `DC_LOG`, `DC_STAGING_DIR`). A
+script-only MDM that cannot deliver files pastes the anchor file into
+`dc_inline_trust_anchors` and the base64 of a small bundle into
+`dc_inline_bundle`. Flags override the settings block. The wrapper refuses any argument
 it does not know, including positional arguments, with exit `2`
 (`mdm_invalid_arguments`). If your MDM appends its own arguments, follow its
 recipe in this section.
@@ -432,6 +437,7 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the key is stored first, so the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
 | `mdm_staging_noexec` | — / `1` | Linux: the payload's `defenseclaw-gateway` cannot run from the staging folder because its filesystem is mounted `noexec`; the message names the mount. Pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm as the source. |
+| `mdm_anchor_install_failed` | — / `1` | Linux and macOS: the wrapper could not write the bundle trust anchor file, or its folder is not root-only. Nothing was applied. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
 ## Stage a custom macOS rule pack
@@ -540,7 +546,7 @@ output (`DefenseClaw Enterprise <version>`) and nothing on standard error; "not
 detected" is exit `1` with the reason on standard error. It reads the marker
 through the 64-bit registry view, so it works in 32-bit Windows PowerShell.
 
-`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-tetragon MODE] [--format exit|value|jamf]`
+`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-tetragon MODE] [--require-bundle ID|VERSION] [--format exit|value|jamf]`
 asks the installed, root-owned gateway for its status instead of trusting
 files, so run it as root. The formats are:
 
@@ -549,6 +555,13 @@ files, so run it as root. The formats are:
 | `exit` (default) | `0` when detected, `1` otherwise | `DefenseClaw Enterprise <version>` on standard output, or the reason on standard error |
 | `value` | Always `0` | The installed version, or `not-installed`, `outdated` (with `--min-version`) or `unhealthy` (with `--require-healthy`). For inventory attributes. |
 | `jamf` | Always `0` | The same values inside `<result>...</result>`, for Jamf Pro extension attributes |
+
+`--require-bundle ID|VERSION` also requires a confirmed [signed policy
+bundle](/docs/enterprise/policy-bundles#detection) that the gateway enforces
+(values `bundle-missing`, `bundle-mismatch`, `bundle-outdated`,
+`bundle-not-enforced`), and `--bundle-status` instead prints
+`<bundle id> <version> <state>` of the last bundle receipt for an extension
+attribute or a compliance script.
 
 `--require-tetragon consume|observe|enforce` (Linux only) also runs
 `enterprise linux tetragon verify --ready-for MODE --json` and counts a failing

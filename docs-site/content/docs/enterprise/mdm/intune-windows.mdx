@@ -355,6 +355,37 @@ changes made outside Setup are not validated.
 (`downgrade_refused`, `1603`), so superseding with an older app does nothing.
 Follow [Roll back](/docs/enterprise/lifecycle#roll-back).
 
+## Deliver signed policy bundles
+
+To deliver policy as [signed bundles](/docs/enterprise/policy-bundles) instead of `CONFIG=`, add a
+second Win32 app for each bundle version, with the DefenseClaw app as its
+dependency. Its content folder holds the Setup, `v12.dcbundle`,
+`bundle-anchors.json` and an `install.cmd`, because Setup needs absolute paths
+and the Intune content folder is not known in advance:
+
+```bat
+@echo off
+"%~dp0DefenseClawSetup-Enterprise-Standalone-x64.exe" /ensure JSON=1 BUNDLE="%~dp0v12.dcbundle" TRUSTANCHORS="%~dp0bundle-anchors.json"
+exit /b %ERRORLEVEL%
+```
+
+| Setting | Value |
+| --- | --- |
+| Install command | `install.cmd` |
+| Uninstall command | `cmd.exe /c exit 0` (a bundle is replaced by a higher version, never removed) |
+| Return codes | The defaults; `1618` retries a busy run |
+| Detection rules | **Custom script**: `detect.ps1` with the default of `$RequireBundle` in its `param()` block set to `12` |
+| Dependencies | The DefenseClaw app, **Automatically install**: **Yes** |
+| Supersedence | The app of the previous bundle version, **Uninstall previous version**: **No** |
+
+Detection passes when version 12 or a newer bundle is confirmed and the
+gateway enforces it. Store a credential the bundle names in `secret_refs`
+before the bundle arrives (see [Deliver the Cisco AI Defense key](#5-deliver-the-cisco-ai-defense-key)),
+or the bundle fails `secret_ref_missing` and the previous one keeps enforcing.
+`Install-DefenseClawIntune.ps1` does not take a bundle; the first install
+still uses `CONFIG=`. Known limits:
+[Policy bundles](/docs/enterprise/policy-bundles#known-limits).
+
 ## 7. Remove DefenseClaw
 
 First remove every **Required** assignment of the install, upgrade and config

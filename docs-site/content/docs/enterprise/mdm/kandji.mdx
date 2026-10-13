@@ -297,6 +297,16 @@ Run it before the config and pkg steps. In `config.yaml`, set
 `guardrail.custom_packs.<name>` to that absolute path and its
 `sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
 
+## Deliver signed policy bundles
+
+For [signed bundles](/docs/enterprise/policy-bundles), ship `v12.dcbundle` and `bundle-anchors.json` in
+a custom package that installs them into a root-only folder, and run the
+wrapper with `--trust-anchor-file` and `--bundle-file` (or the settings
+`DC_TRUST_ANCHOR_FILE` and `DC_BUNDLE_FILE`) and no config. The script-only
+route can paste both into `dc_inline_trust_anchors` and `dc_inline_bundle`
+when the bundle is small. Report with `detect.sh --bundle-status`. See
+[Deliver with MDM](/docs/enterprise/policy-bundles#deliver-with-mdm).
+
 ## Uninstall
 
 Remove the DefenseClaw Library Items from the Blueprints first. Then run

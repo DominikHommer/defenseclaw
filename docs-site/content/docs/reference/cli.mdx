@@ -1456,6 +1456,21 @@ Property names are case-insensitive, and dashes in them are ignored. Paths
 must be absolute: Setup refuses relative paths and paths that contain `%`.
 The unsigned (hash-pinned) Setup writes its payload trust file itself from its embedded manifest; a signed Setup uses Authenticode trust, optionally pinned with `ALLOWEDSIGNERS=`. Setup's own argument errors, such as an unknown property, a missing, relative or environment-expanded `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`, or a `TIMEOUTSECONDS` out of range, exit `1639`. A token that is not elevated, or a `CONFIG=` or `MANIFEST=` file a non-administrator can change, exits `1603`. The Secure Client Setup returns only `0` and `1603`.
 
+### Signed policy bundles (`enterprise bundle`)
+
+Standalone enterprise only; on a Secure Client computer every verb refuses
+with `not_supported_secure_client`. Exit codes: `0`, `1` (`1603` on Windows;
+`errors[].code` names the refusal), `75` busy (`1618`) and `2` usage
+(`1639`). See [Policy bundles](/docs/enterprise/policy-bundles#command-reference).
+
+| Command | Use it for |
+| --- | --- |
+| `bundle sign --in DIR --out FILE --key PEM --key-id ID --tenant T --device-group G --version N --created-by P` | Sign a bundle directory offline, on any OS. `--emit-digest` and `--attach-sig` sign with an HSM or KMS |
+| `bundle verify --bundle FILE [--anchors FILE] [--platform P]` | Run every check; changes nothing |
+| `bundle apply --bundle FILE\|DIR` or `--inbox` | Root. Verify and install a bundle through the ensure transaction; the policy in force keeps enforcing until the gateway confirms the new one |
+| `bundle status` | Root. The current and last good bundle, the floor, the last receipt and whether the gateway enforces the current bundle |
+
+
 ### Machine policy (`enterprise policy`)
 
 These commands inspect DefenseClaw's entries in vendor machine policy. They

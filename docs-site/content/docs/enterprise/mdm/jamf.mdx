@@ -310,6 +310,34 @@ Run it before the config and pkg steps. In `config.yaml`, set
 `guardrail.custom_packs.<name>` to that absolute path and its
 `sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
 
+## Deliver signed policy bundles
+
+For [signed bundles](/docs/enterprise/policy-bundles), build a pkg that installs `v12.dcbundle` and
+`bundle-anchors.json` into `/Library/Management/DefenseClaw` (root-owned,
+not writable by others), and add it to the policy before the ensure script.
+In the ensure script set
+
+```bash
+DC_CONFIG_FILE=""
+DC_TRUST_ANCHOR_FILE="/Library/Management/DefenseClaw/bundle-anchors.json"
+DC_BUNDLE_FILE="/Library/Management/DefenseClaw/v12.dcbundle"
+```
+
+and drop the stage config script: a bundle carries its config, and the wrapper
+refuses both together. A failed apply exits `1`, keeps the bundle in force and
+puts back the previous anchor file. For reporting, add a second extension
+attribute with `detect.sh` and
+
+```bash
+set --
+DC_BUNDLE_STATUS=1
+DC_FORMAT="jamf"
+```
+
+It prints `<bundle id> <version> <state>`, for example a Smart Group
+`DefenseClaw bundle current` on **matches regex** ` 12 confirmed$`. See
+[Detection](/docs/enterprise/policy-bundles#detection).
+
 ## Uninstall
 
 Jamf Pro's own package uninstall works only for packages indexed with Jamf

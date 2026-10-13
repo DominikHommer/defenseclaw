@@ -16,7 +16,11 @@ covers the manifest. The standalone enterprise profile only: Secure Client
 computers do not have the `enterprise bundle` commands.
 
 `sign` and `verify` run offline and change nothing on the computer; `apply`
-installs a bundle on a Linux or macOS managed device.
+installs a bundle on a managed Linux, macOS or Windows device. Your MDM
+delivers the trust anchor file and the bundles
+([Deliver with MDM](#deliver-with-mdm)) and detects the bundle that enforces
+([Detection](#detection)). The [command reference](#command-reference) and the
+[error and exit codes](#error-and-exit-codes) are at the end of the page.
 
 ## Install the trust anchor file
 
@@ -139,6 +143,63 @@ enforces it. The generic wrapper takes the same inputs:
 `defenseclaw.exe enterprise bundle apply --bundle <file>` runs the same ensure
 from the installed CLI.
 
+## Deliver with MDM
+
+Deliver three things: the trust anchor file (once, and again when you rotate
+keys), each signed bundle, and every credential a bundle names in
+`secret_refs`, with the secret delivery you already use. A bundle never
+carries a secret value.
+
+| OS | Wrapper | Bundle | Trust anchor file |
+| --- | --- | --- | --- |
+| Linux, macOS | `packaging/mdm/linux` or `macos/defenseclaw-enterprise.sh` | `--bundle-file FILE`, or the base64 of the bundle in `dc_inline_bundle` | `--trust-anchor-file FILE`, or the JSON in `dc_inline_trust_anchors` |
+| Windows | Setup `/ensure`, or `Invoke-DefenseClawEnterprise.ps1` | `BUNDLE=`, `-BundlePath` | `TRUSTANCHORS=`, `-TrustAnchorPath` |
+
+```bash
+sudo ./defenseclaw-enterprise.sh --trust-anchor-file /Library/Management/DefenseClaw/bundle-anchors.json \
+  --bundle-file /Library/Management/DefenseClaw/v12.dcbundle
+```
+
+On Linux and macOS the wrapper runs, in this order: the package or payload
+step when you give `--source`, the credential (`--secret-name` with
+`--secret-file` or `--secret-stdin`), the trust anchor file, then
+`enterprise bundle apply` on the wrapper's own copy of the bundle. It prints
+the apply's lifecycle result and exits with its code (0, 1, 2 or 75; it
+retries 75 twice).
+
+- The anchor file is the root of trust, so its path must be root-owned and
+  not writable by group or others, like `--config-file`. The wrapper writes it
+  as root, mode 0644, to the path in [Install the trust anchor
+  file](#install-the-trust-anchor-file). An identical file is left alone.
+- The bundle may come from any folder: the apply verifies its own copy. It is
+  at most 4 MiB.
+- A bundle carries its config. `--bundle-file` (or an inline bundle) refuses
+  `--config-file`, `--config-stdin` and a non-empty inline config with
+  `mdm_invalid_arguments` (exit 2).
+- When the apply fails, the bundle in force keeps enforcing and the wrapper
+  puts back the anchor file it replaced, or removes the one it added. A bad
+  anchor file never replaces the one that verified the bundle in force.
+- `--trust-anchor-file` without a bundle installs the anchor file after the
+  ensure. Use it to roll out a new key before the first bundle signed with it,
+  and check the file on a workstation first with `bundle verify --anchors
+  FILE --bundle <a bundle signed with the new key>`.
+- The same delivery again is a no-op (`already_applied`), so the MDM can run
+  the script on a schedule.
+
+The wrapper applies its copy directly instead of dropping it into the inbox,
+so its result and exit code are the bundle's. A package that only drops a
+bundle into the inbox relies on the apply trigger; check the outcome with
+[detection](#detection).
+
+Per-MDM recipes:
+[Intune for Windows](/docs/enterprise/mdm/intune-windows#deliver-signed-policy-bundles),
+[Intune for Linux](/docs/enterprise/mdm/intune-linux#deliver-signed-policy-bundles),
+[Intune for macOS](/docs/enterprise/mdm/intune-macos#deliver-signed-policy-bundles),
+[Jamf Pro](/docs/enterprise/mdm/jamf#deliver-signed-policy-bundles),
+[Kandji](/docs/enterprise/mdm/kandji#deliver-signed-policy-bundles),
+[Workspace ONE](/docs/enterprise/mdm/workspace-one#deliver-signed-policy-bundles) and
+[Configuration Manager](/docs/enterprise/mdm/configmgr#deliver-signed-policy-bundles).
+
 ## Status
 
 ```bash
@@ -154,6 +215,38 @@ effective policy digest of the current bundle. The enterprise status
 that fails or whose run is interrupted never becomes current: the last good
 bundle keeps enforcing, and the next lifecycle run ends an interrupted receipt
 as `failed` with `interrupted`.
+
+## Detection
+
+| Question | Linux and macOS | Windows |
+| --- | --- | --- |
+| Is bundle 12 (or newer) enforcing? | `detect.sh --require-bundle 12` | `detect.ps1 -RequireBundle 12` |
+| Is this exact bundle enforcing? | `detect.sh --require-bundle b-<ULID>` | `detect.ps1 -RequireBundle b-<ULID>` |
+| What happened to the last delivery? | `detect.sh --bundle-status` | The marker values `BundleId`, `BundleVersion` and `BundleState`, and `enterprise bundle status --json` |
+
+`--require-bundle` detects only when the current, confirmed bundle is that
+bundle id, or that version or a newer one, and `enterprise bundle status`
+reports that the running gateway enforces its effective policy digest. A
+newer version counts, so an assignment for version 12 does not try to
+reinstall over version 13. Otherwise the `value` and `jamf` formats print
+`bundle-missing`, `bundle-mismatch`, `bundle-outdated` or
+`bundle-not-enforced`, and the `exit` format exits 1 with the reason on
+STDERR. The script-only setting is `DC_REQUIRE_BUNDLE`.
+
+`--bundle-status` (setting `DC_BUNDLE_STATUS=1`) prints one line for the last
+bundle receipt and always exits 0, inside `<result>` with `--format jamf`:
+
+| Line | Meaning |
+| --- | --- |
+| `<bundle id> <version> confirmed` | The bundle enforces |
+| `<bundle id> <version> not-enforced` | Confirmed, but the running gateway does not report its digest (stopped, or a reload was rejected) |
+| `<bundle id> <version> failed:<code>` | The delivery failed with that [code](#error-and-exit-codes); the bundle before it keeps enforcing |
+| `<bundle id> <version> received`, `verified`, `staged` or `applied` | A run is in progress or was interrupted; the next lifecycle run settles it |
+| `none 0 none` | No bundle received yet |
+| `none 0 not-installed`, `none 0 unknown` | No managed deployment; or not run as root, or the state could not be read |
+
+Use it as a Jamf Pro extension attribute (data type String) or in a
+compliance script that requires the line to end in ` confirmed`.
 
 ## Audit and telemetry
 
@@ -176,6 +269,61 @@ device reads it within about 5 seconds and reports each terminal receipt once:
 Both log events are control-plane records: they keep their mandatory floor
 when a destination drops ordinary records. All of it is reporting only;
 enforcement does not depend on it.
+
+## Command reference
+
+All four verbs are on `defenseclaw-gateway` (Windows: `defenseclaw.exe`) under
+`enterprise bundle`. On a Secure Client computer every verb refuses with
+`not_supported_secure_client` before it changes anything.
+
+| Command | Flags | Notes |
+| --- | --- | --- |
+| `sign` | `--in DIR`, `--out FILE`, `--key PEM`, `--key-id ID`, `--tenant T`, `--device-group G`, `--version N`, `--created-by P`, `--parent ID`, `--rollback-of ID`, `--summary S`, `--min-product-version V`, `--platform linux\|darwin\|windows` (repeat; default all three), `--emit-digest`, `--tbs-out FILE`, `--attach-sig FILE`, `--public-key PEM`, `--json` | Offline, any OS, no root. Runs the whole validator, refuses errors and records warnings in the manifest. |
+| `verify` | `--bundle FILE\|DIR`, `--anchors FILE` (default: the installed anchor file), `--platform P` (default: this OS), `--json` | Changes nothing. On a managed device as root it also checks the version floor and the credentials. |
+| `apply` | `--bundle FILE\|DIR` or `--inbox`, `--reason R`, `--lock-wait D`, `--json` | Root or administrator, standalone managed device only. Prints the lifecycle result with the `bundle` block. |
+| `status` | `--json` | Root or administrator. Changes nothing. |
+
+## Error and exit codes
+
+| Result | Linux and macOS | Windows |
+| --- | --- | --- |
+| Applied, or nothing to do (`already_applied`, `inbox_empty`) | `0` | `0` |
+| Refused or failed; `errors[].code` names why | `1` | `1603` |
+| Another run holds the lock (`lifecycle_busy`): retry later | `75` | `1618` |
+| Invalid arguments | `2` | `1639` |
+
+Retry only the busy code. A refused bundle keeps failing until you deliver a
+different bundle, anchor file or credential.
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `archive_invalid` | Not a well-formed bundle: over a size limit, a link, a bad or duplicate name, an unexpected top-level entry | Build it again with `bundle sign` |
+| `manifest_invalid` | `manifest.json` or `manifest.sig` does not decode, or a field breaks its rule | Build it again with `bundle sign` |
+| `anchor_missing`, `anchor_invalid` | No trust anchor file is installed, or it does not decode | Deliver a valid anchor file |
+| `anchor_insecure` | The anchor file or a folder above it is writable by another account, or a link | Fix the owner and mode (Windows: the ACL) |
+| `key_unknown`, `key_revoked`, `key_expired` | The signing key is not in the anchor file, is revoked, or is outside `not_before`..`not_after` (a retired key verifies only the bundle already applied) | Sign with an active key, or deliver an anchor file that has it |
+| `signature_invalid` | The signature does not verify | Sign again; never edit a signed bundle |
+| `tenant_mismatch`, `target_mismatch` | The bundle is for another tenant, device group or platform | Sign it for this device |
+| `version_not_newer` | The version is at or below the floor (last confirmed version or `min_version`) | Sign a higher version; a rollback is a new version |
+| `product_too_old` | The device runs an older product than `min_product_version` | Upgrade first |
+| `file_missing`, `file_extra`, `file_hash_mismatch` | The content differs from `files[]` | Build it again with `bundle sign` |
+| `inline_secret` | A file holds a literal secret | Use `secret://NAME` |
+| `secret_ref_missing` | A required credential is not on the device | Deliver the credential first, then the bundle |
+| `config_invalid` | The config fails validation | Fix the config and sign again |
+| `digest_mismatch` | Same product version and platform as the signer, but another effective policy digest | Sign on the product version the devices run |
+| `apply_failed` | The ensure transaction failed and rolled back; the lifecycle code is in `errors[]` too | Read the lifecycle code |
+| `not_confirmed` | The gateway did not report the new policy in time; rolled back | Check `status` and the gateway log, then deliver again |
+| `interrupted` | A run stopped before it finished; the next run settled it | Deliver again |
+| `lifecycle_busy` | Another run holds the lock | Retry |
+| `bundle_required` | `ensure --config` or `CONFIG=` on a device in bundle mode | Deliver a signed bundle |
+| `bundle_state_unreadable`, `state_invalid` | The bundle state or the current version directory cannot be read | Deliver a bundle with a higher version; see the limits below |
+| `bundle_inbox_refused` | An inbox file is not administrator-controlled | Copy it as root |
+| `not_managed` | Not a standalone managed device | Install the enterprise profile first |
+| `not_supported_secure_client` | A Secure Client computer | Bundles are standalone only |
+| `mdm_anchor_install_failed` | The Linux or macOS wrapper could not write the anchor file, or its folder is not root-only | Fix the folder, then run again |
+
+The MDM wrapper codes (`mdm_*`) and their exit codes are in
+[Exit codes](/docs/enterprise/mdm#exit-codes).
 
 ## Known limits
 
@@ -280,3 +428,22 @@ enforcement does not depend on it.
   changing runs refuse to apply any config (`bundle_state_unreadable`) and the
   installed config keeps enforcing. Applying the current bundle again does not
   repair it; apply a bundle with a higher version.
+- **Root is trusted.** The checks protect a device from standard accounts
+  and from tampered or replayed deliveries, not from its administrators: root
+  (Windows: an administrator or SYSTEM) can replace the anchor file, edit the
+  bundle state or remove DefenseClaw. A reinstall or purge that removes
+  `bundle-state.json` resets the floor to the anchor's `min_version`; raise
+  `min_version` as you retire old bundles.
+- **MDM script size.** A bundle pasted into the wrapper as base64 grows by a
+  third. MDMs limit script bodies (Intune for macOS: 1 MB per script), so keep
+  an inline bundle well under that, and deliver a larger bundle as a file
+  (`--bundle-file`) in a package. Bundles themselves are at most 4 MiB.
+- **Wrapper runs that stop.** An MDM timeout that ends the Linux or macOS
+  wrapper after it installed a new anchor file, and before the apply ended,
+  leaves the new anchor file in place; the bundle in force keeps enforcing and
+  the next delivery settles it. An anchor file delivered without a bundle is
+  not checked until the next bundle applies.
+- **Detection needs root.** `detect.sh` reads `enterprise bundle status`,
+  which only root can run; under another account `--bundle-status` prints
+  `none 0 unknown` and `--require-bundle` reports `bundle-missing`. Windows
+  has no `--bundle-status` line; read the marker values instead.
