@@ -28,11 +28,13 @@ from __future__ import annotations
 
 import base64
 import json
+import ntpath
 import os
 import posixpath
 import re
 import shlex
 import stat
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -340,6 +342,87 @@ def _hook_section(document: Any) -> Any:
     return hooks if isinstance(hooks, list) else None
 
 
+# Per-user Windows Claude Code registers its launcher through cmd.exe so a
+# missing launcher blocks instead of failing open (GAP-1091). Keep this
+# sentence and argv identical to internal/gateway/connector/claudecode_launcher_guard.go.
+CLAUDE_LAUNCHER_GUARD_WORDS = (
+    "DefenseClaw blocked this: its Claude Code hook launcher is missing. "
+    "Run the DefenseClaw installer again to repair it."
+).split()
+
+
+def claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged.
+
+    Doctor's hook matrix and the status registration check both read a
+    Claude Code handler through this view (GAP-0463).
+    """
+    if not isinstance(handler, dict):
+        return handler
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return handler
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return handler
+    if len(args) < 8 or args[:4] != ["/d", "/c", "if", "exist"] or args[5] != "(" or args[6] != args[4]:
+        return handler
+    end = next((i for i in range(7, len(args) - 1) if args[i] == ")" and args[i + 1] == "else"), -1)
+    if end < 0:
+        return handler
+    launcher, inner = args[4], args[7:end]
+    expected = [
+        "/d", "/c", "if", "exist", launcher, "(", launcher, *inner, ")", "else", "(", "echo",
+        *CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+    ]
+    if args != expected:
+        return handler
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(inner)
+    return view
+
+
+def hook_handler_command_lines(handler: Any, connector: str) -> list[str]:
+    """The command lines one decoded hook handler runs.
+
+    Claude Code's exec form keeps the argv in ``args``, and per-user Windows
+    runs the launcher through the cmd.exe guard, so ``command`` is cmd.exe and
+    the launcher is named only in ``args``. Reading ``command`` alone made
+    status call every hook of a 1.0.1 or later Windows install unregistered
+    while doctor, which reads the same view, passed them (GAP-0463).
+    """
+
+    if connector == "claudecode":
+        handler = claude_launcher_guard_view(handler)
+    if not isinstance(handler, dict):
+        return []
+    args = handler.get("args")
+    argv = list(args) if isinstance(args, list) and all(isinstance(arg, str) for arg in args) else None
+    lines: list[str] = []
+    for key in _HOOK_COMMAND_KEYS:
+        value = handler.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        lines.append(subprocess.list2cmdline([value, *argv]) if key == "command" and argv is not None else value)
+    return lines
+
+
+def _hook_command_lines(value: Any, connector: str) -> list[str]:
+    """Every command line in a decoded ``hooks`` section, read one handler at a time."""
+
+    if isinstance(value, list):
+        return [line for item in value for line in _hook_command_lines(item, connector)]
+    if not isinstance(value, dict):
+        return []
+    found = hook_handler_command_lines(value, connector)
+    for key, item in value.items():
+        if not (key in _HOOK_COMMAND_KEYS and isinstance(item, str)):
+            found.extend(_hook_command_lines(item, connector))
+    return found
+
+
 def _decoded_command(command: str) -> str:
     """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
 
@@ -359,17 +442,24 @@ def _defenseclaw_hook_command(cfg: Any, connector: str, command: str, *, strict:
     Per-user Unix hooks run a script under this data directory's ``hooks``
     folder (or an edited DefenseClaw entry, which the edited-hook check
     reports). Windows registers the native launcher, and managed installs
-    their own runtime: there the command must name DefenseClaw.
+    their own runtime: there the command must name DefenseClaw or run a
+    script in this data directory's hooks folder (the Windows Copilot
+    PowerShell adapter, which names DefenseClaw only when the data directory
+    does).
     """
 
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    roots = dict.fromkeys((data_dir, os.path.realpath(data_dir)))
+    hooks_dirs = [os.path.join(root, "hooks") + os.sep for root in roots]
     if strict:
-        data_dir = str(getattr(cfg, "data_dir", "") or "")
-        for root in dict.fromkeys((data_dir, os.path.realpath(data_dir))):
-            if os.path.join(root, "hooks") + os.sep in command:
-                return True
+        if any(hooks in command for hooks in hooks_dirs):
+            return True
         script_name = HOOK_SCRIPT_NAMES.get(connector, "")
         return bool(script_name and edited_hook_script(command, script_name))
-    return "defenseclaw" in _decoded_command(command).lower()
+    if "defenseclaw" in _decoded_command(command).lower():
+        return True
+    lowered = command.casefold()
+    return bool(data_dir) and any(hooks.casefold() in lowered for hooks in hooks_dirs)
 
 
 def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict: bool) -> bool:
@@ -397,7 +487,8 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     if section is None:
         return False
     return any(
-        _defenseclaw_hook_command(cfg, connector, command, strict=strict) for command in _hook_command_strings(section)
+        _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+        for command in _hook_command_lines(section, connector)
     )
 
 
