@@ -553,7 +553,14 @@ func (m *Manager) endSessionRules(ctx context.Context, gw *Gateway, b *box, eff 
 	}
 	cfg, err := gw.Client.SandboxConfig(ctx, name)
 	if err != nil {
-		return upstream("read the policy of sandbox "+name, err)
+		var rules []string
+		for rule, origin := range origins {
+			if origin == actorOperator {
+				rules = append(rules, rule)
+			}
+		}
+		sort.Strings(rules)
+		return &sessionRulesError{rules: rules, err: upstream("read the policy of sandbox "+name, err)}
 	}
 	var decided map[string]bool
 	if m.authority() != nil {
@@ -588,7 +595,7 @@ func (m *Manager) endSessionRules(ctx context.Context, gw *Gateway, b *box, eff 
 	})
 	if err != nil {
 		m.forgetApprovedRules(b, gone)
-		return upstream("end the session approvals of sandbox "+name, err)
+		return &sessionRulesError{rules: ended, err: upstream("end the session approvals of sandbox "+name, err)}
 	}
 	m.logf("sandbox %s: the rules approved for its last session ended with it: %s", name, strings.Join(ended, ", "))
 	m.forgetApprovedRules(b, append(gone, ended...))
@@ -607,6 +614,41 @@ func (m *Manager) endSessionRules(ctx context.Context, gw *Gateway, b *box, eff 
 		m.tel.RecordSandboxPolicy(ctx, ev)
 	}
 	return nil
+}
+
+// sessionRulesError is a failed endSessionRules: the rules it could not
+// remove (every rule the person approved when the policy could not be
+// read) and why.
+type sessionRulesError struct {
+	rules []string
+	err   error
+}
+
+func (e *sessionRulesError) Error() string { return e.err.Error() }
+func (e *sessionRulesError) Unwrap() error { return e.err }
+
+// sessionRulesLeft is the refusal of a start whose sandbox still has rules
+// approved for its last session after both tries to remove them: the new
+// session must not run with them (GAP-0014), so it was stopped again. The
+// gateway's own words stay in the log.
+func sessionRulesLeft(name string, err error) error {
+	what := "the network rules approved for its last session"
+	var left *sessionRulesError
+	if errors.As(err, &left) && len(left.rules) == 1 {
+		what = "the network rule " + left.rules[0] + ", approved for its last session,"
+	} else if left != nil && len(left.rules) > 1 {
+		what = "the network rules " + strings.Join(left.rules, ", ") + ", approved for its last session,"
+	}
+	code := sandboxapi.CodeUpstream
+	var apiErr *sandboxapi.Error
+	if errors.As(err, &apiErr) {
+		code = apiErr.Code
+	}
+	return &sandboxapi.Error{Code: code,
+		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
+			"so DefenseClaw stopped it again (its work is kept)",
+		Detail: "a new session does not keep what was approved for the last one; start it again " +
+			"(the removal is tried first), and if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 }
 
 func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest) error {
@@ -800,7 +842,12 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	if rulesLeft != nil {
 		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
-			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v)", rec.Name, err, rulesLeft)
+			// Fail closed: a sandbox must not run a new session with a rule
+			// approved for the last one.
+			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
+				rec.Name, err, rulesLeft)
+			m.stopUnverified(ctx, gw, b)
+			return sessionRulesLeft(rec.Name, err)
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
