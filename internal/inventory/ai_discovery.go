@@ -3911,7 +3911,6 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 
 func (s *ContinuousDiscoveryService) scanRoots() []string {
 	var roots []string
-	privacySkipped := false
 	seen := make(map[string]struct{})
 	for _, root := range s.opts.ScanRoots {
 		for _, expanded := range s.expandCandidatePath(root) {
@@ -3919,7 +3918,6 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 				continue
 			}
 			if s.macOSTCCRootSkipped(expanded) {
-				privacySkipped = true
 				continue
 			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {
@@ -3928,7 +3926,7 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 			}
 		}
 	}
-	if len(roots) == 0 && !privacySkipped {
+	if len(roots) == 0 {
 		for _, home := range s.homesToScan() {
 			if _, ok := seen[home]; ok {
 				continue
