@@ -12,6 +12,18 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg07_workload_python_shims(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("`python3`, `python` and `pip` using `/sandbox/.venv`", text)
+        self.assertIn("hooks keep the system `/usr/bin/python3`", text)
+
+    def test_fg07_full_disk_stop_keeps_copy(self):
+        guide = page("sandboxes/guide.mdx")
+        reference = page("reference/sandbox-cli.mdx")
+        self.assertIn("even with `--yes` (exit `5`)", guide)
+        self.assertIn("full disk keeps running if its copy holds work not\nyet pulled", reference)
+        self.assertIn("If its disk does not answer\nwithin 15 seconds", reference)
+
     def test_pr886_remote_scanner_empty_rules_use_connection_policy(self):
         text = page("guardrail/index.mdx")
         self.assertIn("an unset or empty\n`cisco_ai_defense.enabled_rules` sends no", text)

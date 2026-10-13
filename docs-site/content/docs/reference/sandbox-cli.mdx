@@ -1085,6 +1085,12 @@ warn about unpulled work, as after a session that brought everything back.
 When the copy is as its last pull took it, the next `pull` uses that pull
 instead of starting the sandbox.
 
+A copy-mode MicroVM with a full disk keeps running if its copy holds work not
+yet pulled (exit `5`), even with `--yes`: check it with
+`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name>`, then
+stop. `sandbox delete <name>` gives up that work. If its disk does not answer
+within 15 seconds, stop asks first; `--yes` skips that question.
+
 ```bash
 defenseclaw sandbox stop myapp-7f3a
 ```

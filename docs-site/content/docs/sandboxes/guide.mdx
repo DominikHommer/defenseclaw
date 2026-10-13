@@ -359,9 +359,12 @@ Each harness image is NVIDIA's OpenShell community base image (Ubuntu
 The agent finds these tools in it:
 
 - `gcc`, `g++` and `make`
-- Python 3.14 with `pip` (in `/sandbox/.venv`, first on `PATH`) and `uv`
+- Python 3.14 with `python3`, `python` and `pip` using `/sandbox/.venv`, plus `uv`
 - Node.js 22 with `npm`
 - `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
+
+Root-owned shims in `/usr/local/sbin` send the workload's Python commands to
+that venv; DefenseClaw's hooks keep the system `/usr/bin/python3`.
 
 `make` on the agent's `PATH` is `/usr/local/bin/make`, a DefenseClaw
 wrapper around the image's GNU make: OpenShell's seccomp filter refuses a
@@ -1629,7 +1632,7 @@ myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~
 | --- | --- |
 | `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going, or that another session is attached to, running. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
-| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not); like every stop, it marks the run interrupted and keeps its log for `sandbox logs`. |
+| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not); like every stop, it marks the run interrupted and keeps its log for `sandbox logs`. A copy-mode MicroVM whose own disk is full keeps running while its copy holds unpulled work, even with `--yes` (exit `5`). Check space with `sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name>`, then stop. `sandbox delete <name>` gives up that work. If the disk does not answer within 15 seconds, stop asks first; `--yes` skips that question. |
 | `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder and you did not keep them at the end of that session, in which case the old snapshot is kept so `undo` still reverts them; it says which. `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
 | `defenseclaw sandbox delete <name>` | Delete sandboxes with their credentials and, unless `--keep-snapshot`, their undo snapshot. |
 | `defenseclaw sandbox status` | The sandbox subsystem: OpenShell, the gateway, the listeners, the policy, and how many sandboxes run. With a name, one sandbox in detail. |
