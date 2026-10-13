@@ -12,6 +12,16 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_lfuninst_running_sandbox_refuses_uninstall(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("A running sandbox stops\n`defenseclaw uninstall` before any change", text)
+        self.assertIn("`--stop-sandboxes`\ninstead stops and deletes running sandboxes", text)
+
+    def test_lfuninst_signed_out_gateway_files_restore(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("without a systemd user manager restores these files and finishes", text)
+        self.assertIn("service loads them when it next starts", text)
+
     def test_fg01_failed_uninstall_teardown_keeps_receipt(self):
         text = page("sandboxes/guide.mdx")
         self.assertIn("without either flag so the data\ndirectory and gateway binary stay", text)

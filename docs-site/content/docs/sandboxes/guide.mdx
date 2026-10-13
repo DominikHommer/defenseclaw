@@ -1689,6 +1689,9 @@ Teardown takes these steps, in order:
    sandbox on it, and on the MicroVM driver to first stop the sandboxes
    still running on it (named) with `defenseclaw sandbox stop NAME`, which
    flushes their disks, or what they wrote since their last sync is lost.
+   On Linux, a teardown or per-user uninstall from a signed-out session
+   without a systemd user manager restores these files and finishes without
+   restarting the gateway. Its service loads them when it next starts.
 7. **shell wrappers**: removes them from every shell's rc file.
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 
@@ -1702,7 +1705,14 @@ sandbox is left that could boot it: when a sandbox could not be deleted, or no
 daemon or gateway listed them, it keeps the disks and says why. It never
 removes anything else of OpenShell's state there.
 
-OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
+OpenShell itself stays installed. A running sandbox stops
+`defenseclaw uninstall` before any change. Pull a copy-mode sandbox's work
+with `defenseclaw sandbox pull NAME --branch`, or review a mount-mode
+sandbox with `defenseclaw sandbox review NAME`, then run
+`defenseclaw sandbox stop NAME` and uninstall again. `--stop-sandboxes`
+instead stops and deletes running sandboxes during teardown, including any
+copy-mode work that was not pulled. `reset` accepts the same flag.
+`defenseclaw uninstall` runs teardown too,
 and stops if teardown fails (where sandboxes are not supported, such as
 Windows, it skips it). When Docker or OpenShell are
 gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the
