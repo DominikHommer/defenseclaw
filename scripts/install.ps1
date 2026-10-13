@@ -1956,7 +1956,9 @@ function Wait-UninstallCleanup([int]$Seconds = 300) {
 }
 
 function Invoke-Install {
-    if ($Help) { Show-Usage; return 0 }
+    # -h binds to -Help; the --help of install.sh lands in UnknownArguments
+    # and shows the same help, before anything else runs (GAP-0466).
+    if ($Help -or $UnknownArguments -contains "--help") { Show-Usage; return 0 }
     foreach ($argument in $UnknownArguments) {
         if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
             # -Name=value is the same option as -Name value (GAP-0361).
