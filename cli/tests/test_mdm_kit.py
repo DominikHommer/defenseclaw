@@ -754,6 +754,47 @@ def test_intune_package_rejects_inline_key_before_copying_setup() -> None:
     assert script.index("if ($configText -match") < script.index("New-Item -ItemType Directory -Path $content")
 
 
+def test_intune_package_requires_current_config_version(tmp_path: Path) -> None:
+    script = MDM / "intune" / "windows" / "New-DefenseClawIntunePackage.ps1"
+    source = _text(script)
+    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not pwsh:
+        assert "Setup migrates it on install" in source
+        assert source.index("Setup migrates it on install") < source.index("New-Item -ItemType Directory -Path $content")
+        return
+    setup = tmp_path / "Setup.exe"
+    setup.write_bytes(b"fixture setup")
+    pin = hashlib.sha256(setup.read_bytes()).hexdigest()
+    config = tmp_path / "config.yaml"
+
+    def build(version: str) -> subprocess.CompletedProcess[str]:
+        config.write_text(version, encoding="utf-8")
+        return subprocess.run(
+            [pwsh, "-NoProfile", "-File", str(script), "-SetupPath", str(setup),
+             "-Sha256", pin, "-ConfigPath", str(config), "-OutputDirectory", str(tmp_path / "out")],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    old = build("# config_version: 9\n  config_version: 9\nconfig_version: 8\n")
+    assert old.returncode != 0
+    assert "config_version 8" in old.stderr and "Setup migrates it on install" in old.stderr
+    assert not (tmp_path / "out" / "content").exists()
+    current = build("config_version: 9\n")
+    assert current.returncode == 0, current.stderr
+    content = tmp_path / "out" / "content"
+    pins = json.loads((content / "intune-package.json").read_text(encoding="utf-8"))
+    assert pins["config_sha256"] == hashlib.sha256(config.read_bytes()).hexdigest()
+    assert "Setup migrates it on install" in source
+
+
+def test_intune_config_change_docs_explain_the_version_pin() -> None:
+    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune-windows.mdx")
+    section = page.split("**Change the config.**", 1)[1].split("**Roll back.**", 1)[0]
+    assert "config_version: 9" in section
+    assert "packager\nrefuses a missing or older version" in section
+    assert "installed hash would differ from the hash pinned" in section
+
+
 # PowerShell 7 / .NET Core only constructs that break Windows PowerShell 5.1.
 PS7_ONLY = [
     (re.compile(r"\?\?"), "null-coalescing ??"),
