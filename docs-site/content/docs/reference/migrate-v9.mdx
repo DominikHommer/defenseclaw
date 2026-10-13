@@ -238,6 +238,12 @@ admission:
   `guardrail.hilt`, `guardrail.patterns`, `guardrail.severity_mappings`,
   `guardrail.severity_rank`) are dropped and listed under `removed` in the record.
 
+V9 does not retain an activated custom policy's name. If a custom policy was
+created from a preset and activated with the same effective values,
+`policy list` can show the preset as active after upgrade. The configuration
+keeps the effective admission, guardrail, watch and trust settings; the display
+name is inferred from those values.
+
 **Thresholds.** In v8 the severity that blocks came from different places on
 different paths: `config.yaml` for hook tool calls, the rule pack's posture for
 hook prompts, and `data.json` for the LLM proxy. In v9 `guardrail.block_at` and
