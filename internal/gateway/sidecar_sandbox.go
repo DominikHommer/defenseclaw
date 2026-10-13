@@ -312,7 +312,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 				Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID,
 				SessionID: d.SessionID, ToolInput: d.ToolInput, ResultStatus: d.ResultStatus,
 				Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity, Reason: d.Reason,
-				ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
+				ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef, AlertsLow: d.AlertsLow,
 			})
 		},
 		OnHookFailure: func(f SandboxHookFailure) {

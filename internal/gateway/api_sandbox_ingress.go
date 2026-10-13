@@ -222,6 +222,9 @@ type SandboxHookDecision struct {
 	// message names. Empty for every other event.
 	ModelError  string
 	ModelStatus int
+	// AlertsLow reports that the guardrail profile which decided the call
+	// alerts at LOW itself (manager.HookDecision.AlertsLow).
+	AlertsLow bool
 	// CallRef is manager.ContentRef of SessionID, Tool and ToolInput, set
 	// for a relayed call's verdict trailer (the tool input itself never
 	// crosses back to the daemon).
@@ -958,6 +961,7 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 		ResultStatus: strings.TrimSpace(payloadString(req.Payload, "status")),
 		Action:       resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
 		ModelError: modelError, ModelStatus: modelStatus,
+		AlertsLow: a.sandboxAlertsLow(ctx, binding.Connector),
 	}
 	if sink != nil {
 		// The tool input stays on this gateway: the daemon pairs a
@@ -968,6 +972,15 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 		return
 	}
 	st.onHookDecision(decision)
+}
+
+// sandboxAlertsLow reports that the guardrail profile deciding the request
+// sets alert_at: low for connectorName itself (not the rule pack's own
+// levels, whose LOW alerts stay in the audit log): its LOW alerts are
+// findings of the sandbox session (#1207).
+func (a *APIServer) sandboxAlertsLow(ctx context.Context, connectorName string) bool {
+	cfg := a.decisionConfig(ctx)
+	return cfg != nil && cfg.Guardrail.EffectiveAlertAt(connectorName) == "LOW"
 }
 
 // sandboxModelStatus finds the HTTP status in Claude Code's "API Error: 401
@@ -1143,7 +1156,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
 			Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID, SessionID: d.SessionID,
 			ResultStatus: d.ResultStatus, Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity,
-			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
+			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef, AlertsLow: d.AlertsLow,
 		})
 	})
 }

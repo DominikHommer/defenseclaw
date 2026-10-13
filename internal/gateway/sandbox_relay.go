@@ -435,6 +435,7 @@ func (s *sandboxRelayDecisionSink) put(d SandboxHookDecision) {
 		Reason:       d.Reason,
 		ModelError:   d.ModelError,
 		ModelStatus:  d.ModelStatus,
+		AlertsLow:    d.AlertsLow,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
