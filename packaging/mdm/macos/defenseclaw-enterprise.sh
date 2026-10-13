@@ -876,9 +876,16 @@ dc_extract_payload() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive has absolute or parent-relative members"
     fi
     payload="$DC_STAGE/payload"
-    mkdir "$payload"
-    if ! tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>"$DC_STAGE/tar.err"; then
-        if grep -Eiq 'No space left|ENOSPC' "$DC_STAGE/tar.err"; then
+    if ! mkdir_err=$(mkdir "$payload" 2>&1 >/dev/null); then
+        available=$(df -Pk "$DC_STAGE" 2>/dev/null | awk 'END { print $4 }')
+        if printf '%s\n' "$mkdir_err" | grep -Eiq 'No space left|ENOSPC|Disk quota exceeded' || [ "$available" = 0 ]; then
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_full "the staging filesystem is full at $DC_STAGE; choose a staging folder with more space"
+        fi
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "cannot create the payload staging folder $payload: $mkdir_err"
+    fi
+    if ! tar_err=$(tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>&1 >/dev/null); then
+        available=$(df -Pk "$DC_STAGE" 2>/dev/null | awk 'END { print $4 }')
+        if printf '%s\n' "$tar_err" | grep -Eiq 'No space left|ENOSPC|Disk quota exceeded' || [ "$available" = 0 ]; then
             dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_full "the staging filesystem is full at $DC_STAGE; choose a staging folder with more space"
         fi
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive did not extract"
