@@ -118,10 +118,13 @@ func copyUpgradeFixture(t *testing.T, src, dst string) {
 		if err != nil {
 			return err
 		}
+		// The goldens pin the fixtures' LF bytes; a CRLF checkout must not
+		// change a digest.
+		text := strings.ReplaceAll(string(raw), "\r\n", "\n")
 		if rel == "config.yaml" {
-			raw = []byte(strings.ReplaceAll(string(raw), "@HOME@", dst))
+			text = strings.ReplaceAll(text, "@HOME@", dst)
 		}
-		return os.WriteFile(target, raw, 0o600)
+		return os.WriteFile(target, []byte(text), 0o600)
 	})
 	if err != nil {
 		t.Fatal(err)
