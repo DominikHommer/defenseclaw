@@ -186,6 +186,8 @@ fleet.
 
 Every lifecycle refuses an older release unless you ask for the rollback
 (`downgrade_refused`).
+For an Intune Win32 deployment, remove the superseding **Required** assignment
+before assigning the older app; otherwise Intune can reapply the newer release.
 
 **Going back to a release that reads `config_version: 8`.** An
 upgrade rewrites a `config_version: 8` administrator config as
@@ -488,6 +490,10 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair --js
   it unpacked to disk before its own install run starts, the MDM detection
   script reports a host with empty binaries as not installed, and the MDM
   wrapper reinstalls the same package version on such a host.
+  If `rpm -q defenseclaw-enterprise` lists two versions after an interrupted
+  upgrade, run `sudo dnf remove --duplicates defenseclaw-enterprise`, then
+  `sudo dnf reinstall defenseclaw-enterprise`. `ensure --from-package` does not
+  repair the package database.
 - **Deleted accounts (Linux and macOS).** `repair` also removes the guardian
   targets of accounts that no longer exist. Otherwise they stay until the
   enumerator removes them, 10 to 15 minutes after the account is deleted:
@@ -629,6 +635,12 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+  A removal refused with `uninstall_precheck_refused` or stopped with
+  `uninstall_incomplete` keeps the package files. Read
+  `/var/lib/defenseclaw-enterprise/last-package-result.json`, fix the named
+  cause and run the removal again. On RHEL, the last-resort
+  `rpm -e --nopreun defenseclaw-enterprise` removes the files without cleaning
+  registrations, which then name a missing binary until removed manually.
 - **Tetragon (Linux).** Uninstall deletes the `defenseclaw-*` policies the
   sensor helper loaded in Tetragon before it removes any file, so no control
   keeps denying after the helper is gone. With the machine state it then
