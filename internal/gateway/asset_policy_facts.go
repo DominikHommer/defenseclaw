@@ -157,8 +157,11 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 }
 
 // maxDeclaredNameScan bounds the skill folders of one root whose SKILL.md
-// a name-only call reads to find the folders that declare that name.
-const maxDeclaredNameScan = 256
+// a name-only call reads to find the folders that declare that name. It
+// counts folders, not entries: at 256 entries a disabled skill renamed into
+// a folder that sorts late was never read, so its runtime disable did not
+// apply (GAP-1197).
+const maxDeclaredNameScan = 4096
 
 // foldersDeclaringSkill lists the folders in root, other than root/name,
 // whose SKILL.md declares name. Codex selects a skill ($name, or by plain
@@ -174,12 +177,13 @@ func foldersDeclaringSkill(root, name string) []string {
 		return nil
 	}
 	var folders []string
-	for i, entry := range entries {
-		if i >= maxDeclaredNameScan {
-			break
-		}
+	scanned := 0
+	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
 			continue
+		}
+		if scanned++; scanned > maxDeclaredNameScan {
+			break
 		}
 		dir := filepath.Join(root, entry.Name())
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) != nil {
@@ -269,6 +273,7 @@ func (a *APIServer) skillFolderAccessDecision(
 			continue
 		}
 		declared := facts.DeclaredFor(ref.Name)
+		claimed := len(declared) > 0
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(ref.Dir) == nil {
 			if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
 				declared = append(declared, name)
@@ -279,6 +284,21 @@ func (a *APIServer) skillFolderAccessDecision(
 			Connector: connector, SourcePath: ref.Dir, RuntimeSurface: "skill_folder",
 		}
 		if verdict, _ := cfg.AssetListDecision(input); verdict != config.AssetListDeny {
+			// The hook sends at most maxSkills name claims. A folder past
+			// them that this gateway cannot read may declare a denied
+			// name, so it is refused as unproven (fail closed, GAP-1303).
+			if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
+				decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
+					"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
+						"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
+					"skill-facts-truncated")
+				decision.RegistryStatus = "unknown"
+				a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+					TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+					SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+				})
+				return decision, true
+			}
 			continue
 		}
 		decision := cfg.EvaluateAssetPolicy(input)
@@ -290,6 +310,31 @@ func (a *APIServer) skillFolderAccessDecision(
 		return decision, true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillManifestUnreadable reports whether this gateway cannot read the
+// SKILL.md in dir (a service account and a 0700 home), as opposed to there
+// being none.
+func skillManifestUnreadable(dir string) bool {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) != nil {
+		return true
+	}
+	manifest := filepath.Join(dir, "SKILL.md")
+	info, err := os.Lstat(manifest)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return false
+	case err != nil:
+		return true
+	case !info.Mode().IsRegular():
+		return false
+	}
+	file, err := os.Open(manifest)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	_ = file.Close()
+	return false
 }
 
 // lookupCallerMCPServer finds the MCP server name the caller's agent has

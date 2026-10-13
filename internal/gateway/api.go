@@ -4288,11 +4288,17 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 }
 
 // evaluateAdmissionPolicy evaluates admission with the input built from the
-// live config: the compiled admission: and the asset_policy lists. The
-// built-in Go twin runs only when OPA fails. OPA is the live generation's
-// prepared query (prepared once for an API server without a generation).
+// config of the generation the request is pinned to (else the live config):
+// the compiled admission: and the asset_policy lists. The built-in Go twin
+// runs only when OPA fails. OPA is that generation's prepared query
+// (prepared once for an API server without a generation), so a reload during
+// the request cannot pair one generation's query with another's lists
+// (GAP-0873).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
 	cfg := a.liveConfig()
+	if g := pinnedGeneration(ctx); g != nil && g.Config != nil && (cfg == nil || !cfg.SecureClientIntegration()) {
+		cfg = g.Config
+	}
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
