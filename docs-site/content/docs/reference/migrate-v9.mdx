@@ -525,7 +525,7 @@ scanners:
 | `scanners.skill_scanner.binary`, `scanners.mcp_scanner.binary` | Removed. DefenseClaw runs the scanners it ships. |
 | `scanners.skill_scanner.policy` empty or missing | `policy: quiet`, the recommended preset. This is the one value an unmodified install moves. |
 | `policy: strict`, `balanced`, `permissive`, `low-noise` or `quiet` | Kept. |
-| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. A file that cannot be read becomes `quiet` and a conflict is recorded. |
+| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. If the file cannot be read, migration stops with an error. |
 | `use_virustotal` | `analyzers.virustotal.enabled` (written only when it was `true`). |
 | `virustotal_api_key` (inline) | Written to `<data_dir>/.env` under the name in `virustotal_api_key_env`, or `VIRUSTOTAL_API_KEY`. The record shows `<redacted>`, and `config.yaml` names only the variable. |
 | `virustotal_api_key_env` | `analyzers.virustotal.api_key_env`. |
