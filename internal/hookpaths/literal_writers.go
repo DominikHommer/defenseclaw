@@ -36,6 +36,10 @@ type literalWriterRule struct {
 // Module bindings are resolved before a call is looked up here.
 var literalWriterRules = map[string][]literalWriterRule{
 	"python": {
+		{"logging.basicConfig", -1, "filename", -1, "", literalWriterAlways},
+		{"logging.FileHandler", 0, "filename", -1, "", literalWriterAlways},
+		{"logging.handlers.RotatingFileHandler", 0, "filename", -1, "", literalWriterAlways},
+		{"logging.handlers.WatchedFileHandler", 0, "filename", -1, "", literalWriterAlways},
 		{"open", 0, "file", 1, "mode", literalWriterMode},
 		{"builtins.open", 0, "file", 1, "mode", literalWriterMode},
 		{"__builtins__.open", 0, "file", 1, "mode", literalWriterMode},
@@ -106,12 +110,12 @@ var literalWriterRules = map[string][]literalWriterRule{
 
 var (
 	literalCallName          = regexp.MustCompile(`\b[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*\s*\(`)
-	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib|builtins|subprocess)\s+as\s+([A-Za-z_]\w*)`)
-	literalFromImport        = regexp.MustCompile(`\bfrom\s+(os|io|shutil|pathlib|builtins)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?`)
+	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib|builtins|subprocess|logging)\s+as\s+([A-Za-z_]\w*)`)
+	literalFromImport        = regexp.MustCompile(`\bfrom\s+(os|io|shutil|pathlib|builtins|logging)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?`)
 	literalPythonBinding     = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b`)
 	literalNodeRequire       = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?fs(?:/promises)?['"]\s*\)`)
 	literalNodeProcess       = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?child_process['"]\s*\)`)
-	literalNodeBinding       = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(fs(?:\.promises)?)\b`)
+	literalNodeBinding       = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(fs(?:\.promises)?(?:\.[A-Za-z_$][\w$]*)?)\b`)
 	literalNodeDestructure   = regexp.MustCompile(`\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeNamedImport   = regexp.MustCompile(`\bimport\s*\{([^}]+)\}\s*from\s*['"](?:node:)?fs(?:/promises)?['"]`)
 	literalNodeDefaultImport = regexp.MustCompile(`\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](?:node:)?fs(?:/promises)?['"]`)

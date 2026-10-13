@@ -48,7 +48,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
 				cmdCWD, language, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
 				if ok {
-					paths, dynamic := literalInterpreterWrites(language, code)
+					paths, dynamic := literalInterpreterAnalysis(language, code, cmdCWD, home)
 					unknown = unknown || dynamic
 					for _, name := range paths {
 						add(name, cmdCWD)
@@ -78,7 +78,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 					if start < 0 || end > len(command) || end <= start {
 						continue
 					}
-					paths, dynamic := literalInterpreterWrites(language, command[start:end])
+					paths, dynamic := literalInterpreterAnalysis(language, command[start:end], cmdCWD, home)
 					unknown = unknown || dynamic
 					for _, name := range paths {
 						add(name, cmdCWD)
@@ -92,7 +92,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 					if !static {
 						continue
 					}
-					paths, dynamic := literalInterpreterWrites(language, code)
+					paths, dynamic := literalInterpreterAnalysis(language, code, cmdCWD, home)
 					unknown = unknown || dynamic
 					for _, name := range paths {
 						add(name, cmdCWD)
@@ -108,7 +108,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 				return true
 			}
 			if _, static := StaticWord(call.Args[0], home); !static {
-				paths, dynamic := literalUnresolvedProgramWrites(call.Args, home)
+				paths, dynamic := literalUnresolvedProgramWrites(call.Args, cwd, home)
 				unknown = unknown || dynamic
 				for _, name := range paths {
 					add(name, cwd)
@@ -122,7 +122,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 			switch {
 			case literalInterpreterProgram(program):
 				if code, ok := literalInterpreterCode(program, programWords); ok {
-					paths, dynamic := literalInterpreterWrites(literalLanguage(program), code)
+					paths, dynamic := literalInterpreterAnalysis(literalLanguage(program), code, cmdCWD, home)
 					unknown = unknown || dynamic
 					for _, name := range paths {
 						add(name, cmdCWD)
@@ -131,13 +131,16 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 			case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
 				for _, arg := range programWords[1:] {
 					if strings.Contains(arg, "{") {
-						paths, dynamic := literalInterpreterWrites("awk", arg)
+						paths, dynamic := literalInterpreterAnalysis("awk", arg, cmdCWD, home)
 						unknown = unknown || dynamic
 						for _, name := range paths {
 							add(name, cmdCWD)
 						}
 						for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
 							add(match[1], cmdCWD)
+						}
+						for _, name := range literalAwkVariableWrites(programWords[1:], arg) {
+							add(name, cmdCWD)
 						}
 					}
 				}
@@ -157,7 +160,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 	return operands, unknown
 }
 
-func literalUnresolvedProgramWrites(args []*syntax.Word, home string) ([]string, bool) {
+func literalUnresolvedProgramWrites(args []*syntax.Word, cwd, home string) ([]string, bool) {
 	var paths []string
 	unknown := false
 	for i := 1; i+1 < len(args); i++ {
@@ -171,7 +174,7 @@ func literalUnresolvedProgramWrites(args []*syntax.Word, home string) ([]string,
 			return paths, true
 		}
 		for _, language := range []string{"python", "node", "perl", "ruby"} {
-			found, dynamic := literalInterpreterWrites(language, code)
+			found, dynamic := literalInterpreterAnalysis(language, code, cwd, home)
 			paths = append(paths, found...)
 			unknown = unknown || dynamic
 		}
