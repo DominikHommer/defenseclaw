@@ -308,6 +308,10 @@ using either slash. A look-alike never matches:
 defenseclaw config set admission.skill.first_party_allow_list --json '[{"name":"acme-review","source_path_contains":[".acme/skills/acme-review"],"reason":"first-party Acme skill"}]'
 ```
 
+The account `alice`, skill `acme-review` and `.acme/skills/acme-review` path
+above are examples. Replace the skill name and path with your reviewed asset
+before copying the command; use your own account paths when checking matches.
+
 `codeguard` and `defenseclaw` are DefenseClaw's own asset names, and a folder
 in a skills or plugins folder can be written by anything the user installs (a
 `git clone`, `npx skills add`). So an entry with one of these names, built in or
