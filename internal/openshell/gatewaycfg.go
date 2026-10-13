@@ -1531,12 +1531,26 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	// A stopped systemd service starts on the restored files (Homebrew's
 	// state is not asked: `brew services info` is slow).
 	if g.GOOS != "darwin" {
-		if svc, err := g.ServiceState(ctx); err == nil && svc.Installed && !svc.Active {
+		svc, err := g.ServiceState(ctx)
+		switch {
+		case err == nil && svc.Installed && !svc.Active:
 			if err := g.restore(ctx, res); err != nil {
 				return err
 			}
 			g.clearRestartPending()
 			return ErrGatewayServiceStopped
+		case noUserManager(err):
+			// No systemd user manager runs for this account (it is signed
+			// out and has no linger), so neither does its gateway service,
+			// and there is nothing to restart it through: the restart
+			// failed and stopped the per-user uninstall half done
+			// (GAP-0369). The files go back; the service loads them when it
+			// next starts.
+			if err := g.restore(ctx, res); err != nil {
+				return err
+			}
+			g.clearRestartPending()
+			return fmt.Errorf("%w: this session reaches no systemd user manager", ErrGatewayServiceStopped)
 		}
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
@@ -1551,6 +1565,18 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return err
 	}
 	return g.restart(ctx)
+}
+
+// noUserManager reports a `systemctl --user` failure that means this
+// session reaches no systemd user manager: systemctl says "Failed to
+// connect to bus" (No such file or directory, No medium found) or, since
+// systemd 248, "Failed to connect to user scope bus".
+func noUserManager(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Failed to connect to bus") || strings.Contains(msg, "Failed to connect to user scope bus")
 }
 
 // NoService reports that the service manager has no gateway service
