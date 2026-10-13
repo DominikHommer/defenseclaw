@@ -1373,7 +1373,11 @@ func (a *APIServer) handleSandboxDecisions(w http.ResponseWriter, r *http.Reques
 // the identity the gateway verified (emitSandboxDaemonEvent); tests replace
 // it.
 var sandboxEmitEvent = func(ctx context.Context, a *APIServer, peer managedHookPeer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
-	fmt.Fprintf(os.Stderr, "[sandbox-authority] event uid=%d registration=%s kind=%s\n", peer.UID, reg.ID, ev.Kind)
+	if !sandboxrelay.EventTelemetry(ev.Kind) {
+		// The lifecycle and egress records come by the hundred; their own
+		// records are the trail.
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] event uid=%d registration=%s kind=%s\n", peer.UID, reg.ID, ev.Kind)
+	}
 	emitSandboxDaemonEvent(ctx, a, reg, ev)
 }
 
@@ -1397,14 +1401,42 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
 		return
 	}
-	for _, ev := range batch.Events {
+	telemetry, rows := 0, 0
+	unreadable := make([]bool, len(batch.Events))
+	for i, ev := range batch.Events {
 		switch ev.Kind {
 		case sandboxrelay.EventForeignSandbox, sandboxrelay.EventForeignRule, sandboxrelay.EventForeignContainer,
-			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy:
+			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy,
+			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress:
 		default:
 			writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
 			return
 		}
+		// Every payload string is the daemon's claim, so control characters
+		// (ESC, NUL, C1, bidi and zero-width marks) never reach the managed
+		// audit (sandboxClaimPayload). A payload two of whose keys are one
+		// once cleaned refuses the batch; one that is not JSON is dropped.
+		isTelemetry := sandboxrelay.EventTelemetry(ev.Kind)
+		if isTelemetry {
+			telemetry++
+		}
+		payload, err := sandboxClaimPayload(ev.Payload)
+		switch {
+		case errors.Is(err, errSandboxClaimKeyCollision):
+			writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
+			return
+		case err != nil:
+			unreadable[i] = true
+			continue
+		}
+		batch.Events[i].Payload = payload
+		if !isTelemetry {
+			rows += sandboxEventRows(batch.Events[i])
+		}
+	}
+	if telemetry > 0 && len(batch.Events) > sandboxrelay.MaxTelemetryBatchRecords || rows > sandboxEventRecordBurst {
+		writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
+		return
 	}
 	var reg sandboxreg.Registration
 	if strings.TrimSpace(batch.Registration) == "" {
@@ -1429,20 +1461,53 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		reg = sandboxreg.Registration{UID: peer.UID, UserName: accountName,
 			SubjectKey: sandboxSubjectKey(auth.key, peer.UID, accountName, "")}
 	} else {
+		// A batch of only lifecycle and egress records may name a revoked
+		// registration: the daemon reports a sandbox deleted right after
+		// recording its deleting and deleted phases, and a sandbox the
+		// gateway revoked (a changed policy) is then stopped and deleted by
+		// its daemon. Those records still describe the caller's own sandbox
+		// (GAP-0003); sandboxTelemetryAdmit bounds what such a tombstone
+		// takes.
+		telemetryOnly := telemetry == len(batch.Events)
 		var ok bool
-		reg, ok = a.sandboxRegistrationFor(w, auth, peer, batch.Registration, true, false)
+		reg, ok = a.sandboxRegistrationFor(w, auth, peer, batch.Registration, true, telemetryOnly)
 		if !ok || !a.sandboxDecide(w, r, peer, reg.Connector) || !a.sandboxCheckSubject(w, auth, peer, reg) {
 			return
 		}
+		if telemetry > 0 && !sandboxTelemetryAdmit(w, auth, peer, reg, telemetry) {
+			return
+		}
 	}
-	for _, ev := range batch.Events {
-		if ev.Time.IsZero() || ev.Time.After(time.Now().Add(time.Minute)) {
-			ev.Time = time.Now().UTC()
+	// The records of the other events, by the record (sandboxEventRows).
+	if rows > 0 && !sandboxBudgetAdmit(w, &auth.eventRecords, peer, rows, auth.clock()) {
+		return
+	}
+	now := auth.clock()
+	refused, lifecycle := 0, false
+	for i, ev := range batch.Events {
+		if unreadable[i] {
+			sandboxRecordFailed(ev.Kind, fmt.Errorf("payload is not the event's JSON"))
+			continue
+		}
+		if ev.Time.IsZero() || ev.Time.After(now.Add(time.Minute)) {
+			ev.Time = now
+		}
+		if sandboxrelay.EventTelemetry(ev.Kind) && !sandboxTelemetryRecordAllowed(reg, ev) {
+			refused++
+			continue
 		}
 		sandboxEmitEvent(r.Context(), a, peer, reg, ev)
+		lifecycle = lifecycle || ev.Kind == sandboxrelay.EventSandboxLifecycle
 		if ev.Kind == sandboxrelay.EventForeignSandbox {
 			a.sandboxRevokeForeign(auth, peer, ev)
 		}
+	}
+	if lifecycle && reg.State != sandboxreg.StateRevoked {
+		a.sandboxForgetIfGone(auth, peer.UID, reg)
+	}
+	if refused > 0 {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] refused %d sandbox telemetry record(s) uid=%d registration=%s state=%s\n",
+			refused, peer.UID, reg.ID, reg.State)
 	}
 	w.WriteHeader(http.StatusAccepted)
 }

@@ -17,10 +17,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
 	"os"
 	"regexp"
 	"slices"
@@ -30,6 +34,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
@@ -55,8 +60,35 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		return r.(*audit.SandboxRecorder)
 	}
-	r, _ := managedSandboxRecorders.LoadOrStore(a, audit.NewSandboxRecorder(a.logger))
+	fresh := audit.NewSandboxRecorder(a.logger)
+	// One account tracks at most as many managed sandboxes as it may hold
+	// registrations: a lifecycle record past that is dropped and logged.
+	fresh.LimitManagedPhases(sandboxreg.MaxEntriesPerUID)
+	r, _ := managedSandboxRecorders.LoadOrStore(a, fresh)
 	return r.(*audit.SandboxRecorder)
+}
+
+// sandboxRegistrationGone stops tracking the phase of reg's sandbox. The
+// registration store calls it (sandboxreg.FileStore.OnGone) whenever a
+// registration is revoked, removed or evicted, by any path, so a sandbox
+// whose deleted phase never arrives neither stays in the managed
+// recorder's phase map nor counts in sandbox.active; the daemon's deleted
+// record is not relied on.
+func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
+	if r, ok := managedSandboxRecorders.Load(a); ok {
+		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
+	}
+}
+
+// sandboxForgetIfGone stops tracking the phase of reg's sandbox when reg was
+// revoked or removed while a batch of its lifecycle records was being
+// recorded: the store's OnGone may have run before one of them tracked the
+// phase again.
+func (a *APIServer) sandboxForgetIfGone(auth *sandboxAuthority, uid int, reg sandboxreg.Registration) {
+	cur, ok, err := auth.store.Get(uid, reg.ID)
+	if err == nil && (!ok || cur.State == sandboxreg.StateRevoked) {
+		a.sandboxRegistrationGone(reg)
+	}
 }
 
 // sandboxRecordFailed logs a managed record the recorder refused; the
@@ -327,6 +359,10 @@ func sandboxManagedAction(action string) string {
 // emitSandboxDaemonEvent records one daemon event of reg, with the person
 // and registration the gateway verified.
 func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
+	if sandboxrelay.EventTelemetry(ev.Kind) {
+		emitSandboxTelemetryClaim(ctx, a, reg, ev)
+		return
+	}
 	var p sandboxEventPayload
 	if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &p) != nil {
 		sandboxRecordFailed(ev.Kind, fmt.Errorf("payload is not the event's JSON"))
@@ -394,4 +430,309 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxAccessRefused(ctx, audit.SandboxAccessRefusedEvent{
 			Sandbox: identity, Subject: subject, Host: p.Host, Port: p.Port, Rule: p.Rule, Reason: p.Reason, Timestamp: at}))
 	}
+}
+
+// emitSandboxTelemetryClaim records one of the daemon's sandbox telemetry
+// records (daemonRelayTelemetry): a phase change (log.sandbox.lifecycle) or
+// an egress decision or connection end (log.egress.*) of reg's sandbox. The
+// sandbox name and id, its registration, guardrail profile and policy stamp
+// and the person come from reg, which the gateway verified is the peer's own
+// (handleSandboxEvents), as on every other managed sandbox record; the
+// payload only adds what the daemon observed, and never the image digest,
+// network profile or policy revision, which no registration vouches for. A
+// registration not bound to a sandbox yet takes no record (the daemon posts
+// only after the bind), and a record naming another sandbox than reg's is
+// dropped, so a caller can't make up sandboxes: each one would be a phase the
+// managed recorder tracks for every account (sandboxPhaseKey).
+func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
+	var c sandboxTelemetryClaim
+	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &c) != nil {
+		sandboxRecordFailed(ev.Kind, fmt.Errorf("payload is not the event's JSON"))
+		return
+	}
+	switch {
+	case reg.SandboxName == "":
+		sandboxRecordFailed(ev.Kind, fmt.Errorf("registration %s is not bound to a sandbox", reg.ID))
+		return
+	case c.Sandbox != reg.SandboxName, c.SandboxID != "" && reg.SandboxID != "" && c.SandboxID != reg.SandboxID:
+		sandboxRecordFailed(ev.Kind, fmt.Errorf("registration %s is not sandbox %q's", reg.ID, c.Sandbox))
+		return
+	}
+	identity := sandboxRecordIdentity(reg)
+	identity.Phase = audit.SandboxPhase(c.Phase)
+	identity.Pack = c.Pack
+	subject := sandboxRecordSubject(reg)
+	r := a.managedSandboxRecorder()
+	record := func(identity audit.SandboxIdentity) error {
+		if ev.Kind == sandboxrelay.EventSandboxLifecycle {
+			// The phase sets the severity (error HIGH, unknown MEDIUM).
+			e := audit.SandboxLifecycleEvent{Sandbox: identity, PreviousPhase: audit.SandboxPhase(c.PreviousPhase),
+				Trigger: audit.SandboxLifecycleTrigger(c.Trigger), ExitCode: c.ExitCode, Timestamp: ev.Time,
+				UserID: subject.UserID, UserName: subject.UserName,
+				// A revoked registration's sandbox is no longer tracked
+				// (sandboxRegistrationGone): its last records never track
+				// it again.
+				TrackedOnly: reg.State == sandboxreg.StateRevoked}
+			if c.Condition != nil {
+				e.Condition = &audit.SandboxCondition{Type: c.Condition.Type, Status: c.Condition.Status,
+					Reason: c.Condition.Reason, Message: c.Condition.Message}
+			}
+			return r.RecordSandboxLifecycle(ctx, e)
+		}
+		floor := observability.SeverityInfo
+		if c.Blocked {
+			floor = observability.SeverityMedium
+		}
+		return r.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{Sandbox: identity, Source: audit.SandboxEgressSource(c.Source),
+			End: audit.SandboxEgressEnd(c.End), TimedOut: c.TimedOut, Terminated: c.Terminated, BytesUp: c.BytesUp, BytesDown: c.BytesDown,
+			Duration: sandboxClaimDuration(c.DurationMS), PID: c.PID, Executable: c.Executable,
+			ConversationID: c.ConversationID, Host: c.Host, Port: c.Port, Scheme: c.Scheme, Path: c.Path, ResolvedIP: c.ResolvedIP,
+			Blocked: c.Blocked, DecisionCode: c.DecisionCode, Reason: c.Reason, PolicyOutcome: c.PolicyOutcome,
+			Severity: sandboxClaimSeverity(c.Severity, floor), Timestamp: ev.Time, UserID: subject.UserID, UserName: subject.UserName})
+	}
+	if err := record(identity); err != nil {
+		if errors.Is(err, audit.ErrSandboxPhaseLimit) {
+			sandboxRecordFailed(ev.Kind, err)
+			return
+		}
+		// Should the recorder refuse the profile stamp, the record keeps
+		// the registration and the subject key alone.
+		sandboxRecordFailed(ev.Kind+" (stamped)", err)
+		identity.Managed = audit.SandboxManaged{RegistrationID: reg.ID, SubjectKey: reg.SubjectKey}
+		sandboxRecordFailed(ev.Kind, record(identity))
+	}
+}
+
+// sandboxTelemetryAfterRevoke is how long after a registration was revoked
+// (its daemon reported the sandbox deleted, or the gateway revoked it) its
+// tombstone still takes the sandbox's last records (the stopping, stopped,
+// error, deleting and deleted phases, the ends of its connections), which
+// the daemon posts within seconds.
+const sandboxTelemetryAfterRevoke = 10 * time.Minute
+
+// sandboxClaimMaxDuration bounds a claimed connection duration.
+const sandboxClaimMaxDuration = 30 * 24 * time.Hour
+
+// sandboxTelemetryAdmit admits a batch carrying n sandbox telemetry records
+// under reg, or answers the refusal:
+//
+//   - a registration not bound to a sandbox (pending, or no sandbox name)
+//     names no sandbox to record for: 403 sandbox_not_allowed;
+//   - a revoked registration takes them only within
+//     sandboxTelemetryAfterRevoke of the revocation, whether its daemon
+//     reported the sandbox deleted or the gateway revoked it (a changed
+//     policy or subject: the daemon then stops and deletes the sandbox and
+//     reports its going away), but never once its daemon reported the
+//     sandbox foreign, which the registration never named: 410 otherwise.
+//     What such a tombstone takes is the sandbox's going away alone
+//     (sandboxTelemetryRecordAllowed);
+//   - the account's records budget (sandboxRecordBudget): 429 with
+//     Retry-After when it is spent.
+func sandboxTelemetryAdmit(w http.ResponseWriter, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration, n int) bool {
+	now := auth.clock()
+	switch {
+	case reg.State == sandboxreg.StatePending || strings.TrimSpace(reg.SandboxName) == "":
+		writeSandboxReason(w, sandboxrelay.ReasonNotAllowed, sandboxTextNotBound)
+		return false
+	case reg.State == sandboxreg.StateRevoked && (reg.RevokedReason == sandboxreg.ReasonForeign || reg.RevokedAt.IsZero() ||
+		now.Sub(reg.RevokedAt) > sandboxTelemetryAfterRevoke):
+		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxTextRegistrationGone)
+		return false
+	}
+	return sandboxBudgetAdmit(w, &auth.records, peer, n, now)
+}
+
+// sandboxBudgetAdmit spends n records of peer's budget b, or answers 429
+// with Retry-After when it is spent.
+func sandboxBudgetAdmit(w http.ResponseWriter, b *sandboxRecordBudget, peer managedHookPeer, n int, now time.Time) bool {
+	wait, ok := b.take(peer.UID, n, now)
+	if !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
+		writeSandboxRefusal(w, http.StatusTooManyRequests, managedHookReasonRateLimited,
+			"DefenseClaw is limiting the sandbox records of this account; retry shortly")
+		return false
+	}
+	return true
+}
+
+// sandboxEventRows is the number of managed records a daemon event of a
+// kind other than telemetry makes: a foreign_rule event one per rule it
+// names (at most sandboxEventRulesMax), every other kind one.
+func sandboxEventRows(ev sandboxrelay.Event) int {
+	if ev.Kind != sandboxrelay.EventForeignRule {
+		return 1
+	}
+	var p struct {
+		Rules []json.RawMessage `json:"rules"`
+	}
+	if json.Unmarshal(ev.Payload, &p) != nil {
+		return 1
+	}
+	return min(max(len(p.Rules), 1), sandboxEventRulesMax)
+}
+
+// sandboxTelemetryRecordAllowed reports whether one telemetry record of an
+// admitted batch (sandboxTelemetryAdmit) is recorded: never one dated before
+// its registration was made, and under a tombstone only the records of its
+// sandbox going away (the stopping, stopped, error, deleting and deleted
+// phases and the ends of its connections), dated before the tombstone stops
+// taking records. None of them tracks the sandbox's phase again
+// (audit.SandboxLifecycleEvent.TrackedOnly).
+func sandboxTelemetryRecordAllowed(reg sandboxreg.Registration, ev sandboxrelay.Event) bool {
+	if !reg.CreatedAt.IsZero() && ev.Time.Before(reg.CreatedAt) {
+		return false
+	}
+	if reg.State != sandboxreg.StateRevoked {
+		return true
+	}
+	if ev.Time.After(reg.RevokedAt.Add(sandboxTelemetryAfterRevoke)) {
+		return false
+	}
+	var c sandboxTelemetryClaim
+	if json.Unmarshal(ev.Payload, &c) != nil {
+		return false
+	}
+	if ev.Kind == sandboxrelay.EventSandboxEgress {
+		return c.End != ""
+	}
+	switch audit.SandboxPhase(c.Phase) {
+	case audit.SandboxPhaseStopping, audit.SandboxPhaseStopped, audit.SandboxPhaseError,
+		audit.SandboxPhaseDeleting, audit.SandboxPhaseDeleted:
+		return true
+	}
+	return false
+}
+
+// sandboxClaimSeverity is the severity of a claimed egress record: the
+// claim, raised to floor (a block is at least MEDIUM) and capped at HIGH, so
+// a daemon can neither make up a CRITICAL nor play a block down; floor for
+// a claim that is no severity.
+func sandboxClaimSeverity(claimed string, floor observability.Severity) string {
+	normalized := observability.NormalizeSeverity(claimed)
+	if !normalized.Valid || !normalized.Present {
+		return string(floor)
+	}
+	rank, _ := observability.SeverityRank(normalized.Severity)
+	floorRank, _ := observability.SeverityRank(floor)
+	highRank, _ := observability.SeverityRank(observability.SeverityHigh)
+	switch {
+	case rank < floorRank:
+		return string(floor)
+	case rank > highRank:
+		return string(observability.SeverityHigh)
+	}
+	return string(normalized.Severity)
+}
+
+// sandboxClaimDuration is a claimed connection duration in milliseconds,
+// bounded to [0, sandboxClaimMaxDuration] without overflowing.
+func sandboxClaimDuration(ms int64) time.Duration {
+	if ms <= 0 {
+		return 0
+	}
+	if ms > sandboxClaimMaxDuration.Milliseconds() {
+		return sandboxClaimMaxDuration
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// errSandboxClaimKeyCollision is the error of a payload two of whose object
+// keys are one key once cleaned ("rule" and "ru\u200ble"): which of them a
+// record would take is the daemon's pick, so the batch is refused.
+var errSandboxClaimKeyCollision = errors.New("two keys of the payload are the same key once cleaned")
+
+// sandboxClaimPayload is a daemon event's payload with every string in it,
+// object keys included, made safe for the managed audit (sandboxClaimText):
+// the daemon runs as the user, so each value is the user's text. Every kind
+// of daemon record is cleaned here, once, before it is decoded. A payload
+// whose keys collide once cleaned is errSandboxClaimKeyCollision.
+func sandboxClaimPayload(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return raw, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("trailing data after the payload")
+	}
+	clean, err := sandboxClaimValue(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(clean)
+}
+
+func sandboxClaimValue(v any) (any, error) {
+	switch t := v.(type) {
+	case string:
+		return sandboxClaimText(t), nil
+	case []any:
+		for i := range t {
+			clean, err := sandboxClaimValue(t[i])
+			if err != nil {
+				return nil, err
+			}
+			t[i] = clean
+		}
+		return t, nil
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			key := sandboxClaimText(k)
+			if _, taken := out[key]; taken {
+				return nil, fmt.Errorf("%w: %q", errSandboxClaimKeyCollision, key)
+			}
+			clean, err := sandboxClaimValue(e)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = clean
+		}
+		return out, nil
+	}
+	return v, nil
+}
+
+// sandboxClaimText is s without the characters that would rewrite or hide
+// text in a terminal or a log viewer that shows the audit: the C0 and C1
+// control characters (NUL, ESC and DEL among them), the bidirectional
+// marks, overrides and isolates (U+061C, U+200E, U+200F, U+202A-U+202E,
+// U+2066-U+2069), the zero-width and invisible characters (U+200B-U+200D,
+// U+2060-U+2064, U+FEFF) and the tag characters (U+E0000-U+E007F). A tab,
+// newline, carriage return, line separator (U+2028) or paragraph separator
+// (U+2029) becomes a space.
+func sandboxClaimText(s string) string {
+	if !strings.ContainsFunc(s, sandboxClaimControl) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r' || r == 0x2028 || r == 0x2029:
+			b.WriteByte(' ')
+		case sandboxClaimControl(r):
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// sandboxClaimControl reports a character sandboxClaimText replaces or
+// removes.
+func sandboxClaimControl(r rune) bool {
+	switch {
+	case r < 0x20, r >= 0x7f && r <= 0x9f:
+		return true
+	case r == 0x061c, r >= 0x200b && r <= 0x200f, r == 0x2028, r == 0x2029, r >= 0x202a && r <= 0x202e:
+		return true
+	case r >= 0x2060 && r <= 0x2064, r >= 0x2066 && r <= 0x2069, r == 0xfeff, r >= 0xe0000 && r <= 0xe007f:
+		return true
+	}
+	return false
 }

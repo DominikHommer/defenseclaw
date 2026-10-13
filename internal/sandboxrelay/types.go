@@ -164,6 +164,10 @@ const (
 	// MaxUnregisteredEventRecords bounds a batch without a registration
 	// (the daemon keeps at most as many records for the managed gateway).
 	MaxUnregisteredEventRecords = 64
+	// MaxTelemetryBatchRecords bounds a batch that carries sandbox
+	// telemetry records (EventTelemetry): the daemon posts at most this many
+	// per batch, and the managed gateway refuses a larger one.
+	MaxTelemetryBatchRecords = 128
 	// MaxOTLPBodyBytes bounds one relayed OTLP post.
 	MaxOTLPBodyBytes = 4 << 20
 	// MaxRequestAccessBytes bounds request_access text.
@@ -579,7 +583,23 @@ const (
 	// refusal comes before any registration exists, and the payload names no
 	// other account (GAP-0598).
 	EventAccountBusy = "account_busy"
+	// EventSandboxLifecycle and EventSandboxEgress carry the daemon's
+	// sandbox telemetry: a phase change of one of the caller's sandboxes
+	// (log.sandbox.lifecycle) and an egress decision or the end of an
+	// allowed connection (log.egress.*). The daemon has no telemetry
+	// destination of its own, so the managed gateway records them, stamped
+	// with the registration's sandbox and the verified peer (GAP-0003).
+	EventSandboxLifecycle = "sandbox_lifecycle"
+	EventSandboxEgress    = "sandbox_egress"
 )
+
+// EventTelemetry reports a kind that carries the daemon's sandbox
+// telemetry (EventSandboxLifecycle, EventSandboxEgress). Such a record may
+// describe a sandbox whose registration the daemon already reported
+// deleted: the deleting and deleted phases are recorded just before.
+func EventTelemetry(kind string) bool {
+	return kind == EventSandboxLifecycle || kind == EventSandboxEgress
+}
 
 // EventWithoutRegistration reports a kind a batch may carry without a
 // registration: the foreign sandboxes and containers a daemon finds belong to
