@@ -236,9 +236,9 @@ applies it.
 
 Intune delivers only the script to Linux, so a [signed bundle](/docs/enterprise/policy-bundles) travels
 inside it. In your copy of the wrapper, paste the JSON of
-`bundle-anchors.json` between the `DEFENSECLAW_TRUST_ANCHORS` markers in
+`bundle-anchors.json` between the `DC_TRUST_ANCHORS_JSON` markers in
 `dc_inline_trust_anchors`, the output of `base64 v12.dcbundle` between the
-`DEFENSECLAW_BUNDLE` markers in `dc_inline_bundle`, and empty
+`DC_BUNDLE_BASE64` markers in `dc_inline_bundle`, and empty
 `dc_inline_config` (a bundle carries its config). The wrapper installs the
 anchor file, applies the bundle with `enterprise bundle apply`, and puts the
 previous anchor file back when the apply fails. Upload one script per bundle

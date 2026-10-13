@@ -95,12 +95,12 @@ DEFENSECLAW_CONFIG
 # a bundle holds no secret values. MDM script bodies have size limits, so
 # deliver a large bundle as a file (--bundle-file) instead.
 dc_inline_trust_anchors() {
-    cat <<'DEFENSECLAW_TRUST_ANCHORS'
-DEFENSECLAW_TRUST_ANCHORS
+    cat <<'DC_TRUST_ANCHORS_JSON'
+DC_TRUST_ANCHORS_JSON
 }
 dc_inline_bundle() {
-    cat <<'DEFENSECLAW_BUNDLE'
-DEFENSECLAW_BUNDLE
+    cat <<'DC_BUNDLE_BASE64'
+DC_BUNDLE_BASE64
 }
 # ---- end of settings ---------------------------------------------------------
 
