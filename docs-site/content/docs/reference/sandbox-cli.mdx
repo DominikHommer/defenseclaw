@@ -1175,7 +1175,9 @@ feed starts when the DefenseClaw daemon last started (HH:MM:SS); what
 happened before is in defenseclaw-gateway audit export …`). An empty feed
 says since when too (`no activity since the DefenseClaw daemon last started
 (HH:MM:SS) …`), also for a sandbox deleted before the restart. The audit
-store keeps every event. A destination
+store keeps every event. A plain `sandbox activity` listing leaves out events
+of sandboxes deleted since the daemon started; `--sandbox NAME` or `-o json`
+shows the whole feed. A destination
 shows its port unless that is 443 (HTTPS): a plain-HTTP request reads
 `example.com:80`, so an HTTPS and an HTTP request refused at the same host
 are two different lines. An IPv6 address with its port is bracketed:
@@ -1306,7 +1308,13 @@ Approves an ask. The approval opens a direct OpenShell rule for the
 destination. It is applied at the sandbox's next quiet moment, because every
 OpenShell policy change closes the sandbox's open connections. `--always`
 also saves the hosts to `openshell.egress.unblocked` for future sandboxes.
-It is refused, and nothing is approved, for the typical asks: a port on your
+
+On a managed computer with `allow_unblock: false`, an approval lasts for the
+session only and `approve --always` is refused, even when `user_approvals` is
+unset.
+
+The `--always` option is also refused, and nothing is approved, for the
+typical asks: a port on your
 machine, a destination on your private network (a private address, an
 intranet name such as `*.corp`, or a name that resolves to a private
 address), or an ask with allowed IP addresses (`allowed_ips`). Those open for
@@ -1357,6 +1365,11 @@ this machine, and your organization's lists can't be unblocked, and neither can 
 `openshell.admin.allow_unblock: false`, nothing can be unblocked. The
 [decision order](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
 has the details.
+
+A managed `sandbox unblock HOST --sandbox NAME` without `--always` lasts only
+for that sandbox's current session. After `sandbox stop` and a start (or a
+connect of a stopped sandbox), DefenseClaw's destination rule applies again
+at the hook and egress proxy. An allowed `--always` unblock outlives the stop.
 
 An unblock also stops DefenseClaw's destination rules (such as
 `C2-WEBHOOK-SITE` for `webhook.site`, or `C2-NGROK`) from flagging or
@@ -1685,6 +1698,10 @@ On a managed computer it starts with your own policy in plain words, and
 `--sources` labels each value as coming from your organization, your profile,
 the pack, the repository or a flag (see
 [On a managed computer](#on-a-managed-computer)).
+
+Without `--sandbox` or `--harness`, a managed `policy explain` describes a
+new run of the default agent and names running sandboxes. Use `--sandbox NAME`
+to explain the policy of a running sandbox.
 
 ![defenseclaw sandbox policy explain on a managed computer: Your sandbox policy in plain words with the organization profile and matched group, then the pack and its digest and a table of settings with their value, source and origin](/images/sandboxes/managed/policy-explain.png)
 

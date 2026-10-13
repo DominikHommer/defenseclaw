@@ -563,7 +563,9 @@ defenseclaw sandbox activity -f
 ```
 
 Nothing in the feed waits for you except asks. `--sandbox NAME` limits the
-feed to one sandbox, and `-o json` prints the events as JSON.
+feed to one sandbox, and `-o json` prints the events as JSON. A plain
+`sandbox activity` listing leaves out sandboxes deleted since the daemon
+started; `--sandbox NAME` or `-o json` shows their events too.
 
 A real feed, replayed (the `⚠` line is the shadow AI finding):
 
@@ -747,8 +749,10 @@ For HTTPS, tools show only that the connection failed (`curl: (56) CONNECT
 tunnel failed, response 403`), so DefenseClaw also tells the agent in its
 hooks. After a shell or web-fetch tool call, the next hook answer names each
 destination the proxy just refused, why, and the `sandbox unblock` command
-you can run. Claude Code, Codex and GitHub Copilot CLI read this note (and
-Cursor Agent and Devin CLI will, once they can run in a sandbox). The other
+you can run. On a managed computer, it also names destinations awaiting an
+approval or declined by the user. A refusal from the repository's
+`.defenseclaw/sandbox.yaml` names that policy. Claude Code, Codex and GitHub
+Copilot CLI read this note. The other
 harnesses have no place for it, and there only your terminal's notice
 reports the block. Each block is told once, and only in
 the sandbox that hit it. An upload that
@@ -795,6 +799,11 @@ networks, metadata addresses or this machine, and never overrides your own
 organization sets `openshell.admin.allow_unblock: false`, unblocking is
 refused with "blocked by your organization's DefenseClaw policy".
 
+A managed `sandbox unblock HOST --sandbox NAME` without `--always` lasts for
+that sandbox's current session only. After a stop and start, or a connect of
+a stopped sandbox, DefenseClaw's destination rule applies again at the hook
+and proxy. An allowed `--always` unblock outlives the stop.
+
 Once a host is unblocked, DefenseClaw's tool-call rules for known exfil
 destinations (such as `C2-WEBHOOK-SITE`) stop flagging calls to it in the
 sandboxes the unblock covers, so the agent is not told the destination is
@@ -819,7 +828,9 @@ defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60
 
 `defenseclaw sandbox approvals --watch` keeps the list open. `--always` keeps a decision for
 future sandboxes, except for your own machine and private networks, which
-are only ever opened per sandbox. An approval applies at the next quiet
+are only ever opened per sandbox. On a managed computer with
+`allow_unblock: false`, approvals last for the session only and
+`approve --always` is refused. An approval applies at the next quiet
 moment of the sandbox, because every OpenShell policy change closes the
 sandbox's open connections. In the TUI, the **Asks** view takes `a`
 (approve), `A` (always) and `x` (reject).

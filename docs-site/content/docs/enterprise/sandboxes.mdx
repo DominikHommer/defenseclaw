@@ -196,6 +196,11 @@ minutes after the switch, with any work in them that was not brought back
 (`sandbox pull`). Switching back later does not restore them, so ask users to
 bring back their work before a driver switch.
 
+While an administrator's driver or install-mode switch is being prepared,
+users see "your organization changed how sandboxes run on this computer" and
+are asked to try again in a few minutes. This notice carries no exception
+contact.
+
 ### Per-OS prerequisites
 
 | | Linux, Docker driver | Linux, MicroVM driver (optional) | macOS, MicroVM driver |
@@ -648,6 +653,10 @@ empty list is refused by the schema; to allow no credentials, write
 error when the config loads, for example `allowed: false` together with
 `required_for`, or two `allowed_harnesses` lists with nothing in common.
 
+An account whose profile has `allow_upstream_telemetry: false` has OpenShell's
+own telemetry off at its gateway, even if the host's rendered `gateway.env`
+allows it.
+
 `required_for` takes connector names such as `claudecode`, `codex`, `cursor`
 and `copilot`. `request_access` falls back to "contact your IT help desk"
 when empty.
@@ -792,9 +801,14 @@ it never passes the organization's floor.
 An answer for the session lasts while the sandbox runs: once it stops, its
 next session asks again. Only an "Always" answer outlives the stop.
 
-With `user_approvals: session` and `allow_unblock: false`, the person can approve
-an ask for this session only. A request for "always" and an unblock are both
-refused, with the rule that refused them and the contact:
+A `sandbox unblock HOST --sandbox NAME` without `--always` also lasts only
+for that sandbox's current session. After stop and start, or `connect` of a
+stopped sandbox, DefenseClaw's destination rule applies again at the hook
+and egress proxy. An allowed `--always` unblock outlives the stop.
+
+With `allow_unblock: false`, the person can approve an ask for this session
+only, even when `user_approvals` is unset. A request for "always" and an
+unblock are both refused, with the rule that refused them and the contact:
 
 ![defenseclaw sandbox approve --always and defenseclaw sandbox unblock on a profile with user_approvals session and allow_unblock false: both end with Blocked by your organization's DefenseClaw policy, one naming rule user_approvals (session only, not for future sandboxes) and one naming rule allow_unblock, each with the Request access quote and exit status 1](/images/sandboxes/managed/always-refused.png)
 
@@ -809,6 +823,12 @@ Request access: it-security@example.com. Quote: profile contractors, rule egress
 The same refusal in the person's activity feed. The agent asked for a host
 outside the profile's allowed list, DefenseClaw refused it, and the entry carries
 the sentence to send to the administrator:
+
+After a shell or web-fetch tool call, a managed agent also receives a note
+about destinations refused, awaiting approval or declined in that sandbox.
+A refusal caused by `.defenseclaw/sandbox.yaml` names that repository policy.
+An unblock lifts DefenseClaw's destination rule for a host only while the
+organization allows unblocks and the host is outside its block list.
 
 ![defenseclaw sandbox activity for a contractor: github.com allowed, example.org blocked as not on the organization's allowed list, with the text Blocked by your organization's DefenseClaw policy, example.org is not on your profile's allowed hosts (profile contractors, rule egress_allow_only), You can't approve this, and the Request access line with the quote](/images/sandboxes/managed/access-refused.png)
 
@@ -887,6 +907,9 @@ learns of it from the next relayed hook or from a poll every 60 seconds. A
 renamed or recycled account is different: the registration is revoked (see the
 last paragraph of this section), not re-matched.
 
+A running managed sandbox takes the changed policy on its next relayed hook
+call; an idle sandbox picks it up on its next poll.
+
 | Kind of field | What happens |
 | --- | --- |
 | Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
@@ -943,6 +966,10 @@ managed sandbox always works on a copy.
 words. `--sources` tags each row with where its value comes from (the
 organization, the profile, a pack, the repository or a flag), and nothing it
 prints names another profile.
+
+Without `--sandbox` or `--harness`, on a managed computer it explains a new
+run of the default agent; it names any running sandboxes. Use `--sandbox NAME`
+to inspect the policy of a running sandbox.
 
 ```text
 Your sandbox policy on this computer
@@ -1149,6 +1176,11 @@ searches and Splunk Observability charts cover the same questions: running
 sandboxes by profile, refused and unavailable host runs, access refusals,
 asks, foreign items, silence stops, re-matches, provisional rates and drift.
 See [Sandbox telemetry](/docs/observability/sandbox-telemetry#managed-computers).
+
+`defenseclaw.sandbox.active` is exported again every minute while a sandbox
+runs, and exports `0` for a connector whose sandboxes stopped. The managed
+gateway refreshes it on its daemons' polls, so after a gateway restart a
+running sandbox counts again within the next minute.
 
 ## Upgrade, roll back, uninstall
 

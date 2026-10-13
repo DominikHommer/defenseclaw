@@ -12,6 +12,58 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg05_managed_agent_destination_notes(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("destinations refused, awaiting approval or declined", text)
+        self.assertIn("only while the\norganization allows unblocks", text)
+
+    def test_fg05_repository_refusal_names_policy(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("A refusal from the repository's\n`.defenseclaw/sandbox.yaml` names that policy", text)
+
+    def test_fg05_activity_omits_deleted_by_default(self):
+        guide = page("sandboxes/guide.mdx")
+        reference = page("reference/sandbox-cli.mdx")
+        self.assertIn("listing leaves out sandboxes deleted since the daemon", guide)
+        self.assertIn("listing leaves out events\nof sandboxes deleted since the daemon started", reference)
+
+    def test_fg05_policy_explain_default_new_run(self):
+        enterprise = page("enterprise/sandboxes.mdx")
+        reference = page("reference/sandbox-cli.mdx")
+        self.assertIn("it explains a new\nrun of the default agent", enterprise)
+        self.assertIn("describes a\nnew run of the default agent", reference)
+
+    def test_fg05_approval_always_refused_under_floor(self):
+        enterprise = page("enterprise/sandboxes.mdx")
+        reference = page("reference/sandbox-cli.mdx")
+        self.assertIn("With `allow_unblock: false`, the person can approve", enterprise)
+        self.assertIn("`approve --always` is refused, even when `user_approvals` is\nunset", reference)
+
+    def test_fg05_driver_switch_notice(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("your organization changed how sandboxes run on this computer", text)
+        self.assertIn("This notice carries no exception\ncontact", text)
+
+    def test_fg05_active_gauge_refresh(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("`defenseclaw.sandbox.active` is exported again every minute", text)
+        self.assertIn("exports `0` for a connector whose sandboxes stopped", text)
+
+    def test_fg05_session_unblock_expires_on_stop(self):
+        guide = page("sandboxes/guide.mdx")
+        reference = page("reference/sandbox-cli.mdx")
+        self.assertIn("After a stop and start, or a connect of\na stopped sandbox", guide)
+        self.assertIn("at the hook and egress proxy", reference)
+
+    def test_fg05_upstream_telemetry_profile_floor(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("`allow_upstream_telemetry: false` has OpenShell's\nown telemetry off", text)
+        self.assertIn("host's rendered `gateway.env`", text)
+
+    def test_fg05_managed_policy_next_hook_call(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("changed policy on its next relayed hook\ncall", text)
+
     def test_lfuninst_running_sandbox_refuses_uninstall(self):
         text = page("sandboxes/guide.mdx")
         self.assertIn("A running sandbox stops\n`defenseclaw uninstall` before any change", text)
