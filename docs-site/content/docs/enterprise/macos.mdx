@@ -501,10 +501,12 @@ The per-user AI Discovery scan also walks the home for package manifests and
 model files. Without Full Disk Access it never opens the folders that make
 macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
 Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
-`~/Library/Group Containers`, and Contacts. It skips them without an error,
-so an employee never sees a prompt attributed to `defenseclaw-gateway` and
-the scan stays complete. The other TCC-protected folders answer "operation not
-permitted" and are skipped the same way.
+`~/Library/Group Containers`, and Contacts. A package scan root reached through
+a link into one of these folders is skipped too. No employee sees a prompt
+attributed to `defenseclaw-gateway`; the scan summary is partial, with
+`detector_errors.macos_privacy` naming the skipped protected folders. The
+other TCC-protected folders answer "operation not permitted" and are skipped
+the same way.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants

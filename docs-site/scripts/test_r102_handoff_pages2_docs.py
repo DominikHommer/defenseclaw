@@ -12,6 +12,14 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg16_linked_macos_scan_root_is_partial(self):
+        discovery = page("ai-discovery.mdx")
+        macos = page("enterprise/macos.mdx")
+        self.assertIn("a root reached through a link into a protected folder is skipped", discovery)
+        self.assertIn("package scan root reached through\na link into one of these folders", macos)
+        self.assertIn("`detector_errors.macos_privacy`", macos)
+        self.assertNotIn("the scan stays complete", macos)
+
     def test_fg04a_windows_plugin_refusal_is_structured(self):
         section = page("enterprise/windows.mdx").split("- Claude Code runs a plugin", 1)[1].split("- MCP servers", 1)[0]
         self.assertIn("ASSET-POLICY reason_code=install-block", section)
