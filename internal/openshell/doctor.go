@@ -841,7 +841,10 @@ func (r *doctorRun) dockerCheck(ctx context.Context) (Check, string) {
 			serverErr = "unexpected docker info output"
 		}
 		c.Status, c.Detail = StatusFail, "the Docker daemon is not reachable: "+serverErr
-		c.Fix = r.dockerAccessFix(serverErr)
+		if r.GOOS == "darwin" && deniedDocker(serverErr) {
+			c.Detail = "Docker Desktop is not running in this account (" + serverErr + ")"
+		}
+		c.Fix = r.dockerAccessFix(ctx, serverErr)
 		return c, ""
 	}
 	r.docker = true
@@ -987,12 +990,29 @@ func firstJSONLine(out []byte) []byte {
 	return nil
 }
 
-func (r *doctorRun) dockerAccessFix(msg string) *Fix {
-	denied := strings.Contains(strings.ToLower(msg), "permission denied")
+// deniedDocker reports whether the Docker client was refused the socket.
+func deniedDocker(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "permission denied")
+}
+
+func (r *doctorRun) dockerAccessFix(ctx context.Context, msg string) *Fix {
+	denied := deniedDocker(msg)
 	switch {
 	case r.GOOS == "darwin" && denied:
 		// macOS has no docker group: the socket is another account's
 		// Docker Desktop's, until this account's starts and takes it.
+		// Docker Desktop is a desktop app: an account that is not logged
+		// in to the desktop (one used over ssh only) cannot start it, and
+		// must never be sent to the other account's socket (GAP-0389).
+		if loggedIn, known := r.desktopSession(ctx); known && !loggedIn {
+			name, _ := r.Username()
+			if name == "" {
+				name = "this account"
+			}
+			return &Fix{Summary: "Docker Desktop runs only in a desktop session, and " + name + " is not logged in to this Mac's desktop: " +
+				"log in to the desktop as " + name + " (at the Mac or with Screen Sharing), start Docker Desktop there, then run " +
+				"`defenseclaw sandbox setup` again; /var/run/docker.sock leads to another account's Docker Desktop, which this account may not use"}
+		}
 		return &Fix{Summary: "start Docker Desktop in this account: /var/run/docker.sock leads to another account's Docker Desktop, " +
 			"which this account may not use (Docker Desktop points it at its own when it starts)"}
 	case r.GOOS == "darwin":
@@ -1012,6 +1032,24 @@ func (r *doctorRun) dockerAccessFix(msg string) *Fix {
 		name = "$USER"
 	}
 	return &Fix{Summary: "add yourself to the docker group, then log out and back in", Command: "sudo usermod -aG docker " + shellQuote(name), Sudo: true}
+}
+
+// desktopSession reports whether this account is logged in to the Mac's
+// desktop, where Docker Desktop runs: launchd keeps a GUI domain
+// (gui/<uid>) for an account only while it is logged in there. known is
+// false when launchctl could not be run.
+func (r *doctorRun) desktopSession(ctx context.Context) (loggedIn, known bool) {
+	_, err := r.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", "gui/" + strconv.Itoa(r.Geteuid())}, Timeout: 10 * time.Second})
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return true, true
+	case errors.As(err, &exit) && exit.ExitCode() > 0:
+		// launchctl ran and found no GUI domain for the account (one it
+		// could not finish, killed at the timeout, says nothing).
+		return false, true
+	}
+	return false, false
 }
 
 var checkTitles = map[string]string{
