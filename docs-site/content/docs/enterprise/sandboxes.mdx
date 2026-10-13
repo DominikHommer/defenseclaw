@@ -38,6 +38,10 @@ verified identity. For the user's side, see
 | Secure Client | No. Every `sandbox` key is refused at load, and the behavior of this edition is unchanged. |
 | Open-source per-user install | Yes, and unchanged. The user owns `config.yaml`, so the admin block is advisory there. See [Authoritative and advisory admin blocks](/docs/sandboxes/policy-packs#authoritative-and-advisory-admin-blocks). |
 
+**Known limit:** Processes running as the same operating-system user are
+inside the trust boundary of that user's sandbox registration. Treat the
+account as one trust boundary. Additional isolation is planned for 1.0.3.
+
 The rest of this page assumes a standalone install: the enterprise rpm, deb,
 pkg or Windows Setup with an admin-owned `config.yaml`. Policy reaches the host
 with the package and `enterprise <os> ensure --config`; there is no MDM step.
@@ -154,9 +158,12 @@ about a minute after the user's last sandbox stops, so the one gateway port is
 free for the next account. A stop, delete or list of a kept sandbox starts it
 again when it needs it. In `prerequisite` mode the unit runs the binary you installed
 (`/usr/bin`, or `/usr/local/bin` on macOS); in `setup` mode it runs the user's
-`~/.local/bin` copy. NVIDIA's own `openshell-gateway.service` is not used: it
-reads the account's own `gateway.toml` and sets a umask that stops every
-MicroVM. The unit's gateway never reads the user's own
+`~/.local/bin` copy. NVIDIA's [upstream user unit](https://github.com/NVIDIA/OpenShell/blob/main/deploy/deb/openshell-gateway.service)
+uses `UMask=0077`. DefenseClaw's Linux user unit uses `UMask=0022` so the
+MicroVM driver can start. New files and folders the gateway creates under
+the user's home can therefore have group or other read access when the
+gateway does not set an explicit mode; existing home permissions are not
+changed. The unit's gateway never reads the user's own
 `~/.config/openshell/gateway.toml`, so an edit there changes nothing; the
 daemon checks the command line the gateway on the port runs instead. A
 gateway that runs another file or extra flags (a drop-in that replaces the
@@ -670,7 +677,7 @@ and name a custom pack without a digest. See
 
 ### Hook silence
 
-Claude Code, Codex, Copilot, Cursor and OmniGent images own their hooks as root,
+Claude Code, Codex, Copilot and Cursor images own their hooks as root,
 so the agent cannot switch them off, and silence on those only alerts. `on_silence`
 and `max_silence_after` bind the user-tier agents, such as OpenCode and Hermes.
 `sandbox policy explain` shows the response that applies to the agent in
@@ -686,6 +693,10 @@ as work.
 ## Require sandboxes
 
 `required_for` lists the agents that must run in a sandbox on this computer.
+It is enforced only by standalone managed gateways. On an unmanaged per-user
+gateway, a user-owned `required_for` setting is advisory and does not refuse
+host runs.
+
 When such an agent starts on the host, its machine-owned hook refuses the first
 blockable event (session start where the agent has one, otherwise the prompt
 and every tool call) before any evaluation, and records it. The refusal tells
@@ -725,8 +736,8 @@ command to run is ready to paste.
   start still gets its full policy. `profile-explain` shows the exemption.
 - **It is a policy control, not an exec deny.** It covers the connectors that
   have a machine-owned hook (Claude Code, Codex, Cursor and Copilot).
-  Setting `DEFENSECLAW_NO_SANDBOX=1` or a forged nested-run variable only makes
-  a host run, which the gate refuses. A person who runs an agent that has no
+  A host run is refused even when it claims to be nested in a sandbox. A
+  person who runs an agent that has no
   machine-owned hook is not stopped by it.
 - **Root is refused** on every sandbox route, including when you inspect.
 
@@ -1179,7 +1190,7 @@ within about 30 seconds, so a fix takes effect on the next run.
 
 | Reason code | What it means | What to do |
 | --- | --- | --- |
-| `required_group` | Not a failure. The person's profile lists this agent in `required_for` and the agent started on the host. This is the normal refusal ("Claude Code must run in a sandbox on this computer"). | The person runs `defenseclaw sandbox run`. Nothing to fix. |
+| `required_for` | Not a failure. The person's profile lists this agent in `required_for` and the agent started on the host. This is the normal refusal ("Claude Code must run in a sandbox on this computer"). | The person runs `defenseclaw sandbox run`. Nothing to fix. |
 | `os_unsupported` | Windows, WSL2, an unsupported operating system, or an Intel Mac | None; sandboxes can't run there. Give the people on it a profile without `required_for`, or `alert` in the floor and the profile |
 | `sandboxes_off` | `openshell.enabled` is off on this computer | Turn it on and run `ensure` |
 | `root_account` | The account is root | Run as a standard user |
