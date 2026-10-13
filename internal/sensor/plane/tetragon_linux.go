@@ -264,6 +264,13 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 	s.fallback = ""
 	s.switchedAt = s.now()
 	s.lastLost = s.backend.EventsLost
+	if s.observeSince.IsZero() && s.ownObserveEnabled(s.backend.Policies) {
+		// Every subscription after the first dials a Tetragon whose observe
+		// policy is already loaded: the session's first coverage names it
+		// as the file half, not 30 s later and never only on the next
+		// policy-list change (#1240).
+		s.observeSince = s.switchedAt
+	}
 	proc := s.proc
 	s.proc, s.procErr = nil, nil
 	s.mu.Unlock()
@@ -595,20 +602,17 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 		s.lossAt, s.fileSince = now, time.Time{}
 	}
 	s.lastLost = current.EventsLost
-	enabled := false
-	if s.options.OwnObservePolicy != nil {
-		for _, policy := range current.Policies {
-			if s.options.OwnObservePolicy(policy.Name) && policy.State == "enabled" {
-				enabled = true
-				break
-			}
-		}
-	}
+	enabled := s.ownObserveEnabled(current.Policies)
+	// The observe policy becoming the file half (or leaving it) changes the
+	// coverage even when the listing does not: the reconciler records the
+	// policy as its own after Tetragon lists it. Without a notice the
+	// subscriber kept the partial coverage for good (#1240).
+	observeChanged := false
 	switch {
 	case enabled && s.observeSince.IsZero():
-		s.observeSince = now
-	case !enabled:
-		s.observeSince = time.Time{}
+		s.observeSince, observeChanged = now, true
+	case !enabled && !s.observeSince.IsZero():
+		s.observeSince, observeChanged = time.Time{}, true
 	}
 	since := latest(s.fileSince, s.observeSince)
 	healthy := enabled && !s.throttled && !s.fileSince.IsZero() && !s.lossAt.After(s.fileSince) &&
@@ -628,9 +632,23 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 		s.changed()
 	case takeBack:
 		s.startFiles(ctx)
-	case policiesChanged:
+	case policiesChanged || observeChanged:
 		s.changed()
 	}
+}
+
+// ownObserveEnabled reports whether policies hold DefenseClaw's own observe
+// policy in the enabled state. Callers hold s.mu.
+func (s *tetragonSource) ownObserveEnabled(policies []BackendPolicy) bool {
+	if s.options.OwnObservePolicy == nil {
+		return false
+	}
+	for _, policy := range policies {
+		if policy.State == "enabled" && s.options.OwnObservePolicy(policy.Name) {
+			return true
+		}
+	}
+	return false
 }
 
 func latest(a, b time.Time) time.Time {

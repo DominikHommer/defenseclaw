@@ -362,6 +362,87 @@ func TestTetragonSourceWithoutAHomeTakesTheFileHalfFromTheObservePolicy(t *testi
 	}
 }
 
+// #1240: the reconciler records its observe policy as its own after Tetragon
+// lists it, so the observe policy can become the file half (and stop being
+// it) while the listing stays the same. The coverage changed, but only a
+// handoff or a policy-list change announced it, so the gateway kept the
+// partial coverage of its first frame for good. The source now signals every
+// such change, both ways.
+func TestTetragonSourceSignalsWhenTheObservePolicyBecomesTheFileHalf(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	recorded := false
+	observe := func(name string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return recorded && name == "defenseclaw-observe-89abcdef"
+	}
+	setRecorded := func(v bool) { mu.Lock(); recorded = v; mu.Unlock() }
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"}}})
+	h.feeds <- feed
+	source := startSource(t, h, nil, observe)
+	waitFor(t, "the Tetragon stream", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	time.Sleep(3 * handoffInterval) // let a hand-off evaluation see the unrecorded policy
+	drain := func() {
+		for {
+			select {
+			case <-source.CoverageChanges():
+			default:
+				return
+			}
+		}
+	}
+	drain()
+	if source.Coverage().Complete() {
+		t.Fatalf("a policy the reconciler has not recorded is the file half: %+v", source.Coverage())
+	}
+	changed := func(what string, complete bool) {
+		t.Helper()
+		select {
+		case <-source.CoverageChanges():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("no coverage change when %s (coverage now %+v)", what, source.Coverage())
+		}
+		if got := source.Coverage().Complete(); got != complete {
+			t.Fatalf("after %s: complete %v, want %v: %+v", what, got, complete, source.Coverage())
+		}
+	}
+	setRecorded(true)
+	changed("the observe policy became the file half", true)
+	if mechanism := source.Coverage().Mechanism; !strings.HasSuffix(mechanism, " + file opens from the DefenseClaw observe policy") {
+		t.Fatalf("mechanism %q", mechanism)
+	}
+	drain()
+	setRecorded(false)
+	changed("the observe policy stopped being the file half", false)
+}
+
+// #1240: an observe policy already loaded when the session dials (every
+// gateway subscription after the first) is the file half from the first
+// coverage, not from the first hand-off evaluation.
+func TestTetragonSourceTakesALoadedObservePolicyAtTheDial(t *testing.T) {
+	h := newHarness(t)
+	handoffInterval = time.Hour // no hand-off evaluation in this test
+	observe := func(name string) bool { return name == "defenseclaw-observe-89abcdef" }
+	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"}}})
+	h.feeds <- feed
+	source := startSource(t, h, nil, observe)
+	if coverage := source.Coverage(); !coverage.Complete() ||
+		!strings.HasSuffix(coverage.Mechanism, " + file opens from the DefenseClaw observe policy") {
+		t.Fatalf("first coverage %+v", coverage)
+	}
+	// A disabled observe policy at the dial is not the file half.
+	h2 := newHarness(t)
+	handoffInterval = time.Hour
+	h2.feeds <- newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "disabled"}}})
+	if coverage := startSource(t, h2, nil, observe).Coverage(); coverage.Complete() {
+		t.Fatalf("a disabled observe policy became the file half: %+v", coverage)
+	}
+}
+
 func TestTetragonSourcePrefersTheTetragonFileEvent(t *testing.T) {
 	h := newHarness(t)
 	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
