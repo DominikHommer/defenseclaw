@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -60,5 +61,20 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 				t.Fatalf("view kept more than exact outer argv: %+v", view)
 			}
 		})
+	}
+}
+
+func TestOpaqueCMDWrapperArgvReductionPreservesExtractedCWD(t *testing.T) {
+	input := Input{
+		Tool: "powershell", DialectHint: DialectPowerShell,
+		Args: json.RawMessage(`{"command":"& cmd.exe /c echo dccert-block-marker > marker.txt","workdir":"C:\\work"}`),
+	}
+	facts := Analyze(input)
+	if facts.CWD == "" {
+		t.Fatalf("shell arguments lost their working directory: %+v", facts)
+	}
+	view, ok := OpaqueCMDWrapperArgvReduction(input, facts)
+	if !ok || view.CWD != facts.CWD || !slices.Contains(view.Commands[0].Argv, "dccert-block-marker") {
+		t.Fatalf("call-operator reduction lost the working directory: ok=%t view=%+v original=%+v", ok, view, facts)
 	}
 }

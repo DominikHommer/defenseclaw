@@ -28,6 +28,10 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 	if callOperatorCMD(commandText, facts) && len(input.Argv) == 0 {
 		trimmed := strings.TrimLeftFunc(commandText, unicode.IsSpace)
 		input.Command = strings.TrimLeftFunc(trimmed[1:], unicode.IsSpace)
+		// The tool may have supplied its working directory inside Args.
+		// Keep that verified context when dropping the original arguments.
+		input.CWD = facts.CWD
+		input.ActiveHome = facts.ActiveHome
 		input.Args = nil
 		facts = Analyze(input)
 	}
