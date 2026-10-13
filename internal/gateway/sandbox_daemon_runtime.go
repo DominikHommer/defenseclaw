@@ -2396,7 +2396,13 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
 	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
 	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
-	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest)
+	// The profile of the same match as the digest: a regroup re-matched the
+	// registration (#1199).
+	profile := strings.TrimSpace(cp.Profile)
+	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile)
+	if profile != "" {
+		reg.Profile = profile
+	}
 	if !changed {
 		r.byName[name] = reg
 		if moved {

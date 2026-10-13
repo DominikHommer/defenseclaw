@@ -511,6 +511,10 @@ type CurrentPolicy struct {
 	Live          LiveFields `json:"live"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
+	// Profile is the guardrail profile of the same match as Digest: after
+	// a regroup re-matched the registration, status and refusals name it,
+	// not the profile the sandbox was created under (#1199).
+	Profile string `json:"profile,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
