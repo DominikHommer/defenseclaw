@@ -186,13 +186,6 @@ func (m *Manager) refreshEgress() {
 	}
 }
 
-// RefreshPolicies re-resolves every sandbox's policy now, as the next
-// configuration check would (refreshEgress): a managed daemon that changed
-// the floor its configuration carries (a registration the managed gateway
-// confirmed) answers the next status with the new policy instead of the one
-// judged before (GAP-0462).
-func (m *Manager) RefreshPolicies() { m.refreshEgress() }
-
 // syncCredential registers a sandbox's egress proxy credential with its
 // current principal and decider, or suspends it while the sandbox's network
 // mode is deny (the strict profile, for example after an administrator
