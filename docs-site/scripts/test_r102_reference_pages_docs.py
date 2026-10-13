@@ -57,10 +57,17 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         self.assertIn("scan verdict still refuses MCP calls", text)
         self.assertIn("runtime_detection.enabled` is `false`", text)
 
-    def test_gap_0301_claude_skill_call_cannot_match_path_pin(self):
-        text = page("policies/admission.mdx")
-        self.assertIn("`Skill` hook call carries no skill path", text)
-        self.assertIn("Deny the skill by name without a path pin", text)
+    def test_gap_0301_claude_skill_call_checks_each_copy_path(self):
+        text = " ".join(page("policies/admission.mdx").split())
+        self.assertIn("judges each copy at its own path", text)
+        self.assertIn("a matching deny on any copy blocks the call", text)
+        self.assertIn("a pin to a copy the caller does not have matches nothing", text)
+        for false_claim in (
+            "carries no skill path",
+            "cannot match that call",
+            "Deny the skill by name without a path pin",
+        ):
+            self.assertNotIn(false_claim, text)
 
     def test_gap_0352_high_rule_alerts_and_requires_complete_argv(self):
         text = page("policies/rules.mdx")

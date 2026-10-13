@@ -493,10 +493,12 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
-Claude Code's `Skill` hook call carries no skill path. A
-`asset_policy.skill.denied` rule pinned to a user-level copy therefore cannot
-match that call. Deny the skill by name without a path pin, or remove the copy
-from the device.
+Claude Code's `Skill` hook call names the skill. DefenseClaw looks in the
+connector's skill folders for folders that provide that name and judges each
+copy at its own path. A `asset_policy.skill.denied` rule pinned with
+`source_path_contains` to one copy blocks the call when that copy exists. If
+several copies exist, a matching deny on any copy blocks the call; a pin to a
+copy the caller does not have matches nothing.
 
 ### enabled and mode
 
