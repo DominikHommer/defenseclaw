@@ -217,6 +217,35 @@ func TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS(t *testin
 	}
 }
 
+// TestSandboxHarnessHookContractHonorsAnExplicitDockerDriverOnLinux: the
+// docker driver runs no MicroVM image, so on a Linux host configured for it
+// a verified MicroVM image is no evidence; its docker image still is
+// (GAP-0451).
+func TestSandboxHarnessHookContractHonorsAnExplicitDockerDriverOnLinux(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	host := evidenceTestHost(nil)
+	vm := currentRecord(t, cfg, host, "claudecode", true)
+	host.ImageID = func(context.Context, string) (string, error) { return vm.ImageID, nil }
+	writeImageStore(t, cfg.DataDir, vm)
+	for _, driver := range []string{"", "auto", "vm"} {
+		cfg.Enterprise.OpenShell.Driver = driver
+		if evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host); err != nil || !ok || !evidence.Record.MicroVM {
+			t.Fatalf("driver %q: MicroVM-verified image not accepted on Linux (ok=%v err=%v)", driver, ok, err)
+		}
+	}
+	for _, driver := range []string{"docker", " Docker "} {
+		cfg.Enterprise.OpenShell.Driver = driver
+		if _, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host); err != nil || ok {
+			t.Fatalf("driver %q: MicroVM image accepted for the docker driver (ok=%v err=%v)", driver, ok, err)
+		}
+	}
+	docker := currentRecord(t, cfg, host, "claudecode", false)
+	writeImageStore(t, cfg.DataDir, vm, docker)
+	if evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host); err != nil || !ok || evidence.Record.MicroVM {
+		t.Fatalf("docker driver: docker image not accepted (ok=%v err=%v rec=%+v)", ok, err, evidence.Record)
+	}
+}
+
 // writeAgentDiscovery writes the agent_discovery.json entry discovery records
 // for connector name (connector.LoadCachedAgentVersion and
 // connector.CachedAgentNotFound read it).
