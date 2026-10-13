@@ -160,7 +160,10 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 // and are then recorded with the bundle fields in config.generation.json; a
 // CLI, TUI or API caller naming one is refused before anything is written.
 func TestBundlePrincipalActorsOnlyFromTheLifecycle(t *testing.T) {
-	path := writeTestConfig(t, "observability: {}\n")
+	// A managed standalone config declares its profile: on Windows an unset
+	// profile resolves to secure_client without the service pin, so the
+	// accepted writes below would fail validation.
+	path := writeTestConfig(t, "enterprise:\n  profile: standalone\nobservability: {}\n")
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
 	change := []Change{{Path: "guardrail.mode", Value: "action"}}
