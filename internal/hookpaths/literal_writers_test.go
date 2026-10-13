@@ -52,7 +52,7 @@ func TestLiteralWriterClasses(t *testing.T) {
 		{"python file object read", `python3 -c 'import io; io.FileIO("disklink","r")'`, false},
 		{"python ordinary variable mode", `python3 -c 'mode="w"; open("notes.txt",mode)'`, false},
 		{"node read", `node -e 'require("fs").readFileSync("disklink")'`, false},
-		{"node open append only", `node -e 'require("fs").openSync("disklink","a")'`, false},
+		{"node open append intent", `node -e 'require("fs").openSync("disklink","a")'`, true},
 		{"perl read", `perl -e 'open(my $fh,"<","disklink")'`, false},
 		{"ruby read", `ruby -e 'File.open("disklink","r")'`, false},
 		{"ordinary copy", `python3 -c 'import shutil; shutil.copy2("source","notes.txt")'`, false},

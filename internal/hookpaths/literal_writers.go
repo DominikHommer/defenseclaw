@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -36,6 +37,8 @@ type literalWriterRule struct {
 var literalWriterRules = map[string][]literalWriterRule{
 	"python": {
 		{"open", 0, "file", 1, "mode", literalWriterMode},
+		{"builtins.open", 0, "file", 1, "mode", literalWriterMode},
+		{"__builtins__.open", 0, "file", 1, "mode", literalWriterMode},
 		{"io.open", 0, "file", 1, "mode", literalWriterMode},
 		{"io.FileIO", 0, "file", 1, "mode", literalWriterMode},
 		{"os.open", 0, "path", 1, "flags", literalWriterFlags},
@@ -51,6 +54,7 @@ var literalWriterRules = map[string][]literalWriterRule{
 		{"pathlib.Path.open", 0, "", 0, "mode", literalWriterMode},
 		{"pathlib.Path.write_text", 0, "", -1, "", literalWriterAlways},
 		{"pathlib.Path.write_bytes", 0, "", -1, "", literalWriterAlways},
+		{"pathlib.Path.touch", 0, "", -1, "", literalWriterAlways},
 	},
 	"node": {
 		{"fs.writeFile", 0, "", -1, "", literalWriterAlways},
@@ -84,6 +88,7 @@ var literalWriterRules = map[string][]literalWriterRule{
 		{"File::Copy::cp", 1, "", -1, "", literalWriterDestinationDirectory},
 		{"File::Copy::mv", 1, "", -1, "", literalWriterDestinationDirectory},
 		{"rename", 1, "", -1, "", literalWriterAlways},
+		{"truncate", 0, "", -1, "", literalWriterAlways},
 	},
 	"ruby": {
 		{"File.write", 0, "", -1, "", literalWriterAlways},
@@ -95,22 +100,25 @@ var literalWriterRules = map[string][]literalWriterRule{
 		{"FileUtils.mv", 1, "", -1, "", literalWriterDestinationDirectory},
 		{"FileUtils.copy_file", 1, "", -1, "", literalWriterAlways},
 		{"File.rename", 1, "", -1, "", literalWriterAlways},
+		{"File.truncate", 0, "", -1, "", literalWriterAlways},
 	},
 }
 
 var (
 	literalCallName          = regexp.MustCompile(`\b[A-Za-z_$][A-Za-z0-9_$]*(?:(?:\.|::)[A-Za-z_$][A-Za-z0-9_$]*)*\s*\(`)
-	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib)\s+as\s+([A-Za-z_]\w*)`)
-	literalFromImport        = regexp.MustCompile(`\bfrom\s+(os|io|shutil|pathlib)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?`)
+	literalImportAlias       = regexp.MustCompile(`\bimport\s+(os|io|shutil|pathlib|builtins)\s+as\s+([A-Za-z_]\w*)`)
+	literalFromImport        = regexp.MustCompile(`\bfrom\s+(os|io|shutil|pathlib|builtins)\s+import\s+([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?`)
+	literalPythonBinding     = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\b`)
 	literalNodeRequire       = regexp.MustCompile(`\brequire\s*\(\s*['"](?:node:)?fs(?:/promises)?['"]\s*\)`)
 	literalNodeBinding       = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeDestructure   = regexp.MustCompile(`\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeNamedImport   = regexp.MustCompile(`\bimport\s*\{([^}]+)\}\s*from\s*['"](?:node:)?fs(?:/promises)?['"]`)
 	literalNodeDefaultImport = regexp.MustCompile(`\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](?:node:)?fs(?:/promises)?['"]`)
-	literalPathMethod        = regexp.MustCompile(`^\s*\.\s*(open|write_text|write_bytes)\s*\(`)
+	literalPathMethod        = regexp.MustCompile(`^\s*\.\s*(open|write_text|write_bytes|touch)\s*\(`)
 	literalReadOnlyFlag      = regexp.MustCompile(`^(?:(?:os|fs\.constants)\.)?O_RDONLY$`)
 	literalPerlOpen          = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	literalPerlOpen2         = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)([^'"]+)['"]`)
+	literalPerlCopyUse       = regexp.MustCompile(`\buse\s+File::Copy(?:\s+qw\(([^)]*)\))?`)
 )
 
 func literalLanguage(program string) string {
@@ -141,6 +149,15 @@ func literalWriterBindings(language, code string) (string, map[string]string) {
 			}
 			aliases[name] = match[1] + "." + match[2]
 		}
+		for _, match := range literalPythonBinding.FindAllStringSubmatch(code, -1) {
+			canonical := literalCanonicalName(match[2], aliases)
+			for _, rule := range literalWriterRules[language] {
+				if rule.callee == canonical {
+					aliases[match[1]] = canonical
+					break
+				}
+			}
+		}
 	case "node":
 		code = literalNodeRequire.ReplaceAllStringFunc(code, func(call string) string {
 			if strings.Contains(call, "/promises") {
@@ -169,9 +186,15 @@ func literalWriterBindings(language, code string) (string, map[string]string) {
 			aliases[match[1]] = module
 		}
 	case "perl":
-		if strings.Contains(code, "use File::Copy") {
-			for _, name := range []string{"copy", "move", "cp", "mv"} {
-				aliases[name] = "File::Copy::" + name
+		for _, match := range literalPerlCopyUse.FindAllStringSubmatch(code, -1) {
+			names := []string{"copy", "move"}
+			if match[1] != "" {
+				names = strings.Fields(match[1])
+			}
+			for _, name := range names {
+				if name == "copy" || name == "move" || name == "cp" || name == "mv" {
+					aliases[name] = "File::Copy::" + name
+				}
 			}
 		}
 	}
@@ -239,12 +262,20 @@ func literalWriterEnabled(rule literalWriterRule, args []string) bool {
 		if modeArg == "" {
 			return false
 		}
+		if rule.kind == literalWriterNodeOpen {
+			if flags, err := strconv.ParseUint(strings.TrimSpace(modeArg), 0, 32); err == nil {
+				return flags&(1|2|64|512|1024) != 0
+			}
+		}
 		mode, ok := literalString(modeArg)
 		if !ok {
+			if rule.kind == literalWriterNodeOpen && literalReadOnlyFlag.MatchString(strings.TrimSpace(modeArg)) {
+				return false
+			}
 			return true
 		}
 		if rule.kind == literalWriterNodeOpen {
-			return strings.ContainsAny(mode, "wx+")
+			return strings.ContainsAny(mode, "wax+")
 		}
 		return literalWriteMode(mode)
 	case literalWriterPerlOpen:

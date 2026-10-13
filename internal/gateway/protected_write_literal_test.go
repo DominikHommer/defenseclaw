@@ -45,7 +45,8 @@ func TestProtectedWriteLiteralWriterDecisions(t *testing.T) {
 		{"dynamic destination", `python3 -c 'p="disklink"; open(p,"w").write("x")'`, true},
 		{"python ordinary", `python3 -c 'import shutil; shutil.copy2("source","notes.txt")'`, false},
 		{"node read", `node -e 'require("fs").readFileSync("disklink")'`, false},
-		{"node append open", `node -e 'require("fs").openSync("disklink","a")'`, false},
+		{"node append open intent", `node -e 'require("fs").openSync("disklink","a")'`, true},
+		{"node read flag", `node -e 'const fs=require("fs"); fs.openSync("disklink",fs.constants.O_RDONLY)'`, false},
 	}
 	for _, row := range rows {
 		for _, managed := range []bool{false, true} {

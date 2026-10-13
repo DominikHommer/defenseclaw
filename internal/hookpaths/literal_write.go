@@ -194,13 +194,22 @@ func literalInterpreterProgram(program string) bool {
 
 func literalInterpreterCode(program string, words []string) (string, bool) {
 	language := literalLanguage(program)
+	perlImports := ""
 	for i := 1; i < len(words); i++ {
 		word := words[i]
+		if language == "perl" && strings.HasPrefix(word, "-MFile::Copy") {
+			suffix := strings.TrimPrefix(word, "-MFile::Copy")
+			if suffix == "" {
+				perlImports = "use File::Copy; "
+			} else if names, found := strings.CutPrefix(suffix, "="); found && names != "" {
+				perlImports = "use File::Copy qw(" + strings.ReplaceAll(names, ",", " ") + "); "
+			}
+		}
 		if word == "-c" && language == "python" ||
 			(word == "-e" || word == "-E") && (language == "perl" || language == "ruby" || language == "node") ||
 			(word == "-p" || word == "--eval" || word == "--print") && language == "node" {
 			if i+1 < len(words) {
-				return words[i+1], true
+				return perlImports + words[i+1], true
 			}
 			return "", false
 		}
