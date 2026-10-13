@@ -154,6 +154,9 @@ guardrail:
       mode: action       # this agent blocks; the others only observe
 ```
 
+`guardrail.block_message` and each connector's `block_message` may contain at
+most 4096 characters. `ensure` refuses a longer value as `config_invalid`.
+
 - **`guardrail.mode`.** `observe` inspects every call and logs the verdict
   without blocking. `action` blocks what policy denies. The default is
   `observe`. A connector's own `mode` overrides the global value for that
@@ -425,7 +428,10 @@ rules on Linux and macOS:
    source instead. The packages ship no copy before they install, so
    for a first install put the pack in place before the package (with your
    MDM, for example) or install with the built-in packs first and switch
-   `rule_pack` afterwards. Keep every file and folder owned by root,
+   `rule_pack` afterwards. After `mkdir -p`, run
+   `sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail` on macOS
+   (or `sudo chmod 0755 /etc/defenseclaw/policies/guardrail` on Linux); a root shell with umask
+   `077` otherwise creates it as `0700`. Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
    `data_dir`, which the gateway can write. Before it changes anything it
