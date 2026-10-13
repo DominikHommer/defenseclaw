@@ -320,17 +320,27 @@ try {
     # a power loss) is repaired, but the change itself did not finish: say
     # so and name the next step (GAP-0767).
     $recovered = @($document.warnings) | Where-Object { $null -ne $_ -and $_.code -eq 'recovered_pending_transaction' } | Select-Object -First 1
+    $specificProblem = @(@($document.errors) + @($document.warnings) | Where-Object {
+        $null -ne $_ -and [string]$_.code -and [string]$_.code -ne 'lifecycle_error'
+    }) | Select-Object -First 1
+    $repairChanges = @($document.changes) | Where-Object { [string]$_ }
     if ($document.ok -and $null -ne $runtime) {
         $summary = "not repaired (scanner_runtime_unavailable): $($runtime.message)"
         $code = 1603
     }
-    elseif ($document.ok -and $null -ne $recovered) { $summary = "repaired: $($recovered.message)" }
-    elseif ($document.ok -and $document.noop) { $summary = 'already healthy' }
-    elseif ($document.ok) { $summary = 'repaired' }
+    elseif ($document.ok -and $null -ne $recovered) { $summary = "repaired (recovered_pending_transaction): $($recovered.message)" }
+    elseif ($document.ok -and $repairChanges.Count -gt 0) {
+        $problemCode = if ($null -ne $specificProblem) { [string]$specificProblem.code } else { 'drift' }
+        $summary = "repaired ($problemCode): $($repairChanges -join ', ')"
+    }
+    elseif ($document.ok -and $document.noop) { $summary = 'no repair needed after verify' }
+    elseif ($document.ok) { $summary = 'ensure completed' }
     else {
-        $summary = "still failing ($codes)"
-        $first = @($document.errors) | Select-Object -First 1
+        $problemCode = if ($null -ne $specificProblem) { [string]$specificProblem.code } else { $codes }
+        $summary = "still failing ($problemCode)"
+        $first = if ($null -ne $specificProblem) { $specificProblem } else { @($document.errors) | Select-Object -First 1 }
         if ($null -ne $first -and $first.message) { $summary += ": $($first.message)" }
+        if ($repairChanges.Count -gt 0) { $summary += "; attempted repair: $($repairChanges -join ', ')" }
         # A DefenseClaw binary went missing (an antivirus quarantine): the
         # installed CLI has no payload to restore it from, so say what does
         # (GAP-0935).

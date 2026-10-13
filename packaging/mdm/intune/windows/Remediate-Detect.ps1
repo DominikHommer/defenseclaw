@@ -265,6 +265,10 @@ function Format-DefenseClawVerifyFailure {
         $document = $Json | ConvertFrom-Json
         $errors = @($document.errors)
         $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
+        $specific = @($errors + @($document.warnings) | Where-Object {
+            $null -ne $_ -and [string]$_.code -and [string]$_.code -ne 'lifecycle_error'
+        }) | Select-Object -First 1
+        if ($null -ne $specific) { $codes = [string]$specific.code }
         if ($errors.Count -gt 0 -and @($errors | Where-Object { [string]$_.code -ne 'lifecycle_busy' }).Count -eq 0) {
             return $null
         }
@@ -276,6 +280,8 @@ function Format-DefenseClawVerifyFailure {
             })
         if ($down.Count -gt 0) {
             $detail = $down -join '; '
+        } elseif ($null -ne $specific) {
+            $detail = [string]$specific.message
         } elseif ($errors.Count -gt 0) {
             $detail = [string]$errors[0].message
         }
