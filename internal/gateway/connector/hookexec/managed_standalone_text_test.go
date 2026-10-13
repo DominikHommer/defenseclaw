@@ -93,6 +93,29 @@ func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) 
 	}
 }
 
+func TestManagedRuntimeRefusalTextNamesTheFolderState(t *testing.T) {
+	const generic = "DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator."
+	for _, tc := range []struct {
+		reason string
+		want   string
+	}{
+		{
+			reason: "enterprise_managed_runtime_home_missing",
+			want:   "DefenseClaw blocked this tool call: Your DefenseClaw folder in your profile is missing. DefenseClaw recreates it within about a minute, try again. If this continues, contact your administrator.",
+		},
+		{reason: "enterprise_managed_runtime_invalid", want: generic},
+		{reason: "enterprise_managed_runtime_disable_sentinel_forbidden", want: generic},
+		{reason: "enterprise_managed_hook_socket_missing", want: generic},
+		{reason: "enterprise_machine_policy_summary_untrusted", want: generic},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			if got := managedStandaloneFailClosedText("PreToolUse", "transport", tc.reason); got != tc.want {
+				t.Fatalf("text = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHookEventSubject(t *testing.T) {
 	for event, want := range map[string]string{
 		"beforeSubmitPrompt":  "prompt",

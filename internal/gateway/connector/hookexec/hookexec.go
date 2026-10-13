@@ -2007,6 +2007,9 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
+	case reason == "enterprise_managed_runtime_home_missing":
+		cause, advice = "Your DefenseClaw folder in your profile is missing",
+			"DefenseClaw recreates it within about a minute, try again. If this continues, contact your administrator."
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":
