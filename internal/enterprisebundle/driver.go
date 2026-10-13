@@ -164,6 +164,14 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		return refuse(err)
 	}
 	p.Config, p.ConfigSHA256 = rendered, sha256Hex(rendered)
+	// The caller's transaction commits this config before Finish runs.
+	// Record which config it is, so SettleRun can tell a run that stopped
+	// after the commit (the bundle config enforces) from one that stopped
+	// before it (the last good config enforces).
+	receipt.ConfigSHA256 = p.ConfigSHA256
+	if err := d.Store.writeReceipt(receipt); err != nil {
+		return refuse(&Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()})
+	}
 	return p, nil
 }
 
@@ -206,6 +214,18 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 			message = fmt.Sprintf("the ensure transaction failed (%s)", joinCodes(failure))
 		}
 		rc.RolledBack = installed != p.ConfigSHA256
+		if !rc.RolledBack && rollback != nil {
+			// The transaction failed after it installed the bundle config:
+			// put the last good config back, as for an unconfirmed bundle.
+			enforcing, ok := rollback()
+			rc.RolledBack = ok
+			if enforcing != "" {
+				rc.EnforcingDigest = enforcing
+			}
+			if !ok {
+				message += "; putting the last good config back failed"
+			}
+		}
 		return State{}, d.fail(rc, CodeApplyFailed, message)
 	}
 	if !policy.Applied || policy.ReloadError != "" || !digestPattern.MatchString(policy.Digest) {
@@ -240,14 +260,24 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 // its config and the gateway enforces its digest, failed(not_confirmed)
 // otherwise. rollback lists the receipts failed here whose config is still
 // the installed one: the caller installs the last good config again.
+//
+// A staged receipt whose config the deployment holds was committed by a
+// transaction whose run stopped before Finish: it is confirmed when the
+// gateway enforces the installed config and failed (not_confirmed, named
+// for a rollback) otherwise, never reported as an apply that did not happen.
 func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (report SettleReport, rollback []*Receipt, err error) {
-	report, err = d.Store.Settle(VersionDirsNamed(installedConfig, d.Store.BundlesDir)...)
-	if err != nil {
-		return report, nil, err
-	}
 	installed := ""
 	if installedConfig != nil {
 		installed = sha256Hex(installedConfig)
+	}
+	completed, rollback, err := d.settleCommitted(installed, policy)
+	if err != nil {
+		return report, rollback, err
+	}
+	report, err = d.Store.Settle(VersionDirsNamed(installedConfig, d.Store.BundlesDir)...)
+	report.Completed = append(completed, report.Completed...)
+	if err != nil {
+		return report, rollback, err
 	}
 	for _, rc := range report.Unconfirmed {
 		holds := installed != "" && installed == rc.ConfigSHA256
@@ -269,6 +299,44 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 		}
 	}
 	return report, rollback, nil
+}
+
+// settleCommitted settles the staged receipts whose rendered config is the
+// installed one (see SettleRun).
+func (d *Driver) settleCommitted(installed string, policy *GatewayPolicy) (completed []string, rollback []*Receipt, err error) {
+	if installed == "" {
+		return nil, nil, nil
+	}
+	receipts, err := d.Store.Receipts()
+	if err != nil {
+		return nil, nil, err
+	}
+	enforces := policy != nil && policy.Applied && policy.ReloadError == "" && digestPattern.MatchString(policy.Digest)
+	for _, rc := range receipts {
+		if rc.State != StateStaged || rc.ConfigSHA256 != installed {
+			continue
+		}
+		if enforces {
+			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.Digest, policy.Generation, at
+			}); err != nil {
+				return completed, rollback, err
+			}
+			if _, err := d.Store.Confirm(rc); err == nil {
+				completed = append(completed, rc.ReceiptID)
+				continue
+			}
+		}
+		if policy != nil {
+			rc.EnforcingDigest = policy.Digest
+		}
+		if err := d.Store.Fail(rc, CodeNotConfirmed, "the run that installed this bundle config ended before the gateway confirmed it"); err != nil {
+			return completed, rollback, err
+		}
+		rollback = append(rollback, rc)
+	}
+	return completed, rollback, nil
 }
 
 func (d *Driver) fail(rc *Receipt, code Code, message string) error {

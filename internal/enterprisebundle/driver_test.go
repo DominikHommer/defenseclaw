@@ -82,6 +82,19 @@ func TestDriverConfirmsOnlyAnInstalledAndEnforcedBundle(t *testing.T) {
 		t.Fatalf("failed receipt = %+v", failed.Receipt)
 	}
 
+	afterCommit, err := d.Prepare(ctx, f.bundle, nil)
+	if err != nil {
+		t.Fatalf("prepare after a failed run: %v", err)
+	}
+	putBack := false
+	if _, err := d.Finish(afterCommit, afterCommit.ConfigSHA256, []string{"service_start_failed"}, enforcing(gatewayDigest), false,
+		func() (string, bool) { putBack = true; return gatewayDigest, true }); enterprisebundle.CodeOf(err) != enterprisebundle.CodeApplyFailed {
+		t.Fatalf("transaction failed after the install: got %v, want apply_failed", err)
+	}
+	if !putBack || !afterCommit.Receipt.RolledBack {
+		t.Fatalf("a transaction that failed after installing the bundle config was not rolled back: %+v", afterCommit.Receipt)
+	}
+
 	unconfirmed, err := d.Prepare(ctx, f.bundle, nil)
 	if err != nil {
 		t.Fatalf("retry prepare: %v", err)
@@ -139,10 +152,15 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 		holds    bool
 		confirm  bool
 		rollback bool
+		// staged: the transaction committed the config but the run stopped
+		// before Finish moved the receipt to applied.
+		staged bool
 	}{
 		{name: "enforced", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, confirm: true},
 		{name: "gateway enforces another policy", policy: &enterprisebundle.GatewayPolicy{Digest: "sha256:" + fmt.Sprintf("%064d", 2), Applied: true}, holds: true, rollback: true},
 		{name: "config rolled back", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}},
+		{name: "committed, run stopped before finish", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest, Applied: true}, holds: true, staged: true, confirm: true},
+		{name: "committed, gateway does not enforce it", policy: &enterprisebundle.GatewayPolicy{Digest: gatewayDigest}, holds: true, staged: true, rollback: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, bundleConfig(t), nil)
@@ -151,10 +169,12 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
-				rc.EffectivePolicyDigest, rc.ConfigSHA256 = gatewayDigest, p.ConfigSHA256
-			}); err != nil {
-				t.Fatal(err)
+			if !tc.staged {
+				if err := d.Store.Advance(p.Receipt, enterprisebundle.StateApplied, func(rc *enterprisebundle.Receipt) {
+					rc.EffectivePolicyDigest, rc.ConfigSHA256 = gatewayDigest, p.ConfigSHA256
+				}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			installed := []byte("config_version: 9\n")
 			if tc.holds {
@@ -170,6 +190,9 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 			}
 			if (len(rollback) == 1) != tc.rollback {
 				t.Fatalf("rollback = %v", rollback)
+			}
+			if tc.staged && len(report.Interrupted) != 0 {
+				t.Fatalf("a committed bundle config was reported as never applied: %+v", report)
 			}
 		})
 	}
