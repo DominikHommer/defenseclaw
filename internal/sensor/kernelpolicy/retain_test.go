@@ -14,6 +14,7 @@ package kernelpolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -255,5 +256,111 @@ func TestLeavingEnforceKeepsNoReplacedControls(t *testing.T) {
 		if p := h.tg.policies[name]; p.Mode.Enforcing() {
 			t.Fatalf("%s enforces in observe", name)
 		}
+	}
+}
+
+// #1156 after a load with no enrolled process alive. The process scan right
+// after such a load finds nothing, which proves that every later session
+// started after it and was marked. The load time used to be 0 (not known)
+// then, so the policy counted as having marked nobody and the first agent
+// update after it deleted the policy under the running session. The common
+// case is a boot: Tetragon starts with no policies and the helper loads them
+// again before anyone logs in.
+func TestAgentUpdateAfterALoadWithNoSessionKeepsTheControls(t *testing.T) {
+	cases := map[string]func(t *testing.T) *harness{
+		"boot before login": func(t *testing.T) *harness {
+			h := enforcing(t)
+			h.tg.restart()
+			h.procs = nil
+			h.start(h.intent) // the helper starts with the boot too
+			h.pass()
+			return h
+		},
+		"enforce before any session": func(t *testing.T) *harness {
+			intent := enforceIntent(Digest())
+			intent.BurnIn = 0
+			h := newHarness(t, intent, baseTargets)
+			h.pass()
+			return h
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := setup(t)
+			old := mustName(t, h.status(), FamilyControls)
+			if p := h.tg.policies[old]; p == nil || !p.Mode.Enforcing() {
+				t.Fatalf("controls after the load = %+v, want enforce", p)
+			}
+			loadTicks := h.status().Applied[old].LoadTicks
+			h.tg.take()
+			// The user logs in and starts Claude Code.
+			h.procs = []Proc{nativeProc(4010, 1, 300, 1001, aliceClaudeNew), codexProc(5001, 1, 320, 1002)}
+			h.pass()
+			if calls := h.tg.take(); indexOf(calls, "delete:") >= 0 || len(controlsNames(h)) != 1 {
+				t.Fatalf("a session start replaced the controls: %v, loaded %v", mutations(calls), h.tg.names())
+			}
+			if warning, observed := predating(h); warning != "" || len(observed) != 0 {
+				t.Fatalf("a session started after the load is reported as predating it: %q %+v", warning, observed)
+			}
+			// Claude Code updates itself.
+			h.w.fs.elf(aliceClaude102)
+			h.now = h.now.Add(time.Minute)
+			h.pass()
+			calls := mutations(h.tg.take())
+			if indexOf(calls, "add:defenseclaw-controls-") < 0 || indexOf(calls, "delete:"+old) >= 0 {
+				t.Fatalf("calls after the update = %v, want the replacement added and %s kept", calls, old)
+			}
+			if p := h.tg.policies[old]; p == nil || !p.Mode.Enforcing() || p.State != StateEnabled {
+				t.Fatalf("%s after the update = %+v, want enforcing", old, p)
+			}
+			if st := policyStatus(h, old); st.RetainedSessions != 1 || st.DesiredMode != PolicyEnforce {
+				t.Fatalf("status of the kept policy %+v", st)
+			}
+			if warning, observed := predating(h); warning != "" || len(observed) != 0 {
+				t.Fatalf("the running session is reported as not enforced: %q %+v", warning, observed)
+			}
+			// The session exits: the kept policy goes.
+			h.procs = []Proc{codexProc(5001, 1, 320, 1002)}
+			h.pass()
+			if calls := mutations(h.tg.take()); len(calls) != 1 || calls[0] != "delete:"+old {
+				t.Fatalf("calls after the session exited = %v, want only the delete of %s", calls, old)
+			}
+			if loadTicks != 1 {
+				t.Fatalf("load ticks of a load with no process alive = %d, want 1 (0 is not known)", loadTicks)
+			}
+		})
+	}
+}
+
+// A load whose process scan failed has no known load time (0): it is not
+// taken as having marked any session, so the first agent update replaces it
+// as before and the running session is reported as predating the controls.
+func TestALoadWithAFailedScanMarksNothing(t *testing.T) {
+	h := enforcing(t)
+	h.tg.restart()
+	h.procs = nil
+	h.start(h.intent)
+	scan := h.ctl.cfg.Procs
+	h.ctl.cfg.Procs = func(func(int) bool) ([]Proc, error) { return nil, errors.New("/proc is not readable") }
+	h.pass()
+	old := mustName(t, h.status(), FamilyControls)
+	if p := h.tg.policies[old]; p == nil || !p.Mode.Enforcing() {
+		t.Fatalf("controls after the load = %+v, want enforce", p)
+	}
+	if got := h.status().Applied[old].LoadTicks; got != 0 {
+		t.Fatalf("load ticks after a failed scan = %d, want 0 (not known)", got)
+	}
+	h.ctl.cfg.Procs = scan
+	h.procs = []Proc{nativeProc(4010, 1, 300, 1001, aliceClaudeNew), codexProc(5001, 1, 320, 1002)}
+	h.pass()
+	h.tg.take()
+	h.w.fs.elf(aliceClaude102)
+	h.now = h.now.Add(time.Minute)
+	h.pass()
+	if calls := mutations(h.tg.take()); indexOf(calls, "delete:"+old) < 0 {
+		t.Fatalf("calls after the update = %v, want %s replaced", calls, old)
+	}
+	if warning, _ := predating(h); warning != WarnSessionsPredateControls+":1" {
+		t.Fatalf("predating warning %q, want the running session named", warning)
 	}
 }

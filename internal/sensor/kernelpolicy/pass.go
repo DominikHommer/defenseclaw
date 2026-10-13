@@ -283,14 +283,18 @@ func (c *Controller) markApplied(name string, family Family, mode PolicyMode, pi
 // process alive right after a load: every agent session that started no
 // later than it may predate the load, and Tetragon marks an agent's
 // processes for matchBinaries followChildren only when the agent starts, so
-// such a session is not denied. 0 when the scan fails (nothing is then
-// reported as predating).
+// such a session is not denied. 0 when the scan fails: the load time is not
+// known, so nothing is reported as predating it and no later session counts
+// as marked by it. A scan that finds no process (a boot, where Tetragon lost
+// its policies and the helper loads them again before any enrolled user
+// logs in) proves that every later session started after the load, so it
+// gives 1, not 0 (#1156).
 func (c *Controller) loadTicks() uint64 {
 	procs, err := c.cfg.Procs(c.enrollment.Has)
 	if err != nil {
 		return 0
 	}
-	var newest uint64
+	newest := uint64(1)
 	for _, p := range procs {
 		newest = max(newest, p.StartTicks)
 	}

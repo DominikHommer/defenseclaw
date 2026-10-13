@@ -55,7 +55,9 @@ func newBinaryMark(binaries []string, loadTicks uint64) binaryMark {
 }
 
 // marked reports whether the policy marked root. A load time that is not
-// known (the process scan failed right after the load) proves nothing.
+// known (the process scan failed right after the load) proves nothing; a
+// load with no process alive (load ticks 1, as at a boot before any login)
+// marked every later session.
 func (m binaryMark) marked(root Root) bool {
 	return root.Native && m.binaries[root.Exe] && m.loadTicks > 0 && root.StartTicks > m.loadTicks
 }

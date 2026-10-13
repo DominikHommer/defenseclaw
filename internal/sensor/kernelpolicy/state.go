@@ -65,6 +65,7 @@ type Applied struct {
 	// ticks since boot) of the newest process alive right after Tetragon
 	// loaded it. An agent session that started no later is not marked by
 	// the binaries anchor, so it is reported as predating the controls.
+	// 1 when no process was alive; 0 (absent) when it is not known.
 	LoadTicks uint64 `json:"load_ticks,omitempty"`
 	// BinaryUID and Binaries are, for a controls-family policy, the
 	// binaries anchor it was loaded with. A replaced enforcing policy is
