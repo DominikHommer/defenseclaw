@@ -321,25 +321,48 @@ def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
 _CONFIG_LIMIT = 2 * 1024 * 1024
 
 
-# Agent config formats whose hook registrations live in a ``hooks`` section.
+# Agent config formats whose hook registrations are read from the decoded
+# document (:func:`_hook_section`).
 _STRUCTURED_SUFFIXES = (".json", ".toml", ".yaml", ".yml")
+
+# Antigravity keeps each hook set under its own top-level name; Setup writes
+# DefenseClaw's as defenseclaw-antigravity-<event> (antigravityOwnedHookKeys in
+# internal/gateway/connector/hook_only.go). Devin's project hooks.v1.json holds
+# the event map at its root (devinHooksObject in internal/gateway/connector/devin.go).
+_ANTIGRAVITY_HOOK_KEY_PREFIX = "defenseclaw-antigravity-"
+_DEVIN_PROJECT_HOOKS_FILE = "hooks.v1.json"
 
 # A PowerShell -EncodedCommand (or an abbreviation of it) and its base64
 # script: the per-user Windows hook command names the launcher only inside it.
 _ENCODED_SCRIPT = re.compile(r"(?i)(?:^|\s)[-/]e[a-z]*\s+([A-Za-z0-9+/]{64,}={0,2})(?=\s|$)")
 
 
-def _hook_section(document: Any) -> Any:
-    """The ``hooks`` section of a decoded agent config, or None.
+def _hook_section(document: Any, path: Path) -> list[Any] | None:
+    """The hook registrations of the decoded agent config *path*, or None.
 
-    Codex keeps its hook trust state beside the events (``[hooks.state]``);
-    it registers nothing.
+    Most agents keep them in a ``hooks`` section; Codex keeps its hook trust
+    state beside the events (``[hooks.state]``), which registers nothing.
+    Antigravity's hooks.json has a top-level key per hook set and Devin's
+    project hooks.v1.json is the event map itself, so reading only a
+    ``hooks`` key called a clean Setup of either unregistered (GAP-0489).
     """
 
-    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(document, dict):
+        return None
+    if path.name.lower() == _DEVIN_PROJECT_HOOKS_FILE:
+        return [document]
+    sections: list[Any] = []
+    hooks = document.get("hooks")
     if isinstance(hooks, dict):
-        return {key: value for key, value in hooks.items() if key != "state"}
-    return hooks if isinstance(hooks, list) else None
+        sections.append({key: value for key, value in hooks.items() if key != "state"})
+    elif isinstance(hooks, list):
+        sections.append(hooks)
+    sections.extend(
+        value
+        for key, value in document.items()
+        if isinstance(key, str) and key.startswith(_ANTIGRAVITY_HOOK_KEY_PREFIX)
+    )
+    return sections or None
 
 
 # Per-user Windows Claude Code registers its launcher through cmd.exe so a
@@ -470,8 +493,8 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     the Codex ``[otel]`` exporters), the Codex ``notify`` bridge, an MCP
     server entry. A whole-file match kept a file with no hooks looking
     registered (GAP-1230, GAP-1311), so for JSON, TOML and YAML only a hook
-    command in the ``hooks`` section counts. Other formats (the OpenCode
-    plugin file) are matched as a whole.
+    command in the file's hook registrations (:func:`_hook_section`) counts.
+    Other formats (the OpenCode plugin file) are matched as a whole.
     """
 
     raw = path.read_bytes()
@@ -483,7 +506,7 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
         # A file the parser cannot read is reported by the agent itself;
         # never call it unregistered on that ground alone.
         return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
-    section = _hook_section(document)
+    section = _hook_section(document, path)
     if section is None:
         return False
     return any(
