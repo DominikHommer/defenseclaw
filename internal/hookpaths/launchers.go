@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -213,9 +214,15 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 			}
 			if replace != "" {
 				result.replace = replace
+				child := programBase(result.words[0])
+				shellChild := launcherSpecs[child].kind == launcherShell
 				for i, word := range result.words {
 					if strings.Contains(word, replace) {
-						result.static[i] = false
+						if shellChild && i > 0 {
+							result.words[i] = strings.ReplaceAll(word, replace, "${DC_XARGS_INPUT}")
+						} else {
+							result.static[i] = false
+						}
 					}
 				}
 			}
@@ -647,6 +654,12 @@ func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd,
 	if pipe.X == nil || pipe.Y == nil {
 		return
 	}
+	for _, redirect := range pipe.Y.Redirs {
+		if redirect.Op == syntax.RdrIn || redirect.Op == syntax.RdrInOut ||
+			redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc || redirect.Op == syntax.WordHdoc {
+			return
+		}
+	}
 	code, known := literalProducerCode(pipe.X, context.source, home)
 	if !known {
 		return
@@ -668,24 +681,93 @@ func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd,
 		return
 	}
 	result := resolveLauncherWords(words, static, context.cwd)
-	if !result.ok || result.replace == "" || len(result.words) == 0 {
+	if !result.ok || len(result.words) == 0 {
 		return
 	}
-	for j, word := range result.words {
-		result.words[j] = strings.ReplaceAll(word, result.replace, values[0])
-		result.static[j] = true
+	if result.replace == "" {
+		result.words = append(result.words, values[0])
+		result.static = append(result.static, true)
+	} else {
+		for j, word := range result.words {
+			result.words[j] = strings.ReplaceAll(word, result.replace, values[0])
+			result.static[j] = true
+		}
 	}
 	if !allStatic(result.static) {
 		return
 	}
-	var quoted []string
-	for _, word := range result.words {
-		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", "'\\''")+"'")
-	}
-	source := strings.Join(quoted, " ")
+	source := launcherQuotedWords(result.words)
 	inner, parsed := parseShell(source)
 	if parsed {
 		*queue = append(*queue, shellScriptContext{file: inner, cwd: result.cwd, source: source})
 		context.handled[int(call.Pos().Offset())] = true
 	}
+}
+
+func launcherQuotedWords(words []string) string {
+	var quoted []string
+	for _, word := range words {
+		quoted = append(quoted, "'"+strings.ReplaceAll(word, "'", "'\\''")+"'")
+	}
+	return strings.Join(quoted, " ")
+}
+
+// ShellStdinWriteUnknown reports a child write whose destination comes from
+// an input stream that the command text does not determine. Reader operands
+// and copy sources do not become write targets.
+func ShellStdinWriteUnknown(command, cwd, home string) bool {
+	contexts, _ := shellAnalysisScripts(command, cwd, home)
+	for _, context := range contexts {
+		unknown := false
+		syntax.Walk(context.file, func(node syntax.Node) bool {
+			pipe, ok := node.(*syntax.BinaryCmd)
+			if !ok || pipe.Op != syntax.Pipe || pipe.Y == nil {
+				return true
+			}
+			call, ok := pipe.Y.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 || context.handled[int(call.Pos().Offset())] {
+				return true
+			}
+			words := make([]string, len(call.Args))
+			static := make([]bool, len(call.Args))
+			for i, arg := range call.Args {
+				words[i], static[i] = StaticWord(arg, home)
+			}
+			result := resolveLauncherWords(words, static, context.cwd)
+			if !result.stdin || len(result.words) == 0 && result.script == "" {
+				return true
+			}
+			const target = "__dc_stdin_write_target__"
+			var source string
+			if result.script != "" {
+				source = strings.ReplaceAll(result.script, "${DC_XARGS_INPUT}", target)
+			} else {
+				child := slices.Clone(result.words)
+				if result.replace == "" {
+					child = append(child, target)
+				} else {
+					for i, word := range child {
+						child[i] = strings.ReplaceAll(word, result.replace, target)
+					}
+				}
+				source = launcherQuotedWords(child)
+			}
+			want := filepath.Clean(OperandPath(target, result.cwd))
+			operands, _, dynamic := ShellWriteOperands(source, result.cwd, home)
+			literal, literalUnknown := LiteralWriteAnalysis(source, result.cwd, home)
+			operands = append(operands, literal...)
+			for _, extra := range ShellExtraWriteOperands(source, result.cwd, home) {
+				operands = append(operands, extra.Path)
+			}
+			if dynamic || literalUnknown || slices.Contains(operands, want) {
+				unknown = true
+				return false
+			}
+			return true
+		})
+		if unknown {
+			return true
+		}
+	}
+	return false
 }

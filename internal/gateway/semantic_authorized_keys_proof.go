@@ -902,6 +902,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if literalUnknown {
 			return true
 		}
+		if hookpaths.ShellStdinWriteUnknown(input.Command, input.CWD, input.ActiveHome) {
+			return true
+		}
 		for _, operand := range literalOperands {
 			if writeTarget(operand, false, false) {
 				return true
