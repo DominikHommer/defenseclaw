@@ -629,20 +629,32 @@ func (e *sessionRulesError) Unwrap() error { return e.err }
 
 // sessionRulesLeft is the refusal of a start whose sandbox still has rules
 // approved for its last session after both tries to remove them: the new
-// session must not run with them (GAP-0014), so it was stopped again. The
-// gateway's own words stay in the log.
-func sessionRulesLeft(name string, err error) error {
+// session must not run with them (GAP-0014), so it was stopped again.
+// stopErr is that stop's failure: the sandbox then still runs with the
+// rules, and the refusal says so and how to end it instead. The gateway's
+// own words stay in the log.
+func sessionRulesLeft(name string, err, stopErr error) error {
+	rules, these := "the network rules", "the rules"
 	what := "the network rules approved for its last session"
 	var left *sessionRulesError
 	if errors.As(err, &left) && len(left.rules) == 1 {
-		what = "the network rule " + left.rules[0] + ", approved for its last session,"
+		rules, these = "the network rule "+left.rules[0], "the rule"
+		what = rules + ", approved for its last session,"
 	} else if left != nil && len(left.rules) > 1 {
-		what = "the network rules " + strings.Join(left.rules, ", ") + ", approved for its last session,"
+		rules = "the network rules " + strings.Join(left.rules, ", ")
+		what = rules + ", approved for its last session,"
 	}
 	code := sandboxapi.CodeUpstream
 	var apiErr *sandboxapi.Error
 	if errors.As(err, &apiErr) {
 		code = apiErr.Code
+	}
+	if stopErr != nil {
+		return &sandboxapi.Error{Code: code,
+			Message: "sandbox " + name + " is still running with " + rules + " approved for its last session: " + these +
+				" could not be removed from its policy, and DefenseClaw could not stop the sandbox again",
+			Detail: "a new session must not keep what was approved for the last one: stop it now with `defenseclaw sandbox stop " + name +
+				"`, then start it again (the removal is tried first); if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 	}
 	return &sandboxapi.Error{Code: code,
 		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
@@ -846,8 +858,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			// approved for the last one.
 			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
 				rec.Name, err, rulesLeft)
-			m.stopUnverified(ctx, gw, b)
-			return sessionRulesLeft(rec.Name, err)
+			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b))
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
