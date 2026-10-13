@@ -836,8 +836,12 @@ dc_extract_payload() {
     fi
     payload="$DC_STAGE/payload"
     mkdir "$payload"
-    tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>/dev/null ||
+    if ! tar -xzf "$file" -C "$payload" --no-same-owner --no-same-permissions 2>"$DC_STAGE/tar.err"; then
+        if grep -Eiq 'No space left|ENOSPC' "$DC_STAGE/tar.err"; then
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_full "the staging filesystem is full at $DC_STAGE; choose a staging folder with more space"
+        fi
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive did not extract"
+    fi
     if [ -n "$(find "$payload" \( ! -type f ! -type d \) -o \( -type f -links +1 \) | head -n 1)" ]; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_payload_invalid "the payload archive contains links or special files"
     fi
