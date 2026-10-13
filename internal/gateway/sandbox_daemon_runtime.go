@@ -2460,7 +2460,8 @@ var writeRegistrationsTemp = func(f *os.File, data []byte) error {
 
 // writeDaemonFileAtomic replaces path with a 0600 file holding data: a temporary
 // file in the same directory, written and synced, renamed over path, then
-// the directory synced. Any failure leaves path as it was.
+// the directory synced (off Windows, see syncDaemonDir). Any failure leaves
+// path as it was.
 func writeDaemonFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
@@ -2483,6 +2484,17 @@ func writeDaemonFileAtomic(path string, data []byte) error {
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
+	}
+	return syncDaemonDir(dir)
+}
+
+// syncDaemonDir makes a rename in dir durable. Windows cannot flush a
+// directory handle (FlushFileBuffers on it is "Access is denied"), and NTFS
+// journals the rename itself, so there it does nothing, as the connector
+// files and the device identity do.
+func syncDaemonDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
 	}
 	d, err := os.Open(dir)
 	if err != nil {

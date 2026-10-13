@@ -202,11 +202,14 @@ func compareUpgradeGolden(t *testing.T, stage, golden, home string, raw []byte) 
 		}
 		return
 	}
-	want, err := os.ReadFile(golden)
+	wantRaw, err := os.ReadFile(golden)
 	if err != nil {
 		t.Fatalf("%s: %v (DEFENSECLAW_UPDATE_GOLDEN=1 writes it)", stage, err)
 	}
-	if got != string(want) {
+	// A CRLF checkout (core.autocrlf on Windows) must not fail the compare,
+	// as copyUpgradeFixture keeps the fixtures LF.
+	want := strings.ReplaceAll(string(wantRaw), "\r\n", "\n")
+	if got != want {
 		t.Fatalf("%s: config.yaml differs from %s:\n--- got\n%s\n--- want\n%s", stage, golden, got, want)
 	}
 }

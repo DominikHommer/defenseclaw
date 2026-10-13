@@ -242,6 +242,8 @@ $failures = & $module {
                 $result = Invoke-DefenseClawForcedUninstall `
                     -Layout @{
                         StateRoot = $stateRoot
+                        # Every Get-DefenseClawLayout layout names the receipt; none exists here.
+                        InstallRollbackIntentPath = ''
                         GatewayPath = ''
                         ManifestPath = ''
                         SensorHelperPath = ''

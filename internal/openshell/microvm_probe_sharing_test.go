@@ -37,18 +37,20 @@ func TestDoctorChecksTheHookFireProbeDirOnMicroVMs(t *testing.T) {
 	const why = " (the hook-fire probe of an image build mounts a MicroVM\x27s /etc/hosts from there; sandboxes mount nothing)"
 	for _, tc := range []struct {
 		name, engine string
-		// shared is what Docker Desktop shares, given the home directory.
-		shared   func(home string) []string
+		// shared is what Docker Desktop shares, given the home directory and
+		// the temp folder ($TMPDIR, a directory that holds neither the home
+		// nor the probe directory).
+		shared   func(home, tmp string) []string
 		override string
 		status   openshell.CheckStatus
 		detail   string // after the probe directory
 		fix      string
 	}{
 		{name: "Docker Desktop sharing the home only", engine: "Docker Desktop",
-			shared: func(home string) []string { return []string{home} },
+			shared: func(home, _ string) []string { return []string{home} },
 			status: pass, detail: " is shared with Docker Desktop" + why},
 		{name: "Docker Desktop sharing the temp folders only", engine: "Docker Desktop",
-			shared: func(string) []string { return []string{"/tmp", "/var/folders", "/private"} },
+			shared: func(_, tmp string) []string { return []string{tmp} },
 			status: fail, detail: " is not shared with Docker Desktop, so the hook-fire probe cannot run an image",
 			fix: " (or your home directory) in Docker Desktop → Settings → Resources → File sharing (/Users is shared by default)"},
 		{name: "Colima", engine: "Ubuntu 24.04.3 LTS",
@@ -62,7 +64,14 @@ func TestDoctorChecksTheHookFireProbeDirOnMicroVMs(t *testing.T) {
 			f.onMicroVMs()
 			t.Setenv("HOME", f.home)
 			t.Setenv("XDG_CACHE_HOME", "")
-			t.Setenv("TMPDIR", "/tmp")
+			// The temp folder is a directory of its own: a fixed /tmp holds the
+			// fake home on a host whose test temp root is under /tmp (the CI
+			// runners), so "shares the temp folders" would share the home too.
+			tmp := t.TempDir()
+			if rel, err := filepath.Rel(tmp, f.home); err == nil && !strings.HasPrefix(rel, "..") {
+				t.Fatalf("the temp folder %s holds the fake home %s", tmp, f.home)
+			}
+			t.Setenv("TMPDIR", tmp)
 			probe := openshell.HookFireProbeDir()
 			if !strings.HasPrefix(probe, f.home+string(filepath.Separator)) || !strings.HasSuffix(probe, filepath.Join("defenseclaw", "hookfire")) {
 				t.Fatalf("HookFireProbeDir = %q, want one under %s", probe, f.home)
@@ -74,7 +83,7 @@ func TestDoctorChecksTheHookFireProbeDirOnMicroVMs(t *testing.T) {
 			}
 			var shared []string
 			if tc.shared != nil {
-				shared = tc.shared(f.home)
+				shared = tc.shared(f.home, tmp)
 			}
 			f.runner.On("docker info", dockerInfoJSON("29.1.5", tc.engine, nil), nil)
 			f.doctor.DockerDesktop = func() (*openshell.DockerDesktop, error) { return &openshell.DockerDesktop{FileSharing: shared}, nil }
