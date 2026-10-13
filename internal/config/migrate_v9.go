@@ -3071,16 +3071,28 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 	case policy == "":
 		v9Set(skill, v9Scalar("quiet"), "policy")
 		m.moved("config", prefix+"policy", prefix+"policy", "quiet")
-	case v9SkillPolicies[policy] || policy == "custom":
+	case v9SkillPolicies[policy]:
+	case policy == SkillScannerPolicyCustom && v8YAMLMapValue(skill, "policy_file") != nil:
+		// Already the config_version 9 form: the name and its pinned file.
 	default:
+		// Any other value is the path of a policy file, which 0.8.x read
+		// relative to the working directory. That includes a file named
+		// custom: 0.8.x had no custom name, and keeping it as one, with no
+		// policy_file, failed the upgrade (GAP-1286). A relative path is
+		// pinned as the absolute path of the file read here, so the 1.0
+		// gateway finds it whatever directory it starts in.
 		raw, err := os.ReadFile(policy)
 		if err != nil {
 			return fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
 		}
-		v9Set(skill, v9Scalar("custom"), "policy")
-		ref := v9Mapping("path", v9Scalar(policy), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
+		pinned := policy
+		if abs, err := filepath.Abs(policy); err == nil && !filepath.IsAbs(policy) {
+			pinned = abs
+		}
+		v9Set(skill, v9Scalar(SkillScannerPolicyCustom), "policy")
+		ref := v9Mapping("path", v9Scalar(pinned), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
 		v9Set(skill, ref, "policy_file")
-		m.moved("config", prefix+"policy", prefix+"policy_file", map[string]string{"path": policy})
+		m.moved("config", prefix+"policy", prefix+"policy_file", map[string]string{"path": pinned})
 	}
 	useVT := v9Pop(skill, "use_virustotal")
 	keyEnv := v9Pop(skill, "virustotal_api_key_env")
