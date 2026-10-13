@@ -686,6 +686,18 @@ field by field, where `default_profile` is looser than an assigned profile,
 and name a custom pack without a digest. See
 [Sandbox policy packs](/docs/sandboxes/policy-packs) for the pack format.
 
+Releases before 1.0.2 read the packs of a managed standalone host from the
+data directory, `/var/lib/defenseclaw/policies/sandbox` on Linux and
+`/opt/cisco/defenseclaw/runtime/policies/sandbox` on macOS. A host upgraded
+from 1.0.1 whose packs are still there, and that has no
+`<policy_dir>/sandbox` yet, keeps reading them from the old folder, so the
+upgrade loses no pack. Every `ensure`, `status` and `verify` then warns with
+`sandbox_policy_advisory` and names both folders. Move the packs to
+`<policy_dir>/sandbox` (`root:defenseclaw`, macOS `root:_defenseclaw`,
+folders 0750, files 0640): the gateway reads that folder once it exists,
+and `ensure` and `verify` check it. An explicit `openshell.pack_dir` is kept
+as set.
+
 ### Hook silence
 
 Claude Code, Codex, Copilot and Cursor images own their hooks as root,
@@ -1252,7 +1264,7 @@ text and in `--json`. None of them is raised for a person.
 | `sandbox_pending_restart` | A user's daemon is outdated and waits for that user's sandboxes to stop | None; the user's next idle `defenseclaw sandbox` command restarts it |
 | `sandbox_user_state` | A per-user change could not be applied or removed (units, a file that changed after DefenseClaw wrote it, a teardown) | Read the message; the next run tries again, or finish by hand as it says |
 | `sandbox_default_profile_looser` | `default_profile` is looser than an assigned profile for a field | Make `default_profile` repeat the stricter setting |
-| `sandbox_policy_advisory` | A floor that works but probably isn't what you meant (an empty `request_access`, a pack without a digest, a `required_for` agent with no machine-owned hook) | Read the message |
+| `sandbox_policy_advisory` | A floor that works but probably isn't what you meant (an empty `request_access`, a pack without a digest, a `required_for` agent with no machine-owned hook), or packs still read from the folder releases before 1.0.2 used ([Packs](#packs)) | Read the message |
 | `sandbox_packs_dir_untrusted` | Other accounts can read the packs folder, or its owner or mode is not as required. `ensure` refuses it and `verify` fails | Make it `root:defenseclaw` (macOS `root:_defenseclaw`), mode 0750 |
 | `openshell_failed` | A sandbox step of the lifecycle failed (for example removing a link) | Read the message |
 
