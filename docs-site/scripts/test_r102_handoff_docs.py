@@ -138,6 +138,12 @@ class R102HandoffDocsTest(unittest.TestCase):
         self.assertIn("Setup can upgrade\nthe `nvidia/openshell` formula", text)
         self.assertIn("including `~/Library/Caches/defenseclaw/hookfire`", text)
 
+    def test_lfmac_second_account_without_openshell(self):
+        for name in ("sandboxes/macos.mdx", "sandboxes/linux.mdx"):
+            text = page(name)
+            self.assertIn("Setup installs and starts nothing there", text)
+            self.assertIn("`--install-openshell` if OpenShell is not installed there", text)
+
     def test_lfuninst_cli_running_sandbox_option(self):
         text = page("reference/cli.mdx")
         self.assertIn("| `defenseclaw uninstall --stop-sandboxes` |", text)

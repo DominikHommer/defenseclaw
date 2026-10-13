@@ -508,9 +508,11 @@ gateway, so only that account can run sandboxes. Each account would also need
 its own Docker Desktop and Homebrew service, which run only in that account's
 desktop session; per-user gateway ports are planned. In a second account,
 `defenseclaw sandbox doctor` says that the gateway's port is held by a
-process of another account. When the Homebrew prefix belongs to the first
-account, the doctor also says that its gateway configuration belongs to
-that account, so the compute driver is not known in the second account.
+process of another account, even if OpenShell is not installed in the second
+account. Setup installs and starts nothing there. When the Homebrew prefix
+belongs to the first account, the doctor also says that its gateway
+configuration belongs to that account, so the compute driver is not known
+in the second account.
 The checks that follow from the gateway (its registration, the gateway
 itself, Docker Desktop) are skipped (`not checked: the OpenShell gateway on
 this machine is another account's`), and `sandbox setup` stops at that one
@@ -527,7 +529,8 @@ runs it:
 brew services stop nvidia/openshell/openshell
 ```
 
-Then run `defenseclaw sandbox setup` in the other account. When that
+Then run `defenseclaw sandbox setup` in the other account, adding
+`--install-openshell` if OpenShell is not installed there. When that
 account cannot use the Homebrew prefix, setup says which account owns it.
 Several users on one machine are tracked upstream in
 [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
