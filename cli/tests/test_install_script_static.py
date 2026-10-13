@@ -1883,3 +1883,45 @@ def test_a_sigstore_cache_older_than_the_0_8_uv_is_the_users(tmp_path: Path) -> 
     proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "uv-cache\n"
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
+def test_a_second_restore_keeps_the_installer_the_first_one_put_back(tmp_path: Path) -> None:
+    # #1096/GAP-0922: a restore that stopped part-way kept its snapshot, and
+    # the next run deleted the installer the first had already put back.
+    dc_home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = dc_home / "previous.new"
+    for root in (dc_home, snap / "data"):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    for root, body in ((snap / "installer", "previous installer"), (dc_home / "installer", "failed installer")):
+        root.mkdir(parents=True)
+        (root / "install.sh").write_text(body, encoding="utf-8")
+    (snap / "bin").mkdir()
+    (snap / "bin" / "defenseclaw-gateway").write_text("1.0.1\n", encoding="utf-8")
+    (snap / "COMPLETE").touch()
+    bin_dir.mkdir()
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { :; }\nwarn() { :; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + f'DEFENSECLAW_HOME="{dc_home}" SNAP="{snap}" VENV="{dc_home}/.venv" BIN_DIR="{bin_dir}"\n'
+        + f'INSTALLER_DIR="{dc_home}/installer" APP_PATH="" VERSION=1.0.2 PREV_VERSION=1.0.1\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+    bin_dir.chmod(0o555)
+    try:
+        first = _run([str(script)], tmp_path)
+    finally:
+        bin_dir.chmod(0o755)
+    assert "back completely" in first.stdout and snap.is_dir(), first
+    assert (dc_home / "installer" / "install.sh").read_text(encoding="utf-8") == "previous installer"
+
+    _run([str(script)], tmp_path)
+
+    assert not snap.exists()
+    assert (dc_home / "installer" / "install.sh").read_text(encoding="utf-8") == "previous installer"
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "1.0.1\n"

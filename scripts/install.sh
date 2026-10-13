@@ -1560,8 +1560,19 @@ restore_snapshot() {
         rm -f "${BIN_DIR:?}/${link}" || restored=false
         if [[ -L "${SNAP}/bin/${link}" ]]; then cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}" || restored=false; fi
     done
-    rm -rf "${INSTALLER_DIR}" || restored=false
-    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
+    # INSTALLER_BACK marks the installer as put back, as VENV_BACK does the
+    # venv: a second run deleted the installer the first had restored (GAP-0922).
+    if [[ ! -f "${SNAP}/INSTALLER_BACK" ]]; then
+        moved=true
+        if [[ -d "${SNAP}/installer" ]]; then
+            : > "${SNAP}/INSTALLER_RESTORING" 2>/dev/null || moved=false
+        fi
+        if [[ "${moved}" == true && ! ( -f "${SNAP}/INSTALLER_RESTORING" && ! -d "${SNAP}/installer" ) ]]; then
+            rm -rf "${INSTALLER_DIR}" || moved=false
+            if [[ "${moved}" == true && -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || moved=false; fi
+        fi
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/INSTALLER_BACK" 2>/dev/null || restored=false; else restored=false; fi
+    fi
     if [[ ! -f "${SNAP}/DATA_ASIDE" ]]; then
         moved=true
         while IFS= read -r name; do
