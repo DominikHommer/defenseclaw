@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -130,6 +131,9 @@ var (
 	openShellExecAdminBinary = openshell.AdminBinary
 	openShellExecRenderedEnv = openshell.RenderedEnvironment
 	openShellExecVMProbe     = sandboxOpenShellVMProbe
+	// openShellExecUpstreamTelemetry reports whether the account's own
+	// floor allows OpenShell's own telemetry (es:GAP-0144).
+	openShellExecUpstreamTelemetry = sandboxOpenShellUpstreamTelemetry
 )
 
 // planSandboxOpenShellExec checks the managed host and the OpenShell of the
@@ -222,6 +226,15 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, sandboxPlatformName(goos))
 	}
 	env = append(env, rendered...)
+	if !openShellExecUpstreamTelemetry(ctx) {
+		// The rendered file is the host's: the organization's floor. The
+		// account's own profile may turn OpenShell's telemetry off
+		// (allow_upstream_telemetry: false), and so does a managed gateway
+		// that did not answer; it never turns it on (es:GAP-0144). The one
+		// entry is replaced, not repeated: getenv reads the first.
+		env = slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, openshell.EnvTelemetryEnabled+"=") })
+		env = append(env, openshell.EnvTelemetryEnabled+"=false")
+	}
 	// Every MicroVM runs as the account: the images are built for its uid
 	// and gid, which no value in the one rendered file can be (GAP-0254).
 	env = append(env, openshell.AccountVMEnvironment(os.Getuid(), os.Getegid())...)
@@ -335,9 +348,25 @@ func sandboxOpenShellVMProbe(home, configPath string) openshell.VMProbeResult {
 // mode, the administrator's e2fsprogs directory and the caller's own docker
 // fallback.
 func sandboxOpenShellAdminSettings(ctx context.Context) sandboxrelay.EnterpriseOpenShell {
+	settings, _ := sandboxOpenShellDaemonSettings(ctx)
+	return settings.Enterprise
+}
+
+// sandboxOpenShellUpstreamTelemetry reports whether the managed gateway's
+// settings for the account allow OpenShell's own telemetry: the floor of
+// the account's own profile (sandbox_authority_routes.go sandboxOperational),
+// false when the gateway does not answer.
+func sandboxOpenShellUpstreamTelemetry(ctx context.Context) bool {
+	settings, ok := sandboxOpenShellDaemonSettings(ctx)
+	return ok && settings.Operational.UpstreamTelemetry
+}
+
+// sandboxOpenShellDaemonSettings asks the managed gateway's hook socket for
+// the account's settings; ok is false when it does not answer.
+func sandboxOpenShellDaemonSettings(ctx context.Context) (sandboxrelay.DaemonSettings, bool) {
 	layout, descriptor, err := sandboxDaemonHost(runtime.GOOS)
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
 	socket := descriptor.HookSocket
 	if socket == "" {
@@ -349,14 +378,14 @@ func sandboxOpenShellAdminSettings(ctx context.Context) sandboxrelay.EnterpriseO
 	}
 	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: socket, TrustedOwners: trusted, Timeout: 10 * time.Second})
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
 	defer relay.Close()
 	settings, err := relay.Settings(ctx)
 	if err != nil {
-		return sandboxrelay.EnterpriseOpenShell{}
+		return sandboxrelay.DaemonSettings{}, false
 	}
-	return settings.Enterprise
+	return settings, true
 }
 
 // ownFileOnly checks that path is a regular file the caller owns that no
