@@ -835,3 +835,63 @@ def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> No
         "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
     )
     assert 'Write-Info "Nothing was left installed"' in resume
+
+
+# ── 1.0.2 (FG-01) ───────────────────────────────────────────────────────────
+
+
+def _run_powershell(script: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configured(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0009 on Windows: the newer gateway of the two removes the
+    # DefenseClaw hook entries of a connector the live install does not
+    # configure; an older gateway prints its connector help instead.
+    calls = tmp_path / "calls.txt"
+    gateways = []
+    for name, usage in (("older", "defenseclaw-gateway connector [command]"), ("newer", "defenseclaw-gateway connector prune-orphans [flags]")):
+        body = (
+            f"param()\nAdd-Content -LiteralPath '{calls}' -Value ('{name} ' + ($args -join ' '))\n"
+            f"if ($args -contains '--help') {{ Write-Output 'Usage:'; Write-Output '  {usage}' }}\nexit 0\n"
+        )
+        path = tmp_path / f"{name}.ps1"
+        path.write_text(body, encoding="utf-8")
+        gateways.append(path)
+    data_dir = tmp_path / "dc"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\nfunction Write-Warn([string]$m) {{ 'warn: ' + $m }}\n"
+        f"{_ps1_function('Invoke-Native')}\n{_ps1_function('Get-NativeOutput')}\n{_ps1_function('Invoke-PruneOrphanedHooks')}\n"
+        f"Invoke-PruneOrphanedHooks @('{tmp_path / 'missing.exe'}', '{gateways[0]}', '{gateways[1]}')\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "older connector prune-orphans --help",
+        "newer connector prune-orphans --help",
+        f"newer connector prune-orphans --data-dir {data_dir}",
+    ]
+
+
+def test_windows_rollback_and_upgrade_run_the_hook_entry_prune() -> None:
+    # rel-1-0-1:GAP-0009: after the swap of a 1.x rollback (live gateway, then
+    # the one just left in previous\bin), and in the upgrade after the migration.
+    rollback = _ps1_function("Invoke-Rollback")
+    prune = (
+        'Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), '
+        '(Join-Path $Previous "bin\\defenseclaw-gateway.exe"))'
+    )
+    assert rollback.index("Switch-WithPrevious $current") < rollback.index(prune)
+    assert "if (-not $toLegacy) {\n        " + prune in rollback
+    install = _ps1_function("Install-New")
+    assert install.index('"migrate"') < install.index('Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"))')

@@ -12313,6 +12313,7 @@ def doctor(
     # config patches are still on disk. This is a global filesystem sweep
     # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
+    _check_orphaned_hook_entries(cfg, active_connector, r)
     # Surface a dead-end asset_policy.plugin.registry_required flag, which can
     # only ever deny (no plugin-registry pipeline exists in v1) and silently
     # blocks all plugins under enforcement. (OTHER-5)
@@ -15301,6 +15302,60 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
     _emit("warn", "Connector residue", detail, r=r)
+
+
+def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
+    """Flag DefenseClaw hook entries of a connector that is not configured (GAP-0009).
+
+    A rollback restores the data directory from before a connector was set
+    up, but the agent settings keep that connector's DefenseClaw hook
+    entries. They run a hook script of this data directory that the restored
+    install does not have: Claude Code then blocks every prompt. The next
+    upgrade removes them, and so does ``defenseclaw setup remove <name>``.
+    Windows registers the native launcher, not a script, so this is a POSIX
+    check. A clean install prints no row.
+    """
+    from defenseclaw import hook_integrity
+    from defenseclaw.connector_paths import connector_config_files
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if os.name == "nt" or not data_dir:
+        return
+    hooks_dir = os.path.join(data_dir, "hooks")
+    active_set = _residue_active_set(cfg, active)
+    found: list[tuple[str, str, str]] = []  # (connector, agent config file, hook script)
+    for name, script_name in sorted(hook_integrity.HOOK_SCRIPT_NAMES.items()):
+        if name in active_set:
+            continue
+        script = os.path.join(hooks_dir, script_name)
+        pattern = re.compile(re.escape(script) + r"(?![A-Za-z0-9._/-])")
+        for path in connector_config_files(name):
+            document = hook_integrity._read_agent_config(Path(path))
+            if document is None:
+                continue
+            if any(pattern.search(command) for command in hook_integrity._registered_commands(document)):
+                found.append((name, path, script))
+                break
+    # Nothing to say when there are none, as for ACP bindings.
+    for name, path, script in found:
+        if os.path.lexists(script):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} has DefenseClaw hook entries for {name}, which is not configured, and they run "
+                f"{script}, which does not exist, so the agent cannot run them (Claude Code blocks every "
+                "prompt); a rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
 
 
 def _check_scan_coverage(cfg, r: _DoctorResult) -> None:

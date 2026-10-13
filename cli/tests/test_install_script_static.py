@@ -796,7 +796,9 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
-    assert not calls.exists()
+    # Only the GAP-0009 check of which gateway can prune hook entries; neither fake can.
+    made = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
+    assert [line for line in made if not line.endswith("connector prune-orphans --help")] == []
 
 
 def _damaged_audit_db(path: Path) -> bytes:
@@ -1798,3 +1800,53 @@ def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path, rep
     urls = curl_log.read_text(encoding="utf-8").splitlines()
     assert all("/releases/latest" not in url for url in urls)
     assert f"{base}/releases/download/1.0.0/install.sh" in urls
+
+
+# ── 1.0.2 (FG-01) ───────────────────────────────────────────────────────────
+
+
+def _fake_gateway(path: Path, help_usage: str, calls: Path) -> Path:
+    path.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in *--help*) printf "Usage:\\n  %s\\n" "' + help_usage + '";; esac\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configured(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0009: a connector set up after the upgrade kept its
+    # DefenseClaw hook entries after the rollback, which restored a data dir
+    # without its hook script: Claude Code blocked every prompt. The newer
+    # gateway of the two removes them; an older one prints the connector help.
+    calls = tmp_path / "calls"
+    older = _fake_gateway(tmp_path / "older", "defenseclaw-gateway connector [command]", calls)
+    newer = _fake_gateway(tmp_path / "newer", "defenseclaw-gateway connector prune-orphans [flags]", calls)
+    home = tmp_path / "dc"
+    script = tmp_path / "prune.sh"
+    script.write_text(
+        'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("prune_orphaned_hooks")
+        + f'DEFENSECLAW_HOME="{home}" LOG="{tmp_path / "log"}"\n'
+        + f'prune_orphaned_hooks "{tmp_path / "missing"}" "{older}" "{newer}"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "connector prune-orphans --help",
+        "connector prune-orphans --help",
+        f"connector prune-orphans --data-dir {home}",
+    ]
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') : text.index("# ── Stage: nothing live changes")]
+    # Run after the swap, for a 1.x install; a 0.x one gets its own teardown first.
+    assert rollback.index("swap_with_previous || swapped=$?") < rollback.index(
+        'if ! version_lt "${back_to}" 1.0.0; then\n        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
+    )
+    swap = text[text.index("swap_in() {") : text.index("swap_app() {")]
+    assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit

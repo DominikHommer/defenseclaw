@@ -235,6 +235,22 @@ lane_fresh() {
     stop_lane
 }
 
+# plant_orphaned_claude_hooks: Claude Code hook entries of DefenseClaw for a
+# connector this install does not configure, whose hook script it does not
+# have, next to the user's own entry: what a rollback left (GAP-0009).
+plant_orphaned_claude_hooks() {
+    mkdir -p "${HOME}/.claude"
+    printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"%s/hooks/claude-code-hook.sh || { rc=$?; exit 2; }"}]},{"hooks":[{"type":"command","command":"/opt/operator/prompt-check.sh"}]}]}}\n' \
+        "${DC_HOME}" > "${HOME}/.claude/settings.json"
+}
+
+assert_no_orphaned_claude_hooks() {
+    local settings="${HOME}/.claude/settings.json"
+    grep -q "/opt/operator/prompt-check.sh" "${settings}" || fail "$1 removed the user's own Claude Code hook"
+    ! grep -q "${DC_HOME}/hooks/claude-code-hook.sh" "${settings}" \
+        || fail "$1 left DefenseClaw hook entries of a connector that is not configured (GAP-0009)"
+}
+
 # upgrade_lane NAME FROM_VERSION INSTALL_FN: install FROM, upgrade to the
 # candidate, roll back, roll forward.
 upgrade_lane() {
@@ -244,11 +260,16 @@ upgrade_lane() {
     must "${installer}" || return 1
     must init_and_start || return 1
     assert_versions "${from}"
+    if [[ "${name}" == upgrade-previous ]]; then
+        # A host a rollback by an earlier release already left broken.
+        plant_orphaned_claude_hooks
+    fi
     log "${name}: upgrade ${from} -> ${TARGET}"
     must install_candidate "${ASSETS}" || return 1
     assert_versions "${TARGET}"
     assert_healthy
     assert_data_kept
+    [[ "${name}" != upgrade-previous ]] || assert_no_orphaned_claude_hooks "the upgrade"
     [[ "$(cat "${DC_HOME}/previous/VERSION" 2>/dev/null)" == "${from}" ]] || fail "previous/VERSION is not ${from}"
     if [[ "${name}" == upgrade-previous && "$(id -u)" != 0 ]]; then
         log "${name}: a rollback that cannot restore the previous install puts the current one back"
@@ -266,9 +287,12 @@ upgrade_lane() {
     log "${name}: defenseclaw rollback"
     local copies
     copies="$(installer_copies)"
+    # A connector set up after the upgrade, which ${from} does not configure.
+    [[ "${name}" != upgrade-previous ]] || plant_orphaned_claude_hooks
     must "${HOME}/.local/bin/defenseclaw" rollback --yes || return 1
     [[ "$(installer_copies)" == "${copies}" ]] || fail "defenseclaw rollback left its installer copy in ${TMPDIR:-/tmp}"
     assert_versions "${from}"
+    [[ "${name}" != upgrade-previous ]] || assert_no_orphaned_claude_hooks "the rollback"
     assert_healthy
     assert_data_kept
     if [[ "${name}" == upgrade-previous ]]; then

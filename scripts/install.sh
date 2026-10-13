@@ -579,6 +579,13 @@ if [[ "${ROLLBACK}" == true ]]; then
         fi
         die "Rollback failed part-way; see ${LOG}"
     fi
+    # GAP-0009: a connector set up after the upgrade is not configured in the
+    # install now back, whose data has no hook script for it: its agent ran a
+    # hook that no longer exists (Claude Code blocked every prompt). The
+    # newer gateway of the two knows the entries; only DefenseClaw's go.
+    if ! version_lt "${back_to}" 1.0.0; then
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"
+    fi
     rollback_rc=0
     QUARANTINED=""
     if [[ -n "${AUDIT_DAMAGED}" ]] && ! quarantine_rolled_back_audit; then
@@ -1465,6 +1472,9 @@ swap_in() {
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
             "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
         fi
+        # A rollback by an earlier release left hook entries of a connector
+        # this install does not configure (GAP-0009). Best effort.
+        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"
     fi
 }
 
@@ -2003,6 +2013,22 @@ convert_hooks_for_rollback() {
     [[ -x "${gateway}" ]] || return 0
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
         || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
+# prune_orphaned_hooks GATEWAY...: with the first GATEWAY that has the
+# command, remove the DefenseClaw hook entries of every connector the live
+# install does not configure (GAP-0009). Only DefenseClaw-owned entries go;
+# it says which.
+prune_orphaned_hooks() {
+    local gateway
+    for gateway in "$@"; do
+        # An older gateway prints the connector help for an unknown subcommand.
+        [[ -x "${gateway}" ]] && "${gateway}" connector prune-orphans --help 2>/dev/null | grep "connector prune-orphans" >/dev/null || continue
+        "${gateway}" connector prune-orphans --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+            || warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see ${LOG}); 'defenseclaw doctor' lists them"
+        return 0
+    done
+    return 0
 }
 
 remove_connector_registrations_for_legacy() {
