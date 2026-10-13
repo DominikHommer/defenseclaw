@@ -40,9 +40,16 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("0.8.10 `install.sh`\npredates the managed-host check", text)
 
     def test_gap_0344_custom_pack_folder_mode(self):
-        text = page("configuration.mdx")
-        self.assertIn("`sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail`", text)
-        self.assertIn("`sudo chmod 0755 /etc/defenseclaw/policies/guardrail`", text)
+        text = " ".join(page("configuration.mdx").split())
+        self.assertIn("umask 022 && mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail && cp -R", text)
+        self.assertIn("umask 022 && mkdir -p /etc/defenseclaw/policies/guardrail && cp -R", text)
+        self.assertIn("sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt/cisco/defenseclaw/etc/policies/guardrail", text)
+        self.assertIn("sudo chmod 0755 /etc/defenseclaw/policies /etc/defenseclaw/policies/guardrail", text)
+        self.assertIn("sudo chmod -R u=rwX,go=rX /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack", text)
+        self.assertIn("sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies/guardrail/my-pack", text)
+        self.assertNotIn("sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies`", text)
+        self.assertNotIn("After `mkdir -p`, run", text)
+        self.assertNotIn("a root shell with umask `077` otherwise creates it as `0700`", text)
 
     def test_gap_0447_windows_scan_examples_avoid_user_profiles(self):
         text = " ".join(page("windows.mdx").split())
