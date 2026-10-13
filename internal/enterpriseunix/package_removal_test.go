@@ -15,12 +15,14 @@ package enterpriseunix
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -116,5 +118,48 @@ func TestPackageRemovalKeepsTheFilesWhenTheUninstallKeptTheBinaries(t *testing.T
 	other.Finish("linux", 0)
 	if rc, stderr, _ := runPreremove(t, other); rc != 0 || !strings.Contains(stderr, "uninstall reported a problem") {
 		t.Fatalf("preremove exit %d after an uninstall_failed result, want 0; stderr:\n%s", rc, stderr)
+	}
+}
+
+// GAP-1065: preinstall.sh read config_version only at column 0, so a config
+// whose document is indented as a whole (valid YAML) passed the guard that
+// refuses a package older than the config, and the package replaced every
+// file before its ensure failed. It reads the top-level key at the
+// document's own indentation, quoted or not, and not a nested key.
+func TestPreinstallReadsTheTopLevelConfigVersion(t *testing.T) {
+	if _, err := exec.LookPath("awk"); err != nil {
+		t.Skip("no awk")
+	}
+	script, err := os.ReadFile(filepath.Join("..", "..", "packaging", "linux", "preinstall.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	cfg := filepath.Join(work, "config.yaml")
+	text := strings.NewReplacer(
+		"/etc/defenseclaw/config.yaml", cfg,
+		"/var/lib/defenseclaw-enterprise", filepath.Join(work, "state"),
+		"/run/systemd/system", filepath.Join(work, "no-systemd"),
+	).Replace(string(script))
+	newer := fmt.Sprint(config.MaxSupportedConfigVersion + 1)
+	for content, refused := range map[string]bool{
+		"config_version: " + newer + "\n":                                      true,
+		"  config_version: " + newer + "\n  gateway:\n    port: 1\n":           true,
+		"# managed\n---\n    \"config_version\": '" + newer + "' # pushed\n":   true,
+		"config_version : \"" + newer + "\"\n":                                 true,
+		"gateway:\n  config_version: " + newer + "\nconfig_version: 9\n":       false,
+		"  gateway:\n    config_version: " + newer + "\n  config_version: 9\n": false,
+		"config_version: 9\n": false,
+	} {
+		if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("sh", "-c", text, "preinstall.sh", "install")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if got := err != nil; got != refused || refused && !strings.Contains(stderr.String(), "config_version "+newer) {
+			t.Errorf("config %q: refused=%v (%v), want %v; stderr: %s", content, got, err, refused, stderr.String())
+		}
 	}
 }
