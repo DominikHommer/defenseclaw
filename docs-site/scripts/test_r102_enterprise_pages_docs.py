@@ -44,6 +44,15 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("`sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail`", text)
         self.assertIn("`sudo chmod 0755 /etc/defenseclaw/policies/guardrail`", text)
 
+    def test_gap_0447_windows_scan_examples_avoid_user_profiles(self):
+        text = " ".join(page("windows.mdx").split())
+        self.assertNotIn("C:\\Users\\Public", text)
+        self.assertIn("scan skill 'C:\\DefenseClawReview\\my-skill'", text)
+        self.assertIn("scan plugin 'C:\\DefenseClawReview\\my-plugin'", text)
+        self.assertIn("refuses any folder inside a user profile", text)
+        self.assertIn("administrator-created folder outside the profiles", text)
+        self.assertIn("LocalSystem can read", text)
+
     def test_gap_0294_purge_removes_lifecycle_lock(self):
         text = page("windows.mdx")
         self.assertIn("Setup with `PURGE=1` removes that lock", text)

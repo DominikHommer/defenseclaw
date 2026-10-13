@@ -998,15 +998,18 @@ same scanners, policy and judge from an elevated prompt:
 
 ```powershell title="Elevated Administrator prompt"
 $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
-& $Cli scan skill 'C:\Users\Public\review\my-skill'
+& $Cli scan skill 'C:\DefenseClawReview\my-skill'
 & $Cli scan mcp https://mcp.example.com/mcp
-& $Cli scan plugin 'C:\Users\Public\review\my-plugin'
+& $Cli scan plugin 'C:\DefenseClawReview\my-plugin'
 ```
 
 Each command prints the verdict, the findings, the skill scanner policy (or
 the MCP analyzers) and the judge model; add `--json` for the full response.
-The gateway service reads the folder, so scan a copy in a folder it can
-read, such as one under `C:\Users\Public`. Variables such as
+The gateway service reads the folder as LocalSystem and refuses any folder
+inside a user profile, including paths under `C:\Users` or another registered
+profile root. Copy what you want to scan to an administrator-created folder
+outside the profiles, such as `C:\DefenseClawReview`, that LocalSystem can read.
+Variables such as
 `SKILL_SCANNER_LLM_MODEL` in the administrator's shell are ignored: the scan
 runs in the gateway service with the admin config.
 
