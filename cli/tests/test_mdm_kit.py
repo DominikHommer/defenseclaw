@@ -759,9 +759,7 @@ def test_intune_package_requires_current_config_version(tmp_path: Path) -> None:
     source = _text(script)
     pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
     if not pwsh:
-        assert "Setup migrates it on install" in source
-        assert source.index("Setup migrates it on install") < source.index("New-Item -ItemType Directory -Path $content")
-        return
+        pytest.skip("PowerShell is unavailable")
     setup = tmp_path / "Setup.exe"
     setup.write_bytes(b"fixture setup")
     pin = hashlib.sha256(setup.read_bytes()).hexdigest()
@@ -785,6 +783,41 @@ def test_intune_package_requires_current_config_version(tmp_path: Path) -> None:
     pins = json.loads((content / "intune-package.json").read_text(encoding="utf-8"))
     assert pins["config_sha256"] == hashlib.sha256(config.read_bytes()).hexdigest()
     assert "Setup migrates it on install" in source
+
+
+@pytest.mark.parametrize(
+    ("config_bytes", "accepted", "error_text"),
+    [
+        (b"config_version: 9\r\n", True, ""),
+        (b"\xef\xbb\xbfconfig_version: 9\r\n", True, ""),
+        (b"config_version: 8\r\n", False, "config_version 8"),
+    ],
+)
+def test_intune_package_config_version_with_crlf(
+    tmp_path: Path, config_bytes: bytes, accepted: bool, error_text: str,
+) -> None:
+    pwsh = os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
+    if not pwsh:
+        pytest.skip("PowerShell is unavailable")
+    setup = tmp_path / "Setup.exe"
+    setup.write_bytes(b"fixture setup")
+    config = tmp_path / "config.yaml"
+    config.write_bytes(config_bytes)
+    output = tmp_path / "out"
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(MDM / "intune/windows/New-DefenseClawIntunePackage.ps1"),
+         "-SetupPath", str(setup), "-Sha256", hashlib.sha256(setup.read_bytes()).hexdigest(),
+         "-ConfigPath", str(config), "-OutputDirectory", str(output)],
+        capture_output=True, text=True, timeout=30,
+    )
+    if accepted:
+        assert result.returncode == 0, result.stderr
+        pins = json.loads((output / "content/intune-package.json").read_text(encoding="utf-8"))
+        assert pins["config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+    else:
+        assert result.returncode != 0
+        assert error_text in result.stderr and "Setup migrates it on install" in result.stderr
+        assert not (output / "content").exists()
 
 
 def test_intune_config_change_docs_explain_the_version_pin() -> None:
