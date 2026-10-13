@@ -313,27 +313,93 @@ func (a *App) handoverText(h *handover) string {
 // one (a prompt, or a subcommand whose own options would not apply
 // without it) and is not the harness's launch operand (launchOperand). A
 // one-prompt run's arguments (the harness's print mode) are not kept at
-// all. An option's value is the next word unless the option carries it
-// (--model=x) or the word is another option or holds a space (a prompt
-// after a switch). A harness whose command line holds no prompt word
-// (keepsEveryArg) keeps every argument, in order.
+// all. An option the harness takes a value with (optionArity) keeps the
+// next word whatever it holds (--append-system-prompt "be brief"); one it
+// takes none with keeps no word, so a prompt after it is not replayed. For
+// an option the table does not know, the value is the next word unless the
+// option carries it (--model=x) or the word is another option or holds a
+// space (a prompt after a switch). A harness whose command line holds no
+// prompt word (keepsEveryArg) keeps every argument, in order.
 //
-// An option followed by a word that holds a space is kept without it, and
-// the record stops there; launchOptionsSplit names that option and the
-// options after it: `sandbox run` tells the operator, because a later
-// session passes the harness the option without the word and none of the
-// options after it.
+// An option the table does not know followed by a word that holds a space
+// is kept without it, and the record stops there; launchOptionsSplit names
+// that option and the options after it: `sandbox run` tells the operator,
+// because a later session passes the harness the option without the word
+// and none of the options after it.
 func launchOptions(spec *harness.Spec, args []string) []string {
 	kept, _, _ := launchOptionsSplit(spec, args)
 	return kept
 }
 
+// arity is whether a harness option takes a value (optionArity).
+type arity int
+
+const (
+	// arityUnknown: the table does not know the option; its value is read
+	// from the shape of the next word.
+	arityUnknown arity = iota
+	// arityValue: the option takes the next word as its value.
+	arityValue
+	// aritySwitch: the option takes no value.
+	aritySwitch
+)
+
+// harnessOptions are, per harness, the interactive options a run passes
+// and whether each takes a value, from the pinned harness's --help (Claude
+// Code 2.1, Codex 0.146, OpenCode 1.18, Copilot CLI 1.0, Hermes 0.19). An
+// option with an optional value (Claude Code's --resume [id]) is left out:
+// only the shape of the next word can tell, as for any other option the
+// table does not hold.
+var harnessOptions = map[string]map[string]arity{
+	"claudecode": optionTable(
+		[]string{"--model", "--fallback-model", "--append-system-prompt", "--system-prompt", "--append-system-prompt-file", "--system-prompt-file",
+			"--permission-mode", "--permission-prompt-tool", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools",
+			"--tools", "--mcp-config", "--add-dir", "--settings", "--setting-sources", "--session-id", "--agents", "--agent", "--plugin-dir", "--betas"},
+		[]string{"--verbose", "-c", "--continue", "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--ide",
+			"--strict-mcp-config", "--fork-session", "--mcp-debug", "--disable-slash-commands"}),
+	"codex": optionTable(
+		[]string{"-m", "--model", "-c", "--config", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval", "-C", "--cd",
+			"-i", "--image", "--add-dir", "--enable", "--disable", "--local-provider"},
+		[]string{"--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--oss", "--search", "--no-alt-screen"}),
+	"opencode": optionTable(
+		[]string{"-m", "--model", "-s", "--session", "--prompt", "--agent", "--port", "--hostname", "--log-level"},
+		[]string{"-c", "--continue", "--print-logs", "--auto"}),
+	"copilot": optionTable(
+		[]string{"--model", "--add-dir", "--allow-tool", "--deny-tool", "--log-level", "--log-dir", "--agent", "--additional-mcp-config",
+			"--disable-mcp-server", "--config-dir"},
+		[]string{"--allow-all-tools", "--allow-all-paths", "--allow-all", "--yolo", "--continue", "--banner", "--no-color", "--screen-reader",
+			"--disable-builtin-mcps", "--no-custom-instructions"}),
+	// Hermes's parser also takes any unambiguous prefix of an option
+	// (--mod for --model): a prefix is read from the shape of its next word.
+	"hermes": optionTable(
+		[]string{"-m", "--model", "--provider", "-t", "--toolsets", "-r", "--resume"},
+		[]string{"--yolo", "-Q", "--quiet"}),
+}
+
+func optionTable(values, switches []string) map[string]arity {
+	t := make(map[string]arity, len(values)+len(switches))
+	for _, o := range values {
+		t[o] = arityValue
+	}
+	for _, o := range switches {
+		t[o] = aritySwitch
+	}
+	return t
+}
+
+// optionArity is whether spec's option takes a value, as harnessOptions
+// knows it.
+func optionArity(spec *harness.Spec, option string) arity {
+	return harnessOptions[spec.Name][option]
+}
+
 // launchOptionsSplit is launchOptions and, separately, the option whose
 // next word the record leaves out ("" when none) and the names of the
-// options after it, which the record leaves out too. The word may have been
-// a prompt rather than the option's value - nothing available here tells
-// the two apart, and a prompt is not recorded on purpose - so the caller's
-// message is worded for both readings.
+// options after it, which the record leaves out too. Only an option the
+// table (optionArity) does not know leaves a word out: the word may have
+// been a prompt rather than the option's value - nothing available here
+// tells the two apart, and a prompt is not recorded on purpose - so the
+// caller's message is worded for both readings.
 func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkept string, later []string) {
 	if len(args) == 0 || printMode(spec, args) {
 		return nil, "", nil
@@ -357,6 +423,18 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkep
 			continue
 		}
 		next := args[i+1]
+		switch optionArity(spec, arg) {
+		case aritySwitch:
+			// The next word is not its value: an option, or a prompt that
+			// ends the record.
+			continue
+		case arityValue:
+			if next != "--" {
+				out = append(out, next)
+				i++
+			}
+			continue
+		}
 		if strings.HasPrefix(next, "-") {
 			continue
 		}
