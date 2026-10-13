@@ -361,6 +361,37 @@ dc_stage_file() {
     dc_read_bounded "$dest" "$limit" "$label" <"$src"
 }
 
+# Read the raw credential before putting it in a shell variable, since command
+# substitution discards NUL bytes. The temporary copy is removed immediately.
+dc_read_secret() {
+    secret_input="$DC_STAGE/secret-input"
+    if [ "$DC_SECRET_STDIN" = 1 ]; then
+        (umask 077; head -c "$((DC_MAX_SECRET_BYTES + 1))" >"$secret_input")
+    else
+        case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
+        if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
+        fi
+        dc_trusted_path "$DC_SECRET_FILE" ||
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE$DC_TRUST_ACL"
+        (umask 077; head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE" >"$secret_input")
+    fi
+    secret_bytes=$(wc -c <"$secret_input" | tr -d ' ')
+    if [ "$secret_bytes" -gt "$DC_MAX_SECRET_BYTES" ]; then
+        rm -f "$secret_input"
+        dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
+    fi
+    without_nul=$(tr -d '\000' <"$secret_input" | wc -c | tr -d ' ')
+    if [ "$secret_bytes" != "$without_nul" ]; then
+        rm -f "$secret_input"
+        dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret contains a NUL byte"
+    fi
+    [ "$secret_bytes" != 0 ] || { rm -f "$secret_input"; dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"; }
+    secret_data=$(cat "$secret_input"; printf x)
+    secret_data=${secret_data%x}
+    rm -f "$secret_input"
+}
+
 dc_usage() {
     sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -958,24 +989,11 @@ dc_main() {
             config=$inline
         fi
     fi
-    # The credential stays in memory and reaches the lifecycle through a
-    # pipe: a staged copy outlived a run killed before its cleanup.
+    # After a raw-byte check, the credential stays in memory and reaches the
+    # lifecycle through a pipe. No staged copy remains during the lifecycle.
     secret_data=""
     if [ -n "$DC_SECRET_NAME" ]; then
-        if [ "$DC_SECRET_STDIN" = 1 ]; then
-            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))")
-        else
-            case "$DC_SECRET_FILE" in /*) ;; *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret must be an absolute path" ;; esac
-            if [ ! -f "$DC_SECRET_FILE" ] || [ -L "$DC_SECRET_FILE" ]; then
-                dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
-            fi
-            dc_trusted_path "$DC_SECRET_FILE" ||
-                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE$DC_TRUST_ACL"
-            secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE")
-        fi
-        [ "$(printf '%s' "$secret_data" | wc -c | tr -d ' ')" -le "$DC_MAX_SECRET_BYTES" ] ||
-            dc_fail_result "$DC_EXIT_INVALID" mdm_input_too_large "secret exceeds $DC_MAX_SECRET_BYTES bytes"
-        [ -n "$secret_data" ] || dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "the secret value is empty"
+        dc_read_secret
     fi
 
     DC_CHANNEL_FLAG=""
