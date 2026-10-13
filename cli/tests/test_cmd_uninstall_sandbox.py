@@ -83,7 +83,9 @@ class SandboxTeardownTests(unittest.TestCase):
             ' {"name": "copy-one", "workdir_mode": "copy", "phase": "stopped"}]}'
         )
         with patch("subprocess.run", return_value=_completed(stdout=listed)) as run:
-            live = cmd_uninstall._live_mounted_sandboxes(self.gateway)
+            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+        live = cmd_uninstall._live_mounted_sandboxes(rows)
+        self.assertEqual(error, "")
         self.assertEqual(run.call_args.args[0], [self.gateway, "sandbox", "list", "--output", "json"])
         self.assertEqual(live, ("edge-ub-uninstall",))
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, data_dir=self._tmp.name, live_sandboxes=live)
@@ -95,7 +97,9 @@ class SandboxTeardownTests(unittest.TestCase):
             " ".join(buf.getvalue().split()),
         )
         with patch("subprocess.run", return_value=_completed(returncode=1)):
-            self.assertEqual(cmd_uninstall._live_mounted_sandboxes(self.gateway), ())
+            rows, error = cmd_uninstall._listed_sandboxes(self.gateway)
+        self.assertEqual(cmd_uninstall._live_mounted_sandboxes(rows), ())
+        self.assertIn("`sandbox list` failed", error)
 
     def test_teardown_runs_before_the_sidecar_stops(self):
         plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=self.gateway)

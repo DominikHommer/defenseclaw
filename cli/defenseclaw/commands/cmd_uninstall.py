@@ -206,6 +206,10 @@ class UninstallPlan:
     # them (GAP-0368).
     running_sandboxes: tuple[tuple[str, str], ...] = ()
     stop_sandboxes: bool = False
+    # sandbox_list_error is why ``sandbox list`` could not say which
+    # sandboxes run ("" when it did). The teardown would delete whatever
+    # runs, so an unknown answer stops the run too, unless stop_sandboxes.
+    sandbox_list_error: str = ""
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -1762,6 +1766,15 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
                     f"      {ux.dim('·')} running sandboxes ({running}) stop this run before any change: stop them "
                     "first, or add --stop-sandboxes"
                 )
+        elif plan.sandbox_list_error:
+            unread = f"the sandbox list could not be read ({plan.sandbox_list_error})"
+            if plan.stop_sandboxes:
+                ux.echo(f"      {ux.dim('·')} {unread}: any running sandbox is stopped and deleted (--stop-sandboxes)")
+            else:
+                ux.echo(
+                    f"      {ux.dim('·')} {unread}: this run stops before any change; check with "
+                    "`defenseclaw sandbox list`, or add --stop-sandboxes"
+                )
     elif plan.sandbox_teardown_skipped:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
         # What teardown needs to find DefenseClaw's sandboxes later lives in
@@ -2785,45 +2798,72 @@ def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNI
     return f"remove it with `sudo {_SANDBOX_FEED_HELPER} --sandbox-feed --uninstall`"
 
 
-def _listed_sandboxes(gateway_path: str) -> list:
-    """The sandbox rows ``sandbox list`` prints, or [] when it cannot say."""
+# How long ``sandbox list`` may take before the run treats it as unanswered.
+_SANDBOX_LIST_TIMEOUT_SECONDS = 10
+
+
+def _listed_sandboxes(gateway_path: str) -> tuple[list, str]:
+    """The sandbox rows ``sandbox list`` prints, and why it could not say ('' when it did).
+
+    No gateway binary, or a gateway that reports sandboxes unsupported here,
+    answers with no rows: no sandbox can run, and the teardown deletes none.
+    A failed, timed-out or unreadable list is an unknown answer (GAP-0448).
+    """
     if not gateway_path or not os.path.isfile(gateway_path):
-        return []
+        return [], ""
     try:
         proc = subprocess.run(
             [gateway_path, "sandbox", "list", "--output", "json"],
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=10,
+            timeout=_SANDBOX_LIST_TIMEOUT_SECONDS,
         )
-        rows = json.loads(proc.stdout or "{}").get("sandboxes") if proc.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
-        return []
-    return [row for row in rows or () if isinstance(row, dict) and row.get("name")]
+    except subprocess.TimeoutExpired:
+        return [], f"`sandbox list` did not answer within {_SANDBOX_LIST_TIMEOUT_SECONDS} seconds"
+    except OSError as exc:
+        return [], f"`sandbox list` could not run: {exc.strerror or exc}"
+    if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
+        return [], ""
+    if proc.returncode != 0:
+        lines = [
+            line.strip().removeprefix("✗").strip().removeprefix("Error:").strip()
+            for line in (proc.stderr or "").splitlines()
+            if line.strip()
+        ]
+        reason = lines[-1][:300] if lines else f"it exited with status {proc.returncode}"
+        return [], f"`sandbox list` failed: {reason}"
+    try:
+        rows = json.loads(proc.stdout or "").get("sandboxes")
+    except (ValueError, AttributeError):
+        rows = None
+    if not isinstance(rows, list):
+        return [], "`sandbox list` printed no sandbox list"
+    return [row for row in rows if isinstance(row, dict) and row.get("name")], ""
 
 
-def _live_mounted_sandboxes(gateway_path: str, rows: list | None = None) -> tuple[str, ...]:
-    """The live-mounted sandboxes the daemon lists, or () when it cannot say (GAP-0295)."""
-    if rows is None:
-        rows = _listed_sandboxes(gateway_path)
+def _live_mounted_sandboxes(rows: list) -> tuple[str, ...]:
+    """The live-mounted sandboxes in *rows* (GAP-0295)."""
     return tuple(
         sorted(str(row["name"]) for row in rows if row.get("workdir_mode") == "mount" and row.get("phase") != "deleted")
     )
 
 
-# The OpenShell phases (lowercased by the daemon) of a sandbox that runs or
-# is coming up.
-_RUNNING_SANDBOX_PHASES = frozenset({"ready", "provisioning", "starting"})
+# The phases (lowercased by the daemon) of a sandbox whose workload no longer
+# runs: stopped, completed (its workload ended), deleted (gone, its snapshot
+# kept) and missing (OpenShell no longer has it). Every other phase may run:
+# creating, provisioning, starting, ready, stopping, deleting, unknown, and
+# error, which may still run its containers (manager.foreignOne) (GAP-0449).
+_STOPPED_SANDBOX_PHASES = frozenset({"stopped", "completed", "deleted", "missing"})
 
 
 def _running_sandboxes(rows: list) -> tuple[tuple[str, str], ...]:
-    """The running sandboxes in *rows*, as (name, workdir mode) (GAP-0368)."""
+    """The sandboxes in *rows* that may run, as (name, workdir mode) (GAP-0368)."""
     return tuple(
         sorted(
             (str(row["name"]), str(row.get("workdir_mode") or ""))
             for row in rows
-            if row.get("phase") in _RUNNING_SANDBOX_PHASES
+            if str(row.get("phase") or "").strip().lower() not in _STOPPED_SANDBOX_PHASES
         )
     )
 
@@ -2832,12 +2872,17 @@ def _with_listed_sandboxes(plan: UninstallPlan, stop_sandboxes: bool) -> Uninsta
     """*plan* with the sandboxes its teardown would stop, from one ``sandbox list``."""
     if not plan.sandbox_teardown:
         return plan
-    rows = _listed_sandboxes(plan.gateway_path)
+    rows, error = _listed_sandboxes(plan.gateway_path)
+    if error and not _gateway_supports_sandbox_teardown(plan.gateway_path):
+        # A gateway without ``sandbox teardown`` deletes no sandbox
+        # (_sandbox_teardown), so there is nothing to protect.
+        error = ""
     return replace(
         plan,
-        live_sandboxes=_live_mounted_sandboxes(plan.gateway_path, rows),
+        live_sandboxes=_live_mounted_sandboxes(rows),
         running_sandboxes=_running_sandboxes(rows),
         stop_sandboxes=stop_sandboxes,
+        sandbox_list_error=error,
     )
 
 
@@ -2849,7 +2894,19 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
     ran into the sandboxes users still worked in (GAP-0368), so a running
     sandbox needs the user to stop it, or --stop-sandboxes.
     """
-    if not plan.sandbox_teardown or plan.stop_sandboxes or not plan.running_sandboxes:
+    if not plan.sandbox_teardown or plan.stop_sandboxes:
+        return ""
+    if plan.sandbox_list_error:
+        # A destructive step does not go ahead on an unknown answer (GAP-0448).
+        return (
+            f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
+            "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
+            "and the sandbox teardown would stop and delete it; nothing was changed. Run `defenseclaw sandbox list` "
+            "to check (`defenseclaw sandbox pull NAME --branch` keeps a copy-mode sandbox's work, "
+            "`defenseclaw sandbox stop NAME` stops one), then run this command again, or add --stop-sandboxes to "
+            "stop and delete any running sandbox with the teardown."
+        )
+    if not plan.running_sandboxes:
         return ""
     import shlex
 
