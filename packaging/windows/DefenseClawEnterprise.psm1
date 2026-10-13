@@ -4342,7 +4342,29 @@ function Install-DefenseClawFileAtomic {
             if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
                 throw "atomic replacement backup path unexpectedly exists: $backup"
             }
-            [IO.File]::Replace($temporary, $Destination, $backup, $true)
+            try {
+                [IO.File]::Replace($temporary, $Destination, $backup, $true)
+            }
+            catch {
+                # GAP-0852: a program that holds the file open without delete
+                # sharing (an antivirus scan, an editor) failed the upgrade
+                # with a raw sharing violation. Name the file and the retry.
+                $replaceFailure = $_.Exception
+                while ($replaceFailure -is [Management.Automation.MethodInvocationException] -and
+                    $null -ne $replaceFailure.InnerException) {
+                    $replaceFailure = $replaceFailure.InnerException
+                }
+                if (-not (Test-DefenseClawStandaloneProfile) -or
+                    -not ($replaceFailure -is [IO.IOException] -or
+                        $replaceFailure -is [UnauthorizedAccessException])) {
+                    throw
+                }
+                throw (
+                    "another program holds $Destination open, so Setup could not replace it (" +
+                    (ConvertTo-DefenseClawBoundedDiagnostic -Value $replaceFailure.Message -MaxLength 256) +
+                    '). Close the program that has the file open (for example an antivirus scan or an editor), then run Setup again'
+                )
+            }
         }
         else {
             [IO.File]::Move($temporary, $Destination)
