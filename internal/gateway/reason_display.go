@@ -424,11 +424,13 @@ func agentAssetPolicySubject(reason string) string {
 		// A disabled or quarantined asset: say so in words, not with the
 		// registry fields of the record (GAP-0362).
 		if values["asset_type"] == "skill" {
-			// A standard user of a managed Windows computer has no
-			// `defenseclaw skill info`: the managed install ships no
+			// A standard user of a standalone enterprise Windows computer
+			// has no `defenseclaw skill info`: the managed install ships no
 			// per-user CLI there, and the managed state is administrator
-			// only (GAP-0758).
-			if managedEnterpriseActive.Load() && reasonDisplayGOOS == "windows" {
+			// only (GAP-0758). Secure Client (managedEnterpriseActive)
+			// never reaches this function: agentVerdictReason and
+			// notificationDisplayReason keep its pinned wording.
+			if standaloneEnterpriseActive.Load() && reasonDisplayGOOS == "windows" {
 				return "skill " + name + " is disabled by security policy; your administrator can tell you why"
 			}
 			return "skill " + name + " is disabled by security policy; `defenseclaw skill info " + name + "` shows why"
