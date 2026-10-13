@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // This file is the user-facing side of the managed sandbox policy (plan
@@ -365,11 +366,15 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	}
 	add("Egress", strings.Join(egress, "; "), egressKeys...)
 
+	// What the managed gateway's check of each answer allows
+	// (sandboxreg.CheckApprovals): under allow_unblock: false an answer is
+	// kept for this session only, and `approve --always` is refused; the
+	// row said "for good" there (#1200).
 	var approvals string
-	switch m.UserApprovals {
-	case "none":
+	switch {
+	case m.UserApprovals == "none":
 		approvals = "you can't approve asks; they are refused"
-	case "session":
+	case m.UserApprovals == "session" || !m.AllowUnblock:
 		approvals = "you may approve asks for this session only"
 	default:
 		approvals = "you may approve asks for a session or for good"
@@ -904,6 +909,12 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 	}
 	c.Detail = firstNonEmpty(strings.Join(parts, ", "), "managed by your organization")
 	switch {
+	case m.Unavailable == sandboxrelay.UnavailableSetupChanging:
+		// The organization's switch of the setup is under way: it clears
+		// by itself, and is nothing to ask IT about (#1203).
+		c.Status = openshell.StatusWarn
+		c.Detail = m.Unavailable
+		c.Fix = &openshell.Fix{Summary: "nothing to do on this computer; run the command again in a few minutes"}
 	case m.Unavailable != "":
 		c.Status = openshell.StatusFail
 		c.Detail = sandboxapi.DisplayText(m.Unavailable)

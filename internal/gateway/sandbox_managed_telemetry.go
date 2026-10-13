@@ -68,6 +68,44 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 	return r.(*audit.SandboxRecorder)
 }
 
+// refreshManagedSandboxActive exports the managed recorder's active-sandbox
+// gauge again when its last export is SandboxActiveExportInterval old
+// (audit.SandboxRecorder.RecordActiveSandboxesIfDue); nothing before the
+// recorder tracked anything.
+func (a *APIServer) refreshManagedSandboxActive(ctx context.Context) {
+	r, ok := managedSandboxRecorders.Load(a)
+	if !ok {
+		return
+	}
+	if err := r.(*audit.SandboxRecorder).RecordActiveSandboxesIfDue(context.WithoutCancel(ctx), audit.SandboxActiveExportInterval); err != nil {
+		sandboxRecordFailed("sandbox active", err)
+	}
+}
+
+// trackManagedSandboxActive has the managed recorder count reg's sandbox
+// from the registration, running while its daemon reports it running,
+// unless a lifecycle record tracks it (audit.SandboxRecorder.
+// TrackManagedSandbox). After the gateway starts again its recorder tracks
+// nothing, and a sandbox that runs on quietly sends no lifecycle record to
+// count it by: its daemon's polls, once a minute, count it again (#1241).
+func (a *APIServer) trackManagedSandboxActive(ctx context.Context, auth *sandboxAuthority, uid int, reg sandboxreg.Registration) {
+	if reg.State != sandboxreg.StateLive && reg.State != sandboxreg.StateStopped || reg.SandboxName == "" {
+		return
+	}
+	phase := audit.SandboxPhaseStopped
+	if sandboxreg.EffectiveState(reg, auth.clock()) == sandboxreg.StateLive {
+		phase = audit.SandboxPhaseReady
+	}
+	changed, err := a.managedSandboxRecorder().TrackManagedSandbox(context.WithoutCancel(ctx), reg.ID, reg.Connector,
+		sandboxRecordSubject(reg).UserID, phase)
+	sandboxRecordFailed("sandbox active", err)
+	if changed {
+		// Revoked or removed meanwhile: the store's OnGone may have run
+		// before it was tracked.
+		a.sandboxForgetIfGone(auth, uid, reg)
+	}
+}
+
 // sandboxRegistrationGone stops tracking the phase of reg's sandbox. The
 // registration store calls it (sandboxreg.FileStore.OnGone) whenever a
 // registration is revoked, removed or evicted, by any path, so a sandbox

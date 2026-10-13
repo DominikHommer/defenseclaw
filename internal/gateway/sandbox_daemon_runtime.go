@@ -221,6 +221,11 @@ type SandboxDaemon struct {
 	// lastDriver is the compute driver the last create chose and why
 	// (status before the registrations say).
 	lastDriver atomic.Pointer[openshell.DriverChoice]
+
+	// starting holds the names of the sandboxes a Start is starting (name
+	// -> struct{}): the policy poll reports them running, not the stopped
+	// phase OpenShell lists until a resumed MicroVM is up (#1204).
+	starting sync.Map
 }
 
 // NewSandboxDaemon prepares the daemon: the sandbox runtime in forwarding
@@ -770,7 +775,7 @@ func (d *SandboxDaemon) superviseLoop(ctx context.Context, serveErr <-chan error
 		case err := <-serveErr:
 			return fmt.Errorf("sandbox daemon: serve the CLI socket: %w", err)
 		case <-d.refresh:
-			d.refreshSettings(ctx)
+			d.applyNewGeneration(ctx)
 		case <-tick.C:
 			if stop, err := d.check(ctx); stop {
 				return err
@@ -870,6 +875,18 @@ func sandboxMayRun(phase string) bool {
 		return true
 	}
 	return false
+}
+
+// applyNewGeneration applies a policy generation a relayed answer (or a
+// poll) named that the daemon had not seen: the managed settings, and at
+// once every live registration's policy/current, so a running sandbox's
+// live fields (egress lists, approvals) switch with the first relayed call
+// after the administrator's change instead of on the next minute's poll
+// (es-demo:GAP-0012: a running sandbox took a loosened or tightened policy
+// 20-35 s after the ensure reported it applied).
+func (d *SandboxDaemon) applyNewGeneration(ctx context.Context) {
+	d.refreshSettings(ctx)
+	d.pollOnce(ctx)
 }
 
 // refreshSettings reads the managed gateway's settings after a generation
@@ -972,7 +989,14 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		}
 		var cp sandboxrelay.CurrentPolicy
 		var err error
-		if running, report := sandboxStateReport(phases, listed, r.Sandbox); report {
+		running, report := sandboxStateReport(phases, listed, r.Sandbox)
+		if _, starting := d.starting.Load(r.Sandbox); starting {
+			// Start reported it running; a resumed MicroVM is listed stopped
+			// until it is up, and a stopped report then refused the agent's
+			// first hooks (403) right after `sandbox connect` (#1204).
+			running, report = true, true
+		}
+		if report {
 			// Tell the gateway whether the sandbox runs: a stopped one's
 			// registration authorizes no relayed call (GAP-0505).
 			cp, err = d.relay.Report(ctx, r.ID, running)
@@ -1608,6 +1632,12 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 		return sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are turned off by your organization")
 	}
 	if !s.Available {
+		if s.Unavailable == sandboxrelay.UnavailableSetupChanging {
+			// A notice, no policy block: the CLI prints it without the
+			// organization's exception contact (#1203).
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
+				Message: s.Unavailable, Detail: sandboxrelay.DetailSetupChanging}
+		}
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
 			Message: sandboxapi.AdminMessage, Detail: s.Unavailable}
 	}
@@ -1784,9 +1814,17 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 	// admitted; a start that fails reports it stopped again.
 	cp, err := d.relay.Report(ctx, r.ID, true)
 	if err == nil {
+		d.starting.Store(name, struct{}{})
 		defer func() {
+			d.starting.Delete(name)
 			if err != nil {
 				d.reportStopped(context.WithoutCancel(ctx), name)
+				return
+			}
+			// Running once more: a poll that listed the sandbox stopped
+			// before this start marked it may have reported it so since.
+			if _, rerr := d.relay.Report(context.WithoutCancel(ctx), r.ID, true); rerr != nil {
+				d.logf("report %s running: %v", name, rerr)
 			}
 		}()
 	}
@@ -2370,7 +2408,13 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
 	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
 	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
-	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest)
+	// The profile of the same match as the digest: a regroup re-matched the
+	// registration (#1199).
+	profile := strings.TrimSpace(cp.Profile)
+	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile)
+	if profile != "" {
+		reg.Profile = profile
+	}
 	if !changed {
 		r.byName[name] = reg
 		if moved {

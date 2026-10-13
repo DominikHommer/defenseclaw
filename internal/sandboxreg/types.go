@@ -154,6 +154,10 @@ type Registration struct {
 	// LiveLease counts from it (from BoundAt before the first report).
 	SeenAt    time.Time `json:"seen_at,omitzero"`
 	RevokedAt time.Time `json:"revoked_at,omitzero"`
+	// SessionAt is when the sandbox last started a new session: the running
+	// report that followed a stop (Report). Zero while it runs the session
+	// it was bound in (SessionStart).
+	SessionAt time.Time `json:"session_at,omitzero"`
 }
 
 // Decision is one saved decision, kept under

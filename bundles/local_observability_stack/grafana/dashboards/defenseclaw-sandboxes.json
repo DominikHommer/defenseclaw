@@ -1591,7 +1591,7 @@
       "id": 124,
       "type": "timeseries",
       "title": "Required-sandbox refusals by reason",
-      "description": "Host runs refused or unavailable by event and machine-readable reason (required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, ...).",
+      "description": "Host runs refused or unavailable by event and machine-readable reason (required_for, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, ...).",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
