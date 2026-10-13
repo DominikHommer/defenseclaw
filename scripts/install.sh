@@ -1053,9 +1053,11 @@ install_uv() {
 # installer and the venv: the Python check, the release policy and Cosign,
 # the connector menu and the gateway download.
 #   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
-#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
-#     cache, and nothing in it is older than that window or newer than the
-#     venv, so no other Cosign has used it.
+#   ~/.sigstore: only with that uv, no cosign on PATH, it holds only the
+#     public Sigstore TUF cache, and everything in it is newer than uv's
+#     receipt and none of it newer than the venv: the 0.8.x installer ran its
+#     temporary Cosign after uv, so no other Cosign has used it. A ten-minute
+#     window alone claimed a cache the user had made just before (GAP-1262).
 readonly LEGACY_WINDOW=600
 LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
@@ -1102,7 +1104,7 @@ legacy_uv_from_0_8() {
     done
 }
 find_legacy_leftovers() {
-    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
+    local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore receipt
     [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
     venv_t="$(mtime_of "${cfg}")" || return 0
     if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
@@ -1110,8 +1112,9 @@ find_legacy_leftovers() {
         LEGACY_LEFTOVERS="uv-cache"
     fi
     sigstore="${HOME}/.sigstore"
-    if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
-        && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    if [[ -n "${LEGACY_UV_RECORD}" && -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
+        && [[ -z "$(find "${sigstore}" ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] \
         && [[ -z "$(find "${sigstore}" -mindepth 1 -maxdepth 2 ! -path "${sigstore}/root" \
             ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev" ! -path "${sigstore}/root/tuf-repo-cdn.sigstore.dev.json" \

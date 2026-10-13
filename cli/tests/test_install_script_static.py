@@ -1335,7 +1335,9 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: str) -> tuple[Path, Path]:
+def _legacy_0_8_home(
+    home: Path, receipt_age: int, cache_age: int, cache_wheel: str, sigstore_age: int = 5
+) -> tuple[Path, Path]:
     """Lay out a 0.8.10 install that ran uv's installer and a temporary Cosign, without a marker."""
     bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
     bin_dir.mkdir(parents=True)
@@ -1361,7 +1363,7 @@ def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: 
     (tuf / "root.json").write_text("{}", encoding="utf-8")
     venv_t = 1_700_000_000
     for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
-        os.utime(path, (venv_t - 5, venv_t - 5))
+        os.utime(path, (venv_t - sigstore_age, venv_t - sigstore_age))
     (cache / "CACHEDIR.TAG").touch()
     os.utime(cache / "CACHEDIR.TAG", (venv_t - 1, venv_t - 1))
     for path in (*cache.glob("archive-v0/*/*"), *cache.glob("archive-v0/*"), cache / "archive-v0", cache):
@@ -1386,9 +1388,27 @@ def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
     # GAP-0908: the 0.8.10 installer ran uv's installer and kept no marker,
     # and it also reused a uv the user already had. The upgrade records the
     # uv (the digests install_uv writes) and its cache only on evidence that
-    # user's own uv cannot meet.
+    # user's own uv cannot meet, and ~/.sigstore only with that uv (GAP-1262).
     home = tmp_path / "home"
     bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=cache_age, cache_wheel=cache_wheel)
+
+    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
+    record = bin_dir / "defenseclaw-uv.sha256"
+    leftovers = dc_home / "legacy-install-leftovers"
+    if not claimed:
+        assert not record.exists()
+        assert not leftovers.exists()
+        return
+    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
+    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
+    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
+    assert leftovers.read_text(encoding="utf-8") == "uv-cache\nsigstore\n"
+
+
+def _legacy_leftovers_script(tmp_path: Path, home: Path, bin_dir: Path, dc_home: Path) -> Path:
     text = INSTALL_SH.read_text(encoding="utf-8")
     script = tmp_path / "legacy.sh"
     script.write_text(
@@ -1400,21 +1420,7 @@ def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
         + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
         encoding="utf-8",
     )
-
-    proc = _run([str(script)], tmp_path)
-
-    assert proc.returncode == 0, proc.stderr
-    assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
-    record = bin_dir / "defenseclaw-uv.sha256"
-    leftovers = (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8")
-    if not claimed:
-        assert not record.exists()
-        assert leftovers == "sigstore\n"
-        return
-    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
-    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
-    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
-    assert leftovers == "uv-cache\nsigstore\n"
+    return script
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
@@ -1866,3 +1872,14 @@ def test_an_empty_local_value_is_a_usage_error(tmp_path: Path) -> None:
     proc = _run([str(_stamped(tmp_path)), "--local="], tmp_path)
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "--local needs a directory; nothing was changed" in proc.stderr
+
+
+def test_a_sigstore_cache_older_than_the_0_8_uv_is_the_users(tmp_path: Path) -> None:
+    # #1096/GAP-1262: a ~/.sigstore the user made five minutes before the
+    # 0.8.x venv fell inside the ten-minute window and was recorded for
+    # deletion. The 0.8.x installer ran its temporary Cosign after uv.
+    home = tmp_path / "home"
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=-5, cache_wheel="litellm-1.91.5", sigstore_age=300)
+    proc = _run([str(_legacy_leftovers_script(tmp_path, home, bin_dir, dc_home))], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "uv-cache\n"
