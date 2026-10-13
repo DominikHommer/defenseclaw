@@ -29,8 +29,15 @@ package gateway
 //
 // This file supplies that fact to those two paths. It is deliberately narrow:
 //
-//   - it applies only when the host has no agent version at all, so a host
-//     verdict always keeps its authority;
+//   - it applies only when the host has no agent: the last discovery looked
+//     for the connector's agent and found no binary
+//     (connector.CachedAgentNotFound), and no agent executable is recorded.
+//     A host agent whose version could not be read, a missing discovery cache
+//     and a cache without the connector's entry keep the unversioned verdict,
+//     so a host verdict always keeps its authority and the lock never pairs
+//     the image's harness version with a host executable. This is the Python
+//     setup gate's rule too (the image is used only for an agent discovery
+//     reports as not installed);
 //   - it applies only when the connector's effective guardrail mode is action,
 //     which is the mode that refuses an unversioned contract;
 //   - it accepts only the image a sandbox started now would run: the record of
@@ -40,8 +47,9 @@ package gateway
 //     whose tag Docker still resolves to the verified image ID, and whose
 //     harness version resolves to a Known sandbox contract.
 //
-// Everything else keeps refusing exactly as before: an unknown host version, a
-// missing or unverified image, an image of another release, of another pinned
+// Everything else keeps refusing exactly as before: an unknown host version, an
+// installed agent with no readable version, no discovery record, a missing or
+// unverified image, an image of another release, of another pinned
 // harness version or base image, an image rebuilt since its probe, a harness
 // version without a reviewed contract, and (independently, in the callers) a
 // contract that drifted from the lock.
@@ -220,19 +228,28 @@ func harnessEvidenceReason(rec image.Record, reason string) string {
 	return reason + "; " + evidence
 }
 
-// applySandboxHarnessEvidence replaces a host verdict that has no version to
-// resolve with the current verified harness image's contract, when the
-// connector's effective guardrail mode is action. Every other case returns
-// its inputs unchanged, so a host agent, an observe-mode connector and a
-// connector with no current verified image behave exactly as before.
-func (s *Sidecar) applySandboxHarnessEvidence(connectorName, agentVersion string, resolution connector.HookContractResolution) (string, connector.HookContractResolution) {
-	if s == nil || s.currentConfig() == nil {
+// applySandboxHarnessEvidence replaces the unversioned verdict of a host with
+// no agent with the current verified harness image's contract, when the
+// connector's effective guardrail mode is action. "No agent" means the last
+// discovery found no binary (connector.CachedAgentNotFound) and agentExecutable,
+// the executable the caller pairs with the version, is empty. Every other case
+// returns its inputs unchanged, so a host agent (versioned or not), a host
+// without a discovery record, an observe-mode connector and a connector with
+// no current verified image behave exactly as before.
+func (s *Sidecar) applySandboxHarnessEvidence(connectorName, agentVersion, agentExecutable string, resolution connector.HookContractResolution) (string, connector.HookContractResolution) {
+	if s == nil {
+		return agentVersion, resolution
+	}
+	cfg := s.currentConfig()
+	if cfg == nil {
 		return agentVersion, resolution
 	}
 	if strings.TrimSpace(agentVersion) != "" || resolution.Status == connector.HookCompatibilityKnown {
 		return agentVersion, resolution
 	}
-	cfg := s.currentConfig()
+	if strings.TrimSpace(agentExecutable) != "" || !connector.CachedAgentNotFound(cfg.DataDir, connectorName) {
+		return agentVersion, resolution
+	}
 	if !strings.EqualFold(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(connectorName)), "action") {
 		return agentVersion, resolution
 	}

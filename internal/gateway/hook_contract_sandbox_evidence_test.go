@@ -217,10 +217,28 @@ func TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS(t *testin
 	}
 }
 
-// TestApplySandboxHarnessEvidenceKeepsTheHostVerdict: a host agent version,
-// when there is one, decides; observe mode never looks at images.
-func TestApplySandboxHarnessEvidenceKeepsTheHostVerdict(t *testing.T) {
-	cfg := evidenceTestConfig(t)
+// writeAgentDiscovery writes the agent_discovery.json entry discovery records
+// for connector name (connector.LoadCachedAgentVersion and
+// connector.CachedAgentNotFound read it).
+func writeAgentDiscovery(t *testing.T, dataDir, name string, entry map[string]any) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"agents": map[string]any{name: entry}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), body, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// agentNotFound is the entry discovery records when it looked and found no
+// binary.
+var agentNotFound = map[string]any{"installed": false, "binary_path": "", "version": ""}
+
+// evidenceSidecar is a sidecar of cfg whose host has the current verified
+// claudecode image; it returns that image's record.
+func evidenceSidecar(t *testing.T, cfg *config.Config) (*Sidecar, image.Record) {
+	t.Helper()
 	host := evidenceTestHost(nil)
 	rec := currentRecord(t, cfg, host, "claudecode", false)
 	host.ImageID = func(context.Context, string) (string, error) { return rec.ImageID, nil }
@@ -228,22 +246,101 @@ func TestApplySandboxHarnessEvidenceKeepsTheHostVerdict(t *testing.T) {
 	prev := sandboxEvidenceHostFunc
 	sandboxEvidenceHostFunc = func() sandboxEvidenceHost { return host }
 	t.Cleanup(func() { sandboxEvidenceHostFunc = prev })
+	return &Sidecar{cfg: cfg}, rec
+}
 
-	s := &Sidecar{cfg: cfg}
+// applyAsTheCallersDo runs applySandboxHarnessEvidence on the version,
+// executable and resolution runGuardrail and connectorSetupOptsChecked read
+// from the data dir.
+func applyAsTheCallersDo(s *Sidecar, name string) (string, string, connector.HookContractResolution) {
+	version := connector.LoadCachedAgentVersion(s.cfg.DataDir, name)
+	executable := connector.LoadCachedAgentExecutable(s.cfg.DataDir, name)
+	v, r := s.applySandboxHarnessEvidence(name, version, executable, connector.ResolveHookContract(name, version))
+	return v, executable, r
+}
+
+// TestApplySandboxHarnessEvidenceKeepsTheHostVerdict: a host agent version,
+// when there is one, decides; observe mode never looks at images.
+func TestApplySandboxHarnessEvidenceKeepsTheHostVerdict(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	s, _ := evidenceSidecar(t, cfg)
 	unversioned := connector.ResolveHookContract("claudecode", "")
 
 	// A host agent whose version is outside every contract keeps its verdict.
+	writeAgentDiscovery(t, cfg.DataDir, "claudecode", map[string]any{"installed": true, "binary_path": "/usr/local/bin/claude", "version": "0.0.1"})
 	hostUnknown := connector.ResolveHookContract("claudecode", "0.0.1")
-	if v, r := s.applySandboxHarnessEvidence("claudecode", "0.0.1", hostUnknown); v != "0.0.1" || r.Status != hostUnknown.Status {
+	if v, r := s.applySandboxHarnessEvidence("claudecode", "0.0.1", "/usr/local/bin/claude", hostUnknown); v != "0.0.1" || r.Status != hostUnknown.Status {
 		t.Fatalf("host verdict replaced: version %q status %q", v, r.Status)
 	}
-	// No host agent, action mode: the current image's contract is used.
-	if v, r := s.applySandboxHarnessEvidence("claudecode", "", unversioned); v != rec.HarnessVersion || r.Status != connector.HookCompatibilityKnown {
-		t.Fatalf("sandbox evidence not applied: version %q status %q", v, r.Status)
-	}
-	// Observe mode keeps the unversioned verdict.
+	// Observe mode keeps the unversioned verdict, even where discovery found
+	// no agent.
+	writeAgentDiscovery(t, cfg.DataDir, "claudecode", agentNotFound)
 	cfg.Guardrail.Mode = "observe"
-	if v, r := s.applySandboxHarnessEvidence("claudecode", "", unversioned); v != "" || r.Status != unversioned.Status {
+	if v, r := s.applySandboxHarnessEvidence("claudecode", "", "", unversioned); v != "" || r.Status != unversioned.Status {
 		t.Fatalf("observe mode used sandbox evidence: version %q status %q", v, r.Status)
+	}
+}
+
+// TestApplySandboxHarnessEvidenceAcceptsTheImageWhenDiscoveryFoundNoAgent is
+// the sandbox-only layout: discovery looked and recorded installed:false with
+// no binary path, so in action mode the current verified image's harness
+// version and contract are used, and no host executable is paired with them.
+func TestApplySandboxHarnessEvidenceAcceptsTheImageWhenDiscoveryFoundNoAgent(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	s, rec := evidenceSidecar(t, cfg)
+	writeAgentDiscovery(t, cfg.DataDir, "claudecode", agentNotFound)
+	v, exe, r := applyAsTheCallersDo(s, "claudecode")
+	if v != rec.HarnessVersion || exe != "" || r.Status != connector.HookCompatibilityKnown || r.Contract.ContractID != rec.HookContract {
+		t.Fatalf("sandbox evidence not applied: version %q executable %q status %q contract %q", v, exe, r.Status, r.Contract.ContractID)
+	}
+}
+
+// TestApplySandboxHarnessEvidenceNeedsDiscoveryToFindNoAgent: the image stands
+// in only for a host where discovery looked and found no binary. An installed
+// agent whose version could not be read, or a host with no discovery record,
+// keeps the unversioned verdict (which action mode refuses), even with a
+// current verified image.
+func TestApplySandboxHarnessEvidenceNeedsDiscoveryToFindNoAgent(t *testing.T) {
+	cases := []struct {
+		name string
+		// discovery is the claudecode entry to record; nil writes no cache.
+		discovery map[string]any
+		// otherEntry records discovery for another agent only.
+		otherEntry bool
+		// executable overrides the cached executable the caller passes.
+		executable string
+	}{
+		{name: "installed agent with no readable version", discovery: map[string]any{"installed": true, "binary_path": "/usr/local/bin/claude", "version": ""}},
+		{name: "no discovery cache"},
+		{name: "discovery without the connector's entry", otherEntry: true},
+		{name: "entry that does not say installed", discovery: map[string]any{"binary_path": "", "version": ""}},
+		{name: "not installed but a binary path is recorded", discovery: map[string]any{"installed": false, "binary_path": "/usr/local/bin/claude", "version": ""}},
+		{name: "discovery found nothing but an executable is recorded", discovery: agentNotFound, executable: "/opt/claude/bin/claude"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := evidenceTestConfig(t)
+			s, _ := evidenceSidecar(t, cfg)
+			switch {
+			case c.otherEntry:
+				writeAgentDiscovery(t, cfg.DataDir, "codex", agentNotFound)
+			case c.discovery != nil:
+				writeAgentDiscovery(t, cfg.DataDir, "claudecode", c.discovery)
+			}
+			version := connector.LoadCachedAgentVersion(cfg.DataDir, "claudecode")
+			executable := connector.LoadCachedAgentExecutable(cfg.DataDir, "claudecode")
+			if c.executable != "" {
+				executable = c.executable
+			}
+			unversioned := connector.ResolveHookContract("claudecode", version)
+			if unversioned.Status == connector.HookCompatibilityKnown {
+				t.Fatalf("fixture resolves to a known contract: %+v", unversioned)
+			}
+			v, r := s.applySandboxHarnessEvidence("claudecode", version, executable, unversioned)
+			if v != version || r.Status != unversioned.Status || r.Contract.ContractID != unversioned.Contract.ContractID {
+				t.Fatalf("image evidence replaced the host verdict: version %q status %q contract %q (executable %q)",
+					v, r.Status, r.Contract.ContractID, executable)
+			}
+		})
 	}
 }

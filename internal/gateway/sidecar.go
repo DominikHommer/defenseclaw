@@ -4547,10 +4547,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	// F9: a sandbox-only layout has no host agent to probe, but it does have a
-	// hook-fire verified harness image. Accept that evidence here. A host
-	// version, when there is one, still decides (see
+	// hook-fire verified harness image. Accept that evidence here, only when
+	// discovery found no agent binary and no executable is recorded; a host
+	// agent, with or without a readable version, still decides (see
 	// hook_contract_sandbox_evidence.go).
-	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, contractResolution)
+	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, agentExecutable, contractResolution)
 	setupOpts := connector.SetupOpts{
 		DataDir:              s.currentConfig().DataDir,
 		CodexOtelEnvironment: s.currentConfig().Environment,
@@ -6482,7 +6483,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 	// accepted harness version and contract, so every caller of this helper
 	// (the setup paths, application protection) sees one consistent evidence
 	// base, and the hook contract lock records it.
-	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, contractResolution)
+	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, agentExecutable, contractResolution)
 	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {
 		return connector.SetupOpts{}, err
