@@ -219,8 +219,23 @@ sudo usermod -aG docker alice
 sudo usermod -aG kvm alice
 ```
 
-Plan for the group membership, because Docker access is root-equivalent: on a
-host where several accounts log in, put only the sandbox user in `docker`.
+Plan for the group membership, because Docker access is root-equivalent. A
+member of `docker` can read every file on the host that root can, including
+the administrator policy in `/etc/defenseclaw/config.yaml`, the sandbox
+profiles and packs, and other people's files, whatever their owner and mode.
+For those accounts the rule that each person sees only their own policy does
+not hold (see [Docker group members](#what-users-see)). Linux
+sandboxes need the group in this release, so:
+
+- Put only the accounts that run sandboxes in `docker`, never an administrator
+  or service account that does not.
+- Keep every secret out of the config as a reference: a managed config already
+  refuses inline keys and tokens, and a destination header that carries a
+  credential belongs in `{credential: NAME}` or `{env: NAME}`, not in a static
+  value.
+- `ensure`, `status` and `verify` count the enrolled accounts in the group
+  (`docker_group_members`, a number, no names), and
+  `defenseclaw sandbox doctor` tells such a person what the membership means.
 
 **Linger.** By default Linux stops the user's service manager when the user's
 last login session ends; stopping the sandbox daemon stops that account's
@@ -1012,7 +1027,12 @@ organization set, whether sandboxes are available for them and why not (the
 same prerequisite facts `enterprise <os> verify` reads), their profile, and
 their images and hooks. It does not inspect Homebrew, Docker Desktop, the
 gateway service or other accounts' files, and every fix it prints is either
-one the person can apply or a pointer to the IT help desk.
+one the person can apply or a pointer to the IT help desk. On Linux, a person
+in the `docker` group also gets a **Docker access** warning: the group, which
+their sandboxes need, is administrator-equivalent on the computer and is not
+limited to their own policy. It asks them to run only images and containers
+they trust, and to ask the help desk to take them out of the group once they
+no longer run sandboxes there. The warning does not stop sandboxes.
 `defenseclaw sandbox setup` is refused: there is nothing for the person to
 set up.
 
@@ -1055,7 +1075,7 @@ sandbox already has its own policy.
 | Policy routes, `pack list` and `pack show` | The caller's own policy, profile, matched group and `request_access`. Another person's registration is "not found". |
 | Daemon socket | The user's own sandboxes, mode 0600 and a peer-uid check. |
 | Refusals, banner, status, doctor | The caller's profile. Another account on the sandbox ports is "another account", with no name or PID. A configuration error says only that the policy can't be loaded. |
-| Files | Nothing beyond the admin files: `config.yaml` is mode 0640, packs 0750, the runtime descriptor has no sandbox fields, the stores are service-owned and 0600, and daemon state is 0700. |
+| Files | Nothing beyond the admin files: `config.yaml` is mode 0640, packs 0750, the runtime descriptor has no sandbox fields, the stores are service-owned and 0600, and daemon state is 0700. On Linux this holds only for accounts outside the `docker` group (see below). |
 | Admin views | Everything, to root only. Principals are hashed unless `ai_discovery.include_user_principal` is set. |
 
 This is a person trying to look past their own policy. `policy explain` and
@@ -1080,6 +1100,24 @@ the process list. DefenseClaw does not hide it.
 - **Linux** shows the same by default. To hide other accounts' processes, mount
   `/proc` with `hidepid=2` (and a `gid=` exception for your monitoring group);
   DefenseClaw does not change the mount options of the host.
+
+**Residual: Docker group members.** On Linux, sandboxes need the `docker` group: the docker driver runs in
+Docker, and the agent images of MicroVM sandboxes are built in Docker for each
+account ([Per-OS prerequisites](#per-os-prerequisites)). Membership in
+`docker` is root-equivalent, a property of Docker, not of DefenseClaw. A member
+can read every root-owned file on the host, so file modes do not keep the
+organization's `config.yaml`, the sandbox profiles and packs, or other
+people's files from them, and the privacy rules above hold only for accounts
+outside the group. DefenseClaw's own routes, sockets and messages still show
+each person only their own policy.
+
+- Treat the sandbox policy on a Linux host as readable by every account in
+  `docker`, and keep secrets in it as references only.
+- Put only the accounts that run sandboxes in the group.
+- `ensure`, `status` and `verify` report `docker_group_members` with the
+  number of enrolled accounts in the group, and `sandbox doctor` warns each of
+  them.
+- macOS has no such group: Docker Desktop runs in each person's own account.
 
 The other messages a person can get are below. The text column quotes stable
 fragments; the complete notice adds the sandbox name, phase, affected setting
@@ -1249,6 +1287,7 @@ text and in `--json`. None of them is raised for a person.
 | `openshell_driver_fallback` | A MicroVM prerequisite is missing but the Docker fallback is ready, so people still get sandboxes | Fix the prerequisite if you want MicroVMs, or set `driver: docker` |
 | `openshell_launcher_conflict` | The launcher path (`/usr/bin/defenseclaw`, or `/usr/local/bin/defenseclaw` on macOS) holds a file that is not DefenseClaw's link, a Python install for example, so people don't get `defenseclaw sandbox` | Move that file aside, then run `ensure` |
 | `sandbox_user_groups` | People who need `docker` or `kvm` are not in it. `ensure` never adds anyone | Add them ([Per-OS prerequisites](#per-os-prerequisites)) |
+| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent: they can read the administrator policy and every other root-owned file. A number, never names | Keep the group to the accounts that run sandboxes and secrets out of the policy ([Docker group members](#what-users-see)) |
 | `sandbox_pending_restart` | A user's daemon is outdated and waits for that user's sandboxes to stop | None; the user's next idle `defenseclaw sandbox` command restarts it |
 | `sandbox_user_state` | A per-user change could not be applied or removed (units, a file that changed after DefenseClaw wrote it, a teardown) | Read the message; the next run tries again, or finish by hand as it says |
 | `sandbox_default_profile_looser` | `default_profile` is looser than an assigned profile for a field | Make `default_profile` repeat the stricter setting |
