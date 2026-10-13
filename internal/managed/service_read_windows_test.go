@@ -56,9 +56,11 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", tree...)
 	err := ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	// The example icacls command is copyable as is: single backslashes
-	// (GAP-1477), not Go-quoted ones.
+	// (GAP-1477), not Go-quoted ones. It grants the service SID derived from
+	// the name, which icacls accepts before the service exists (#1251).
+	serviceSID := "*" + WindowsServiceSIDString("TrustedInstaller")
 	if err == nil || !strings.Contains(err.Error(), "cannot read") || !strings.Contains(err.Error(), account) ||
-		!strings.Contains(err.Error(), `icacls "`+root+`" /grant`) {
+		!strings.Contains(err.Error(), `icacls "`+root+`" /grant "`+serviceSID+`:(OI)(CI)RX"`) {
 		t.Fatalf("admin-only rule pack: %v", err)
 	}
 	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)", tree...)
@@ -80,7 +82,7 @@ func TestValidateServiceCanReadTreeNamesAnUnreadableRulePack(t *testing.T) {
 	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x20020;;;BU)", parent)
 	err = ValidateServiceCanReadTree(root, "guardrail.rule_pack_dir", account)
 	if err == nil || !strings.Contains(err.Error(), "parent folder "+parent) ||
-		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant`) {
+		!strings.Contains(err.Error(), `icacls "`+parent+`" /grant "`+serviceSID+`:RX"`) {
 		t.Fatalf("pack under a locked parent: %v", err)
 	}
 	setDACL(readableParent, parent)

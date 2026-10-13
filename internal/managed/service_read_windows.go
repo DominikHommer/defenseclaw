@@ -65,7 +65,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 			return fmt.Errorf(
 				"%s %s: the gateway service account %s cannot list or read the permissions of the parent folder %s; "+
 					"grant it Read & execute on that folder, for example: icacls \"%s\" /grant \"%s:RX\", or move the rule pack out of %s to a folder whose parents it can read",
-				label, root, serviceAccount, parent, parent, serviceAccount, parent)
+				label, root, serviceAccount, parent, parent, serviceGrantPrincipal(serviceAccount), parent)
 		}
 	}
 	entries := 0
@@ -89,8 +89,8 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 		// folder, then let everything in it inherit again.
 		return fmt.Errorf(
 			"%s %s: the gateway service account %s cannot read %s; grant it Read & execute on the folder and let everything in it inherit that, "+
-				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)RX\" and then icacls \"%s\\*\" /reset /T /C",
-			label, root, serviceAccount, path, root, serviceAccount, root)
+				"for example: icacls \"%s\" /grant \"%s\" and then icacls \"%s\\*\" /reset /T /C",
+			label, root, serviceAccount, path, root, RulePackServiceReadGrant(serviceAccount), root)
 	})
 }
 
@@ -164,7 +164,7 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 		if !serviceDACLGrants(folder, creators, want, windows.CONTAINER_INHERIT_ACE, skip) {
 			return fmt.Errorf("the gateway service account %s can create a folder in %s, but the folders it creates there "+
 				"would not let it create the rest of %s; grant it Modify on %s for its subfolders too, "+
-				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceAccount)
+				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceGrantPrincipal(serviceAccount))
 		}
 		return nil
 	}
