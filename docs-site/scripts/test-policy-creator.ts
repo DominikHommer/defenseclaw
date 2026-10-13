@@ -54,7 +54,14 @@ import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
-import { BLOCK_CARDS, SINK_CARDS, defaultAnswers } from '../components/policy-creator/quick-start/questions.js';
+import {
+  ALLOW_CARDS,
+  BLOCK_CARDS,
+  SINK_CARDS,
+  defaultAnswers,
+  deserializeAnswers,
+  serializeAnswers,
+} from '../components/policy-creator/quick-start/questions.js';
 import { applyAnswers } from '../components/policy-creator/quick-start/apply.js';
 import {
   BOUNDED_CHAINS,
@@ -586,6 +593,37 @@ test('quick start always selects a guardrail mode', () => {
     const answers = defaultAnswers();
     answers.response = response;
     assert.ok(['observe', 'action'].includes(applyAnswers(answers).guardrail.mode ?? ''), response);
+  }
+});
+
+test('quick start ignores legacy first-party answers without adding unpinned entries', () => {
+  const answers = deserializeAnswers({
+    posture: 'default',
+    allow: ['first_party_plugins', 'internal_domains'],
+    firstPartyExtra: ['cisco-ai-defense/*'],
+  });
+  assert.equal(answers.allow.has('first_party_plugins'), false);
+  assert.equal('firstPartyExtra' in serializeAnswers(answers), false);
+
+  const policy = applyAnswers(answers);
+  assert.deepEqual(policy.first_party_allow_list, policyFromPreset('default').first_party_allow_list);
+  assert.ok(policy.first_party_allow_list.every((entry) => entry.source_path_contains.length > 0));
+});
+
+test('quick start allow cards never emit an unpinned first-party entry', () => {
+  assert.equal(ALLOW_CARDS.some((card) => card.id === 'first_party_plugins'), false);
+  assert.ok(ALLOW_CARDS.every((card) => !('firstParty' in card)));
+  for (const posture of ['default', 'permissive', 'strict'] as const) {
+    for (let mask = 0; mask < 2 ** ALLOW_CARDS.length; mask++) {
+      const answers = defaultAnswers();
+      answers.posture = posture;
+      answers.allow = new Set(ALLOW_CARDS.filter((_, i) => mask & (1 << i)).map((card) => card.id));
+      answers.domainsExtra = ['api.corp.internal'];
+      for (const entry of applyAnswers(answers).first_party_allow_list) {
+        assert.ok(entry.target_name && !/[*?\[\]]/.test(entry.target_name), entry.target_name);
+        assert.ok(entry.source_path_contains.some((path) => path.trim()), entry.target_name);
+      }
+    }
   }
 });
 

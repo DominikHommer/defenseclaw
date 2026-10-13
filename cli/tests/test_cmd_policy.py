@@ -397,6 +397,43 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", ""))
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
+    def test_activate_names_skipped_first_party_entries_and_keeps_valid_ones(self):
+        import yaml
+
+        self.assertEqual(self.invoke(["create", "first-party-notes"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "first-party-notes.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data["first_party_allow_list"] = [
+            {"target_type": "plugin", "target_name": "org/*", "source_path_contains": ["plugins/org"]},
+            {"target_type": "plugin", "target_name": "empty-pins", "source_path_contains": []},
+            {"target_type": "plugin", "target_name": "", "source_path_contains": ["plugins/unnamed"]},
+            {"target_type": "unknown", "target_name": "wrong-type", "source_path_contains": ["plugins/wrong"]},
+            "not-an-entry",
+            {"target_type": "plugin", "target_name": "acme", "source_path_contains": ["plugins/acme"]},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+        result = self.invoke(["activate", "first-party-notes", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Skipped first-party entry 'org/*'", result.output)
+        self.assertIn("concrete target_name", result.output)
+        self.assertIn("Skipped first-party entry 'empty-pins'", result.output)
+        self.assertIn("source_path_contains", result.output)
+        self.assertIn("Skipped first-party entry #3", result.output)
+        self.assertIn("Skipped first-party entry 'wrong-type'", result.output)
+        self.assertIn("Skipped first-party entry #5", result.output)
+        self.assertEqual(result.output.count("Skipped first-party entry"), 5)
+        self.assertEqual(
+            [entry.name for entry in self.app.cfg.admission.plugin.first_party_allow_list], ["acme"]
+        )
+
+    def test_activate_valid_first_party_entries_print_no_skip_note(self):
+        result = self.invoke(["activate", "default", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Skipped first-party entry", result.output)
+
     def test_activate_explicit_empty_first_party_list_clears_builtin_exemptions(self):
         import yaml
         from defenseclaw.enforce.admission import compile_admission

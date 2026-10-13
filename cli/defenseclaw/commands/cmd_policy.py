@@ -765,7 +765,7 @@ def _policy_bool(value: object, key: str) -> bool:
     return value
 
 
-def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, imported lazily
+def _admission_from_policy(data: dict, skipped: list[str] | None = None):  # noqa: ANN202 - AdmissionConfig, imported lazily
     """A named policy's admission settings as config ``admission:``.
 
     The policy's ``skill_actions`` applied to every asset type and its
@@ -803,14 +803,32 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
             getattr(adm, target_type).first_party_allow_list = []
     else:
         entries = []
-    for entry in entries:
+    def note(label: str, reason: str) -> None:
+        if skipped is not None:
+            skipped.append(f"Skipped first-party entry {label}: {reason}")
+
+    for index, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
+            note(f"#{index}", "add an object with target_type, a concrete target_name and source_path_contains")
             continue
-        holder = getattr(adm, str(entry.get("target_type", "")), None)
+        target_type = str(entry.get("target_type", "") or "")
         name = str(entry.get("target_name", "") or "")
-        paths = [str(p) for p in entry.get("source_path_contains") or [] if p]
-        if holder is None or not name or not paths:
+        label = repr(name) if name.strip() else f"#{index}"
+        raw_paths = entry.get("source_path_contains")
+        paths = [str(p) for p in raw_paths if str(p).strip()] if isinstance(raw_paths, list) else []
+        if target_type not in ("skill", "mcp", "plugin"):
+            note(label, "target_type must be skill, mcp or plugin; add a supported type")
             continue
+        if not name.strip():
+            note(label, "add a concrete target_name")
+            continue
+        if any(char in name for char in "*?[]"):
+            note(label, "add a concrete target_name; first-party names match exactly, not as globs")
+            continue
+        if not paths:
+            note(label, "source_path_contains needs at least one path pin; add a source path")
+            continue
+        holder = getattr(adm, target_type)
         if holder.first_party_allow_list is None:
             holder.first_party_allow_list = []
         holder.first_party_allow_list.append(
@@ -897,9 +915,10 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     watch_raw = data.get("watch", {})
     secure_client = asset_lists.is_secure_client(app.cfg)
     opa_update = _prepare_opa_data(app, data) if secure_client else None
+    first_party_notes: list[str] = []
     if not secure_client:
         try:
-            app.cfg.admission = _admission_from_policy(data)
+            app.cfg.admission = _admission_from_policy(data, first_party_notes)
             _apply_policy_guardrail(app.cfg, data)
         except (TypeError, ValueError) as exc:
             raise click.ClickException(f"invalid policy {name!r}: {exc}") from exc
@@ -979,7 +998,7 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
         result = app.cfg.save_verified(lambda _path: _write_opa_data(*opa_update))
     else:
         result = app.cfg.save()
-    for note in webhook_notes:
+    for note in first_party_notes + webhook_notes:
         click.echo(f"  {note}")
     return path, list(getattr(result, "restart_required", None) or [])
 
