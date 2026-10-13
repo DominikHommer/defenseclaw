@@ -295,6 +295,10 @@ docker without BuildKit. Such a refusal says only why. It starts no build and
 keeps the previous build's log. On a MicroVM gateway
 it warns after a build when the volume of the driver's image cache lacks the
 room the first start of the new image needs (see `sandbox run`).
+On macOS the MicroVM name-resolution check binds two files from
+`~/Library/Caches/defenseclaw/hookfire`; when the container engine cannot
+see that home directory, it reports the sharing prerequisite and the
+`sandbox image build <harness> --force` recheck command.
 
 ```bash
 defenseclaw sandbox image build

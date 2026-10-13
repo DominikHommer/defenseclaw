@@ -12,6 +12,17 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg06_guide_uses_private_home_probe_directory(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("`~/Library/Caches/defenseclaw/hookfire` directory under your home", text)
+        self.assertIn("Colima and OrbStack also\nrun containers in VMs", text)
+        self.assertNotIn("Docker Desktop shares your temp directory", text)
+
+    def test_fg06_image_build_reference_names_probe_directory(self):
+        section = page("reference/sandbox-cli.mdx").split("### `sandbox image build`", 1)[1]
+        self.assertIn("`~/Library/Caches/defenseclaw/hookfire`", section)
+        self.assertIn("`sandbox image build <harness> --force` recheck command", section)
+
     def test_fg07_workload_python_shims(self):
         text = page("sandboxes/guide.mdx")
         self.assertIn("`python3`, `python` and `pip` using `/sandbox/.venv`", text)
