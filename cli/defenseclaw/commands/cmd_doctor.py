@@ -11418,7 +11418,7 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
         # cannot stop a background server's attempts (GAP-0313).
         remediation = (
             "attempts are recent. An agent that was already running when its DefenseClaw token "
-            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "changed (an upgrade, a rollback, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
             "token until it restarts: restart your agents and their background servers (Codex's "
             "app-server outlives its sessions: run 'codex app-server daemon restart'). "
             "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
