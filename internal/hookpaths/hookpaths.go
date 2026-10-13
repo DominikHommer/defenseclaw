@@ -203,7 +203,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			if _, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison); static {
 				return true
 			}
-			if paths, glob := shellLiteralGlobCandidates(redirect.Word, context.cwd, links); glob {
+			if paths, glob := shellLiteralGlobCandidates(redirect.Word, context.cwd, home, context.file, redirect, links); glob {
 				for _, path := range paths {
 					add(path, "")
 				}

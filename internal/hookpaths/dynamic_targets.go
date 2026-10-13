@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -25,9 +26,64 @@ func shellHasLiteralGlob(word *syntax.Word) bool {
 	return false
 }
 
+func shellRenameIntoGlob(file *syntax.File, redirect *syntax.Redirect, pattern, cwd, home string) bool {
+	if file == nil || redirect == nil {
+		return true
+	}
+	unsafe := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || call.Pos().Offset() >= redirect.Pos().Offset() {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = staticShellWordWithVars(arg, home, nil, shellVariablePoison{})
+		}
+		if !static[0] {
+			return true
+		}
+		resolved := resolveLauncherWords(words, static, cwd)
+		if !resolved.ok || resolved.noExec || len(resolved.words) == 0 || !resolved.static[0] {
+			return true
+		}
+		program := programBase(resolved.words[0])
+		if !slices.Contains(renamePrograms, program) {
+			return true
+		}
+		if program == "rename" || len(resolved.words) < 3 {
+			unsafe = true
+			return false
+		}
+		for i, word := range resolved.words[1:] {
+			if !resolved.static[i+1] || word == "-t" || word == "--target-directory" || strings.HasPrefix(word, "--target-directory=") {
+				unsafe = true
+				return false
+			}
+		}
+		destination := finalOperandDestination(resolved.words[1:], resolved.cwd)
+		matched, err := filepath.Match(pattern, destination)
+		if destination == "" || err != nil || matched || destination == filepath.Dir(pattern) {
+			unsafe = true
+			return false
+		}
+		if info, statErr := os.Stat(destination); statErr == nil && info.IsDir() {
+			parent, parentErr := filepath.EvalSymlinks(filepath.Dir(pattern))
+			resolvedDestination, destinationErr := filepath.EvalSymlinks(destination)
+			if parentErr != nil || destinationErr != nil || parent == resolvedDestination {
+				unsafe = true
+				return false
+			}
+		}
+		return true
+	})
+	return unsafe
+}
+
 // shellLiteralGlobCandidates lists the current names of a redirect pattern.
-// A command that changes links can change that set before the redirect runs.
-func shellLiteralGlobCandidates(word *syntax.Word, cwd string, links shellLinks) ([]string, bool) {
+// Earlier commands or expansions can change that set before the redirect runs.
+func shellLiteralGlobCandidates(word *syntax.Word, cwd, home string, file *syntax.File, redirect *syntax.Redirect, links shellLinks) ([]string, bool) {
 	if word == nil || len(word.Parts) != 1 || !filepath.IsAbs(cwd) || links.opaque || len(links.aliases) > 0 {
 		return nil, false
 	}
@@ -37,6 +93,9 @@ func shellLiteralGlobCandidates(word *syntax.Word, cwd string, links shellLinks)
 		return nil, false
 	}
 	pattern := OperandPath(literal.Value, cwd)
+	if shellRenameIntoGlob(file, redirect, pattern, cwd, home) {
+		return nil, false
+	}
 	matches, err := filepath.Glob(pattern)
 	if err != nil || len(matches) > 256 {
 		return nil, false

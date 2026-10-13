@@ -19,6 +19,9 @@ func TestLiteralGlobRedirectCandidates(t *testing.T) {
 	if err := os.MkdirAll(cwd, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cwd, "result"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	key := filepath.Join(home, ".ssh", "authorized_keys")
 	if err := os.WriteFile(key, []byte("marker\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -27,6 +30,9 @@ func TestLiteralGlobRedirectCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(key, filepath.Join(cwd, "out-key.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(key, filepath.Join(cwd, "prior-key.txt")); err != nil {
 		t.Fatal(err)
 	}
 	rows := []struct {
@@ -41,6 +47,8 @@ func TestLiteralGlobRedirectCandidates(t *testing.T) {
 		{"protected match", `echo ok > ../.ssh/authorized_key*`, key, false},
 		{"variable pattern", `echo ok > "$F"*.txt`, "", true},
 		{"created link", `ln -s ../.ssh/authorized_keys out-new.txt; echo ok > out-*.txt`, "", true},
+		{"changed match set", `mv prior-key.txt result-key.txt; echo ok > result-*.txt`, "", true},
+		{"changed directory match", `mv prior-key.txt result/; echo ok > result/prior-*.txt`, "", true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

@@ -22,10 +22,16 @@ func TestProtectedWriteGlobDecisions(t *testing.T) {
 	if err := os.MkdirAll(cwd, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cwd, "result"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(key, []byte("marker\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(key, filepath.Join(cwd, "out-key.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(key, filepath.Join(cwd, "prior-key.txt")); err != nil {
 		t.Fatal(err)
 	}
 	rows := []struct {
@@ -35,6 +41,8 @@ func TestProtectedWriteGlobDecisions(t *testing.T) {
 		{"ordinary unmatched", `echo ok > report-*.txt`, false},
 		{"linked match", `echo ok > out-*.txt`, true},
 		{"protected match", `echo ok > ../.ssh/authorized_key*`, true},
+		{"changed match set", `mv prior-key.txt result-key.txt; echo ok > result-*.txt`, true},
+		{"changed directory match", `mv prior-key.txt result/; echo ok > result/prior-*.txt`, true},
 	}
 	for _, row := range rows {
 		for _, managed := range []bool{false, true} {
