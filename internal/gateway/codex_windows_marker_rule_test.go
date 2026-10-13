@@ -42,10 +42,27 @@ func TestCodexWindowsActionBlocksCompleteArgvMarker(t *testing.T) {
 		{"PowerShell cmdlet", `Set-Content -Path codex-blocked-marker.txt -Value dccert-block-marker`, true},
 		{"PowerShell wrapper", `powershell -NoProfile -Command "Set-Content -Path codex-blocked-marker.txt -Value dccert-block-marker"`, true},
 		{"cmd wrapper", `cmd.exe /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /d /c unquoted body", `cmd.exe /d /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /s /c unquoted body", `cmd.exe /s /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /q /c unquoted body", `cmd.exe /q /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /a /c unquoted body", `cmd.exe /a /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /u /c unquoted body", `cmd.exe /u /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /e:on /c unquoted body", `cmd.exe /e:on /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /v:off /c unquoted body", `cmd.exe /v:off /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /f:on /c unquoted body", `cmd.exe /f:on /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd.exe /t:0A /c unquoted body", `cmd.exe /t:0A /c echo dccert-block-marker > codex-blocked2.txt`, true},
+		{"cmd /d /c one-word body", `cmd /d /c dccert-block-marker`, true},
+		{"cmd /c one-word body", `cmd /c dccert-block-marker`, true},
+		{"& cmd.exe /c call operator", `& cmd.exe /c echo dccert-block-marker > codex-blocked2.txt`, true},
 		{"cmd caret redirect", `cmd.exe /c echo dccert-block-marker ^> codex-blocked2.txt`, true},
 		{"cmd quoted wrapper", `cmd.exe /c "echo dccert-block-marker > codex-blocked2.txt"`, true},
 		{"cmd with AutoRun disabled", `cmd.exe /d /c "echo dccert-block-marker > codex-blocked2.txt"`, true},
 		{"benign", `Set-Content -Path codex-action-allowed.txt -Value hi`, false},
+		{"benign cmd.exe /d /c", `cmd.exe /d /c echo hello > codex-allowed.txt`, false},
+		{"benign & cmd.exe /c", `& cmd.exe /c echo hello > codex-allowed.txt`, false},
+		{"cmd.exe /k stays partial", `cmd.exe /k echo dccert-block-marker > codex-allowed.txt`, false},
+		{"cmd.exe /x stays partial", `cmd.exe /x /c echo dccert-block-marker > codex-allowed.txt`, false},
+		{"cmd.exe /e:maybe stays partial", `cmd.exe /e:maybe /c echo dccert-block-marker > codex-allowed.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
@@ -84,14 +101,29 @@ func TestWindowsConnectorMarkerRuleUsesCompleteCMDWrapperArgv(t *testing.T) {
 		"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "omnigent", "opencode",
 	} {
 		t.Run(connectorName, func(t *testing.T) {
-			command := `cmd.exe /c echo dccert-block-marker > marker.txt`
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input:      actionfacts.Input{Tool: "powershell", Command: command, DialectHint: actionfacts.DialectPowerShell},
-				LegacyText: command, Connector: connectorName, EnforcementCapable: true,
-			})
-			match := findingWithID(findings, ruleID)
-			if match == nil || !match.contributesToEnforcement() {
-				t.Fatalf("marker rule was not enforceable for %s: %v", connectorName, FindingStrings(findings))
+			for _, command := range []string{
+				`cmd.exe /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /d /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /s /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /q /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /a /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /u /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /e:on /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /v:off /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /f:on /c echo dccert-block-marker > marker.txt`,
+				`cmd.exe /t:0A /c echo dccert-block-marker > marker.txt`,
+				`cmd /d /c dccert-block-marker`,
+				`cmd /c dccert-block-marker`,
+				`& cmd.exe /c echo dccert-block-marker > marker.txt`,
+			} {
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input:      actionfacts.Input{Tool: "powershell", Command: command, DialectHint: actionfacts.DialectPowerShell},
+					LegacyText: command, Connector: connectorName, EnforcementCapable: true,
+				})
+				match := findingWithID(findings, ruleID)
+				if match == nil || !match.contributesToEnforcement() {
+					t.Fatalf("marker rule was not enforceable for %s on %s: %v", connectorName, command, FindingStrings(findings))
+				}
 			}
 		})
 	}
