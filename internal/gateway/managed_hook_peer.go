@@ -44,6 +44,7 @@ const (
 	managedHookReasonLedgerUnavailable = "enterprise_managed_ledger_unavailable"
 	managedHookReasonConnectorUnknown  = "enterprise_managed_connector_unknown"
 	managedHookReasonSurfaceUnverified = "enterprise_managed_surface_unverified"
+	managedHookReasonGuardianOnly      = "enterprise_managed_guardian_only"
 )
 
 // managedHookPeer is the kernel-verified identity of a caller on the
@@ -516,6 +517,16 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == managedGuardianRepairAuditPath {
+			// The guardian runs as root and reports repairs over the same
+			// kernel-verified socket; user hooks cannot create audit rows.
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
 			// A hook in a private user namespace refused its agent before it
 			// could check the runtime state; the refusal left no audit row or
@@ -601,10 +612,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
-// notifier, the refused-write report of a standard user CLI and the managed
-// sandbox authority routes a user's sandbox daemon calls. Management,
-// status, configuration, policy and scan routes are not reachable through it
-// at all.
+// notifier, the refused-write report of a standard user CLI, the root
+// guardian's repair report and the managed sandbox authority routes a user's
+// sandbox daemon calls. Management, status, configuration, policy and scan
+// routes are not reachable through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -618,6 +629,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	a.registerConnectorHookRoutes(mux, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
+	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	a.registerSandboxAuthorityRoutes(mux)
 	a.registerSandboxRelayRoutes(mux)
 	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {

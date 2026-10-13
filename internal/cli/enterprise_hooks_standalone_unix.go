@@ -802,6 +802,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
 	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
+	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, repaired)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
