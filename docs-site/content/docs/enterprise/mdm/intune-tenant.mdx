@@ -128,12 +128,12 @@ Nothing was changed. Run again with --apply to make these changes.
 The helper does not upload packages: build and upload the Win32 app in the
 admin center as [Intune on Windows](/docs/enterprise/mdm/intune-windows)
 describes. Then assign it, and add the Remediations package from the kit's own
-scripts:
+scripts. Run these commands from `packaging/mdm/intune/tenant`:
 
 ```bash
 python3 intune_tenant.py assign-app --app "DefenseClaw Enterprise" --group defenseclaw-windows --apply
 python3 intune_tenant.py remediation --group defenseclaw-windows --daily-at 02:00 --apply
-python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ./defenseclaw-enterprise.sh --group defenseclaw-macos --apply
+python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ../../macos/defenseclaw-enterprise.sh --group defenseclaw-macos --apply
 ```
 
 | Command | What it does |
