@@ -589,9 +589,44 @@ func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment)
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		cause = " (" + failure + ")"
 	}
+	if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+		// A power loss in the middle of an rpm upgrade leaves both versions
+		// in the package database; ensure --from-package cannot repair that,
+		// and the next dnf transaction trips over it (GAP-0782).
+		return fmt.Sprintf("the installed package is version %s but the deployment applied %s, and the rpm database records %d versions of %s (%s): "+
+			"a package upgrade was interrupted. Remove the older record with `sudo dnf remove --duplicates %s`, then reinstall the package with "+
+			"`sudo dnf reinstall %s`, which applies it",
+			version, record.ProductVersion, len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName)
+	}
 	return fmt.Sprintf("the installed package is version %s but the deployment applied %s: the package's install run did not finish%s; "+
 		"fix that and run `%s --from-package` to apply it (add --allow-downgrade when %s is the older package you meant to go back to)",
 		version, record.ProductVersion, cause, env.lifecycleCommand(ActionEnsure), version)
+}
+
+// linuxPackageName is the deb and rpm package of the managed deployment.
+const linuxPackageName = "defenseclaw-enterprise"
+
+// rpmDuplicateRecords lists the versions of the package the rpm database
+// records, when it records more than one; nil otherwise (and on a host
+// without rpm).
+func (e *Env) rpmDuplicateRecords(ctx context.Context) []string {
+	if e.GOOS != "linux" {
+		return nil
+	}
+	result, err := e.Runner.Run(ctx, "rpm", "-q", "--qf", "%{VERSION}-%{RELEASE}\n", linuxPackageName)
+	if err != nil {
+		return nil
+	}
+	var versions []string
+	for _, line := range strings.Split(string(result.Stdout), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			versions = append(versions, line)
+		}
+	}
+	if len(versions) < 2 {
+		return nil
+	}
+	return versions
 }
 
 // restartSettle bounds the wait for a unit its service manager is about to
