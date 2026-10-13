@@ -2038,7 +2038,8 @@ func unresolvedProgramMayLink(words []string, static []bool) bool {
 // dataPrograms only print, search or count text, so link API text in their
 // arguments or here-documents is data, not code (GAP-1536).
 var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail",
-	"wc", "sort", "uniq", "cut", "tr", "nl", "less", "more"}
+	"wc", "sort", "uniq", "cut", "tr", "nl", "less", "more", "ls", "sha256sum", "diff", "stat",
+	"file", "man", "which", "type"}
 
 // opaqueLinkText reports link API text that the command may run. Only a
 // command made of data programs alone, without substitutions, is exempt: an

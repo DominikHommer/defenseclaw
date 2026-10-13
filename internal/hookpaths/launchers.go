@@ -28,6 +28,7 @@ type launcherSpec struct {
 	longFlags, longArgs   []string
 	longOptional          []string
 	positionals           int
+	negativeAdjustment    bool
 }
 
 // Every command prefix uses this option description before its child is read.
@@ -37,7 +38,7 @@ var launcherSpecs = map[string]launcherSpec{
 	"builtin":     {},
 	"exec":        {shortFlags: "cl", shortArgs: "a"},
 	"nohup":       {longFlags: []string{"help", "version"}},
-	"nice":        {shortArgs: "n", longArgs: []string{"adjustment"}},
+	"nice":        {shortArgs: "n", longArgs: []string{"adjustment"}, negativeAdjustment: true},
 	"timeout":     {shortFlags: "v", shortArgs: "sk", longFlags: []string{"foreground", "preserve-status", "verbose", "help", "version"}, longArgs: []string{"signal", "kill-after"}, positionals: 1},
 	"stdbuf":      {shortArgs: "ioe", longArgs: []string{"input", "output", "error"}},
 	"setsid":      {shortFlags: "cfw", longFlags: []string{"ctty", "fork", "wait"}},
@@ -88,7 +89,15 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		program := programBase(result.words[0])
 		spec, found := launcherSpecs[program]
 		if !found {
-			return result
+			if slices.Contains(dataPrograms, program) || launcherWriterProgram(program) {
+				return result
+			}
+			child := launcherChildIndex(result.words, result.static)
+			if child < 0 {
+				return result
+			}
+			result.words, result.static = result.words[child:], result.static[child:]
+			continue
 		}
 		if spec.kind == launcherEnv {
 			if !resolveEnvWords(&result) {
@@ -132,10 +141,6 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 			result.noExec = true
 			result.words, result.static = nil, nil
 			return result
-		}
-		if program == "nice" && index < len(result.words) && result.static[index] &&
-			len(result.words[index]) > 1 && result.words[index][0] == '-' && decimalDigits(result.words[index][1:]) {
-			index++
 		}
 		if program == "sudo" && (values["i"] != "" || values["s"] != "") {
 			result.ok = false
@@ -224,6 +229,31 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 
 func allStatic(static []bool) bool { return !slices.Contains(static, false) }
 
+// A program outside the launcher table can still start a child command. The
+// first known program word is the child; data programs stop that search.
+func launcherChildIndex(words []string, static []bool) int {
+	for i := 1; i < len(words); i++ {
+		if !static[i] || strings.HasPrefix(words[i], "-") {
+			continue
+		}
+		name := programBase(words[i])
+		if _, known := launcherSpecs[name]; known {
+			return i
+		}
+		if slices.Contains(dataPrograms, name) || launcherWriterProgram(name) {
+			return i
+		}
+	}
+	return -1
+}
+
+func launcherWriterProgram(program string) bool {
+	return literalInterpreterProgram(program) || slices.Contains(linkPrograms, program) ||
+		slices.Contains(copyPrograms, program) || slices.Contains(renamePrograms, program) ||
+		slices.Contains(archivePrograms, program) ||
+		slices.Contains([]string{"tee", "dd", "truncate", "install", "sed", "gsed", "awk", "gawk", "mawk", "nawk"}, program)
+}
+
 func launcherAssignmentPrefix(word *syntax.Word) string {
 	if word == nil || len(word.Parts) == 0 {
 		return ""
@@ -265,6 +295,10 @@ func launcherOptions(words []string, static []bool, spec launcherSpec) (int, map
 			return i, values, false
 		}
 		word := words[i]
+		if spec.negativeAdjustment && len(word) > 1 && word[0] == '-' && decimalDigits(word[1:]) {
+			values["n"] = word[1:]
+			continue
+		}
 		if word == "--" {
 			return i + 1, values, true
 		}
@@ -588,10 +622,6 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 				}
 			}
 			if !static[0] {
-				return true
-			}
-			_, known := launcherSpecs[programBase(words[0])]
-			if !known {
 				return true
 			}
 			result := resolveLauncherWords(words, static, context.cwd)
