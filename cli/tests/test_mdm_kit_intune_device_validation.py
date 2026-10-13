@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-
 PATH = Path(__file__).resolve().parents[2] / "packaging/mdm/intune/tenant/intune_tenant.py"
 
 

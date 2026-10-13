@@ -4,7 +4,6 @@ import os
 import pathlib
 import subprocess
 
-
 SCRIPT = pathlib.Path(__file__).with_name("verify-okta-identity.sh")
 
 

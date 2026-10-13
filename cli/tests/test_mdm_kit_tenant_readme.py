@@ -1,7 +1,6 @@
 import re
 from pathlib import Path
 
-
 README = Path(__file__).resolve().parents[2] / "packaging/mdm/intune/tenant/README.md"
 
 

@@ -2,7 +2,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "packaging/mdm/intune/linux/sync-local-group.sh"
 

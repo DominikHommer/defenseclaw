@@ -257,8 +257,11 @@ def require_editable_group(group: dict | None, name: str) -> None:
     if group is not None and (
         "DynamicMembership" in (group.get("groupTypes") or []) or group.get("mailEnabled") is True
     ):
-        raise GraphError(400, "MembershipNotEditable",
-                         f"group {name!r} has dynamic or mail-enabled membership that Graph cannot change; use a static security group")
+        raise GraphError(
+            400, "MembershipNotEditable",
+            f"group {name!r} has dynamic or mail-enabled membership that Graph cannot change; "
+            "use a static security group",
+        )
 
 
 def find_user(graph: Graph, upn: str) -> dict | None:

@@ -3,7 +3,6 @@ import re
 import subprocess
 from pathlib import Path
 
-
 KIT = Path(__file__).parent
 INSTALLER = KIT / "install-sssd-okta.sh"
 
@@ -37,8 +36,11 @@ def test_identical_sssd_config_repairs_unsafe_mode(tmp_path: Path) -> None:
         "log() { :; }\nfail() { exit \"$1\"; }\n"
         + function(source, "install_conf") + f"\ninstall_conf '{rendered}'\n"
     )
-    result = subprocess.run(["bash", "-c", script], env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CALL_LOG": str(calls)},
-                            capture_output=True, text=True, timeout=10)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "CALL_LOG": str(calls)},
+        capture_output=True, text=True, timeout=10,
+    )
     assert result.returncode == 0, result.stderr
     assert config.stat().st_mode & 0o777 == 0o600
     assert "chown root:root" in calls.read_text()
