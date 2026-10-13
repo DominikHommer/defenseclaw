@@ -530,11 +530,14 @@ in the `docker` group. The optional MicroVM driver also needs `/dev/kvm`, the
 its agent images are built in Docker, so it needs the `docker` group too.
 `ensure` and `verify` print a row for each piece.
 
-Membership in `docker` is root-equivalent: a member can read the
-administrator policy in `/etc/defenseclaw/config.yaml` and every other
-root-owned file, so add only the accounts that run sandboxes and keep secrets
-in the config as references. `ensure`, `status` and `verify` count the
-enrolled accounts in the group (`docker_group_members`); see
+Membership in `docker` is root-equivalent: a member can read and change what
+root can on the host, including the administrator policy in
+`/etc/defenseclaw/config.yaml`, the protected credentials and the services'
+environment. Credential and environment references keep secrets out of
+`config.yaml`, but they do not protect them from members of the group. In
+this release the only mitigation is to add only the accounts that run
+sandboxes. `ensure`, `status` and `verify` count the enrolled accounts in the
+group (`docker_group_members`); see
 [Docker group members](/docs/enterprise/sandboxes#what-users-see).
 
 The full guide covers the config keys, the recipes for both install modes, the

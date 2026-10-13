@@ -62,10 +62,11 @@ Okta through SSSD, and similar sources work. See
   sandbox holds the sandbox ports. Another account is told that sandboxes
   aren't available for it right now, without the name of the first account.
   Hosts shared by many people at once are a design topic, not a certified use.
-- **Docker is root-equivalent.** On the Docker driver a member of the `docker`
-  group can already do anything root can. DefenseClaw contains the agent and
-  keeps honest users inside the policy, and it does not stop a hostile local
-  user.
+- **Docker is root-equivalent.** On Linux a member of the `docker` group, which
+  sandboxes need with either driver, can already do anything root can, the
+  protected credentials included ([Docker group members](#what-users-see)).
+  DefenseClaw contains the agent and keeps honest users inside the policy, and
+  it does not stop a hostile local user.
 - **A registration vouches for the account, not for a VM.** The managed
   gateway learns from the kernel who calls, but it can't see the user's
   sandboxes. It relies on the user's own daemon to say which sandbox a
@@ -220,19 +221,26 @@ sudo usermod -aG kvm alice
 ```
 
 Plan for the group membership, because Docker access is root-equivalent. A
-member of `docker` can read every file on the host that root can, including
-the administrator policy in `/etc/defenseclaw/config.yaml`, the sandbox
-profiles and packs, and other people's files, whatever their owner and mode.
-For those accounts the rule that each person sees only their own policy does
-not hold (see [Docker group members](#what-users-see)). Linux
-sandboxes need the group in this release, so:
+member of `docker` can read and change what root can on the host, including
+the administrator policy in `/etc/defenseclaw/config.yaml`, the protected
+credentials, the services' environment, the sandbox profiles and packs, and
+other people's files, whatever their owner and mode. For those accounts the
+rule that each person sees only their own policy does not hold (see
+[Docker group members](#what-users-see)). Linux sandboxes need the group in
+this release, so:
 
 - Put only the accounts that run sandboxes in `docker`, never an administrator
-  or service account that does not.
-- Keep every secret out of the config as a reference: a managed config already
-  refuses inline keys and tokens, and a destination header that carries a
-  credential belongs in `{credential: NAME}` or `{env: NAME}`, not in a static
-  value.
+  or service account that does not. In this release that is the only
+  mitigation.
+- Credential and environment references keep secrets out of `config.yaml`, but
+  they do not protect them from members of the group: the LLM and AI Defense
+  keys are within their reach too.
+- A managed config refuses inline values only for `llm.api_key`,
+  `guardrail.llm.api_key`, `guardrail.judge.llm.api_key`,
+  `scanners.mcp_scanner.llm.api_key`, `scanners.skill_scanner.llm.api_key`,
+  `scanners.plugin_llm.api_key`, `cisco_ai_defense.api_key` and
+  `gateway.token`. Webhook URLs and provider or destination headers are
+  accepted as literals, and anyone who can read the config can read them.
 - `ensure`, `status` and `verify` count the enrolled accounts in the group
   (`docker_group_members`, a number, no names), and
   `defenseclaw sandbox doctor` tells such a person what the membership means.
@@ -1105,15 +1113,20 @@ the process list. DefenseClaw does not hide it.
 Docker, and the agent images of MicroVM sandboxes are built in Docker for each
 account ([Per-OS prerequisites](#per-os-prerequisites)). Membership in
 `docker` is root-equivalent, a property of Docker, not of DefenseClaw. A member
-can read every root-owned file on the host, so file modes do not keep the
-organization's `config.yaml`, the sandbox profiles and packs, or other
-people's files from them, and the privacy rules above hold only for accounts
-outside the group. DefenseClaw's own routes, sockets and messages still show
-each person only their own policy.
+can read and change what root can on the host, so file modes do not keep the
+organization's `config.yaml`, the protected credentials, the services'
+environment, the sandbox profiles and packs, or other people's files from
+them, and the privacy rules above hold only for accounts outside the group.
+DefenseClaw's own routes, sockets and messages still show each person only
+their own policy.
 
-- Treat the sandbox policy on a Linux host as readable by every account in
-  `docker`, and keep secrets in it as references only.
-- Put only the accounts that run sandboxes in the group.
+- Treat the administrator policy, the protected credentials (the LLM and AI
+  Defense keys among them) and the services' environment on a Linux host as
+  readable and changeable by every account in `docker`. References keep
+  secrets out of `config.yaml`; they do not protect them from members of the
+  group.
+- The only mitigation in this release is to put only the accounts that run
+  sandboxes in the group.
 - `ensure`, `status` and `verify` report `docker_group_members` with the
   number of enrolled accounts in the group, and `sandbox doctor` warns each of
   them.
@@ -1287,7 +1300,7 @@ text and in `--json`. None of them is raised for a person.
 | `openshell_driver_fallback` | A MicroVM prerequisite is missing but the Docker fallback is ready, so people still get sandboxes | Fix the prerequisite if you want MicroVMs, or set `driver: docker` |
 | `openshell_launcher_conflict` | The launcher path (`/usr/bin/defenseclaw`, or `/usr/local/bin/defenseclaw` on macOS) holds a file that is not DefenseClaw's link, a Python install for example, so people don't get `defenseclaw sandbox` | Move that file aside, then run `ensure` |
 | `sandbox_user_groups` | People who need `docker` or `kvm` are not in it. `ensure` never adds anyone | Add them ([Per-OS prerequisites](#per-os-prerequisites)) |
-| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent: they can read the administrator policy and every other root-owned file. A number, never names | Keep the group to the accounts that run sandboxes and secrets out of the policy ([Docker group members](#what-users-see)) |
+| `docker_group_members` | How many enrolled accounts are in the `docker` group (Linux), which is root-equivalent: they can read and change what root can, including the administrator policy, the protected credentials and the services' environment. A number, never names | Keep the group to the accounts that run sandboxes; references do not protect secrets from its members ([Docker group members](#what-users-see)) |
 | `sandbox_pending_restart` | A user's daemon is outdated and waits for that user's sandboxes to stop | None; the user's next idle `defenseclaw sandbox` command restarts it |
 | `sandbox_user_state` | A per-user change could not be applied or removed (units, a file that changed after DefenseClaw wrote it, a teardown) | Read the message; the next run tries again, or finish by hand as it says |
 | `sandbox_default_profile_looser` | `default_profile` is looser than an assigned profile for a field | Make `default_profile` repeat the stricter setting |
