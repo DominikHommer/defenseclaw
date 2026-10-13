@@ -1945,7 +1945,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
-		return runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		started := time.Now()
+		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		if err == nil {
+			recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run)
+		}
+		return run, err
 	}
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
 		return run, err

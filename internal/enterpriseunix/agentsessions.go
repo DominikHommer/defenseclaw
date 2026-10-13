@@ -267,9 +267,10 @@ func parseElapsed(text string) (time.Duration, bool) {
 }
 
 // describeAgentSessionsBeforeActivation warns, per account, about agent
-// sessions that started before this deployment was activated, and about
-// Claude Code sessions that were open while the DefenseClaw drop-in was
-// changed or removed before DefenseClaw put it back.
+// sessions that started before this deployment was activated, about
+// sessions that started before the guardian put back hooks a user changed or
+// removed, and about Claude Code sessions that were open while the
+// DefenseClaw drop-in was changed or removed before DefenseClaw put it back.
 func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, record *Deployment) {
 	if record == nil || record.NoStart {
 		return
@@ -285,6 +286,7 @@ func (l *lifecycle) describeAgentSessionsBeforeActivation(ctx context.Context, r
 	l.warnAgentSessions(l.env.agentSessionsStartedBefore(ctx, activated, record.ServiceUID), func(sessions string) string {
 		return fmt.Sprintf("runs %s, started before DefenseClaw was activated on this computer at %s; an agent reads its hooks when it starts, so these sessions run without DefenseClaw until they are restarted: ask that user to restart them", sessions, activationTime)
 	})
+	l.describeAgentSessionsBeforeGuardianRestore(ctx, record, activated)
 	restored := l.env.claudeDropInRestoredAt()
 	if !restored.After(activated) {
 		return

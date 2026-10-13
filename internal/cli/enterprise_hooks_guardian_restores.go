@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,14 +18,17 @@ import (
 )
 
 // hookGuardianRestoresFile records, in the guardian's data directory, when
-// the standalone Windows hook guardian last put back each target's hooks
+// the standalone hook guardian (Windows, Linux, macOS) last put back each
+// target's hooks
 // because they no longer verified, for example after a standard user
 // emptied the hooks block of their Hermes config. An agent reads its hooks
 // when it starts, and Hermes keeps the callbacks it loaded for the life of
 // the process: a session started while the hooks were gone kept running
 // without DefenseClaw after the guardian restored the file, while status
-// and verify read complete (GAP-0440). Status, verify and ensure name that
-// account's sessions of the connector that started before the restore.
+// and verify read complete (GAP-0440 on Windows, GAP-0499 on Linux and
+// macOS). Status, verify and ensure name that account's sessions of the
+// connector that started before the restore. A Windows target is keyed by
+// its SID, a Linux or macOS one by its uid.
 //
 // It is its own file: the guardian's state and authorization records keep
 // the schema a prior binary reads strictly.
@@ -35,7 +39,9 @@ const hookGuardianRestoresFile = "hook_guardian_restores.json"
 const hookGuardianRestoresMaxBytes = 1 << 20
 
 type enterpriseHookGuardianRestore struct {
-	SID        string `json:"sid"`
+	SID        string `json:"sid,omitempty"`
+	UID        *int   `json:"uid,omitempty"`
+	User       string `json:"user,omitempty"`
 	Connector  string `json:"connector"`
 	RestoredAt string `json:"restored_at"`
 }
@@ -45,13 +51,39 @@ type enterpriseHookGuardianRestoreRecord struct {
 	Targets []enterpriseHookGuardianRestore `json:"targets"`
 }
 
-// enterpriseHookGuardianRestoresEnabled is true for the standalone Windows
-// guardian only; elsewhere, and on Secure Client, the guardian writes no
-// restore record.
+// enterpriseHookGuardianRestoresEnabled is true for the standalone guardian
+// only; on Secure Client the guardian writes no restore record.
 var enterpriseHookGuardianRestoresEnabled = func() bool { return false }
 
 func enterpriseHookGuardianRestoreKey(sid, connectorName string) string {
 	return windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: connectorName})
+}
+
+// enterpriseHookGuardianRestoreUIDKey keys a Linux or macOS target.
+func enterpriseHookGuardianRestoreUIDKey(uid int, connectorName string) string {
+	return "uid:" + strconv.Itoa(uid) + "\x00" + strings.ToLower(strings.TrimSpace(connectorName))
+}
+
+// key is the entry's SID key, its uid key, or "" for an entry that names
+// neither.
+func (entry enterpriseHookGuardianRestore) key() string {
+	if sid := strings.TrimSpace(entry.SID); sid != "" {
+		return enterpriseHookGuardianRestoreKey(sid, entry.Connector)
+	}
+	if entry.UID != nil && *entry.UID > 0 {
+		return enterpriseHookGuardianRestoreUIDKey(*entry.UID, entry.Connector)
+	}
+	return ""
+}
+
+// enterpriseHookGuardianRestoreRowKey keys a reconcile row like its entry.
+func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string {
+	entry := enterpriseHookGuardianRestore{SID: row.SID, Connector: row.Connector}
+	if row.UID > 0 {
+		uid := row.UID
+		entry.UID = &uid
+	}
+	return entry.key()
 }
 
 // recordEnterpriseHookGuardianRestores dates the targets this reconcile put
@@ -72,16 +104,16 @@ func recordEnterpriseHookGuardianRestores(
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	enrolled := make(map[string]bool, len(rows))
 	for _, row := range rows {
-		if sid := strings.TrimSpace(row.SID); sid != "" {
-			enrolled[enterpriseHookGuardianRestoreKey(sid, row.Connector)] = true
+		if key := enterpriseHookGuardianRestoreRowKey(row); key != "" {
+			enrolled[key] = true
 		}
 	}
 	entries := map[string]enterpriseHookGuardianRestore{}
 	changed := false
 	if record, err := readEnterpriseHookGuardianRestoreRecord(path); err == nil {
 		for _, entry := range record.Targets {
-			key := enterpriseHookGuardianRestoreKey(entry.SID, entry.Connector)
-			if !enrolled[key] {
+			key := entry.key()
+			if key == "" || !enrolled[key] {
 				changed = true
 				continue
 			}
@@ -92,16 +124,13 @@ func recordEnterpriseHookGuardianRestores(
 		changed = true
 	}
 	for _, entry := range restored {
-		sid := strings.ToUpper(strings.TrimSpace(entry.SID))
-		if sid == "" {
+		entry.SID = strings.ToUpper(strings.TrimSpace(entry.SID))
+		entry.Connector = strings.ToLower(strings.TrimSpace(entry.Connector))
+		key := entry.key()
+		if key == "" {
 			continue
 		}
-		key := enterpriseHookGuardianRestoreKey(sid, entry.Connector)
-		entries[key] = enterpriseHookGuardianRestore{
-			SID:        sid,
-			Connector:  strings.ToLower(strings.TrimSpace(entry.Connector)),
-			RestoredAt: entry.RestoredAt,
-		}
+		entries[key] = entry
 		changed = true
 	}
 	if !changed {
@@ -111,12 +140,7 @@ func recordEnterpriseHookGuardianRestores(
 	for _, entry := range entries {
 		record.Targets = append(record.Targets, entry)
 	}
-	sort.Slice(record.Targets, func(i, j int) bool {
-		if record.Targets[i].SID != record.Targets[j].SID {
-			return record.Targets[i].SID < record.Targets[j].SID
-		}
-		return record.Targets[i].Connector < record.Targets[j].Connector
-	})
+	sort.Slice(record.Targets, func(i, j int) bool { return record.Targets[i].key() < record.Targets[j].key() })
 	data, err := json.Marshal(record)
 	if err == nil {
 		err = writeEnterpriseHookProtectedFile(path, append(data, '\n'))
@@ -146,8 +170,8 @@ func readEnterpriseHookGuardianRestoreRecord(path string) (enterpriseHookGuardia
 }
 
 // readEnterpriseHookGuardianRestores returns when the guardian last put back
-// each target's hooks, keyed as windowsEnterpriseManifestRowKey; nil when
-// there is no readable record.
+// each target's hooks, keyed as windowsEnterpriseManifestRowKey (Windows) or
+// enterpriseHookGuardianRestoreUIDKey; nil when there is no readable record.
 func readEnterpriseHookGuardianRestores(dataDir string) map[string]time.Time {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
@@ -160,10 +184,11 @@ func readEnterpriseHookGuardianRestores(dataDir string) map[string]time.Time {
 	restores := make(map[string]time.Time, len(record.Targets))
 	for _, entry := range record.Targets {
 		at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.RestoredAt))
-		if err != nil || strings.TrimSpace(entry.SID) == "" {
+		key := entry.key()
+		if err != nil || key == "" {
 			continue
 		}
-		restores[enterpriseHookGuardianRestoreKey(entry.SID, entry.Connector)] = at
+		restores[key] = at
 	}
 	return restores
 }

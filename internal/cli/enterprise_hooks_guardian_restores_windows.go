@@ -5,10 +5,20 @@
 
 package cli
 
-import "github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+import (
+	"io"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
 
 // Only the standalone Windows guardian records the targets it put back
 // (GAP-0440); Secure Client is unchanged.
 func init() {
 	enterpriseHookGuardianRestoresEnabled = enterprisehooks.WindowsStandaloneProcess
+}
+
+// recordEnterpriseHookStandaloneUnixRestores is Linux and macOS only; the
+// standalone Unix guardian never runs here.
+func recordEnterpriseHookStandaloneUnixRestores(io.Writer, string, time.Time, enterpriseHookReconcileRun) {
 }
