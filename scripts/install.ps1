@@ -370,7 +370,13 @@ function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {
 }
 
 function Get-Sha256([string]$Path) {
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    # A file this account cannot read printed PowerShell's raw ReadError and
+    # "The property 'Hash' cannot be found" before the sentence that said what
+    # happened (GAP-0007): say once which file could not be read.
+    try { $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $Path -ErrorAction Stop } catch {
+        throw "Could not read $Path; restore read access to it, then try again"
+    }
+    return $hash.Hash.ToLowerInvariant()
 }
 
 function Get-ListedSha256([string]$Checksums, [string]$Name) {

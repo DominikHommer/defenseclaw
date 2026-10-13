@@ -895,3 +895,20 @@ def test_windows_rollback_and_upgrade_run_the_hook_entry_prune() -> None:
     assert "if (-not $toLegacy) {\n        " + prune in rollback
     install = _ps1_function("Install-New")
     assert install.index('"migrate"') < install.index('Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"))')
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_unreadable_file_is_named_once_without_the_raw_hash_error(tmp_path: Path) -> None:
+    # rel-1-0-1:GAP-0007: a rollback over an unreadable previous gateway printed
+    # PowerShell's ReadError record and "The property 'Hash' cannot be found".
+    missing = tmp_path / "previous" / "bin" / "defenseclaw-gateway.exe"
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"{_ps1_function('Get-Sha256')}\n"
+        f"try {{ Get-Sha256 '{missing}' }} catch {{ 'caught: ' + $_.Exception.Message }}\n"
+    )
+    completed = _run_powershell(script)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    out = completed.stdout + completed.stderr
+    assert f"caught: Could not read {missing}; restore read access to it, then try again" in out
+    assert "Hash" not in out and "CategoryInfo" not in out
