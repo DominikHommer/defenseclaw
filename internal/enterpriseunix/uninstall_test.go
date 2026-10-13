@@ -803,3 +803,32 @@ func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) 
 		t.Fatal("the rerun did not finish the removal")
 	}
 }
+
+// GAP-1440: the uninstall removed the lifecycle state, the deployment record
+// with it, before it knew every state folder was gone; when one could not be
+// removed, the rerun found no record and was a not_installed no-op. The
+// record stays until the removal is complete.
+func TestUninstallKeepsTheRecordWhenAStateFolderStays(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove a folder from a read-only parent")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	parent := filepath.Dir(h.env.P(h.env.Layout.LogDir))
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	requireError(t, h.run(Options{Action: ActionUninstall}), codeUninstall)
+	if !exists(h.env.deploymentPath()) {
+		t.Fatal("the failed uninstall removed the deployment record")
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retry := h.run(Options{Action: ActionUninstall})
+	requireOK(t, retry)
+	if retry.Noop || exists(h.env.deploymentPath()) || exists(h.env.P(h.env.Layout.LogDir)) {
+		t.Fatalf("the rerun did not finish the removal (noop %v)", retry.Noop)
+	}
+}

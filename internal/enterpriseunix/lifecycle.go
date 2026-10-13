@@ -481,6 +481,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 
 // removeLifecycleStateKeepingLock clears transaction state without replacing
 // the lock inode. Waiters can have the file open before this run acquired it.
+// The deployment record stays too: the uninstall removes it last, once
+// everything else is gone. Removed here, an uninstall that then failed to
+// remove another state folder left no record, so its rerun was a
+// not_installed no-op and the leftovers needed --adopt-existing (GAP-1440).
 func (e *Env) removeLifecycleStateKeepingLock() error {
 	dir := e.P(e.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
@@ -488,7 +492,7 @@ func (e *Env) removeLifecycleStateKeepingLock() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName {
+		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
