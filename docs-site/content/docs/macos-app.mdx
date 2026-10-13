@@ -146,7 +146,8 @@ The panel has four parts:
   - **Stop…** asks first, then runs `defenseclaw sandbox stop <name> --yes`;
     `defenseclaw sandbox connect <name>` resumes it. A detached run still
     going ends: DefenseClaw marks it interrupted and keeps its log for
-    `defenseclaw sandbox logs <name>`.
+    `defenseclaw sandbox logs <name>`. A full-disk MicroVM with work not yet
+    pulled keeps running and the stop exits `5`, even with `--yes`.
   - **Review changes** runs `defenseclaw sandbox review <name>`.
   - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
     which stops the sandbox and puts the project folder back to its
