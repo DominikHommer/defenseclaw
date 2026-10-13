@@ -525,7 +525,7 @@ scanners:
 | `scanners.skill_scanner.binary`, `scanners.mcp_scanner.binary` | Removed. DefenseClaw runs the scanners it ships. |
 | `scanners.skill_scanner.policy` empty or missing | `policy: quiet`, the recommended preset. This is the one value an unmodified install moves. |
 | `policy: strict`, `balanced`, `permissive`, `low-noise` or `quiet` | Kept. |
-| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. If the file cannot be read, migration stops with an error. |
+| `policy: <path to a file>` | `policy: custom` with `policy_file: {path, digest}`. A relative path, including a file named `custom` (not a preset in 0.8.x), is read from the directory where upgrade runs and pinned by its absolute path. If the file cannot be read, migration stops and keeps the v8 config; restore the file or select a preset, then run upgrade again. |
 | `use_virustotal` | `analyzers.virustotal.enabled` (written only when it was `true`). |
 | `virustotal_api_key` (inline) | Written to `<data_dir>/.env` under the name in `virustotal_api_key_env`, or `VIRUSTOTAL_API_KEY`. The record shows `<redacted>`, and `config.yaml` names only the variable. |
 | `virustotal_api_key_env` | `analyzers.virustotal.api_key_env`. |
@@ -657,6 +657,9 @@ in `config.yaml` (`asset_policy`, `admission`) or in a module that reads
 
 The migration moves entries from a legacy `custom-providers.json` into
 `llm_providers.custom` and `llm_providers.ollama_ports` in `config.yaml`.
+A provider named more than once in the overlay, or already present in
+`llm_providers.custom`, becomes one entry: lists are unioned and the overlay's
+values win, as in 0.8.x. `migration-v9.json` notes each merged provider.
 For an overlay inside the data home, it then renames the old file to
 `custom-providers.json.migrated-v9`. An overlay outside the data home stays
 in place so a 0.8.x rollback can still read it. Future provider changes use

@@ -12,6 +12,18 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg02_relative_scanner_policy_path(self):
+        row = next(line for line in page("reference/migrate-v9.mdx").splitlines()
+                   if line.startswith("| `policy: <path to a file>` |"))
+        self.assertIn("including a file named `custom`", row)
+        self.assertIn("pinned by its absolute path", row)
+        self.assertNotIn("becomes `quiet`", row)
+
+    def test_fg02_duplicate_custom_providers_merge(self):
+        section = page("reference/migrate-v9.mdx").split("### Custom providers", 1)[1]
+        self.assertIn("lists are unioned and the overlay's\nvalues win", section)
+        self.assertIn("`migration-v9.json` notes each merged provider", section)
+
     def test_fg01_rollback_restores_data_and_prunes_hooks(self):
         text = page("get-started/upgrade.mdx")
         self.assertIn("comes back when you run `defenseclaw rollback`\nagain", text)
