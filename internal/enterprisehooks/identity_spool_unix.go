@@ -31,6 +31,21 @@ type IdentitySpoolAccount struct {
 	User string
 }
 
+// checkMacOSRecordUID refuses the Open Directory record dscl returned for an
+// account unless its UniqueID is the account's uid. dscl /Search reads by
+// short name, so the record can be another account's: its verified identity
+// (UPN, domain) was then spooled under this uid (GAP-1075).
+func checkMacOSRecordUID(dscl string, uid int) error {
+	got, ok := useridentity.MacOSDSCLRecordUID(dscl)
+	if !ok {
+		return fmt.Errorf("the directory record has no single UniqueID; refusing it for uid %d", uid)
+	}
+	if got != uid {
+		return fmt.Errorf("record belongs to another account (UniqueID %d, not uid %d)", got, uid)
+	}
+	return nil
+}
+
 // identitySpoolLookupTimeout bounds the privileged lookups for one account,
 // so one unreachable directory cannot stall the guardian's pass.
 const identitySpoolLookupTimeout = 10 * time.Second

@@ -16,6 +16,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -225,5 +226,21 @@ func TestIdentitySpoolStaleWhenOneAccountStopsRefreshing(t *testing.T) {
 	oldest, key, stale := IdentitySpoolStale(dir, now, 30*time.Minute)
 	if !stale || now.Sub(oldest) < time.Hour || key != "1001" {
 		t.Fatalf("oldest record = %s (%q), stale = %v; want the stale account reported", oldest, key, stale)
+	}
+}
+
+// GAP-1075: a macOS record dscl returned by short name is refused unless its
+// UniqueID is the uid the enumerator resolves: another account's verified
+// identity must not be spooled under this uid.
+func TestMacOSRecordOfAnotherAccountIsRefused(t *testing.T) {
+	if err := checkMacOSRecordUID("UniqueID: 501\nAuthenticationAuthority: ;Kerberosv5;;alice@CORP.EXAMPLE.COM;CORP.EXAMPLE.COM;\n", 501); err != nil {
+		t.Fatalf("the account's own record was refused: %v", err)
+	}
+	err := checkMacOSRecordUID("UniqueID: 1404012345\nAltSecurityIdentities: PlatformSSO:alice@contoso.example\n", 501)
+	if err == nil || !strings.Contains(err.Error(), "record belongs to another account") {
+		t.Fatalf("another account's record was accepted: %v", err)
+	}
+	if err := checkMacOSRecordUID("AuthenticationAuthority: ;ShadowHash;\n", 501); err == nil {
+		t.Fatal("a record without a UniqueID was accepted")
 	}
 }
