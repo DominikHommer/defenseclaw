@@ -187,3 +187,33 @@ func TestDsclDeleteErrorNamesTheRecordAndTheError(t *testing.T) {
 		t.Fatalf("an error without an Open Directory name = %v", got)
 	}
 }
+
+// appearingLoginAccountRunner answers no defenseclaw account until
+// systemd-sysusers ran, then a login account: a directory account NSS could
+// not reach at the first lookup, which sysusers found and left alone.
+type appearingLoginAccountRunner struct{ sysusersRan bool }
+
+func (r *appearingLoginAccountRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	switch {
+	case name == "systemd-sysusers":
+		r.sysusersRan = true
+		return CommandResult{}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "passwd" && r.sysusersRan:
+		return CommandResult{Stdout: []byte("defenseclaw:x:1404:1404:Dee Fense:/home/defenseclaw:/bin/bash\n")}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "group" && r.sysusersRan:
+		return CommandResult{Stdout: []byte("defenseclaw:x:1404:\n")}, nil
+	}
+	return CommandResult{ExitCode: 2}, errors.New("exit status 2")
+}
+
+// GAP-1457: the lookup after systemd-sysusers recorded any account it found
+// as created, also a login account that existed before (sysusers found it
+// and created nothing), which the uninstall then deleted. It is refused like
+// a login account found before.
+func TestLinuxAccountEnsureRefusesALoginAccountFoundAfterSysusers(t *testing.T) {
+	accounts := &linuxAccounts{env: &Env{GOOS: "linux", Runner: &appearingLoginAccountRunner{}}}
+	account, err := accounts.Ensure(context.Background(), "defenseclaw")
+	if err == nil || account.Created || !strings.Contains(err.Error(), "login shell /bin/bash") {
+		t.Fatalf("Ensure = %+v, %v; want a login-account refusal", account, err)
+	}
+}

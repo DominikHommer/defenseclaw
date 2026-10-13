@@ -140,6 +140,14 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 			return Account{}, err
 		}
 		if ok {
+			// An account that only now answers (a directory account NSS
+			// could not reach before, which systemd-sysusers then found and
+			// left alone) is not one this run created: a login account is
+			// refused, as above, instead of being recorded as created and
+			// deleted by the uninstall (GAP-1457).
+			if account.LoginShell != "" {
+				return Account{}, loginAccountError(account, a.env.lifecycleCommand("ensure"), a.env.GOOS)
+			}
 			account.Created = true
 			return account, nil
 		}
@@ -166,6 +174,9 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	}
 	if !ok {
 		return Account{}, fmt.Errorf("service account %s was not created", name)
+	}
+	if account.LoginShell != "" {
+		return Account{}, loginAccountError(account, a.env.lifecycleCommand("ensure"), a.env.GOOS)
 	}
 	account.Created = true
 	return account, nil
