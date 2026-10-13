@@ -504,6 +504,20 @@ pam_step() {
   fi
 }
 
+sshd_reload_with_marker() {
+  local marker="$SSHD_DROPIN.reload-pending"
+  if [[ -L $marker || ( -e $marker && ! -f $marker ) ]]; then
+    fail 1 "the sshd reload state $marker is not a regular file; review it before retrying"
+  fi
+  if [[ ! -e $marker ]]; then
+    (umask 077; : > "$marker")
+  fi
+  if ! systemctl reload sshd; then
+    fail 1 "sshd reload failed; $marker keeps the retry pending for the next run"
+  fi
+  rm -f -- "$marker"
+}
+
 sshd_step() {
   if ((NO_SSHD)); then
     log "  skipped: sshd drop-in (--no-sshd)"
@@ -520,6 +534,18 @@ Match Group $ALLOW_GROUP
 Match all
 DROPIN
   if [[ -r $SSHD_DROPIN ]] && cmp -s "$want" "$SSHD_DROPIN"; then
+    if [[ -e $SSHD_DROPIN.reload-pending || -L $SSHD_DROPIN.reload-pending ]]; then
+      if ((DRY_RUN)); then
+        CHANGED=1
+        log "  would retry the pending sshd reload"
+      else
+        sshd -t 2> "$WORK/sshd-test.err" || fail 1 "sshd -t rejected the unchanged drop-in; reload remains pending"
+        sshd_reload_with_marker
+        CHANGED=1
+        log "  retried: sshd reloaded the unchanged $SSHD_DROPIN"
+      fi
+      return 0
+    fi
     log "  unchanged: $SSHD_DROPIN"
     return 0
   fi
@@ -545,7 +571,7 @@ DROPIN
     if [[ -n $backup ]]; then cp -p "$backup" "$SSHD_DROPIN"; else rm -f -- "$SSHD_DROPIN"; fi
     fail 1 "sshd -t rejected a configuration file: $rejected. The new drop-in was rolled back; $CONF was already replaced (previous: ${PREVIOUS_SSSD_CONF:-none, this was a first install})."
   fi
-  systemctl reload sshd
+  sshd_reload_with_marker
   CHANGED=1
   log "  installed: $SSHD_DROPIN (sshd reloaded; open sessions stay)"
 }
