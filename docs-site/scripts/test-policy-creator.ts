@@ -452,6 +452,24 @@ test('live test: config_version 9 Rego gets the policy as input.admission and in
   assert.equal(guardrail.thresholds.block, policy.guardrail.block_threshold);
 });
 
+test('live test: guardrail projection carries the selected mode and defaults to observe', () => {
+  const policy = makePolicy();
+  assert.equal(projectPolicyToData(policy).guardrail.mode, 'observe');
+  policy.guardrail.mode = 'action';
+  assert.equal(projectPolicyToData(policy).guardrail.mode, 'action');
+});
+
+test('live test: policy guardrail mode overrides a canned scenario mode', () => {
+  const policy = makePolicy();
+  const scenario = { mode: 'action', findings: [{ severity: 'CRITICAL' }] };
+  let data = projectPolicyToData(policy);
+  assert.equal((withPolicyInput('guardrail', scenario, data) as { mode: string }).mode, 'observe');
+
+  policy.guardrail.mode = 'action';
+  data = projectPolicyToData(policy);
+  assert.equal((withPolicyInput('guardrail', { ...scenario, mode: 'observe' }, data) as { mode: string }).mode, 'action');
+});
+
 test('live test withholds built-in first-party trust without content verification', () => {
   const data = projectPolicyToData(policyFromPreset('default'));
   data.first_party_allow_list = [
