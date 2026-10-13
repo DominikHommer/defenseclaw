@@ -58,6 +58,75 @@ func TestLaunchOptionsUseTheHarnessesOptionArity(t *testing.T) {
 	}
 }
 
+// #1074 verifier: an option whose value is the session's first prompt, or
+// is attached to it, is a one-off like a prompt word: the record leaves it
+// out with its value, in every form the harness's parser takes, and keeps
+// the options after it. Kept, `connect` gave OpenCode the run's task again
+// at every session (its launcher adds --auto, so it ran it).
+func TestLaunchOptionsLeaveOutAPromptOption(t *testing.T) {
+	for _, c := range []struct {
+		harness string
+		args    []string
+		want    []string
+	}{
+		{"opencode", []string{"--prompt", "delete the build dir and push"}, nil},
+		{"opencode", []string{"--prompt", "fixit"}, nil},
+		{"opencode", []string{"--prompt=delete the build dir", "--agent", "plan"}, []string{"--agent", "plan"}},
+		{"opencode", []string{"-m", "amazon-bedrock/claude", "--prompt", "delete the build dir and push", "-c"},
+			[]string{"-m", "amazon-bedrock/claude", "-c"}},
+		{"opencode", []string{"./app", "--prompt", "fix it", "--auto"}, []string{"./app", "--auto"}},
+		// A prompt option at the end, then `--`, leaves no word out.
+		{"opencode", []string{"--prompt", "--", "x"}, nil},
+		// Codex attaches -i/--image files to the first prompt.
+		{"codex", []string{"-i", "shot.png", "-m", "gpt-5"}, []string{"-m", "gpt-5"}},
+		{"codex", []string{"--image=a.png,b.png", "--full-auto"}, []string{"--full-auto"}},
+		{"codex", []string{"-ishot.png", "-m", "gpt-5"}, []string{"-m", "gpt-5"}},
+		{"codex", []string{"-m", "gpt-5", "-i", "shot.png", "explain this"}, []string{"-m", "gpt-5"}},
+		// Copilot CLI runs -i/--interactive's prompt at start.
+		{"copilot", []string{"-i", "fix the tests", "--model", "claude-sonnet-4.5"}, []string{"--model", "claude-sonnet-4.5"}},
+		{"copilot", []string{"--interactive=fixit", "--allow-all-tools"}, []string{"--allow-all-tools"}},
+		// Hermes's one-shot prompt and chat's attached image.
+		{"hermes", []string{"-z", "say hi", "-m", "gpt-5-mini"}, []string{"-m", "gpt-5-mini"}},
+		{"hermes", []string{"chat", "--image", "shot.png", "--yolo"}, []string{"chat", "--yolo"}},
+	} {
+		if got := launchOptions(harnessSpec(t, c.harness), c.args); !slices.Equal(got, c.want) {
+			t.Errorf("%s: launchOptions(%q) = %q, want %q", c.harness, c.args, got, c.want)
+		}
+	}
+	// A prompt option after an unkept value is not named among the
+	// settings the record loses: it is never recorded.
+	opencode := harnessSpec(t, "opencode")
+	_, unkept, later := launchOptionsSplit(opencode, []string{"--some-new-option", "a b", "--prompt", "fix it", "--model", "m"})
+	if unkept != "--some-new-option" || !slices.Equal(later, []string{"--model"}) {
+		t.Errorf("launchOptionsSplit: unkept %q, later %q; want --some-new-option and [--model]", unkept, later)
+	}
+}
+
+// #1074 verifier end to end: `connect` after an OpenCode run given its task
+// with --prompt starts OpenCode without that task (it is not run again),
+// and with the run's other options.
+func TestConnectDoesNotReplayARunsPromptOption(t *testing.T) {
+	ta := newTestApp(t, "")
+	noChanges(ta)
+	const task = "delete the build dir and push"
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "op1", Args: []string{"--prompt", task, "--agent", "plan"}}))
+	lacks(t, ta.output(), "followed by a word with a space", "without the last word")
+	ta.out.Reset()
+	ta.term.runs = nil
+	ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "op1"}))
+	if len(ta.term.runs) != 1 {
+		t.Fatalf("terminal runs = %q", ta.term.runs)
+	}
+	argv := ta.term.runs[0]
+	if slices.Contains(argv, task) || slices.Contains(argv, "--prompt") {
+		t.Fatalf("connect argv = %q: the run's --prompt task is replayed", argv)
+	}
+	at := slices.Index(argv, "--agent")
+	if at < 0 || at+1 >= len(argv) || argv[at+1] != "plan" {
+		t.Fatalf("connect argv = %q, want the run's --agent plan", argv)
+	}
+}
+
 // #1074 end to end: `connect` after a run whose option value holds a space
 // starts the harness with the option and its value, and without the
 // one-word prompt that followed a switch; the run warns of nothing.
