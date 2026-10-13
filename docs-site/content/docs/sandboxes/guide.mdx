@@ -148,6 +148,9 @@ share, and then the others by the names `--harness` takes:
   Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
 ```
 
+The setup output still names OpenHands and OmniGent, but both harnesses are
+deprecated. Do not select them for new sandbox runs.
+
 On a Mac the gateway questions differ: instead of the mounts question,
 setup asks whether to run sandboxes in OpenShell MicroVMs (the default
 answer is yes), offers to install `e2fsprogs` with Homebrew, asks the
@@ -330,8 +333,8 @@ drop a harness from it, edit `openshell.harnesses` in `config.yaml`.
 | OpenCode | `opencode` | user | Verified |
 | Kiro CLI | `kiro` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
 | Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| OpenHands | `openhands` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| OmniGent | `omnigent` | managed | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
+| OpenHands | `openhands` | user | Deprecated. |
+| OmniGent | `omnigent` | managed | Deprecated. |
 | Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
 | Cursor Agent | `cursor-agent` | managed | Unverified: the Cursor Agent CLI needs a Cursor account before its first turn, and no mock can stand in for it. |
 | Amp | `amp` | user | Unverified: every Amp run needs an Amp account API key (`AMP_API_KEY`). |
@@ -438,7 +441,7 @@ the only host it works at, then how that host is reached.
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook or a config setting that would run on your machine the next time you use git. |
 | `Not visible` | Nothing else on your machine is in the sandbox. |
 | `Context` | Extra reference folders you added with `--context`, read-only. |
-| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. For a harness that runs on an interpreter (an npm build of a Node harness, or a Python harness such as Hermes or OpenHands), that program is its `node` or `python`, so a script the agent runs with it can reach the model hosts too, with the real credential swapped in. The hooks still check the tool call that runs the script. |
+| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. For a harness that runs on an interpreter (an npm build of a Node harness, or a Python harness such as Hermes), that program is its `node` or `python`, so a script the agent runs with it can reach the model hosts too, with the real credential swapped in. The hooks still check the tool call that runs the script. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
@@ -953,7 +956,7 @@ stopped, and the summary says how to resume it.
 | `balanced`, `strict` | `stop` | DefenseClaw stops the sandbox; its next session is watched again. |
 
 A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI, Cursor
-Agent, OmniGent), whose hooks are root-owned, only alerts. The banner's
+Agent), whose hooks are root-owned, only alerts. The banner's
 `Hooks` line of a user-tier harness says what its silent hooks lead to.
 
 ### Nested repositories in a mounted project
@@ -1051,9 +1054,8 @@ terminal names what was ended:
 defenseclaw: the harness exited with 1 command still running in the sandbox; ended it, so the session's work is final: sleep 200 && make test
 ```
 
-This applies to terminal sessions. OmniGent keeps its server running for the
-next session, and a command you start with `defenseclaw sandbox exec` keeps
-what it starts in the background.
+This applies to terminal sessions. A command you start with
+`defenseclaw sandbox exec` keeps what it starts in the background.
 
 The sandbox is then stopped, not deleted, so you can resume it later.
 `--rm` deletes it instead, and so does the end of a headless run
@@ -1393,15 +1395,11 @@ By default (`--llm auto`) a run shares the first model credential it finds:
 | Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared), then `AWS_BEARER_TOKEN_BEDROCK` |
 | OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key, then `AWS_BEARER_TOKEN_BEDROCK` |
-| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
+| Hermes Agent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | Antigravity | `GEMINI_API_KEY`; without it, you sign in with Google inside the sandbox |
 
 `AWS_BEARER_TOKEN_BEDROCK` is a short-term Amazon Bedrock key, so it comes
 last: a host with only that key set runs its sandboxes on Bedrock.
-
-OmniGent also needs a model name after `--`, for example
-`defenseclaw sandbox run omnigent -- --model <model>`; `run` refuses to
-start without one. On Bedrock it defaults to `openai.gpt-oss-20b`.
 
 `--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`,
 `bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
