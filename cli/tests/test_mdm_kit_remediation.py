@@ -33,6 +33,17 @@ def _run_script(pwsh: str, tmp_path: Path, script: str, document: dict, exit_cod
     return result.stdout.strip()
 
 
+def _fix_script() -> str:
+    source = (SCRIPTS / "Remediate-Fix.ps1").read_text(encoding="utf-8")
+    block = "$code = $run.ExitCode" + source.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
+    return (
+        "Set-StrictMode -Version 2.0\n"
+        "$run = [pscustomobject]@{ ExitCode = [int]$env:DC_TEST_EXIT_CODE; "
+        "StdOut = Get-Content -LiteralPath $env:DC_TEST_DOCUMENT -Raw }\n"
+        + block + '\n[Console]::Out.WriteLine("$code|$summary")\n'
+    )
+
+
 @pytest.mark.parametrize(
     ("document", "expected"),
     [
@@ -46,6 +57,11 @@ def _run_script(pwsh: str, tmp_path: Path, script: str, document: dict, exit_cod
             {"code": "telemetry_unreachable", "message": "otel down"},
         ], "changes": ["started guardian", "restored config"]},
          "0|repaired (drift): started guardian, restored config"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "telemetry_unreachable", "message": "otel down"},
+            {"code": "ensure_config_applied", "message": "applied drift:config"},
+        ], "changes": ["applied the config change in the running gateway"]},
+         "0|repaired (ensure_config_applied): applied the config change in the running gateway"),
         ({"ok": True, "noop": False, "errors": [], "warnings": [
             {"code": "scanner_runtime_unavailable", "message": "runtime missing"},
         ]}, "1603|not repaired (scanner_runtime_unavailable): runtime missing"),
@@ -64,15 +80,27 @@ def _run_script(pwsh: str, tmp_path: Path, script: str, document: dict, exit_cod
 def test_remediation_summary_under_strict_mode(
     pwsh: str, tmp_path: Path, document: dict, expected: str,
 ) -> None:
-    source = (SCRIPTS / "Remediate-Fix.ps1").read_text(encoding="utf-8")
-    block = "$code = $run.ExitCode" + source.split("$code = $run.ExitCode", 1)[1].split("$line =", 1)[0]
-    script = (
-        "Set-StrictMode -Version 2.0\n"
-        "$run = [pscustomobject]@{ ExitCode = [int]$env:DC_TEST_EXIT_CODE; "
-        "StdOut = Get-Content -LiteralPath $env:DC_TEST_DOCUMENT -Raw }\n"
-        + block + '\n[Console]::Out.WriteLine("$code|$summary")\n'
-    )
-    assert _run_script(pwsh, tmp_path, script, document) == expected
+    assert _run_script(pwsh, tmp_path, _fix_script(), document) == expected
+
+
+@pytest.mark.parametrize(
+    ("document", "exit_code", "expected"),
+    [
+        # A missing scanner runtime only overrides the exit code of a result that says ok.
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_busy", "message": "busy"},
+        ], "warnings": [
+            {"code": "scanner_runtime_unavailable", "message": "runtime missing"},
+        ]}, 1618, "1618|still failing (lifecycle_busy): busy"),
+        ({"ok": True, "noop": False, "errors": [], "changes": ["started guardian"]},
+         3010, "3010|repaired (drift): started guardian"),
+        ({"ok": True, "noop": True, "errors": []}, 77, "1603|no repair needed after verify"),
+    ],
+)
+def test_remediation_keeps_the_ensure_exit_code(
+    pwsh: str, tmp_path: Path, document: dict, exit_code: int, expected: str,
+) -> None:
+    assert _run_script(pwsh, tmp_path, _fix_script(), document, exit_code) == expected
 
 
 @pytest.mark.parametrize(
@@ -85,6 +113,10 @@ def test_remediation_summary_under_strict_mode(
         ({"errors": [{"code": "hooks_drifted", "message": "hooks drifted"}], "warnings": [
             {"code": "telemetry_unreachable", "message": "otel down"},
         ], "services": []}, "verify failed (hooks_drifted): hooks drifted"),
+        # An informational warning never replaces the error code and message.
+        ({"errors": [{"code": "lifecycle_error", "message": "verify failed"}], "warnings": [
+            {"code": "telemetry_unreachable", "message": "otel down"},
+        ], "services": []}, "verify failed (lifecycle_error): verify failed"),
         ({"errors": [
             {"code": "lifecycle_error", "message": "verify failed"},
             {"code": "hooks_drifted", "message": "hooks drifted"},

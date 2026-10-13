@@ -311,16 +311,16 @@ if (@(0, 1603, 1618, 1639, 3010) -notcontains $code) { $code = 1603 }
 $summary = "exit $code"
 try {
     $document = $run.StdOut | ConvertFrom-Json
+    $ok = $false
+    if ($document.PSObject.Properties['ok']) { $ok = [bool]$document.ok }
     $warnings = @(if ($document.PSObject.Properties['warnings']) { $document.warnings })
     # The installed CLI has no payload to install a missing scanner runtime
     # from: its ensure succeeds with a warning while verify keeps failing, so
     # this is not repaired, and only Setup /repair fixes it (GAP-0631).
     $runtime = @($warnings | Where-Object { $null -ne $_ -and $_.code -eq 'scanner_runtime_unavailable' } | Select-Object -First 1)
-    if ($runtime.Count -gt 0) { $code = 1603 }
+    if ($ok -and $runtime.Count -gt 0) { $code = 1603 }
     $errors = @(if ($document.PSObject.Properties['errors']) { $document.errors })
     $changes = @(if ($document.PSObject.Properties['changes']) { $document.changes })
-    $ok = $false
-    if ($document.PSObject.Properties['ok']) { $ok = [bool]$document.ok }
     $noop = $false
     if ($document.PSObject.Properties['noop']) { $noop = [bool]$document.noop }
     $codes = (@($errors | ForEach-Object { [string]$_.code }) -join ',')
