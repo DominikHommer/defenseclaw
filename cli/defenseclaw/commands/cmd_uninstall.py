@@ -315,9 +315,9 @@ def uninstall_cmd(
     binaries: bool,
     keep_openclaw: bool,
     skip_sandbox_teardown: bool,
-    stop_sandboxes: bool,
     dry_run: bool,
     yes: bool,
+    stop_sandboxes: bool = False,
 ) -> None:
     """Uninstall DefenseClaw (reversibly by default)."""
     if _dispatch_native_windows_uninstall(
@@ -586,7 +586,7 @@ def _remove_script_install_after_native_setup(platform_name: str) -> None:
     ),
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
-def reset_cmd(skip_sandbox_teardown: bool, stop_sandboxes: bool, yes: bool) -> None:
+def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = False) -> None:
     """Wipe user state so 'defenseclaw quickstart' starts clean.
 
     Keeps a managed .venv runtime, binaries, and the OpenClaw plugin
