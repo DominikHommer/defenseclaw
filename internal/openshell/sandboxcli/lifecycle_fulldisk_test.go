@@ -140,7 +140,7 @@ func TestStopOfAMicroVMWhoseDiskCannotBeRead(t *testing.T) {
 			ta.wantCalls(t, want, "POST", "vmbox/stop")
 			has(t, ta.output(), "could not read how full vmbox's own disk is (it did not answer within 15s)")
 			if strings.Contains(ta.output(), "Stop anyway?") != (c.tty && !c.yes) {
-				t.Fatalf("asked = %t:\n%s", !(c.tty && !c.yes), ta.output())
+				t.Fatalf("asked = %t:\n%s", !c.tty || c.yes, ta.output())
 			}
 		})
 	}
