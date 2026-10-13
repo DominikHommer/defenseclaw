@@ -221,6 +221,11 @@ type SandboxDaemon struct {
 	// lastDriver is the compute driver the last create chose and why
 	// (status before the registrations say).
 	lastDriver atomic.Pointer[openshell.DriverChoice]
+
+	// starting holds the names of the sandboxes a Start is starting (name
+	// -> struct{}): the policy poll reports them running, not the stopped
+	// phase OpenShell lists until a resumed MicroVM is up (#1204).
+	starting sync.Map
 }
 
 // NewSandboxDaemon prepares the daemon: the sandbox runtime in forwarding
@@ -972,7 +977,14 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		}
 		var cp sandboxrelay.CurrentPolicy
 		var err error
-		if running, report := sandboxStateReport(phases, listed, r.Sandbox); report {
+		running, report := sandboxStateReport(phases, listed, r.Sandbox)
+		if _, starting := d.starting.Load(r.Sandbox); starting {
+			// Start reported it running; a resumed MicroVM is listed stopped
+			// until it is up, and a stopped report then refused the agent's
+			// first hooks (403) right after `sandbox connect` (#1204).
+			running, report = true, true
+		}
+		if report {
 			// Tell the gateway whether the sandbox runs: a stopped one's
 			// registration authorizes no relayed call (GAP-0505).
 			cp, err = d.relay.Report(ctx, r.ID, running)
@@ -1790,9 +1802,17 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 	// admitted; a start that fails reports it stopped again.
 	cp, err := d.relay.Report(ctx, r.ID, true)
 	if err == nil {
+		d.starting.Store(name, struct{}{})
 		defer func() {
+			d.starting.Delete(name)
 			if err != nil {
 				d.reportStopped(context.WithoutCancel(ctx), name)
+				return
+			}
+			// Running once more: a poll that listed the sandbox stopped
+			// before this start marked it may have reported it so since.
+			if _, rerr := d.relay.Report(context.WithoutCancel(ctx), r.ID, true); rerr != nil {
+				d.logf("report %s running: %v", name, rerr)
 			}
 		}()
 	}
