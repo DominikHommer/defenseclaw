@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -204,7 +205,7 @@ func TestSandboxDaemonStopRechecksTheStateAfterAFailedWait(t *testing.T) {
 func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
 	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) { seedSandboxRecord(t, o.StateDir, "dc-a", created) })
-	f.run(t)
+	runPastRevalidate(t, f)
 	ctx := context.Background()
 	floor := config.OpenShellAdminConfig{MinProfile: "balanced", RequestAccess: "it-help@example.com"}
 	// On file but not confirmed: the managed gateway did not answer at start.
@@ -280,7 +281,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	// start, on a bound of its own (not the status's ended context), and its
 	// floor is never adopted.
 	g := newSandboxDaemonFixture(t)
-	g.run(t)
+	runPastRevalidate(t, g)
 	if err := g.d.regs.put(daemonRegistration{ID: "reg-2", Sandbox: "dc-b", Floor: floor, UpdatedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
@@ -325,4 +326,295 @@ func seedSandboxRecord(t *testing.T, stateDir, name string, policy map[string]an
 	if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The managed gateway's answers in a closedFloorFixture.
+const (
+	relayDown int32 = iota
+	relayAnswers
+	relayRevokes
+)
+
+// closedFloorFixture is a daemon restarted while the managed gateway did not
+// answer, with the stopped sandbox dc-a (created balanced, allowlist,
+// triage) and its registration reg-1 on file: the manager judges against
+// the closed start-up floor, and its view of dc-a is the deny of the
+// evidence. relay is what the managed gateway's policy/current answers.
+type closedFloorFixture struct {
+	*sandboxDaemonFixture
+	ctl   *managedSandboxController
+	relay atomic.Int32
+}
+
+// closedFloorRegFloor is reg-1's floor: the organization's, which allows
+// dc-a's policy.
+var closedFloorRegFloor = config.OpenShellAdminConfig{MinProfile: "balanced", RequestAccess: "it-help@example.com"}
+
+// newClosedFloorFixture seeds dc-a and the other sandboxes named (each
+// listed stopped by OpenShell; only dc-a has a registration) and runs the
+// daemon past its start-up confirmation.
+func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
+	t.Helper()
+	c := &closedFloorFixture{}
+	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
+	names := append([]string{"dc-a"}, others...)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		for _, name := range names {
+			seedSandboxRecord(t, o.StateDir, name, created)
+		}
+		o.listPhases = func(context.Context) (map[string]string, bool) {
+			phases := make(map[string]string, len(names))
+			for _, name := range names {
+				phases[name] = "stopped"
+			}
+			return phases, true
+		}
+	})
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		switch c.relay.Load() {
+		case relayAnswers:
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+		case relayRevokes:
+			return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: "profile removed"}, nil
+		}
+		return sandboxrelay.CurrentPolicy{}, errors.New("connect: connection refused")
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", Floor: closedFloorRegFloor, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	c.sandboxDaemonFixture = f
+	runPastRevalidate(t, f)
+	c.ctl = &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	if !f.d.floorClosed() {
+		t.Fatal("the fixture's start-up confirmation adopted a floor")
+	}
+	if r, _ := f.d.regs.get("dc-a"); r.Confirmed {
+		t.Fatal("the fixture's registration is confirmed at start")
+	}
+	// The configuration check's resolution on the closed floor.
+	f.d.rt.manager.RefreshPolicies()
+	raw, err := f.d.rt.manager.Get(context.Background(), "dc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertClosedFloorDeny(t, "the closed floor's view", *raw)
+	return c
+}
+
+// runPastRevalidate runs the daemon and waits for its start-up
+// confirmation to end (the sandbox subsystem reports running after it), so
+// a test's later relay answers are not the start-up's.
+func runPastRevalidate(t *testing.T, f *sandboxDaemonFixture) {
+	t.Helper()
+	f.run(t)
+	waitFor(t, "the daemon's start-up confirmation", func() bool {
+		s := f.d.opts.Health.Snapshot().Sandbox
+		return s != nil && s.State == StateRunning
+	})
+}
+
+// assertClosedFloorDeny fails unless v is judged against the closed floor:
+// "your organization does not let you run sandboxes", strict, deny.
+func assertClosedFloorDeny(t *testing.T, what string, v sandboxapi.Sandbox) {
+	t.Helper()
+	if !slices.ContainsFunc(v.Violations, closedFloorDeny) || v.Profile != "strict" || v.NetworkMode != "deny" ||
+		slices.Contains(v.Warnings, sandboxConfirmingNote) {
+		t.Fatalf("%s: %+v %s/%s %q, want the closed floor's deny", what, v.Violations, v.Profile, v.NetworkMode, v.Warnings)
+	}
+}
+
+// assertOrganizationPolicy fails unless v is judged against the
+// registration's floor: no organization violation, no strict or deny-all
+// policy, no confirming note.
+func assertOrganizationPolicy(t *testing.T, what string, v sandboxapi.Sandbox) {
+	t.Helper()
+	if slices.ContainsFunc(v.Violations, func(x sandboxapi.Violation) bool { return x.Admin }) ||
+		v.Profile == "strict" || v.NetworkMode == "deny" || slices.Contains(v.Warnings, sandboxConfirmingNote) {
+		t.Fatalf("%s: %+v %s/%s %q, want the organization's policy", what, v.Violations, v.Profile, v.NetworkMode, v.Warnings)
+	}
+}
+
+// statusAndList are the controller's status of name and its list entry.
+func (c *closedFloorFixture) statusAndList(t *testing.T, name string) []sandboxapi.Sandbox {
+	t.Helper()
+	ctx := context.Background()
+	sb, err := c.ctl.Get(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ctl.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(list, func(v sandboxapi.Sandbox) bool { return v.Name == name })
+	if i < 0 {
+		t.Fatalf("list has no %s: %+v", name, list)
+	}
+	return []sandboxapi.Sandbox{*sb, list[i]}
+}
+
+// assertRegistrationFloor fails unless the manager's floor is reg-1's.
+func (c *closedFloorFixture) assertRegistrationFloor(t *testing.T, what string) {
+	t.Helper()
+	if admin := c.d.config().OpenShell.Admin; c.d.floorClosed() || admin.Allowed != nil || admin.MinProfile != closedFloorRegFloor.MinProfile {
+		t.Fatalf("%s: the manager's floor is %+v, want the confirmed registration's", what, admin)
+	}
+}
+
+// assertClosed fails unless the manager still judges against the closed
+// floor.
+func (c *closedFloorFixture) assertClosed(t *testing.T, what string) {
+	t.Helper()
+	if admin := c.d.config().OpenShell.Admin; !c.d.floorClosed() || admin.Allowed == nil || *admin.Allowed || admin.MinProfile != "strict" {
+		t.Fatalf("%s: the manager's floor is %+v, want the closed one", what, admin)
+	}
+}
+
+// rel-1-0-2:GAP-0462 part 3 (verify r2, TST-2014): the managed gateway did
+// not answer when the daemon started, so the floor stayed the closed one;
+// the 60 s poll then confirmed the registration of a STOPPED sandbox, whose
+// floor adoptRunningFloor skips (only a running sandbox's floor is adopted),
+// and with no registration left unconfirmed neither the status's
+// re-confirmation nor the confirming view applied: `sandbox status` and
+// `list` said "your organization does not let you run sandboxes" (strict,
+// deny) until a start or a restart. The poll now opens the closed floor with
+// the newest confirmed registration's, as revalidate does at start, and
+// re-resolves the views at once.
+func TestSandboxDaemonPollOfAStoppedSandboxOpensTheClosedFloor(t *testing.T) {
+	c := newClosedFloorFixture(t)
+	c.relay.Store(relayAnswers)
+	c.d.pollOnce(context.Background())
+	if got := c.sandboxDaemonFixture.relay.reported(); !slices.Contains(got, "reg-1=stopped") {
+		t.Fatalf("reports = %v, want the poll to report dc-a stopped", got)
+	}
+	if r, _ := c.d.regs.get("dc-a"); !r.Confirmed || r.Revoked {
+		t.Fatalf("the poll did not confirm the registration: %+v", r)
+	}
+	c.assertRegistrationFloor(t, "after the poll")
+	// The manager's own view, before any status asks: re-resolved at once,
+	// not on the configuration check's next tick.
+	raw, err := c.d.rt.manager.Get(context.Background(), "dc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOrganizationPolicy(t, "the manager's view after the poll", *raw)
+	for _, v := range c.statusAndList(t, "dc-a") {
+		assertOrganizationPolicy(t, "status and list after the poll", v)
+	}
+}
+
+// A registration the managed gateway confirmed without its floor being
+// adopted (a start that then failed: Start confirms the registration before
+// it readies OpenShell and adopts the floor) opens the closed floor at the
+// next status or list, with the managed gateway down by then: the status's
+// re-confirmation keys on any live registration on the closed floor, not
+// only on an unconfirmed one.
+func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *testing.T) {
+	for _, via := range []string{"status", "list"} {
+		t.Run(via, func(t *testing.T) {
+			c := newClosedFloorFixture(t)
+			c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+			c.assertClosed(t, "confirmed, before the "+via)
+			ctx := context.Background()
+			if via == "status" {
+				sb, err := c.ctl.Get(ctx, "dc-a")
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertOrganizationPolicy(t, "the first status", *sb)
+			} else {
+				list, err := c.ctl.List(ctx)
+				if err != nil || len(list) != 1 {
+					t.Fatalf("list = %+v, %v", list, err)
+				}
+				assertOrganizationPolicy(t, "the first list", list[0])
+			}
+			c.assertRegistrationFloor(t, "after the "+via)
+			for _, v := range c.statusAndList(t, "dc-a") {
+				assertOrganizationPolicy(t, "status and list after the "+via, v)
+			}
+		})
+	}
+}
+
+// Adopting a confirmed registration's floor (Start's adoptFloor)
+// re-resolves every sandbox's policy at once, not only the started one's
+// and not on the configuration check's next tick.
+func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
+	c := newClosedFloorFixture(t, "dc-x")
+	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+	c.d.adoptFloor("dc-a")
+	c.assertRegistrationFloor(t, "after adoptFloor")
+	for _, name := range []string{"dc-a", "dc-x"} {
+		raw, err := c.d.rt.manager.Get(context.Background(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertOrganizationPolicy(t, "the manager's view of "+name+" after adoptFloor", *raw)
+	}
+}
+
+// The negative case: no registration the managed gateway confirmed, so the
+// floor stays closed. The poll and the status ask the managed gateway and
+// adopt nothing; the manager keeps the closed floor's deny, the
+// registration's sandbox says its policy is being confirmed (never the
+// organization's policy as if confirmed), and a sandbox without a
+// registration keeps the deny.
+func TestSandboxDaemonClosedFloorStaysWithoutAConfirmedRegistration(t *testing.T) {
+	c := newClosedFloorFixture(t, "dc-x")
+	ctx := context.Background()
+	c.d.pollOnce(ctx)
+	c.assertClosed(t, "after the poll")
+	views := c.statusAndList(t, "dc-a")
+	c.assertClosed(t, "after the status")
+	for _, v := range views {
+		if !slices.Contains(v.Warnings, sandboxConfirmingNote) {
+			t.Fatalf("an unconfirmed registration's sandbox: %q, want the confirming note", v.Warnings)
+		}
+	}
+	raw, err := c.d.rt.manager.Get(ctx, "dc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertClosedFloorDeny(t, "the manager's view without a confirmation", *raw)
+	for _, v := range c.statusAndList(t, "dc-x") {
+		assertClosedFloorDeny(t, "a sandbox without a registration", v)
+	}
+	if r, _ := c.d.regs.get("dc-a"); r.Confirmed {
+		t.Fatalf("a registration the gateway never answered for is confirmed: %+v", r)
+	}
+}
+
+// A revoked registration keeps the closed floor and its deny: revoked by
+// the poll's answer, or confirmed and then revoked before its floor was
+// adopted (a start the managed gateway refused), even with the managed
+// gateway answering again.
+func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
+	t.Run("revoked by the poll", func(t *testing.T) {
+		c := newClosedFloorFixture(t)
+		c.relay.Store(relayRevokes)
+		c.d.pollOnce(context.Background())
+		if r, _ := c.d.regs.get("dc-a"); !r.Revoked {
+			t.Fatalf("the poll did not mark the registration revoked: %+v", r)
+		}
+		c.relay.Store(relayAnswers)
+		c.d.pollOnce(context.Background())
+		c.assertClosed(t, "after the polls")
+		for _, v := range c.statusAndList(t, "dc-a") {
+			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+		}
+		c.assertClosed(t, "after the status")
+	})
+	t.Run("confirmed then revoked", func(t *testing.T) {
+		c := newClosedFloorFixture(t)
+		c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+		c.d.regs.markRevoked("dc-a", "profile removed")
+		c.relay.Store(relayAnswers)
+		c.d.pollOnce(context.Background())
+		c.assertClosed(t, "after the poll")
+		for _, v := range c.statusAndList(t, "dc-a") {
+			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+		}
+		c.assertClosed(t, "after the status")
+	})
 }

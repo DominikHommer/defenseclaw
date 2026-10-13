@@ -141,6 +141,9 @@ type SandboxDaemonOptions struct {
 	// sandboxes; tests replace them.
 	newRuntime   func(*SandboxDaemon) (*sandboxRuntime, error)
 	countRunning func(context.Context) (int, error)
+	// listPhases is the phase of each sandbox by name (sandboxPhases: the
+	// manager's list when nil); tests replace it.
+	listPhases func(context.Context) (map[string]string, bool)
 	// openShell readies the account's OpenShell (newAccountOpenShell when
 	// nil); tests replace it.
 	openShell daemonOpenShell
@@ -1040,7 +1043,9 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		d.observeGeneration(cp.Generation)
 		d.regs.applyLive(r.Sandbox, cp)
 	}
-	if adopt && listed {
+	if adopt {
+		// Unlisted (nil phases), no sandbox counts as running: only the
+		// closed start-up floor can change, as revalidate's does.
 		d.adoptRunningFloor(phases)
 	}
 	return revoked
@@ -1056,19 +1061,34 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 // and approvals (GAP-0693). A stopped sandbox's floor becomes the manager's
 // when it starts again (Start); floorConflicts keeps the floors of the
 // running sandboxes the same.
+//
+// The closed start-up floor is the exception: with no running sandbox's
+// floor, it takes the newest confirmed registration's, as revalidate does
+// at start. A managed gateway that did not answer at start left it closed,
+// and a poll that then confirmed only a stopped sandbox's registration
+// adopted nothing, so that sandbox's status and list said "your
+// organization does not let you run sandboxes" (strict, deny) until a start
+// or a restart (GAP-0462). An unconfirmed or revoked registration's floor
+// is never adopted: the floor stays closed. A new floor re-resolves every
+// sandbox's policy at once.
 func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) {
 	floor := d.regs.newestFloor(func(name string) bool { return sandboxMayRun(phases[name]) })
+	var newest *config.OpenShellAdminConfig
 	if floor == nil {
-		return
+		newest = d.regs.newestFloor(nil)
 	}
 	d.floorMu.Lock()
-	changed := d.floor == nil || !reflect.DeepEqual(*d.floor, *floor)
+	if floor == nil && d.floor == nil {
+		floor = newest
+	}
+	changed := floor != nil && (d.floor == nil || !reflect.DeepEqual(*d.floor, *floor))
 	if changed {
 		d.floor = floor
 	}
 	d.floorMu.Unlock()
 	if changed {
 		d.reloadConfig()
+		d.rt.manager.RefreshPolicies()
 	}
 }
 
@@ -1076,6 +1096,9 @@ func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) {
 // false when the manager cannot list them, and then nothing is reported (a
 // registration no report renews lapses after sandboxreg.LiveLease).
 func (d *SandboxDaemon) sandboxPhases(ctx context.Context) (map[string]string, bool) {
+	if d.opts.listPhases != nil {
+		return d.opts.listPhases(ctx)
+	}
 	if d.rt == nil || d.rt.manager == nil {
 		return nil, false
 	}
@@ -1168,10 +1191,19 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	if floor == nil {
 		floor = d.regs.newestFloor(nil)
 	}
-	if floor != nil {
-		d.floorMu.Lock()
+	if floor == nil {
+		return revoked
+	}
+	// Only the closed floor is replaced: a status's re-confirmation
+	// (confirmIfClosed) must not put back an older registration's floor
+	// over the one a create or a start just adopted.
+	d.floorMu.Lock()
+	closed := d.floor == nil
+	if closed {
 		d.floor = floor
-		d.floorMu.Unlock()
+	}
+	d.floorMu.Unlock()
+	if closed {
 		d.reloadConfig()
 	}
 	return revoked
@@ -1180,12 +1212,15 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 // confirmIfClosed confirms the registrations again when the manager still
 // judges against the closed start-up floor (no confirmed registration was
 // adopted: the managed gateway did not answer revalidate when the daemon
-// started, a restart after an upgrade, say) and a registration waits for
-// its confirmation. A sandbox's status and list are judged against that
-// floor, which denies every sandbox: they said "your organization does not
-// let you run sandboxes" and a strict, deny-all policy for a sandbox the
-// organization allows (GAP-0462). A revoked registration's sandbox is
-// stopped, as at start.
+// started, a restart after an upgrade, say) and a live registration could
+// open it: one that waits for its confirmation, or one a poll or a failed
+// start confirmed without adopting its floor (a stopped sandbox's). A
+// sandbox's status and list are judged against that floor, which denies
+// every sandbox: they said "your organization does not let you run
+// sandboxes" and a strict, deny-all policy for a sandbox the organization
+// allows (GAP-0462). The managed gateway is asked again before the floor
+// opens; one that does not answer leaves the confirmations it gave, and a
+// revoked registration's sandbox is stopped, as at start.
 //
 // A confirmed floor re-resolves every sandbox's policy at once: the views
 // are built from the policies resolved before, which the configuration
@@ -1222,10 +1257,12 @@ func (d *SandboxDaemon) floorClosed() bool {
 	return d.floor == nil
 }
 
-// awaitingConfirmation reports the closed floor in force while a
-// registration waits for the managed gateway's confirmation.
+// awaitingConfirmation reports the closed floor in force while a live
+// registration could open it. Keyed on unconfirmed registrations only, it
+// skipped one a poll had confirmed for a stopped sandbox, and that
+// sandbox's status kept the closed floor's deny (GAP-0462).
 func (d *SandboxDaemon) awaitingConfirmation() bool {
-	return d.floorClosed() && slices.ContainsFunc(d.regs.list(), registrationUnconfirmed)
+	return d.floorClosed() && slices.ContainsFunc(d.regs.list(), func(r daemonRegistration) bool { return !r.Revoked })
 }
 
 // registrationUnconfirmed is a live registration the managed gateway has
@@ -1269,7 +1306,10 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 }
 
 // adoptFloor makes the floor of name's registration the one the manager
-// resolves against, once the managed gateway confirmed the registration.
+// resolves against, once the managed gateway confirmed the registration,
+// and re-resolves every sandbox's policy at once: the other sandboxes'
+// status and list are judged against it too, not only after the
+// configuration check's next tick (GAP-0462).
 func (d *SandboxDaemon) adoptFloor(name string) {
 	r, ok := d.regs.get(name)
 	if !ok || !r.Confirmed || r.Revoked {
@@ -1280,6 +1320,7 @@ func (d *SandboxDaemon) adoptFloor(name string) {
 	d.floor = &floor
 	d.floorMu.Unlock()
 	d.reloadConfig()
+	d.rt.manager.RefreshPolicies()
 }
 
 // floorConflicts reports whether floor differs from the floor of a running
