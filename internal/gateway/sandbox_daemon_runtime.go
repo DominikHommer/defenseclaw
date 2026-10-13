@@ -775,7 +775,7 @@ func (d *SandboxDaemon) superviseLoop(ctx context.Context, serveErr <-chan error
 		case err := <-serveErr:
 			return fmt.Errorf("sandbox daemon: serve the CLI socket: %w", err)
 		case <-d.refresh:
-			d.refreshSettings(ctx)
+			d.applyNewGeneration(ctx)
 		case <-tick.C:
 			if stop, err := d.check(ctx); stop {
 				return err
@@ -875,6 +875,18 @@ func sandboxMayRun(phase string) bool {
 		return true
 	}
 	return false
+}
+
+// applyNewGeneration applies a policy generation a relayed answer (or a
+// poll) named that the daemon had not seen: the managed settings, and at
+// once every live registration's policy/current, so a running sandbox's
+// live fields (egress lists, approvals) switch with the first relayed call
+// after the administrator's change instead of on the next minute's poll
+// (es-demo:GAP-0012: a running sandbox took a loosened or tightened policy
+// 20-35 s after the ensure reported it applied).
+func (d *SandboxDaemon) applyNewGeneration(ctx context.Context) {
+	d.refreshSettings(ctx)
+	d.pollOnce(ctx)
 }
 
 // refreshSettings reads the managed gateway's settings after a generation
