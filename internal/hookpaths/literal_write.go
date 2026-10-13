@@ -39,6 +39,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 	}
 	for _, context := range contexts {
 		cwd := context.cwd
+		states := shellWordStates(context.file, home, shellVariablePoison{})
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
 				cmdCWD, language, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
@@ -56,7 +57,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 				if !ok || len(call.Args) == 0 {
 					return true
 				}
-				cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
+				cmdCWD, programWords, ok := literalProgramWordsWithVars(call, cwd, home, states.varsFor(call.Args[0]))
 				if !ok || len(programWords) == 0 {
 					return true
 				}
@@ -102,7 +103,14 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 			if context.handled[int(call.Pos().Offset())] {
 				return true
 			}
-			cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
+			if _, static := StaticWord(call.Args[0], home); !static {
+				paths, dynamic := literalUnresolvedProgramWrites(call.Args, home)
+				unknown = unknown || dynamic
+				for _, name := range paths {
+					add(name, cwd)
+				}
+			}
+			cmdCWD, programWords, ok := literalProgramWordsWithVars(call, cwd, home, states.varsFor(call.Args[0]))
 			if !ok || len(programWords) == 0 {
 				return true
 			}
@@ -137,11 +145,38 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 	return operands, unknown
 }
 
+func literalUnresolvedProgramWrites(args []*syntax.Word, home string) ([]string, bool) {
+	var paths []string
+	unknown := false
+	for i := 1; i+1 < len(args); i++ {
+		option, ok := StaticWord(args[i], home)
+		if !ok || option != "-c" && option != "-e" && option != "-E" &&
+			option != "-p" && option != "--eval" {
+			continue
+		}
+		code, ok := StaticWord(args[i+1], home)
+		if !ok {
+			return paths, true
+		}
+		for _, language := range []string{"python", "node", "perl", "ruby"} {
+			found, dynamic := literalInterpreterWrites(language, code)
+			paths = append(paths, found...)
+			unknown = unknown || dynamic
+		}
+		break
+	}
+	return paths, unknown
+}
+
 func literalProgramWords(call *syntax.CallExpr, cwd, home string) (string, []string, bool) {
+	return literalProgramWordsWithVars(call, cwd, home, nil)
+}
+
+func literalProgramWordsWithVars(call *syntax.CallExpr, cwd, home string, vars shellVariables) (string, []string, bool) {
 	words := make([]string, len(call.Args))
 	staticWords := make([]bool, len(call.Args))
 	for i, arg := range call.Args {
-		words[i], staticWords[i] = staticShellWordWithVars(arg, home, nil, shellVariablePoison{})
+		words[i], staticWords[i] = staticShellWordWithVars(arg, home, vars, shellVariablePoison{})
 		if !staticWords[i] {
 			words[i] = launcherAssignmentPrefix(arg)
 		}

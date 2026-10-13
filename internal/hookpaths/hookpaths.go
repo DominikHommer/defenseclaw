@@ -1740,8 +1740,7 @@ type linkAlias struct{ name, target string }
 
 // shellLinks are the links one shell command creates. known is false when
 // link names or operands are dynamic or an archive can extract links. opaque
-// identifies a possible unreadable link; a dynamic program word alone keeps
-// the older per-user behavior (GAP-1523).
+// identifies a possible unreadable link from an unresolved program word.
 type shellLinks struct {
 	aliases          []linkAlias
 	known            bool
@@ -1888,7 +1887,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			}
 			resolved := resolveLauncherWords(words, static, callCWD)
 			if !resolved.ok {
-				links.unknown(static[0])
+				links.unknown(unresolvedProgramMayLink(words[1:], static[1:]))
 				return true
 			}
 			if resolved.noExec || len(resolved.words) == 0 {
@@ -1906,8 +1905,8 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			}
 			switch {
 			case program == "":
-				// A program named by a parameter or a substitution may be ln.
-				links.unknown(false)
+				// An unresolved program can create a link before a later write.
+				links.unknown(unresolvedProgramMayLink(words[1:], static[1:]))
 			case slices.Contains(linkPrograms, program):
 				if slices.Contains(static, false) || !links.add(program, words[1:], siteCWD) {
 					links.unknown(true)
@@ -1978,6 +1977,23 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.globalOpaque = true
 	}
 	return links
+}
+
+func unresolvedProgramMayLink(words []string, static []bool) bool {
+	operands := false
+	for i, word := range words {
+		if !static[i] {
+			return true
+		}
+		if word == "--" {
+			operands = true
+			continue
+		}
+		if operands || word == "-" || !strings.HasPrefix(word, "-") {
+			return true
+		}
+	}
+	return false
 }
 
 // dataPrograms only print, search or count text, so link API text in their
@@ -2212,7 +2228,7 @@ func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]str
 // Such operations include a wrapper or multicall binary running ln, an
 // interpreter or Windows link call, an archive or sync link option, or an mv
 // or relative cd with a link. Archive and copy scopes narrow the affected
-// paths. A program word that is not static alone does not count (GAP-1523).
+// paths. An unresolved program remains opaque for later writes.
 func (l Links) OpaqueTarget(path string) bool {
 	return l.links.opaqueTarget(path)
 }
