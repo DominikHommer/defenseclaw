@@ -15310,20 +15310,23 @@ def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
     entries. They run a hook script of this data directory that the restored
     install does not have: Claude Code then blocks every prompt. The next
     upgrade removes them, and so does ``defenseclaw setup remove <name>``.
-    Windows registers the native launcher, not a script, so this is a POSIX
-    check. A clean install prints no row.
+    Windows registers the native launcher, not a script, so the hook entry
+    check is a POSIX one. A plugin-file connector (OpenCode, Amp) is
+    registered by DefenseClaw's managed plugin instead, which reads its
+    credential from this data directory: without it the plugin refuses every
+    tool call. That check runs on every OS. A clean install prints no row.
     """
     from defenseclaw import hook_integrity
     from defenseclaw.connector_paths import connector_config_files
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if os.name == "nt" or not data_dir:
+    if not data_dir:
         return
     hooks_dir = os.path.join(data_dir, "hooks")
     active_set = _residue_active_set(cfg, active)
     found: list[tuple[str, str, str]] = []  # (connector, agent config file, hook script)
     for name, script_name in sorted(hook_integrity.HOOK_SCRIPT_NAMES.items()):
-        if name in active_set:
+        if os.name == "nt" or name in active_set:
             continue
         script = os.path.join(hooks_dir, script_name)
         pattern = re.compile(re.escape(script) + r"(?![A-Za-z0-9._/-])")
@@ -15354,6 +15357,66 @@ def _check_orphaned_hook_entries(cfg, active: str, r: _DoctorResult) -> None:
                 r=r,
                 remediation=f"defenseclaw setup remove {name}",
             )
+    plugins = {
+        "amp": os.path.join(amp_config_home(), "plugins", "defenseclaw.ts"),
+        "opencode": os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+    }
+    for name, path in sorted(plugins.items()):
+        token = "" if name in active_set else _managed_plugin_credential(path, hooks_dir)
+        if not token:
+            continue
+        if os.path.lexists(token):
+            _emit(
+                "warn",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+        else:
+            _emit(
+                "fail",
+                f"Orphaned hook entries [{name}]",
+                f"{path} is the DefenseClaw plugin of {name}, which is not configured, and it reads its "
+                f"credential from {token}, which does not exist, so {name} refuses every tool call; a "
+                "rollback to a release set up without it leaves this",
+                r=r,
+                remediation=f"defenseclaw setup remove {name}",
+            )
+
+
+_MANAGED_PLUGIN_MARKER = re.compile(r"// defenseclaw-managed-plugin v[1-9][0-9]*")
+_MANAGED_PLUGIN_CREDENTIAL = re.compile(r'^const DC_TOKEN_FILE = ("(?:[^"\\\r\n]|\\.)*");?\r?$', re.MULTILINE)
+_MANAGED_PLUGIN_LIMIT = 4 << 20
+
+
+def _managed_plugin_credential(path: str, hooks_dir: str) -> str:
+    """Return the credential file DefenseClaw's managed plugin at *path* reads.
+
+    Only when the plugin is DefenseClaw's (a regular file whose first line is
+    the ownership marker, the test its teardown removes it by) and the
+    credential is a file of *hooks_dir*; "" otherwise, so the operator's own
+    plugins and another data directory's plugin are never named.
+    """
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _MANAGED_PLUGIN_LIMIT:
+            return ""
+        with open(path, "rb") as handle:
+            text = handle.read(_MANAGED_PLUGIN_LIMIT).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _MANAGED_PLUGIN_CREDENTIAL.search(text)
+    if match is None or not _MANAGED_PLUGIN_MARKER.fullmatch(text.split("\n", 1)[0].rstrip("\r")):
+        return ""
+    try:
+        token = json.loads(match.group(1))
+    except ValueError:
+        return ""
+    if not isinstance(token, str) or not os.path.isabs(token):
+        return ""
+    folder = os.path.normcase(os.path.normpath(os.path.dirname(token)))
+    return token if folder == os.path.normcase(os.path.normpath(os.path.abspath(hooks_dir))) else ""
 
 
 def _check_scan_coverage(cfg, r: _DoctorResult) -> None:

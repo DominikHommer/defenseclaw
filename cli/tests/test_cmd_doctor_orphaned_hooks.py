@@ -89,3 +89,69 @@ def test_doctor_is_silent_for_a_configured_connector_and_for_other_installs(
     # Entries that run another data dir's scripts are not this install's.
     cmd_doctor._check_orphaned_hook_entries(_cfg(tmp_path / "other"), "", r)
     assert r.checks == []
+
+
+def _opencode_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, data_dir: Path) -> Path:
+    """Write DefenseClaw's OpenCode plugin of *data_dir* next to an operator plugin."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    config = tmp_path / "opencode"
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(config))
+    plugins = config / "plugins"
+    plugins.mkdir(parents=True)
+    (plugins / "operator.js").write_text("export const Operator = async () => ({});\n", encoding="utf-8")
+    token = data_dir / "hooks" / ".hook-opencode.token"
+    path = plugins / "defenseclaw.js"
+    path.write_text(
+        "// defenseclaw-managed-plugin v7\n"
+        'const DC_API_ADDR = "127.0.0.1:18970";\n'
+        f"const DC_TOKEN_FILE = {json.dumps(str(token))};\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_doctor_fails_on_the_opencode_plugin_a_rollback_left(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # rel-1-0-2:GAP-0001 (rel-1-0-1:GAP-0009) for a plugin-file connector:
+    # after a rollback OpenCode's plugin read a credential the restored data
+    # dir does not have and refused every tool call.
+    data_dir = tmp_path / "dc"
+    path = _opencode_plugin(tmp_path, monkeypatch, data_dir)
+    r = _DoctorResult()
+
+    cmd_doctor._check_orphaned_hook_entries(_cfg(data_dir, "codex"), "codex", r)
+
+    (check,) = r.checks
+    assert check["status"] == "fail" and check["label"] == "Orphaned hook entries [opencode]"
+    assert f"{path} is the DefenseClaw plugin of opencode, which is not configured" in check["detail"]
+    assert f"{data_dir / 'hooks' / '.hook-opencode.token'}, which does not exist" in check["detail"]
+    assert check["remediation"] == "defenseclaw setup remove opencode"
+
+
+def test_doctor_warns_on_an_unconfigured_opencode_plugin_whose_credential_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "dc"
+    _opencode_plugin(tmp_path, monkeypatch, data_dir)
+    (data_dir / "hooks").mkdir(parents=True)
+    (data_dir / "hooks" / ".hook-opencode.token").write_text("0" * 64 + "\n", encoding="utf-8")
+    r = _DoctorResult()
+
+    cmd_doctor._check_orphaned_hook_entries(_cfg(data_dir, "codex"), "codex", r)
+
+    (check,) = r.checks
+    assert check["status"] == "warn" and check["remediation"] == "defenseclaw setup remove opencode"
+
+
+def test_doctor_is_silent_for_a_configured_foreign_or_operator_opencode_plugin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "dc"
+    path = _opencode_plugin(tmp_path, monkeypatch, data_dir)
+    r = _DoctorResult()
+    cmd_doctor._check_orphaned_hook_entries(_cfg(data_dir, "opencode"), "opencode", r)
+    # Another data dir's plugin is not this install's.
+    cmd_doctor._check_orphaned_hook_entries(_cfg(tmp_path / "other"), "", r)
+    # Without DefenseClaw's ownership marker first it is the operator's file.
+    path.write_text("// my plugin\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    cmd_doctor._check_orphaned_hook_entries(_cfg(data_dir), "", r)
+    assert r.checks == []

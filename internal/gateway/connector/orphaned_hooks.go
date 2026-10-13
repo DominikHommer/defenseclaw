@@ -5,9 +5,16 @@
 package connector
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // OrphanedHookConfigPaths returns the agent config files that still hold a
@@ -18,16 +25,34 @@ import (
 // configured, so each such entry is an orphan. A rollback restored a data
 // directory from before the connector was set up, and Claude Code then ran a
 // hook script that no longer existed and blocked every prompt (GAP-0009). A
-// config file that cannot be read or parsed is an error, so nothing is
-// removed on a guess.
+// plugin-file connector (OpenCode, Amp) is registered by its managed plugin
+// file instead, which is reported when it is DefenseClaw's plugin for this
+// data directory (orphanedPluginArtifact): it read its credential from
+// opts.DataDir/hooks, which the restored install does not have, so it refused
+// every tool call. A config file that cannot be read or parsed is an error,
+// so nothing is removed on a guess.
 func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
+	var found []string
+	if plugin, ok := conn.(interface {
+		orphanedPluginArtifact(SetupOpts) (string, error)
+	}); ok {
+		path, err := plugin.orphanedPluginArtifact(opts)
+		if err != nil {
+			return nil, err
+		}
+		if path != "" {
+			found = append(found, path)
+		}
+	}
 	exact := ownedHookCommandNeedles(opts, conn)
 	scripts := ownedHookScriptPaths(conn, opts)
 	if len(exact) == 0 && len(scripts) == 0 {
-		return nil, nil
+		return found, nil
 	}
-	var found []string
 	for _, path := range HookConfigPathsForConnector(conn, opts) {
+		if slices.Contains(found, path) {
+			continue
+		}
 		decoded, err := decodeHookConfigFile(path)
 		if err != nil {
 			return nil, err
@@ -40,6 +65,72 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 		}
 	}
 	return found, nil
+}
+
+// maxOrphanedPluginBytes bounds the read of a managed plugin, as Teardown's.
+const maxOrphanedPluginBytes = 4 << 20
+
+// orphanedPluginArtifact returns c's managed plugin file when it is
+// DefenseClaw's plugin for opts.DataDir: a regular file (not a link) whose
+// first line is a DefenseClaw ownership marker, the test Teardown removes it
+// by, and whose credential file is in opts.DataDir/hooks. The operator's other
+// plugins, another data directory's plugin and a sandbox render (it reads no
+// credential file) are not, and "" is returned for them.
+func (c *hookOnlyConnector) orphanedPluginArtifact(opts SetupOpts) (string, error) {
+	if c == nil || !c.pluginArtifact || strings.TrimSpace(opts.DataDir) == "" {
+		return "", nil
+	}
+	path := c.configPath(opts)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("%s inspect plugin %s: %w", c.name, path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxOrphanedPluginBytes {
+		return "", nil
+	}
+	data, err := safefile.ReadRegularFileBounded(path, maxOrphanedPluginBytes)
+	if os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("%s read plugin %s: %w", c.name, path, err)
+	}
+	firstLine, _, _ := bytes.Cut(data, []byte("\n"))
+	if !validManagedPluginOwnershipMarker(bytes.TrimSuffix(firstLine, []byte("\r"))) {
+		return "", nil
+	}
+	tokenFile, ok := managedPluginTokenFile(data)
+	if !ok {
+		return "", nil
+	}
+	hookDir, err := filepath.Abs(filepath.Join(opts.DataDir, "hooks"))
+	if err != nil || !sameManagedTargetPath(filepath.Dir(tokenFile), hookDir) {
+		return "", nil
+	}
+	return path, nil
+}
+
+// managedPluginTokenFile returns the absolute credential path a rendered
+// managed plugin reads, the string of its `const DC_TOKEN_FILE = "...";` line
+// (the TypeScript render has no semicolon).
+func managedPluginTokenFile(data []byte) (string, bool) {
+	declaration := []byte("const DC_TOKEN_FILE = ")
+	for rest := data; len(rest) > 0; {
+		var line []byte
+		line, rest, _ = bytes.Cut(rest, []byte("\n"))
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if !bytes.HasPrefix(line, declaration) {
+			continue
+		}
+		var tokenFile string
+		if err := json.Unmarshal(bytes.TrimSuffix(line[len(declaration):], []byte(";")), &tokenFile); err != nil ||
+			!filepath.IsAbs(tokenFile) {
+			return "", false
+		}
+		return tokenFile, true
+	}
+	return "", false
 }
 
 // ownedHookScriptPaths lists the absolute paths of conn's Unix hook scripts in
