@@ -49,7 +49,7 @@ var launcherSpecs = map[string]launcherSpec{
 	"unshare":     {shortFlags: "imnpuUfrR", longFlags: []string{"mount", "uts", "ipc", "net", "pid", "user", "cgroup", "time", "fork", "map-root-user", "map-current-user", "kill-child", "mount-proc", "propagation", "setgroups", "keep-caps", "root", "wd", "setuid", "setgid", "help", "version"}},
 	"nsenter":     {shortFlags: "aminupCT", shortArgs: "trwSFG", longFlags: []string{"all", "no-fork", "help", "version"}, longArgs: []string{"target", "setuid", "setgid"}, longOptional: []string{"mount", "uts", "ipc", "net", "pid", "cgroup", "time", "root", "wd", "follow-context", "preserve-credentials"}},
 	"xargs":       {kind: launcherXargs, shortFlags: "0prt", shortArgs: "IinPLdEas", longFlags: []string{"null", "open-tty", "no-run-if-empty", "verbose", "interactive", "show-limits", "help", "version"}, longArgs: []string{"replace", "max-args", "max-procs", "max-lines", "delimiter", "eof", "arg-file", "max-chars"}},
-	"sudo":        {shortFlags: "EHnSkbhisVv", shortArgs: "ugpC", longFlags: []string{"preserve-env", "set-home", "non-interactive", "stdin", "reset-timestamp", "background", "help", "login", "shell", "version", "validate"}, longArgs: []string{"user", "group", "prompt", "close-from"}},
+	"sudo":        {shortFlags: "EHnSkbhilsVv", shortArgs: "ugpC", longFlags: []string{"preserve-env", "set-home", "non-interactive", "stdin", "reset-timestamp", "background", "help", "login", "list", "shell", "version", "validate"}, longArgs: []string{"user", "group", "prompt", "close-from"}},
 	"doas":        {shortFlags: "nLs", shortArgs: "u"},
 	"su":          {kind: launcherScript, shortFlags: "lmps", shortArgs: "cgw", longFlags: []string{"login", "preserve-environment", "help", "version"}, longArgs: []string{"command", "group", "supp-group", "shell"}},
 	"find":        {kind: launcherFind},
@@ -127,7 +127,8 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 			return result
 		}
 		if program == "command" && (values["v"] != "" || values["V"] != "") ||
-			values["help"] != "" || values["version"] != "" || program == "sudo" && values["h"] != "" {
+			values["help"] != "" || values["version"] != "" ||
+			program == "sudo" && (values["h"] != "" || values["l"] != "" || values["list"] != "") {
 			result.noExec = true
 			result.words, result.static = nil, nil
 			return result

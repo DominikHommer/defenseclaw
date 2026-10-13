@@ -203,6 +203,16 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			if _, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison); static {
 				return true
 			}
+			if paths, glob := shellLiteralGlobCandidates(redirect.Word, context.cwd, links); glob {
+				for _, path := range paths {
+					add(path, "")
+				}
+				return true
+			}
+			if shellHasLiteralGlob(redirect.Word) {
+				unknown = true
+				return true
+			}
 			names, wordUnknown := shellWordDynamicParamNames(redirect.Word, home)
 			if wordUnknown && safeDomain && !candidates.allUnknown && shellNumericTargetSafe(redirect.Word, context.cwd, home, candidates) {
 				return true

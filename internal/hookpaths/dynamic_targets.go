@@ -13,6 +13,40 @@ import (
 
 type shellValueKind uint8
 
+func shellHasLiteralGlob(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		if literal, ok := part.(*syntax.Lit); ok && strings.ContainsAny(literal.Value, "*?[") {
+			return true
+		}
+	}
+	return false
+}
+
+// shellLiteralGlobCandidates lists the current names of a redirect pattern.
+// A command that changes links can change that set before the redirect runs.
+func shellLiteralGlobCandidates(word *syntax.Word, cwd string, links shellLinks) ([]string, bool) {
+	if word == nil || len(word.Parts) != 1 || !filepath.IsAbs(cwd) || links.opaque || len(links.aliases) > 0 {
+		return nil, false
+	}
+	literal, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || !strings.ContainsAny(literal.Value, "*?[") || strings.HasPrefix(literal.Value, "~") ||
+		strings.ContainsAny(literal.Value, "\x00\r\n") {
+		return nil, false
+	}
+	pattern := OperandPath(literal.Value, cwd)
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) > 256 {
+		return nil, false
+	}
+	if len(matches) == 0 {
+		return []string{pattern}, true
+	}
+	return matches, true
+}
+
 func shellZeroIndex(index syntax.ArithmExpr) bool {
 	word, ok := index.(*syntax.Word)
 	return ok && word.Lit() == "0"
