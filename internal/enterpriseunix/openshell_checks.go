@@ -637,18 +637,21 @@ const codeDockerGroupMembers = "docker_group_members"
 
 // dockerGroupAdvisory says how many of the enrolled accounts are in the
 // docker group and what that means for policy privacy: membership is
-// root-equivalent, so a member can read every root-owned file, the
-// administrator policy included, and the rule that each person sees only
-// their own effective policy does not hold for them. It counts and never
-// names the accounts. "" when none is a member.
+// root-equivalent, so a member can read and change what root can, the
+// administrator policy, the protected credentials and the services'
+// environment included, and the rule that each person sees only their own
+// effective policy does not hold for them. References do not help against a
+// member, so the only mitigation is a small group. It counts and never names
+// the accounts. "" when none is a member.
 func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
 	if members == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read every "+
-		"root-owned file, including the administrator policy (%s) and the sandbox profiles, so the rule that each person sees only their own "+
-		"effective policy does not hold for them; sandboxes on Linux need the group, so add only the accounts that run sandboxes, and keep "+
-		"every secret out of the policy as a protected credential or environment reference", members, enrolled, e.Layout.ConfigPath)
+	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read and "+
+		"change what root can, including the administrator policy (%s), the protected credentials and the services' environment, so the "+
+		"rule that each person sees only their own effective policy does not hold for them, and references keep secrets out of the policy "+
+		"file but do not protect them from a member; sandboxes on Linux need the group, so the only mitigation is to add only the accounts "+
+		"that run sandboxes", members, enrolled, e.Layout.ConfigPath)
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per

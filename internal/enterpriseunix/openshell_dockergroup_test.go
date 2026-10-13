@@ -35,8 +35,14 @@ func TestDockerGroupMembersAdvisory(t *testing.T) {
 		r := h.run(Options{Action: action})
 		message := messagesOf(r.Warnings, codeDockerGroupMembers)
 		if !strings.Contains(message, "2 of 3 enrolled accounts are in the docker group, which is root-equivalent") ||
-			!strings.Contains(message, h.env.Layout.ConfigPath) || !strings.Contains(message, "only their own effective policy") {
+			!strings.Contains(message, h.env.Layout.ConfigPath) || !strings.Contains(message, "only their own effective policy") ||
+			!strings.Contains(message, "read and change what root can") || !strings.Contains(message, "the protected credentials and the services' environment") ||
+			!strings.Contains(message, "do not protect them from a member") || !strings.Contains(message, "the only mitigation is to add only the accounts that run sandboxes") {
 			t.Fatalf("%s: advisory = %q", action, message)
+		}
+		// References are not a mitigation against a member (GAP-0498 fix-up).
+		if strings.Contains(message, "as a protected credential or environment reference") {
+			t.Fatalf("%s: the advisory offers references as a mitigation: %q", action, message)
 		}
 		for _, name := range []string{"alice", "bob", "carol"} {
 			if strings.Contains(message, name) {

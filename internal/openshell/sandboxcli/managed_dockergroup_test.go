@@ -51,7 +51,7 @@ func TestManagedDoctorExplainsDockerGroupAccess(t *testing.T) {
 	if c == nil || c.Status != openshell.StatusWarn || c.Fix == nil || c.Fix.Command != "" {
 		t.Fatalf("docker group row = %+v", c)
 	}
-	has(t, c.Detail, "you are in the docker group", "administrator-equivalent", "your organization's policy", "not limited to your own policy")
+	has(t, c.Detail, "you are in the docker group", "administrator-equivalent", "can read and change every file here", "your organization's policy", "not limited to your own policy")
 	has(t, c.Fix.Summary, "run only images and containers you trust", "take you out of the docker group")
 	if !rep.OK() {
 		t.Fatalf("the advisory blocks sandboxes: %+v", rep.Checks)

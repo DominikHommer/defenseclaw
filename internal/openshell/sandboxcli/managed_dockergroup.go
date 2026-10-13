@@ -30,7 +30,7 @@ const CheckIDManagedDockerGroup = "managed-docker-group"
 // sees only their own policy does not hold against it (GAP-0498).
 const managedDockerGroupDetail = "you are in the docker group, which sandboxes on this computer need " +
 	"(the docker driver runs in Docker, and MicroVM agent images are built in Docker for your account); " +
-	"Docker access is administrator-equivalent on this computer: it reaches every file here, " +
+	"Docker access is administrator-equivalent on this computer: it can read and change every file here, " +
 	"including your organization's policy and other people's files, so it is not limited to your own policy"
 
 // managedDockerGroupCheck is the doctor's Docker access row on a managed
