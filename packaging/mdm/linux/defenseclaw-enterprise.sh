@@ -620,6 +620,14 @@ dc_install_package() {
             [ "$arch" = "$(dpkg --print-architecture)" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .deb is for $arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             installed=$(dpkg-query -W -f='${Status} ${Version}' "$DC_LINUX_PACKAGE" 2>/dev/null || true)
+            case "$installed" in
+                "install ok installed "*)
+                    installed_version=${installed#install ok installed }
+                    if dpkg --compare-versions "$version" lt "$installed_version"; then
+                        dc_fail_result "$DC_EXIT_FAILURE" downgrade_refused "package version $version is older than the installed $installed_version; nothing was installed"
+                    fi
+                    ;;
+            esac
             if [ "$installed" = "install ok installed $version" ] && ! dc_binaries_damaged; then
                 dc_log "package $version already installed"
             else
