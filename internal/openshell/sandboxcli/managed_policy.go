@@ -947,6 +947,71 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 	return &c
 }
 
+// managedAdminVMDriver finds the administrator's MicroVM driver with the
+// check `enterprise verify` runs (openshell.AdminVMDriver); a seam for tests.
+var managedAdminVMDriver = func(goos string) (found string, refused []string) {
+	return openshell.AdminVMDriver(goos, func(p string) bool {
+		_, err := os.Lstat(p)
+		return err == nil
+	}, func(p string) error { return managed.ValidateTrustedFilePath(p, "managed file") })
+}
+
+// managedVMDriverGoarch is the CPU architecture the driver fix names; a seam
+// for tests.
+var managedVMDriverGoarch = runtime.GOARCH
+
+// withAdminVMDriver checks, for the doctor's Sandbox driver row c, the
+// administrator's openshell-driver-vm where the account's sandboxes need it
+// (prerequisite install, the MicroVM driver), live and with the check the
+// administrator's `enterprise verify` runs: the daemon's view of the driver
+// is the lifecycle's last record, so a driver removed since read ready
+// (GAP-0481). A missing or untrusted driver fails the row (warns on Linux
+// with the docker fallback, which then runs the sandboxes), naming the path
+// and the administrator's pinned-digest install. c is nil when the daemon
+// named no driver.
+func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus) *openshell.Check {
+	goos := a.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	wantsVM := m.Driver == config.EnterpriseOpenShellDriverVM || m.Driver == config.EnterpriseOpenShellDriverAuto
+	if (goos != "linux" && goos != "darwin") || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
+		!wantsVM || openshell.IsFallbackReason(m.DriverReason) {
+		return c
+	}
+	found, refused := managedAdminVMDriver(goos)
+	if found != "" {
+		return c
+	}
+	if c == nil {
+		c = &openshell.Check{ID: "managed-driver", Title: "Sandbox driver", Detail: managedDriverText(m.Driver, m.DriverReason, m.DriverFallback)}
+	}
+	why := "the MicroVM driver openshell-driver-vm is not installed (looked in " + strings.Join(openshell.AdminVMDriverDirs(goos), ", ") + ")"
+	if len(refused) > 0 {
+		why = "the MicroVM driver openshell-driver-vm is installed only where an account other than root can change it: " + strings.Join(refused, "; ") +
+			"; sandboxes do not use it"
+	}
+	if c.Detail != "" {
+		why = c.Detail + "; but " + why
+	}
+	c.Detail = why
+	c.Status = openshell.StatusFail
+	if goos == "linux" && m.DriverFallback == config.EnterpriseOpenShellFallbackDocker {
+		c.Status = openshell.StatusWarn
+		c.Detail += ", so your sandboxes run on docker with your organization's policy unchanged"
+	} else {
+		c.Detail += ", so no sandbox can start for you on this computer"
+	}
+	fix := openshell.AdminVMDriverFix(goos, managedVMDriverGoarch)
+	contact := sandboxapi.RequestAccessText(m.RequestAccess)
+	if contact != sandboxapi.RequestAccessFallback {
+		contact = "contact " + contact
+	}
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; an administrator step (" + contact + "): " + fix.Summary,
+		Command: fix.Command, Sudo: true}
+	return c
+}
+
 // managedDockerCheck is the doctor's Docker row on a managed Mac. The
 // MicroVM driver boots the agent images that DefenseClaw builds in the
 // account's Docker, so if Docker does not answer for the account, every

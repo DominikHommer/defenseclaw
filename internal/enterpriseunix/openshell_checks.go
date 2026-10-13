@@ -420,8 +420,7 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 		if dir != "" {
 			driver = filepath.Join(dir, "openshell-driver-vm")
 		}
-		part("microvm driver", "openshell-driver-vm", "", driver, refused, "install NVIDIA's openshell-driver-vm for the MicroVM driver root-owned into "+e.systemDriverDirs()[0]+
-			" (the openshell rpm does not carry it; chown -R root after extracting the tarball), or use enterprise.openshell.install: setup")
+		part("microvm driver", "openshell-driver-vm", "", driver, refused, adminVMDriverFixText(e.GOOS))
 	}
 	if len(parts) > 1 {
 		var named []string
@@ -439,6 +438,18 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	}
 	rows = append(rows, e.checkDriver(ctx, s)...)
 	return rows
+}
+
+// adminVMDriverFixText is the microvm driver row's fix: the shared
+// openshell.AdminVMDriverFix the managed user's doctor names too, with its
+// pinned-digest command (GAP-0481).
+func adminVMDriverFixText(goos string) string {
+	fix := openshell.AdminVMDriverFix(goos, sandboxHostArch)
+	text := fix.Summary
+	if fix.Command != "" {
+		text += ": " + fix.Command
+	}
+	return text + "; or use enterprise.openshell.install: setup"
 }
 
 // checkDriver checks what the compute driver needs from the host.

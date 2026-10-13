@@ -69,7 +69,7 @@ import (
 //  2. driver: vm only. Extract NVIDIA's openshell-driver-vm tarball into
 //     /usr/local/libexec/openshell and chown -R root:root it (tar keeps the
 //     builder's owner). The lifecycle renders driver_dir from the first
-//     folder in systemDriverDirs that holds openshell-driver-vm.
+//     folder in openshell.AdminVMDriverDirs that holds openshell-driver-vm.
 //  3. Run the lifecycle (`enterprise <os> ensure`). It needs the policies
 //     folder to be root:defenseclaw 0750 and the rule pack folders to be
 //     root-owned.
@@ -550,16 +550,6 @@ func (e *Env) ensureSymlink(path, target string) (changed bool, err error) {
 	return true, nil
 }
 
-// systemDriverDirs are where an administrator's OpenShell keeps its MicroVM
-// driver, the root-owned places first (on a Mac a Homebrew prefix belongs to
-// the account that ran brew).
-func (e *Env) systemDriverDirs() []string {
-	if e.GOOS == "darwin" {
-		return []string{"/usr/local/libexec/openshell", "/opt/homebrew/libexec/openshell"}
-	}
-	return []string{"/usr/libexec/openshell", "/usr/lib/openshell", "/usr/local/libexec/openshell"}
-}
-
 // systemDriverDir is the directory holding a trusted openshell-driver-vm, or
 // "": the rendered gateway configuration never points at a driver another
 // account can change.
@@ -569,13 +559,11 @@ func (e *Env) systemDriverDir() string {
 }
 
 // systemDriver is systemDriverDir with the candidates that exist but fail
-// the managed trust check.
+// the managed trust check. It is openshell.AdminVMDriver, the check a
+// managed user's `sandbox doctor` runs too (GAP-0481), on this filesystem.
 func (e *Env) systemDriver() (dir string, refused []string) {
-	var paths []string
-	for _, d := range e.systemDriverDirs() {
-		paths = append(paths, filepath.Join(d, "openshell-driver-vm"))
-	}
-	found, refused := e.trustedAdminFile(paths)
+	found, refused := openshell.AdminVMDriver(e.GOOS, func(p string) bool { return exists(e.P(p)) },
+		func(p string) error { return e.Trust(e.P(p), TrustAdminFile) })
 	if found == "" {
 		return "", refused
 	}
