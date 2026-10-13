@@ -595,14 +595,9 @@ func (a *App) Unblock(ctx context.Context, o UnblockOptions) error {
 	if err != nil {
 		return apiError(err)
 	}
-	// One line: the daemon's message repeats where the unblock applies.
-	msg := "unblocked " + res.Host + " in " + res.Sandbox
-	if res.Scope == "always" {
-		msg = "unblocked " + res.Host + " for every sandbox"
-		if res.Persisted {
-			msg += " (saved to openshell.egress.unblocked)"
-		}
-	}
-	a.ok(msg)
+	// One line, the daemon's own: it says where the unblock applies and
+	// where it is kept, which only it knows (a managed computer keeps it in
+	// the organization's gateway, not in openshell.egress.unblocked; #1205).
+	a.ok(firstNonEmpty(res.Message, "unblocked "+res.Host))
 	return nil
 }
