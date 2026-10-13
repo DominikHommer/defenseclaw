@@ -183,6 +183,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
+	// rollbackConfigFile is the file of that config.yaml: a writer that
+	// puts the same bytes back after the restart replaces it, which the
+	// digest alone cannot tell (GAP-1411).
+	rollbackConfigFile os.FileInfo
 	// configACLWritable is set when a transaction found a macOS ACL entry
 	// that let another account write config.yaml after the plan checked it,
 	// or could not read the ACLs: bytes that changed since are not applied,
@@ -2371,8 +2375,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if beforeStart != nil {
 		beforeStart()
 	}
-	l.rollbackConfigSHA = ""
+	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
+		l.rollbackConfigFile, _ = os.Stat(env.P(env.Layout.ConfigPath))
 		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
 	if err := l.recordRestoredGeneration(ctx); err != nil {
