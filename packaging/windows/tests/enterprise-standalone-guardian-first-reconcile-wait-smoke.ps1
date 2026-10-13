@@ -239,7 +239,7 @@ try {
     if (@($failures).Count -gt 0) {
         throw ("guardian first-reconcile wait smoke failed:`n" + (@($failures) -join "`n"))
     }
-    Microsoft.PowerShell.Utility\Write-Output 'guardian first-reconcile wait smoke passed'
+    Microsoft.PowerShell.Utility\Write-Output 'enterprise-standalone-guardian-first-reconcile-wait-smoke: OK'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
