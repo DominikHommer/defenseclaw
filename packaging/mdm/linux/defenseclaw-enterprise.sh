@@ -161,7 +161,7 @@ dc_stop_child() {
 # gone (the pid it recorded no longer runs) or, without a pid, a day old.
 dc_sweep_stages() {
     for stale in "$1"/defenseclaw-mdm.*; do
-        [ -d "$stale" ] && [ ! -L "$stale" ] || continue
+        if [ ! -d "$stale" ] || [ -L "$stale" ]; then continue; fi
         [ "$(dc_stat_uid "$stale")" = 0 ] || continue
         owner=$(head -c 32 "$stale/pid" 2>/dev/null || true)
         case "$owner" in
@@ -965,7 +965,7 @@ dc_run_lifecycle_retry() {
     while :; do
         status=0
         dc_run_lifecycle "$@" || status=$?
-        [ "$status" = 75 ] && [ "$attempt" -lt 3 ] || break
+        if [ "$status" != 75 ] || [ "$attempt" -ge 3 ]; then break; fi
         dc_log "lifecycle busy; retry $attempt of 2"
         attempt=$((attempt + 1))
         sleep 10
