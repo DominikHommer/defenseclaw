@@ -422,24 +422,22 @@ func TestTetragonSourceSignalsWhenTheObservePolicyBecomesTheFileHalf(t *testing.
 // gateway subscription after the first) is the file half from the first
 // coverage, not from the first hand-off evaluation.
 func TestTetragonSourceTakesALoadedObservePolicyAtTheDial(t *testing.T) {
-	h := newHarness(t)
-	handoffInterval = time.Hour // no hand-off evaluation in this test
 	observe := func(name string) bool { return name == "defenseclaw-observe-89abcdef" }
-	feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
-		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"}}})
-	h.feeds <- feed
-	source := startSource(t, h, nil, observe)
-	if coverage := source.Coverage(); !coverage.Complete() ||
-		!strings.HasSuffix(coverage.Mechanism, " + file opens from the DefenseClaw observe policy") {
-		t.Fatalf("first coverage %+v", coverage)
-	}
-	// A disabled observe policy at the dial is not the file half.
-	h2 := newHarness(t)
-	handoffInterval = time.Hour
-	h2.feeds <- newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
-		Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "disabled"}}})
-	if coverage := startSource(t, h2, nil, observe).Coverage(); coverage.Complete() {
-		t.Fatalf("a disabled observe policy became the file half: %+v", coverage)
+	for _, tc := range []struct {
+		state    string
+		complete bool
+	}{{"enabled", true}, {"disabled", false}} {
+		t.Run(tc.state, func(t *testing.T) {
+			h := newHarness(t)
+			handoffInterval = time.Hour // no hand-off evaluation in this test
+			h.feeds <- newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1",
+				Policies: []BackendPolicy{{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: tc.state}}})
+			coverage := startSource(t, h, nil, observe).Coverage()
+			if coverage.Complete() != tc.complete ||
+				(tc.complete && !strings.HasSuffix(coverage.Mechanism, " + file opens from the DefenseClaw observe policy")) {
+				t.Fatalf("first coverage with the observe policy %s: %+v", tc.state, coverage)
+			}
+		})
 	}
 }
 
