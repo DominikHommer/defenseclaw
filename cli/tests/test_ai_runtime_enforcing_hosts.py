@@ -119,20 +119,23 @@ def evaluate(expr: str, records: list[dict], host_regex: str = ".*") -> int:
 _SEQ = iter(range(1, 1_000_000))
 
 
-def _health(host: str, minutes_ago: float, enforced: int | None, *, mode: str | None = "enforce",
-            plane: str = "c") -> dict:
+def _health(
+    host: str, minutes_ago: float, enforced: int | None, *, mode: str | None = "enforce", plane: str = "c"
+) -> dict:
     body: dict[str, object] = {
         "defenseclaw.ai.runtime.plane": plane,
         "defenseclaw.ai.runtime.plane_backend": "tetragon",
     }
     if enforced is not None:
-        body.update({
-            "defenseclaw.ai.runtime.tetragon.version": "v1.7.1",
-            "defenseclaw.ai.runtime.kernel.approval": "approved",
-            "defenseclaw.ai.runtime.kernel.paused": False,
-            "defenseclaw.policy.version": "sha256:08b71155b713",
-            "defenseclaw.ai.runtime.kernel.users_enforced": enforced,
-        })
+        body.update(
+            {
+                "defenseclaw.ai.runtime.tetragon.version": "v1.7.1",
+                "defenseclaw.ai.runtime.kernel.approval": "approved",
+                "defenseclaw.ai.runtime.kernel.paused": False,
+                "defenseclaw.policy.version": "sha256:08b71155b713",
+                "defenseclaw.ai.runtime.kernel.users_enforced": enforced,
+            }
+        )
         if mode is not None:
             body["defenseclaw.ai.runtime.kernel.helper_mode"] = mode
     ts = NOW - minutes_ago * MINUTE
@@ -182,8 +185,10 @@ def test_other_planes_and_records_without_kernel_state_are_ignored(expr: str) ->
 
 def test_hosts_are_counted_separately_and_the_host_filter_applies(expr: str) -> None:
     records = [
-        _health("web-1", 4, 1), _health("web-1", 1, 1),
-        _health("web-2", 4, 2), _health("web-2", 1, 0),
+        _health("web-1", 4, 1),
+        _health("web-1", 1, 1),
+        _health("web-2", 4, 2),
+        _health("web-2", 1, 0),
         _health("db-1", 1, 4),
     ]
     assert evaluate(expr, records) == 2
