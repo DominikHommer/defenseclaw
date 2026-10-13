@@ -12,6 +12,12 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_pr886_remote_scanner_empty_rules_use_connection_policy(self):
+        text = page("guardrail/index.mdx")
+        self.assertIn("an unset or empty\n`cisco_ai_defense.enabled_rules` sends no", text)
+        self.assertIn("A nonempty operator list is sent in\nthe order configured", text)
+        self.assertIn("former implicit 12-rule list", text)
+
     def test_fg02_relative_scanner_policy_path(self):
         row = next(line for line in page("reference/migrate-v9.mdx").splitlines()
                    if line.startswith("| `policy: <path to a file>` |"))
