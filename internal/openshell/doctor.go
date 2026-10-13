@@ -1063,6 +1063,9 @@ func (r *doctorRun) dockerDesktopChecks() (hostNet, sharing Check) {
 	sharing = Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
 	if !r.desktop {
 		hostNet.Status, hostNet.Detail = StatusPass, "Docker Engine shares the host network"
+		if r.GOOS == "darwin" {
+			return hostNet, r.macEngineFileSharing(sharing)
+		}
 		sharing.Status, sharing.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
 		return hostNet, sharing
 	}
@@ -1098,6 +1101,26 @@ func (r *doctorRun) dockerDesktopChecks() (hostNet, sharing Check) {
 		sharing.Fix = &Fix{Summary: "add your home directory in Docker Desktop → Settings → Resources → File sharing"}
 	}
 	return hostNet, sharing
+}
+
+// macEngineFileSharing is the Docker file sharing check of an engine other
+// than Docker Desktop on a Mac (Colima, OrbStack): it runs containers in a
+// Linux VM, so a bind mount reaches only what that VM sees, never straight
+// from the host filesystem. Colima and OrbStack let the VM see the home
+// directory by default; anything more is their own configuration, which
+// DefenseClaw does not read. A live sandbox mounts its project folder.
+func (r *doctorRun) macEngineFileSharing(c Check) Check {
+	home, _ := r.HomeDir()
+	if !filepath.IsAbs(home) {
+		c.Status, c.Detail = StatusWarn, "this Docker engine runs containers in a VM, and without a home directory DefenseClaw cannot tell which folders it can mount"
+		c.Fix = &Fix{Summary: "run DefenseClaw with HOME set to your home directory"}
+		return c
+	}
+	c.Status = StatusPass
+	c.Detail = "this Docker engine runs containers in a VM, which Colima and OrbStack let see your home directory (" + filepath.Clean(home) +
+		") by default, so project folders under it can be mounted; a project elsewhere needs the engine to share it " +
+		"(Colima: add it under mounts in ~/.colima/default/colima.yaml, then `colima restart`)"
+	return c
 }
 
 func sharedDir(shared []string, path string) bool {

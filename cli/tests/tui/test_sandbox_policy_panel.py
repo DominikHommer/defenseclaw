@@ -308,3 +308,18 @@ async def test_the_policy_section_fits_80x24_and_e_opens_it(managed_daemon) -> N
         assert screen.query_one("#sandbox-detail-close").region.bottom <= 24
         await pilot.press("escape")
         await pilot.pause()
+
+
+def test_the_approvals_row_matches_what_approve_always_does() -> None:
+    # GAP-0169 (#1200): under allow_unblock: false the managed gateway refuses
+    # approve --always, so an approval lasts this session only, as `sandbox
+    # policy explain` says.
+    def row(approvals: str, unblock: bool) -> str:
+        return dict(managed_policy_pairs({**EXPLAIN, "user_approvals": approvals, "allow_unblock": unblock}, NOW))["Approvals"]
+
+    assert row("", True) == "you may approve asks for a session or for good"
+    assert row("", False) == "you may approve asks for this session only; you can't unblock destinations"
+    assert row("session", True) == "you may approve asks for this session only"
+    assert row("session", False) == "you may approve asks for this session only; you can't unblock destinations"
+    assert row("none", True) == "you can't approve asks; they are refused"
+    assert row("none", False) == "you can't approve asks; they are refused; you can't unblock destinations"

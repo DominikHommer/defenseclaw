@@ -478,7 +478,16 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, e
 		return false, accountBusyError()
 	}
 	if err := o.startUnit(ctx); err != nil {
-		return true, openShellPrerequisiteError("your OpenShell gateway could not be started: %v", err)
+		// The service manager's command line and job text stay in the log:
+		// they name nothing the person can act on (#1202).
+		o.logf("start your OpenShell gateway: %v", err)
+		if holder, held := o.portHolder(port); held && holder != o.uid {
+			// Another account's gateway holds the port (its idle gateway
+			// had not stopped yet), so this account's could not bind it.
+			return true, accountBusyError()
+		}
+		return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); "+
+			"`defenseclaw sandbox doctor` shows why", o.unitState(ctx))
 	}
 	deadline := time.Now().Add(openShellGatewayStartWait)
 	for {
@@ -690,7 +699,7 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 	status := ""
 	switch o.goos {
 	case "linux":
-		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
+		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "show", "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus", openShellGatewayUnit}, userManagerEnv(o.uid))
 		if err != nil {
 			return "its state is unknown"
 		}
@@ -699,6 +708,12 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 			if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
 				fields[k] = v
 			}
+		}
+		switch {
+		case fields["LoadState"] == "not-found":
+			return "its service unit was not found on this computer"
+		case fields["ActiveState"] == "":
+			return "its state is unknown"
 		}
 		status = fields["ExecMainStatus"]
 		if status != strconv.Itoa(78) {
