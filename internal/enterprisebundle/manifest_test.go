@@ -100,6 +100,7 @@ func TestDecodeManifestRefuses(t *testing.T) {
 		"other tenant admin":  mutate(func(m *Manifest) { m.CreatedBy = "control-plane:other/alice" }),
 		"unknown principal":   mutate(func(m *Manifest) { m.CreatedBy = "alice" }),
 		"empty operator":      mutate(func(m *Manifest) { m.CreatedBy = "operator:" }),
+		"principal too long":  mutate(func(m *Manifest) { m.CreatedBy = "control-plane:acme/" + strings.Repeat("\u00e9", 128) }),
 		"summary newline":     mutate(func(m *Manifest) { m.ChangeSummary = "ok\nconfig.change.applied fake" }),
 		"summary bidi":        mutate(func(m *Manifest) { m.ChangeSummary = "ok \u202e" }),
 		"summary too long":    mutate(func(m *Manifest) { m.ChangeSummary = strings.Repeat("x", MaxChangeSummary+1) }),

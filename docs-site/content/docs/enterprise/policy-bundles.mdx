@@ -201,6 +201,16 @@ enforcement does not depend on it.
   gateway starts, when the bundle the live generation runs changes and with
   each receipt; between those it is not re-sent. A device that has never
   confirmed a bundle records none.
+- **Principal in telemetry.** `created_by` is at most 256 bytes; sign and
+  verify refuse a longer one. The OTel attribute
+  `defenseclaw.admin.principal_ref` carries only letters, digits and
+  `. _ : / -`, so a principal such as `control-plane:acme/alice@example.com`
+  or `operator:CORP\admin` is left out of the attribute; the receipt,
+  `receipt.json` and `config.generation.json` keep it.
+- **Rollback record.** A failed apply that rolls back to the last good
+  bundle records the restored config as that bundle again (its principal
+  and bundle fields), so `/health` names the bundle that enforces. A
+  rollback to a config no bundle installed is recorded as the lifecycle.
 - **Windows restart path.** On Windows, a bundle config applied without a
   gateway restart is recorded as the bundle principal with the bundle fields.
   A bundle config that needs the restart path is installed by the upgrade

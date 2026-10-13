@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
 // ManifestSchemaVersion is the manifest.json schema this build reads.
@@ -429,6 +430,12 @@ func (m *Manifest) CreatedTime() (time.Time, error) {
 // checkPrincipal accepts control-plane:<tenant>/<admin> for tenant and
 // operator:<os-admin>.
 func checkPrincipal(principal, tenant string) error {
+	// The device records the principal as the config writer, which takes at
+	// most MaxPrincipalBytes: refuse a longer one at sign and verify, not at
+	// apply.
+	if len(principal) > configwrite.MaxPrincipalBytes {
+		return fmt.Errorf("longer than %d bytes", configwrite.MaxPrincipalBytes)
+	}
 	switch {
 	case strings.HasPrefix(principal, "control-plane:"):
 		rest := strings.TrimPrefix(principal, "control-plane:")
