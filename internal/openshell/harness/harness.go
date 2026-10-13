@@ -27,6 +27,7 @@
 package harness
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path"
@@ -66,6 +67,62 @@ const (
 // the root-owned system directories, ahead of whatever the caller's PATH
 // adds.
 const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// The workload's Python (WorkloadPythonShimStep). The base image's pip and
+// uv install into WorkloadVenv, but LauncherSystemPATH puts /usr/local/bin,
+// where the base image's python3 is, ahead of the venv's bin, so `pip
+// install x` and then `python3 -c 'import x'` used two environments
+// (#1238). Root-owned python3 and python shims in WorkloadPythonShimDir,
+// first on LauncherSystemPATH, run the venv's interpreter instead. The
+// hooks' PATH (connector.SandboxHookPATH) leaves that directory out, so a
+// hook never runs the workload-writable venv.
+const (
+	WorkloadPythonShimDir = "/usr/local/sbin"
+	WorkloadVenv          = connector.SandboxHomeDir + "/.venv"
+)
+
+// pythonShimScript is each shim: @PY@ is the venv's versioned interpreter
+// (python3.X), run by its absolute path so the shim never finds itself on
+// PATH, and @BASE@ the base image's python3, which a venv the agent removed
+// leaves (empty: none).
+const pythonShimScript = `#!/bin/sh
+# DefenseClaw: python3 is the sandbox's workload environment (@VENV@), where
+# pip and uv install, as in a shell that activated it.
+if [ -x @PY@ ]; then exec @PY@ "$@"; fi
+if [ -n "@BASE@" ]; then exec @BASE@ "$@"; fi
+echo "python3: @PY@ is gone" >&2
+exit 127
+`
+
+// WorkloadPythonShimStep is the image step that installs the python3 and
+// python shims (pythonShimScript) when the base image has the workload venv.
+// Like WorkloadPythonStep it is a compatibility fix, not a control: the
+// venv is the workload's, as pip already was. A base image without the
+// venv, or with a program of its own at a shim's path, builds on without
+// it. It runs after the harness install steps, which keep the base image's
+// python3.
+func WorkloadPythonShimStep() InstallStep {
+	return InstallStep{
+		Comment: "python3 and pip use one environment, the workload venv " + WorkloadVenv + " (the hooks keep the system python3)",
+		Run:     workloadPythonShimRun(WorkloadVenv, WorkloadPythonShimDir, "/usr/local/bin/python3 /usr/bin/python3"),
+	}
+}
+
+// workloadPythonShimRun is WorkloadPythonShimStep's command for the venv,
+// the shim directory and the base interpreters to fall back to (shell
+// words).
+func workloadPythonShimRun(venv, dir, bases string) string {
+	shim := strings.ReplaceAll(pythonShimScript, "@VENV@", venv)
+	b64 := base64.StdEncoding.EncodeToString([]byte(shim))
+	return `set -eu; venv=` + shellQuote(venv) + `; dir=` + shellQuote(dir) + `; ` +
+		`if [ -x "$venv/bin/python3" ]; then ` +
+		`v="$("$venv/bin/python3" -I -S -c 'import sys; print("%d.%d" % sys.version_info[:2])')"; py="$venv/bin/python$v"; ` +
+		`base=""; for b in ` + bases + `; do if [ -x "$b" ]; then base="$b"; break; fi; done; ` +
+		`if [ ! -x "$py" ]; then echo "DefenseClaw: $venv has no python$v, so python3 and pip may use different environments" >&2; ` +
+		`else install -d -m 0755 "$dir"; for name in python3 python; do ` +
+		`if [ -e "$dir/$name" ]; then echo "DefenseClaw: the base image has its own $dir/$name" >&2; continue; fi; ` +
+		`printf '%s' ` + b64 + ` | base64 -d | sed -e "s#@PY@#$py#g" -e "s#@BASE@#$base#g" >"$dir/$name"; chmod 0755 "$dir/$name"; done; fi; fi`
+}
 
 // launcherScrubbedEnv are variables no launcher passes to its harness. The
 // harnesses run hooks and tool commands through bash, which reads the file
