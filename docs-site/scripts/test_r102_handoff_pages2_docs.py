@@ -12,6 +12,12 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_lfwin_guardian_first_reconcile_wait(self):
+        text = page("enterprise/troubleshooting.mdx")
+        self.assertIn("Setup waits up to 10 minutes for the guardian's first reconcile", text)
+        self.assertIn("hook_guardian_startup.json", text)
+        self.assertIn("no longer running during its first reconcile", text)
+
     def test_fg12_uninstall_incomplete_code(self):
         row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
                    if line.startswith("| `uninstall_incomplete` |"))
