@@ -1381,15 +1381,36 @@ func statusNext(in tetragonInputs, probes tetragonProbes, now time.Time) []strin
 		case a.Users == 0:
 			return []string{"Next: no user is enrolled for the kernel controls yet. See:", verify("--ready-for", "enforce")}
 		}
-		sentence := fmt.Sprintf("Next: %d of %d %s %s ready", a.ReadyUsers, a.Users, plural(a.Users, "user", "users"), plural(a.ReadyUsers, "is", "are"))
-		if a.ReadyUsers < a.Users {
+		users := plural(a.Users, "user", "users")
+		// Observe counts the users ready for enforce, the STATE column's
+		// words; enforce counts the users it denies for now, so "ready"
+		// never means two things (#1152). The BURN-IN column keeps its own
+		// "ready" for a finished burn-in.
+		sentence := fmt.Sprintf("Next: %d of %d %s %s ready for enforce", a.ReadyUsers, a.Users, users, plural(a.ReadyUsers, "is", "are"))
+		counted := a.ReadyUsers
+		if mode == config.TetragonModeEnforce {
+			counted = enforcedUsers(in.State.UIDs)
+			sentence = fmt.Sprintf("Next: %d of %d %s enforced", counted, a.Users, users)
+		}
+		if counted < a.Users {
 			if eta, ok := nextReady(in, now); ok {
-				sentence += "; the next is ready in " + humanDuration(eta) + " at the current rate"
+				sentence += "; the next in " + humanDuration(eta) + " at the current rate"
 			}
 		}
 		return []string{sentence + ". Check with:", verify("--ready-for", "enforce")}
 	}
 	return nil
+}
+
+// enforcedUsers counts the users the helper enforces for now.
+func enforcedUsers(users []kernelpolicy.UIDStatus) int {
+	n := 0
+	for _, user := range users {
+		if user.State == kernelpolicy.UIDEnforcing {
+			n++
+		}
+	}
+	return n
 }
 
 // userStateWords is a user's place in the rollout in words, and for a

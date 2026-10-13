@@ -1234,7 +1234,7 @@ func TestTetragonStatusTextInObserveWithAResetUser(t *testing.T) {
 		"    dcr-std2 (1002)  in burn-in         claudecode  40.5h of 168h (24%), ~9 days  0\n",
 		"    dcr-std3 (1003)  reset by a hit     claudecode  0.0h of 168h (0%), measuring  1\n",
 		"      dcr-std3 (1003): would block ssh_private_key_read 1x, last 2026-10-07T09:12:00Z\n        ~/.ssh/id_ed25519 by /usr/bin/python3.11\n",
-		"Next: 1 of 3 users is ready; the next is ready in ~9 days at the current rate. Check with:\n" +
+		"Next: 1 of 3 users is ready for enforce; the next in ~9 days at the current rate. Check with:\n" +
 			"  sudo " + adminBinDir + "/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -1277,7 +1277,7 @@ func TestTetragonStatusTextNamesMonitorOnlyUsers(t *testing.T) {
 		"    dcr-std1 (1001)  monitor only    codex*      168.0h of 168h                0\n",
 		"    * through vendor machine policy: an eligible account without a targets.yaml row\n",
 		"      dcr-std1 (1001): monitor only: connector in observe mode\n",
-		"Next: 0 of 3 users are ready; the next is ready in ~9 days at the current rate. Check with:\n",
+		"Next: 0 of 3 users are ready for enforce; the next in ~9 days at the current rate. Check with:\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("text lacks %q:\n%s", want, got)
@@ -1287,6 +1287,38 @@ func TestTetragonStatusTextNamesMonitorOnlyUsers(t *testing.T) {
 		t.Fatalf("machine_policy = %v / %v", rep.Users[0].MachinePolicy, rep.Users[1].MachinePolicy)
 	}
 	assertStatusColumns(t, got)
+}
+
+// #1152: the Next: footer said "N of M users are ready" in observe and in
+// enforce, the word the BURN-IN column uses for a finished burn-in. Observe
+// now counts the users ready for enforce (the STATE column's words), and
+// enforce counts the users it denies for now.
+func TestTetragonStatusNextSeparatesEnforcedFromReady(t *testing.T) {
+	stubTetragonAccounts(t)
+	observe := withUsers(readyInputs("observe"))
+	got := statusNext(observe, readyProbes, readinessNow)
+	if len(got) != 2 || got[0] != "Next: 1 of 3 users is ready for enforce; the next in ~9 days at the current rate. Check with:" {
+		t.Fatalf("observe footer %q", got)
+	}
+
+	enforce := withUsers(readyInputs("enforce"))
+	enforce.Intent.EnforceAck = []string{kernelpolicy.Digest()}
+	enforce.State.UIDs[0].State, enforce.State.UIDs[0].Reason = kernelpolicy.UIDEnforcing, ""
+	got = statusNext(enforce, readyProbes, readinessNow)
+	if len(got) != 2 || got[0] != "Next: 1 of 3 users enforced; the next in ~9 days at the current rate. Check with:" {
+		t.Fatalf("enforce footer %q", got)
+	}
+	for _, line := range got {
+		if strings.Contains(line, "ready;") || strings.Contains(line, "is ready") || strings.Contains(line, "are ready") {
+			t.Fatalf("enforce footer still says ready: %q", got)
+		}
+	}
+	// Burn-in finished but not denied for (another user holds the binary
+	// anchor): ready, yet not counted as enforced.
+	enforce.State.UIDs[0].State, enforce.State.UIDs[0].Reason = kernelpolicy.UIDMonitor, kernelpolicy.WarnBinaryScopeLimited
+	if got = statusNext(enforce, readyProbes, readinessNow); len(got) != 2 || !strings.HasPrefix(got[0], "Next: 0 of 3 users enforced") {
+		t.Fatalf("enforce footer with no enforced user %q", got)
+	}
 }
 
 func TestConnectorsWordsMarkMachinePolicy(t *testing.T) {
