@@ -25215,6 +25215,8 @@ function Invoke-DefenseClawForcedUninstallPreparation {
     $preparation = [pscustomobject]@{
         state_root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
         moved_state_root = ''
+        install_rollback_intent = ''
+        moved_install_rollback_intent = ''
         services = $prior.ToArray()
         restored = $false
     }
@@ -25257,6 +25259,17 @@ function Restore-DefenseClawForcedUninstallPreparation {
     }
     $Preparation.restored = $true
     $notRestored = [Collections.Generic.List[string]]::new()
+    $movedIntentProperty = $Preparation.PSObject.Properties['moved_install_rollback_intent']
+    $movedIntent = if ($null -ne $movedIntentProperty) { [string]$movedIntentProperty.Value } else { '' }
+    if (-not [string]::IsNullOrEmpty($movedIntent)) {
+        try {
+            [IO.File]::Move($movedIntent, [string]$Preparation.install_rollback_intent)
+            $Preparation.moved_install_rollback_intent = ''
+        }
+        catch {
+            $notRestored.Add('install receipt ' + [string]$Preparation.install_rollback_intent + ' (still at ' + $movedIntent + '): ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 256))
+        }
+    }
     $moved = [string]$Preparation.moved_state_root
     if (-not [string]::IsNullOrEmpty($moved)) {
         try {
@@ -25284,6 +25297,53 @@ function Restore-DefenseClawForcedUninstallPreparation {
     return [string[]]$notRestored.ToArray()
 }
 
+function Move-DefenseClawForcedUninstallInstallReceipt {
+    <#
+        A failed initial install leaves its fresh-install rollback receipt
+        beside the lifecycle lock, bound to the pending transaction in
+        StateRoot. The forced uninstall preparation moves StateRoot aside, so
+        the pre-layout recovery refused the receipt ("bound install
+        preparation lost its protected pending transaction") and every forced
+        retry failed the same way (GAP-1365). A forced uninstall reads nothing
+        of the transaction: the receipt moves aside too, and the state-absent
+        exact-scope purge removes what the install created. A receipt of a
+        committed install stays, for the recovery to complete. When the
+        forced uninstall is refused, Restore-DefenseClawForcedUninstallPreparation
+        puts it back; when it completes, Complete-DefenseClawForcedUninstall
+        removes it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Preparation
+    )
+    $path = [string]$Layout.InstallRollbackIntentPath
+    if ([string]::IsNullOrWhiteSpace($path) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        return
+    }
+    Assert-DefenseClawNoReparsePath -Path $path
+    $phase = ''
+    try {
+        $receipt = Microsoft.PowerShell.Management\Get-Content -LiteralPath $path -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        $phaseProperty = $receipt.PSObject.Properties['phase']
+        if ($null -ne $phaseProperty) {
+            $phase = [string]$phaseProperty.Value
+        }
+    }
+    catch {
+        # An unreadable receipt cannot be completed either; move it aside.
+        $phase = ''
+    }
+    if ($phase -ceq 'committed') {
+        return
+    }
+    $moved = $path + '.forced-uninstall-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    [IO.File]::Move($path, $moved)
+    $Preparation.install_rollback_intent = $path
+    $Preparation.moved_install_rollback_intent = $moved
+}
+
 function Invoke-DefenseClawForcedUninstall {
     <#
         Standalone Setup /uninstall FORCE=1: the preparation, then the
@@ -25309,6 +25369,9 @@ function Invoke-DefenseClawForcedUninstall {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
     try {
+        Move-DefenseClawForcedUninstallInstallReceipt `
+            -Layout $Layout `
+            -Preparation $preparation
         $recovery = Invoke-DefenseClawPreLayoutRecovery `
             -Action Uninstall `
             -Layout $Layout `
@@ -25333,7 +25396,8 @@ function Invoke-DefenseClawForcedUninstall {
     }
     return Complete-DefenseClawForcedUninstall `
         -Result $recovery.result `
-        -MovedStateRoot $preparation.moved_state_root
+        -MovedStateRoot $preparation.moved_state_root `
+        -MovedInstallReceipt $preparation.moved_install_rollback_intent
 }
 
 function Complete-DefenseClawForcedUninstall {
@@ -25344,9 +25408,19 @@ function Complete-DefenseClawForcedUninstall {
     #>
     param(
         [Parameter(Mandatory)]$Result,
-        [AllowEmptyString()][string]$MovedStateRoot
+        [AllowEmptyString()][string]$MovedStateRoot,
+        [AllowEmptyString()][string]$MovedInstallReceipt
     )
     $kept = ''
+    if (-not [string]::IsNullOrWhiteSpace($MovedInstallReceipt)) {
+        try {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $MovedInstallReceipt -Force -ErrorAction Stop
+        }
+        catch {
+            $Result |
+                Microsoft.PowerShell.Utility\Add-Member -MemberType NoteProperty -Name forced_install_receipt_kept -Value ("${MovedInstallReceipt}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)) -Force
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($MovedStateRoot)) {
         try {
             Remove-DefenseClawManagedTree `
