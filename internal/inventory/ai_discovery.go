@@ -3917,9 +3917,6 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 			if _, ok := seen[expanded]; ok {
 				continue
 			}
-			if s.macOSTCCRootSkipped(expanded) {
-				continue
-			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {
 				seen[expanded] = struct{}{}
 				roots = append(roots, expanded)
