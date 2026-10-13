@@ -219,6 +219,14 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertIn("removed when the last one exits", row)
         self.assertNotIn("A planned follow-up", row)
 
+    def test_fg13_entra_planning_and_local_group_guards(self):
+        text = page("enterprise/identity-entra-id.mdx")
+        self.assertIn("A Microsoft Graph read failure stops the plan", text)
+        self.assertIn("planned groups without regard to letter case", text)
+        self.assertIn("refuses existing\ndynamic or mail-enabled groups", text)
+        self.assertIn("whose SID differs from the local\ngroup with the same short name", text)
+        self.assertNotIn("leaves the others alone", text)
+
 
 if __name__ == "__main__":
     unittest.main()

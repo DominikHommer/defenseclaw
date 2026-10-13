@@ -122,9 +122,16 @@ python3 entra_setup.py sids --group defenseclaw-ml-team
 ```
 
 A token in `GRAPH_ACCESS_TOKEN` works instead of the app registration. The
-script creates objects that do not exist and leaves the others alone, so it is
-safe to run again. New users get a generated password that goes only to the
+script creates missing objects, leaves existing users unchanged and adds
+requested group memberships where allowed, so it is safe to run again. New
+users get a generated password that goes only to the
 `--password-file` (mode 0600), never to the screen.
+
+A Microsoft Graph read failure stops the plan, including a preview; the script
+does not treat it as a missing object. Group references in the config match
+planned groups without regard to letter case. The script refuses existing
+dynamic or mail-enabled groups because it cannot manage their membership;
+use a static security group instead.
 
 `sids` prints the object ID and the Windows SID of the group:
 
@@ -205,6 +212,8 @@ reports `Added`, `AlreadyMember`, `Removed` or `NotMember`. `-Remove` undoes it.
 It warns when you name a group other than the six Windows reads, and when you
 name Administrators, because that makes every member of the Entra group a local
 administrator.
+If `-LocalGroup` names a qualified domain group whose SID differs from the local
+group with the same short name, the script refuses the change.
 
 The script ran on Windows Server 2025 in Windows PowerShell 5.1 and PowerShell
 7 against a throwaway local group. The same API call put an Entra group into
