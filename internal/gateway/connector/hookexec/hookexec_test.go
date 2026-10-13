@@ -2767,3 +2767,45 @@ func TestSecureClientHookDoesNotRetry429(t *testing.T) {
 		t.Fatalf("Secure Client: %d requests, code %d, stdout %q, stderr %q", rt.requests, result.code, result.stdout, result.stderr)
 	}
 }
+
+func TestManagedHermesHookBlocksWhenTheGatewayIsDown(t *testing.T) {
+	sp := specs["hermes"]
+	for _, tc := range []struct {
+		name   string
+		invoke func(Options) int
+	}{
+		{name: "gateway unavailable", invoke: func(o Options) int {
+			return failUnreachable(o, sp, "closed", managedGatewayNotRunningReason)
+		}},
+		{name: "credential missing", invoke: func(o Options) int {
+			return handleMissingToken(o, sp, "open", "token")
+		}},
+		{name: "home unavailable", invoke: func(o Options) int {
+			return handleUnavailableHome(o, sp, "DefenseClaw home is unavailable")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			opts := Options{Connector: "hermes", Event: "pre_tool_call", ManagedEnterprise: true, Stdout: &stdout, Stderr: &stderr}
+			var body map[string]string
+			if code := tc.invoke(opts); code != 0 || json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &body) != nil || body["action"] != "block" ||
+				!strings.Contains(stderr.String(), "blocking managed") {
+				t.Fatalf("managed pre_tool_call = %d %q %q", code, stdout.String(), stderr.String())
+			}
+			if tc.name == "gateway unavailable" && !strings.Contains(body["message"], "the DefenseClaw gateway service is not running on this computer") {
+				t.Fatalf("gateway message = %q", body["message"])
+			}
+		})
+	}
+	for name, o := range map[string]Options{
+		"per-user":      {Connector: "hermes", Event: "pre_tool_call"},
+		"Secure Client": {Connector: "hermes", Event: "pre_tool_call", ManagedEnterprise: true, SecureClient: true},
+		"other event":   {Connector: "hermes", Event: "pre_llm_call", ManagedEnterprise: true},
+	} {
+		var stdout, stderr bytes.Buffer
+		o.Stdout, o.Stderr = &stdout, &stderr
+		if code := failUnreachable(o, sp, "closed", managedGatewayNotRunningReason); code != 0 || strings.Contains(stdout.String(), `"action":"block"`) {
+			t.Fatalf("%s = %d %q, want the neutral result", name, code, stdout.String())
+		}
+	}
+}

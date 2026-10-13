@@ -1255,6 +1255,9 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
+	if code, handled := managedHermesFailClosed(opts, sp, reason); handled {
+		return code
+	}
 	if opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")) {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
@@ -1273,6 +1276,9 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 		return allowFailedStop(opts, sp, reason, "transport", normalizeFailMode(opts.FailMode))
 	}
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
+	if code, handled := managedHermesFailClosed(opts, sp, reason); handled {
 		return code
 	}
 	if !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise) {
@@ -1326,6 +1332,9 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		return code
+	}
+	if code, handled := managedHermesFailClosed(opts, sp, reason); handled {
 		return code
 	}
 	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
@@ -1692,6 +1701,20 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
+}
+
+// managedHermesFailClosed returns Hermes' native block directive when a
+// standalone managed pre_tool_call cannot get a gateway verdict. Other
+// profiles and events keep the connector's neutral result.
+func managedHermesFailClosed(opts Options, sp spec, reason string) (int, bool) {
+	if !opts.ManagedEnterprise || opts.SecureClient || sp.connector != "hermes" ||
+		!strings.EqualFold(strings.TrimSpace(opts.Event), "pre_tool_call") {
+		return 0, false
+	}
+	text := managedStandaloneFailClosedText(opts.Event, "transport", reason)
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	fmt.Fprintln(opts.Stdout, `{"action":"block","message":`+mustJSONString(text)+`}`)
 	return 0, true
 }
 

@@ -6,6 +6,9 @@
 package hookexec
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -18,6 +21,25 @@ import (
 )
 
 var managedTransportTestMu sync.Mutex
+
+func TestManagedHermesWindowsNativeFailureResult(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), Options{
+		Connector:             "hermes",
+		Event:                 "pre_tool_call",
+		ManagedEnterprise:     true,
+		ManagedRuntimeFailure: managedGatewayNotRunningReason,
+		Home:                  t.TempDir(),
+		Stdin:                 strings.NewReader(`{"event":"pre_tool_call"}`),
+		Stdout:                &stdout,
+		Stderr:                &stderr,
+	})
+	var body map[string]string
+	if code != 0 || json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &body) != nil ||
+		body["action"] != "block" || !strings.Contains(body["message"], "gateway service is not running") {
+		t.Fatalf("Windows native result = code %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+}
 
 func TestManagedEnterpriseTransportRejectsForeignListenerBeforeHTTPBytes(t *testing.T) {
 	managedTransportTestMu.Lock()
