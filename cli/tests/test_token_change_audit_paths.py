@@ -201,6 +201,8 @@ class SetupReplaceTests(_RunningTokenCase):
 
         with (
             _setup_patches(),
+            # setup openclaw is refused on a Windows host (hook-only); pin the OS.
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
             patch("defenseclaw.commands.cmd_setup.setup_guardrail", side_effect=backend),
             patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client),
         ):
