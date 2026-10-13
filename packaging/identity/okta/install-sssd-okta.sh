@@ -394,6 +394,21 @@ install_conf() {
   fi
   if [[ -e $CONF ]]; then
     if cmp -s "$rendered" "$CONF"; then
+      local owner_mode
+      owner_mode=$(stat -c '%a %u:%g' "$CONF")
+      if ((DRY_RUN)); then
+        if [[ $owner_mode != '600 0:0' ]]; then
+          CHANGED=1
+          log "  would repair $CONF owner and mode to root:root 0600"
+        fi
+      else
+        chown root:root "$CONF"
+        chmod 0600 "$CONF"
+        if [[ $owner_mode != '600 0:0' ]]; then
+          CHANGED=1
+          log "  repaired $CONF owner and mode to root:root 0600"
+        fi
+      fi
       log "  unchanged: $CONF already has this configuration"
       CONF_CHANGED=0
       return 0
