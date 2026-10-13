@@ -659,10 +659,10 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
     usage = plan.get("usage_location", "US")
     force_change = bool(plan.get("force_password_change", True))
     created_groups: dict[str, dict | None] = {}
-    planned_groups = {spec["name"] for spec in plan.get("groups", [])}
+    planned_groups = {spec["name"].casefold() for spec in plan.get("groups", [])}
     for spec in plan.get("users", []):
         for name in spec.get("groups", []):
-            if name not in planned_groups and find_group(graph, name) is None:
+            if name.casefold() not in planned_groups and find_group(graph, name) is None:
                 raise SystemExit(f"error: user {spec['name']} names missing group {name!r}")
 
     # Resolve every planned group before the first tenant write. A later
@@ -698,7 +698,7 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
             else:
                 group = graph.get_after_create(f"/v1.0/groups/{made['id']}?$select=id,displayName,securityIdentifier")
                 print(f"group {name}: created")
-        created_groups[name] = group
+        created_groups[name.casefold()] = group
 
     for spec in plan.get("users", []):
         upn = f"{spec['name']}@{plan['domain']}"
@@ -743,14 +743,15 @@ def cmd_apply(graph: Graph, args: argparse.Namespace) -> int:
                 print(f"user {upn}: created (password in {args.password_file})")
 
         for group_name in spec.get("groups", []):
-            group = created_groups.get(group_name)
-            if group_name not in created_groups:
+            group_key = group_name.casefold()
+            group = created_groups.get(group_key)
+            if group_key not in created_groups:
                 group = find_group(graph, group_name)
                 if group is None:
                     raise SystemExit(
                         f"error: user {upn} names group {group_name!r}, which is not in the tenant or the file"
                     )
-                created_groups[group_name] = group
+                created_groups[group_key] = group
             if group is None or user is None:
                 print(f"{tag}add {upn} to {group_name}: would add")
                 continue
