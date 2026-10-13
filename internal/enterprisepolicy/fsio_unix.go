@@ -432,9 +432,14 @@ var writeLinuxAccessACL = func(path string, acl posixacl.View) error {
 // administrator's unrelated entries on a vendor directory survived no
 // repair, since the whole ACL went (`chmod -N`, or the Linux access ACL
 // removed; GAP-1323). On macOS it removes each entry that denies search
-// (or list, on the drop-in directory), highest index first so the lower
-// indexes stay valid. On Linux it rewrites the access ACL with the missing
-// access added to each entry without it and to the mask.
+// (or list, on the drop-in directory), and each entry that grants write,
+// highest index first so the lower indexes stay valid: write on a folder is
+// usable only with search, so an allow-write entry the deny kept unusable
+// would let its account add or replace machine policy once the deny is
+// gone (status and verify name such an entry, and ensure clears it). On
+// Linux it rewrites the access ACL with the missing access added to each
+// entry without it and to the mask, and no group-class write
+// (grantPublishedDirAccess).
 var clearPublishedDirACL = func(opts Options, dir string, index int) error {
 	want := uint16(publishedDirAccess(index))
 	if opts.goos() == "linux" {
@@ -462,7 +467,7 @@ var clearPublishedDirACL = func(opts Options, dir string, index int) error {
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Index > entries[j].Index })
 	for _, entry := range entries {
-		if entry.DeniesDirectoryAccess(index == 0) {
+		if entry.DeniesDirectoryAccess(index == 0) || entry.GrantsWrite() {
 			if err := removeDarwinACLEntry(dir, entry.Index); err != nil {
 				return fmt.Errorf("remove ACL entry %d (%s): %w", entry.Index, entry.Text, err)
 			}
@@ -479,12 +484,20 @@ func hasLinuxAccessACL(path string) bool {
 
 // grantPublishedDirAccess is acl with want added to the owning group entry,
 // each named entry and the mask; the owner, other and the rest of each
-// entry's permissions stay.
+// entry's permissions stay. The group class comes out without write: the
+// mask is written without it (and the owning group entry, when there is no
+// mask), the way the mode repair drops group and other write (&^0o022) and
+// validateTrustedElement refuses a group-writable folder. Write on a
+// folder is usable only with search, so raising search on an entry that had
+// write without it (user:x:rw-, group:g:-w-) under a mask with write let
+// that account add or replace machine policy in the root-owned drop-in
+// folder, and verify still reported the connector covered.
 func grantPublishedDirAccess(acl posixacl.View, want uint16) posixacl.View {
+	const write = 0o2
 	out := acl
 	out.Present = true
 	out.Group |= want
-	out.Mask |= want
+	out.Mask = (acl.Mask | want) &^ write
 	out.Users = append([]posixacl.Entry(nil), acl.Users...)
 	out.Groups = append([]posixacl.Entry(nil), acl.Groups...)
 	for i := range out.Users {
@@ -492,6 +505,11 @@ func grantPublishedDirAccess(acl posixacl.View, want uint16) posixacl.View {
 	}
 	for i := range out.Groups {
 		out.Groups[i].Perm |= want
+	}
+	if len(out.Users)+len(out.Groups) == 0 {
+		// linuxAccessACLData writes no mask here: the owning group entry is
+		// the whole group class.
+		out.Group &^= write
 	}
 	return out
 }
