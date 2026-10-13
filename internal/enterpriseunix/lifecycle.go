@@ -1725,7 +1725,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if record != nil {
 		activatedAt = record.ActivatedAt
 	}
-	if !l.opts.NoStart && record != nil && record.NoStart {
+	// The activation is the start of the services, not the plan: a first
+	// install that fell back to InstalledAt (taken when the run planned)
+	// missed the agent sessions started while it published the hooks and
+	// started the services (GAP-1367). A record written by an older version
+	// without the field keeps the InstalledAt fallback: it was activated
+	// when it was installed.
+	if !l.opts.NoStart && (record == nil || record.NoStart) {
 		activatedAt = env.Now().UTC().Format(time.RFC3339Nano)
 	}
 	newRecord := &Deployment{
