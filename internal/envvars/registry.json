@@ -5669,6 +5669,30 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_PWSH",
+      "category": "test_fixture",
+      "purpose": "Names the PowerShell executable the MDM kit tests run the Intune remediation scripts with, when pwsh is not on PATH.",
+      "default": "unset (pwsh or pwsh.exe from PATH)",
+      "accepted_values": [
+        "path to a pwsh executable",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cli/tests/test_mdm_kit.py",
+          "description": "Intune remediation script tests; never read by production runtime paths"
+        },
+        {
+          "location": "cli/tests/test_mdm_kit_remediation.py",
+          "description": "Intune Remediate-Detect/Remediate-Fix fixtures; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.2"
+    },
+    {
       "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",
       "category": "test_fixture",
       "purpose": "Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path. Consumed only by tests.",
