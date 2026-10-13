@@ -98,7 +98,7 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 			return nil, fmt.Errorf("your sandbox service is not running and could not be started: %v", startErr)
 		}
 		if status, err = launcherAwait(ctx, client); err != nil {
-			return nil, fmt.Errorf("your sandbox service was started but does not answer: %v; `defenseclaw sandbox doctor` shows why", err)
+			return nil, &launcherDaemonError{msg: "your sandbox service was started but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 	}
 	if status.Managed != nil && status.Managed.PendingRestart && status.Running == 0 {
@@ -108,12 +108,25 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 		}
 		restarted, err := launcherAwait(ctx, client)
 		if err != nil {
-			return nil, fmt.Errorf("your sandbox service was restarted but does not answer: %v; `defenseclaw sandbox doctor` shows why", err)
+			return nil, &launcherDaemonError{msg: "your sandbox service was restarted but does not answer; `defenseclaw sandbox doctor` shows why", err: err}
 		}
 		status = restarted
 	}
 	return status, nil
 }
+
+// launcherDaemonError is a sentence for the person about a sandbox service
+// that does not answer. The transport error it wraps names the daemon's
+// internal URL ("Get http://sandbox-daemon/api/v1/sandbox/status: context
+// deadline exceeded"), which tells the person nothing; `sandbox doctor`
+// has the detail (#1202).
+type launcherDaemonError struct {
+	msg string
+	err error
+}
+
+func (e *launcherDaemonError) Error() string { return e.msg }
+func (e *launcherDaemonError) Unwrap() error { return e.err }
 
 // launcherProbe asks the daemon for its status within timeout.
 func launcherProbe(ctx context.Context, client launcherStatusClient, timeout time.Duration) (*sandboxapi.Status, error) {
