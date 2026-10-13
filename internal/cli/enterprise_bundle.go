@@ -62,8 +62,9 @@ enterprise profile. A bundle carries config.yaml and the policy files it
 names, a manifest with their hashes and the effective policy digest per
 platform, and a detached signature. Devices trust the keys in their
 MDM-installed anchor file (<etc>/trust/bundle-anchors.json). sign and verify
-run offline; status reports the bundle state of a managed device. None of
-them changes anything; Secure Client computers do not have them.`
+run offline and change nothing; status reports the bundle state of a managed
+device; apply installs a bundle on a Linux or macOS managed device as root.
+Secure Client computers do not have them.`
 
 func init() {
 	enterpriseCmd.AddCommand(newEnterpriseBundleCommand())
@@ -84,7 +85,7 @@ func newEnterpriseBundleCommand() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
-	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand(), newEnterpriseBundleStatusCommand())
+	group.AddCommand(newEnterpriseBundleSignCommand(), newEnterpriseBundleVerifyCommand(), newEnterpriseBundleStatusCommand(), newEnterpriseBundleApplyCommand())
 	return group
 }
 

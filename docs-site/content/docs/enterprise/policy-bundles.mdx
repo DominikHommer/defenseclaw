@@ -15,7 +15,8 @@ references and the effective policy digest per platform. A detached signature
 covers the manifest. The standalone enterprise profile only: Secure Client
 computers do not have the `enterprise bundle` commands.
 
-Both verbs run offline and change nothing on the computer.
+`sign` and `verify` run offline and change nothing on the computer; `apply`
+installs a bundle on a Linux or macOS managed device.
 
 ## Install the trust anchor file
 
@@ -71,6 +72,34 @@ inline secrets, secret references (and on a managed device that each required
 credential exists), the config and the effective policy digest. The first
 failure is reported with a stable code and exit code 1 (1603 on Windows).
 
+## Apply (Linux and macOS)
+
+```bash
+sudo defenseclaw-gateway enterprise bundle apply --bundle v12.dcbundle --json
+```
+
+Apply copies the bundle into the bundle store and verifies the copy (every
+check of `verify`, the version floor and the credentials), then installs its
+`config.yaml` with the ensure transaction. The policy in force keeps enforcing
+until the gateway reports the policy of the new config, the new config
+generation and no reload error; then the bundle becomes current in one atomic
+write. If the gateway does not confirm it within 20 seconds the transaction
+rolls back (`not_confirmed`) and the last good bundle enforces. A run that is
+interrupted is recovered by the next lifecycle run. Applying the current bundle
+again is a no-op (`noop_reason: already_applied`). The lifecycle result carries
+the receipt in its `bundle` block; exit codes are 0, 1 (`errors[].code`), 75
+(another run holds the lock) and 2 (usage).
+
+MDM can also copy a bundle into `/etc/defenseclaw/bundles/inbox/` (macOS:
+`/opt/cisco/defenseclaw/etc/bundles/inbox/`). The apply trigger applies the
+highest version there and removes the processed files; `apply --inbox` does the
+same on demand.
+
+Once the trust anchor file is installed the device is in bundle mode: every
+lifecycle run applies the config of the current bundle, an edit of
+`config.yaml` in place is reverted, and `ensure --config` with any other config
+is refused with `bundle_required`.
+
 ## Status
 
 ```bash
@@ -122,3 +151,20 @@ as `failed` with `interrupted`.
   checking each credential.
 - **Sizes.** A bundle is at most 4 MiB compressed, `manifest.sig` 16 KiB, the
   anchor file 64 KiB with at most 32 keys and 256 device groups.
+- **Apply on Windows.** This build applies bundles on Linux and macOS only;
+  `bundle apply` on Windows refuses before it changes anything.
+- **Receipt digest.** The `effective_policy_digest` of a receipt and of
+  `bundle status` is the digest the running gateway reports. It covers the
+  install path of the bundle version directory, so it differs from the
+  manifest digest even when verify compared that digest.
+- **Restart-required keys.** A bundle that changes a key the gateway cannot
+  reload restarts it (receipt `restart: true`); managed hooks fail closed for
+  the few seconds of the restart.
+- **Inbox files.** Only regular `*.dcbundle` files that only root can write are
+  read; names that start with a dot are ignored, so copy under a dot name and
+  rename. Every processed file is removed, also one that was refused: the
+  receipt records the outcome.
+- **First bundle after a crash.** When a run dies after it installed the first
+  bundle but before it recorded it, and the gateway then does not report its
+  policy, there is no last good bundle to return to: the receipt fails
+  `not_confirmed` and the gateway keeps enforcing the policy it last built.

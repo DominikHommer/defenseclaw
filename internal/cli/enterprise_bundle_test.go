@@ -302,7 +302,7 @@ func TestEnterpriseBundleRefusals(t *testing.T) {
 	}
 	// A Secure Client computer refuses every verb before reading anything.
 	bundleSecureClient = func() bool { return true }
-	for _, args := range [][]string{{"verify", "--bundle", "/nonexistent", "--json"}, e.signArgs("--out", "/nonexistent/x", "--emit-digest")} {
+	for _, args := range [][]string{{"verify", "--bundle", "/nonexistent", "--json"}, {"apply", "--bundle", "/nonexistent", "--json"}, e.signArgs("--out", "/nonexistent/x", "--emit-digest")} {
 		out, code := runBundle(t, args...)
 		if code != bundleFailureExitCode() || !strings.Contains(out, `"not_supported_secure_client"`) {
 			t.Errorf("%v on Secure Client: exit %d:\n%s", args[0], code, out)

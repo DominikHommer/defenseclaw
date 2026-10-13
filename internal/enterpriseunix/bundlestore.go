@@ -9,6 +9,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -34,10 +35,11 @@ func (e *Env) bundleStore() *enterprisebundle.Store {
 // settleBundles runs after recoverInterrupted on every changing run: a
 // bundle a previous run received but did not apply ends as
 // failed(interrupted) and its staging copy goes; the last good bundle keeps
-// enforcing. An applied bundle that was not confirmed is reported; the
-// apply path re-checks and confirms or rolls it back.
-func (l *lifecycle) settleBundles() {
-	report, err := l.env.bundleStore().Settle()
+// enforcing. An applied bundle that was not confirmed is confirmed or failed
+// against the deployment and the gateway (settleUnconfirmedBundle).
+func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
+	store := l.env.bundleStore()
+	report, err := store.Settle()
 	if err != nil {
 		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
 		return
@@ -46,8 +48,8 @@ func (l *lifecycle) settleBundles() {
 		l.result.AddWarning(codeBundleInterrupted, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
-	for _, r := range report.Unconfirmed {
-		l.result.AddWarning(codeBundleUnconfirmed, fmt.Sprintf("policy bundle %s version %d was applied but not confirmed", r.BundleID, r.Version))
+	for _, rc := range report.Unconfirmed {
+		l.settleUnconfirmedBundle(ctx, store, record, rc)
 	}
 }
 

@@ -7,6 +7,7 @@
 package enterprisebundle
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -189,6 +190,11 @@ type Receipt struct {
 	Restart               bool         `json:"restart,omitempty"`
 	// Dir is the version directory name once the bundle is staged.
 	Dir string `json:"dir,omitempty"`
+	// ConfigSHA256 is the hex SHA-256 of the config.yaml the apply installed
+	// from this bundle, recorded when it reaches applied: settle compares it
+	// with the committed deployment to tell a finished transaction from one
+	// that was rolled back.
+	ConfigSHA256 string `json:"config_sha256,omitempty"`
 }
 
 // ReceivedAt is the time of the first transition ("" when there is none).
@@ -406,6 +412,49 @@ func (s *Store) Fail(r *Receipt, code Code, message string) error {
 		return err
 	}
 	return removeTree(s.stagingPath(r.ReceiptID))
+}
+
+// Discard removes the unfinished receipt r and its staging copy, for a
+// delivery that turned out to be the bundle already applied: the confirmed
+// receipt of that bundle stays the one status reports.
+func (s *Store) Discard(r *Receipt) error {
+	if Finished(r.State) {
+		return fmt.Errorf("bundle receipt %s is %s; a finished receipt is kept", r.ReceiptID, r.State)
+	}
+	if err := removeTree(s.stagingPath(r.ReceiptID)); err != nil {
+		return err
+	}
+	if err := os.Remove(s.receiptPath(r.ReceiptID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return syncDir(s.receiptsDir())
+}
+
+// ReadVersion reads the bundle that ref names from its version directory
+// and checks it again: the manifest bytes must be the ones confirmed
+// (manifest_sha256) and every file must match files[]. A version directory
+// is root-owned and read-only, so this guards against a damaged store, not
+// an attacker who is root.
+func (s *Store) ReadVersion(ref *Ref) (*Bundle, error) {
+	if err := ref.validate(); err != nil {
+		return nil, &Error{Code: CodeStateInvalid, Path: StateFileName, Detail: err.Error()}
+	}
+	b, err := ReadDir(s.VersionDir(ref.Dir))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b.Manifest)
+	if hex.EncodeToString(sum[:]) != ref.ManifestSHA256 {
+		return nil, refuse(CodeFileHashMismatch, ManifestName, "the stored manifest of bundle %s version %d is not the confirmed one", ref.BundleID, ref.Version)
+	}
+	m, err := DecodeManifest(b.Manifest)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckFiles(m, b); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Stage copies b (manifest.json, manifest.sig and every file) into a fresh
