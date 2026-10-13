@@ -688,7 +688,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			"fail_mode": opts.HookFailMode,
 		})
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
 	return nil
 }
 
@@ -1130,7 +1130,7 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 		for _, name := range names {
 			if count := converted[name]; count > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: rewrote %d hook entries in the form earlier releases remove\n",
-					Style("✓", "fg=green", "bold"), name, count)
+					Style(glyph("✓", "OK"), "fg=green", "bold"), name, count)
 			}
 			if reason, ok := failed[name]; ok {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
@@ -1216,7 +1216,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		connectorExit(1)
 		return nil
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: no residual DefenseClaw state detected\n", Style("✓", "fg=green", "bold"), name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: no residual DefenseClaw state detected\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
 	return nil
 }
 
