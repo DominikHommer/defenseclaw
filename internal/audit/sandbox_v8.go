@@ -668,6 +668,10 @@ type sandboxTrackedPhase struct {
 	// owner is the account (SandboxLifecycleEvent.UserID) of a managed
 	// sandbox, which LimitManagedPhases bounds.
 	owner string
+	// fromRegistration is a phase TrackManagedSandbox set from the managed
+	// gateway's registration, not a lifecycle record: never a lifecycle
+	// record's previous phase.
+	fromRegistration bool
 }
 
 var _ SandboxTelemetry = (*SandboxRecorder)(nil)
@@ -754,7 +758,7 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	defer recorder.lifecycle.Unlock()
 	previous := input.PreviousPhase
 	phaseKey := sandboxPhaseKey(identity)
-	if tracked, known := recorder.phases[phaseKey]; previous == "" && known {
+	if tracked, known := recorder.phases[phaseKey]; previous == "" && known && !tracked.fromRegistration {
 		previous = tracked.phase
 	}
 	if err := recorder.managedPhaseRoomLocked(phaseKey, input); err != nil {
@@ -848,15 +852,28 @@ func (recorder *SandboxRecorder) RecordActiveSandboxes(ctx context.Context) erro
 	if len(recorder.exported) == 0 {
 		return nil
 	}
-	binding := recorder.logger.runtimeV8BindingSnapshot()
-	if binding.metricBatch == nil {
-		return fmt.Errorf("audit: sandbox v8 runtime is unavailable")
-	}
 	connectors := make([]string, 0, len(recorder.exported))
 	for connector := range recorder.exported {
 		connectors = append(connectors, connector)
 	}
 	sort.Strings(connectors)
+	return recorder.exportActiveLocked(ctx, connectors)
+}
+
+// exportActiveLocked exports metric.defenseclaw.sandbox.active for each of
+// connectors with the count the recorder tracks now, and remembers them as
+// exported. The caller holds recorder.lifecycle.
+func (recorder *SandboxRecorder) exportActiveLocked(ctx context.Context, connectors []string) error {
+	for _, connector := range connectors {
+		recorder.noteExportedLocked(connector)
+	}
+	if err := recorder.ready(); err != nil {
+		return err
+	}
+	binding := recorder.logger.runtimeV8BindingSnapshot()
+	if binding.metricBatch == nil {
+		return fmt.Errorf("audit: sandbox v8 runtime is unavailable")
+	}
 	metrics := make([]RuntimeV8GeneratedMetric, 0, len(connectors))
 	for _, connector := range connectors {
 		event := recorder.newEvent(ctx, ActionSandboxLifecycle, SandboxIdentity{Connector: connector}, "", "", time.Now())

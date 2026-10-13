@@ -792,6 +792,9 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
+	// A running sandbox counts again on its daemon's first poll after a
+	// gateway restart, not only at its next phase change (#1241).
+	a.trackManagedSandboxActive(r.Context(), auth, peer.UID, reg)
 	cfg := a.liveBaseConfig(r.Context())
 	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
 	if err != nil {
