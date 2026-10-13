@@ -836,6 +836,14 @@ func (d *SandboxDaemon) check(ctx context.Context) (bool, error) {
 		d.keepOpenShellLocked(ctx)
 		return false, nil
 	}
+	// A stop that began during the list (its sandbox already stopping, so
+	// not counted) holds the release off too: the count before the list
+	// alone left that window open (GAP-0462). A stop counts itself before
+	// it asks OpenShell anything, so one that begins after this read found
+	// its sandbox among the running ones above.
+	if d.stops.Load() > 0 {
+		return false, nil
+	}
 	d.releaseListeners()
 	d.stopIdleOpenShellLocked(ctx)
 	if d.pendingRestart.Load() {
@@ -1178,17 +1186,66 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 // let you run sandboxes" and a strict, deny-all policy for a sandbox the
 // organization allows (GAP-0462). A revoked registration's sandbox is
 // stopped, as at start.
+//
+// A confirmed floor re-resolves every sandbox's policy at once: the views
+// are built from the policies resolved before, which the configuration
+// check re-resolves only on its next tick, so the first status after the
+// confirmation still showed the closed floor's deny. A revoked
+// registration's stop has its own bound, apart from the view's: a stop cut
+// short left a revoked registration's sandbox running, which no poll stops
+// again.
 func (d *SandboxDaemon) confirmIfClosed(ctx context.Context) {
-	d.floorMu.Lock()
-	closed := d.floor == nil
-	d.floorMu.Unlock()
-	if !closed || !slices.ContainsFunc(d.regs.list(), func(r daemonRegistration) bool { return !r.Revoked && !r.Confirmed }) {
+	if !d.awaitingConfirmation() {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	vctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	revoked := d.revalidate(vctx)
+	cancel()
+	if !d.floorClosed() {
+		d.rt.manager.RefreshPolicies()
+	}
+	if len(revoked) == 0 {
+		return
+	}
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revalidateTimeout)
 	defer cancel()
-	for _, r := range d.revalidate(ctx) {
-		d.stopRevoked(ctx, r)
+	for _, r := range revoked {
+		d.stopRevoked(sctx, r)
+	}
+}
+
+// floorClosed reports whether the manager still judges against the closed
+// start-up floor: no confirmed registration's floor was adopted.
+func (d *SandboxDaemon) floorClosed() bool {
+	d.floorMu.Lock()
+	defer d.floorMu.Unlock()
+	return d.floor == nil
+}
+
+// awaitingConfirmation reports the closed floor in force while a
+// registration waits for the managed gateway's confirmation.
+func (d *SandboxDaemon) awaitingConfirmation() bool {
+	return d.floorClosed() && slices.ContainsFunc(d.regs.list(), registrationUnconfirmed)
+}
+
+// registrationUnconfirmed is a live registration the managed gateway has
+// not confirmed since the daemon started.
+func registrationUnconfirmed(r daemonRegistration) bool { return !r.Revoked && !r.Confirmed }
+
+// sandboxConfirmingNote is what a sandbox's status and list say while its
+// registration waits for the managed gateway's confirmation on the closed
+// floor (GAP-0462), in place of that floor's deny.
+const sandboxConfirmingNote = "DefenseClaw is confirming this sandbox's policy with your organization's gateway after a restart; " +
+	"try again in a moment. Until then it has no web egress, and the policy shown is the one it was created with"
+
+// confirmingView makes v say its policy is being confirmed (Manager.ConfirmingView)
+// while its registration waits for that on the closed floor.
+func (c *managedSandboxController) confirmingView(v *sandboxapi.Sandbox) {
+	if v == nil || !c.d.floorClosed() {
+		return
+	}
+	if r, ok := c.d.regs.get(v.Name); ok && registrationUnconfirmed(r) {
+		c.Manager.ConfirmingView(v, sandboxConfirmingNote)
 	}
 }
 
@@ -1628,14 +1685,45 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 	}
 	ready := c.d.openShellForKept(ctx, true)
 	sb, err := c.Manager.Stop(ctx, name)
-	if err != nil && ready != nil {
-		return sb, ready
-	}
 	if err != nil {
+		// The wait for the stop may have lost the gateway (a deferred
+		// restart, the caller gone) after OpenShell stopped the sandbox:
+		// the stop failed with "context canceled" and a refused connection
+		// for a sandbox that stopped (GAP-0462). Its state decides; a
+		// sandbox DefenseClaw does not know has none to read.
+		if !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+			if stopped := c.d.stoppedAfterFailedStop(ctx, name, c.Manager.Get); stopped != nil {
+				c.d.logf("stop %s: the wait failed (%v), and the sandbox is stopped", name, err)
+				c.d.reportStopped(context.WithoutCancel(ctx), name)
+				return stopped, nil
+			}
+		}
+		if ready != nil {
+			return sb, ready
+		}
 		return sb, err
 	}
 	c.d.reportStopped(context.WithoutCancel(ctx), name)
 	return sb, nil
+}
+
+// stopRecheckTimeout bounds the re-read of a sandbox whose stop failed.
+const stopRecheckTimeout = 10 * time.Second
+
+// stoppedAfterFailedStop reads name's sandbox again after its stop failed,
+// with a bound of its own (the stop's context may be what ended), on the
+// account's gateway readied again if the daemon can; it returns the
+// sandbox when OpenShell says it is stopped, else nil.
+func (d *SandboxDaemon) stoppedAfterFailedStop(ctx context.Context, name string,
+	get func(context.Context, string) (*sandboxapi.Sandbox, error)) *sandboxapi.Sandbox {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopRecheckTimeout)
+	defer cancel()
+	_ = d.openShellForKept(rctx, false)
+	sb, err := get(rctx, name)
+	if err != nil || sb == nil || audit.SandboxPhase(sb.Phase) != audit.SandboxPhaseStopped {
+		return nil
+	}
+	return sb
 }
 
 // List lists the account's sandboxes. A phase the gateway could not confirm
@@ -1644,20 +1732,26 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	list, err := c.Manager.List(ctx)
-	if err != nil || !slices.ContainsFunc(list, unconfirmedSandbox) || c.d.openShellForKept(ctx, false) != nil {
-		return list, err
+	if err == nil && slices.ContainsFunc(list, unconfirmedSandbox) && c.d.openShellForKept(ctx, false) == nil {
+		list, err = c.Manager.List(ctx)
 	}
-	return c.Manager.List(ctx)
+	for i := range list {
+		c.confirmingView(&list[i])
+	}
+	return list, err
 }
 
 // Get is List for one sandbox.
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	sb, err := c.Manager.Get(ctx, name)
-	if err != nil || sb == nil || !unconfirmedSandbox(*sb) || c.d.openShellForKept(ctx, false) != nil {
-		return sb, err
+	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.d.openShellForKept(ctx, false) == nil {
+		sb, err = c.Manager.Get(ctx, name)
 	}
-	return c.Manager.Get(ctx, name)
+	if err == nil {
+		c.confirmingView(sb)
+	}
+	return sb, err
 }
 
 // unconfirmedSandbox is a sandbox whose phase the gateway could not say.
