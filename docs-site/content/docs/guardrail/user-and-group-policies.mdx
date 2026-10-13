@@ -306,18 +306,19 @@ What follows when the identity is missing:
   again. Set a strict default profile. A membership change also needs a new
   desktop sign-in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After
-  that the user has no facts and gets the default profile
+  that group-dependent assignments cannot match. A verified UID, SID or agent
+  assignment can still select a profile; otherwise the default profile applies
   (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
-  group does not keep its profile for the whole outage. `defenseclaw doctor`,
+  group does not keep its group profile for the whole outage. `defenseclaw doctor`,
   `guardrail status` and `guardrail profile explain` warn while lookups are
   failing, with the number of accounts, the first failure and the reason; the
   gateway log has one line when an account's lookups start to fail and one when
   they work again.
 
-Because a failed lookup always lands on the default profile, and so does an
-unverified request that no `connectors`-only assignment selects, **set a strict
-`default_profile`**. A lenient default means a lookup failure is treated more
-leniently than a known user.
+Because a failed lookup may fall through to the default profile, and so does
+an unverified request that no `connectors`-only assignment selects, **set a
+strict `default_profile`**. A lenient default can treat an unresolved user
+more leniently than a known user.
 
 <Callout type="warn" title="Per-user installs on Windows have no groups">
 On a per-user Windows install the gateway cannot read the sign-in token's
