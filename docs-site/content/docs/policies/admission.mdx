@@ -493,6 +493,11 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
+Claude Code's `Skill` hook call carries no skill path. A
+`asset_policy.skill.denied` rule pinned to a user-level copy therefore cannot
+match that call. Deny the skill by name without a path pin, or remove the copy
+from the device.
+
 ### enabled and mode
 
 The explicit lists always apply, whatever `asset_policy.enabled` and
