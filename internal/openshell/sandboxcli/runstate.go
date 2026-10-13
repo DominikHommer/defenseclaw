@@ -338,9 +338,9 @@ func launchOptions(spec *harness.Spec, args []string) []string {
 type arity int
 
 const (
-	// arityUnknown: the table does not know the option; its value is read
+	// The zero value: the table does not know the option; its value is read
 	// from the shape of the next word.
-	arityUnknown arity = iota
+	_ arity = iota
 	// arityValue: the option takes the next word as its value.
 	arityValue
 	// aritySwitch: the option takes no value.

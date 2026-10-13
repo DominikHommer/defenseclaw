@@ -750,7 +750,7 @@ func (s spawnScheduledServices) Active(ctx context.Context, unit Unit) bool {
 }
 
 func (s spawnScheduledServices) Loaded(_ context.Context, unit Unit) bool {
-	return s.fakeServices.isActive(unit.Name)
+	return s.isActive(unit.Name)
 }
 
 // GAP-1520: an uninstall that stops short of removing the deployment puts

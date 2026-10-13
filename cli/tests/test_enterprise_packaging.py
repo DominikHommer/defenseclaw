@@ -1138,7 +1138,13 @@ def _shell_function(text: str, name: str) -> str:
 # the version already installed (empty: not installed).
 _PACKAGE_STUBS = {
     "dpkg-deb": """case "$3" in Package) echo defenseclaw-enterprise ;; Version) echo "$DC_TEST_VERSION" ;; Architecture) echo amd64 ;; esac""",
-    "dpkg": """case "$1" in --print-architecture) echo amd64 ;; esac""",
+    "dpkg": """case "$1" in
+    --print-architecture) echo amd64 ;;
+    --compare-versions)
+        [ "$3" = lt ] && [ "$2" != "$4" ] && [ "$(printf '%s\\n%s\\n' "$2" "$4" | sort -V | head -n 1)" = "$2" ]
+        exit $?
+        ;;
+esac""",
     "dpkg-query": """[ -n "$DC_TEST_INSTALLED" ] || exit 1
 printf 'install ok installed %s' "$DC_TEST_INSTALLED\"""",
     "rpm": """case "$1" in
