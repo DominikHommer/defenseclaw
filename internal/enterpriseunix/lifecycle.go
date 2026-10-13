@@ -2450,8 +2450,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 // generationRecord is config.generation.json before a transaction, with the
 // config digest it names.
 type generationRecord struct {
-	raw []byte
-	sha string
+	raw   []byte
+	sha   string
+	state configwrite.GenerationState
 }
 
 // rememberGeneration keeps the generation record as the transaction found it.
@@ -2464,7 +2465,7 @@ func (l *lifecycle) rememberGeneration() {
 		return
 	}
 	if state, err := configwrite.ReadGenerationState(configPath); err == nil {
-		l.generationBefore = &generationRecord{raw: raw, sha: state.ConfigSHA256}
+		l.generationBefore = &generationRecord{raw: raw, sha: state.ConfigSHA256, state: state}
 	}
 }
 
@@ -2487,9 +2488,16 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 	if _, err := os.Stat(configPath); err != nil {
 		return nil
 	}
-	_, err = configwrite.Locked(ctx, configPath, configwrite.Options{
-		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback",
-	}, func() (bool, error) {
+	// A rollback to the config of the bundle the run found (the last good
+	// bundle) is recorded as that bundle again, so /health and
+	// config.change.applied name the bundle that enforces.
+	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback"}
+	if before := l.generationBefore; before != nil {
+		if raw, err := os.ReadFile(configPath); err == nil {
+			opt = configwrite.RestoreOptions(before.state, configwrite.SHA256Hex(raw), opt)
+		}
+	}
+	_, err = configwrite.Locked(ctx, configPath, opt, func() (bool, error) {
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
 			return false, err

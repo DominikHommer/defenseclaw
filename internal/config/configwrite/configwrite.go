@@ -92,8 +92,9 @@ const (
 	ActorPrefixOperator     = "operator:"
 )
 
-// maxPrincipalBytes bounds a bundle principal actor.
-const maxPrincipalBytes = 256
+// MaxPrincipalBytes bounds a bundle principal actor. The bundle manifest
+// check uses it too, so a signed created_by is always one the writer takes.
+const MaxPrincipalBytes = 256
 
 var (
 	// ErrConflict means config.yaml changed after the caller read it.
@@ -316,6 +317,26 @@ func BundleChangeSummary(state GenerationState) string {
 	return strings.TrimPrefix(state.Reason, prefix)
 }
 
+// RestoreOptions is how a rollback records the config bytes it put back.
+// When before, the record the change replaced, named a signed policy bundle
+// for exactly those bytes, the restored config is recorded as that bundle
+// again (its principal, reason and bundle fields), so
+// config.generation.json, /health and config.change.applied keep naming the
+// bundle that enforces after a failed apply. Otherwise fallback is used.
+// fallback's ExpectSHA256 and Timeout are kept either way.
+func RestoreOptions(before GenerationState, restoredSHA256 string, fallback Options) Options {
+	norm := func(v string) string { return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "sha256:") }
+	if before.BundleID == "" || !IsPrincipalActor(before.Actor) || !validPrincipal(before.Actor) ||
+		norm(before.ConfigSHA256) == "" || norm(before.ConfigSHA256) != norm(restoredSHA256) {
+		return fallback
+	}
+	out := fallback
+	out.Actor, out.Lifecycle = before.Actor, true
+	out.Reason = BundleReason(before.BundleID, before.BundleVersion, BundleChangeSummary(before))
+	out.Bundle = BundleRef{ID: before.BundleID, Version: before.BundleVersion, SignerKeyID: before.SignerKeyID}
+	return out
+}
+
 // IsPrincipalActor reports whether actor is a bundle principal
 // (control-plane:<tenant>/<admin> or operator:<os-admin>).
 func IsPrincipalActor(actor string) bool {
@@ -326,7 +347,7 @@ func IsPrincipalActor(actor string) bool {
 // tenant and admin for control-plane:, a non-empty name for operator:, and
 // no control characters (the actor reaches audit lines).
 func validPrincipal(actor string) bool {
-	if len(actor) > maxPrincipalBytes {
+	if len(actor) > MaxPrincipalBytes {
 		return false
 	}
 	for _, r := range actor {

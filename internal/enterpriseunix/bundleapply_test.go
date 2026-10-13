@@ -386,6 +386,12 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	if st := b.state(); st.Current.BundleID != bundleID(1) || b.read(b.env.Layout.ConfigPath) != good {
 		t.Fatalf("state = %+v", st)
 	}
+	// The restored config is recorded as the last good bundle again, so
+	// /health and config.change.applied name the bundle that enforces.
+	if gen, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath)); err != nil ||
+		gen.BundleID != bundleID(1) || gen.BundleVersion != 1 || !configwrite.IsPrincipalActor(gen.Actor) {
+		t.Fatalf("restored generation = %+v (%v), want bundle 1", gen, err)
+	}
 }
 
 // The first bundle, installed by a run that ended before it recorded it and
