@@ -710,10 +710,6 @@ func statusForStructuredJSONIssue(issue IssueCode) ParseStatus {
 	return statusForInputIssue(issue)
 }
 
-func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {
-	return extractArgsAtSchema(raw, projectionDepth, false)
-}
-
 func extractArgsAtSchema(
 	raw json.RawMessage,
 	projectionDepth int,

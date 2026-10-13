@@ -49,7 +49,7 @@ var (
 // and `enterprise macos`, the per-OS spelling the other administrator views
 // use (profile-explain, sandbox list) and the docs give (GAP-0201,
 // GAP-0240). Both trees bind the same flag variables; one runs per process.
-var enterprisePolicyCmd, enterprisePolicyShowCmd, enterprisePolicyExportCmd, enterprisePolicyVerifyCmd = newEnterprisePolicyGroup("")
+var enterprisePolicyCmd, _, _, enterprisePolicyVerifyCmd = newEnterprisePolicyGroup("")
 
 // newEnterprisePolicyGroup builds `enterprise policy` (platform "") or
 // `enterprise <platform> policy` with its show, export and verify commands.
