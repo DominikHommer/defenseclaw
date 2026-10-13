@@ -111,6 +111,47 @@ func (s *ContinuousDiscoveryService) macOSTCCSkipped(path string) bool {
 	return true
 }
 
+// macOSTCCRootSkipped checks every component of a scan root before following
+// a link or opening the root. Relative link targets start at the resolved
+// parent, which may differ from the root's lexical parent.
+func (s *ContinuousDiscoveryService) macOSTCCRootSkipped(root string) bool {
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	resolved := string(filepath.Separator)
+	pending := strings.Split(filepath.Clean(root), string(filepath.Separator))
+	links := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		if s.macOSTCCSkipped(next) {
+			return true
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			resolved = next
+			continue
+		}
+		links++
+		if links > 40 {
+			return false
+		}
+		if filepath.IsAbs(target) {
+			resolved = string(filepath.Separator)
+		}
+		pending = append(strings.Split(target, string(filepath.Separator)), pending...)
+	}
+	return false
+}
+
 // notePrivacyEvidencePath keeps only hashes of protected ancestors. It is
 // called as evidence is discovered, including when raw-path storage is off.
 func (s *ContinuousDiscoveryService) notePrivacyEvidencePath(path string) {
