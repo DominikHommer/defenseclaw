@@ -1692,9 +1692,14 @@ func statusUserLabel(user TetragonUser) string {
 	return fmt.Sprintf("uid %d", user.UID)
 }
 
-// hitLines are, per control, "would block ssh_private_key_read 1x, last <t>"
-// and "~/.ssh/id_ed25519 by /usr/bin/cat" (the most frequent path and
-// binary).
+// maxHitBinaries bounds the binaries a hit line names; the JSON keeps all
+// the helper counted.
+const maxHitBinaries = 3
+
+// hitLines are, per control, "would block ssh_private_key_read 15x, last <t>"
+// and "~/.ssh/id_ed25519 by /usr/bin/curl (12), /usr/bin/python3 (3)" (the
+// most frequent path, and the most frequent binaries with their counts, at
+// most maxHitBinaries and "+N more").
 func hitLines(kind string, hits []TetragonHits, uid int) [][2]string {
 	var out [][2]string
 	for _, hit := range hits {
@@ -1707,11 +1712,25 @@ func hitLines(kind string, hits []TetragonHits, uid int) [][2]string {
 			where = homeRelative(hit.Paths[0].Value, uid)
 		}
 		if len(hit.Binaries) > 0 {
-			where = strings.TrimSpace(where + " by " + hit.Binaries[0].Value)
+			where = strings.TrimSpace(where + " by " + binariesWords(hit.Binaries))
 		}
 		out = append(out, [2]string{line, where})
 	}
 	return out
+}
+
+// binariesWords is "/usr/bin/curl (12), /usr/bin/python3 (3), +2 more": the
+// binaries in the helper's order (most frequent first).
+func binariesWords(binaries []TetragonCount) string {
+	shown := binaries[:min(len(binaries), maxHitBinaries)]
+	words := make([]string, 0, len(shown)+1)
+	for _, binary := range shown {
+		words = append(words, fmt.Sprintf("%s (%d)", binary.Value, binary.Count))
+	}
+	if more := len(binaries) - len(shown); more > 0 {
+		words = append(words, fmt.Sprintf("+%d more", more))
+	}
+	return strings.Join(words, ", ")
 }
 
 func defaultStr(value, fallback string) string {
