@@ -889,6 +889,14 @@ per-user install:
   enumerator reads that file, and the `.mcp.json` of each project inside the
   profile, every 30 seconds and publishes the servers to the gateway, so
   `claude mcp add` (any scope) reaches admission within about a minute.
+  The enumerator opens each project folder and its `.mcp.json` under the
+  enrolled user's own token, so it reads only what that user can read, and it
+  never follows a project key that points to a network, mapped or substituted
+  drive or through a link. A project the user cannot access contributes
+  neither its local-scope servers nor its `.mcp.json` servers; the user's other
+  projects and user-scope servers stay published. Any other read or parse
+  failure of a project file is treated like an unreadable `.claude.json`, as
+  described next.
   When the enumerator cannot read or parse a user's `.claude.json` (an
   access list that leaves SYSTEM out, or broken JSON), DefenseClaw cannot
   see that user's servers, so it fails closed: it refuses every Claude Code

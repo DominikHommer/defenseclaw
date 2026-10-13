@@ -148,6 +148,11 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("File matching is inode-scoped", text)
         self.assertIn("reparented before its first observed exec", text)
 
+    def test_gap_0316_windows_project_mcp_files_are_read_as_the_enrolled_user(self):
+        text = page("windows.mdx")
+        self.assertIn("under the\n  enrolled user's own token", text)
+        self.assertIn("A project the user cannot access contributes\n  neither its local-scope servers nor its `.mcp.json` servers", text)
+
 
 if __name__ == "__main__":
     unittest.main()
