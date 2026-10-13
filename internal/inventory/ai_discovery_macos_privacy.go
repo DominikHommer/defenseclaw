@@ -113,9 +113,11 @@ func (s *ContinuousDiscoveryService) macOSTCCSkipped(path string) bool {
 
 // macOSTCCRootSkipped checks every component of a scan root before following
 // a link or opening the root. Relative link targets start at the resolved
-// parent, which may differ from the root's lexical parent.
+// parent, which may differ from the root's lexical parent. Like
+// macOSTCCSkipped it does nothing off macOS or for Secure Client, so no
+// other system reads the links of a root.
 func (s *ContinuousDiscoveryService) macOSTCCRootSkipped(root string) bool {
-	if !filepath.IsAbs(root) {
+	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" || !filepath.IsAbs(root) {
 		return false
 	}
 	resolved := string(filepath.Separator)

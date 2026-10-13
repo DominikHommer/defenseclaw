@@ -47,6 +47,18 @@ func mustPackageScanLink(t *testing.T, target, link string) {
 	}
 }
 
+// linkFreeTempDir returns a test folder whose path holds no link. macOS keeps
+// the default temp folder under /var, a link to /private/var, and the root
+// check compares the resolved path with the home folder as the service names it.
+func linkFreeTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestPackageScanRootThroughParentLinkKeepsMacOSPrivacySkip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory symlinks need privileges on Windows")
@@ -92,7 +104,7 @@ func TestPackageScanRootThroughParentLinkKeepsMacOSPrivacySkip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			home, outside := t.TempDir(), t.TempDir()
+			home, outside := linkFreeTempDir(t), linkFreeTempDir(t)
 			app := filepath.Join(home, tc.protectedFolder, "app")
 			mustWrite(t, filepath.Join(app, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
 			root := tc.root(t, home, outside, app)
@@ -107,7 +119,7 @@ func TestPackageScanRootThroughParentLinkKeepsMacOSPrivacySkip(t *testing.T) {
 		})
 	}
 
-	home := t.TempDir()
+	home := linkFreeTempDir(t)
 	protectedApp := filepath.Join(home, "Documents", "app")
 	mustWrite(t, filepath.Join(protectedApp, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
 	mustPackageScanLink(t, filepath.Join(home, "Documents"), filepath.Join(home, "linked"))
@@ -162,7 +174,7 @@ func TestMacOSTCCRootSkippedResolvesRelativeLinkFromRealParent(t *testing.T) {
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = oldOS, oldFDA })
 	discoveryGOOS = "darwin"
 	macOSFullDiskAccess = func() bool { return false }
-	home := t.TempDir()
+	home := linkFreeTempDir(t)
 	if err := os.MkdirAll(filepath.Join(home, "work", "nested"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +204,7 @@ func TestMacOSTCCRootSkippedStopsAtMissingProtectedFolder(t *testing.T) {
 	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = oldOS, oldFDA })
 	discoveryGOOS = "darwin"
 	macOSFullDiskAccess = func() bool { return false }
-	home := t.TempDir()
+	home := linkFreeTempDir(t)
 	mustPackageScanLink(t, filepath.Join(home, "Documents", "missing", "deeper"), filepath.Join(home, "route"))
 	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: home}}
 	if !svc.macOSTCCRootSkipped(filepath.Join(home, "route", "app")) ||
