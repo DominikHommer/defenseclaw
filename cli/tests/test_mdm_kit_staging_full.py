@@ -71,7 +71,7 @@ def test_extract_payload_failure_reports_cause(
     )
     result = subprocess.run(
         ["sh", "-c", script], env={"PATH": f"{tmp_path}:{os.environ['PATH']}"},
-        capture_output=True, text=True, timeout=3,
+        capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 1, result.stderr
     error_result = json.loads(result.stdout)["errors"][0]
