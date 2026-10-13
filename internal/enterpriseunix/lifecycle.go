@@ -115,6 +115,12 @@ const (
 	codeRecovered           = "recovered_interrupted_transaction"
 	codeUninstall           = "uninstall_failed"
 	codeUninstallPrecheck   = "uninstall_precheck_refused"
+	// codeUninstallIncomplete: the uninstall stopped before removing the
+	// binaries, because per-user hook registrations or vendor machine policy
+	// still name them, and started the services again. The package removal
+	// (preremove.sh) matches this code exactly and keeps the package files
+	// (GAP-1519).
+	codeUninstallIncomplete = "uninstall_incomplete"
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
@@ -177,6 +183,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
+	// rollbackConfigFile is the file of that config.yaml: a writer that
+	// puts the same bytes back after the restart replaces it, which the
+	// digest alone cannot tell (GAP-1411).
+	rollbackConfigFile os.FileInfo
 	// configACLWritable is set when a transaction found a macOS ACL entry
 	// that let another account write config.yaml after the plan checked it,
 	// or could not read the ACLs: bytes that changed since are not applied,
@@ -475,6 +485,10 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 
 // removeLifecycleStateKeepingLock clears transaction state without replacing
 // the lock inode. Waiters can have the file open before this run acquired it.
+// The deployment record stays too: the uninstall removes it last, once
+// everything else is gone. Removed here, an uninstall that then failed to
+// remove another state folder left no record, so its rerun was a
+// not_installed no-op and the leftovers needed --adopt-existing (GAP-1440).
 func (e *Env) removeLifecycleStateKeepingLock() error {
 	dir := e.P(e.Layout.LifecycleDir)
 	entries, err := os.ReadDir(dir)
@@ -482,7 +496,7 @@ func (e *Env) removeLifecycleStateKeepingLock() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName {
+		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -1719,7 +1733,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if record != nil {
 		activatedAt = record.ActivatedAt
 	}
-	if !l.opts.NoStart && record != nil && record.NoStart {
+	// The activation is the start of the services, not the plan: a first
+	// install that fell back to InstalledAt (taken when the run planned)
+	// missed the agent sessions started while it published the hooks and
+	// started the services (GAP-1367). A record written by an older version
+	// without the field keeps the InstalledAt fallback: it was activated
+	// when it was installed.
+	if !l.opts.NoStart && (record == nil || record.NoStart) {
 		activatedAt = env.Now().UTC().Format(time.RFC3339Nano)
 	}
 	newRecord := &Deployment{
@@ -2355,8 +2375,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if beforeStart != nil {
 		beforeStart()
 	}
-	l.rollbackConfigSHA = ""
+	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
+		l.rollbackConfigFile, _ = os.Stat(env.P(env.Layout.ConfigPath))
 		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
 	if err := l.recordRestoredGeneration(ctx); err != nil {
@@ -2719,7 +2740,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// stops short of removing the deployment puts it back (GAP-1500).
 	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
 	for _, unit := range units {
-		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasActive[unit.Name] = unitStarted(ctx, env.Services, unit)
 		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
 	}
 	for _, unit := range ordered {
@@ -2809,7 +2830,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if policyLeft {
 			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		// Its own code: the package removal must keep the binaries these
+		// registrations call, which an uninstall_failed result does not ask
+		// for (GAP-1519).
+		r.AddError(codeUninstallIncomplete, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
@@ -3307,8 +3331,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
 			// A check that names no registration (an unreadable eligible
-			// accounts file, say) does not hold up the uninstall.
-			r.AddWarning(codePerUserHooks, "some per-user hook registrations were not checked: "+entry)
+			// accounts file, say) says registrations may be left, which
+			// call the binaries: they stay, as for a named one. The precheck
+			// refuses such a report before anything changes; one here was
+			// only a warning, and the binaries went (GAP-1140).
+			r.AddError(codePerUserHooks, "some per-user hook registrations were not checked: "+entry+"; fix the cause and rerun "+rerun)
+			left = true
 			continue
 		}
 		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))

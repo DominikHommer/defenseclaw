@@ -4,14 +4,16 @@
 package useridentity
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
 
 // macOS directory facts, verified by the root enumerator from:
 //
-//   - dscl /Search -read /Users/<name> AuthenticationAuthority
-//     OriginalNodeName: an AD-bound or mobile account carries a
+//   - dscl /Search -read /Users/<name> UniqueID AuthenticationAuthority
+//     OriginalNodeName: the UniqueID must be the account's uid
+//     (MacOSDSCLRecordUID); an AD-bound or mobile account carries a
 //     ;Kerberosv5;;user@REALM;REALM; authority (local accounts carry an LKDC
 //     one, which is skipped) and its original node names the directory;
 //   - dsconfigad -show: the AD domain the Mac is bound to;
@@ -108,6 +110,24 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		facts.Directory = DirectoryLocal
 	}
 	return facts
+}
+
+// MacOSDSCLRecordUID is the UniqueID in the output of a `dscl -read` that
+// asked for it, and whether the record has exactly one numeric UniqueID. The
+// root enumerator reads a record by short name through /Search, so the
+// record it gets can belong to another account (a directory account named
+// like a local one, a reused name); it refuses one whose UniqueID is not the
+// uid it resolves (GAP-1075).
+func MacOSDSCLRecordUID(output string) (int, bool) {
+	values := parseDSCLAttributes(output)["UniqueID"]
+	if len(values) != 1 {
+		return 0, false
+	}
+	uid, err := strconv.ParseUint(values[0], 10, 31)
+	if err != nil {
+		return 0, false
+	}
+	return int(uid), true
 }
 
 // parseDSCLAttributes parses dscl -read output: "Name: v1 v2" on one line,
