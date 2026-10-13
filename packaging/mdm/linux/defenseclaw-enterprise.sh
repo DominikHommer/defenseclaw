@@ -917,8 +917,11 @@ dc_run_lifecycle() {
     shift
     result="$DC_STAGE/result.json"
     set +e
-    "$gateway" enterprise "$DC_OS_GROUP" "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null
+    "$gateway" enterprise "$DC_OS_GROUP" "$@" --json >"$result" 2>"$DC_STAGE/lifecycle.err" </dev/null &
+    DC_CHILD=$!
+    wait "$DC_CHILD"
     status=$?
+    DC_CHILD=""
     set -e
     if [ -s "$result" ]; then
         DC_RESULT=$result
@@ -960,7 +963,7 @@ dc_main() {
     dc_sweep_stages "$DC_STAGE_PARENT"
     DC_STAGE=$(mktemp -d "$DC_STAGE_PARENT/defenseclaw-mdm.XXXXXX")
     trap dc_cleanup EXIT
-    trap 'dc_stop_child; exit 1' HUP INT TERM
+    trap 'dc_stop_child; dc_fail_result "$DC_EXIT_FAILURE" mdm_cancelled "the MDM run was cancelled; the lifecycle was stopped"' HUP INT TERM
     chmod 0700 "$DC_STAGE"
     [ "$(dc_stat_uid "$DC_STAGE")" = 0 ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging directory is not root-owned"
     printf '%s\n' "$$" >"$DC_STAGE/pid"
