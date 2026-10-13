@@ -31,12 +31,15 @@ import (
 	"strings"
 	"time"
 
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -505,17 +508,105 @@ func (m *Manager) endSessionUnblocks(b *box) {
 		return
 	}
 	m.mu.Lock()
-	scope, had := scopeID(b.rec.ID, b.rec.Name), len(b.rec.Unblocks) > 0
-	b.rec.Unblocks = nil
+	scope, had := scopeID(b.rec.ID, b.rec.Name), len(b.rec.Unblocks) > 0 || len(b.rec.Approved) > 0
+	b.rec.Unblocks, b.rec.Approved = nil, nil
 	name := b.rec.Name
+	// The answers of the last session: an ask of the new one for the same
+	// destination is not one approved moments ago, which proxyAsk and
+	// hostPortAsk would otherwise not raise again.
+	for id, a := range m.approvals {
+		if a.sandbox == name && a.status == sandboxapi.ApprovalApproved && !a.always {
+			delete(m.approvals, id)
+		}
+	}
 	m.mu.Unlock()
-	if m.unblocks.RemoveSandbox(scope) == 0 && !had {
+	if m.unblocks.RemoveSandbox(scope)+m.approved.RemoveSandbox(scope) == 0 && !had {
 		return
 	}
 	if err := m.saveRecord(b); err != nil {
 		m.logf("drop the session unblocks of %s: %v", name, err)
 	}
 	m.refreshEgress()
+}
+
+// endSessionRules removes from a managed sandbox's OpenShell policy the
+// rules the person approved for its last session (record.ApprovedRules,
+// operator), which outlived a stop like the session unblocks did: on a
+// managed computer an approval lasts while the sandbox runs, and only a
+// saved "always" decision of the managed gateway that opens every endpoint
+// of a rule (coveredByDecisions) keeps it for the next session. Rules
+// DefenseClaw approved on its own stay: the policy approves them again.
+// Outside managed mode an approved rule lasts as long as the sandbox.
+func (m *Manager) endSessionRules(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) error {
+	if !m.managedMode() {
+		return nil
+	}
+	m.mu.Lock()
+	name, origins := b.rec.Name, b.rec.ApprovedRules
+	m.mu.Unlock()
+	mine := false
+	for _, origin := range origins {
+		mine = mine || origin == actorOperator
+	}
+	if !mine {
+		return nil
+	}
+	cfg, err := gw.Client.SandboxConfig(ctx, name)
+	if err != nil {
+		return upstream("read the policy of sandbox "+name, err)
+	}
+	var decided map[string]bool
+	if m.authority() != nil {
+		decided = decidedHosts(m.savedDecisions(m.registrationOf(b), m.floor(eff)))
+	}
+	var gone, ended []string
+	var ops []openshell.PolicyMergeOperation
+	for rule, origin := range origins {
+		if origin != actorOperator {
+			continue
+		}
+		var current v1.NetworkPolicyRule
+		var ok bool
+		if cfg != nil && cfg.Policy != nil {
+			current, ok = cfg.Policy.NetworkPolicies[rule]
+		}
+		switch {
+		case !ok:
+			gone = append(gone, rule)
+		case !coveredByDecisions(triage.FromChunk(name, openshell.PolicyChunk{RuleName: rule, ProposedRule: &current}), decided):
+			ended = append(ended, rule)
+			ops = append(ops, openshell.PolicyMergeOperation{RemoveRule: &v1.RemoveNetworkRule{RuleName: rule}})
+		}
+	}
+	if len(ops) == 0 {
+		m.forgetApprovedRules(b, gone)
+		return nil
+	}
+	sort.Strings(ended)
+	res, err := gw.Client.MergePolicy(ctx, name, ops, openshell.PolicyUpdateOptions{
+		Annotations: map[string]string{"source": "defenseclaw", "reason": "session-ended"},
+	})
+	if err != nil {
+		m.forgetApprovedRules(b, gone)
+		return upstream("end the session approvals of sandbox "+name, err)
+	}
+	m.logf("sandbox %s: the rules approved for its last session ended with it: %s", name, strings.Join(ended, ", "))
+	m.forgetApprovedRules(b, append(gone, ended...))
+	m.mu.Lock()
+	id := b.identity()
+	if res != nil && res.Version != 0 {
+		id.PolicyVersion = res.Version
+	}
+	m.mu.Unlock()
+	for _, rule := range ended {
+		ev := audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleRemove, Actor: "policy", Origin: "internal",
+			Target: rule, Reason: policyReasonApprovalRequired, ChangeCount: 1, Timestamp: m.now()}
+		if res != nil {
+			ev.PolicyHash = res.PolicyHash
+		}
+		m.tel.RecordSandboxPolicy(ctx, ev)
+	}
+	return nil
 }
 
 func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest) error {
@@ -563,6 +654,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := m.checkStart(ctx, gw, rec, eff, violations); err != nil {
 		return err
 	}
+	// Before the sandbox runs again; a gateway that will not change the
+	// policy of a stopped sandbox gets a second try once it runs.
+	rulesLeft := m.endSessionRules(ctx, gw, b, eff)
 	binding, err := m.opts.Bindings.Get(rec.BindingID)
 	if err != nil {
 		return sandboxapi.Errorf(sandboxapi.CodeInternal, "look up the sandbox binding: %v", err)
@@ -703,6 +797,11 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return e
 		}
 		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
+	}
+	if rulesLeft != nil {
+		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
+			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v)", rec.Name, err, rulesLeft)
+		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return err
