@@ -12,6 +12,21 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg12_uninstall_incomplete_code(self):
+        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
+                   if line.startswith("| `uninstall_incomplete` |"))
+        self.assertIn("started the services again", row)
+
+    def test_fg12_linux_package_removal_keeps_files(self):
+        text = page("enterprise/linux.mdx")
+        self.assertIn("apt or dnf fails and keeps the package files", text)
+        self.assertIn("`uninstall_incomplete`", text)
+
+    def test_fg12_doctor_prints_pinned_driver_digest(self):
+        section = page("enterprise/sandboxes.mdx").split("### Recipe: prerequisite mode", 1)[1]
+        self.assertIn("install command with the SHA-256 digest this DefenseClaw build pins", section)
+        self.assertNotIn("and its `.sha256` file", section)
+
     def test_fg11_machine_policy_summary_missing(self):
         self.assertIn("| `machine_policy_summary_missing` | Windows |", page("enterprise/troubleshooting.mdx"))
 

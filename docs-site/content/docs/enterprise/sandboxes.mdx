@@ -268,8 +268,10 @@ and do nothing per account. The steps, as root:
    could have changed.
 2. **MicroVM driver only (`driver: vm`).** NVIDIA's package does not install the
    driver. Download `openshell-driver-vm-<arch>-unknown-linux-gnu.tar.gz` (or
-   the macOS build) and its `.sha256` file from the OpenShell release, check the
-   digest, extract it into `/usr/local/libexec/openshell` (on macOS also
+   the macOS build) from the OpenShell release. `sandbox doctor` prints the
+   install command with the SHA-256 digest this DefenseClaw build pins for
+   OpenShell `0.1.3`; use its `sha256sum -c -` check before extracting the
+   archive into `/usr/local/libexec/openshell` (on macOS also
    `/opt/homebrew/libexec/openshell` is searched) and make it root-owned, because
    `tar` keeps the builder's owner:
 
