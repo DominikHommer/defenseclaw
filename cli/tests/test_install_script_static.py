@@ -1925,3 +1925,29 @@ def test_a_second_restore_keeps_the_installer_the_first_one_put_back(tmp_path: P
     assert not snap.exists()
     assert (dc_home / "installer" / "install.sh").read_text(encoding="utf-8") == "previous installer"
     assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "1.0.1\n"
+
+
+@pytest.mark.parametrize("failing", ["audit.db", "audit.db-wal"])
+def test_a_failed_audit_quarantine_keeps_the_store_with_its_wal(tmp_path: Path, failing: str) -> None:
+    # #1096/GAP-1397: the WAL moved aside before the store, and a store that
+    # then did not move stayed behind without it.
+    home = tmp_path / "dc"
+    home.mkdir()
+    (home / "audit.db").write_text("db", encoding="utf-8")
+    (home / "audit.db-wal").write_text("wal", encoding="utf-8")
+    script = tmp_path / "quarantine.sh"
+    script.write_text(
+        "set -euo pipefail\nwarn() { :; }\n"
+        + f'mv() {{ [[ "$1" == "{home / failing}" ]] && return 1; command mv "$@"; }}\n'
+        + _install_sh_functions("quarantine_rolled_back_audit")
+        + f'DEFENSECLAW_HOME="{home}" back_to=0.8.10 QUARANTINED=""\n'
+        + 'quarantine_rolled_back_audit && echo moved || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out
+    assert (home / "audit.db").read_text(encoding="utf-8") == "db"
+    assert (home / "audit.db-wal").read_text(encoding="utf-8") == "wal"
+    assert not list(home.glob("audit.db.corrupt-*"))

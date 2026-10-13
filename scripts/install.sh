@@ -1956,14 +1956,20 @@ check_rollback_data() {
 # aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
 # time>), so the restored release starts on a new one.
 quarantine_rolled_back_audit() {
-    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix
+    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix back
     [[ -f "${db}" ]] || return 0
     moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
     [[ ! -e "${moved}" ]] || moved="${moved}-$$"
-    for suffix in -wal -shm -journal; do
-        [[ ! -e "${db}${suffix}" ]] || mv "${db}${suffix}" "${moved}${suffix}" || return 1
+    # GAP-1397: a move that fails puts back what moved, so the store is never
+    # separated from its WAL (SQLite would drop the WAL's transactions).
+    for suffix in "" -wal -shm -journal; do
+        [[ -e "${db}${suffix}" ]] || continue
+        mv "${db}${suffix}" "${moved}${suffix}" && continue
+        for back in "" -wal -shm -journal; do
+            if [[ -e "${moved}${back}" && ! -e "${db}${back}" ]]; then mv "${moved}${back}" "${db}${back}" || true; fi
+        done
+        return 1
     done
-    mv "${db}" "${moved}" || return 1
     QUARANTINED="${moved}"
     warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
 }
