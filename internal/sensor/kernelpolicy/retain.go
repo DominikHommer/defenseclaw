@@ -24,7 +24,8 @@ import "sort"
 //
 // It keeps nothing when the plan does not enforce (a pause, a mode change, a
 // missing approval: the demote step already moved the policy to monitor), for
-// a user the plan no longer denies for through a binaries anchor, or for a
+// a user the plan no longer denies for through a binaries anchor, for a
+// session of a connector the plan no longer enforces for its user, or for a
 // policy Tetragon does not list enabled in enforce mode (an operator's
 // set-mode, a failSafe). The decision is made again on every pass from the
 // applied record (anchor and load ticks, in the state file) and the live
@@ -100,7 +101,7 @@ func (c *Controller) retain(desired map[string]Policy, listed map[string]LoadedP
 		own := newBinaryMark(applied.Binaries, applied.LoadTicks)
 		var roots []rootKey
 		for _, root := range c.roots.Roots {
-			if root.UID == applied.BinaryUID && own.marked(root) && !markedByAny(keepers[root.UID], root) {
+			if root.UID == applied.BinaryUID && own.marked(root) && !markedByAny(keepers[root.UID], root) && c.stillEnforced(root) {
 				roots = append(roots, rootKey{root.PID, root.StartTicks})
 			}
 		}
@@ -131,6 +132,13 @@ func (c *Controller) retain(desired map[string]Policy, listed map[string]LoadedP
 		}
 		c.tallyMu.Unlock()
 	}
+}
+
+// stillEnforced reports whether the plan still denies for root's connector
+// for its user: the intent enforces it and the user is enrolled for it. A
+// kept policy must not go on denying for a connector taken out of enforce.
+func (c *Controller) stillEnforced(root Root) bool {
+	return contains(c.cfg.Intent.EnforceConnectors, root.Connector) && contains(c.enrollment.Connectors(root.UID), root.Connector)
 }
 
 // maxRetainedControls bounds the replaced controls policies kept loaded for

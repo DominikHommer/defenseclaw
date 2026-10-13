@@ -364,3 +364,36 @@ func TestALoadWithAFailedScanMarksNothing(t *testing.T) {
 		t.Fatalf("predating warning %q, want the running session named", warning)
 	}
 }
+
+// A connector taken out of enforce keeps nothing either: alice's Claude Code
+// session was kept by the policy it started under, then the administrator
+// enforces only OpenCode. Her controls still deny through a binaries anchor
+// (OpenCode's), but not for Claude Code, so the old policy goes.
+func TestAConnectorLeavingEnforceKeepsNoReplacedControls(t *testing.T) {
+	intent := enforceIntent(Digest(), "claudecode", "opencode")
+	intent.BurnIn = 0
+	h := newHarness(t, intent, baseTargets+"- user: alice\n  uid: 1001\n  user_home: /home/alice\n  connector: opencode\n")
+	h.w.fs.elf("/home/alice/.opencode/bin/opencode")
+	h.procs = []Proc{codexProc(5001, 1, 100, 1002)}
+	h.pass()
+	old := mustName(t, h.status(), FamilyControls)
+	h.procs = append(h.procs, nativeProc(4010, 1, 300, 1001, aliceClaudeNew))
+	h.pass()
+	h.w.fs.elf(aliceClaude102)
+	h.now = h.now.Add(time.Minute)
+	h.pass()
+	if st := policyStatus(h, old); st.RetainedSessions != 1 {
+		t.Fatalf("the update did not keep %s for the session: %+v", old, st)
+	}
+	h.tg.take()
+	opencode := enforceIntent(Digest(), "opencode")
+	opencode.BurnIn = 0
+	h.start(opencode)
+	h.pass()
+	if calls := mutations(h.tg.take()); indexOf(calls, "delete:"+old) < 0 {
+		t.Fatalf("calls after Claude Code left enforce = %v, want %s deleted", calls, old)
+	}
+	if _, ok := h.tg.policies[old]; ok {
+		t.Fatalf("%s still loaded for a connector that is no longer enforced: %v", old, h.tg.names())
+	}
+}
