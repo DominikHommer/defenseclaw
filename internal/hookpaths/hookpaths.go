@@ -2729,12 +2729,11 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{"directory", "dir", "cd", "one-top-level"})
-			if !unique {
+			option, known := tarLongOption(name)
+			if !known {
 				return "", false
 			}
-			switch option {
-			case "directory", "dir", "cd":
+			if option.value {
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
@@ -2742,15 +2741,13 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 					}
 					value = args[i]
 				}
-				if !consume(value) {
+				if value == "" {
 					return "", false
 				}
-			case "one-top-level":
-				if joined && !consume(value) {
-					return "", false
-				}
-			default:
-				// A future or unknown destination option cannot be scoped safely.
+			} else if joined && !option.optional {
+				return "", false
+			}
+			if option.directory && (option.value || joined) && !consume(value) {
 				return "", false
 			}
 			continue
@@ -2787,7 +2784,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'x', 'z', 'j', 'J', 'a', 'v', 'O', 't', 'c', 'p', 'h', 'k', 'm', 'w', 'U':
 			default:
 				// Unknown short options may consume a path.
 				return "", false
