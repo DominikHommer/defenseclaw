@@ -1357,7 +1357,9 @@ EOF`,
 				body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
 					"tool_name": "Bash", "cwd": eventCWD, "tool_input": map[string]any{"command": command, "description": "d"}})
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
-				req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+				if managed {
+					req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+				}
 				if connector == "codex" {
 					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 				}
@@ -1387,8 +1389,15 @@ EOF`,
 				expectAllowed := allowed
 				if !managed {
 					expectAllowed = append(slices.Clone(allowed), allowedPerUser...)
+					if got := post(t, `rsync -a src/ d/ && echo k >> d/log.txt`); !strings.HasPrefix(got, block) {
+						t.Errorf("unverified source = %.300s, want block", got)
+					}
 				}
 				for _, command := range expectAllowed {
+					if !managed && command == `rsync -a src/ d/ && echo k >> d/log.txt` {
+						// The source is unavailable without a client source fact.
+						continue
+					}
 					if got := post(t, command); !strings.HasPrefix(got, allow) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
@@ -1511,7 +1520,9 @@ func TestManagedWriteOperandFactsForRelativeLinkHop(t *testing.T) {
 					cfg.Guardrail.Connector = connector
 					api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 					request := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
-					request.Header.Set(hookpaths.Header, header)
+					if managed {
+						request.Header.Set(hookpaths.Header, header)
+					}
 					if connector == "codex" {
 						setTestCodexHookBinding(request, "PreToolUse", defaultTestCodexHookContract)
 					}

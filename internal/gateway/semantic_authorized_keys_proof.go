@@ -884,10 +884,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			(!parsed || dynamic && dynamicUnknown) {
 			return true
 		}
-		if dynamicUnknown && truncated {
-			return true
-		}
-		if dynamicUnknown && hookpaths.NestedShellDynamicWrite(input.Command, input.CWD, input.ActiveHome) {
+		if dynamicUnknown {
 			return true
 		}
 		for i, operand := range operands {

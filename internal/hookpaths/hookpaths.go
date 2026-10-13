@@ -209,15 +209,35 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			if len(names) == 0 {
 				return true
 			}
-			for _, name := range names {
+			var expandCandidates func(int, shellVariables)
+			count := 0
+			expandCandidates = func(index int, vars shellVariables) {
+				if index == len(names) {
+					value, ok := staticShellWordWithVars(redirect.Word, home, vars, shellVariablePoison{})
+					if !ok {
+						unknown = true
+					} else {
+						add(value, context.cwd)
+					}
+					return
+				}
+				name := names[index]
 				values := candidates.values[name]
 				if candidates.unknown[name] || len(values) == 0 {
 					unknown = true
 				}
 				for _, value := range values {
-					add(value, context.cwd)
+					count++
+					if count > 256 {
+						unknown = true
+						return
+					}
+					vars[name] = value
+					expandCandidates(index+1, vars)
 				}
+				delete(vars, name)
 			}
+			expandCandidates(0, shellVariables{})
 			return true
 		})
 	}
@@ -863,6 +883,7 @@ func shellCandidateCallMutation(
 	case "printf":
 		words, ok := shellStaticWords(call.Args[1:], home)
 		if !ok {
+			candidates.allUnknown = true
 			return
 		}
 		for i := 0; i+1 < len(words); i++ {
@@ -870,20 +891,31 @@ func shellCandidateCallMutation(
 				continue
 			}
 			name := words[i+1]
-			valueIndex := i + 3
-			if valueIndex < len(call.Args) {
-				value, ok := staticShellWordWithVars(
-					call.Args[valueIndex], home, states.varsFor(call.Args[valueIndex]), shellVariablePoison{},
-				)
-				if ok {
-					candidates.add(name, value)
-				} else {
-					candidates.unknown[name] = true
-				}
+			if i+2 >= len(words) {
+				candidates.unknown[name] = true
+				return
+			}
+			if value, ok := shellPrintfValue(words[i+2], words[i+3:]); ok {
+				candidates.add(name, value)
 			} else {
 				candidates.unknown[name] = true
 			}
 			return
+		}
+	case "declare", "typeset", "local", "export", "readonly":
+		for _, arg := range call.Args[1:] {
+			word, ok := staticShellWordWithVars(arg, home, states.varsFor(arg), shellVariablePoison{})
+			if !ok {
+				if prefix := launcherAssignmentPrefix(arg); prefix != "" {
+					if name, _, found := strings.Cut(prefix, "="); found && shellIdentifier(name) {
+						candidates.unknown[name] = true
+					}
+				}
+				continue
+			}
+			if name, value, found := strings.Cut(word, "="); found && shellIdentifier(name) {
+				candidates.add(name, value)
+			}
 		}
 	}
 }
