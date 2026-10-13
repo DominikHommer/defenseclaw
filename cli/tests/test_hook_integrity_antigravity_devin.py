@@ -50,6 +50,8 @@ _GOLDEN = json.loads(
     ).read_text(encoding="utf-8")
 )
 _POSIX = ["antigravity_linux", "devin_workspace_linux"]
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 _WINDOWS = ["antigravity_windows", "devin_workspace_windows"]
 
 
@@ -91,7 +93,7 @@ def _unregistered(config: Path) -> list[str]:
     return [f"no DefenseClaw hooks are registered in {config}"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
+@posix_only
 @pytest.mark.parametrize("name", _POSIX)
 def test_the_posix_file_setup_writes_is_registered(tmp_path, monkeypatch, name):
     monkeypatch.chdir(tmp_path)
@@ -146,6 +148,7 @@ def test_defenseclaw_entries_emptied_by_hand_are_unregistered(tmp_path, monkeypa
     assert hook_registration_problems(cfg, connector) == _unregistered(config)
 
 
+@posix_only
 def test_a_devin_user_config_still_reads_its_hooks_key(tmp_path, monkeypatch):
     # Only the project hooks.v1.json is a bare event map; config.json keeps
     # its hooks key, and other top-level settings there are not hooks.
