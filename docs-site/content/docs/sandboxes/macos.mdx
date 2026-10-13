@@ -120,6 +120,10 @@ Either have the owner give you write access, or install a Homebrew of your
 own in your home directory (see Homebrew's
 [installation guide](https://docs.brew.sh/Installation)), put it first on
 `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again.
+Add that shell setup to your profile for SSH sessions too. Setup can upgrade
+the `nvidia/openshell` formula in your own Homebrew in place; if doctor says
+the gateway uses a different Homebrew, select your own prefix with that
+`brew shellenv` command before running setup.
 
 A Homebrew of your own works, with two differences. The OpenShell CLI looks
 for the gateway's client certificates only under `/opt/homebrew` and
@@ -269,7 +273,7 @@ On a Mac set up through Homebrew, the output looks like this:
   ✓ Docker                     Docker 29.1.5 (Docker Desktop)
   ✓ Docker BuildKit            docker build uses BuildKit (buildx v0.30.1-desktop.2)
   - Docker host networking     the MicroVM driver does not use Docker's network
-  ✓ Docker file sharing        /var/folders/…/T is shared with Docker Desktop (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)
+  ✓ Docker file sharing        /Users/alice/Library/Caches/defenseclaw/hookfire is shared with Docker Desktop (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)
   ✓ MicroVM driver             e2fsprogs in /opt/homebrew/opt/e2fsprogs/sbin; /opt/homebrew/opt/openshell/libexec/openshell-driver-vm signed for Apple's Hypervisor
   ✓ MicroVM sandbox user       sandboxes run as 501:20, your user
   ✓ MicroVM resources          every MicroVM gets 4 vCPUs, 4096 MiB of memory and a 16384 MiB disk for its changes
@@ -295,6 +299,11 @@ On a Mac set up through Homebrew, the output looks like this:
 
   ✓ ready for sandboxes
 ```
+
+With Colima or OrbStack, the **Docker file sharing** check says that the
+`~/Library/Caches/defenseclaw/hookfire` directory is under your home directory,
+which those engines share with their container VM by default. If the probe
+directory is outside home, doctor warns that the engine may not see it.
 
 The **Platform** warning is expected on every Mac: it says that the
 MicroVM driver is experimental upstream. The checks marked `-` do not apply
@@ -465,6 +474,10 @@ Applying a copy's work and undoing it, replayed from a real run:
 | Checks after start | After each create and start, DefenseClaw checks inside the MicroVM that it runs as your uid with no capabilities and that its hooks and settings are the files DefenseClaw prepared. A sandbox that is not as prepared is stopped. |
 | Stopping | `defenseclaw sandbox stop NAME` saves the MicroVM's disk. A gateway restart stops every MicroVM on it, and setup asks before it restarts a gateway with sandboxes running. |
 
+While a session runs, DefenseClaw warns once when its overlay disk reaches
+90% use. `defenseclaw sandbox status NAME` shows the same warning while the
+MicroVM is running.
+
 ## Limits on a Mac
 
 - **Always a copy.** There is no live mount and no pre-session snapshot.
@@ -491,7 +504,9 @@ Applying a copy's work and undoing it, replayed from a real run:
 
 OpenShell's gateway listens on the fixed port `127.0.0.1:17670` and runs
 as the Homebrew service of the account that started it. A Mac runs one
-gateway, so only that account can run sandboxes. In a second account,
+gateway, so only that account can run sandboxes. Each account would also need
+its own Docker Desktop and Homebrew service, which run only in that account's
+desktop session; per-user gateway ports are planned. In a second account,
 `defenseclaw sandbox doctor` says that the gateway's port is held by a
 process of another account. When the Homebrew prefix belongs to the first
 account, the doctor also says that its gateway configuration belongs to
@@ -528,7 +543,8 @@ Several users on one machine are tracked upstream in
 | A run ends with `import provider profile …: openshell: exec: "openshell": executable file not found in $PATH` | The daemon started before your shell had the OpenShell CLI on its `PATH`. Run `defenseclaw sandbox setup` again (it records the CLI's path as `openshell.binary`), or restart the daemon from this shell: `defenseclaw-gateway restart`. |
 | **MicroVM driver** fails: the driver is not signed for Apple's Hypervisor | `brew postinstall nvidia/openshell/openshell`. Setup runs it for you when you agree. |
 | **Docker** fails | Start Docker Desktop. |
-| **Docker file sharing** fails: your temporary folder is not shared with Docker Desktop | Add the folder it names in Docker Desktop → Settings → Resources → File sharing. `/var/folders` and `/tmp` are shared by default. |
+| **Docker file sharing** fails: the hook-fire probe directory is not visible to the container engine | Share your home directory, including `~/Library/Caches/defenseclaw/hookfire`, with the engine's VM, then run the image build again. In Docker Desktop use Settings → Resources → File sharing; Colima mounts home by default, and OrbStack shares `/Users` by default. |
+| **Docker** says `Docker Desktop is not running in this account (permission denied ...)` | Log in to the Mac's desktop as this account, start Docker Desktop there, then run `defenseclaw sandbox setup` again. Do not point `DOCKER_HOST` at another account's socket. |
 | `no sandbox can start on this gateway: it runs sandboxes on the docker driver` | Run `defenseclaw sandbox setup` and answer yes to the MicroVM question. |
 | The first run seems to hang at `Starting a Claude Code sandbox…` | The first start of an image prepares a MicroVM disk of about 5 GB, which takes about a minute. |
 | A first run fails after about 5 minutes with `ProvisioningTimedOut: Provisioning repair window expired after 300 seconds` | The volume most often ran full while the MicroVM disk was prepared (several first starts at once each need one). Check **Disk space** in `defenseclaw sandbox doctor`, then run `defenseclaw sandbox image prune`: it also removes the half-prepared disks that failed or cancelled first starts leave in `~/.local/state/openshell/vm-driver/images`, once nothing has written to them for 15 minutes. |
