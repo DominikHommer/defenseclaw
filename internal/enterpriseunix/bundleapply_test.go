@@ -37,6 +37,8 @@ type bundleHost struct {
 	key ed25519.PrivateKey
 	// frozen makes the gateway keep reporting this digest and reloadError.
 	frozen, reloadError string
+	// extra are bundle files next to config.yaml in every bundle signed.
+	extra map[string]string
 }
 
 // bundleRunner answers `policy digest --json` with the digest of the
@@ -85,7 +87,11 @@ func newBundleHost(t *testing.T) *bundleHost {
 		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
 			digest, generation, b.reloadError)), nil
 	}
-	h.env.BundleDigester = func(_ context.Context, _ *config.Config, raw []byte, _, _ string) (string, error) {
+	h.env.BundleDigester = func(_ context.Context, _ *config.Config, raw []byte, _, root string) (string, error) {
+		// As the gateway digest does, the bundle root is ${bundle_root}.
+		if root != "" {
+			raw = bytes.ReplaceAll(raw, []byte(root), []byte("${bundle_root}"))
+		}
 		return "sha256:" + sha256Bytes(raw), nil
 	}
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -121,6 +127,10 @@ func (b *bundleHost) signed(version uint64, cfg string) *enterprisebundle.Bundle
 	root := t.TempDir()
 	writeRooted(t, filepath.Join(root, enterprisebundle.ConfigName), cfg)
 	files := &enterprisebundle.Bundle{Files: map[string][]byte{enterprisebundle.ConfigName: []byte(cfg)}}
+	for name, content := range b.extra {
+		writeRooted(t, filepath.Join(root, filepath.FromSlash(name)), content)
+		files.Files[name] = []byte(content)
+	}
 	_, manifest, err := enterprisebundle.Compose(context.Background(), enterprisebundle.ComposeInput{
 		Bundle: files, Root: root, BundleID: fmt.Sprintf("b-01JA%022d", version), TenantID: "acme", DeviceGroup: "eng",
 		Platforms: []string{"linux"}, Version: version, CreatedAt: time.Now().Add(-time.Hour), CreatedBy: "operator:mdm-admin",
@@ -148,7 +158,9 @@ func (b *bundleHost) dir(version uint64, cfg string) string {
 	dir := b.t.TempDir()
 	writeRooted(b.t, filepath.Join(dir, enterprisebundle.ManifestName), string(bundle.Manifest))
 	writeRooted(b.t, filepath.Join(dir, enterprisebundle.SignatureName), string(bundle.Signature))
-	writeRooted(b.t, filepath.Join(dir, enterprisebundle.ConfigName), string(bundle.Files[enterprisebundle.ConfigName]))
+	for name, content := range bundle.Files {
+		writeRooted(b.t, filepath.Join(dir, filepath.FromSlash(name)), string(content))
+	}
 	return dir
 }
 
@@ -373,6 +385,39 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	}
 	if st := b.state(); st.Current.BundleID != bundleID(1) || b.read(b.env.Layout.ConfigPath) != good {
 		t.Fatalf("state = %+v", st)
+	}
+}
+
+// The first bundle, installed by a run that ended before it recorded it and
+// then not confirmed by the gateway, has no last good bundle to return to: it
+// keeps enforcing, so later runs keep the version directory its installed
+// config names (gc used to remove it with the failed receipt).
+func TestBundleUnconfirmedFirstBundleKeepsItsVersionDirectory(t *testing.T) {
+	b := newBundleHost(t)
+	v1, _, _ := bundleConfigs(b.testHost)
+	b.extra = map[string]string{"discovery/confidence.yaml": "version: 1\n"}
+	cfg := v1 + "ai_discovery:\n  confidence_policy_path: discovery/confidence.yaml\n"
+	b.env.bundleFault = func(p string) error {
+		if p == "committed" {
+			return errors.New("run ends after the commit")
+		}
+		return nil
+	}
+	b.apply(b.dir(1, cfg))
+	b.env.bundleFault = nil
+	b.frozen = "sha256:" + strings.Repeat("0", 64)
+	b.run(Options{Action: ActionEnsure})
+	rc := b.receipt(bundleID(1))
+	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeNotConfirmed {
+		t.Fatalf("receipt = %+v", rc)
+	}
+	b.run(Options{Action: ActionEnsure})
+	dir := b.env.bundleVersionDir(rc.Dir)
+	if !strings.Contains(b.read(b.env.Layout.ConfigPath), dir) {
+		t.Fatalf("config.yaml does not name %s", dir)
+	}
+	if _, err := os.Stat(b.env.P(filepath.Join(dir, "discovery", "confidence.yaml"))); err != nil {
+		t.Fatalf("the version directory the installed config names is gone: %v", err)
 	}
 }
 

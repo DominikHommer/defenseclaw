@@ -39,7 +39,7 @@ func (e *Env) bundleStore() *enterprisebundle.Store {
 // against the deployment and the gateway (settleUnconfirmedBundle).
 func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
 	store := l.env.bundleStore()
-	report, err := store.Settle()
+	report, err := store.Settle(l.env.installedBundleDirs()...)
 	if err != nil {
 		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
 		return
@@ -71,4 +71,22 @@ func (e *Env) withBundleFields(record enterprisestatus.PolicyStateRecord) enterp
 		record.BundleID, record.BundleVersion = state.BundleID, state.BundleVersion
 	}
 	return record
+}
+
+// installedBundleDirs are the version directories that the installed
+// config.yaml and the committed config name. The store keeps them even when
+// no bundle state or open receipt does: after a failed confirm with no last
+// good bundle, or a return to the last good bundle that rolled back, the
+// config the gateway loads still names that directory.
+func (e *Env) installedBundleDirs() []string {
+	bundlesDir := filepath.Join(e.Layout.ConfigDir, enterprisebundle.BundlesDirName)
+	var names []string
+	for _, path := range []string{e.P(e.Layout.ConfigPath), e.committedConfigPath()} {
+		raw, err := readBounded(path, maxInputBytes)
+		if err != nil {
+			continue
+		}
+		names = append(names, enterprisebundle.VersionDirsNamed(raw, bundlesDir)...)
+	}
+	return names
 }

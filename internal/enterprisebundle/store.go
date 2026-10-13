@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -623,8 +624,12 @@ type SettleReport struct {
 // installed yet), an applied receipt that bundle-state.json names as
 // current is confirmed, and other applied receipts are returned for the
 // caller. Staging copies, temp files and version directories no state or
-// open receipt refers to are removed.
-func (s *Store) Settle() (SettleReport, error) {
+// open receipt refers to, and that are not in keep, are removed. keep names
+// the version directories the installed config still uses (VersionDirsNamed):
+// a bundle installed by a run that then failed it, with no last good bundle
+// to return to or a rollback that did not finish, keeps enforcing from its
+// directory, so that directory must stay.
+func (s *Store) Settle(keep ...string) (SettleReport, error) {
 	var report SettleReport
 	st, err := s.LoadState()
 	if err != nil {
@@ -634,7 +639,10 @@ func (s *Store) Settle() (SettleReport, error) {
 	if err != nil {
 		return report, err
 	}
-	keep := map[string]bool{}
+	kept := map[string]bool{}
+	for _, name := range keep {
+		kept[name] = true
+	}
 	for _, r := range receipts {
 		switch r.State {
 		case StateReceived, StateVerified, StateStaged:
@@ -650,11 +658,11 @@ func (s *Store) Settle() (SettleReport, error) {
 				report.Completed = append(report.Completed, r.ReceiptID)
 				continue
 			}
-			keep[r.Dir] = true
+			kept[r.Dir] = true
 			report.Unconfirmed = append(report.Unconfirmed, r)
 		}
 	}
-	return report, s.gc(st, keep)
+	return report, s.gc(st, kept)
 }
 
 // Receipts returns every readable receipt, newest first. An unreadable
@@ -730,6 +738,20 @@ func (s *Store) prune() error {
 		}
 	}
 	return nil
+}
+
+// VersionDirsNamed returns the version directory names that raw, a rendered
+// config.yaml, names under bundlesDir (the installed bundles directory, as
+// RenderConfig writes it into the config).
+func VersionDirsNamed(raw []byte, bundlesDir string) []string {
+	prefix := regexp.MustCompile(regexp.QuoteMeta(filepath.Clean(bundlesDir)+string(filepath.Separator)) + `([0-9A-Za-z-]+)`)
+	var names []string
+	for _, m := range prefix.FindAllSubmatch(raw, -1) {
+		if name := string(m[1]); versionDirPattern.MatchString(name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // gc removes staging copies, version directories that are not current,
