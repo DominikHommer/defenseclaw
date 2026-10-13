@@ -703,6 +703,11 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(opts.Action))
+	if action == "" {
+		// Early argument errors have no action yet; use the schema's
+		// install-like action so the MDM can still parse the failure.
+		action = "ensure"
+	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
 	var invalid enterpriseSetupInvalidArguments
