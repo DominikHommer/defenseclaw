@@ -1487,15 +1487,23 @@ func (m *v9Migrator) planShippedPacks() {
 }
 
 // seedShippedRulePack writes the embedded pack name to dir, which must not
-// exist: the files go to a sibling folder that is renamed into place.
+// exist: the files go to a new sibling folder that is renamed into place. A
+// fixed <dir>.seeding sibling was removed first, even when it was a custom
+// pack the config selects (GAP-1490).
 func seedShippedRulePack(dir, name string) error {
 	files, err := policyassets.Files()
 	if err != nil {
 		return err
 	}
 	prefix := "guardrail/" + name + "/"
-	staging := dir + ".seeding"
-	_ = os.RemoveAll(staging)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".seeding-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
 	wrote := false
 	for _, f := range files {
 		rel, ok := strings.CutPrefix(f.Path, prefix)
@@ -1507,7 +1515,6 @@ func seedShippedRulePack(dir, name string) error {
 			return err
 		}
 		if err := cfgtxn.WriteFileDurable(target, f.Data, 0o600); err != nil {
-			_ = os.RemoveAll(staging)
 			return err
 		}
 		wrote = true
@@ -1515,15 +1522,7 @@ func seedShippedRulePack(dir, name string) error {
 	if !wrote {
 		return fmt.Errorf("this build ships no %s rule pack", name)
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	if err := os.Rename(staging, dir); err != nil {
-		_ = os.RemoveAll(staging)
-		return err
-	}
-	return nil
+	return os.Rename(staging, dir)
 }
 
 // refreshRegoModules replaces every planned pre-9 module. A failure is
