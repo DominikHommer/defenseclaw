@@ -34,9 +34,12 @@ from defenseclaw.connector_contracts import HOOK_CONTRACT_MANIFEST
 from defenseclaw.rulepack_validation import RulePackValidationResult
 
 # Every connector the manifest knows, by the class its prompt hook falls in.
-PROMPT_BLOCKING = ("claudecode", "codex", "cursor", "devin", "kiro", "openhands", "omnigent")
+PROMPT_BLOCKING = ("claudecode", "codex", "cursor", "devin", "openhands", "omnigent")
 PROXY = ("openclaw", "zeptoclaw")
 NO_PROMPT_HOOK = ("opencode", "copilot", "hermes", "amp", "antigravity")
+# Block events resolved per request from the hook surface (no versioned
+# contract): Kiro IDE vetoes a prompt, neither kiro-cli engine does.
+SURFACE_DEPENDENT = ("kiro",)
 
 
 def _cfg() -> MagicMock:
@@ -83,7 +86,7 @@ class TestRulePackPromptCapability(unittest.TestCase):
 
     def test_classes_cover_every_manifest_connector(self, _validate):
         known = set(HOOK_CONTRACT_MANIFEST["connectors"])
-        self.assertEqual(known, set(PROMPT_BLOCKING) | set(PROXY) | set(NO_PROMPT_HOOK))
+        self.assertEqual(known, set(PROMPT_BLOCKING) | set(PROXY) | set(NO_PROMPT_HOOK) | set(SURFACE_DEPENDENT))
 
     def test_prompt_hook_connectors_say_prompts_still_block(self, validate):
         for connector in PROMPT_BLOCKING:
@@ -110,6 +113,23 @@ class TestRulePackPromptCapability(unittest.TestCase):
                 self.assertIn("has no hook that can block a prompt", detail)
                 self.assertIn("they reach the model, and only tool calls are blocked", detail)
         self.assertIn("OpenCode has no hook", self._row(validate, "opencode")["detail"])
+
+    def test_surface_dependent_connector_names_the_clients(self, validate):
+        # The DELTA-1 verifier: Kiro still said "prompts still block", from
+        # the v3 surface's block events, although kiro-cli 2.24.1 --v3 sends a
+        # blocked prompt to the model and the unmarked 2.x surface blocks tool
+        # calls only.
+        for connector in SURFACE_DEPENDENT:
+            with self.subTest(connector=connector):
+                self.assertEqual(_prompt_block_capability(connector), "surface")
+                detail = self._row(validate, connector)["detail"]
+                self.assertNotIn("never blocked; prompts still block)", detail)
+                self.assertNotIn("no hook that can block a prompt", detail)
+        self.assertIn(
+            "(a match is recorded, never blocked; prompts still block only in Kiro IDE; "
+            "kiro-cli sends every prompt to the model and blocks tool calls only)",
+            self._row(validate, "kiro")["detail"],
+        )
 
     def test_unknown_connector_makes_no_prompt_claim(self, validate):
         self.assertEqual(_prompt_block_capability("not-a-connector"), "unknown")
