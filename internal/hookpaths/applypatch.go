@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -62,9 +63,17 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		if !parsed || !patchTool && !patchShellInvocationsKnown(text) {
 			return nil, false
 		}
+		base := cwd
+		if !patchTool && envelopes > 0 {
+			var known bool
+			base, known = patchShellTargetCWD(text, cwd, home)
+			if !known {
+				return nil, false
+			}
+		}
 		found = found || envelopes > 0
 		for _, path := range paths {
-			resolved, known := patchTargetPaths(path, cwd, home)
+			resolved, known := patchTargetPaths(path, base, home)
 			if !known {
 				return nil, false
 			}
@@ -89,6 +98,57 @@ func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, hom
 		}
 	}
 	return targets, true
+}
+
+// patchShellTargetCWD follows literal directory changes before a shell call
+// to apply_patch. A non-linear directory change has no single target base.
+func patchShellTargetCWD(text, cwd, home string) (string, bool) {
+	file, parsed := parseShell(text)
+	if !parsed {
+		return cwd, !patchLeadingCD.MatchString(text)
+	}
+	statements, linear := linearShellStatements(file)
+	if !linear {
+		return cwd, !patchLeadingCD.MatchString(text)
+	}
+	base := cwd
+	for _, statement := range statements {
+		call, ok := statement.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			continue
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		if !static[0] {
+			return "", false
+		}
+		resolved := resolveLauncherWords(words, static, base)
+		if !resolved.ok || resolved.noExec || len(resolved.words) == 0 {
+			return "", false
+		}
+		switch programBase(resolved.words[0]) {
+		case "apply_patch", "applypatch", "apply-patch":
+			return base, true
+		case "cd":
+			if len(resolved.words) > 2 || !allStatic(resolved.static) {
+				return "", false
+			}
+			if len(resolved.words) == 1 {
+				base = home
+			} else if resolved.words[1] == "-" {
+				return "", false
+			} else {
+				base = OperandPath(resolved.words[1], base)
+			}
+			if !filepath.IsAbs(base) {
+				return "", false
+			}
+		}
+	}
+	return cwd, true
 }
 
 func isApplyPatchToolName(tool string) bool {
@@ -182,6 +242,7 @@ func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
 // supplied to that invocation. In particular, a quoted envelope printed by
 // another command cannot explain a later file-fed apply_patch.
 var (
+	patchLeadingCD    = regexp.MustCompile(`(?m)^\s*cd\s+`)
 	patchProgramWord  = regexp.MustCompile(`(?i)\b(?:apply_patch|applypatch|apply-patch)\b`)
 	patchDirectInput  = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*(?:<<<\s*|<<\s*|@)?['"]`)
 	patchHeredocInput = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$`)
