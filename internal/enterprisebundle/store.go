@@ -27,7 +27,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The bundle store of a standalone device (spec P1 sections 7 and 8).
@@ -249,7 +248,7 @@ func NewStore(bundlesDir, lifecycleDir string) *Store {
 
 // StoreFor is the store of the standalone layout of goos.
 func StoreFor(goos string) (*Store, error) {
-	layout, err := managed.StandaloneLayoutFor(goos)
+	layout, err := Layout(goos)
 	if err != nil {
 		return nil, err
 	}

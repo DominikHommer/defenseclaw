@@ -15,7 +15,7 @@ import (
 // AnchorsPath is <etc>/trust/bundle-anchors.json of the standalone layout
 // of goos.
 func AnchorsPath(goos string) (string, error) {
-	layout, err := managed.StandaloneLayoutFor(goos)
+	layout, err := Layout(goos)
 	if err != nil {
 		return "", err
 	}

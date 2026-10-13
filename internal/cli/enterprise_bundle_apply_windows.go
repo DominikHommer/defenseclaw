@@ -7,18 +7,33 @@
 package cli
 
 import (
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// runEnterpriseBundleApply: Windows applies bundles through Setup
-// (/ensure BUNDLE=), which a later stack item wires; this build refuses
-// before anything changes.
+// runEnterpriseBundleApply runs the Windows ensure with the bundle, as
+// Setup /ensure BUNDLE= does. A Secure Client computer and a host that is
+// not a standalone managed device are refused before anything is read.
 func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) error {
 	if bundleSecureClient() {
 		return bundleApplyRefused(cmd, opts.json, secureClientBundleRefusal())
 	}
-	return bundleApplyRefused(cmd, opts.json, &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
-		Detail: "bundle apply is not available on Windows in this build"})
+	if !bundleManagedDevice() {
+		return bundleApplyRefused(cmd, opts.json, &enterprisebundle.Error{Code: enterprisebundle.CodeNotManaged,
+			Detail: "this computer is not a standalone managed device; install the enterprise profile first"})
+	}
+	if opts.inbox || opts.bundle == "" {
+		return bundleUsage("give --bundle; Windows takes bundles from Setup /ensure BUNDLE= or --bundle, not from an inbox")
+	}
+	bundle, err := filepath.Abs(opts.bundle)
+	if err != nil {
+		return bundleUsage("--bundle: %v", err)
+	}
+	return runWindowsEnterpriseLifecycle(cmd.Context(), cmd, "ensure", &windowsEnterpriseLifecycleOptions{
+		bundlePath: bundle, profile: managed.ProfileStandalone, jsonOutput: opts.json,
+	})
 }

@@ -100,6 +100,43 @@ lifecycle run applies the config of the current bundle, an edit of
 `config.yaml` in place is reverted, and `ensure --config` with any other config
 is refused with `bundle_required`.
 
+## Apply (Windows)
+
+Run Setup elevated (or as SYSTEM from your MDM) on a computer where the
+standalone deployment is installed:
+
+```powershell
+DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure BUNDLE=C:\Stage\v12.dcbundle TRUSTANCHORS=C:\Stage\bundle-anchors.json JSON=1
+```
+
+`TRUSTANCHORS=` installs the anchor file into
+`C:\ProgramData\Cisco\DefenseClaw\etc\trust\` first; give it on the first
+bundle and whenever you rotate keys. It must sit in a folder only
+administrators can change. `BUNDLE=` may come from any local folder: Setup
+copies it into the bundle store under `C:\ProgramData\Cisco\DefenseClaw\etc\bundles\`
+and verifies that copy. `BUNDLE=` is not combined with `CONFIG=` (the bundle
+carries the config; exit code 1639). The ordinary ensure then installs the
+bundle config, with the same transaction and rollback as `CONFIG=`. The bundle
+becomes current only when the running gateway reports the effective policy of
+the installed config with no reload error; otherwise Setup installs the last
+good config again and the receipt fails (`not_confirmed`, `rolled_back: true`).
+Exit codes are the MDM contract: 0, 1603 (`errors[].code`), 1618 (another
+bundle run holds the store) and 1639.
+
+On a confirmed bundle the marker key `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`
+gains `BundleId`, `BundleVersion` and `BundleState=confirmed`. Detection:
+
+```powershell
+powershell -File detect.ps1 -RequireBundle 12
+```
+
+detects when the confirmed bundle is version 12 or newer (or exactly the
+bundle id you give) and `enterprise bundle status` reports that the gateway
+enforces it. The generic wrapper takes the same inputs:
+`Invoke-DefenseClawEnterprise.ps1 -SetupPath ... -Sha256 ... -BundlePath ... -TrustAnchorPath ...`.
+`defenseclaw.exe enterprise bundle apply --bundle <file>` runs the same ensure
+from the installed CLI.
+
 ## Status
 
 ```bash
@@ -110,8 +147,8 @@ Status changes nothing. It reports bundle mode (whether the trust anchor file
 is installed), the current and last good bundle, the version floor, the last
 receipt (`received`, `verified`, `staged`, `applied`, `confirmed` or `failed`
 with its error code and times) and whether the running gateway enforces the
-effective policy digest of the current bundle. On Linux and macOS the
-enterprise status (`--json`) carries the same summary in its `bundle` block. A bundle
+effective policy digest of the current bundle. The enterprise status
+(`--json`) of every platform carries the same summary in its `bundle` block. A bundle
 that fails or whose run is interrupted never becomes current: the last good
 bundle keeps enforcing, and the next lifecycle run ends an interrupted receipt
 as `failed` with `interrupted`.
@@ -131,9 +168,6 @@ as `failed` with `interrupted`.
 - **Status needs root.** The bundle state and receipts are readable only by
   root or an administrator; `bundle status` as a standard account refuses with
   `not_root`. The device keeps the 20 newest receipts.
-- **Windows gateway check.** On Windows `bundle status` does not query the
-  running gateway yet and warns `gateway_unchecked`; use the Windows
-  enterprise status command for the enforced digest.
 - **Retired and expired keys.** A retired key verifies only the bundle already
   applied, and only while the key is inside `not_before`..`not_after`. Once a
   key expires, the bundle it signed no longer verifies (`key_expired`): publish
@@ -151,8 +185,20 @@ as `failed` with `interrupted`.
   checking each credential.
 - **Sizes.** A bundle is at most 4 MiB compressed, `manifest.sig` 16 KiB, the
   anchor file 64 KiB with at most 32 keys and 256 device groups.
-- **Apply on Windows.** This build applies bundles on Linux and macOS only;
-  `bundle apply` on Windows refuses before it changes anything.
+- **Windows: install first.** Setup applies a bundle only on a computer
+  where the standalone deployment is installed (`not_managed` otherwise):
+  install with `/ensure CONFIG=<config.yaml>`, then deliver `BUNDLE=`. The
+  first install cannot take a bundle yet.
+- **Windows: confirm after commit.** The Windows transaction commits the
+  bundle config before the gateway confirms it. Until then the gateway keeps
+  enforcing its previous policy generation; a bundle that is not confirmed is
+  replaced by the last good config in the same run (or, for the first
+  bundle, by the config installed before it). Windows has no bundle inbox:
+  deliver each bundle with Setup or `bundle apply --bundle`.
+- **Windows: credentials.** The wrapper stores `-SecretName` after the
+  ensure, so a bundle that requires a credential the computer does not hold
+  yet fails `secret_ref_missing`; store the credential first (a run with
+  `-SecretName` only), then deliver the bundle.
 - **Receipt digest.** The `effective_policy_digest` of a receipt and of
   `bundle status` is the digest the running gateway reports. It covers the
   install path of the bundle version directory, so it differs from the

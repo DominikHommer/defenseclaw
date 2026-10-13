@@ -725,7 +725,7 @@ func readBundlePublicKey(path string) (crypto.PublicKey, error) {
 // An unreadable store (a standard account) is reported as an error, so
 // verify warns instead of refusing.
 func managedBundleSecretPresent(name string) (bool, error) {
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	layout, err := enterprisebundle.Layout(runtime.GOOS)
 	if err != nil {
 		return false, err
 	}
