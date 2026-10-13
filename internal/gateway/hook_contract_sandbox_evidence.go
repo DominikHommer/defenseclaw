@@ -1,6 +1,22 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package gateway
 
-// F9: the hook-contract gate and the sandbox-only layout.
+// The hook-contract gate and the sandbox-only layout (#1069, PR #1070).
 //
 // In the layout the OpenShell sandbox documentation recommends - no agent
 // installed on the host, the agent inside the harness image - the guardrail
@@ -17,25 +33,39 @@ package gateway
 //     verdict always keeps its authority;
 //   - it applies only when the connector's effective guardrail mode is action,
 //     which is the mode that refuses an unversioned contract;
-//   - it accepts only a record whose hooks were fire-verified, whose harness
-//     version resolves to a Known sandbox contract, and that this same
-//     DefenseClaw release built.
+//   - it accepts only the image a sandbox started now would run: the record of
+//     exactly the build context this config, this host user and this release
+//     render (image.Store.Current), whose hooks were fire-verified (and, for
+//     an image built for the MicroVM driver, whose MicroVM scenario passed),
+//     whose tag Docker still resolves to the verified image ID, and whose
+//     harness version resolves to a Known sandbox contract.
 //
 // Everything else keeps refusing exactly as before: an unknown host version, a
-// missing or unverified image, a harness version without a reviewed contract,
-// and (independently, in the callers) a contract that drifted from the lock.
+// missing or unverified image, an image of another release, of another pinned
+// harness version or base image, an image rebuilt since its probe, a harness
+// version without a reviewed contract, and (independently, in the callers) a
+// contract that drifted from the lock.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"sort"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
-	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 )
+
+// sandboxEvidenceInspectTimeout bounds the one `docker image inspect` the
+// admission runs per candidate image, so a stalled Docker daemon refuses the
+// evidence instead of holding the guardrail start.
+const sandboxEvidenceInspectTimeout = 10 * time.Second
 
 // sandboxHarnessContract is the hook contract of a connector's verified
 // harness image, together with the record it came from so a caller can name
@@ -45,49 +75,127 @@ type sandboxHarnessContract struct {
 	Record     image.Record
 }
 
-// sandboxHarnessHookContract returns the contract of the newest verified
-// harness image recorded for connectorName, when that contract is Known.
-// No record, no fire-verified record, no harness version, an image from
-// another DefenseClaw release or an unknown contract are all reported as
-// (false, nil): the caller keeps its host-based verdict.
-func sandboxHarnessHookContract(dataDir, connectorName string) (sandboxHarnessContract, bool, error) {
-	return sandboxHarnessHookContractFor(dataDir, connectorName, version.Current().BinaryVersion)
+// sandboxEvidenceHost is everything outside the config that names the
+// current image: the platform (which compute drivers can run the sandbox),
+// the run-as identity baked into the image, the release that renders its
+// hooks, and the Docker lookup that confirms a tag still names the verified
+// image. Tests replace it.
+type sandboxEvidenceHost struct {
+	GOOS    string
+	UID     int
+	GID     int
+	Release string
+	// ImageID returns the image ID Docker's tag resolves to.
+	ImageID func(ctx context.Context, tag string) (string, error)
 }
 
-// sandboxHarnessHookContractFor is sandboxHarnessHookContract with the release
-// pinned by the caller, so tests can exercise the "image built by another
-// release" rule without depending on the test binary's build metadata.
-func sandboxHarnessHookContractFor(dataDir, connectorName, release string) (sandboxHarnessContract, bool, error) {
+// currentSandboxEvidenceHost is this process's host.
+func currentSandboxEvidenceHost() sandboxEvidenceHost {
+	return sandboxEvidenceHost{
+		GOOS: runtime.GOOS, UID: os.Getuid(), GID: os.Getgid(),
+		Release: manager.ImageVersion(), ImageID: dockerImageID,
+	}
+}
+
+// sandboxEvidenceHostFunc is the host the sidecar reads; tests replace it.
+var sandboxEvidenceHostFunc = currentSandboxEvidenceHost
+
+// dockerImageID asks Docker for the image ID tag names.
+func dockerImageID(ctx context.Context, tag string) (string, error) {
+	var stdout, stderr strings.Builder
+	if err := (image.CLI{}).Run(ctx, nil, &stdout, &stderr, "image", "inspect", "--format", "{{.Id}}", tag); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// sandboxEvidenceTargets lists the image kinds (MicroVM or not) a sandbox
+// of this host can run: macOS runs the MicroVM driver only (unless the
+// docker driver is configured), Linux the docker driver or the MicroVM
+// driver. Other platforms run no OpenShell sandbox.
+func sandboxEvidenceTargets(cfg *config.Config, goos string) []bool {
+	switch goos {
+	case "darwin":
+		if cfg.Enterprise.OpenShell.SandboxDriver(goos) == config.EnterpriseOpenShellDriverDocker {
+			return []bool{false}
+		}
+		return []bool{true}
+	case "linux":
+		return []bool{false, true}
+	}
+	return nil
+}
+
+// sandboxHarnessHookContract returns the contract of the connector's current
+// verified harness image, when that contract is Known. No image, an image
+// that is not current, not verified or rebuilt since, or an unknown contract
+// are all reported as (false, nil): the caller keeps its host-based verdict.
+func sandboxHarnessHookContract(cfg *config.Config, connectorName string) (sandboxHarnessContract, bool, error) {
+	return sandboxHarnessHookContractFor(cfg, connectorName, sandboxEvidenceHostFunc())
+}
+
+// sandboxHarnessHookContractFor is sandboxHarnessHookContract on host.
+func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, host sandboxEvidenceHost) (sandboxHarnessContract, bool, error) {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	if strings.TrimSpace(dataDir) == "" || name == "" {
+	if cfg == nil || strings.TrimSpace(cfg.DataDir) == "" || name == "" {
 		return sandboxHarnessContract{}, false, nil
 	}
-	records, err := image.NewStore(dataDir).List()
+	spec, ok := harness.Get(name)
+	if !ok {
+		return sandboxHarnessContract{}, false, nil
+	}
+	targets := sandboxEvidenceTargets(cfg, host.GOOS)
+	if len(targets) == 0 {
+		return sandboxHarnessContract{}, false, nil
+	}
+	store := image.NewStore(cfg.DataDir)
+	// No store means no image was ever built here; do not create one (Owner
+	// would).
+	if _, err := os.Lstat(store.Path()); errors.Is(err, os.ErrNotExist) {
+		return sandboxHarnessContract{}, false, nil
+	} else if err != nil {
+		return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
+	}
+	owner, err := store.Owner()
 	if err != nil {
 		return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 	}
-	sort.SliceStable(records, func(i, j int) bool { return records[i].BuiltAt.After(records[j].BuiltAt) })
-	currentRelease := release
-	for _, rec := range records {
-		if !rec.HookFireVerified {
+	for _, microVM := range targets {
+		// The same BuildSpec the sandbox manager selects its image with
+		// (manager.Manager.image, sandboxcli builderImages.spec).
+		c, err := image.NewContext(image.BuildSpec{
+			Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
+			UID: host.UID, GID: host.GID, IngressPort: cfg.OpenShellIngressPort(), FailMode: connector.SandboxFailMode,
+			DefenseClawVersion: host.Release, Owner: owner, MicroVM: microVM,
+		})
+		if err != nil {
+			// A pinned harness version without a reviewed sandbox contract, a
+			// root run-as identity or an invalid release renders no image a
+			// sandbox could run.
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(rec.Connector)) != name {
+		rec, ok, err := store.Current(c)
+		if err != nil {
+			return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
+		}
+		if !ok || !rec.HookFireVerified || (rec.MicroVM && !rec.MicroVMVerified) {
 			continue
 		}
-		harnessVersion := strings.TrimSpace(rec.HarnessVersion)
-		if harnessVersion == "" {
-			continue
-		}
-		// An image built by another release carries the hooks that release
-		// rendered. A record that names no release at all cannot be shown to be
-		// this release's evidence either. Both are refused; the operator rebuilds
-		// the image instead.
-		if currentRelease != "" && strings.TrimSpace(rec.DefenseClawVersion) != currentRelease {
-			continue
-		}
-		resolution := connector.ResolveSandboxHookContract(rec.Connector, harnessVersion)
+		resolution := connector.ResolveSandboxHookContract(rec.Connector, strings.TrimSpace(rec.HarnessVersion))
 		if resolution.Status != connector.HookCompatibilityKnown {
+			continue
+		}
+		// A rebuild moves the tag before the new image is verified, and a
+		// failed one can leave the old verified record behind a tag that
+		// is gone: the record is evidence only while Docker still names its
+		// image (image.Builder.Current).
+		if host.ImageID == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), sandboxEvidenceInspectTimeout)
+		id, err := host.ImageID(ctx, rec.Tag)
+		cancel()
+		if err != nil || id == "" || id != rec.ImageID {
 			continue
 		}
 		resolution.Reason = harnessEvidenceReason(rec, resolution.Reason)
@@ -113,10 +221,10 @@ func harnessEvidenceReason(rec image.Record, reason string) string {
 }
 
 // applySandboxHarnessEvidence replaces a host verdict that has no version to
-// resolve with the verified harness image's contract, when the connector's
-// effective guardrail mode is action. Every other case returns its inputs
-// unchanged, so a host agent, an observe-mode connector and a connector with
-// no verified image behave exactly as before.
+// resolve with the current verified harness image's contract, when the
+// connector's effective guardrail mode is action. Every other case returns
+// its inputs unchanged, so a host agent, an observe-mode connector and a
+// connector with no current verified image behave exactly as before.
 func (s *Sidecar) applySandboxHarnessEvidence(connectorName, agentVersion string, resolution connector.HookContractResolution) (string, connector.HookContractResolution) {
 	if s == nil || s.currentConfig() == nil {
 		return agentVersion, resolution
@@ -124,10 +232,11 @@ func (s *Sidecar) applySandboxHarnessEvidence(connectorName, agentVersion string
 	if strings.TrimSpace(agentVersion) != "" || resolution.Status == connector.HookCompatibilityKnown {
 		return agentVersion, resolution
 	}
-	if !strings.EqualFold(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(connectorName)), "action") {
+	cfg := s.currentConfig()
+	if !strings.EqualFold(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(connectorName)), "action") {
 		return agentVersion, resolution
 	}
-	evidence, ok, err := sandboxHarnessHookContract(s.currentConfig().DataDir, connectorName)
+	evidence, ok, err := sandboxHarnessHookContract(cfg, connectorName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s: sandbox harness evidence unreadable: %v\n", connectorName, err)
 		return agentVersion, resolution

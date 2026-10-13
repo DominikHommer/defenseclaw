@@ -1,25 +1,101 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 )
 
-// writeImageStore writes a minimal, valid image store: the same shape
-// internal/openshell/image writes, with only the fields this test needs.
+const (
+	evidenceTestOwner   = "0123456789abcdef"
+	evidenceTestRelease = "1.0.2"
+	evidenceTestImageID = "sha256:b5c5beadc6252084bf397c610cc7a214b62dd4a07213a1ef50d98c1f52eb453e"
+)
+
+func evidenceTestConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Guardrail.Mode = "action"
+	return cfg
+}
+
+// evidenceTestHost is a Linux host whose Docker names every tag in ids.
+func evidenceTestHost(ids map[string]string) sandboxEvidenceHost {
+	return sandboxEvidenceHost{
+		GOOS: "linux", UID: 1000, GID: 1000, Release: evidenceTestRelease,
+		ImageID: func(_ context.Context, tag string) (string, error) {
+			if id, ok := ids[tag]; ok {
+				return id, nil
+			}
+			return "", errors.New("no such image")
+		},
+	}
+}
+
+// currentRecord is the record image.Builder writes for the image a sandbox
+// of cfg on host runs, verified unless the caller changes it.
+func currentRecord(t *testing.T, cfg *config.Config, host sandboxEvidenceHost, name string, microVM bool) image.Record {
+	t.Helper()
+	spec, ok := harness.Get(name)
+	if !ok {
+		t.Fatalf("no %s harness", name)
+	}
+	c, err := image.NewContext(image.BuildSpec{
+		Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[name], BaseImage: cfg.OpenShell.Image.Base,
+		UID: host.UID, GID: host.GID, IngressPort: cfg.OpenShellIngressPort(), FailMode: connector.SandboxFailMode,
+		DefenseClawVersion: host.Release, Owner: evidenceTestOwner, MicroVM: microVM,
+	})
+	if err != nil {
+		t.Fatalf("NewContext: %v", err)
+	}
+	return image.Record{
+		Tag: c.Tag, ImageID: evidenceTestImageID, ContentHash: c.ContentHash, Connector: spec.Name,
+		HarnessVersion: c.HarnessVersion, HookContract: c.Contract, BaseImage: c.Spec.BaseImage,
+		UID: c.Spec.UID, GID: c.Spec.GID, IngressPort: c.Spec.IngressPort, DefenseClawVersion: c.Spec.DefenseClawVersion,
+		FailMode: c.Spec.FailMode, Owner: c.Spec.Owner, MicroVM: microVM,
+		BuiltAt:          time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC),
+		HookFireVerified: true, HookFireVerifiedAt: time.Date(2026, 10, 13, 10, 1, 0, 0, time.UTC),
+		MicroVMVerified: microVM,
+	}
+}
+
+// writeImageStore writes the image store image.Store reads.
 func writeImageStore(t *testing.T, dataDir string, records ...image.Record) {
 	t.Helper()
 	dir := filepath.Join(dataDir, "sandboxes")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	doc := map[string]any{"version": 1, "images": records}
-	body, err := json.Marshal(doc)
+	if records == nil {
+		records = []image.Record{}
+	}
+	body, err := json.Marshal(map[string]any{"version": 1, "owner": evidenceTestOwner, "images": records})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -28,139 +104,146 @@ func writeImageStore(t *testing.T, dataDir string, records ...image.Record) {
 	}
 }
 
-func verifiedClaudeCodeImage() image.Record {
-	return image.Record{
-		Tag:                "defenseclaw/sandbox:claudecode-41d116a05187f7ae-u1000",
-		ImageID:            "sha256:b5c5beadc6252084bf397c610cc7a214b62dd4a07213a1ef50d98c1f52eb453e",
-		ContentHash:        "41d116a05187f7aea74790a94d6bda7be78e5efddc0e42d1d054a14dbacff3f7",
-		Connector:          "claudecode",
-		HarnessVersion:     "2.1.156",
-		HookContract:       "claudecode-hooks-v1",
-		UID:                1000,
-		GID:                1000,
-		IngressPort:        18971,
-		DefenseClawVersion: "0.8.10",
-		FailMode:           "closed",
-		HookFireVerified:   true,
+// TestSandboxHarnessHookContractAcceptsTheCurrentVerifiedImage is #1069: no
+// host agent, but the image a sandbox would run now had its hooks proven to
+// fire.
+func TestSandboxHarnessHookContractAcceptsTheCurrentVerifiedImage(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	host := evidenceTestHost(nil)
+	rec := currentRecord(t, cfg, host, "claudecode", false)
+	host = evidenceTestHost(map[string]string{rec.Tag: rec.ImageID})
+	writeImageStore(t, cfg.DataDir, rec)
+
+	evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host)
+	if err != nil || !ok {
+		t.Fatalf("the current verified image was not accepted (ok=%v err=%v)", ok, err)
+	}
+	if evidence.Record.Tag != rec.Tag {
+		t.Errorf("tag = %q, want %q", evidence.Record.Tag, rec.Tag)
+	}
+	if evidence.Resolution.Status != connector.HookCompatibilityKnown || evidence.Resolution.Contract.ContractID != rec.HookContract {
+		t.Errorf("resolution = %+v, want Known %s", evidence.Resolution, rec.HookContract)
 	}
 }
 
-// TestSandboxHarnessHookContractAcceptsVerifiedImage is the F9 case: no host
-// agent, but the harness image's hooks were proven to fire.
-func TestSandboxHarnessHookContractAcceptsVerifiedImage(t *testing.T) {
-	dir := t.TempDir()
-	writeImageStore(t, dir, verifiedClaudeCodeImage())
-
-	evidence, ok, err := sandboxHarnessHookContractFor(dir, "claudecode", "0.8.10")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestSandboxHarnessHookContractRefusesAnImageThatIsNotCurrentAndVerified(t *testing.T) {
+	type tc struct {
+		name string
+		// mutate changes the stored records, the config after the build, or
+		// the host; it returns the records to store.
+		mutate func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record
 	}
-	if !ok {
-		t.Fatal("verified harness image was not accepted as evidence")
+	cases := []tc{
+		{"no store", func(*testing.T, *config.Config, *sandboxEvidenceHost, image.Record) []image.Record { return nil }},
+		{"hooks not verified", func(_ *testing.T, _ *config.Config, _ *sandboxEvidenceHost, rec image.Record) []image.Record {
+			rec.HookFireVerified = false
+			return []image.Record{rec}
+		}},
+		{"built by another release", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+			old := *host
+			old.Release = "1.0.1"
+			return []image.Record{currentRecord(t, cfg, old, "claudecode", false)}
+		}},
+		{"base image changed after the build", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+			// Built while the config named another base image; a sandbox
+			// would run (and build) one on the configured base now.
+			based := *cfg
+			based.OpenShell.Image.Base = "registry.example/base@sha256:" + strings.Repeat("ab", 32)
+			return []image.Record{currentRecord(t, &based, *host, "claudecode", false)}
+		}},
+		{"rebuilt: the tag names another image", func(_ *testing.T, _ *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record {
+			host.ImageID = func(context.Context, string) (string, error) { return "sha256:ffff", nil }
+			return []image.Record{rec}
+		}},
+		{"tag gone", func(_ *testing.T, _ *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record {
+			host.ImageID = func(context.Context, string) (string, error) { return "", errors.New("no such image") }
+			return []image.Record{rec}
+		}},
+		{"another connector's image", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+			return []image.Record{currentRecord(t, cfg, *host, "codex", false)}
+		}},
+		{"another host user's image", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+			other := *host
+			other.UID, other.GID = 1001, 1001
+			return []image.Record{currentRecord(t, cfg, other, "claudecode", false)}
+		}},
+		{"MicroVM image whose MicroVM scenario did not pass", func(t *testing.T, cfg *config.Config, host *sandboxEvidenceHost, _ image.Record) []image.Record {
+			vm := currentRecord(t, cfg, *host, "claudecode", true)
+			vm.MicroVMVerified = false
+			vm.MicroVMInconclusive = "the probe settled nothing"
+			return []image.Record{vm}
+		}},
+		{"macOS with only a docker-driver image", func(_ *testing.T, _ *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record {
+			host.GOOS = "darwin"
+			return []image.Record{rec}
+		}},
+		{"Windows runs no sandbox", func(_ *testing.T, _ *config.Config, host *sandboxEvidenceHost, rec image.Record) []image.Record {
+			host.GOOS = "windows"
+			return []image.Record{rec}
+		}},
 	}
-	if got, want := evidence.Record.HarnessVersion, "2.1.156"; got != want {
-		t.Errorf("harness version = %q, want %q", got, want)
-	}
-	if got, want := evidence.Resolution.Contract.ContractID, "claudecode-hooks-v1"; got != want {
-		t.Errorf("contract = %q, want %q", got, want)
-	}
-	if got, want := evidence.Resolution.Status, "known"; got != want {
-		t.Errorf("status = %q, want %q", got, want)
-	}
-}
-
-func TestSandboxHarnessHookContractRefusals(t *testing.T) {
-	unverified := verifiedClaudeCodeImage()
-	unverified.HookFireVerified = false
-
-	otherConnector := verifiedClaudeCodeImage()
-	otherConnector.Connector = "codex"
-
-	foreignRelease := verifiedClaudeCodeImage()
-	foreignRelease.DefenseClawVersion = "0.8.9"
-
-	// A record whose builder did not record its release cannot be shown to be
-	// this release's evidence.
-	noRelease := verifiedClaudeCodeImage()
-	noRelease.DefenseClawVersion = ""
-
-	// 2.0.0 is below claudecode-hooks-v1's reviewed range (>= 2.1.154), so no
-	// contract claims it; a version above the newest minimum is claimed by that
-	// contract on purpose (see the forward-compatibility test below).
-	unknownHarness := verifiedClaudeCodeImage()
-	unknownHarness.HarnessVersion = "2.0.0"
-
-	unparseableHarness := verifiedClaudeCodeImage()
-	unparseableHarness.HarnessVersion = "not-a-version"
-
-	noVersion := verifiedClaudeCodeImage()
-	noVersion.HarnessVersion = ""
-
-	cases := []struct {
-		name    string
-		records []image.Record
-	}{
-		{name: "no store", records: nil},
-		{name: "unverified hooks", records: []image.Record{unverified}},
-		{name: "another connector", records: []image.Record{otherConnector}},
-		{name: "another release built it", records: []image.Record{foreignRelease}},
-		{name: "record has no release", records: []image.Record{noRelease}},
-		{name: "harness version below every reviewed range", records: []image.Record{unknownHarness}},
-		{name: "harness version cannot be normalized", records: []image.Record{unparseableHarness}},
-		{name: "record has no harness version", records: []image.Record{noVersion}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if tc.records != nil {
-				writeImageStore(t, dir, tc.records...)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := evidenceTestConfig(t)
+			rec := currentRecord(t, cfg, evidenceTestHost(nil), "claudecode", false)
+			host := evidenceTestHost(nil)
+			host.ImageID = func(_ context.Context, tag string) (string, error) { return evidenceTestImageID, nil }
+			records := c.mutate(t, cfg, &host, rec)
+			if records != nil {
+				writeImageStore(t, cfg.DataDir, records...)
 			}
-			if evidence, ok, err := sandboxHarnessHookContractFor(dir, "claudecode", "0.8.10"); err != nil {
+			if evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			} else if ok {
-				t.Fatalf("refusal case accepted evidence: %+v", evidence)
+				t.Fatalf("refusal case accepted evidence: %+v", evidence.Record)
 			}
 		})
 	}
 }
 
-// TestSandboxHarnessHookContractInheritsTheBuildersForwardCompatibility pins
-// the semantics the fix inherits rather than invents: a harness version above
-// the newest reviewed minimum is claimed by that contract, which is the same
-// predicate harness.Spec.InstallSteps applied before the image was built.
-func TestSandboxHarnessHookContractInheritsTheBuildersForwardCompatibility(t *testing.T) {
-	future := verifiedClaudeCodeImage()
-	future.HarnessVersion = "9.9.9"
-
-	dir := t.TempDir()
-	writeImageStore(t, dir, future)
-
-	evidence, ok, err := sandboxHarnessHookContractFor(dir, "claudecode", "0.8.10")
-	if err != nil || !ok {
-		t.Fatalf("a future harness version must resolve like the build did (ok=%v err=%v)", ok, err)
-	}
-	if got, want := evidence.Resolution.Contract.ContractID, "claudecode-hooks-v2"; got != want {
-		t.Errorf("contract = %q, want %q", got, want)
+// TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS: a Mac
+// runs the MicroVM driver, so its evidence is the MicroVM image, and only
+// once that image's MicroVM scenario passed.
+func TestSandboxHarnessHookContractAcceptsAMicroVMVerifiedImageOnMacOS(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	host := evidenceTestHost(nil)
+	host.GOOS = "darwin"
+	vm := currentRecord(t, cfg, host, "claudecode", true)
+	host.ImageID = func(context.Context, string) (string, error) { return vm.ImageID, nil }
+	writeImageStore(t, cfg.DataDir, vm)
+	evidence, ok, err := sandboxHarnessHookContractFor(cfg, "claudecode", host)
+	if err != nil || !ok || !evidence.Record.MicroVM {
+		t.Fatalf("MicroVM-verified image not accepted on macOS (ok=%v err=%v rec=%+v)", ok, err, evidence.Record)
 	}
 }
 
-// TestSandboxHarnessHookContractPrefersNewestRecord keeps the choice
-// deterministic when a connector has several recorded images.
-func TestSandboxHarnessHookContractPrefersNewestRecord(t *testing.T) {
-	older := verifiedClaudeCodeImage()
-	older.Tag = "defenseclaw/sandbox:claudecode-older-u1000"
-	older.BuiltAt = older.BuiltAt.Add(-24 * time.Hour)
-	newer := verifiedClaudeCodeImage()
-	newer.Tag = "defenseclaw/sandbox:claudecode-newer-u1000"
+// TestApplySandboxHarnessEvidenceKeepsTheHostVerdict: a host agent version,
+// when there is one, decides; observe mode never looks at images.
+func TestApplySandboxHarnessEvidenceKeepsTheHostVerdict(t *testing.T) {
+	cfg := evidenceTestConfig(t)
+	host := evidenceTestHost(nil)
+	rec := currentRecord(t, cfg, host, "claudecode", false)
+	host.ImageID = func(context.Context, string) (string, error) { return rec.ImageID, nil }
+	writeImageStore(t, cfg.DataDir, rec)
+	prev := sandboxEvidenceHostFunc
+	sandboxEvidenceHostFunc = func() sandboxEvidenceHost { return host }
+	t.Cleanup(func() { sandboxEvidenceHostFunc = prev })
 
-	dir := t.TempDir()
-	writeImageStore(t, dir, older, newer)
+	s := &Sidecar{cfg: cfg}
+	unversioned := connector.ResolveHookContract("claudecode", "")
 
-	evidence, ok, err := sandboxHarnessHookContractFor(dir, "claudecode", "0.8.10")
-	if err != nil || !ok {
-		t.Fatalf("verified harness image was not accepted (ok=%v err=%v)", ok, err)
+	// A host agent whose version is outside every contract keeps its verdict.
+	hostUnknown := connector.ResolveHookContract("claudecode", "0.0.1")
+	if v, r := s.applySandboxHarnessEvidence("claudecode", "0.0.1", hostUnknown); v != "0.0.1" || r.Status != hostUnknown.Status {
+		t.Fatalf("host verdict replaced: version %q status %q", v, r.Status)
 	}
-	if evidence.Record.Tag != newer.Tag {
-		t.Errorf("tag = %q, want the newest record %q", evidence.Record.Tag, newer.Tag)
+	// No host agent, action mode: the current image's contract is used.
+	if v, r := s.applySandboxHarnessEvidence("claudecode", "", unversioned); v != rec.HarnessVersion || r.Status != connector.HookCompatibilityKnown {
+		t.Fatalf("sandbox evidence not applied: version %q status %q", v, r.Status)
+	}
+	// Observe mode keeps the unversioned verdict.
+	cfg.Guardrail.Mode = "observe"
+	if v, r := s.applySandboxHarnessEvidence("claudecode", "", unversioned); v != "" || r.Status != unversioned.Status {
+		t.Fatalf("observe mode used sandbox evidence: version %q status %q", v, r.Status)
 	}
 }
