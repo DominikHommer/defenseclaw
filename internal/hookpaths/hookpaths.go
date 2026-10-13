@@ -217,6 +217,10 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			if _, static := shellStaticWordWithKnownCalls(redirect.Word, home, context.cwd, states.varsFor(redirect.Word), poison); static {
 				return true
 			}
+			if redirect.Word != nil && strings.HasPrefix(redirect.Word.Lit(), "~-") {
+				unknown = true
+				return true
+			}
 			if paths, glob := shellLiteralGlobCandidates(redirect.Word, context.cwd, home, context.file, redirect, links); glob {
 				for _, path := range paths {
 					add(path, "")
@@ -313,6 +317,7 @@ func shellCallExtraWriteOperands(
 			}
 		}
 	}
+	normalizeSameUserLauncherOptions(words, staticWords, call.Args)
 	resolved := resolveLauncherWords(words, staticWords, cwd)
 	var rawOutputs []ExtraWriteOperand
 	if allStatic(staticWords) && (programBase(words[0]) == "script" || programBase(words[0]) == "strace" || programBase(words[0]) == "ltrace" || programBase(words[0]) == "time") {
@@ -411,6 +416,15 @@ func shellCallExtraWriteOperands(
 // OperandPath preserves dot-dot in the command operand until link resolution.
 // filepath.Join would erase a directory link before the following dot-dot.
 func OperandPath(name, cwd string) string {
+	for _, prefix := range []string{"/proc/self/cwd/", "/proc/thread-self/cwd/", "~+/"} {
+		if suffix, ok := strings.CutPrefix(name, prefix); ok && filepath.IsAbs(cwd) {
+			name = filepath.Join(cwd, suffix)
+			break
+		}
+	}
+	if suffix, ok := strings.CutPrefix(name, "/proc/self/root/"); ok {
+		name = string(filepath.Separator) + suffix
+	}
 	// Keep the old canonical spelling for ordinary operands. Only dot-dot
 	// needs a raw spelling until the component walk has followed links.
 	if !strings.Contains(filepath.ToSlash(name), "/../") &&
@@ -2191,6 +2205,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 					}
 				}
 			}
+			normalizeSameUserLauncherOptions(words, static, call.Args)
 			resolved := resolveLauncherWords(words, static, callCWD)
 			if !resolved.ok {
 				links.unknown(unresolvedProgramMayLink(words[1:], static[1:]))

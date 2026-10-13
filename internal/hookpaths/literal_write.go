@@ -196,6 +196,7 @@ func literalProgramWordsWithVars(call *syntax.CallExpr, cwd, home string, vars s
 			words[i] = launcherAssignmentPrefix(arg)
 		}
 	}
+	normalizeSameUserLauncherOptions(words, staticWords, call.Args)
 	resolved := resolveLauncherWords(words, staticWords, cwd)
 	if !resolved.ok || resolved.noExec || !allStatic(resolved.static) {
 		return cwd, nil, false

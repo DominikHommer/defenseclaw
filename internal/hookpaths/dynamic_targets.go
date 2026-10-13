@@ -312,7 +312,13 @@ func shellBoundedTargetSafe(word *syntax.Word, home, cwd string, vars shellVaria
 }
 
 func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars shellVariables, poison shellVariablePoison) (string, bool) {
+	if word != nil && strings.HasPrefix(word.Lit(), "~-") {
+		return "", false
+	}
 	if value, ok := staticShellWordWithVars(word, home, vars, poison); ok {
+		if strings.HasPrefix(value, "~-/") || value == "~-" {
+			return "", false
+		}
 		return value, true
 	}
 	if word == nil {
@@ -378,6 +384,9 @@ func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars she
 		return true
 	}
 	if !appendParts(word.Parts, false) || strings.ContainsAny(value.String(), "\x00\r\n") {
+		return "", false
+	}
+	if strings.HasPrefix(value.String(), "~-/") || value.String() == "~-" {
 		return "", false
 	}
 	return value.String(), true

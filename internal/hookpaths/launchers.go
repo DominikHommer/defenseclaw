@@ -269,6 +269,31 @@ func launcherWriterProgram(program string) bool {
 		slices.Contains([]string{"tee", "dd", "truncate", "install", "sed", "gsed", "awk", "gawk", "mawk", "nawk"}, program)
 }
 
+func normalizeSameUserLauncherOptions(words []string, static []bool, args []*syntax.Word) {
+	if len(words) != len(args) || len(static) != len(args) {
+		return
+	}
+	for i := 1; i < len(args); i++ {
+		if static[i] || !static[i-1] {
+			continue
+		}
+		switch words[i-1] {
+		case "-u", "--user", "-g", "--group":
+		default:
+			continue
+		}
+		var rendered bytes.Buffer
+		if syntax.NewPrinter().Print(&rendered, args[i]) != nil {
+			continue
+		}
+		value := strings.Trim(rendered.String(), "\"'")
+		switch value {
+		case "$USER", "${USER}", "$LOGNAME", "${LOGNAME}", "$(whoami)", "$(id -un)":
+			words[i], static[i] = "__dc_current_user__", true
+		}
+	}
+}
+
 func launcherAssignmentPrefix(word *syntax.Word) string {
 	if word == nil || len(word.Parts) == 0 {
 		return ""
@@ -671,6 +696,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 					words[j] = launcherAssignmentPrefix(arg)
 				}
 			}
+			normalizeSameUserLauncherOptions(words, static, call.Args)
 			if !static[0] {
 				return true
 			}
