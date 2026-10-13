@@ -550,6 +550,45 @@ test('quick start hard block exports action mode for activation', () => {
   assert.equal(exported.guardrail.block_threshold, 2);
 });
 
+test('guardrail mode control keeps an unset host mode out of the export', async () => {
+  const { GUARDRAIL_MODE_CHOICES, getGuardrailModeChoice, setGuardrailModeChoice } =
+    await import('../components/policy-creator/lib/guardrail-mode.js');
+  const policy = makePolicy();
+  assert.equal(getGuardrailModeChoice(policy.guardrail), 'keep-host-mode');
+  assert.equal(GUARDRAIL_MODE_CHOICES.find((choice) => choice.value === 'keep-host-mode')?.label, 'keep host mode');
+
+  policy.guardrail = setGuardrailModeChoice(policy.guardrail, 'observe');
+  assert.equal(getGuardrailModeChoice(policy.guardrail), 'observe');
+  let exported = yaml.load(emit(policy)[0].contents) as { guardrail: { mode?: string } };
+  assert.equal(exported.guardrail.mode, 'observe');
+
+  policy.guardrail = setGuardrailModeChoice(policy.guardrail, 'action');
+  assert.equal(getGuardrailModeChoice(policy.guardrail), 'action');
+  policy.guardrail = setGuardrailModeChoice(policy.guardrail, 'keep-host-mode');
+  assert.equal(Object.hasOwn(policy.guardrail, 'mode'), false);
+  exported = yaml.load(emit(policy)[0].contents) as { guardrail: { mode?: string } };
+  assert.equal(Object.hasOwn(exported.guardrail, 'mode'), false);
+});
+
+test('guardrail mode control renders keep host mode as the selected choice when unset', async () => {
+  const { createElement } = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { GuardrailSection } = await import('../components/policy-creator/sections/guardrail.js');
+  const html = renderToStaticMarkup(createElement(GuardrailSection, {
+    policy: makePolicy(),
+    onPolicyChange: () => {},
+  }));
+  assert.match(html, /<button[^>]*aria-checked="true"[^>]*>keep host mode<\/button>/);
+});
+
+test('quick start always selects a guardrail mode', () => {
+  for (const response of ['log_only', 'alert', 'ask', 'block'] as const) {
+    const answers = defaultAnswers();
+    answers.response = response;
+    assert.ok(['observe', 'action'].includes(applyAnswers(answers).guardrail.mode ?? ''), response);
+  }
+});
+
 test('quick start does not present Splunk HEC as a generic webhook', () => {
   assert.equal(SINK_CARDS.some((card) => card.id === 'splunk' && card.type === 'generic'), false);
 });
