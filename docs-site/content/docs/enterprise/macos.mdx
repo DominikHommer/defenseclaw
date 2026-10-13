@@ -402,6 +402,11 @@ per-user product refuses to run:
 | `defenseclaw upgrade` | Refuses |
 | Per-user gateway | Refuses to start |
 
+This table describes the current per-user installer. The 0.8.10 `install.sh`
+predates the managed-host check and can install a per-user copy after that
+user's old `~/.defenseclaw` folder has been removed. Do not use that older
+installer on a managed Mac.
+
 Nothing migrates a per-user install automatically. Before you deploy, have
 each user remove their per-user install with `defenseclaw uninstall --binaries --yes`.
 Add `--all` to also delete `~/.defenseclaw`. See
@@ -496,10 +501,11 @@ The per-user AI Discovery scan also walks the home for package manifests and
 model files. Without Full Disk Access it never opens the folders that make
 macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
 Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
-`~/Library/Group Containers`, and Contacts. It skips them without an error,
-so an employee never sees a prompt attributed to `defenseclaw-gateway` and
-the scan stays complete. The other TCC-protected folders answer "operation not
-permitted" and are skipped the same way.
+`~/Library/Group Containers`, and Contacts. No employee sees a prompt
+attributed to `defenseclaw-gateway`; the scan summary is partial, with
+`detector_errors.macos_privacy` reporting "protected folders were not scanned". The
+other TCC-protected folders answer "operation not permitted" and are skipped
+the same way.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants
@@ -526,6 +532,10 @@ the helper is the binary that needs Full Disk Access. Without it, Endpoint
 Security refuses the client (`ES_NEW_CLIENT_RESULT_ERR_NOT_PERMITTED`), Plane C
 reports `running: false` with that reason, and the runtime snapshot stays
 degraded. Planes A and B keep working.
+
+**Known limit:** Plane C can leave a detached child of a terminal-launched
+agent unattributed after the child is reparented to PID 1. Its process lineage
+no longer identifies the agent from the parent PID alone.
 
 Grant the access with a PPPC payload (`com.apple.TCC.configuration-profile-policy`)
 under `SystemPolicyAllFiles`:

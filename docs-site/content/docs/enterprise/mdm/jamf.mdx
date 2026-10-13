@@ -166,6 +166,8 @@ DC_CONFIG_FILE="/Library/Management/DefenseClaw/config.yaml"
 The wrapper refuses a config file that is not owned by root or that another
 account can write, anywhere on its path (`mdm_untrusted_input`). The stage
 script creates the folder and the file with the right owner and mode.
+It refuses a secret containing a NUL byte as `mdm_invalid_arguments`; if Jamf
+cancels the run, it stops the lifecycle child and reports `mdm_cancelled`.
 
 ### DefenseClaw uninstall
 

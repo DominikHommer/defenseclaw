@@ -205,7 +205,7 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 
 | Metric | Labels | Notes |
 | --- | --- | --- |
-| `defenseclaw.sandbox.active` (gauge) | `connector` | Sandboxes provisioning, starting, ready or stopping, per harness connector. |
+| `defenseclaw.sandbox.active` (gauge) | `connector` | Sandboxes provisioning, starting, ready or stopping, per harness connector. Exported every minute, including `0` after the connector's last sandbox stops. On a managed host, the daemon refreshes the gateway's count on its polls; after a gateway restart a running sandbox counts again within a minute. |
 | `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
 | `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
 

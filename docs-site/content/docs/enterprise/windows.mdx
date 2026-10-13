@@ -889,6 +889,14 @@ per-user install:
   enumerator reads that file, and the `.mcp.json` of each project inside the
   profile, every 30 seconds and publishes the servers to the gateway, so
   `claude mcp add` (any scope) reaches admission within about a minute.
+  The enumerator opens each project folder and its `.mcp.json` under the
+  enrolled user's own token, so it reads only what that user can read, and it
+  never follows a project key that points to a network, mapped or substituted
+  drive or through a link. A project the user cannot access contributes
+  neither its local-scope servers nor its `.mcp.json` servers; the user's other
+  projects and user-scope servers stay published. Any other read or parse
+  failure of a project file is treated like an unreadable `.claude.json`, as
+  described next.
   When the enumerator cannot read or parse a user's `.claude.json` (an
   access list that leaves SYSTEM out, or broken JSON), DefenseClaw cannot
   see that user's servers, so it fails closed: it refuses every Claude Code
@@ -919,9 +927,12 @@ per-user install:
   that folder, which DefenseClaw does not watch and never changes. When
   admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
   under `.claude\plugins\cache` is quarantined and the Claude Code hook
-  refuses the plugin's skills, commands, agents and MCP tools: the refusal
-  says `plugin "<plugin>@<marketplace>" is blocked by install admission` or
-  that the plugin is denied by asset policy.
+  refuses the plugin's skills, commands, agents and MCP tools. For an install
+  block, the hook gives a structured asset-policy reason such as
+  `ASSET-POLICY reason_code=install-block source=install-block asset_type=plugin asset_name=<plugin>`.
+  On managed Windows, displayed values may instead be redacted as
+  `<redacted len=N sha=...>`. The gateway audit log and `defenseclaw plugin info`
+  give the install-admission refusal and its scan reason.
 - MCP servers a Claude Code plugin bundles (its `.mcp.json`, or `mcpServers`
   in `.claude-plugin/plugin.json`) are admitted with the plugin, not on their
   own: the plugin scan reads their definitions, and the plugin's verdict and
@@ -987,15 +998,18 @@ same scanners, policy and judge from an elevated prompt:
 
 ```powershell title="Elevated Administrator prompt"
 $Cli = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
-& $Cli scan skill 'C:\Users\Public\review\my-skill'
+& $Cli scan skill 'C:\DefenseClawReview\my-skill'
 & $Cli scan mcp https://mcp.example.com/mcp
-& $Cli scan plugin 'C:\Users\Public\review\my-plugin'
+& $Cli scan plugin 'C:\DefenseClawReview\my-plugin'
 ```
 
 Each command prints the verdict, the findings, the skill scanner policy (or
 the MCP analyzers) and the judge model; add `--json` for the full response.
-The gateway service reads the folder, so scan a copy in a folder it can
-read, such as one under `C:\Users\Public`. Variables such as
+The gateway service reads the folder as LocalSystem and refuses any folder
+inside a user profile, including paths under `C:\Users` or another registered
+profile root. Copy what you want to scan to an administrator-created folder
+outside the profiles, such as `C:\DefenseClawReview`, that LocalSystem can read.
+Variables such as
 `SKILL_SCANNER_LLM_MODEL` in the administrator's shell are ignored: the scan
 runs in the gateway service with the admin config.
 
@@ -1321,29 +1335,29 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. So does the empty,
-administrator-only lock file
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, and with it
-`C:\ProgramData\Cisco`: the lock serializes every lifecycle run, including
-the next install's, so the uninstall keeps it in place. To leave nothing,
-delete `C:\ProgramData\Cisco\DefenseClaw-Lifecycle`, and
-`C:\ProgramData\Cisco` if it is then empty, after the uninstall. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
+also keeps the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
+lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
+cleanup; do not delete a lock while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,
 such as `defenseclaw-gateway.exe`, refuse it (exit 1639) without changing
 anything, because a running binary keeps its own folder in use. If an
-uninstall reports that it committed but could not finish, run the same
-`defenseclaw.exe` uninstall (or the MDM `uninstall.ps1`) again: it finishes
-the cleanup.
+uninstall reports that it committed but could not finish, run Setup again as
+LocalSystem with `/uninstall JSON=1` (and `PURGE=1` if the original run was a
+purge). Setup carries its own verified gateway and can finish cleanup after
+the installed CLI has been removed.
 
 ### Per-user registrations at uninstall
 
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
 Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
-hook file and plugin folder) from the agent configuration of every signed-in user, running as that
-user. Only DefenseClaw's entries are removed; the user's own hooks and
+hook file and plugin folder) from the agent configuration of users with an
+active, connected session, running as each user. Disconnected or signed-out
+sessions remain pending. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
 

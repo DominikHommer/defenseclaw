@@ -143,6 +143,10 @@ verifies it, installs the package only when its version differs from the
 installed one, runs `ensure` with the config, and exits with the lifecycle's
 code. A busy package manager, for example during unattended upgrades, exits
 `75` (`mdm_package_manager_busy`). Intune typically checks in about hourly; a failed non-busy run waits for a later frequency window.
+An older `.deb` is refused before `dpkg -i` changes the host. A full payload
+staging filesystem reports `mdm_staging_full` (exit `1`). A secret containing
+a NUL byte is refused as `mdm_invalid_arguments` (exit `2`); a cancelled MDM
+run stops the lifecycle child and reports `mdm_cancelled` (exit `1`).
 
 
 For a local-group profile assignment, upload

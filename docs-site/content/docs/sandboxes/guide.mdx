@@ -148,6 +148,9 @@ share, and then the others by the names `--harness` takes:
   Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands
 ```
 
+The setup output still names OpenHands and OmniGent, but both harnesses are
+deprecated. Do not select them for new sandbox runs.
+
 On a Mac the gateway questions differ: instead of the mounts question,
 setup asks whether to run sandboxes in OpenShell MicroVMs (the default
 answer is yes), offers to install `e2fsprogs` with Homebrew, asks the
@@ -330,8 +333,8 @@ drop a harness from it, edit `openshell.harnesses` in `config.yaml`.
 | OpenCode | `opencode` | user | Verified |
 | Kiro CLI | `kiro` | user | Verified in Kiro's scripted mode. A real model through `KIRO_API_KEY` or a login is unverified. |
 | Hermes Agent | `hermes` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| OpenHands | `openhands` | user | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
-| OmniGent | `omnigent` | managed | Verified with a mock model. Its OpenAI and Anthropic sign-ins are not tested live. |
+| OpenHands | `openhands` | user | Deprecated. |
+| OmniGent | `omnigent` | managed | Deprecated. |
 | Antigravity | `antigravity` (or `agy`) | user | Verified with a mock Gemini API. A `GEMINI_API_KEY` against Google and a Google sign-in are not tested live. |
 | Cursor Agent | `cursor-agent` | managed | Unverified: the Cursor Agent CLI needs a Cursor account before its first turn, and no mock can stand in for it. |
 | Amp | `amp` | user | Unverified: every Amp run needs an Amp account API key (`AMP_API_KEY`). |
@@ -356,9 +359,12 @@ Each harness image is NVIDIA's OpenShell community base image (Ubuntu
 The agent finds these tools in it:
 
 - `gcc`, `g++` and `make`
-- Python 3.14 with `pip` (in `/sandbox/.venv`, first on `PATH`) and `uv`
+- Python 3.14 with `python3`, `python` and `pip` using `/sandbox/.venv`, plus `uv`
 - Node.js 22 with `npm`
 - `git`, the GitHub CLI (`gh`), `curl`, `jq` and `ssh`
+
+Root-owned shims in `/usr/local/sbin` send the workload's Python commands to
+that venv; DefenseClaw's hooks keep the system `/usr/bin/python3`.
 
 `make` on the agent's `PATH` is `/usr/local/bin/make`, a DefenseClaw
 wrapper around the image's GNU make: OpenShell's seccomp filter refuses a
@@ -388,6 +394,15 @@ defenseclaw sandbox run claude
 The first run of a harness without an image builds it first. Then you see
 the launch banner, and the harness's normal interface takes over your
 terminal:
+
+For action mode on a host without the agent installed, build its sandbox
+image first. The [connector compatibility guide](/docs/connectors/compatibility)
+explains when an image from another release or changed image settings needs
+to be rebuilt and verified.
+
+With Claude Code and its first-party model provider, a fresh sandbox home may
+show the agent's model-launch notice again. Each new sandbox has a fresh home;
+the notice does not mean sandbox setup failed.
 
 ```text
   Starting a Claude Code sandbox… (building its image first: about 3 GB, a few minutes)
@@ -434,7 +449,7 @@ the only host it works at, then how that host is reached.
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook or a config setting that would run on your machine the next time you use git. |
 | `Not visible` | Nothing else on your machine is in the sandbox. |
 | `Context` | Extra reference folders you added with `--context`, read-only. |
-| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. For a harness that runs on an interpreter (an npm build of a Node harness, or a Python harness such as Hermes or OpenHands), that program is its `node` or `python`, so a script the agent runs with it can reach the model hosts too, with the real credential swapped in. The hooks still check the tool call that runs the script. |
+| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. For a harness that runs on an interpreter (an npm build of a Node harness, or a Python harness such as Hermes), that program is its `node` or `python`, so a script the agent runs with it can reach the model hosts too, with the real credential swapped in. The hooks still check the tool call that runs the script. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
@@ -454,14 +469,19 @@ defenseclaw sandbox run claude -- --model sonnet
 ```
 
 The run records its options for a later `sandbox connect`, up to the first
-word that is not an option, such as a prompt. An option followed by a word
-with a space ends the record: `sandbox connect` passes that option without
-the word, and none of the options after it, so with
-`-- --append-system-prompt "be brief" --model sonnet` it passes only
-`--append-system-prompt`. The run warns when this happens, and notes it in
-one line when that word is the last one, as a prompt after a switch is. Write the value
-attached (`-- --append-system-prompt="be brief"`) to have it recorded, and put
-a prompt after the options.
+standalone word, such as a prompt. `sandbox connect` replays known options with
+their values for Claude Code, Codex, OpenCode, Copilot CLI and Hermes. For
+example, `-- --append-system-prompt "be brief" --model sonnet` passes
+`--append-system-prompt` with `be brief` and `--model` with `sonnet`. For other
+harnesses, or an option whose value is optional, attach the value
+(`--opt="a b"`). The run warns when an option value is not kept, including
+when the last word could be a prompt after a switch. Put a prompt after the
+options.
+
+Options that supply the first prompt or an attachment to it (OpenCode
+`--prompt`, Codex `-i`/`--image`, Copilot CLI `-i`/`--interactive` and
+`--attachment`, and Hermes `-z`/`--oneshot` and `--image`) apply to the run only
+and are not replayed by `sandbox connect`.
 
 `--prompt TEXT` (`-p`) runs the harness headless with one prompt and
 streams its output, so it works without a terminal too:
@@ -548,7 +568,9 @@ defenseclaw sandbox activity -f
 ```
 
 Nothing in the feed waits for you except asks. `--sandbox NAME` limits the
-feed to one sandbox, and `-o json` prints the events as JSON.
+feed to one sandbox, and `-o json` prints the events as JSON. A plain
+`sandbox activity` listing leaves out sandboxes deleted since the daemon
+started; `--sandbox NAME` or `-o json` shows their events too.
 
 A real feed, replayed (the `⚠` line is the shadow AI finding):
 
@@ -732,8 +754,10 @@ For HTTPS, tools show only that the connection failed (`curl: (56) CONNECT
 tunnel failed, response 403`), so DefenseClaw also tells the agent in its
 hooks. After a shell or web-fetch tool call, the next hook answer names each
 destination the proxy just refused, why, and the `sandbox unblock` command
-you can run. Claude Code, Codex and GitHub Copilot CLI read this note (and
-Cursor Agent and Devin CLI will, once they can run in a sandbox). The other
+you can run. On a managed computer, it also names destinations awaiting an
+approval or declined by the user. A refusal from the repository's
+`.defenseclaw/sandbox.yaml` names that policy. Claude Code, Codex and GitHub
+Copilot CLI read this note. The other
 harnesses have no place for it, and there only your terminal's notice
 reports the block. Each block is told once, and only in
 the sandbox that hit it. An upload that
@@ -780,6 +804,11 @@ networks, metadata addresses or this machine, and never overrides your own
 organization sets `openshell.admin.allow_unblock: false`, unblocking is
 refused with "blocked by your organization's DefenseClaw policy".
 
+A managed `sandbox unblock HOST --sandbox NAME` without `--always` lasts for
+that sandbox's current session only. After a stop and start, or a connect of
+a stopped sandbox, DefenseClaw's destination rule applies again at the hook
+and proxy. An allowed `--always` unblock outlives the stop.
+
 Once a host is unblocked, DefenseClaw's tool-call rules for known exfil
 destinations (such as `C2-WEBHOOK-SITE`) stop flagging calls to it in the
 sandboxes the unblock covers, so the agent is not told the destination is
@@ -804,7 +833,9 @@ defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60
 
 `defenseclaw sandbox approvals --watch` keeps the list open. `--always` keeps a decision for
 future sandboxes, except for your own machine and private networks, which
-are only ever opened per sandbox. An approval applies at the next quiet
+are only ever opened per sandbox. On a managed computer with
+`allow_unblock: false`, approvals last for the session only and
+`approve --always` is refused. An approval applies at the next quiet
 moment of the sandbox, because every OpenShell policy change closes the
 sandbox's open connections. In the TUI, the **Asks** view takes `a`
 (approve), `A` (always) and `x` (reject).
@@ -949,7 +980,7 @@ stopped, and the summary says how to resume it.
 | `balanced`, `strict` | `stop` | DefenseClaw stops the sandbox; its next session is watched again. |
 
 A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI, Cursor
-Agent, OmniGent), whose hooks are root-owned, only alerts. The banner's
+Agent), whose hooks are root-owned, only alerts. The banner's
 `Hooks` line of a user-tier harness says what its silent hooks lead to.
 
 ### Nested repositories in a mounted project
@@ -1047,9 +1078,8 @@ terminal names what was ended:
 defenseclaw: the harness exited with 1 command still running in the sandbox; ended it, so the session's work is final: sleep 200 && make test
 ```
 
-This applies to terminal sessions. OmniGent keeps its server running for the
-next session, and a command you start with `defenseclaw sandbox exec` keeps
-what it starts in the background.
+This applies to terminal sessions. A command you start with
+`defenseclaw sandbox exec` keeps what it starts in the background.
 
 The sandbox is then stopped, not deleted, so you can resume it later.
 `--rm` deletes it instead, and so does the end of a headless run
@@ -1389,15 +1419,11 @@ By default (`--llm auto`) a run shares the first model credential it finds:
 | Codex | `OPENAI_API_KEY` or `CODEX_API_KEY`, then the API key a `codex login --with-api-key` stored in `~/.codex/auth.json` (a ChatGPT login is not shared), then `AWS_BEARER_TOKEN_BEDROCK` |
 | OpenCode | `ANTHROPIC_API_KEY`, then `OPENAI_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | GitHub Copilot CLI | `ANTHROPIC_API_KEY`, as Copilot's bring-your-own-provider key, then `AWS_BEARER_TOKEN_BEDROCK` |
-| Hermes Agent, OpenHands, OmniGent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
+| Hermes Agent | `OPENAI_API_KEY`, then `ANTHROPIC_API_KEY`, then `AWS_BEARER_TOKEN_BEDROCK` |
 | Antigravity | `GEMINI_API_KEY`; without it, you sign in with Google inside the sandbox |
 
 `AWS_BEARER_TOKEN_BEDROCK` is a short-term Amazon Bedrock key, so it comes
 last: a host with only that key set runs its sandboxes on Bedrock.
-
-OmniGent also needs a model name after `--`, for example
-`defenseclaw sandbox run omnigent -- --model <model>`; `run` refuses to
-start without one. On Bedrock it defaults to `openai.gpt-oss-20b`.
 
 `--llm` picks one explicitly (`anthropic`, `claude-oauth`, `openai`,
 `bedrock` or `gemini`), and `--llm none` shares nothing, so you log in inside the
@@ -1622,7 +1648,7 @@ myapp-7f3a  Claude Code  stopped  mount  open     -       57 calls, 1 blocked  ~
 | --- | --- |
 | `defenseclaw sandbox connect <name>` | Resume a sandbox: start it if stopped (with a fresh snapshot unless an earlier session's changes are still pending), attach the harness, and end the session as `run` does. `--shell` opens a shell instead, and `--prompt TEXT` runs one prompt headless, without a terminal. A session stops only a sandbox it started, and leaves a sandbox whose detached run is still going, or that another session is attached to, running. |
 | `defenseclaw sandbox exec <name> -- <command>` | Run one command in a running sandbox, through its egress proxy. |
-| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not); like every stop, it marks the run interrupted and keeps its log for `sandbox logs`. |
+| `defenseclaw sandbox stop <name>` | Stop a sandbox; it is kept. With a detached run still going it asks first (`--yes` does not); like every stop, it marks the run interrupted and keeps its log for `sandbox logs`. A copy-mode MicroVM whose own disk is full keeps running while its copy holds unpulled work, even with `--yes` (exit `5`). Check space with `sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name>`, then stop. `sandbox delete <name>` gives up that work. If the disk does not answer within 15 seconds, stop asks first; `--yes` skips that question. |
 | `defenseclaw sandbox start <name>` | Start a stopped sandbox. It takes a fresh snapshot unless an earlier session's changes are still in the folder and you did not keep them at the end of that session, in which case the old snapshot is kept so `undo` still reverts them; it says which. `--new-snapshot` accepts those changes, `--no-snapshot` always keeps the old snapshot. |
 | `defenseclaw sandbox delete <name>` | Delete sandboxes with their credentials and, unless `--keep-snapshot`, their undo snapshot. |
 | `defenseclaw sandbox status` | The sandbox subsystem: OpenShell, the gateway, the listeners, the policy, and how many sandboxes run. With a name, one sandbox in detail. |
@@ -1679,6 +1705,9 @@ Teardown takes these steps, in order:
    sandbox on it, and on the MicroVM driver to first stop the sandboxes
    still running on it (named) with `defenseclaw sandbox stop NAME`, which
    flushes their disks, or what they wrote since their last sync is lost.
+   On Linux, a teardown or per-user uninstall from a signed-out session
+   without a systemd user manager restores these files and finishes without
+   restarting the gateway. Its service loads them when it next starts.
 7. **shell wrappers**: removes them from every shell's rc file.
 8. **config**: turns `openshell.enabled` off in `config.yaml`.
 
@@ -1692,12 +1721,23 @@ sandbox is left that could boot it: when a sandbox could not be deleted, or no
 daemon or gateway listed them, it keeps the disks and says why. It never
 removes anything else of OpenShell's state there.
 
-OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
+OpenShell itself stays installed. A running sandbox stops
+`defenseclaw uninstall` before any change. Pull a copy-mode sandbox's work
+with `defenseclaw sandbox pull NAME --branch`, or review a mount-mode
+sandbox with `defenseclaw sandbox review NAME`, then run
+`defenseclaw sandbox stop NAME` and uninstall again. `--stop-sandboxes`
+instead stops and deletes running sandboxes during teardown, including any
+copy-mode work that was not pulled. `reset` accepts the same flag.
+`defenseclaw uninstall` runs teardown too,
 and stops if teardown fails (where sandboxes are not supported, such as
 Windows, it skips it). When Docker or OpenShell are
 gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the
 sandboxes in place; `defenseclaw sandbox teardown` removes them later, as
 long as the data directory is kept (no `--all`).
+If teardown failed during an uninstall with `--all` or `--binaries`, rerun
+uninstall with `--skip-sandbox-teardown` and without either flag so the data
+directory and gateway binary stay. Once Docker and OpenShell work, run
+`defenseclaw-gateway sandbox teardown`, then uninstall again.
 
 When the DefenseClaw daemon isn't running (or has sandboxes off), teardown
 deletes the sandboxes on the OpenShell gateway itself. It then also removes
@@ -1905,10 +1945,13 @@ runs sandboxes as your uid and gid (**vm-identity**), the gateway-wide
 organization's `max_resources` (**vm-resources**), and the free space and
 size of the MicroVM driver's prepared disks. It skips the host networking
 check, which only Docker Desktop's VM needs, and the bind mounts, with the
-reason. Its file sharing check is of your temp directory (`$TMPDIR`, under
-`/var/folders`), from which an image build mounts a MicroVM's `/etc/hosts`
-into the container that checks the image; Docker Desktop shares it by
-default. A gateway configured for the MicroVM driver that
+reason. Its file sharing check covers the private
+`~/Library/Caches/defenseclaw/hookfire` directory under your home, from
+which an image build mounts two MicroVM name-resolution files into the
+container that checks the image. Docker Desktop reports whether the home is
+shared under Settings > Resources > File sharing. Colima and OrbStack also
+run containers in VMs; they share the home by default (OrbStack shares
+`/Users`). A gateway configured for the MicroVM driver that
 still runs the Docker driver is reported as a restart pending. On a gateway
 still on the Docker driver whose Docker VM has no Landlock (Docker
 Desktop's), the doctor skips the Docker Desktop host networking and file
@@ -2015,7 +2058,7 @@ which runs NVIDIA's installer and sets up the service.
 | On macOS, a run ends with ``✗ <Harness> exited with status <code> before any of its hooks reached DefenseClaw: it could not resolve localhost ("…"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and <Harness> does not use the system resolver, which answers localhost here`` | The harness resolves names on its own (as a Go program built without cgo, or a static musl program, does), so no image can answer `localhost` for it in a MicroVM, whose `/etc/hosts` is empty. Run it on a Linux host, whose Docker driver writes `/etc/hosts` (``→ <Harness> cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it``). |
 | ``<Harness> cannot start in an OpenShell MicroVM (the vm driver this gateway runs): <Harness> cannot resolve localhost in an OpenShell MicroVM: it printed "…"`` (a run), or ``<Harness> cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: …`` (`sandbox image build`) | The check of the image found the same before any sandbox was made: the harness resolves names on its own, and the message quotes what it printed. Run it on a Linux host. The refusal stays until the image is checked again, which ``defenseclaw sandbox image build <harness> --force`` does. |
 | ``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs): its image <tag> was not checked with a MicroVM's name resolution`` | A MicroVM gateway boots only an image checked with a MicroVM's name resolution, and this one never was. Check it with ``defenseclaw sandbox image build <harness> --force``, then run again. |
-| ``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs): its image <tag> was run with a MicroVM's name resolution, which settled nothing: …`` (a run), or ``<Harness>'s image is not checked for an OpenShell MicroVM yet: …`` (`sandbox image build`) | The check of the image with a MicroVM's name resolution failed without showing that the harness cannot resolve `localhost`, and the rest of the message says how: ``the hook-fire probe could not run <Harness> with an OpenShell MicroVM's name resolution: …`` when the check could not run at all (a mount Docker refused, a timeout), or ``with the name resolution of an OpenShell MicroVM (…), <Harness> exited <code>; …`` or ``hook … never fired`` when the harness failed there. The next run checks the image again, and so does ``defenseclaw sandbox image build <harness> --force``. When the check could not mount its files, make sure Docker Desktop shares your temp directory (`$TMPDIR`, under `/var/folders`), which the doctor's **Docker file sharing** check reports. |
+| ``<Harness>'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs): its image <tag> was run with a MicroVM's name resolution, which settled nothing: …`` (a run), or ``<Harness>'s image is not checked for an OpenShell MicroVM yet: …`` (`sandbox image build`) | The check of the image with a MicroVM's name resolution failed without showing that the harness cannot resolve `localhost`, and the rest of the message says how: ``the hook-fire probe could not run <Harness> with an OpenShell MicroVM's name resolution: …`` when the check could not run at all (a mount Docker refused, a timeout), or ``with the name resolution of an OpenShell MicroVM (…), <Harness> exited <code>; …`` or ``hook … never fired`` when the harness failed there. The next run checks the image again, and so does ``defenseclaw sandbox image build <harness> --force``. When the check could not mount its files, make the home directory and `~/Library/Caches/defenseclaw/hookfire` visible to the engine, then run `defenseclaw sandbox image build <harness> --force` again. Docker Desktop uses Settings > Resources > File sharing, Colima mounts the home by default, and OrbStack shares `/Users` by default; the doctor's **Docker file sharing** check reports what it can verify. |
 | ``OpenShell sandboxes do not run on this machine: … Apple silicon only`` | OpenShell's MicroVM driver needs Apple silicon, so an Intel Mac cannot run sandboxes. `defenseclaw sandbox teardown` still removes what an earlier setup left. |
 | ``copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`` | Expected on a Mac: every run works on a copy. Bring the work back at the end of the session or with `defenseclaw sandbox pull <name>`. |
 | ``--context mounts a folder into the sandbox read-only, and the OpenShell MicroVM (vm) driver mounts no host folders`` | Run without `--context` on a Mac. To give the agent a reference folder, put a copy of it inside the project. |
