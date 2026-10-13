@@ -73,3 +73,36 @@ def test_remediation_summary_under_strict_mode(
         + block + '\n[Console]::Out.WriteLine("$code|$summary")\n'
     )
     assert _run_script(pwsh, tmp_path, script, document) == expected
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ({"errors": [{"code": "lifecycle_busy", "message": "another run"}], "services": []}, "<null>"),
+        ({"errors": [{"code": "lifecycle_error", "message": "verify failed"}], "services": [
+            {"name": "DefenseClawGuardian", "required": True, "state": "stopped", "start_mode": "auto"},
+        ]}, "verify failed (lifecycle_error): DefenseClawGuardian is stopped (start auto)"),
+        ({"errors": [{"code": "hooks_drifted", "message": "hooks drifted"}], "warnings": [
+            {"code": "telemetry_unreachable", "message": "otel down"},
+        ], "services": []}, "verify failed (hooks_drifted): hooks drifted"),
+        ({"errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+            {"code": "hooks_drifted", "message": "hooks drifted"},
+        ], "services": []}, "verify failed (hooks_drifted): hooks drifted"),
+    ],
+)
+def test_detection_failure_under_strict_mode(
+    pwsh: str, tmp_path: Path, document: dict, expected: str,
+) -> None:
+    source = (SCRIPTS / "Remediate-Detect.ps1").read_text(encoding="utf-8")
+    function = "function Format-DefenseClawVerifyFailure" + source.split(
+        "function Format-DefenseClawVerifyFailure", 1,
+    )[1].split("\ntry {\n    $deployment", 1)[0]
+    script = (
+        "Set-StrictMode -Version 2.0\n" + function + "\n"
+        "$failure = Format-DefenseClawVerifyFailure -Json "
+        "(Get-Content -LiteralPath $env:DC_TEST_DOCUMENT -Raw)\n"
+        "if ($null -eq $failure) { [Console]::Out.WriteLine('<null>') } "
+        "else { [Console]::Out.WriteLine($failure) }\n"
+    )
+    assert _run_script(pwsh, tmp_path, script, document) == expected
