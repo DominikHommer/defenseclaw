@@ -118,7 +118,11 @@ from defenseclaw.file_permissions import (
     windows_acl_write_error,
 )
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+from defenseclaw.logger import (
+    CanonicalObservabilityError,
+    CanonicalObservabilityUnavailableError,
+    keep_running_gateway_token,
+)
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.paths import bundled_splunk_bridge_dir, splunk_bridge_bin
 from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
@@ -4728,6 +4732,7 @@ def setup_gateway(
     gw = app.cfg.gateway
     previous_api_port = gw.api_port
     previous_target = (gw.host, gw.port)
+    # The running gateway keeps this token until the restart after this command.
     previous_token = gw.resolved_token()
 
     data_dir = app.cfg.data_dir
@@ -4782,9 +4787,7 @@ def setup_gateway(
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
     gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
-    if gw.resolved_token() != previous_token:
-        # A new token reaches the gateway with the restart after this command.
-        _audit_with_running_gateway_token(app, previous_token)
+    keep_running_gateway_token(app.logger, data_dir, previous_token, gw.resolved_token())
     # The running gateway keeps its old OpenClaw host and port until the
     # restart that follows this command, so checking it now reports a
     # "reconnecting" FAIL row that the restart fixes (GAP-2478).
@@ -13047,7 +13050,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     stopped = restart and _stop_gateway_before_token_swap(data_dir)
     if not stopped:
         # --no-restart: the running gateway keeps the old token (GAP-0464).
-        _audit_with_running_gateway_token(app, previous)
+        keep_running_gateway_token(app.logger, data_dir, previous, detected)
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
@@ -13061,22 +13064,6 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
         if ctx is not None:
             # Only the token step restarted; setup's own restart still runs.
             ctx.meta[_SETUP_RESTART_HANDLED_KEY] = handled
-
-
-def _audit_with_running_gateway_token(app: AppContext, token: str) -> None:
-    """Send this run's audit events with *token* while the gateway that loaded it runs.
-
-    A new gateway token takes effect when the gateway restarts. Until then the
-    running gateway accepts only the token it started with, so a setup that
-    saved a new token without a restart had its own audit event refused with
-    401 and exited nonzero after the change was saved (GAP-0464).
-    """
-
-    if not token or not _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid")):
-        return
-    keep = getattr(app.logger, "keep_gateway_token", None)
-    if callable(keep):
-        keep(token)
 
 
 def _stop_gateway_before_token_swap(data_dir: str) -> bool:

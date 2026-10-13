@@ -91,7 +91,7 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
 
     def _adopt_and_audit(self, gateway: _Gateway, *, alive: bool = True) -> None:
         with (
-            patch.object(cmd_setup, "_is_pid_alive", return_value=alive),
+            patch("defenseclaw.process_liveness.pid_file_alive", return_value=alive),
             patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client),
             click.Context(click.Command("openclaw")),
         ):
@@ -123,7 +123,7 @@ class SetupAuditUsesTheRunningGatewayTokenTests(unittest.TestCase):
         gateway = _Gateway(_RUNNING)
         self.app.logger = Logger.from_config(self.app.cfg)
         with (
-            patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+            patch("defenseclaw.process_liveness.pid_file_alive", return_value=True),
             patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
             patch.object(cmd_setup, "_restart_services", return_value=None),
             patch("defenseclaw.logger.OrchestratorClient", side_effect=gateway.client),
