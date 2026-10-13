@@ -20184,6 +20184,92 @@ function Test-DefenseClawGuardianCoverageReport {
     }
 }
 
+# GAP-0401: the first reconcile of a standalone guardian reads every signed-in
+# target and can outlast the usual coverage wait on a busy device. Past that
+# wait Setup keeps waiting, in steps and up to the hard limit, only while the
+# guardian process it started is still the service process and its startup
+# record shows that reconcile running and moving.
+$script:GuardianFirstReconcileTimeoutSeconds = 600
+$script:GuardianFirstReconcileStallSeconds = 180
+$script:GuardianFirstReconcileCheckSeconds = 5
+
+function Get-DefenseClawGuardianStartupProgress {
+    <#
+        The startup record of the standalone LocalSystem guardian
+        (<RuntimeDirectory>\hook_guardian_startup.json): how far the first
+        reconcile of guardian process ProcessId, started after StartedAfter,
+        has come. $null when there is no such record (Secure Client, a release
+        that does not write it, another process, or a record that cannot be
+        read): the coverage wait then keeps its usual limit.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][uint32]$ProcessId,
+        [Parameter(Mandatory)][DateTime]$StartedAfter
+    )
+    if ($ProcessId -eq 0 -or -not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    try {
+        $path = Microsoft.PowerShell.Management\Join-Path `
+            $Layout.RuntimeDirectory `
+            'hook_guardian_startup.json'
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $null
+        }
+        [void](Assert-DefenseClawDescendant `
+            -Path $path `
+            -Root $Layout.StateRoot `
+            -Label 'hook guardian startup record')
+        Assert-DefenseClawNoReparsePath -Path $path
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
+        if ($item.Length -gt 4096) {
+            return $null
+        }
+        $record = [IO.File]::ReadAllText($path) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        foreach ($name in @(
+                'version', 'pid', 'state', 'started_at', 'updated_at',
+                'targets_done', 'targets_total'
+            )) {
+            if ($null -eq $record.PSObject.Properties[$name]) {
+                return $null
+            }
+        }
+        if ([int64]$record.version -ne 1 -or
+            [int64]$record.pid -ne [int64]$ProcessId -or
+            @('reconciling', 'finished') -cnotcontains [string]$record.state) {
+            return $null
+        }
+        $times = @(foreach ($value in @($record.started_at, $record.updated_at)) {
+                # PowerShell 7 may materialize ISO JSON strings as DateTime.
+                if ($value -is [DateTime]) {
+                    ([DateTime]$value).ToUniversalTime()
+                }
+                else {
+                    [DateTime]::Parse(
+                        [string]$value,
+                        [Globalization.CultureInfo]::InvariantCulture,
+                        [Globalization.DateTimeStyles]::RoundtripKind
+                    ).ToUniversalTime()
+                }
+            })
+        if ($times[0] -lt $StartedAfter.ToUniversalTime()) {
+            return $null
+        }
+        return [pscustomobject][ordered]@{
+            state = [string]$record.state
+            started_at = $times[0]
+            updated_at = $times[1]
+            targets_done = [int64]$record.targets_done
+            targets_total = [int64]$record.targets_total
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
 function Wait-DefenseClawFreshGuardianReconcile {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -20209,9 +20295,30 @@ function Wait-DefenseClawFreshGuardianReconcile {
     Stop-DefenseClawService -Name $GuardianServiceName
     Start-DefenseClawService -Name $GuardianServiceName
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $begin = [DateTime]::UtcNow
+    $guardianProcess = {
+        try {
+            return [uint32](Get-DefenseClawServiceProcessId -Name $GuardianServiceName)
+        }
+        catch {
+            return [uint32]0
+        }
+    }
+    $guardianProcessId = [uint32]0
+    if (Test-DefenseClawStandaloneProfile) {
+        $guardianProcessId = & $guardianProcess
+    }
+    $deadline = $begin.AddSeconds($TimeoutSeconds)
+    $limit = $begin.AddSeconds([Math]::Max(
+            $TimeoutSeconds,
+            $script:GuardianFirstReconcileTimeoutSeconds
+        ))
+    $extended = $false
+    $finishedRead = $false
+    $progress = $null
+    $guardianGone = ''
     $lastStatus = 'guardian status report unavailable'
-    do {
+    while ($true) {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
@@ -20231,8 +20338,67 @@ function Wait-DefenseClawFreshGuardianReconcile {
         }
         $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic `
             -Value $coverage.reason
+        $now = [DateTime]::UtcNow
+        if ($now -ge $deadline) {
+            if ($guardianProcessId -eq 0 -or $now -ge $limit) {
+                break
+            }
+            $current = & $guardianProcess
+            if ($current -ne $guardianProcessId) {
+                $guardianGone = if ($current -eq 0) {
+                    'is no longer running'
+                }
+                else {
+                    "was replaced by process $current"
+                }
+                break
+            }
+            # A record the guardian is replacing right now cannot be read;
+            # the last one read stands until the stall limit.
+            $read = Get-DefenseClawGuardianStartupProgress `
+                -Layout $Layout `
+                -ProcessId $guardianProcessId `
+                -StartedAfter $startedAfter
+            if ($null -ne $read) {
+                $progress = $read
+            }
+            if ($null -eq $progress) {
+                break
+            }
+            if ($progress.state -cne 'reconciling') {
+                # The first reconcile finished after the status above was
+                # read: read the records it published once more.
+                if ($finishedRead) {
+                    break
+                }
+                $finishedRead = $true
+                $deadline = $now.AddSeconds(2)
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+                continue
+            }
+            if (($now - $progress.updated_at).TotalSeconds -gt $script:GuardianFirstReconcileStallSeconds) {
+                break
+            }
+            $extended = $true
+            $deadline = $now.AddSeconds($script:GuardianFirstReconcileCheckSeconds)
+            if ($deadline -gt $limit) {
+                $deadline = $limit
+            }
+        }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
+    }
+    $waited = [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds)
+    $guardianLog = "the guardian log is $([string]$Layout.GuardianLogPath)"
+    if (-not [string]::IsNullOrEmpty($guardianGone)) {
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus"
+    }
+    if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
+        $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+    }
+    if ($extended -or $guardianProcessId -ne 0) {
+        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
+    }
     throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
 

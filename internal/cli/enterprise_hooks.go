@@ -2000,7 +2000,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
-	for _, target := range manifest.Targets {
+	for index, target := range manifest.Targets {
+		enterpriseHookStartup.target(os.Stderr, index, len(manifest.Targets))
 		if !target.IsEnabled() {
 			continue
 		}
@@ -2126,6 +2127,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		rows = append(rows, row)
 	}
+	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
 
 	var enrollmentErr error
 	if failures == 0 {
@@ -2340,7 +2342,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
-	if _, err := reconcile("startup"); err != nil {
+	// The standalone Windows guardian records how far this first reconcile
+	// has come, for the Setup coverage wait (GAP-0401).
+	enterpriseHookStartup.begin(cmd.ErrOrStderr(), cfg.DataDir)
+	_, startupErr := reconcile("startup")
+	enterpriseHookStartup.end(cmd.ErrOrStderr())
+	if err := startupErr; err != nil {
 		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
 		}
