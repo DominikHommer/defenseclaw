@@ -146,6 +146,11 @@ Assign it to device groups. On each run the wrapper downloads the pkg,
 verifies it, installs it only when its version differs from the installed
 one, runs `ensure` with the config, and exits with the lifecycle's code. The
 script's run status in Intune is Success for exit `0` and Failed otherwise.
+If payload staging fills, the wrapper reports `mdm_staging_full` (exit `1`).
+A secret containing a NUL byte is refused as `mdm_invalid_arguments` (exit
+`2`); a cancelled run stops the lifecycle child and reports `mdm_cancelled`
+(exit `1`). A version 8 inline config migration warning names **MDM inline
+config** as its source, rather than the private staging file.
 
 ### 4. Report the version with a custom attribute
 

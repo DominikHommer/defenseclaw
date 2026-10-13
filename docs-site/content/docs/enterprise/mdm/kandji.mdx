@@ -197,6 +197,9 @@ config into a root-only staging folder and runs `enterprise macos ensure` with
 it. `ensure` applies a changed config, repairs drift, or does nothing when the
 Mac already matches, and the wrapper exits with its code. So the audit passes
 when the Mac matches, and a failure raises an alert.
+The wrapper refuses a secret containing a NUL byte as
+`mdm_invalid_arguments`. A cancelled run stops its lifecycle child and reports
+`mdm_cancelled`; inspect the deployment before retrying.
 
 The script is its own audit because `detect.sh` does not compare configs. An
 audit built on it would keep passing after you change the config, and the
