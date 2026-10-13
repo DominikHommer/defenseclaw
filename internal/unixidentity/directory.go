@@ -543,7 +543,10 @@ func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
 // another domain's account of that name and list its groups (GAP-0563).
 // The files module matches no /etc/group member to that form, so the
 // /etc/group groups that list the account by its passwd name, the groups the
-// OS gives it at login, are read from /etc/group (GAP-0729). Its name
+// OS gives it at login, are read from /etc/group (GAP-0729), when the OS
+// reads /etc/group at login at all: the initgroups services of
+// nsswitch.conf name files. Without that a membership in /etc/group that
+// login ignores selected a group profile (GAP-1280). Its name
 // qualified with the domain is not matched: under short names that is the
 // passwd name of an account a domain names by e-mail address, and a group
 // listing it is that account's. The boolean reports whether the
@@ -556,9 +559,15 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 			if err != nil {
 				return nil, false, err
 			}
-			local, err := localGroupsListing(account.Name)
+			services, err := nssInitgroupsServices()
 			if err != nil {
 				return nil, false, err
+			}
+			var local []int
+			if nssReadsLocalGroups(services) {
+				if local, err = localGroupsListing(account.Name); err != nil {
+					return nil, false, err
+				}
 			}
 			ids = append(ids, local...)
 			slices.Sort(ids)
@@ -625,16 +634,9 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 // for this account's groups. Looking up a group by gid alone would prove only
 // that the group exists, not that the account belongs to it.
 func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error) {
-	data, err := readSmallFile(nsswitchPath, 1<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil // glibc defaults to files
-	}
-	if err != nil {
-		return nil, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
-	}
-	services := ParseNSSwitchServices(string(data), "initgroups")
-	if len(services) == 0 {
-		services = ParseNSSwitchServices(string(data), "group")
+	services, err := nssInitgroupsServices()
+	if err != nil || services == nil {
+		return nil, err // no list: glibc defaults to files
 	}
 	groups := map[int]bool{}
 	for _, service := range services {
@@ -660,6 +662,31 @@ func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error
 		}
 	}
 	return groups, nil
+}
+
+// nssInitgroupsServices is the service list glibc uses for initgroups: the
+// initgroups line of nsswitch.conf, else its group line; nil without either
+// line or without the file, which glibc reads as files.
+func nssInitgroupsServices() ([]string, error) {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unixidentity: read NSS configuration: %w", err)
+	}
+	services := ParseNSSwitchServices(string(data), "initgroups")
+	if len(services) == 0 {
+		services = ParseNSSwitchServices(string(data), "group")
+	}
+	return services, nil
+}
+
+// nssReadsLocalGroups reports whether initgroups reads /etc/group with the
+// services nssInitgroupsServices returned: files, or compat, which reads it
+// too; glibc's default (no list) is files.
+func nssReadsLocalGroups(services []string) bool {
+	return len(services) == 0 || slices.Contains(services, "files") || slices.Contains(services, "compat")
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
