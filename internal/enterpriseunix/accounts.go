@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -389,8 +390,23 @@ func (a *dsclAccounts) Remove(ctx context.Context, name string) error {
 	}
 	for _, record := range []string{"/Users/" + name, "/Groups/" + name} {
 		if _, err := a.env.Runner.Run(ctx, "dscl", ".", "-delete", record); err != nil {
-			return fmt.Errorf("remove %s: %w", record, err)
+			return dsclDeleteError(record, err)
 		}
 	}
 	return nil
+}
+
+// dsclOpenDirectoryError finds the Open Directory error name in dscl output
+// ("DS Error: -14120 (eDSPermissionError)").
+var dsclOpenDirectoryError = regexp.MustCompile(`\beDS[A-Za-z]+\b`)
+
+// dsclDeleteError says that macOS refused to delete record, with the Open
+// Directory error name, instead of dscl's raw output (exit 40, "DS Error:
+// -14120 (eDSPermissionError)"), which the uninstall warning repeated next
+// to the command that deletes the account by hand (GAP-0769).
+func dsclDeleteError(record string, err error) error {
+	if name := dsclOpenDirectoryError.FindString(err.Error()); name != "" {
+		return fmt.Errorf("macOS refused to delete the directory record %s (%s)", record, name)
+	}
+	return fmt.Errorf("remove %s: %w", record, err)
 }
