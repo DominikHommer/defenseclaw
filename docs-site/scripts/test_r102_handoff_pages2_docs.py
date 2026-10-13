@@ -12,6 +12,17 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg04a_windows_plugin_refusal_is_structured(self):
+        section = page("enterprise/windows.mdx").split("- Claude Code runs a plugin", 1)[1].split("- MCP servers", 1)[0]
+        self.assertIn("ASSET-POLICY reason_code=install-block", section)
+        self.assertIn("gateway audit log and `defenseclaw plugin info`", section)
+        self.assertNotIn("the refusal\n  says `plugin", section)
+
+    def test_fg04a_sandbox_image_action_mode_cross_link(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("For action mode on a host without the agent installed", text)
+        self.assertIn("[connector compatibility guide](/docs/connectors/compatibility)", text)
+
     def test_lfwin_guardian_first_reconcile_wait(self):
         text = page("enterprise/troubleshooting.mdx")
         self.assertIn("Setup waits up to 10 minutes for the guardian's first reconcile", text)

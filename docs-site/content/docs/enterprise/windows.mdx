@@ -919,9 +919,12 @@ per-user install:
   that folder, which DefenseClaw does not watch and never changes. When
   admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
   under `.claude\plugins\cache` is quarantined and the Claude Code hook
-  refuses the plugin's skills, commands, agents and MCP tools: the refusal
-  says `plugin "<plugin>@<marketplace>" is blocked by install admission` or
-  that the plugin is denied by asset policy.
+  refuses the plugin's skills, commands, agents and MCP tools. For an install
+  block, the hook gives a structured asset-policy reason such as
+  `ASSET-POLICY reason_code=install-block source=install-block asset_type=plugin asset_name=<plugin>`.
+  On managed Windows, displayed values may instead be redacted as
+  `<redacted len=N sha=...>`. The gateway audit log and `defenseclaw plugin info`
+  give the install-admission refusal and its scan reason.
 - MCP servers a Claude Code plugin bundles (its `.mcp.json`, or `mcpServers`
   in `.claude-plugin/plugin.json`) are admitted with the plugin, not on their
   own: the plugin scan reads their definitions, and the plugin's verdict and
