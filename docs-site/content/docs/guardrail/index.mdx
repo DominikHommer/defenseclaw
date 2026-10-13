@@ -546,6 +546,12 @@ the list as JSON. For a live view, open `defenseclaw tui`.
 Which commands prompt and which are flag-only is listed in the
 [interactive vs non-interactive matrix](/docs/reference/setup-commands#interactive-vs-non-interactive).
 
+### Protected-file write proof
+
+The write proof checks command text before a tool runs. It does not see what
+child programs write. For protected files, use a sandbox or file permissions
+as an additional control.
+
 ## Common follow-ups
 
 <Cards>
