@@ -3,7 +3,11 @@
 
 package hookpaths
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // shellPrintfValue evaluates the literal string forms used by shell printf.
 // Other conversions remain unknown until their output can be determined.
@@ -34,6 +38,37 @@ func shellPrintfValue(format string, args []string) (string, bool) {
 				if i >= len(format) {
 					return "", false
 				}
+				start := i
+				for i < len(format) && format[i] >= '0' && format[i] <= '9' {
+					i++
+				}
+				if i < len(format) && format[i] == 'd' {
+					width := 0
+					if i > start {
+						parsed, err := strconv.Atoi(format[start:i])
+						if err != nil || parsed > 64 {
+							return "", false
+						}
+						width = parsed
+					}
+					value := int64(0)
+					if used < len(args) {
+						parsed, err := strconv.ParseInt(args[used], 10, 64)
+						if err != nil {
+							return "", false
+						}
+						value = parsed
+						used++
+					}
+					if i > start && format[start] == '0' {
+						result.WriteString(fmt.Sprintf("%0*d", width, value))
+					} else {
+						result.WriteString(fmt.Sprintf("%*d", width, value))
+					}
+					conversions++
+					continue
+				}
+				i = start
 				switch format[i] {
 				case '%':
 					result.WriteByte('%')

@@ -266,7 +266,7 @@ func TestShellWriteOperandsNestedAndPoisonedVariables(t *testing.T) {
 		{"command substitution assignment poisons", `f=other; echo "$(f=disklink)"; echo k >> "$f"`, nil, true, nil},
 		{"alternate expansion stays dynamic", `x=a; echo k >> ${x:+disklink}`, nil, true, nil},
 		{"pattern expansion stays dynamic", `x=disklink; echo k >> ${x#d}`, nil, true, nil},
-		{"array expansion stays dynamic", `a=(disklink); echo k >> ${a[0]}`, nil, true, nil},
+		{"fixed array expansion", `a=(disklink); echo k >> ${a[0]}`, []string{disk}, false, nil},
 		{"positional expansion stays dynamic", `echo k >> $@`, nil, true, nil},
 		{"random expansion stays dynamic", `echo k >> $RANDOM`, nil, true, nil},
 		{"seconds expansion stays dynamic", `echo k >> $SECONDS`, nil, true, nil},

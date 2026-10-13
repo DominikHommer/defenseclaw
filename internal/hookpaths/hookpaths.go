@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -222,7 +223,17 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 				unknown = true
 				return true
 			}
+			if safeDomain && shellBoundedTargetSafe(redirect.Word, home, context.cwd, states.varsFor(redirect.Word)) {
+				return true
+			}
 			names, wordUnknown := shellWordDynamicParamNames(redirect.Word, home)
+			if safeDomain && !candidates.allUnknown && !wordUnknown && len(names) == 1 &&
+				candidates.safePath[names[0]] && !candidates.unknown[names[0]] && len(candidates.values[names[0]]) == 0 {
+				prefix, suffix, _, template := shellWordTemplate(redirect.Word)
+				if template && prefix == "" && suffix == "" {
+					return true
+				}
+			}
 			if wordUnknown && safeDomain && !candidates.allUnknown && shellNumericTargetSafe(redirect.Word, context.cwd, home, candidates) {
 				return true
 			}
@@ -611,6 +622,27 @@ func shellApplyAssignments(
 ) bool {
 	ok := true
 	for _, assign := range assigns {
+		if assign != nil && assign.Array != nil && assign.Name != nil && !assign.Append &&
+			!poison.poisoned(assign.Name.Value) && shellIdentifier(assign.Name.Value) {
+			for i, element := range assign.Array.Elems {
+				index := strconv.Itoa(i)
+				if element.Index != nil {
+					var known bool
+					index, known = shellArrayIndex(element.Index)
+					if !known {
+						ok = false
+						continue
+					}
+				}
+				value, known := staticShellWordWithVars(element.Value, home, vars, poison)
+				if !known {
+					ok = false
+					continue
+				}
+				vars[assign.Name.Value+"["+index+"]"] = value
+			}
+			continue
+		}
 		if assign == nil || assign.Append || assign.Naked || assign.Name == nil ||
 			assign.Index != nil || assign.Array != nil || !shellIdentifier(assign.Name.Value) || assign.Name.Value == "HOME" ||
 			poison.poisoned(assign.Name.Value) {
@@ -629,6 +661,18 @@ func shellApplyAssignments(
 		vars[assign.Name.Value] = value
 	}
 	return ok
+}
+
+func shellArrayIndex(index syntax.ArithmExpr) (string, bool) {
+	word, ok := index.(*syntax.Word)
+	if !ok {
+		return "", false
+	}
+	value := word.Lit()
+	if value == "" || strings.ContainsAny(value, "\x00\r\n/[]$`*?") {
+		return "", false
+	}
+	return value, true
 }
 
 func shellExpandedCallWords(file *syntax.File, home string) map[int]string {
@@ -721,6 +765,22 @@ func shellApplyStraightStmt(stmt *syntax.Stmt, home string, vars shellVariables,
 	if len(call.Args) == 0 {
 		shellApplyAssignments(call.Assigns, home, vars, poison)
 		return
+	}
+	if program, static := staticShellWordWithVars(call.Args[0], home, vars, poison); static && programBase(program) == "set" &&
+		len(call.Args) >= 2 {
+		if separator, known := staticShellWordWithVars(call.Args[1], home, vars, poison); known && separator == "--" {
+			for i := 1; i <= 9; i++ {
+				delete(vars, strconv.Itoa(i))
+			}
+			for i, arg := range call.Args[2:] {
+				if i >= 9 {
+					break
+				}
+				if value, known := staticShellWordWithVars(arg, home, vars, poison); known {
+					vars[strconv.Itoa(i+1)] = value
+				}
+			}
+		}
 	}
 	if names, ok := shellUnsetNames(call, home, vars, poison); ok {
 		for _, name := range names {
@@ -824,6 +884,7 @@ type shellVariableCandidateSet struct {
 	unknown     map[string]bool
 	safeTemp    map[string]bool
 	safeNumeric map[string]bool
+	safePath    map[string]bool
 	allUnknown  bool
 }
 
@@ -834,6 +895,7 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 		unknown:     map[string]bool{},
 		safeTemp:    map[string]bool{},
 		safeNumeric: map[string]bool{},
+		safePath:    map[string]bool{},
 	}
 	if filepath.IsAbs(cwd) {
 		candidates.add("PWD", cwd)
@@ -859,6 +921,8 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 				candidates.safeTemp[name] = true
 			case shellValueNumeric:
 				candidates.safeNumeric[name] = true
+			case shellValueSafePath:
+				candidates.safePath[name] = true
 			default:
 				candidates.unknown[name] = true
 			}
@@ -961,6 +1025,9 @@ func shellCandidateAssignValue(assign *syntax.Assign, home, cwd string, states s
 		value, ok = staticShellWordWithVars(assign.Value, home, vars, shellVariablePoison{})
 		if !ok {
 			value, kind = shellKnownAssignmentValue(assign.Value, home, cwd, vars)
+			if kind == shellValueUnknown && shellBoundedTargetSafe(assign.Value, home, cwd, vars) {
+				kind = shellValueSafePath
+			}
 		}
 	}
 	if kind != shellValueExact {
@@ -996,8 +1063,12 @@ func shellCandidateCallMutation(
 		for _, name := range names {
 			candidates.unknown[name] = true
 		}
-	case "eval", "source", ".", "trap", "let":
+	case "eval", "source", ".", "let":
 		candidates.allUnknown = true
+	case "trap":
+		if !shellTrapNoMutation(call, home) {
+			candidates.allUnknown = true
+		}
 	case "read":
 		names := shellReadTargets(call.Args[1:], home)
 		if len(names) == 0 {
@@ -1103,9 +1174,21 @@ func shellAllowedStraightMutations(
 
 func shellPlainAssignment(assign *syntax.Assign, home string) (string, bool) {
 	name := shellAssignName(assign)
-	if name == "" || assign.Append || assign.Naked || assign.Index != nil ||
-		assign.Array != nil {
+	if name == "" || assign.Append || assign.Naked || assign.Index != nil {
 		return "", false
+	}
+	if assign.Array != nil {
+		for _, element := range assign.Array.Elems {
+			if element.Index != nil {
+				if _, ok := shellArrayIndex(element.Index); !ok {
+					return "", false
+				}
+			}
+			if _, ok := StaticWord(element.Value, home); !ok {
+				return "", false
+			}
+		}
+		return name, true
 	}
 	value, static := "", true
 	if assign.Value != nil {
@@ -1215,8 +1298,12 @@ func shellPoisonCallMutation(call *syntax.CallExpr, program, home string, poison
 		for _, name := range names {
 			poison.add(name)
 		}
-	case "eval", "source", ".", "trap", "let":
+	case "eval", "source", ".", "let":
 		poison.all = true
+	case "trap":
+		if !shellTrapNoMutation(call, home) {
+			poison.all = true
+		}
 	case "read":
 		names := shellReadTargets(call.Args[1:], home)
 		if len(names) == 0 {
@@ -1254,6 +1341,51 @@ func shellPoisonCallMutation(call *syntax.CallExpr, program, home string, poison
 			}
 		}
 	}
+}
+
+func shellTrapNoMutation(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) < 2 {
+		return false
+	}
+	script, ok := StaticWord(call.Args[1], home)
+	if !ok {
+		return false
+	}
+	file, ok := parseShell(script)
+	if !ok {
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if len(stmt.Redirs) != 0 {
+			return false
+		}
+		body, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(body.Assigns) != 0 || len(body.Args) == 0 {
+			return false
+		}
+		program, ok := StaticWord(body.Args[0], home)
+		if !ok || program != "rm" && !slices.Contains(dataPrograms, programBase(program)) {
+			return false
+		}
+		mutation := shellVariablePoison{}
+		shellPoisonCallMutation(body, programBase(program), home, &mutation)
+		if mutation.all || len(mutation.names) != 0 {
+			return false
+		}
+		static := true
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				static = false
+				return false
+			}
+			return true
+		})
+		if !static {
+			return false
+		}
+	}
+	return true
 }
 
 func shellReadTargets(args []*syntax.Word, home string) []string {

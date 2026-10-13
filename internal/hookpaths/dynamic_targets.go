@@ -147,6 +147,8 @@ const (
 	shellValueExact
 	shellValueTemp
 	shellValueNumeric
+	shellValueSlashless
+	shellValueSafePath
 )
 
 // shellKnownAssignmentValue reads command substitutions whose output is
@@ -212,11 +214,98 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 			return "", shellValueNumeric
 		}
 	case "mktemp":
-		if len(words) == 1 || len(words) == 2 && words[1] == "-d" {
+		if shellMktempDirectorySafe(words, cwd, home) {
 			return "", shellValueTemp
+		}
+	case "whoami":
+		if len(words) == 1 {
+			return "", shellValueSlashless
 		}
 	}
 	return "", shellValueUnknown
+}
+
+func shellMktempDirectorySafe(words []string, cwd, home string) bool {
+	directory := os.TempDir()
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "-d" || word == "-u" || word == "--directory" || word == "--dry-run":
+		case word == "-p" || word == "--tmpdir":
+			i++
+			if i >= len(words) {
+				return false
+			}
+			directory = words[i]
+		case strings.HasPrefix(word, "--tmpdir="):
+			directory = strings.TrimPrefix(word, "--tmpdir=")
+		default:
+			return false
+		}
+	}
+	directory = OperandPath(directory, cwd)
+	resolved, ok := ResolveWriteTarget(directory)
+	if !ok || !filepath.IsAbs(resolved) {
+		return false
+	}
+	protectedDirectory := filepath.Join(home, ".ssh")
+	return resolved != protectedDirectory && !strings.HasPrefix(resolved, protectedDirectory+string(filepath.Separator))
+}
+
+func shellBoundedTargetSafe(word *syntax.Word, home, cwd string, vars shellVariables) bool {
+	if word == nil {
+		return false
+	}
+	var prefix, suffix strings.Builder
+	kind := shellValueUnknown
+	seen := false
+	var appendParts func([]syntax.WordPart) bool
+	appendParts = func(parts []syntax.WordPart) bool {
+		for _, part := range parts {
+			if sub, ok := part.(*syntax.CmdSubst); ok {
+				if seen {
+					return false
+				}
+				_, found := shellKnownAssignmentValue(&syntax.Word{Parts: []syntax.WordPart{sub}}, home, cwd, vars)
+				if found != shellValueTemp && found != shellValueNumeric && found != shellValueSlashless {
+					return false
+				}
+				kind, seen = found, true
+				continue
+			}
+			if quoted, ok := part.(*syntax.DblQuoted); ok {
+				if !appendParts(quoted.Parts) {
+					return false
+				}
+				continue
+			}
+			piece, ok := shellStaticWordWithKnownCalls(&syntax.Word{Parts: []syntax.WordPart{part}}, home, cwd, vars, shellVariablePoison{})
+			if !ok || strings.ContainsAny(piece, "*?[]\x00\r\n") {
+				return false
+			}
+			if seen {
+				suffix.WriteString(piece)
+			} else {
+				prefix.WriteString(piece)
+			}
+		}
+		return true
+	}
+	if !appendParts(word.Parts) || !seen {
+		return false
+	}
+	if kind == shellValueTemp {
+		if prefix.Len() != 0 {
+			return false
+		}
+		for _, part := range strings.Split(suffix.String(), "/") {
+			if part == ".." {
+				return false
+			}
+		}
+		return suffix.Len() == 0 || strings.HasPrefix(suffix.String(), "/")
+	}
+	return shellPatternTargetSafe(prefix.String(), suffix.String(), cwd, home, kind == shellValueNumeric)
 }
 
 func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars shellVariables, poison shellVariablePoison) (string, bool) {
@@ -231,30 +320,51 @@ func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars she
 		known["PWD"] = cwd
 	}
 	var value strings.Builder
-	var appendParts func([]syntax.WordPart) bool
-	appendParts = func(parts []syntax.WordPart) bool {
+	var appendParts func([]syntax.WordPart, bool) bool
+	appendParts = func(parts []syntax.WordPart, quoted bool) bool {
 		for _, part := range parts {
 			switch part := part.(type) {
 			case *syntax.Lit:
-				if strings.ContainsAny(part.Value, "*?[]") {
+				if strings.ContainsAny(part.Value, "*?[]") || !quoted && strings.ContainsAny(part.Value, " \t") {
 					return false
 				}
 				value.WriteString(part.Value)
 			case *syntax.SglQuoted:
 				value.WriteString(part.Value)
 			case *syntax.DblQuoted:
-				if !appendParts(part.Parts) {
+				if !appendParts(part.Parts, true) {
 					return false
 				}
 			case *syntax.ParamExp:
+				if part.Param != nil && part.Index != nil && part.Exp == nil && !poison.poisoned(part.Param.Value) {
+					if index, ok := shellArrayIndex(part.Index); ok {
+						if element, found := known[part.Param.Value+"["+index+"]"]; found {
+							if strings.ContainsAny(element, "\x00\r\n") || !quoted && strings.ContainsAny(element, "*?[] \t") {
+								return false
+							}
+							value.WriteString(element)
+							continue
+						}
+					}
+				}
+				if part.Param != nil && len(part.Param.Value) == 1 && part.Param.Value[0] >= '1' && part.Param.Value[0] <= '9' {
+					if positional, found := known[part.Param.Value]; found {
+						if strings.ContainsAny(positional, "\x00\r\n") || !quoted && strings.ContainsAny(positional, "*?[] \t") {
+							return false
+						}
+						value.WriteString(positional)
+						continue
+					}
+				}
 				piece, ok := staticShellWordWithVars(&syntax.Word{Parts: []syntax.WordPart{part}}, home, known, poison)
-				if !ok {
+				if !ok || !quoted && strings.ContainsAny(piece, " \t") {
 					return false
 				}
 				value.WriteString(piece)
 			case *syntax.CmdSubst:
 				piece, kind := shellKnownAssignmentValue(&syntax.Word{Parts: []syntax.WordPart{part}}, home, cwd, known)
-				if kind != shellValueExact || strings.ContainsAny(piece, "*?[]\x00\r\n") {
+				if kind != shellValueExact || strings.ContainsAny(piece, "*?[]\x00\r\n") ||
+					!quoted && strings.ContainsAny(piece, " \t") {
 					return false
 				}
 				value.WriteString(piece)
@@ -264,7 +374,7 @@ func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars she
 		}
 		return true
 	}
-	if !appendParts(word.Parts) || strings.ContainsAny(value.String(), "\x00\r\n") {
+	if !appendParts(word.Parts, false) || strings.ContainsAny(value.String(), "\x00\r\n") {
 		return "", false
 	}
 	return value.String(), true
@@ -489,6 +599,13 @@ func shellNumericTargetSafe(word *syntax.Word, cwd, home string, candidates shel
 		strings.ContainsAny(prefix+suffix, "*?[]$`") || strings.Contains(suffix, "/") {
 		return false
 	}
+	return shellPatternTargetSafe(prefix, suffix, cwd, home, true)
+}
+
+func shellPatternTargetSafe(prefix, suffix, cwd, home string, numeric bool) bool {
+	if strings.ContainsAny(prefix+suffix, "*?[]$`\x00\r\n") || strings.Contains(suffix, "/") {
+		return false
+	}
 	path := OperandPath(prefix+"0"+suffix, cwd)
 	directory := filepath.Dir(path)
 	entries, err := os.ReadDir(directory)
@@ -503,18 +620,20 @@ func shellNumericTargetSafe(word *syntax.Word, cwd, home string, candidates shel
 			continue
 		}
 		middle := strings.TrimSuffix(strings.TrimPrefix(candidate, basePrefix), suffix)
-		if middle == "" {
+		if middle == "" || middle == "." || middle == ".." {
 			continue
 		}
-		digits := true
-		for _, char := range middle {
-			if char < '0' || char > '9' {
-				digits = false
-				break
+		if numeric {
+			digits := true
+			for _, char := range middle {
+				if char < '0' || char > '9' {
+					digits = false
+					break
+				}
 			}
-		}
-		if !digits {
-			continue
+			if !digits {
+				continue
+			}
 		}
 		resolved, ok := ResolveWriteTarget(filepath.Join(directory, candidate))
 		if !ok {

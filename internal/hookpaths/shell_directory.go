@@ -217,6 +217,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			return false
 		}
 		if program == "trap" {
+			if shellTrapNoMutation(call, home) {
+				return false
+			}
 			// A DEBUG, RETURN or ERR action runs before or after later
 			// commands and may change the directory there. Only listing
 			// traps leaves the directory known.
