@@ -344,6 +344,8 @@ type closedFloorFixture struct {
 	*sandboxDaemonFixture
 	ctl   *managedSandboxController
 	relay atomic.Int32
+	// unlisted: the manager cannot list the sandboxes.
+	unlisted atomic.Bool
 }
 
 // closedFloorRegFloor is reg-1's floor: the organization's, which allows
@@ -363,6 +365,9 @@ func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
 			seedSandboxRecord(t, o.StateDir, name, created)
 		}
 		o.listPhases = func(context.Context) (map[string]string, bool) {
+			if c.unlisted.Load() {
+				return nil, false
+			}
 			phases := make(map[string]string, len(names))
 			for _, name := range names {
 				phases[name] = "stopped"
@@ -617,4 +622,57 @@ func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 		}
 		c.assertClosed(t, "after the status")
 	})
+}
+
+// A poll that could not list the sandboxes (nothing counts as running then)
+// still opens the closed floor with a registration it confirmed, as
+// revalidate does at start without a list; an open floor is left as it is.
+func TestSandboxDaemonUnlistedPollOpensOnlyTheClosedFloor(t *testing.T) {
+	c := newClosedFloorFixture(t)
+	c.unlisted.Store(true)
+	c.relay.Store(relayAnswers)
+	c.d.pollOnce(context.Background())
+	if r, _ := c.d.regs.get("dc-a"); !r.Confirmed {
+		t.Fatalf("the poll did not confirm the registration: %+v", r)
+	}
+	c.assertRegistrationFloor(t, "after an unlisted poll")
+	for _, v := range c.statusAndList(t, "dc-a") {
+		assertOrganizationPolicy(t, "status and list after an unlisted poll", v)
+	}
+
+	// An open floor: an unlisted poll changes nothing.
+	g := newClosedFloorFixture(t)
+	open := config.OpenShellAdminConfig{MinProfile: "permissive"}
+	g.d.floorMu.Lock()
+	g.d.floor = &open
+	g.d.floorMu.Unlock()
+	g.d.reloadConfig()
+	g.unlisted.Store(true)
+	g.relay.Store(relayAnswers)
+	g.d.pollOnce(context.Background())
+	if admin := g.d.config().OpenShell.Admin; admin.MinProfile != "permissive" {
+		t.Fatalf("an unlisted poll replaced the open floor: %+v", admin)
+	}
+}
+
+// The status's re-confirmation (revalidate) replaces only the closed floor:
+// a create or a start that adopted its floor meanwhile keeps it, instead of
+// an older registration's floor put back over it.
+func TestSandboxDaemonRevalidateKeepsAnAdoptedFloor(t *testing.T) {
+	c := newClosedFloorFixture(t)
+	c.relay.Store(relayAnswers)
+	created := config.OpenShellAdminConfig{MinProfile: "permissive", RequestAccess: "new@example.com"}
+	c.d.floorMu.Lock()
+	c.d.floor = &created
+	c.d.floorMu.Unlock()
+	c.d.reloadConfig()
+	if revoked := c.d.revalidate(context.Background()); len(revoked) != 0 {
+		t.Fatalf("revoked = %+v", revoked)
+	}
+	if r, _ := c.d.regs.get("dc-a"); !r.Confirmed {
+		t.Fatalf("revalidate did not confirm the registration: %+v", r)
+	}
+	if admin := c.d.config().OpenShell.Admin; admin.MinProfile != "permissive" || admin.RequestAccess != "new@example.com" {
+		t.Fatalf("revalidate replaced the adopted floor with %+v", admin)
+	}
 }
