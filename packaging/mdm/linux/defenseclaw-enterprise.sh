@@ -94,6 +94,8 @@ DC_SECRET_STDIN=0
 DC_STAGE=""
 DC_CHILD=""
 DC_RESULT=""
+DC_CONFIG_STAGED=""
+DC_CONFIG_ORIGIN=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
@@ -902,10 +904,33 @@ dc_extract_payload() {
     DC_PAYLOAD_GATEWAY=$gateway
 }
 
+# Replace the private staging path in the version-8 warning with the source
+# the administrator actually supplied.
+dc_relabel_config_source() {
+    [ -n "$DC_CONFIG_STAGED" ] && [ -n "$DC_CONFIG_ORIGIN" ] || return 0
+    grep -q '"code": "config_version_8"' "$DC_RESULT" || return 0
+    DC_AWK_OLD=$(dc_json_escape "$DC_CONFIG_STAGED")
+    DC_AWK_NEW=$(dc_json_escape "$DC_CONFIG_ORIGIN")
+    export DC_AWK_OLD DC_AWK_NEW
+    awk '
+        BEGIN { old = ENVIRON["DC_AWK_OLD"]; source = ENVIRON["DC_AWK_NEW"]; warning = 0 }
+        /"code"[[:space:]]*:[[:space:]]*"config_version_8"/ { warning = 1 }
+        {
+            if (warning && (at = index($0, old)) > 0) {
+                $0 = substr($0, 1, at - 1) source substr($0, at + length(old))
+                warning = 0
+            }
+            print
+        }
+    ' "$DC_RESULT" >"$DC_STAGE/result-source.json"
+    DC_RESULT="$DC_STAGE/result-source.json"
+}
+
 # dc_emit_result: print the lifecycle's result document, the one document
 # this wrapper writes to stdout on success or on a lifecycle failure.
 dc_emit_result() {
     [ -n "$DC_RESULT" ] || return 0
+    dc_relabel_config_source
     cat "$DC_RESULT"
     dc_log "result $(tr -d '\n' <"$DC_RESULT")"
 }
@@ -981,17 +1006,21 @@ dc_main() {
     config=""
     if [ "$DC_CONFIG_STDIN" = 1 ]; then
         config="$DC_STAGE/config.yaml"
+        DC_CONFIG_ORIGIN="MDM standard input"
         dc_read_bounded "$config" "$DC_MAX_CONFIG_BYTES" "config"
     elif [ -n "$DC_CONFIG_FILE" ]; then
         config="$DC_STAGE/config.yaml"
+        DC_CONFIG_ORIGIN=$DC_CONFIG_FILE
         dc_stage_file "$DC_CONFIG_FILE" "$config" "$DC_MAX_CONFIG_BYTES" "config" trusted
     else
         inline="$DC_STAGE/inline-config.yaml"
         dc_inline_config >"$inline"
         if grep -q '[^[:space:]]' "$inline"; then
             config=$inline
+            DC_CONFIG_ORIGIN="MDM inline config"
         fi
     fi
+    DC_CONFIG_STAGED=$config
     # After a raw-byte check, the credential stays in memory and reaches the
     # lifecycle through a pipe. No staged copy remains during the lifecycle.
     secret_data=""
