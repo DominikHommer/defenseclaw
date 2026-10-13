@@ -603,8 +603,9 @@ enabled destination references is stored and passes the file checks in
 [Where the key is stored](/docs/enterprise/ai-defense-key#where-the-key-is-stored).
 Otherwise it refuses the config, names the credential and the destination
 field, and keeps the running config. `enterprise secret remove` likewise
-refuses a credential that an enabled destination of the installed config
-still references, because the gateway could not start without it, and one
+refuses when it cannot read the installed config, or when an enabled destination
+of that config still references the credential, because the gateway could not
+start without it, and one
 that `enterprise.inspection.llm.credential` (or an enabled
 `enterprise.inspection.ai_defense.credential`) names, because the judge and
 the scanners would run without their key: remove the reference and apply the

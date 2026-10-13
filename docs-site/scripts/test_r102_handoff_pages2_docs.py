@@ -12,6 +12,34 @@ def page(path):
 
 
 class R102HandoffPages2DocsTest(unittest.TestCase):
+    def test_fg11_machine_policy_summary_missing(self):
+        self.assertIn("| `machine_policy_summary_missing` | Windows |", page("enterprise/troubleshooting.mdx"))
+
+    def test_fg11_stopped_service_verify_is_not_ready(self):
+        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
+                   if line.startswith("| `not_ready` | Windows |"))
+        self.assertIn("`verify` also reports it", row)
+
+    def test_fg11_rule_pack_preflight_grant(self):
+        row = next(line for line in page("enterprise/troubleshooting.mdx").splitlines()
+                   if line.startswith("| `rule_pack_unreadable` | Windows |"))
+        self.assertIn("Setup's config preflight", row)
+        self.assertIn("service's derived SID", row)
+
+    def test_fg11_scanner_trust_and_judge(self):
+        text = page("enterprise/troubleshooting.mdx")
+        self.assertIn("folder or executable is writable by a non-administrator", text)
+        self.assertIn("| `scanner_judge_missing` | Windows |", text)
+        self.assertIn("`Scanners:` shows `judge none`", text)
+
+    def test_fg11_secret_remove_requires_readable_config(self):
+        text = page("enterprise/configuration.mdx")
+        self.assertIn("refuses when it cannot read the installed config", text)
+
+    def test_fg11_setup_upgrade_file_held(self):
+        text = page("enterprise/troubleshooting.mdx")
+        self.assertIn("Setup upgrade says another program holds a file open", text)
+
     def test_fg08_update_keeps_running_sessions_enforced(self):
         section = page("enterprise/tetragon.mdx").split(
             "5. **Restart agent sessions after enforce starts.**", 1
