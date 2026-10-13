@@ -306,6 +306,29 @@ function Move-Path([string]$From, [string]$To, [int]$Seconds = 10) {
     }
 }
 
+function Move-AuditStore([string]$From, [string]$To) {
+    # An SQLite store moves with its -wal, -shm and -journal as one unit: when
+    # a move fails, what moved goes back and the error is thrown, so a store is
+    # never separated from its WAL (SQLite would drop the WAL's transactions;
+    # rel-1-0-2:GAP-0491, as move_audit_store in install.sh).
+    $moved = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
+            if (-not (Test-Path -LiteralPath "$From$suffix")) { continue }
+            Move-Path "$From$suffix" "$To$suffix"
+            $moved.Add($suffix)
+        }
+    } catch {
+        $failure = $_
+        $stuck = @()
+        for ($i = $moved.Count - 1; $i -ge 0; $i--) {
+            try { Move-Path "$To$($moved[$i])" "$From$($moved[$i])" } catch { $stuck += "$To$($moved[$i])" }
+        }
+        if ($stuck.Count) { throw "$($failure.Exception.Message); $($stuck -join ', ') could not be moved back to $From" }
+        throw $failure
+    }
+}
+
 function Copy-Kept([string]$Source, [string]$DestinationDir) {
     # Copy into DestinationDir with robocopy, which keeps each file's
     # permissions: DefenseClaw refuses keys and tokens that come back from a
@@ -808,10 +831,7 @@ function Move-DamagedAuditStore([string]$BackTo) {
     if (-not (Test-Path -LiteralPath $db -PathType Leaf)) { return "" }
     $moved = "$db.corrupt-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
     if (Test-Path -LiteralPath $moved) { $moved += "-$PID" }
-    foreach ($suffix in @("-wal", "-shm", "-journal")) {
-        if (Test-Path -LiteralPath "$db$suffix") { Move-Path "$db$suffix" "$moved$suffix" }
-    }
-    Move-Path $db $moved
+    Move-AuditStore $db $moved
     Write-Warn ("The saved $BackTo audit store failed SQLite's integrity check; it was kept as $moved and $BackTo starts on a new " +
         "audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)")
     return $moved
@@ -1828,10 +1848,26 @@ function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [stri
     $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
     Set-Content -LiteralPath (Join-Path $Previous "GATEWAY_WAS_RUNNING") -Value $state -Encoding Ascii
     $audit = Join-Path $Previous "data\audit.db"
-    if ($Quarantined -and -not (Test-Path -LiteralPath $audit)) {
-        $kept = Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)"
-        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
-            if (Test-Path -LiteralPath "$kept$suffix") { Invoke-Quietly { Move-Path "$kept$suffix" "$audit$suffix" } }
+    $kept = if ($Quarantined) { Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)" } else { "" }
+    if ($kept -and (Test-Path -LiteralPath $kept -PathType Leaf)) {
+        # rel-1-0-2:GAP-0492: the failed start of $BackTo made a new, empty
+        # audit.db here, which a later rollback then used without a word. It
+        # goes aside, and the saved store goes back with its WAL, so that
+        # rollback checks it again (as undo_rollback in install.sh).
+        if (Test-Path -LiteralPath $audit) {
+            $fresh = "$audit.failed-start-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
+            if (Test-Path -LiteralPath $fresh) { $fresh += "-$PID" }
+            try { Move-AuditStore $audit $fresh } catch {
+                Write-Warn "Could not move aside the new audit store the failed start of $BackTo made ($($_.Exception.Message))"
+            }
+        }
+        if (-not (Test-Path -LiteralPath $audit)) {
+            try { Move-AuditStore $kept $audit } catch {
+                Write-Warn "Could not put back the saved $BackTo audit store ($($_.Exception.Message))"
+            }
+        }
+        if (Test-Path -LiteralPath $kept) {
+            Write-Warn "The saved $BackTo audit store is still $kept; before 'defenseclaw rollback' again, move it and its -wal and -shm files to $audit"
         }
     }
     if ((Start-Gateway) -in @(0, 3)) {
