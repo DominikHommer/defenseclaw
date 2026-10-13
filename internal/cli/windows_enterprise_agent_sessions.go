@@ -99,6 +99,21 @@ var (
 	}
 )
 
+// windowsEnterpriseRecoveredFailedInstallCode is the warning an ensure adds
+// when its repair rolled back a failed initial install before it installed.
+const windowsEnterpriseRecoveredFailedInstallCode = "recovered_failed_install"
+
+// windowsEnterpriseResultRecoveredFailedInstall reports whether this run
+// rolled back a failed initial install (GAP-1366).
+func windowsEnterpriseResultRecoveredFailedInstall(result *enterprisestatus.Result) bool {
+	for _, warning := range result.Warnings {
+		if warning.Code == windowsEnterpriseRecoveredFailedInstallCode {
+			return true
+		}
+	}
+	return false
+}
+
 // windowsEnterpriseStandaloneInstalled reports a standalone deployment that
 // is installed now; a change action reads it before it runs.
 func windowsEnterpriseStandaloneInstalled() bool {
@@ -125,8 +140,15 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	path := filepath.Join(filepath.Dir(metadata), windowsEnterpriseActivationFileName)
 	record, activated := readWindowsEnterpriseActivation(path)
 	// A first install and a staged first install still use the deployment
-	// activation time. Later upgrades can enable individual connectors.
-	firstInstall := !opts.activationStartedAt.IsZero() && !opts.installedBeforeRun && len(result.Errors) == 0
+	// activation time. Later upgrades can enable individual connectors. An
+	// ensure that rolled back a failed initial install and then installed is
+	// a first install too: the failed install had written deployment.json, so
+	// the host looked installed before the run (GAP-1366). A missing
+	// activation record is not the signal: an upgrade from a build that
+	// predates the record has none either, and must not warn.
+	firstInstall := !opts.activationStartedAt.IsZero() &&
+		(!opts.installedBeforeRun || windowsEnterpriseResultRecoveredFailedInstall(result)) &&
+		len(result.Errors) == 0
 	activatePending := !opts.activationStartedAt.IsZero() && record.Pending && !opts.noStart &&
 		len(result.Errors) == 0 && result.Readiness.Gateway
 	writeRecord := firstInstall || activatePending

@@ -140,6 +140,70 @@ func TestWindowsStandaloneStagedInstallRecordsActivationOnRepair(t *testing.T) {
 	}
 }
 
+// GAP-1366: an ensure that rolled back a failed initial install (which had
+// written deployment.json, so the host looked installed before the run) and
+// then installed is a first install: it records the activation and names the
+// sessions started before it. An upgrade with the same inputs and no
+// recovery, from a build that predates activation-state.json, names none.
+func TestWindowsStandaloneRecoveredFirstInstallRecordsActivation(t *testing.T) {
+	installedAt := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousConnectors, previousTargets := windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseEnrolledTargets = previousConnectors, previousTargets
+	})
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"claudecode"}, nil }
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) { return map[string]bool{}, nil }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{
+			PID: 51, Connector: "claudecode", User: `DCFC\dcw-std1`, StartedAt: installedAt.Add(-time.Hour),
+		}}, nil
+	}
+	for _, recovered := range []bool{true, false} {
+		dir := t.TempDir()
+		metadata := filepath.Join(dir, "deployment.json")
+		if err := os.WriteFile(metadata, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.2")
+		result.Installed = true
+		result.Readiness.Gateway = true
+		if recovered {
+			result.AddWarning(windowsEnterpriseRecoveredFailedInstallCode, "ensure rolled back a failed initial install before installing")
+		}
+		stubWindowsEnterpriseActivationNow(t, installedAt)
+		applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{
+			activationStartedAt: installedAt, installedBeforeRun: true,
+			previousConnectors: []string{"claudecode"}, previousConnectorsKnown: true,
+			previousTargets: map[string]bool{}, previousTargetsKnown: true,
+		})
+		var named []string
+		for _, warning := range result.Warnings {
+			if warning.Code == windowsAgentSessionsRestartCode {
+				named = append(named, warning.Message)
+			}
+		}
+		record, recordErr := os.ReadFile(filepath.Join(dir, windowsEnterpriseActivationFileName))
+		if recovered {
+			if len(named) != 1 || !strings.Contains(named[0], "claudecode (pid 51)") {
+				t.Fatalf("recovered first install warnings = %+v, want the restart warning for pid 51", result.Warnings)
+			}
+			if recordErr != nil || !strings.Contains(string(record), `"activated_at"`) {
+				t.Fatalf("recovered first install activation record = %q (%v), want activated_at", record, recordErr)
+			}
+			continue
+		}
+		if len(named) != 0 {
+			t.Fatalf("upgrade without a record warnings = %+v, want no restart warning", result.Warnings)
+		}
+		if recordErr == nil && strings.Contains(string(record), `"activated_at"`) {
+			t.Fatalf("upgrade without a record wrote activation %q", record)
+		}
+	}
+}
+
 // GAP-1193: a full upgrade can enable hooks for a session opened after the
 // original install. The upgrade and later status must both ask for a restart.
 func TestWindowsStandaloneUpgradeNamesNewConnectorSessions(t *testing.T) {
