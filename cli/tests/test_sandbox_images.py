@@ -7,15 +7,20 @@ setup gate must never accept what the gateway refuses.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from defenseclaw.sandbox_images import (
+    DEFAULT_BASE_IMAGE,
     SandboxImageSettings,
+    image_kinds,
     image_version,
     verified_harness_contract,
 )
+
+CUSTOM_BASE = "ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:" + "ab" * 32
 
 RELEASE = "1.0.2"
 OWNER = "0123456789abcdef"
@@ -31,7 +36,7 @@ def claudecode_image(**overrides: object) -> dict:
         "connector": "claudecode",
         "harness_version": "2.1.156",
         "hook_contract": "claudecode-hooks-v1",
-        "base_image": "ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:" + "ab" * 32,
+        "base_image": DEFAULT_BASE_IMAGE,
         "uid": UID,
         "gid": UID,
         "ingress_port": 18971,
@@ -89,6 +94,14 @@ class VerifiedHarnessContractTest(unittest.TestCase):
                 [claudecode_image()],
                 {"settings": SandboxImageSettings(base_image="registry.example/b@sha256:" + "cd" * 32, ingress_port=18971)},
             ),
+            # GAP-0450: an empty setting means the default base, as in Go.
+            "built on a custom base, the setting is empty": ([claudecode_image(base_image=CUSTOM_BASE)], {}),
+            "record names no base image": ([claudecode_image(base_image="")], {}),
+            # GAP-0451: the docker driver runs no MicroVM image on Linux.
+            "Linux docker driver with only a MicroVM image": (
+                [claudecode_image(microvm=True, microvm_verified=True)],
+                {"settings": SandboxImageSettings(ingress_port=18971, driver="docker")},
+            ),
             "ingress port changed since the build": (
                 [claudecode_image()],
                 {"settings": SandboxImageSettings(ingress_port=19001)},
@@ -119,6 +132,39 @@ class VerifiedHarnessContractTest(unittest.TestCase):
                 if records:
                     self.write_store(Path(tmp), records)
                 self.assertIsNone(evidence_for(tmp, **kwargs), f"{name}: evidence must not be accepted")
+
+    def test_a_configured_base_image_matches_its_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_store(Path(tmp), [claudecode_image(base_image=CUSTOM_BASE)])
+            evidence = evidence_for(tmp, settings=SandboxImageSettings(base_image=CUSTOM_BASE, ingress_port=18971))
+        self.assertIsNotNone(evidence)
+
+    def test_the_default_base_image_is_the_go_one(self) -> None:
+        version_go = Path(__file__).resolve().parents[2] / "internal" / "openshell" / "version.go"
+        if not version_go.is_file():
+            self.skipTest("Go sources are not next to this checkout")
+        match = re.search(r'DefaultBaseImage = "([^"]+)"', version_go.read_text(encoding="utf-8"))
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(DEFAULT_BASE_IMAGE, match.group(1))
+
+    def test_image_kinds_follow_the_driver(self) -> None:
+        self.assertEqual(image_kinds("linux", ""), (False, True))
+        self.assertEqual(image_kinds("linux", "vm"), (False, True))
+        self.assertEqual(image_kinds("linux", "auto"), (False, True))
+        self.assertEqual(image_kinds("linux", " Docker "), (False,))
+        self.assertEqual(image_kinds("darwin", ""), (True,))
+        self.assertEqual(image_kinds("darwin", "docker"), (False,))
+        self.assertEqual(image_kinds("win32", ""), ())
+
+    def test_linux_docker_driver_accepts_its_docker_image(self) -> None:
+        records = [claudecode_image(), claudecode_image(tag="vm", microvm=True, microvm_verified=True)]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_store(Path(tmp), records)
+            evidence = evidence_for(tmp, settings=SandboxImageSettings(ingress_port=18971, driver="docker"))
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertFalse(evidence.microvm)
 
     def test_accepts_a_microvm_verified_image_on_macos(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -62,6 +62,14 @@ SANDBOX_ONLY_CONTRACT_CONNECTORS = frozenset({"kiro", "omnigent"})
 # Sandbox hooks always fail closed (connector.SandboxFailMode).
 SANDBOX_FAIL_MODE = "closed"
 
+# Mirrors openshell.DefaultBaseImage (internal/openshell/version.go): the base
+# image.NewContext builds on when openshell.image.base is empty (GAP-0450).
+# cli/tests/test_sandbox_images.py ties the two together.
+DEFAULT_BASE_IMAGE = (
+    "ghcr.io/nvidia/openshell-community/sandboxes/base"
+    "@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e"
+)
+
 _IMAGE_VERSION_UNSAFE = re.compile(r"[^A-Za-z0-9.+_-]+")
 
 
@@ -102,13 +110,16 @@ def image_version(release: str) -> str:
 
 
 def image_kinds(platform_name: str, driver: str) -> tuple[bool, ...]:
-    """Which images (MicroVM or not) a sandbox on this platform can run."""
+    """Which images (MicroVM or not) a sandbox on this platform can run.
+
+    Mirrors Go sandboxEvidenceTargets: the docker driver runs no MicroVM
+    image; on Linux an unset, vm or auto driver may run either (GAP-0451).
+    """
+    docker = (driver or "").strip().lower() == "docker"
     if platform_name == "darwin":
-        if (driver or "").strip().lower() == "docker":
-            return (False,)
-        return (True,)
+        return (False,) if docker else (True,)
     if platform_name.startswith("linux"):
-        return (False, True)
+        return (False,) if docker else (False, True)
     return ()
 
 
@@ -186,7 +197,8 @@ def _same_inputs(
         return False
     if settings.harness_pin and str(record.get("harness_version", "") or "").strip() != settings.harness_pin:
         return False
-    if settings.base_image and str(record.get("base_image", "") or "") != settings.base_image:
+    # An empty setting builds on the default base, as image.NewContext does.
+    if str(record.get("base_image", "") or "") != (settings.base_image or DEFAULT_BASE_IMAGE):
         return False
     if settings.ingress_port and record.get("ingress_port") != settings.ingress_port:
         return False

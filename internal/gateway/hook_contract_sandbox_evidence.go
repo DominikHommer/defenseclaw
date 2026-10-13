@@ -120,7 +120,10 @@ func dockerImageID(ctx context.Context, tag string) (string, error) {
 // sandboxEvidenceTargets lists the image kinds (MicroVM or not) a sandbox
 // of this host can run: macOS runs the MicroVM driver only (unless the
 // docker driver is configured), Linux the docker driver or the MicroVM
-// driver. Other platforms run no OpenShell sandbox.
+// driver, and only the docker driver when enterprise.openshell.driver says
+// docker (GAP-0451; vm and auto may fall back to docker). Other platforms
+// run no OpenShell sandbox. cli/defenseclaw/sandbox_images.py image_kinds
+// mirrors it.
 func sandboxEvidenceTargets(cfg *config.Config, goos string) []bool {
 	switch goos {
 	case "darwin":
@@ -129,6 +132,9 @@ func sandboxEvidenceTargets(cfg *config.Config, goos string) []bool {
 		}
 		return []bool{true}
 	case "linux":
+		if strings.EqualFold(strings.TrimSpace(cfg.Enterprise.OpenShell.Driver), config.EnterpriseOpenShellDriverDocker) {
+			return []bool{false}
+		}
 		return []bool{false, true}
 	}
 	return nil

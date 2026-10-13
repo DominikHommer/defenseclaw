@@ -26,7 +26,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
+
+// TestHookFireMicroVMProbeParentIsTheDoctorsProbeDir: the doctor checks that
+// Docker shares openshell.HookFireProbeDir, so the builder must mount its
+// MicroVM probe files from that same directory (GAP-0452).
+func TestHookFireMicroVMProbeParentIsTheDoctorsProbeDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", "")
+	got, err := (&Builder{}).microVMProbeParent()
+	if err != nil {
+		t.Fatalf("microVMProbeParent: %v", err)
+	}
+	if want := openshell.HookFireProbeDir(); want == "" || got != want {
+		t.Fatalf("microVMProbeParent = %q, openshell.HookFireProbeDir = %q", got, want)
+	}
+}
 
 // resolutionMountSources returns the host paths bound over the MicroVM
 // scenario's name-resolution files.

@@ -1327,17 +1327,17 @@ func microVMMountRefused(err error) bool {
 }
 
 // microVMProbeParent returns the parent of the MicroVM scenario's mounted
-// files. The default is private and under the user's cache directory, which
-// container engines that share the user's home directory can see.
+// files. The default is openshell.HookFireProbeDir, private and under the
+// user's cache directory, which container engines that share the user's home
+// directory can see; the doctor checks that Docker shares the same directory.
 func (b *Builder) microVMProbeParent() (string, error) {
 	if b.TempDir != "" {
 		return b.TempDir, nil
 	}
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", fmt.Errorf("openshell image: hook-fire MicroVM scenario needs a home directory for its probe files: %w", err)
+	parent := openshell.HookFireProbeDir()
+	if parent == "" {
+		return "", errors.New("openshell image: hook-fire MicroVM scenario needs a home directory for its probe files: no user cache directory")
 	}
-	parent := filepath.Join(cache, "defenseclaw", "hookfire")
 	check := func() error {
 		info, err := os.Lstat(parent)
 		if err != nil {

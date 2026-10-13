@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,11 +46,16 @@ def gateway(tmp_path: Path) -> str:
 
 
 def _invoke(command, args, plan, listed):
+    run_patch = (
+        patch("subprocess.run", side_effect=listed)
+        if callable(listed)
+        else patch("subprocess.run", return_value=listed)
+    )
     with (
         patch.object(native, "prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
-        patch("subprocess.run", return_value=listed) as run,
+        run_patch as run,
         patch.object(cmd_uninstall, "_execute_plan") as execute,
     ):
         result = CliRunner().invoke(command, args)
@@ -113,8 +119,8 @@ def test_dry_run_says_a_real_run_would_stop(gateway: str) -> None:
     [
         # Only stopped sandboxes: nothing runs.
         _completed(stdout=json.dumps({"sandboxes": [_LISTED["sandboxes"][2]]})),
-        # The daemon cannot say: the teardown runs as before.
-        _completed(returncode=1, stderr="the sandbox daemon is not running"),
+        # Sandboxes are not supported here (exit 3): none can run.
+        _completed(returncode=3, stderr="✗ OpenShell sandboxes are not supported here"),
     ],
 )
 def test_no_running_sandbox_does_not_refuse(gateway: str, listed) -> None:
@@ -123,6 +129,120 @@ def test_no_running_sandbox_does_not_refuse(gateway: str, listed) -> None:
     assert result.exit_code == 0, result.output
     execute.assert_called_once()
     assert execute.call_args.args[0].running_sandboxes == ()
+
+
+def _list_then(listed, *, teardown_help=True):
+    """A subprocess.run fake: ``sandbox list`` answers *listed* (or raises it)."""
+
+    def fake_run(argv, **_):
+        if argv[-1] == "--help":
+            return _completed(stdout="Flags:\n  --keep-images\n") if teardown_help else _completed(returncode=1)
+        if isinstance(listed, BaseException):
+            raise listed
+        return listed
+
+    return fake_run
+
+
+# GAP-0448: a list that cannot answer is not "no sandbox runs".
+_UNANSWERED = {
+    "error exit": (
+        _completed(
+            returncode=1, stderr="✗ the sandbox daemon is not running; start it with `defenseclaw-gateway start`"
+        ),
+        "`sandbox list` failed: the sandbox daemon is not running",
+    ),
+    "timeout": (subprocess.TimeoutExpired(["defenseclaw-gateway"], 10), "did not answer within 10 seconds"),
+    "bad JSON": (_completed(stdout="{not json"), "printed no sandbox list"),
+    "JSON without a sandbox list": (_completed(stdout='{"enabled": true}'), "printed no sandbox list"),
+    "cannot run": (PermissionError(13, "Permission denied"), "could not run: Permission denied"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_UNANSWERED))
+def test_an_unanswered_sandbox_list_refuses_before_any_change(gateway: str, case: str) -> None:
+    listed, reason = _UNANSWERED[case]
+    plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=gateway)
+    result, execute, _ = _invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"], plan, _list_then(listed))
+    assert result.exit_code == 1, result.output
+    execute.assert_not_called()
+    out = _one_line(result.output)
+    assert "the sandbox list could not be read (" in out
+    assert reason in out
+    assert "a running sandbox may hold work never pulled back" in out
+    assert "nothing was changed" in out
+    assert "Run `defenseclaw sandbox list` to check" in out
+    assert "then run this command again, or add --stop-sandboxes" in out
+
+    # --stop-sandboxes still lets the teardown run.
+    result, execute, _ = _invoke(
+        cmd_uninstall.uninstall_cmd, ["--all", "--stop-sandboxes", "--yes"], plan, _list_then(listed)
+    )
+    assert result.exit_code == 0, result.output
+    execute.assert_called_once()
+    assert reason in execute.call_args.args[0].sandbox_list_error
+
+
+def test_an_unanswered_sandbox_list_refuses_reset_and_a_dry_run_says_so(gateway: str) -> None:
+    listed = _completed(returncode=1, stderr="✗ the sandbox daemon is not running")
+    plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=gateway)
+    result, execute, _ = _invoke(cmd_uninstall.reset_cmd, ["--yes"], plan, _list_then(listed))
+    assert result.exit_code == 1, result.output
+    execute.assert_not_called()
+    assert "the sandbox list could not be read" in _one_line(result.output)
+    result, execute, _ = _invoke(cmd_uninstall.uninstall_cmd, ["--dry-run"], plan, _list_then(listed))
+    assert result.exit_code == 0, result.output
+    execute.assert_not_called()
+    assert "a real run would stop before any change: the sandbox list could not be read" in _one_line(result.output)
+
+
+def test_an_unanswered_list_does_not_refuse_where_the_teardown_deletes_nothing(tmp_path: Path, gateway: str) -> None:
+    listed = _completed(returncode=1, stderr='✗ unknown command "list"')
+    # A gateway without `sandbox teardown` deletes no sandbox.
+    plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=gateway)
+    result, execute, _ = _invoke(cmd_uninstall.uninstall_cmd, ["--yes"], plan, _list_then(listed, teardown_help=False))
+    assert result.exit_code == 0, result.output
+    execute.assert_called_once()
+    # No gateway binary: nothing lists, nothing is deleted.
+    plan = cmd_uninstall.UninstallPlan(sandbox_teardown=True, gateway_path=str(tmp_path / "gone"))
+    result, execute, run = _invoke(cmd_uninstall.uninstall_cmd, ["--yes"], plan, _list_then(listed))
+    assert result.exit_code == 0, result.output
+    execute.assert_called_once()
+    run.assert_not_called()
+    # No sandbox state for the account: no list at all (today's behaviour).
+    plan = cmd_uninstall.UninstallPlan(sandbox_teardown=False, gateway_path=gateway)
+    result, execute, run = _invoke(cmd_uninstall.uninstall_cmd, ["--yes"], plan, _list_then(listed))
+    assert result.exit_code == 0, result.output
+    execute.assert_called_once()
+    run.assert_not_called()
+
+
+def test_every_phase_but_a_stopped_one_may_run() -> None:
+    # GAP-0449: error may still run its containers, stopping still runs its
+    # workload; an unknown or empty phase is not known to be stopped.
+    live = ["creating", "provisioning", "starting", "ready", "stopping", "deleting", "error", "unknown", "", "Ready"]
+    stopped = ["stopped", "completed", "deleted", "missing"]
+    rows = [{"name": f"live-{i}", "workdir_mode": "copy", "phase": phase} for i, phase in enumerate(live)]
+    rows += [{"name": f"stopped-{phase}", "workdir_mode": "copy", "phase": phase} for phase in stopped]
+    rows.append({"name": "no-phase", "workdir_mode": "mount"})
+    running = cmd_uninstall._running_sandboxes(rows)
+    assert {name for name, _ in running} == {f"live-{i}" for i in range(len(live))} | {"no-phase"}
+
+
+def test_plan_names_an_unanswered_sandbox_list() -> None:
+    for stop, want in (
+        (False, "this run stops before any change; check with `defenseclaw sandbox list`, or add --stop-sandboxes"),
+        (True, "any running sandbox is stopped and deleted (--stop-sandboxes)"),
+    ):
+        plan = cmd_uninstall.UninstallPlan(
+            sandbox_teardown=True, sandbox_list_error="`sandbox list` failed: boom", stop_sandboxes=stop
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        out = _one_line(buf.getvalue())
+        assert "the sandbox list could not be read (`sandbox list` failed: boom)" in out
+        assert want in out
 
 
 def test_skipped_teardown_does_not_list_or_refuse(gateway: str) -> None:
