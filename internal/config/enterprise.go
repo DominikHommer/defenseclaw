@@ -852,6 +852,9 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	if cfg.StandaloneEnterprise() {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
+		if !cfg.openShellPackDirDeclared {
+			standaloneOpenShellPackDirDefault(cfg, cfg.DataDir)
+		}
 	}
 	if err := validateEnterpriseConfig(cfg); err != nil {
 		return enterpriseSettingError(err)
@@ -1052,6 +1055,49 @@ func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 		}
 	}
 	cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+}
+
+// standaloneOpenShellPackDirDefault moves the loader's implicit sandbox
+// packs folder (<data_dir>/policies/sandbox, which the standalone gateway
+// service can write) to <policy_dir>/sandbox: the administrator-owned folder
+// ensure and verify check (enterpriseunix sandboxPackDir), the docs stage
+// packs in, and validateManagedSandboxPack requires a custom required pack
+// to be in (GAP-0099). Callers keep an explicit openshell.pack_dir. A host
+// upgraded from a release that read its packs from the old folder keeps
+// reading them there while that folder holds entries and <policy_dir>/sandbox
+// is known to be absent, so an upgrade loses no staged pack;
+// OpenShellPackDirAdvisory asks the administrator to move them.
+func standaloneOpenShellPackDirDefault(cfg *Config, dataDir string) {
+	cfg.legacyOpenShellPackDir = ""
+	implicit := filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+	policyDir := strings.TrimSpace(cfg.PolicyDir)
+	if policyDir == "" || filepath.Clean(strings.TrimSpace(cfg.OpenShell.PackDir)) != implicit {
+		return
+	}
+	packDir := filepath.Join(filepath.Clean(policyDir), DefaultOpenShellPackDirName)
+	if packDir == implicit {
+		return
+	}
+	if entries, err := os.ReadDir(implicit); err == nil && len(entries) > 0 {
+		if _, err := os.Lstat(packDir); errors.Is(err, fs.ErrNotExist) {
+			cfg.legacyOpenShellPackDir = implicit
+			return
+		}
+	}
+	cfg.OpenShell.PackDir = packDir
+}
+
+// OpenShellPackDirAdvisory is the status and verify warning of a managed
+// standalone host that still reads its sandbox packs from the folder releases
+// before 1.0.2 used (standaloneOpenShellPackDirDefault), or "".
+func (c *Config) OpenShellPackDirAdvisory() string {
+	if c == nil || c.legacyOpenShellPackDir == "" {
+		return ""
+	}
+	packDir := filepath.Join(c.PolicyDir, DefaultOpenShellPackDirName)
+	return fmt.Sprintf("the sandbox packs are read from %s, their folder before 1.0.2, because %s does not exist; "+
+		"move them to %s (root and the DefenseClaw service group, folders 0750, files 0640): the gateway reads it once it exists, "+
+		"and ensure and verify check it", c.legacyOpenShellPackDir, packDir, packDir)
 }
 
 // standalonePolicyDirDefault clears a Windows standalone policy_dir that

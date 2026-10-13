@@ -278,6 +278,13 @@ type Config struct {
 	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
 	// never rewrites an explicit value. Set only by the loader.
 	rulePackDirDeclared bool
+	// openShellPackDirDeclared records that the config source sets
+	// openshell.pack_dir, which the standalone sandbox packs default never
+	// rewrites; legacyOpenShellPackDir is the pre-1.0.2 default folder a
+	// standalone host still reads its packs from
+	// (standaloneOpenShellPackDirDefault). Set only by the loader.
+	openShellPackDirDeclared bool
+	legacyOpenShellPackDir   string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -2685,6 +2692,9 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 	if !has("openshell", "pack_dir") {
 		candidate.OpenShell.PackDir = filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+		if candidate.StandaloneEnterprise() {
+			standaloneOpenShellPackDirDefault(candidate, dataDir)
+		}
 	}
 	if !has("gateway", "device_key_file") {
 		candidate.Gateway.DeviceKeyFile = filepath.Join(dataDir, "device.key")
@@ -2791,6 +2801,7 @@ func loadConfigSourceChecked(
 	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
