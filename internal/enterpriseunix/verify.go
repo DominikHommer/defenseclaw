@@ -652,6 +652,12 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 				problems = append(problems, fmt.Sprintf("%s is writable by group or other (%04o), so another account could replace it; restore it with `chmod 0755 %s` or reinstall the package", path, perm, path))
 			} else if uid != 0 {
 				problems = append(problems, fmt.Sprintf("%s is owned by uid %d, not root, so that account could replace it; restore it with `chown 0 %s` or reinstall the package", path, uid, path))
+			} else if managedExecutable(filepath.Base(path)) && perm&0o111 != 0o111 {
+				// Only the hook binary's execute bits were checked, so a sensor
+				// helper (or gateway) that lost them stayed healthy in verify and
+				// detect.sh --require-healthy until its service restarted and
+				// could not start it (GAP-1235, GAP-1285).
+				problems = append(problems, fmt.Sprintf("%s is not executable (%04o), so its service cannot start it again; restore it with `chmod 0755 %s` or reinstall the package", path, perm, path))
 			}
 		case path == e.Layout.ConfigPath:
 			if perm != 0o640 || uid != 0 || gid != record.ServiceGID {
@@ -662,6 +668,16 @@ func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip st
 		}
 	}
 	return problems
+}
+
+// managedExecutable reports the programs the deployment installs in BinDir,
+// which every account (the services, the agents running the hook) executes.
+func managedExecutable(name string) bool {
+	switch name {
+	case binGateway, binHook, binSensorHelper, binACP:
+		return true
+	}
+	return false
 }
 
 // lifecycleCommand is the administrator command line for a lifecycle
