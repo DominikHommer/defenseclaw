@@ -772,3 +772,34 @@ func TestRefusedUninstallLoadsASpawnScheduledJobAgain(t *testing.T) {
 		t.Fatalf("the refused uninstall left the spawn-scheduled gateway job unloaded; calls: %v", h.services.calls)
 	}
 }
+
+// GAP-1140: a remove-all failure that names no registration (an unreadable
+// eligible-accounts file) was only a warning, so the uninstall removed the
+// binaries the registrations it could not check may still call. It keeps
+// them, as for a named registration, and the rerun finishes.
+func TestUninstallKeepsTheBinariesWhenRegistrationsWereNotChecked(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	unchecked := true
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		if unchecked {
+			return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["eligible accounts: open unix_eligible_accounts.json: permission denied"]}`)}, errors.New("exit 1")
+		}
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}}
+	failed := h.run(Options{Action: ActionUninstall})
+	requireError(t, failed, codePerUserHooks)
+	requireError(t, failed, codeUninstallIncomplete)
+	if got := messagesOf(failed.Errors, codePerUserHooks); !strings.Contains(got, "were not checked: eligible accounts") {
+		t.Fatalf("the uninstall does not name the unchecked registrations: %s", got)
+	}
+	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	if !exists(gateway) || !exists(h.env.deploymentPath()) {
+		t.Fatal("the uninstall removed the binaries while registrations were not checked")
+	}
+	unchecked = false
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if exists(gateway) || exists(h.env.deploymentPath()) {
+		t.Fatal("the rerun did not finish the removal")
+	}
+}

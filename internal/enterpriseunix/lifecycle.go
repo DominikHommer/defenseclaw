@@ -3322,8 +3322,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
 			// A check that names no registration (an unreadable eligible
-			// accounts file, say) does not hold up the uninstall.
-			r.AddWarning(codePerUserHooks, "some per-user hook registrations were not checked: "+entry)
+			// accounts file, say) says registrations may be left, which
+			// call the binaries: they stay, as for a named one. The precheck
+			// refuses such a report before anything changes; one here was
+			// only a warning, and the binaries went (GAP-1140).
+			r.AddError(codePerUserHooks, "some per-user hook registrations were not checked: "+entry+"; fix the cause and rerun "+rerun)
+			left = true
 			continue
 		}
 		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
