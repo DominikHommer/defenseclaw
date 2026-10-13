@@ -322,20 +322,23 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 			return mgr.EgressUnblock(b.ID, b.SandboxName, host)
 		},
 		EgressRefusals: func(b sandboxauth.Binding) []SandboxEgressRefusal {
-			refused := mgr.EgressRefusals(b.ID, b.SandboxName)
-			if len(refused) == 0 {
-				return nil
-			}
-			out := make([]SandboxEgressRefusal, 0, len(refused))
-			for _, r := range refused {
-				out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
-					Cut: r.Cut, Sent: r.Sent, Note: r.Note})
-			}
-			return out
+			return sandboxEgressRefusalsOf(mgr.EgressRefusals(b.ID, b.SandboxName))
 		},
 	}
 	if opts.Managed {
 		ingress.Relay, ingress.Registration, ingress.OnGeneration = opts.Relay, deps.registration, deps.onGeneration
+		// The managed gateway tells the agent (#1192): the daemon sends the
+		// untold refusals with each hook call and marks the ones it told.
+		ingress.EgressRefusals = func(b sandboxauth.Binding) []SandboxEgressRefusal {
+			return sandboxEgressRefusalsOf(mgr.PendingEgressRefusals(b.ID, b.SandboxName))
+		}
+		ingress.EgressRefusalsTold = func(b sandboxauth.Binding, told []SandboxEgressRefusal) {
+			out := make([]manager.EgressRefusal, 0, len(told))
+			for _, r := range told {
+				out = append(out, manager.EgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, Note: r.Note})
+			}
+			mgr.EgressRefusalsTold(b.ID, b.SandboxName, out)
+		}
 	}
 	if err := api.SetSandboxIngress(ingress); err != nil {
 		return nil, err
@@ -435,6 +438,20 @@ func (rt *sandboxRuntime) run(ctx context.Context, serveAPI func(context.Context
 	rt.api.SetSandboxController(nil)
 	rt.health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// sandboxEgressRefusalsOf is the manager's refusals as the ingress tells
+// them.
+func sandboxEgressRefusalsOf(refused []manager.EgressRefusal) []SandboxEgressRefusal {
+	if len(refused) == 0 {
+		return nil
+	}
+	out := make([]SandboxEgressRefusal, 0, len(refused))
+	for _, r := range refused {
+		out = append(out, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, What: r.What, Remedy: r.Remedy,
+			Cut: r.Cut, Sent: r.Sent, Note: r.Note})
+	}
+	return out
 }
 
 // listenerLost handles the loss of the sandbox listener part (ingress or

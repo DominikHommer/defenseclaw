@@ -472,6 +472,9 @@ type HookDecision struct {
 	Reason      string `json:"reason,omitempty"`
 	ModelError  string `json:"model_error,omitempty"`
 	ModelStatus int    `json:"model_status,omitempty"`
+	// EgressTold reports that the answer told the agent of the call's
+	// EgressRefusalsHeader refusals; the daemon then marks them told.
+	EgressTold bool `json:"egress_told,omitempty"`
 }
 
 // StateReport is POST registrations/{id}/state: whether the daemon sees the

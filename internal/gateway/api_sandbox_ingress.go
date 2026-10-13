@@ -158,8 +158,15 @@ type SandboxIngressConfig struct {
 	// of, and marks them told. The post-tool hook of a shell or fetch tool
 	// call adds them to its context (addSandboxEgressRefusals): the 403
 	// body of a refused CONNECT never reaches the agent. Nil tells nothing.
-	// It runs on the request goroutine and must not block.
+	// It runs on the request goroutine and must not block. In forwarding
+	// mode it must not mark them told: the forwarder sends them with each
+	// hook call (sandboxrelay.EgressRefusalsHeader), the managed gateway
+	// tells the agent, and EgressRefusalsTold marks the ones its answer
+	// told of.
 	EgressRefusals func(binding sandboxauth.Binding) []SandboxEgressRefusal
+	// EgressRefusalsTold marks told, in forwarding mode, the refusals the
+	// managed gateway's answer told the agent of. It must not block.
+	EgressRefusalsTold func(binding sandboxauth.Binding, told []SandboxEgressRefusal)
 	// OnHookFailure observes every authenticated hook or inspect post the
 	// ingress answered with a status outside 2xx. Sandbox hooks fail closed
 	// on such an answer, so the harness did not do what the hook was about.
@@ -255,6 +262,8 @@ type sandboxIngressState struct {
 	// egressRefusals is the manager's refusal lookup
 	// (SandboxIngressConfig.EgressRefusals).
 	egressRefusals func(sandboxauth.Binding) []SandboxEgressRefusal
+	// egressRefusalsTold is SandboxIngressConfig.EgressRefusalsTold.
+	egressRefusalsTold func(sandboxauth.Binding, []SandboxEgressRefusal)
 	// relay, registration and onGeneration are forwarding mode
 	// (SandboxIngressConfig.Relay).
 	relay        sandboxrelay.Client
@@ -313,8 +322,10 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		egressUnblock:  cfg.EgressUnblock,
 		egressRefusals: cfg.EgressRefusals,
 		relay:          cfg.Relay,
-		registration:   cfg.Registration,
-		onGeneration:   cfg.OnGeneration,
+
+		egressRefusalsTold: cfg.EgressRefusalsTold,
+		registration:       cfg.Registration,
+		onGeneration:       cfg.OnGeneration,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -1090,6 +1101,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		switch route {
 		case sandboxauth.RouteHook:
 			call.Class, call.Target = sandboxrelay.RouteHook, binding.Connector
+			call.EgressRefusals = relayEgressRefusals(ctx, st, binding, body)
 		case sandboxauth.RouteNotify:
 			call.Class, call.Target = sandboxrelay.RouteNotify, binding.Connector
 		case sandboxauth.RouteInspect:
@@ -1113,6 +1125,14 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 				st.onGeneration(g)
 			}
 		}
+		if resp.Status >= 200 && resp.Status <= 299 && resp.Decision != nil && resp.Decision.EgressTold &&
+			len(call.EgressRefusals) > 0 && st.egressRefusalsTold != nil {
+			told := make([]SandboxEgressRefusal, 0, len(call.EgressRefusals))
+			for _, r := range call.EgressRefusals {
+				told = append(told, SandboxEgressRefusal{Host: r.Host, Port: r.Port, Category: r.Category, Note: r.Note})
+			}
+			st.egressRefusalsTold(binding, told)
+		}
 		w.WriteHeader(resp.Status)
 		_, _ = w.Write(resp.Body)
 		if resp.Status < 200 || resp.Status > 299 || resp.Decision == nil || st.onHookDecision == nil {
@@ -1126,6 +1146,27 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
 		})
 	})
+}
+
+// relayEgressRefusals are the refusals a relayed hook call carries: the
+// ones the sandbox's agent has not been told of (the daemon's egress proxy
+// made them, so only the daemon knows them; #1192), bounded for the
+// header. A call whose payload names a refused direct connection waits for
+// OpenShell's record of it, like a local sandbox ingress's post-tool hook
+// (awaitSandboxDirectRefusal), when the connector's agent reads post-tool
+// context at all.
+func relayEgressRefusals(ctx context.Context, st *sandboxIngressState, binding sandboxauth.Binding, body []byte) []sandboxrelay.EgressRefusal {
+	if st.egressRefusals == nil || st.egressRefusalsTold == nil {
+		return nil
+	}
+	refusals := st.egressRefusals(binding)
+	if len(postToolContextEvents[binding.Connector]) > 0 {
+		refusals = awaitSandboxDirectRefusal(ctx, body, refusals, func() []SandboxEgressRefusal { return st.egressRefusals(binding) })
+	}
+	if len(refusals) == 0 {
+		return nil
+	}
+	return sandboxrelay.FitEgressRefusals(sandboxRelayWireRefusals(refusals))
 }
 
 // writeSandboxRelayError answers a call the relay could not complete: a
