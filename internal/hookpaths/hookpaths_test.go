@@ -165,11 +165,11 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		{"ln \"$SRC\" notes.txt; echo k >> notes.txt", "notes.txt", ""},
 		{"python3 -c \"import os; os.link('a', 'notes.txt')\"; echo k >> notes.txt", "notes.txt", ""},
 		{"echo k >> notes.txt", "notes.txt", notes},
-		// A multicall binary runs its applet; archive and sync tools that
-		// link files make the write targets unknown (GAP-1521).
+		// A multicall binary and its launcher use the applet's operands.
+		// Archive and sync commands with unknown members remain unresolved.
 		{"busybox ln ~/.ssh/autho\"\"rized_keys n1.txt && echo k >> n1.txt", "n1.txt", keys},
 		{"toybox ln -s ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
-		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", ""},
+		{"sudo busybox ln ~/.ssh/authorized_keys n1.txt; echo k >> n1.txt", "n1.txt", keys},
 		{"rsync -a --link-dest=$HOME/.ssh $HOME/.ssh/ d/; echo k >> d/autho\"\"rized_keys", "d/authorized_keys", ""},
 		{"rsync -aH ~/.ssh/ d/; echo k >> d/authorized_keys", "d/authorized_keys", ""},
 		{"ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/n1.txt", "d/n1.txt", ""},

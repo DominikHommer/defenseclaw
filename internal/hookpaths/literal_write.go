@@ -26,10 +26,7 @@ var (
 // interpreter, awk program, or sed in-place command. The shell and gateway
 // call this same extractor before resolving each operand through links.
 func LiteralWriteOperands(command, cwd, home string) (operands []string) {
-	file, ok := parseShell(command)
-	if !ok {
-		return nil
-	}
+	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	add := func(name, base string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
 			return
@@ -39,19 +36,62 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		}
 		operands = append(operands, OperandPath(name, base))
 	}
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
-			cmdCWD, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
-			if ok {
-				for _, name := range literalInterpreterWrites(code) {
-					add(name, cmdCWD)
+	for _, context := range contexts {
+		cwd := context.cwd
+		syntax.Walk(context.file, func(node syntax.Node) bool {
+			if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
+				cmdCWD, code, ok := literalPipelineInterpreterInput(pipe, command, cwd, home)
+				if ok {
+					for _, name := range literalInterpreterWrites(code) {
+						add(name, cmdCWD)
+					}
 				}
+				return true
 			}
-			return true
-		}
-		if stmt, ok := node.(*syntax.Stmt); ok {
-			call, ok := stmt.Cmd.(*syntax.CallExpr)
+			if stmt, ok := node.(*syntax.Stmt); ok {
+				call, ok := stmt.Cmd.(*syntax.CallExpr)
+				if !ok || len(call.Args) == 0 {
+					return true
+				}
+				cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
+				if !ok || len(programWords) == 0 {
+					return true
+				}
+				program := programBase(programWords[0])
+				if !literalInterpreterProgram(program) || !literalReadsStdin(programWords) {
+					return true
+				}
+				for _, redirect := range stmt.Redirs {
+					if (redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc) || redirect.Hdoc == nil {
+						continue
+					}
+					start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
+					if start < 0 || end > len(command) || end <= start {
+						continue
+					}
+					for _, name := range literalInterpreterWrites(command[start:end]) {
+						add(name, cmdCWD)
+					}
+				}
+				for _, redirect := range stmt.Redirs {
+					if redirect.Op != syntax.WordHdoc || redirect.Word == nil {
+						continue
+					}
+					code, static := staticShellWordWithVars(redirect.Word, home, nil, shellVariablePoison{})
+					if !static {
+						continue
+					}
+					for _, name := range literalInterpreterWrites(code) {
+						add(name, cmdCWD)
+					}
+				}
+				return true
+			}
+			call, ok := node.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			if context.handled[int(call.Pos().Offset())] {
 				return true
 			}
 			cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
@@ -59,91 +99,51 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 				return true
 			}
 			program := programBase(programWords[0])
-			if !literalInterpreterProgram(program) || !literalReadsStdin(programWords) {
-				return true
-			}
-			for _, redirect := range stmt.Redirs {
-				if (redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc) || redirect.Hdoc == nil {
-					continue
+			switch {
+			case literalInterpreterProgram(program):
+				for i := 1; i+1 < len(programWords); i++ {
+					if programWords[i] == "-c" || programWords[i] == "-e" {
+						for _, name := range literalInterpreterWrites(programWords[i+1]) {
+							add(name, cmdCWD)
+						}
+						break
+					}
 				}
-				start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
-				if start < 0 || end > len(command) || end <= start {
-					continue
+			case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
+				for _, arg := range programWords[1:] {
+					if strings.Contains(arg, "{") {
+						for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
+							add(match[1], cmdCWD)
+						}
+					}
 				}
-				for _, name := range literalInterpreterWrites(command[start:end]) {
-					add(name, cmdCWD)
-				}
-			}
-			for _, redirect := range stmt.Redirs {
-				if redirect.Op != syntax.WordHdoc || redirect.Word == nil {
-					continue
-				}
-				code, static := staticShellWordWithVars(redirect.Word, home, nil, shellVariablePoison{})
-				if !static {
-					continue
-				}
-				for _, name := range literalInterpreterWrites(code) {
-					add(name, cmdCWD)
-				}
-			}
-			return true
-		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		cmdCWD, programWords, ok := literalProgramWords(call, cwd, home)
-		if !ok || len(programWords) == 0 {
-			return true
-		}
-		program := programBase(programWords[0])
-		switch {
-		case literalInterpreterProgram(program):
-			for i := 1; i+1 < len(programWords); i++ {
-				if programWords[i] == "-c" || programWords[i] == "-e" {
-					for _, name := range literalInterpreterWrites(programWords[i+1]) {
+			case program == "sed" || program == "gsed":
+				for _, name := range sedInPlaceFiles(programWords) {
+					if sedFollowsInPlaceLinks(programWords) || sedParentProtected(name, cmdCWD, home) {
 						add(name, cmdCWD)
 					}
-					break
 				}
 			}
-		case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
-			for _, arg := range programWords[1:] {
-				if strings.Contains(arg, "{") {
-					for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
-						add(match[1], cmdCWD)
-					}
-				}
-			}
-		case program == "sed" || program == "gsed":
-			for _, name := range sedInPlaceFiles(programWords) {
-				if sedFollowsInPlaceLinks(programWords) || sedParentProtected(name, cmdCWD, home) {
-					add(name, cmdCWD)
-				}
-			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 	return operands
 }
 
 func literalProgramWords(call *syntax.CallExpr, cwd, home string) (string, []string, bool) {
 	words := make([]string, len(call.Args))
+	staticWords := make([]bool, len(call.Args))
 	for i, arg := range call.Args {
-		var static bool
-		words[i], static = staticShellWordWithVars(arg, home, nil, shellVariablePoison{})
-		if !static {
-			return cwd, nil, false
+		words[i], staticWords[i] = staticShellWordWithVars(arg, home, nil, shellVariablePoison{})
+		if !staticWords[i] {
+			words[i] = launcherAssignmentPrefix(arg)
 		}
 	}
-	cmdCWD, words, ok := envCommandWords(words, cwd)
-	if !ok {
+	resolved := resolveLauncherWords(words, staticWords, cwd)
+	if !resolved.ok || resolved.noExec || !allStatic(resolved.static) {
 		return cwd, nil, false
 	}
-	for len(words) > 1 && (programBase(words[0]) == "busybox" || programBase(words[0]) == "toybox") {
-		words = words[1:]
-	}
-	return cmdCWD, words, true
+	return resolved.cwd, resolved.words, true
 }
 
 func literalInterpreterProgram(program string) bool {
@@ -241,22 +241,18 @@ func SedReplacedOperands(command, cwd, home string) map[string]bool {
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
-		words := make([]string, len(call.Args))
-		for i, arg := range call.Args {
-			var static bool
-			words[i], static = StaticWord(arg, home)
-			if !static {
-				return true
-			}
+		cmdCWD, words, known := literalProgramWords(call, cwd, home)
+		if !known || len(words) == 0 {
+			return true
 		}
 		if (programBase(words[0]) == "sed" || programBase(words[0]) == "gsed") &&
 			!sedFollowsInPlaceLinks(words) {
 			for _, name := range sedInPlaceFiles(words) {
 				if !filepath.IsAbs(name) {
-					if !filepath.IsAbs(cwd) {
+					if !filepath.IsAbs(cmdCWD) {
 						continue
 					}
-					name = OperandPath(name, cwd)
+					name = OperandPath(name, cmdCWD)
 				}
 				parent, ok := ResolveWriteTarget(rawParent(name))
 				if !ok {

@@ -884,6 +884,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if dynamicUnknown && truncated {
 			return true
 		}
+		if dynamicUnknown && hookpaths.NestedShellDynamicWrite(input.Command, input.CWD, input.ActiveHome) {
+			return true
+		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
 			if writeTarget(operand, safe, false) {
