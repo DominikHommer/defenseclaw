@@ -56,7 +56,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   checks first, as `run` does, that the daemon serves sandboxes.
 - **Harness names.** A harness can be named by the command you type
   (`claude`, `codex`, `opencode`, `copilot`, `kiro-cli-chat`, `hermes`,
-  `openhands`, `omnigent`, `agy`, `amp`, `cursor-agent`, `devin`), by its
+  `agy`, `amp`, `cursor-agent`, `devin`), by its
   connector name (`claudecode`, `kiro`, `antigravity`), or by its display name.
   Help and hints name Kiro and Antigravity by their connector names, as
   `image build` and `image list` do. Setup and the image commands default to `openshell.harnesses`, and then to
@@ -81,7 +81,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
   `0` but not one of the session's hooks reached DefenseClaw, so that every
   tool call was blocked, `run` and `connect` exit `69`. A harness that sends
   its first hook only with your first prompt (Kiro CLI, Hermes Agent,
-  Antigravity, OpenHands, OmniGent, GitHub Copilot CLI) and was never
+  Antigravity, GitHub Copilot CLI) and was never
   prompted is not counted, unless the daemon saw it work without hooks.
   Neither is an interactive session given harness arguments after `--`
   that may start no session (`connect NAME -- --version`), unless the
@@ -709,12 +709,13 @@ A kept sandbox's resume line is followed, last, by the command that
 continues the same conversation inside the sandbox, for every harness that
 can continue one:
 
+OpenHands and OmniGent are deprecated and are omitted from the resume examples.
+
 | Harness | Continue with |
 | --- | --- |
-| Claude Code, OpenCode, GitHub Copilot CLI, Hermes Agent, OmniGent | `defenseclaw sandbox connect myapp-7f3a -- --continue` |
+| Claude Code, OpenCode, GitHub Copilot CLI, Hermes Agent | `defenseclaw sandbox connect myapp-7f3a -- --continue` |
 | Codex | `defenseclaw sandbox connect myapp-7f3a -- resume --last` |
 | Kiro CLI | `defenseclaw sandbox connect myapp-7f3a -- --resume` |
-| OpenHands | `defenseclaw sandbox connect myapp-7f3a -- --resume --last` |
 | Antigravity | `defenseclaw sandbox connect myapp-7f3a -- -c` |
 
 A plain `connect` starts a new conversation. To resume a particular
@@ -723,8 +724,8 @@ conversation, pass the harness's own flag and ID after `--`:
 
 The resume line the harness itself prints as it exits (`claude --resume
 <id>`, `codex resume <id>`, `opencode -s <id>`, `copilot --resume=<id>`,
-`kiro-cli --resume-id <id>`, `hermes --resume <id>`, `openhands --resume
-<id>`, `omnigent run … --resume <id>`, `agy --conversation=<id>`) works only
+`kiro-cli --resume-id <id>`, `hermes --resume <id>`,
+`agy --conversation=<id>`) works only
 inside the sandbox, where the conversation is. Typed on this machine it does
 not reach it, unless the shell wrapper is on (`sandbox enable`) for that
 command, which sends it into the folder's sandbox. DefenseClaw cannot keep
@@ -767,8 +768,7 @@ one, prints its line only after a prompt.
 - the banner's model line.
 
 Secret values are never kept. The options stop at the first word that is
-not one, except for OmniGent, whose every argument is kept in order (the
-agent path included), an OpenCode project path, and Hermes's `chat`.
+not one, except for an OpenCode project path and Hermes's `chat`.
 `connect`, and a shell wrapper's resume, pass those options again before
 any new ones, and show the same Model and Secret lines as the run.
 
@@ -852,9 +852,7 @@ A few rules the flags follow:
   required pack that works on copies), `run` says so before it copies.
 - In a safe run (`--safe`, or a policy that keeps the prompts), harness
   arguments that would turn the prompts off are dropped with a warning that
-  names the organization when the policy is its. OmniGent has no
-  skip-permissions switch: its banner shows that its approvals come from its
-  own policies, DefenseClaw's included.
+  names the organization when the policy is its.
 - A folder that can't be mounted live (a linked git worktree, a git
   directory outside it) runs on a copy, with one line saying why.
 - A copy larger than `openshell.workdir.max_upload_mb` (500 MB by default)
