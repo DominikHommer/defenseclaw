@@ -417,6 +417,13 @@ func (s *session) watchNotices(ctx context.Context) func() {
 			s.checkHooksAfter(ctx, s.app.hookWindow())
 		}()
 	}
+	if s.sb.WorkdirMode == config.OpenShellWorkdirCopy && createdDriver(*s.sb) == string(openshell.DriverVM) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.watchOverlayDisk(ctx)
+		}()
+	}
 	return func() {
 		cancel()
 		wg.Wait()
@@ -1477,9 +1484,7 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	if !stopped {
 		switch {
 		case s.diskFull:
-			a.note("Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
-				"free some space in it (`" + CommandName + " exec " + name + " -- df -h /` shows it; `" + CommandName + " connect " + name +
-				" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + "`; stop it after that: `" + CommandName + " stop " + name + "`")
+			a.note(fullDiskKeepText(name))
 			return nil
 		case s.liveRun:
 			a.note("Sandbox " + name + " keeps running: its detached run is still going → follow: " + CommandName + " logs " + name + " -f   stop: " +
@@ -1882,6 +1887,41 @@ func (s *session) printAsks(sb *sandboxapi.Sandbox) {
 	a := s.app
 	a.println(a.style("? "+plural(int64(sb.PendingApprovals), "ask is", "asks are")+" still waiting for you → "+
 		CommandName+" approvals --sandbox "+sb.Name, ansiYellow))
+}
+
+// fullDiskKeepText is why the copy-mode MicroVM name keeps running, at the
+// end of a session and at `sandbox stop`, while its own disk is full, and
+// what to do first.
+func fullDiskKeepText(name string) string {
+	return "Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
+		"free some space in it (`" + CommandName + " exec " + name + " -- df -h /` shows it; `" + CommandName + " connect " + name +
+		" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + "`; stop it after that: `" + CommandName + " stop " + name + "`"
+}
+
+// overlayDiskEvery paces the session's look at its MicroVM's own disk
+// (watchOverlayDisk); tests shorten it.
+var overlayDiskEvery = 2 * time.Minute
+
+// watchOverlayDisk looks at the own disk of the session's copy-mode
+// MicroVM every overlayDiskEvery and says once, while the session runs,
+// that it is full or filling: a write that fails there said nothing before
+// the end of the session (#1148). A look that does not answer is tried
+// again at the next tick.
+func (s *session) watchOverlayDisk(ctx context.Context) {
+	t := time.NewTicker(overlayDiskEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if disk := s.app.overlayDiskOf(ctx, s.cli, s.sb.Name); disk.filling() {
+			text := "⚠ " + overlayDiskFillingText(s.sb.Name, disk, true)
+			s.notice("overlay disk", text, text)
+			return
+		}
+	}
 }
 
 // endCopy pulls a copy-mode sandbox's work and asks where it goes.
