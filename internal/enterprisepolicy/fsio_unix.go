@@ -14,6 +14,7 @@ package enterprisepolicy
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -414,14 +417,116 @@ const linuxAccessACLXattr = "system.posix_acl_access"
 
 var publishedACLReader posixacl.Reader = posixacl.System
 
-var clearPublishedDirACL = func(path string) error {
-	if runtime.GOOS == "linux" {
-		if err := unix.Removexattr(path, linuxAccessACLXattr); err != nil && !errors.Is(err, unix.ENODATA) {
+// removeDarwinACLEntry removes the macOS ACL entry at index from path.
+var removeDarwinACLEntry = func(path string, index int) error {
+	return exec.Command("/bin/chmod", "-h", "-a#", strconv.Itoa(index), path).Run()
+}
+
+// writeLinuxAccessACL replaces the POSIX access ACL of path with acl.
+var writeLinuxAccessACL = func(path string, acl posixacl.View) error {
+	return unix.Setxattr(path, linuxAccessACLXattr, linuxAccessACLData(acl), 0)
+}
+
+// clearPublishedDirACL takes away only what keeps users from passing dir,
+// the publishedDirs entry at index, and keeps every other ACL entry: an
+// administrator's unrelated entries on a vendor directory survived no
+// repair, since the whole ACL went (`chmod -N`, or the Linux access ACL
+// removed; GAP-1323). On macOS it removes each entry that denies search
+// (or list, on the drop-in directory), highest index first so the lower
+// indexes stay valid. On Linux it rewrites the access ACL with the missing
+// access added to each entry without it and to the mask.
+var clearPublishedDirACL = func(opts Options, dir string, index int) error {
+	want := uint16(publishedDirAccess(index))
+	if opts.goos() == "linux" {
+		info, err := os.Lstat(dir)
+		if err != nil {
 			return err
 		}
-		return nil
+		acl, err := publishedACLReader.Read(dir, info.Mode())
+		if err != nil {
+			return err
+		}
+		if acl.Denied(want) == "" {
+			return nil
+		}
+		if len(acl.Users)+len(acl.Groups) == 0 && !hasLinuxAccessACL(dir) {
+			// The mode bits are the whole ACL (getfacl prints them as one):
+			// the chmod of the repair gives the access.
+			return nil
+		}
+		return writeLinuxAccessACL(dir, grantPublishedDirAccess(acl, want))
 	}
-	return exec.Command("/bin/chmod", "-h", "-N", path).Run()
+	entries, err := publishedDirACLEntries(dir)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(entries, func(i, j int) bool { return entries[i].Index > entries[j].Index })
+	for _, entry := range entries {
+		if entry.DeniesDirectoryAccess(index == 0) {
+			if err := removeDarwinACLEntry(dir, entry.Index); err != nil {
+				return fmt.Errorf("remove ACL entry %d (%s): %w", entry.Index, entry.Text, err)
+			}
+		}
+	}
+	return nil
+}
+
+// hasLinuxAccessACL reports whether path has an extended POSIX access ACL.
+func hasLinuxAccessACL(path string) bool {
+	_, err := unix.Getxattr(path, linuxAccessACLXattr, nil)
+	return err == nil
+}
+
+// grantPublishedDirAccess is acl with want added to the owning group entry,
+// each named entry and the mask; the owner, other and the rest of each
+// entry's permissions stay.
+func grantPublishedDirAccess(acl posixacl.View, want uint16) posixacl.View {
+	out := acl
+	out.Present = true
+	out.Group |= want
+	out.Mask |= want
+	out.Users = append([]posixacl.Entry(nil), acl.Users...)
+	out.Groups = append([]posixacl.Entry(nil), acl.Groups...)
+	for i := range out.Users {
+		out.Users[i].Perm |= want
+	}
+	for i := range out.Groups {
+		out.Groups[i].Perm |= want
+	}
+	return out
+}
+
+// linuxAccessACLData encodes acl as the system.posix_acl_access value: the
+// version, then the entries in the order the kernel requires (owner, named
+// users by id, owning group, named groups by id, mask, other). A mask is
+// written only with named entries; without them the kernel keeps the ACL
+// as the mode bits.
+func linuxAccessACLData(acl posixacl.View) []byte {
+	const undefinedID = 0xffffffff
+	data := binary.LittleEndian.AppendUint32(nil, 2)
+	add := func(tag, perm uint16, id uint32) {
+		data = binary.LittleEndian.AppendUint16(data, tag)
+		data = binary.LittleEndian.AppendUint16(data, perm&7)
+		data = binary.LittleEndian.AppendUint32(data, id)
+	}
+	byID := func(entries []posixacl.Entry) []posixacl.Entry {
+		sorted := append([]posixacl.Entry(nil), entries...)
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+		return sorted
+	}
+	add(0x01, acl.Owner, undefinedID)
+	for _, entry := range byID(acl.Users) {
+		add(0x02, entry.Perm, uint32(entry.ID))
+	}
+	add(0x04, acl.Group, undefinedID)
+	for _, entry := range byID(acl.Groups) {
+		add(0x08, entry.Perm, uint32(entry.ID))
+	}
+	if len(acl.Users)+len(acl.Groups) > 0 {
+		add(0x10, acl.Mask, undefinedID)
+	}
+	add(0x20, acl.Other, undefinedID)
+	return data
 }
 
 func publishedDirACLProblem(opts Options, dir string, index int) (string, error) {
@@ -481,8 +586,12 @@ func publishedDirProblem(opts Options, path string) string {
 }
 
 // restorePublishedDirs gives the administrator-owned directories above a
-// published policy file to the access DefenseClaw creates: mode 0755 and no
-// macOS ACL or Linux POSIX access ACL denying list or search. It returns the directories it changed.
+// published policy file the access users need, and nothing more: the mode
+// bits publishedDirModeAccess names, and no macOS ACL entry or Linux POSIX
+// access ACL entry denying list or search. The repair made every one 0755,
+// so a vendor folder an administrator kept at 0700 listed its unrelated
+// files to every account, where users need only search (GAP-0924). It
+// returns the directories it changed.
 func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	var restored []string
 	for index, dir := range publishedDirs(opts, path) {
@@ -503,12 +612,18 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 			continue
 		}
 		if aclProblem != "" {
-			if err := clearPublishedDirACL(dir); err != nil {
-				return restored, fmt.Errorf("remove the ACL of %s: %w", dir, err)
+			if err := clearPublishedDirACL(opts, dir, index); err != nil {
+				return restored, fmt.Errorf("remove the ACL entries denying access to %s: %w", dir, err)
 			}
+			// A Linux ACL rewrite changes the group bits (the mask).
+			if info, err = os.Lstat(dir); err != nil {
+				return restored, err
+			}
+			perm = info.Mode().Perm()
+			needMode = perm&publishedDirModeAccess(index) != publishedDirModeAccess(index)
 		}
 		if needMode {
-			if err := os.Chmod(dir, (perm|0o755)&^0o022); err != nil {
+			if err := os.Chmod(dir, (perm|publishedDirModeAccess(index))&^0o022); err != nil {
 				return restored, err
 			}
 		}
