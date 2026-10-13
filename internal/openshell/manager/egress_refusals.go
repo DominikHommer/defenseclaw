@@ -455,11 +455,20 @@ func (m *Manager) egressRefusals(bindingID, name string, list func(bindingID, na
 			continue
 		}
 		what := refusalWhat(h.category)
+		remedy := refusalRemedy(h, name, honored)
+		if h.category == egress.CategoryOperatorBlock && eff != nil {
+			// The block list merges the pack's, the repository policy's and
+			// the user's own: the agent is told whose entry refused it, as
+			// the feed and the destinations say (GAP-0125), so it does not
+			// send the user to a block list they never set (#1246/GAP-0129).
+			if w, r := blockOriginRefusal(eff.BlockOrigin(h.host)); w != "" {
+				what, remedy = w, r
+			}
+		}
 		if tool, ok := toolHostOf(harnessName, h.host); ok {
 			// Not the site the agent fetched (GAP-0234, GAP-0263).
 			what += "; " + tool
 		}
-		remedy := refusalRemedy(h, name, honored)
 		if rule := egress.AdminRule(h.category); rule != "" && b != nil {
 			// The organization's own lists: the person can't approve it, and
 			// the note says whom to ask and what to quote (GAP-0502).
@@ -521,6 +530,22 @@ func refusalWhat(c egress.Category) string {
 		return "blocked"
 	}
 	return strings.ReplaceAll(string(c), "_", " ")
+}
+
+// blockOriginRefusal is the agent's explanation and remedy of a block-list
+// refusal whose entry came from origin (packs.Effective.BlockOrigin), or ""
+// for the user's own list, which refusalWhat and refusalRemedy name.
+func blockOriginRefusal(origin string) (what, remedy string) {
+	_, text := blockOriginText(origin)
+	switch origin {
+	case packs.BlockFromRepoPolicy:
+		return text, "only removing it from the repository policy (" + packs.RepoPolicyPath + ") allows it"
+	case packs.BlockFromPack:
+		return text, "only a change to the sandbox's pack allows it"
+	case packs.BlockFromFirewall:
+		return text, "only the administrator of the host egress firewall can allow it"
+	}
+	return "", ""
 }
 
 // refusalRemedy says who can allow a refused destination, and how. It
