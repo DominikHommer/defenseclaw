@@ -1951,3 +1951,35 @@ def test_a_failed_audit_quarantine_keeps_the_store_with_its_wal(tmp_path: Path, 
     assert (home / "audit.db").read_text(encoding="utf-8") == "db"
     assert (home / "audit.db-wal").read_text(encoding="utf-8") == "wal"
     assert not list(home.glob("audit.db.corrupt-*"))
+
+
+def test_an_undone_rollback_puts_the_saved_audit_store_back_over_a_new_one(tmp_path: Path) -> None:
+    # #1096/GAP-1398: the failed start of the restored 0.x gateway made a new,
+    # empty audit.db, so the store the rollback had moved aside stayed aside
+    # and the next rollback used the empty one without a word.
+    home = tmp_path / "dc"
+    data = home / "previous" / "data"
+    data.mkdir(parents=True)
+    quarantined = "audit.db.corrupt-20261013T000000Z"
+    (data / quarantined).write_text("0.x history", encoding="utf-8")
+    (data / f"{quarantined}-wal").write_text("0.x wal", encoding="utf-8")
+    (data / "audit.db").write_text("new", encoding="utf-8")
+    script = tmp_path / "undo.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + _install_sh_functions("undo_rollback")
+        + "info() { :; }\nwarn() { :; }\nerr() { :; }\nok() { :; }\n"
+        + "stop_gateway() { :; }\nswap_with_previous() { return 0; }\nstart_gateway() { return 0; }\nwarn_not_started() { :; }\n"
+        + f'DEFENSECLAW_HOME="{home}" PREVIOUS="{home / "previous"}" BIN_DIR="{tmp_path / "bin"}" LOG=/dev/null\n'
+        + f'current=1.0.2 back_to=0.8.10 saved_was_running=false QUARANTINED="{home / quarantined}"\n'
+        + 'undo_rollback "The gateway of DefenseClaw 0.8.10 did not start"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert (data / "audit.db").read_text(encoding="utf-8") == "0.x history"
+    assert (data / "audit.db-wal").read_text(encoding="utf-8") == "0.x wal"
+    aside = list(data.glob("audit.db.failed-start-*"))
+    assert [path.read_text(encoding="utf-8") for path in aside] == ["new"]

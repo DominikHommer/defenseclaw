@@ -1978,7 +1978,7 @@ quarantine_rolled_back_audit() {
 # (GAP-1388). The restored 0.x gateway is not running, and the connector
 # registrations of this install were removed for it: agents would be unguarded.
 undo_rollback() {
-    local left="${current}" undone=0 kept suffix
+    local left="${current}" undone=0 kept suffix fresh
     warn "$1, so the rollback is being undone"
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
     # The same swap the other way: previous/ holds the install just left.
@@ -1993,11 +1993,22 @@ undo_rollback() {
     # previous/ is again the install this rollback started from, as it was.
     rm -f "${PREVIOUS}/ROLLED_BACK" "${PREVIOUS}/START_AFTER"
     printf '%s\n' "${saved_was_running:-false}" > "${PREVIOUS}/GATEWAY_WAS_RUNNING"
-    if [[ -n "${QUARANTINED}" && ! -e "${PREVIOUS}/data/audit.db" ]]; then
-        kept="${PREVIOUS}/data/$(basename "${QUARANTINED}")"
-        for suffix in "" -wal -shm -journal; do
-            [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
-        done
+    kept="${PREVIOUS}/data/$(basename "${QUARANTINED:-none}")"
+    if [[ -n "${QUARANTINED}" && -f "${kept}" ]]; then
+        # GAP-1398: the failed start of ${back_to} made a new, empty audit.db
+        # here, which a later rollback then used without a word. The saved
+        # store goes back, so that rollback checks it again.
+        if [[ -e "${PREVIOUS}/data/audit.db" ]]; then
+            fresh="${PREVIOUS}/data/audit.db.failed-start-$(date -u +%Y%m%dT%H%M%SZ)"
+            for suffix in "" -wal -shm -journal; do
+                [[ ! -e "${PREVIOUS}/data/audit.db${suffix}" ]] || mv "${PREVIOUS}/data/audit.db${suffix}" "${fresh}${suffix}" || true
+            done
+        fi
+        if [[ ! -e "${PREVIOUS}/data/audit.db" ]]; then
+            for suffix in "" -wal -shm -journal; do
+                [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
+            done
+        fi
     fi
     if start_gateway; then
         ok "DefenseClaw ${current:-1.x} is back, with its gateway and agent hooks"
