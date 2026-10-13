@@ -56,11 +56,17 @@ Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
 their generated hooks stay open even when the effective mode is `closed`. See
 [Connector response shapes](#connector-response-shapes).
 
+A managed standalone host is stricter. There the administrator-owned hooks of
+GitHub Copilot CLI and Hermes block a tool call while the gateway service is
+not running, on Linux, macOS and Windows alike, and the agent shows that the
+DefenseClaw gateway service is not running. A managed hook never lets a tool
+call through unchecked because the gateway is down.
+
 ## Effective behavior
 
 | Failure | Effective `open` | Effective `closed` |
 | --- | --- | --- |
-| Gateway connection refused, timeout, or 5xx | Allow the event, warn, and record the transport failure. | Return the connector's block response and record the transport failure. |
+| Gateway connection refused, timeout, or 5xx | Allow the event, warn, and record the transport failure. When the gateway starts again it reports the allowed calls as an alert (see [Reporting and diagnosis](#reporting-and-diagnosis)). | Return the connector's block response and record the transport failure. |
 | Connector authentication is missing | Allow by default and record the missing-token failure. | Block and report token/authentication failure. |
 | Gateway returns 4xx, malformed JSON, or no action | Allow, warn, and record the response failure. | Block with the connector's response shape and record the failure. |
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
@@ -178,10 +184,10 @@ events below:
 | Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
 | Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
 | Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
-| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No (managed standalone: blocks `preToolUse` and `permissionRequest` while the gateway is down) |
 | Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
 | Antigravity | `PreToolUse` | `PreToolUse` | No |
-| Hermes | `pre_tool_call` | None | No |
+| Hermes | `pre_tool_call` | None | No (managed standalone: blocks `pre_tool_call` while the gateway is down) |
 | OpenCode | `tool.execute.before` | None | Yes |
 | OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None | Yes |
 | Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |
@@ -239,6 +245,15 @@ Hook delivery and response failures can also be recorded under
 install the pinned default is
 `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl`. Treat it as sensitive
 operational data and do not publish the whole file.
+
+A call that ran fail-open is never silent. A per-user gateway reads the
+lines added to that file since its last start, and records one
+`guardrail-degraded` alert (severity HIGH) per connector, for example
+`2 hermes hook calls ran without a DefenseClaw check (fail-open) while the
+gateway was unreachable or did not answer (first ..., last ...; last reason:
+gateway unreachable)`. `defenseclaw alerts` lists it. Lines of fail-closed
+calls (the agent showed the block) and lines older than 7 days are not
+reported.
 
 If doctor reports a missing token or token drift, preview its repair with
 `defenseclaw doctor --fix --dry-run`. For how doctor repairs tokens, the audit
