@@ -22,6 +22,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,12 @@ func evidenceTestHost(ids map[string]string) sandboxEvidenceHost {
 // of cfg on host runs, verified unless the caller changes it.
 func currentRecord(t *testing.T, cfg *config.Config, host sandboxEvidenceHost, name string, microVM bool) image.Record {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// image.NewContext renders the sandbox artifacts, which a Windows host
+		// refuses to do: it runs no OpenShell sandbox, so it has no image
+		// evidence either (the product's NewContext error is a refusal).
+		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
+	}
 	spec, ok := harness.Get(name)
 	if !ok {
 		t.Fatalf("no %s harness", name)

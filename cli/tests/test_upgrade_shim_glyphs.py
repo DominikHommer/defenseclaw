@@ -22,7 +22,9 @@ from defenseclaw import upgrade_shim
 
 class _Stream(io.TextIOWrapper):
     def __init__(self, encoding: str, tty: bool) -> None:
-        super().__init__(io.BytesIO(), encoding=encoding)
+        # newline="\n": the assertions compare the bytes print() wrote, so the
+        # wrapper must not turn "\n" into os.linesep ("\r\n" on Windows).
+        super().__init__(io.BytesIO(), encoding=encoding, newline="\n")
         self._tty = tty
 
     def isatty(self) -> bool:
