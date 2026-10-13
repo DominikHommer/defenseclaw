@@ -124,6 +124,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	d.Managed = managed
 	rep := a.HostDoctor(ctx, d)
 	rep.Managed = rep.Managed || managed
+	// The host checks set it; the Docker access row below asks it again.
+	dockerGroup := d.DockerGroup
 	if managed && st != nil && st.managed != nil {
 		rep.ConfiguredDriver = openshell.ComputeDriver(sandboxapi.DisplayText(st.managed.Driver))
 		rep.Driver = rep.ConfiguredDriver
@@ -169,6 +171,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			}
 			if a.GOOS == "darwin" {
 				rep.Checks = append(rep.Checks, a.managedDockerCheck(ctx, st.managed))
+			}
+			if c := managedDockerGroupCheck(a.GOOS, st.managed, dockerGroup); c != nil {
+				rep.Checks = append(rep.Checks, *c)
 			}
 		case managed:
 			// Without the daemon's answer the policy and the runtime are not

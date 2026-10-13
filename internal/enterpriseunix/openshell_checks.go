@@ -136,15 +136,17 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		r.AddWarning(codeDriverFallback, fmt.Sprintf("the docker fallback cannot run for users on this host (%s): %s; %s; users without KVM get no sandbox until it is fixed",
 			check.Name, check.Detail, check.Fix))
 	}
-	if rows := env.groupRows(ctx, settings); rows != nil {
-		for _, group := range rows {
-			if group.OK {
-				row(group.Name, "ok: "+group.Detail)
-				continue
-			}
-			row(group.Name, "missing: "+group.Detail)
-			r.AddWarning(codeSandboxGroups, fmt.Sprintf("%s; %s", group.Detail, group.Fix))
+	groups, dockerMembers := env.groupRows(ctx, settings)
+	for _, group := range groups {
+		if group.OK {
+			row(group.Name, "ok: "+group.Detail)
+			continue
 		}
+		row(group.Name, "missing: "+group.Detail)
+		r.AddWarning(codeSandboxGroups, fmt.Sprintf("%s; %s", group.Detail, group.Fix))
+	}
+	if dockerMembers != "" {
+		r.AddWarning(codeDockerGroupMembers, dockerMembers)
 	}
 	if settings.Install == config.EnterpriseOpenShellInstallSetup {
 		for _, line := range env.userInstalls(ctx) {
@@ -557,32 +559,44 @@ func (e *Env) checkDocker() prereqRow {
 // their own in the home), never every enrolled one: administrators and
 // service accounts that never run a sandbox do not belong in the
 // root-equivalent docker group (GAP-0454). Each row is one summary line with
-// one generic fix.
-func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
+// one generic fix. advisory is the docker_group_members warning over every
+// enrolled account ("" when none is in the group, GAP-0498).
+func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereqRow, advisory string) {
 	vm := s.wantsVM()
 	if e.GOOS != "linux" || (s.Driver != config.EnterpriseOpenShellDriverDocker && !vm) {
-		return nil
+		return nil, ""
 	}
 	kvm, kvmErr := os.Stat(e.P(kvmDevice))
 	needKVM := vm && kvmErr == nil && kvm.Mode().Perm()&0o006 != 0o006
 	ops := e.sandboxOps()
 	var accounts []SandboxAccount
+	var enrolled, members int
+	groupsOf := map[int][]string{}
 	for _, a := range ops.Accounts(ctx) {
+		groups, err := ops.Groups(ctx, a)
+		if err == nil {
+			groupsOf[a.UID] = groups
+			enrolled++
+			if contains(groups, "docker") {
+				members++
+			}
+		}
 		if e.hasHomeSandboxState(a) {
 			accounts = append(accounts, a)
 		}
 	}
+	advisory = e.dockerGroupAdvisory(members, enrolled)
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
 			need = "kvm and docker"
 		}
-		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}
+		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}, advisory
 	}
 	var noKVM, noDocker []string
 	for _, a := range accounts {
-		groups, err := ops.Groups(ctx, a)
-		if err != nil {
+		groups, ok := groupsOf[a.UID]
+		if !ok {
 			continue
 		}
 		if needKVM && !contains(groups, "kvm") {
@@ -593,7 +607,6 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
 		}
 	}
 	n := len(accounts)
-	var rows []prereqRow
 	if needKVM {
 		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) is in the kvm group", n)}
 		if len(noKVM) > 0 {
@@ -615,7 +628,27 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) []prereqRow {
 		rows = append(rows, prereqRow{Name: "groups docker", Fix: groupFix("docker"),
 			Detail: fmt.Sprintf("%d of %d accounts that used sandboxes are not in the docker group (%s), %s", len(noDocker), n, strings.Join(noDocker, ", "), why)})
 	}
-	return rows
+	return rows, advisory
+}
+
+// codeDockerGroupMembers is the advisory that enrolled accounts are in the
+// docker group (GAP-0498).
+const codeDockerGroupMembers = "docker_group_members"
+
+// dockerGroupAdvisory says how many of the enrolled accounts are in the
+// docker group and what that means for policy privacy: membership is
+// root-equivalent, so a member can read every root-owned file, the
+// administrator policy included, and the rule that each person sees only
+// their own effective policy does not hold for them. It counts and never
+// names the accounts. "" when none is a member.
+func (e *Env) dockerGroupAdvisory(members, enrolled int) string {
+	if members == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d of %d enrolled accounts are in the docker group, which is root-equivalent on this host: a member can read every "+
+		"root-owned file, including the administrator policy (%s) and the sandbox profiles, so the rule that each person sees only their own "+
+		"effective policy does not hold for them; sandboxes on Linux need the group, so add only the accounts that run sandboxes, and keep "+
+		"every secret out of the policy as a protected credential or environment reference", members, enrolled, e.Layout.ConfigPath)
 }
 
 // groupFix is the one fix of a groups row: no ready-made command per
