@@ -260,6 +260,9 @@ func launcherChildIndex(words []string, static []bool) int {
 }
 
 func launcherWriterProgram(program string) bool {
+	if _, known := outputProgramGrammars[program]; known && program != "strace" && program != "ltrace" {
+		return true
+	}
 	return literalInterpreterProgram(program) || slices.Contains(linkPrograms, program) ||
 		slices.Contains(copyPrograms, program) || slices.Contains(renamePrograms, program) ||
 		slices.Contains(archivePrograms, program) ||

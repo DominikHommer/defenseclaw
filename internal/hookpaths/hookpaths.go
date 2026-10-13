@@ -314,12 +314,18 @@ func shellCallExtraWriteOperands(
 		}
 	}
 	resolved := resolveLauncherWords(words, staticWords, cwd)
+	var rawOutputs []ExtraWriteOperand
+	if allStatic(staticWords) && (programBase(words[0]) == "script" || programBase(words[0]) == "strace" || programBase(words[0]) == "ltrace" || programBase(words[0]) == "time") {
+		for _, path := range outputProgramFiles(programBase(words[0]), words[1:], cwd) {
+			rawOutputs = append(rawOutputs, ExtraWriteOperand{Path: path})
+		}
+	}
 	if !resolved.ok || len(resolved.words) == 0 || !resolved.static[0] {
-		return nil
+		return rawOutputs
 	}
 	cmdCWD, programWords := resolved.cwd, resolved.words
 	program := programBase(programWords[0])
-	var operands []ExtraWriteOperand
+	operands := rawOutputs
 	var destination string
 	add := func(path string) {
 		operands = append(operands, ExtraWriteOperand{
@@ -342,6 +348,11 @@ func shellCallExtraWriteOperands(
 	}
 	if !allStatic(resolved.static) {
 		return operands
+	}
+	if _, known := outputProgramGrammars[program]; known && program != "script" {
+		for _, path := range outputProgramFiles(program, programWords[1:], cmdCWD) {
+			add(path)
+		}
 	}
 	switch program {
 	case "ln", "gln":
