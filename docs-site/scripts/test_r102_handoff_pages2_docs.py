@@ -102,6 +102,18 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
         self.assertIn("full disk keeps running if its copy holds work not\nyet pulled", reference)
         self.assertIn("If its disk does not answer\nwithin 15 seconds", reference)
 
+    def test_fg07_connect_replays_known_option_values(self):
+        guide = " ".join(page("sandboxes/guide.mdx").split())
+        self.assertIn("known options with their values for Claude Code, Codex, OpenCode, Copilot CLI and Hermes", guide)
+        self.assertIn("For other harnesses, or an option whose value is optional, attach the value", guide)
+        self.assertIn("OpenCode `--prompt`, Codex `-i`/`--image`", guide)
+        self.assertIn("Copilot CLI `-i`/`--interactive` and `--attachment`", guide)
+        self.assertIn("Hermes `-z`/`--oneshot` and `--image`", guide)
+        self.assertIn("apply to the run only", guide)
+        self.assertIn("passes `--append-system-prompt` with `be brief` and `--model` with `sonnet`", guide)
+        self.assertNotIn("with a space ends the record", guide)
+        self.assertNotIn("passes that option without the word", guide)
+
     def test_pr886_remote_scanner_empty_rules_use_connection_policy(self):
         text = page("guardrail/index.mdx")
         self.assertIn("an unset or empty\n`cisco_ai_defense.enabled_rules` sends no", text)
