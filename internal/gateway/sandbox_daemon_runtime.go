@@ -200,11 +200,6 @@ type SandboxDaemon struct {
 
 	pendingRestart atomic.Bool
 	exe            os.FileInfo
-	// stops counts the stops and deletes under way. Their sandboxes leave
-	// the running phases before OpenShell says they stopped, and the
-	// supervision must not stop the account's OpenShell gateway or exit for
-	// a pending restart under them (GAP-0462).
-	stops atomic.Int64
 
 	// openShellUsed is when the daemon last readied the account's OpenShell
 	// gateway (UnixNano), which openShellGatewayLinger keeps; checkNow asks
@@ -813,14 +808,6 @@ func (d *SandboxDaemon) scheduleCheck(delay time.Duration) {
 // with what.
 func (d *SandboxDaemon) check(ctx context.Context) (bool, error) {
 	d.checkUpgrade()
-	// A stop or delete in progress waits on the account's OpenShell
-	// gateway: releasing it or exiting for a restart now cancels that wait,
-	// and the stop failed with "context canceled" and a refused connection
-	// although the sandbox stopped (GAP-0462). The stop schedules the next
-	// check when it ends.
-	if d.stops.Load() > 0 {
-		return false, nil
-	}
 	// A create or start in progress holds the lifecycle: nothing to release
 	// or exit for now. Held from the count through the release, so no create
 	// begins in between and finds its listeners closed under it.
@@ -1167,29 +1154,6 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 		d.reloadConfig()
 	}
 	return revoked
-}
-
-// confirmIfClosed confirms the registrations again when the manager still
-// judges against the closed start-up floor (no confirmed registration was
-// adopted: the managed gateway did not answer revalidate when the daemon
-// started, a restart after an upgrade, say) and a registration waits for
-// its confirmation. A sandbox's status and list are judged against that
-// floor, which denies every sandbox: they said "your organization does not
-// let you run sandboxes" and a strict, deny-all policy for a sandbox the
-// organization allows (GAP-0462). A revoked registration's sandbox is
-// stopped, as at start.
-func (d *SandboxDaemon) confirmIfClosed(ctx context.Context) {
-	d.floorMu.Lock()
-	closed := d.floor == nil
-	d.floorMu.Unlock()
-	if !closed || !slices.ContainsFunc(d.regs.list(), func(r daemonRegistration) bool { return !r.Revoked && !r.Confirmed }) {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
-	defer cancel()
-	for _, r := range d.revalidate(ctx) {
-		d.stopRevoked(ctx, r)
-	}
 }
 
 // stopRevoked stops a sandbox whose registration the managed gateway
@@ -1618,8 +1582,6 @@ func (d *SandboxDaemon) neutralGatewayStatus(st *sandboxapi.Status) {
 // authorizes no relayed call until it starts again (GAP-0505).
 func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	defer c.d.scheduleCheck(time.Second)
-	c.d.stops.Add(1)
-	defer c.d.stops.Add(-1)
 	if _, held := c.d.openShell.PortHolder(c.d.currentSettings()); !held {
 		if sb, err := c.Manager.Get(ctx, name); err == nil && sb != nil && audit.SandboxPhase(sb.Phase) == audit.SandboxPhaseStopped {
 			c.d.reportStopped(context.WithoutCancel(ctx), name)
@@ -1642,7 +1604,6 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 // (unknown: the gateway is not running) is asked again with the account's
 // gateway started, when no other account holds its port (GAP-0492).
 func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
-	c.d.confirmIfClosed(ctx)
 	list, err := c.Manager.List(ctx)
 	if err != nil || !slices.ContainsFunc(list, unconfirmedSandbox) || c.d.openShellForKept(ctx, false) != nil {
 		return list, err
@@ -1652,7 +1613,6 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 
 // Get is List for one sandbox.
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
-	c.d.confirmIfClosed(ctx)
 	sb, err := c.Manager.Get(ctx, name)
 	if err != nil || sb == nil || !unconfirmedSandbox(*sb) || c.d.openShellForKept(ctx, false) != nil {
 		return sb, err
@@ -1938,8 +1898,6 @@ func (c *managedSandboxController) Delete(ctx context.Context, name string, req 
 	// A kept sandbox is deleted on the account's gateway, started for it
 	// when the daemon had stopped it (GAP-0492).
 	defer c.d.scheduleCheck(time.Second)
-	c.d.stops.Add(1)
-	defer c.d.stops.Add(-1)
 	ready := c.d.openShellForKept(ctx, true)
 	resp, err := c.Manager.Delete(ctx, name, req)
 	if err != nil && ready != nil {
