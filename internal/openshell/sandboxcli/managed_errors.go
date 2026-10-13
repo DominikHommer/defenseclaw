@@ -199,6 +199,7 @@ var managedNotices = map[string]bool{
 	"sandbox_account_busy":              true,
 	sandboxrelay.EventSettingsDrift:     true,
 	sandboxrelay.ReasonPolicyUnloadable: true,
+	sandboxrelay.DetailSetupChanging:    true,
 }
 
 // managedReasonTexts word the reason codes a refusal may carry without a

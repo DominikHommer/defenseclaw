@@ -1608,6 +1608,12 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 		return sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are turned off by your organization")
 	}
 	if !s.Available {
+		if s.Unavailable == sandboxrelay.UnavailableSetupChanging {
+			// A notice, no policy block: the CLI prints it without the
+			// organization's exception contact (#1203).
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
+				Message: s.Unavailable, Detail: sandboxrelay.DetailSetupChanging}
+		}
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
 			Message: sandboxapi.AdminMessage, Detail: s.Unavailable}
 	}
