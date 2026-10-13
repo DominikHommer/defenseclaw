@@ -1217,6 +1217,14 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	case !st.Installed:
 		c.Status, c.Detail = StatusFail, st.Unit+" is not installed"
 		c.Fix = &Fix{Summary: "install OpenShell", Command: installOpenShellCommand}
+		if held, other := r.gatewayPortHeld(); other {
+			// Another account's gateway holds the port: the install would
+			// start a service that cannot bind it, so this account is
+			// refused like one whose service is stopped (GAP-0390).
+			c.Detail += "; " + held
+			c.Fix, r.portHeld, r.portOther = r.portHeldFix(true), true, true
+			r.report.GatewayPortElsewhere = true
+		}
 	case !st.Active:
 		c.Status, c.Detail = StatusFail, st.Unit+" is "+st.Status
 		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}

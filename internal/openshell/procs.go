@@ -133,7 +133,9 @@ func (r *doctorRun) launchdLabel(ctx context.Context, pid int) string {
 // setup stops there. Either way the fix is unmanagedFix, the user's.
 func (r *doctorRun) unmanagedService(ctx context.Context) {
 	c := r.report.Get(CheckIDGatewayService)
-	if c == nil || r.service == nil || r.service.Installed {
+	// Another account's gateway on the port (checkService) is not one this
+	// account runs another way: the check keeps that refusal (GAP-0390).
+	if c == nil || r.service == nil || r.service.Installed || r.portOther {
 		return
 	}
 	healthy := r.gateway != nil && r.gateway.Healthy
