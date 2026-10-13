@@ -162,9 +162,18 @@ as `failed` with `interrupted`.
   the few seconds of the restart.
 - **Inbox files.** Only regular `*.dcbundle` files that only root can write are
   read; names that start with a dot are ignored, so copy under a dot name and
-  rename. Every processed file is removed, also one that was refused: the
-  receipt records the outcome.
+  rename. One run applies only the highest version there and removes every
+  file it looked at, also one that was refused: the receipt of the highest
+  version records the outcome, and a lower version in the same batch is
+  removed without a receipt, even when the highest one is refused. Drop one
+  bundle at a time.
 - **First bundle after a crash.** When a run dies after it installed the first
   bundle but before it recorded it, and the gateway then does not report its
   policy, there is no last good bundle to return to: the receipt fails
   `not_confirmed` and the gateway keeps enforcing the policy it last built.
+  Its version directory stays as long as the installed config names it.
+- **Damaged version directory.** If the version directory of the current
+  bundle is missing or no longer matches its confirmed manifest,
+  changing runs refuse to apply any config (`bundle_state_unreadable`) and the
+  installed config keeps enforcing. Applying the current bundle again does not
+  repair it; apply a bundle with a higher version.
