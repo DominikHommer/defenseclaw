@@ -953,6 +953,11 @@ func applyWindowsEnterpriseInstallerReport(
 		if enumeratorCode != "" {
 			code = enumeratorCode
 		}
+		// A stopped required service is not_ready in verify, as in status:
+		// one condition, one code for a monitoring rule (GAP-0750).
+		if result.Action == "verify" && code == "lifecycle_error" && strings.Contains(message, " SCM process is not running") {
+			code = "not_ready"
+		}
 		if lifecycle {
 			original := message
 			if text, ok := windowsEnterpriseInstallerBuildMismatchText(message, result.Action, opts != nil && opts.purge); ok {
@@ -2068,8 +2073,14 @@ func writeWindowsEnterpriseStandaloneRefusal(
 	}
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	code := "preflight_failed"
-	if errors.Is(cause, errWindowsEnterpriseInvalidArguments) {
+	invalid := errors.Is(cause, errWindowsEnterpriseInvalidArguments)
+	if invalid {
 		code = "invalid_arguments"
+		// A rule pack the gateway service cannot read has its own code,
+		// as the enumerator's report has; the exit stays 1639 (GAP-0314).
+		if strings.Contains(cause.Error(), standaloneRulePackUnreadableText) {
+			code = "rule_pack_unreadable"
+		}
 	} else {
 		code = windowsEnterpriseMessageCode(cause.Error(), code)
 	}
@@ -2088,7 +2099,7 @@ func writeWindowsEnterpriseStandaloneRefusal(
 		// report what any account can read, as status and verify do
 		// (GAP-2012, GAP-2162).
 		applyWindowsEnterpriseRecordedDeployment(result)
-	case "invalid_arguments":
+	case "invalid_arguments", "rule_pack_unreadable":
 		message = strings.TrimPrefix(message, errWindowsEnterpriseInvalidArguments.Error()+": ")
 		if windowsEnterpriseUnknownProfileRequested(opts) {
 			// Name the value once (GAP-2040); the resolution error keeps
@@ -2099,7 +2110,11 @@ func writeWindowsEnterpriseStandaloneRefusal(
 		describeHost(result)
 	}
 	result.AddError(code, message)
-	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+	failure := windowsEnterpriseFailureCodeFor(result)
+	if invalid {
+		failure = enterprisestatus.WindowsExitInvalidArgs
+	}
+	return finishWindowsEnterpriseStandalone(cmd, opts, result, failure)
 }
 
 // windowsEnterpriseHealthNotChecked is the warning of a request refused
