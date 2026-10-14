@@ -43,6 +43,8 @@ func TestProtectedWriteLauncherDecisions(t *testing.T) {
 		{"shell positional destination", `sh -c 'tee -a "$1" < payload' _ disklink`, true},
 		{"shell positional ordinary", `bash -c 'echo x >> $1' _ out/one`, false},
 		{"find child", `find disklink -exec cp payload {} \;`, true},
+		{"resolved link target", `tee -a $(readlink -f disklink) < payload`, true},
+		{"resolved link ordinary", `cp payload $(readlink -f build)/out`, false},
 		{"xargs child", `printf disklink | xargs -I{} cp payload {}`, true},
 		{"numa prefix", `numactl --localalloc cp payload disklink`, true},
 		{"flock command", `flock lockfile -c 'cp payload disklink'`, true},

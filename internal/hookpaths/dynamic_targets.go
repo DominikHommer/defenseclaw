@@ -173,8 +173,8 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 	}
 	stmt := sub.Stmts[0]
 	if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.OrStmt {
-		left, leftOK := shellSimpleCallWords(binary.X, home, vars)
-		right, rightOK := shellSimpleCallWords(binary.Y, home, vars)
+		left, leftOK := shellSimpleCallWords(binary.X, home, cwd, vars)
+		right, rightOK := shellSimpleCallWords(binary.Y, home, cwd, vars)
 		if leftOK && rightOK && len(left) == 3 && left[0] == "git" && left[1] == "rev-parse" &&
 			left[2] == "--show-toplevel" && len(right) == 1 && right[0] == "pwd" {
 			if top, ok := shellGitTop(cwd); ok {
@@ -183,7 +183,7 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 		}
 		return "", shellValueUnknown
 	}
-	words, ok := shellSimpleCallWords(stmt, home, vars)
+	words, ok := shellSimpleCallWords(stmt, home, cwd, vars)
 	if !ok || len(words) == 0 {
 		return "", shellValueUnknown
 	}
@@ -207,10 +207,12 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 			return filepath.Base(words[1]), shellValueExact
 		}
 	case "realpath":
-		if len(words) == 2 && filepath.IsAbs(cwd) {
-			if path, err := filepath.EvalSymlinks(OperandPath(words[1], cwd)); err == nil {
-				return path, shellValueExact
-			}
+		if path, ok := shellPathReaderValue(words, cwd); ok {
+			return path, shellValueExact
+		}
+	case "readlink":
+		if path, ok := shellPathReaderValue(words, cwd); ok {
+			return path, shellValueExact
 		}
 	case "date":
 		if len(words) == 2 && shellDateDigits(words[1]) {
@@ -226,6 +228,82 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 		}
 	}
 	return "", shellValueUnknown
+}
+
+// shellPathReaderValue evaluates literal path-reader operands using the same
+// link resolution as write targets.
+func shellPathReaderValue(words []string, cwd string) (string, bool) {
+	if len(words) < 2 || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	program := programBase(words[0])
+	canonical, lexical := false, false
+	relativeTo := ""
+	var operand string
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if operand != "" {
+			return "", false
+		}
+		switch {
+		case word == "--":
+			if i+1 != len(words)-1 {
+				return "", false
+			}
+			operand = words[i+1]
+		case program == "readlink" && (word == "-f" || word == "--canonicalize"):
+			canonical = true
+		case program == "readlink" && (word == "-e" || word == "--canonicalize-existing"):
+			canonical = true
+		case program == "readlink" && (word == "-m" || word == "--canonicalize-missing"):
+			canonical = true
+		case program == "realpath" && (word == "-s" || word == "--strip"):
+			lexical = true
+		case program == "realpath" && (word == "-e" || word == "--canonicalize-existing"):
+		case program == "realpath" && (word == "-m" || word == "--canonicalize-missing"):
+		case program == "realpath" && strings.HasPrefix(word, "--relative-to="):
+			relativeTo = strings.TrimPrefix(word, "--relative-to=")
+		case program == "realpath" && word == "--relative-to" && i+1 < len(words)-1:
+			i++
+			relativeTo = words[i]
+		case strings.HasPrefix(word, "-"):
+			return "", false
+		default:
+			operand = word
+		}
+	}
+	if operand == "" {
+		return "", false
+	}
+	path := OperandPath(operand, cwd)
+	if _, err := os.Stat(path); err != nil {
+		return "", false
+	}
+	if program == "readlink" && !canonical {
+		value, err := os.Readlink(path)
+		return value, err == nil
+	}
+	if lexical {
+		path = filepath.Clean(path)
+	} else {
+		var ok bool
+		path, ok = ResolveWriteTarget(path)
+		if !ok {
+			return "", false
+		}
+	}
+	if relativeTo != "" {
+		base, ok := ResolveWriteTarget(OperandPath(relativeTo, cwd))
+		if !ok {
+			return "", false
+		}
+		var err error
+		path, err = filepath.Rel(base, path)
+		if err != nil {
+			return "", false
+		}
+	}
+	return path, true
 }
 
 func shellMktempDirectorySafe(words []string, cwd, home string) bool {
@@ -392,7 +470,7 @@ func shellStaticWordWithKnownCalls(word *syntax.Word, home, cwd string, vars she
 	return value.String(), true
 }
 
-func shellSimpleCallWords(stmt *syntax.Stmt, home string, vars shellVariables) ([]string, bool) {
+func shellSimpleCallWords(stmt *syntax.Stmt, home, cwd string, vars shellVariables) ([]string, bool) {
 	if stmt == nil {
 		return nil, false
 	}
@@ -408,7 +486,7 @@ func shellSimpleCallWords(stmt *syntax.Stmt, home string, vars shellVariables) (
 	}
 	words := make([]string, len(call.Args))
 	for i, word := range call.Args {
-		value, ok := staticShellWordWithVars(word, home, vars, shellVariablePoison{})
+		value, ok := shellStaticWordWithKnownCalls(word, home, cwd, vars, shellVariablePoison{})
 		if !ok {
 			return nil, false
 		}

@@ -2346,13 +2346,14 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		links.unknown(true)
 		return links
 	}
-	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
 	for _, context := range contexts {
 		callCWD := context.cwd
 		expandedWords := shellExpandedCallWords(context.file, home)
 		boundedWords := shellVariableCandidates(context.file, home, callCWD)
+		poison := shellVariablePoisonForFile(context.file, home)
+		states := shellWordStates(context.file, home, poison)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if _, declared := node.(*syntax.FuncDecl); declared {
 				return false
@@ -2370,7 +2371,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				if value, ok := expandedWords[int(arg.Pos().Offset())]; ok {
 					words[i], static[i] = value, true
 				} else {
-					words[i], static[i] = staticShellWord(arg, env, home != "", nil, shellVariablePoison{})
+					if i == 0 {
+						words[i], static[i] = staticShellWord(arg, states.varsFor(arg).environ(home), home != "", states.varsFor(arg), poison)
+					} else {
+						words[i], static[i] = shellStaticWordWithKnownCalls(arg, home, callCWD, states.varsFor(arg), poison)
+					}
 					if !static[i] {
 						words[i] = launcherAssignmentPrefix(arg)
 					}

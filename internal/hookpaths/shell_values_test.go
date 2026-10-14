@@ -95,6 +95,25 @@ func TestDynamicTargetDomains(t *testing.T) {
 	if err := os.Symlink(keys, filepath.Join(cwd, "out", "run-123.log")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(keys, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`tee -a $(readlink -f disklink) < report.txt`,
+		`cp report.txt $(readlink disklink)`,
+		`cp report.txt $(realpath disklink)`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			var paths []string
+			paths, _ = ShellDynamicWriteOperands(command, cwd, home)
+			for _, item := range ShellExtraWriteOperands(command, cwd, home) {
+				paths = append(paths, item.Path)
+			}
+			if !slices.Contains(paths, keys) {
+				t.Fatalf("resolved target missing: %v", paths)
+			}
+		})
+	}
 	if _, unknown := ShellDynamicWriteOperands(`echo ok > "out/run-$RANDOM.log"`, cwd, home); !unknown {
 		t.Fatal("numeric target with a linked member must stay unknown")
 	}
