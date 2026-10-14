@@ -2342,8 +2342,10 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 
 // readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
 // and exempt rows, and as pending the targets the guardian's last reconcile
-// (in runtimeDir) left waiting for their account's session. Every Windows
-// per-user row is written deferred, so that flag does not say which.
+// (in runtimeDir) left waiting for their account's session: those never
+// enrolled, and those an earlier release protected that the guardian repairs
+// at the account's next sign-in (GAP-0644). Every Windows per-user row is
+// written deferred, so that flag does not say which.
 func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string) (enterprisestatus.Enrollment, error) {
 	body, err := readWindowsEnterpriseBoundedFile(manifestPath, 16<<20)
 	if err != nil {
@@ -2365,6 +2367,11 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	}
 	if state, exists, err := loadEnterpriseHookGuardianState(runtimeDir); err == nil && exists {
 		enrollment.Pending = state.PendingCount
+		for _, row := range state.Results {
+			if enterpriseHookAwaitingSignInError(row) {
+				enrollment.Pending++
+			}
+		}
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
 	}
 	return enrollment, nil
