@@ -23,10 +23,11 @@ import (
 // check that does not finish in time is skipped, never treated as corruption.
 const startupIntegrityCheckTimeout = 5 * time.Second
 
-// SQLite primary result codes for a damaged database file.
+// SQLite primary result codes used to classify an integrity probe result.
 const (
-	sqliteCodeCorrupt = 11
-	sqliteCodeNotADB  = 26
+	sqliteCodeReadOnly = 8
+	sqliteCodeCorrupt  = 11
+	sqliteCodeNotADB   = 26
 )
 
 var errCorruptAuditDB = errors.New("database disk image is malformed")
@@ -58,6 +59,11 @@ func isSQLiteCorrupt(err error) bool {
 // (rebuildAuditDB). A store that is still damaged is moved aside, with its WAL
 // and SHM files, under a ".corrupt-<time>" name and a new store is created,
 // carrying the block/allow list over, so the daemon starts instead of failing.
+// A cold rollback journal present beside a corrupt store moves with it. A hot
+// rollback journal makes the read-only probe inconclusive; SQLite rolls it back
+// during the normal writable open, so it is not archived. If the store is then
+// corrupt, the start warning reports that its pre-existing journal was not
+// preserved.
 // The move is refused while another process still has the database open. Only
 // the daemon, the store's long-lived owner, calls this; other commands keep
 // failing.
@@ -149,6 +155,9 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 // probeExistingAuditStore validates the same path and sidecar trust boundary
 // as NewStore, then runs a bounded integrity check without a writable SQLite
 // connection. Every descriptor is closed before a possible Windows rename.
+// A hot rollback journal cannot be recovered read-only, so that probe result
+// is inconclusive; SQLite rolls it back in the writable open, and a later
+// corruption warning reports that the journal was not archived.
 // The seam lets tests make the probe fail before any file can be moved.
 var probeExistingAuditStore = readOnlyAuditStoreProbe
 
@@ -157,6 +166,10 @@ type auditSidecarAtStart struct {
 	size   int64
 }
 
+// readOnlyAuditStoreProbe identifies corruption before a writable connection
+// can consume a damaged WAL. A hot rollback journal yields SQLITE_READONLY;
+// the probe leaves it unchanged and lets SQLite's writable open roll it back.
+// If corruption remains, the start warning says the journal was not archived.
 func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtStart, error) {
 	if dbPath == ":memory:" || strings.TrimSpace(dbPath) == "" {
 		return nil, nil
@@ -202,7 +215,13 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 			fmt.Fprintf(warn, "[audit] startup integrity check skipped: %v\n", checkErr)
 			return sidecars, nil
 		}
-		return nil, fmt.Errorf("audit: read-only integrity probe failed before opening the store for writing: %w", checkErr)
+		cause := ""
+		var coded sqliteCoded
+		if errors.As(checkErr, &coded) && coded.Code()&0xff == sqliteCodeReadOnly {
+			cause = " (a hot rollback journal is a common cause)"
+		}
+		fmt.Fprintf(warn, "[audit] read-only probe could not read the store%s: %v; the normal open and its integrity check follow.\n", cause, checkErr)
+		return sidecars, nil
 	}
 	return sidecars, checkErr
 }
@@ -227,7 +246,11 @@ func warnLostArchiveSidecars(warn io.Writer, before []auditSidecarAtStart, moved
 	for _, sidecar := range before {
 		archived, err := os.Lstat(moved + sidecar.suffix)
 		if err != nil {
-			fmt.Fprintf(warn, "[audit] WARNING: the pre-existing %s sidecar could not be verified in %s: %v.\n", sidecar.suffix, moved, err)
+			if sidecar.suffix == "-journal" && errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(warn, "[audit] WARNING: the pre-existing -journal sidecar was not preserved in %s (SQLite may have consumed it during rollback recovery): %v.\n", moved, err)
+			} else {
+				fmt.Fprintf(warn, "[audit] WARNING: the pre-existing %s sidecar could not be verified in %s: %v.\n", sidecar.suffix, moved, err)
+			}
 		} else if sidecar.suffix != "-shm" && archived.Size() != sidecar.size {
 			fmt.Fprintf(warn, "[audit] WARNING: the pre-existing %s sidecar changed size from %d to %d before it reached %s; its original bytes were not preserved.\n",
 				sidecar.suffix, sidecar.size, archived.Size(), moved)
