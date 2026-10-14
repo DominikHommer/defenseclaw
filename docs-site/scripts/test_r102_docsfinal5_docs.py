@@ -175,10 +175,13 @@ class R102DocsFinal5DocsTest(unittest.TestCase):
                 "`--purge` removes them and each enrolled account's data and binaries for a clean image",
                 "It removes the sandbox registration store and key for a clean image",
                 "may keep `sandbox` registrations and `redaction-correlation.key` when an account keeps sandboxes",
-                "A plain uninstall can still keep sandbox registrations and their key when an account keeps sandboxes",
+                "gateway and guardian state (the sandbox registrations and key included), logs, lifecycle state and the service account",
                 "Cannot combine with `--purge`",
             ),
-            ("Without `--purge`, uninstall already removes the config, credentials, state",),
+            (
+                "Without `--purge`, uninstall already removes the config, credentials, state",
+                "A plain uninstall can still keep sandbox registrations and their key",
+            ),
         )
 
     def test_jamf_second_uninstall_description(self):
