@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,11 +50,11 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 		}
 		return ""
 	}
-	windowsEnterpriseGuardianRestores = func() map[string]time.Time {
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
 		return map[string]time.Time{
 			enterpriseHookGuardianRestoreKey(std1SID, "hermes"): restoredAt,
 			enterpriseHookGuardianRestoreKey(std1SID, "codex"):  restoredAt,
-		}
+		}, nil
 	}
 	processes := []inventory.AgentProcess{
 		{PID: 61, Connector: "hermes", User: std1, StartedAt: restoredAt.Add(-2 * time.Minute)},
@@ -109,5 +110,25 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
 	if named := restartWarnings(result); len(named) != 0 || !result.SecurityComplete {
 		t.Fatalf("after the restart warnings = %+v security_complete = %t, want none and true", result.Warnings, result.SecurityComplete)
+	}
+
+	// Pass-6 review: a restore record that stays unreadable (a sharing
+	// violation while the guardian replaces it) names each session whose
+	// restart status is now unknown instead of none; Codex, whose hooks live
+	// in machine policy, is still not named.
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		return nil, errors.New("sharing violation")
+	}
+	processes = []inventory.AgentProcess{
+		{PID: 66, Connector: "hermes", User: std1, StartedAt: restoredAt.Add(3 * time.Minute)},
+		{PID: 67, Connector: "codex", User: std1, StartedAt: restoredAt.Add(-time.Minute)},
+	}
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed = true
+	result.SecurityComplete = true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], `user DCFC\dcw-std1 runs hermes (pid 66); restart status unknown`) ||
+		!strings.Contains(named[0], "sharing violation") || strings.Contains(named[0], "pid 67") || result.SecurityComplete {
+		t.Fatalf("unreadable record: warnings = %+v security_complete = %t, want hermes pid 66 named with its restart status unknown", result.Warnings, result.SecurityComplete)
 	}
 }

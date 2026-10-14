@@ -106,11 +106,12 @@ var (
 		return sid.String()
 	}
 	// windowsEnterpriseGuardianRestores returns when the hook guardian last
-	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey.
-	windowsEnterpriseGuardianRestores = func() map[string]time.Time {
+	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey,
+	// or an error when its record stays unreadable.
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
 		layout, err := managed.StandaloneWindowsLayout()
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 		return readEnterpriseHookGuardianRestores(layout.DataDir)
 	}
@@ -292,8 +293,10 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
-	restores := windowsEnterpriseGuardianRestores()
-	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 {
+	// An unreadable restore record leaves each session's restart status
+	// unknown, which is named instead of read as "no restore".
+	restores, restoresErr := windowsEnterpriseGuardianRestores()
+	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 && restoresErr == nil {
 		return
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
@@ -320,6 +323,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	connectorSessions := map[string]map[string][]string{}
 	enrollmentSessions := map[string]map[string][]string{}
 	restoredSessions := map[string]map[string][]string{}
+	unknownSessions := map[string][]string{}
 	sids := map[string]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
@@ -345,7 +349,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			connectorSessions[user][name] = append(connectorSessions[user][name], label)
 			continue
 		}
-		if len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 {
+		if len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 && restoresErr == nil {
 			continue
 		}
 		sid, resolved := sids[user]
@@ -364,7 +368,14 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			enrollmentSessions[user][key] = append(enrollmentSessions[user][key], label)
 			continue
 		}
-		if at, ok := restores[key]; ok && !windowsMachinePolicyHookConnectors[name] && process.StartedAt.Before(at) {
+		if windowsMachinePolicyHookConnectors[name] {
+			continue
+		}
+		if restoresErr != nil {
+			unknownSessions[user] = append(unknownSessions[user], label)
+			continue
+		}
+		if at, ok := restores[key]; ok && process.StartedAt.Before(at) {
 			if restoredSessions[user] == nil {
 				restoredSessions[user] = map[string][]string{}
 			}
@@ -433,7 +444,17 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				user, strings.Join(restoredSessions[user][key], ", "), connectorName, restores[key].UTC().Format(time.RFC3339)))
 		}
 	}
-	if len(restoredSessions) > 0 {
+	users = users[:0]
+	for user := range unknownSessions {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+			"user %s runs %s; restart status unknown: the hook guardian's restore record could not be read (%v), so DefenseClaw cannot tell whether these sessions started before the guardian put back the account's hooks and run without DefenseClaw: ask that user to restart them",
+			user, strings.Join(unknownSessions[user], ", "), restoresErr))
+	}
+	if len(restoredSessions) > 0 || len(unknownSessions) > 0 {
 		result.SecurityComplete = false
 	}
 }
