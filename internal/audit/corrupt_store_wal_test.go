@@ -428,7 +428,7 @@ func TestOpenDaemonStoreFreshRestoreRetriesTransientRename(t *testing.T) {
 		t.Run("audit.db"+suffix, func(t *testing.T) {
 			var path string
 			if suffix == "-journal" {
-				path = corruptHotJournalFixture(t)
+				path = corruptColdJournalFixture(t)
 			} else {
 				path = corruptWALFixture(t, "page")
 			}
@@ -498,7 +498,9 @@ func TestOpenDaemonStoreWarnsWhenALateOpenConsumesWAL(t *testing.T) {
 	}
 }
 
-func corruptHotJournalFixture(t *testing.T) string {
+// corruptColdJournalFixture copies a rollback journal before SQLite writes its
+// header magic. SQLite ignores the copy, so it remains beside a corrupt store.
+func corruptColdJournalFixture(t *testing.T) string {
 	t.Helper()
 	source := filepath.Join(t.TempDir(), "audit.db")
 	store, err := NewStore(source)
@@ -543,6 +545,15 @@ func corruptHotJournalFixture(t *testing.T) string {
 		if err := os.WriteFile(path+suffix, body, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if suffix == "-journal" {
+			if len(body) == 0 {
+				t.Fatal("cold journal is empty")
+			}
+			if body[0] != 0 {
+				t.Fatalf("cold journal header: size=%d first byte=%d; want zero first byte", len(body), body[0])
+			}
+			t.Logf("cold journal: size=%d first byte=%d", len(body), body[0])
+		}
 	}
 	_ = tx.Rollback()
 	file, err := os.OpenFile(path, os.O_WRONLY, 0)
@@ -558,9 +569,9 @@ func corruptHotJournalFixture(t *testing.T) string {
 	return path
 }
 
-func TestOpenDaemonStorePreservesHotJournal(t *testing.T) {
-	path := corruptHotJournalFixture(t)
-	logAuditStoreBytes(t, "hot journal before", path)
+func TestOpenDaemonStoreArchivesColdJournal(t *testing.T) {
+	path := corruptColdJournalFixture(t)
+	logAuditStoreBytes(t, "cold journal before", path)
 	before := map[string][]byte{}
 	for _, suffix := range []string{"", "-journal"} {
 		body, err := os.ReadFile(path + suffix)
@@ -571,9 +582,9 @@ func TestOpenDaemonStorePreservesHotJournal(t *testing.T) {
 	}
 	_, probeErr := readOnlyAuditStoreProbe(path, &bytes.Buffer{})
 	if !isSQLiteCorrupt(probeErr) {
-		t.Fatalf("hot journal probe = %v; want corrupt page", probeErr)
+		t.Fatalf("cold journal probe = %v; want corrupt page", probeErr)
 	}
-	logAuditStoreBytes(t, "hot journal after probe", path)
+	logAuditStoreBytes(t, "cold journal after probe", path)
 	var warning bytes.Buffer
 	fresh, err := OpenDaemonStore(path, &warning)
 	if err != nil {
@@ -595,7 +606,7 @@ func TestOpenDaemonStorePreservesHotJournal(t *testing.T) {
 	if !strings.Contains(warning.String(), "together with its -journal file") {
 		t.Fatalf("start warning does not name journal: %q", warning.String())
 	}
-	logAuditStoreBytes(t, "hot journal after quarantine", archive)
+	logAuditStoreBytes(t, "cold journal after quarantine", archive)
 }
 
 func logAuditStoreBytes(t *testing.T, stage, dbPath string) {
