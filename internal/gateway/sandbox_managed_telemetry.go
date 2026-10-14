@@ -544,10 +544,11 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 		}
 	}
 	// Only a record accepted for this bound sandbox after bind is a sighting.
+	// The gateway stamps receipt time: queued creation records predate the bind.
 	// Tombstone telemetry still records the sandbox's last phases, but cannot
 	// establish a new sighting for a revoked registration.
-	if reg.State != sandboxreg.StateRevoked && !ev.Time.Before(reg.BoundAt) {
-		a.sandboxMarkGuestSeen(reg, ev.Time)
+	if reg.State != sandboxreg.StateRevoked {
+		a.sandboxMarkGuestSeen(reg)
 	}
 }
 
