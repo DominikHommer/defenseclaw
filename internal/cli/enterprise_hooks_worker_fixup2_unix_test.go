@@ -7,9 +7,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,6 +51,109 @@ func TestEnterpriseHookWorkerConfigReferenceLine(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookWorkerUnverifiedReportValidation(t *testing.T) {
+	valid := enterpriseHookWorkerTargetResult{Index: 0, OK: true, Unverified: "load managed backup /home/sample-user/.defenseclaw/connector_backups/codex/notes.json: invalid"}
+	if err := validateEnterpriseHookWorkerRemoveReport(valid); err != nil {
+		t.Fatalf("valid unverified report: %v", err)
+	}
+	remove := enterpriseHookWorkerTarget{Mode: enterpriseHookWorkerModeRemove}
+	if err := validateEnterpriseHookWorkerResult(remove, valid); err != nil {
+		t.Fatalf("valid unverified result: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		result enterpriseHookWorkerTargetResult
+	}{
+		{"report and reason", enterpriseHookWorkerTargetResult{PathsReported: true, Unverified: "receipt unreadable"}},
+		{"oversized", enterpriseHookWorkerTargetResult{Unverified: strings.Repeat("x", enterpriseHookWorkerRemainingMax+1)}},
+		{"invalid utf8", enterpriseHookWorkerTargetResult{Unverified: string([]byte{0xff})}},
+		{"control", enterpriseHookWorkerTargetResult{Unverified: "receipt\nname"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateEnterpriseHookWorkerRemoveReport(tc.result); err == nil {
+				t.Fatal("invalid unverified report accepted")
+			}
+		})
+	}
+	for _, mode := range []string{enterpriseHookWorkerModeInstall, enterpriseHookWorkerModeVerify, enterpriseHookWorkerModePurge} {
+		if err := validateEnterpriseHookWorkerResult(enterpriseHookWorkerTarget{Mode: mode}, valid); err == nil {
+			t.Fatalf("%s accepted a Remove-only reason", mode)
+		}
+	}
+}
+
+func TestEnterpriseHookWorkerCollectionFailureStillRemoves(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the per-user worker requires a non-root test account")
+	}
+	for _, tc := range []struct {
+		name, path, logical string
+		count               int
+	}{
+		{name: "too many paths", count: enterpriseHookWorkerRemovePathsMax},
+		{name: "oversized path", path: "/" + strings.Repeat("a", enterpriseHookWorkerRemovePathMax+1), logical: "oversized"},
+		{name: "relative path", path: "relative/config", logical: "relative"},
+		{name: "unclean path", path: "/tmp/nested/../config", logical: "unclean"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			receipts := filepath.Join(dataDir, "connector_backups", "opencode")
+			if err := os.MkdirAll(receipts, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			write := func(logical, target string) {
+				t.Helper()
+				data, err := json.Marshal(map[string]interface{}{"version": 1, "connector": "opencode", "logical_name": logical, "path": target})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(receipts, logical+".json"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.count != 0 {
+				for i := 0; i < tc.count; i++ {
+					write("item"+strconv.Itoa(i), filepath.Join(home, "item", strconv.Itoa(i)))
+				}
+			} else {
+				write(tc.logical, tc.path)
+			}
+			previous := enterpriseHookWorkerRemover
+			t.Cleanup(func() { enterpriseHookWorkerRemover = previous })
+			calls := 0
+			enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error { calls++; return nil }
+			opts := enterprisehooks.InstallOptions{ConnectorName: "opencode", UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), DataDir: dataDir, Registry: connector.NewDefaultRegistry()}
+			request := enterpriseHookWorkerRequest{Home: home, UID: os.Getuid(), GID: os.Getgid(), Targets: []enterpriseHookWorkerTarget{{Index: 0, Mode: enterpriseHookWorkerModeRemove, Options: enterpriseHookWorkerOptionsFrom(opts)}}}
+			result := runEnterpriseHookWorkerApply(context.Background(), request).Targets[0]
+			if calls != 1 || !result.OK || result.PathsReported || result.Unverified == "" || len(result.CleanedPaths) != 0 || result.Remaining != "" {
+				t.Fatalf("collection failure blocked remover or claimed proof: calls=%d result=%+v", calls, result)
+			}
+			if err := validateEnterpriseHookWorkerResult(request.Targets[0], result); err != nil {
+				t.Fatalf("worker emitted invalid unverified reason: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnterpriseHookWorkerSetupErrorKeepsRemoverError(t *testing.T) {
+	previous := enterpriseHookWorkerRemover
+	t.Cleanup(func() { enterpriseHookWorkerRemover = previous })
+	calls := 0
+	enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error {
+		calls++
+		return errors.New("enterprise hooks: unknown connector \"missing\"")
+	}
+	request := enterpriseHookWorkerRequest{Home: "/home/sample-user", Targets: []enterpriseHookWorkerTarget{{
+		Index: 0, Mode: enterpriseHookWorkerModeRemove,
+		Options: enterpriseHookWorkerOptions{ConnectorName: "missing", UserHome: "/home/sample-user"},
+	}}}
+	result := runEnterpriseHookWorkerApply(context.Background(), request).Targets[0]
+	if calls != 1 || result.OK || result.Error != "enterprise hooks: unknown connector \"missing\"" {
+		t.Fatalf("setup error changed remover result: calls=%d result=%+v", calls, result)
+	}
+}
+
 func TestEnterpriseHookWorkerConfigScanKeepsReadLimits(t *testing.T) {
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
@@ -80,6 +185,42 @@ func TestEnterpriseHookWorkerConfigScanKeepsReadLimits(t *testing.T) {
 	}
 	if got := enterpriseHookWorkerRemainingConfigReference(home, filepath.Join(home, ".defenseclaw"), []string{path}); !strings.Contains(got, "read limit") {
 		t.Fatalf("oversized file was treated as clean: %s", got)
+	}
+}
+
+func TestEnterpriseHookWorkerUnverifiedJSONIsRemoveOnly(t *testing.T) {
+	previousInstaller, previousVerifier, previousRemover := enterpriseHookWorkerInstaller, enterpriseHookWorkerVerifier, enterpriseHookWorkerRemover
+	t.Cleanup(func() {
+		enterpriseHookWorkerInstaller, enterpriseHookWorkerVerifier, enterpriseHookWorkerRemover = previousInstaller, previousVerifier, previousRemover
+	})
+	home := t.TempDir()
+	result := enterprisehooks.InstallResult{Connector: "opencode", UserHome: home}
+	enterpriseHookWorkerInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return result, nil
+	}
+	enterpriseHookWorkerVerifier = enterpriseHookWorkerInstaller
+	enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error { return nil }
+	request := enterpriseHookWorkerRequest{Home: home, Targets: []enterpriseHookWorkerTarget{{Index: 0,
+		Options: enterpriseHookWorkerOptions{ConnectorName: "opencode", UserHome: home},
+	}}}
+	for _, mode := range []string{enterpriseHookWorkerModeInstall, enterpriseHookWorkerModeVerify} {
+		request.Targets[0].Mode = mode
+		got, err := json.Marshal(runEnterpriseHookWorkerApply(context.Background(), request).Targets[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := json.Marshal(enterpriseHookWorkerTargetResult{Index: 0, OK: true, Result: &result})
+		if err != nil || string(got) != string(want) || strings.Contains(string(got), "unverified") {
+			t.Fatalf("%s JSON changed: %s, want %s", mode, got, want)
+		}
+	}
+	request.Targets[0].Mode = enterpriseHookWorkerModeRemove
+	got, err := json.Marshal(runEnterpriseHookWorkerApply(context.Background(), request).Targets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "unverified") {
+		t.Fatalf("successful Remove emitted an unverified field: %s", got)
 	}
 }
 

@@ -372,7 +372,11 @@ func newEnterpriseHookCleanupUnverifiedError(changed *enterpriseHookTargetHomeCh
 
 func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult, home string, requireClean bool) (string, string) {
 	if !report.PathsReported {
-		return home, "the worker did not report the paths it found"
+		reason := "the worker did not report the paths it found"
+		if report.Unverified != "" {
+			reason += ": " + report.Unverified
+		}
+		return home, reason
 	}
 	for _, path := range report.CleanedPaths {
 		if !enterpriseHookWorkerPathWithin(home, path) {

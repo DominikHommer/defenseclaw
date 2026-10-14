@@ -426,7 +426,7 @@ func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, resul
 		if err := validateEnterpriseHookWorkerRemoveReport(result); err != nil {
 			return err
 		}
-	} else if result.PathsReported || len(result.CleanedPaths) != 0 || result.Remaining != "" {
+	} else if result.PathsReported || len(result.CleanedPaths) != 0 || result.Remaining != "" || result.Unverified != "" {
 		return errors.New("worker reported removal paths for a non-remove target")
 	}
 	if !result.OK {
@@ -473,6 +473,13 @@ func validateEnterpriseHookWorkerRemoveReport(result enterpriseHookWorkerTargetR
 	if !result.PathsReported && (len(result.CleanedPaths) != 0 || result.Remaining != "") {
 		return errors.New("worker removal paths lack a report marker")
 	}
+	if result.PathsReported && result.Unverified != "" {
+		return errors.New("worker reported both removal paths and an unverified reason")
+	}
+	if len(result.Unverified) > enterpriseHookWorkerRemainingMax ||
+		!utf8.ValidString(result.Unverified) || strings.IndexFunc(result.Unverified, unicode.IsControl) >= 0 {
+		return errors.New("worker reported an invalid unverified reason")
+	}
 	if len(result.CleanedPaths) > enterpriseHookWorkerRemovePathsMax {
 		return errors.New("worker reported too many removal paths")
 	}
@@ -480,7 +487,13 @@ func validateEnterpriseHookWorkerRemoveReport(result enterpriseHookWorkerTargetR
 		if len(path) > enterpriseHookWorkerRemovePathMax || !filepath.IsAbs(path) ||
 			filepath.Clean(path) != path || strings.TrimSpace(path) != path ||
 			!utf8.ValidString(path) || strings.IndexFunc(path, unicode.IsControl) >= 0 {
-			return fmt.Errorf("worker reported an invalid removal path %q", boundedString(path, 96))
+			display := path
+			if len(display) > 96 && filepath.IsAbs(display) {
+				display = shortEnterpriseHookReportPath(display)
+			} else if len(display) > 96 {
+				display = boundedString(display, 96)
+			}
+			return fmt.Errorf("worker reported an invalid removal path %q", display)
 		}
 	}
 	if len(result.Remaining) > enterpriseHookWorkerRemainingMax ||

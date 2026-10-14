@@ -558,7 +558,9 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	}
 	var unverified *enterpriseHookCleanupUnverifiedError
 	keepConfigPath := ""
+	keepReceiptPath := ""
 	if errors.As(err, &unverified) {
+		receiptPath := enterpriseHookUnverifiedReceiptPath(unverified.reason)
 		paths = append(paths, unverified.path, unverified.dataDir, unverified.home, unverified.configPath)
 		if unverified.configPath != unverified.home && len(unverified.configPath) <= 180 {
 			keepConfigPath = unverified.configPath
@@ -569,8 +571,21 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 			if unverified.configPath != unverified.home {
 				location = "at " + unverified.configPath
 			}
+			reason := boundedString(unverified.reason, 96)
+			if receiptPath != "" {
+				reason = "receipt " + shortEnterpriseHookReportPath(receiptPath) + " could not be checked"
+			}
 			raw = fmt.Sprintf("enterprise hooks: cleanup report unverified at %s (%s); remove DefenseClaw's entries from that agent's config %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
-				unverified.path, boundedString(unverified.reason, 96), location, receiptDir)
+				unverified.path, reason, location, receiptDir)
+		} else if receiptPath != "" && len(receiptPath) <= 180 {
+			keepReceiptPath = receiptPath
+			receiptDir := filepath.Join(unverified.dataDir, "connector_backups", unverified.connector) + string(filepath.Separator)
+			location := "in the home " + unverified.home
+			if unverified.configPath != unverified.home {
+				location = "at " + unverified.configPath
+			}
+			raw = fmt.Sprintf("enterprise hooks: re-homed cleanup report unverified at %s (receipt %s could not be checked); remove DefenseClaw's entries from that agent's config %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
+				unverified.path, receiptPath, location, receiptDir)
 		}
 		if keepConfigPath != "" {
 			raw = strings.Replace(raw, "config at "+keepConfigPath, "config at <current-config-path>", 1)
@@ -578,6 +593,9 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	}
 	if oldKept != nil && unverified == nil && len(raw) <= maxBytes {
 		return raw
+	}
+	if keepReceiptPath != "" {
+		raw = strings.Replace(raw, keepReceiptPath, "<unverified-receipt-path>", 1)
 	}
 	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
 	for _, path := range paths {
@@ -597,6 +615,9 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	raw = strings.Join(words, " ")
 	if keepConfigPath != "" {
 		raw = strings.Replace(raw, "<current-config-path>", keepConfigPath, 1)
+	}
+	if keepReceiptPath != "" {
+		raw = strings.Replace(raw, "<unverified-receipt-path>", keepReceiptPath, 1)
 	}
 	if len(raw) <= maxBytes {
 		return raw
@@ -636,6 +657,24 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 		tail++
 	}
 	return raw[:head] + gap + raw[tail:]
+}
+
+// enterpriseHookUnverifiedReceiptPath is display-only: the worker's
+// validated reason may name an unreadable or misplaced backup receipt.
+func enterpriseHookUnverifiedReceiptPath(reason string) string {
+	for _, prefix := range []string{"load managed backup ", "managed backup "} {
+		index := strings.Index(reason, prefix)
+		if index < 0 {
+			continue
+		}
+		candidate := reason[index+len(prefix):]
+		candidate, _, _ = strings.Cut(candidate, ": ")
+		candidate, _, _ = strings.Cut(candidate, " does not match")
+		if filepath.IsAbs(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func shortEnterpriseHookReportPath(path string) string {
