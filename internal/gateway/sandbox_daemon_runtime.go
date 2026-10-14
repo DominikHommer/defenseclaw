@@ -1205,6 +1205,10 @@ func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	d.floorMu.Unlock()
 	if closed {
 		d.reloadConfig()
+		// The manager loaded its sandbox records under the closed floor
+		// before Run called revalidate. A poll sees this same floor and does
+		// not refresh those records again, so refresh them at adoption.
+		d.rt.manager.RefreshPolicies()
 	}
 	return revoked
 }
@@ -1236,9 +1240,6 @@ func (d *SandboxDaemon) confirmIfClosed(ctx context.Context) {
 	vctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
 	revoked := d.revalidate(vctx)
 	cancel()
-	if !d.floorClosed() {
-		d.rt.manager.RefreshPolicies()
-	}
 	if len(revoked) == 0 {
 		return
 	}
