@@ -35,11 +35,11 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 		for _, group := range groups {
 			var entry map[string]json.RawMessage
 			if err := json.Unmarshal(group, &entry); err != nil || entry == nil {
-				return nil, 0, fmt.Errorf("Claude hooks.%s contains an invalid matcher", event)
+				return nil, 0, fmt.Errorf("the Claude hooks.%s contains an invalid matcher", event)
 			}
 			var handlers []json.RawMessage
 			if err := json.Unmarshal(entry["hooks"], &handlers); err != nil {
-				return nil, 0, fmt.Errorf("Claude hooks.%s contains invalid handlers: %w", event, err)
+				return nil, 0, fmt.Errorf("the Claude hooks.%s contains invalid handlers: %w", event, err)
 			}
 			kept := make([]json.RawMessage, 0, len(handlers))
 			for _, handler := range handlers {
@@ -47,7 +47,7 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 					Command string `json:"command"`
 				}
 				if err := json.Unmarshal(handler, &hook); err != nil {
-					return nil, 0, fmt.Errorf("Claude hooks.%s contains an invalid handler: %w", event, err)
+					return nil, 0, fmt.Errorf("the Claude hooks.%s contains an invalid handler: %w", event, err)
 				}
 				if windowsManagedHookCommandIs(hook.Command, executable) {
 					removed++
