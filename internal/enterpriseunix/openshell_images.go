@@ -281,7 +281,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 		store, found, err := e.readSandboxImageStore(a, path.rel)
 		if err != nil {
 			if found {
-				r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not safely read the sandbox image store of user %s (%s): %v; no Docker image was removed for this store", a.Name, path.name, err))
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not safely read the sandbox image store of user %s (%s): %v; no Docker image was removed for this account from this store", a.Name, path.name, err))
 			}
 			continue
 		}

@@ -1360,7 +1360,8 @@ running sandbox counts again within the next minute.
   legacy store. If Docker is missing or cannot list images,
   the result names each image tag recorded for the account, the reason and
   the root `docker image rm <tag>` command, marks the image as not verified,
-  and gives the account's label-filtered `docker image ls` command. If Docker
+  and gives the account's label-filtered `docker image ls` command. Warnings
+  show at most 32 recorded tags per account and count any others. If Docker
   cannot remove a listed image, the warning names its tag, short ID, account,
   reason and the root `docker image rm <tag>` command; purge still finishes.
   A non-purge uninstall keeps the images. On macOS, each account's Docker

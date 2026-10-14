@@ -628,8 +628,8 @@ func TestSandboxDockerUnavailableUnionsStoresAndBoundsWarnings(t *testing.T) {
 		}
 		r := h.run(Options{Action: ActionUninstall, Purge: true})
 		requireOK(t, r)
-		if got := len(r.Warnings); got != imageWarningLimit+1 {
-			t.Errorf("warning count = %d, want %d: %+v", got, imageWarningLimit+1, r.Warnings)
+		if got := len(r.Warnings); got != 33 {
+			t.Errorf("warning count = %d, want 33: %+v", got, r.Warnings)
 		}
 		all := messagesOf(r.Warnings, codeSandboxUserState)
 		for _, want := range []string{"recorded-00", "recorded-31", "and 8 more recorded tags", "1 recorded tag(s) were not shown", sandboxImageListCommand(sampleImageOwner)} {
