@@ -22,6 +22,9 @@ import (
 // words it as Linux and macOS do: only known codes and connectors, with the
 // account name kept plain.
 func TestGuardianNoticeMessagesWordOnlyKnownNotices(t *testing.T) {
+	// The Windows protected-file writer hands the record to the gateway
+	// service account, which a test host does not have.
+	enableEnterpriseHookGuardianRestores(t, true)
 	dataDir := t.TempDir()
 	writeEnterpriseHookGuardianNotices(io.Discard, dataDir, []enterpriseHookGuardianNotice{
 		{User: "erin", Connector: "hermes", AgentConfig: connector.AgentConfigSettingsLost},
