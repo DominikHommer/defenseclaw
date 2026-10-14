@@ -5,6 +5,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,6 +48,10 @@ var enterpriseHookGuardianRestoreReadBackoff = []time.Duration{10 * time.Millise
 // enterpriseHookGuardianRestoreRecordReader reads and checks the record once;
 // tests replace it.
 var enterpriseHookGuardianRestoreRecordReader = readEnterpriseHookGuardianRestoreRecord
+
+// Content failures may be replaced by the next restore. Read failures may
+// still hide earlier entries, so the recorder must preserve the file.
+var errEnterpriseHookGuardianRestoreRecordInvalid = errors.New("invalid hook guardian restore record")
 
 type enterpriseHookGuardianRestore struct {
 	SID        string `json:"sid,omitempty"`
@@ -116,16 +121,16 @@ func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string 
 // a still-running session for good, as later clean passes repair nothing
 // (GAP-0499). A row whose account identity changed (RevokeProtection) keeps
 // nothing: the old uid may belong to another account now. It is best
-// effort: a failed write is logged and changes nothing else.
+// effort: a failed read or write is logged and returned.
 func recordEnterpriseHookGuardianRestores(
 	stderr io.Writer,
 	dataDir string,
 	rows []enterpriseHookReconcileRow,
 	restored []enterpriseHookGuardianRestore,
-) {
+) error {
 	dataDir = strings.TrimSpace(dataDir)
 	if !enterpriseHookGuardianRestoresEnabled() || dataDir == "" {
-		return
+		return nil
 	}
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	enrolled := make(map[string]bool, len(rows))
@@ -139,6 +144,7 @@ func recordEnterpriseHookGuardianRestores(
 	}
 	entries := map[string]enterpriseHookGuardianRestore{}
 	changed := false
+	var invalidErr error
 	if record, err := readEnterpriseHookGuardianRestoreRecordRetrying(path); err == nil {
 		for _, entry := range record.Targets {
 			key := entry.key()
@@ -148,9 +154,12 @@ func recordEnterpriseHookGuardianRestores(
 			}
 			entries[key] = entry
 		}
-	} else if !os.IsNotExist(err) {
-		// An unreadable record is replaced by this pass's entries.
+	} else if errors.Is(err, errEnterpriseHookGuardianRestoreRecordInvalid) {
+		invalidErr = err
 		changed = true
+	} else if !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "[hook-guardian] warn: could not read the restore record in %s: %v; record left unchanged and status reports restart status unknown until it can be read\n", path, err)
+		return err
 	}
 	for _, entry := range restored {
 		entry.SID = strings.ToUpper(strings.TrimSpace(entry.SID))
@@ -163,7 +172,7 @@ func recordEnterpriseHookGuardianRestores(
 		changed = true
 	}
 	if !changed {
-		return
+		return nil
 	}
 	record := enterpriseHookGuardianRestoreRecord{Version: 1, Targets: make([]enterpriseHookGuardianRestore, 0, len(entries))}
 	for _, entry := range entries {
@@ -178,7 +187,12 @@ func recordEnterpriseHookGuardianRestores(
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] warn: could not record the restored targets in %s: %v\n", path, err)
+		return err
 	}
+	if invalidErr != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] warn: replaced the restore record in %s that could not be parsed: %v\n", path, invalidErr)
+	}
+	return nil
 }
 
 // marshalEnterpriseHookGuardianRestoreRecord serializes record, sorted by
@@ -227,26 +241,30 @@ func readEnterpriseHookGuardianRestoreRecord(path string) (enterpriseHookGuardia
 	if err != nil {
 		return enterpriseHookGuardianRestoreRecord{}, err
 	}
+	if info.Mode().IsRegular() && info.Size() > hookGuardianRestoresMaxBytes {
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: hook guardian restore record exceeds %d-byte limit", errEnterpriseHookGuardianRestoreRecordInvalid, hookGuardianRestoresMaxBytes)
+	}
 	data, err := readEnterpriseHookBoundedFile(path, info, hookGuardianRestoresMaxBytes, "hook guardian restore record")
 	if err != nil {
 		return enterpriseHookGuardianRestoreRecord{}, err
 	}
 	var record enterpriseHookGuardianRestoreRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return enterpriseHookGuardianRestoreRecord{}, err
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: %v", errEnterpriseHookGuardianRestoreRecordInvalid, err)
 	}
 	if record.Version != 1 {
-		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("hook guardian restore record has version %d", record.Version)
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: hook guardian restore record has version %d", errEnterpriseHookGuardianRestoreRecordInvalid, record.Version)
 	}
 	return record, nil
 }
 
 // readEnterpriseHookGuardianRestoreRecordRetrying reads the record, retrying
-// a failed read with a short backoff; a missing record is not retried.
+// a failed read with a short backoff; a missing or content-invalid record is
+// not retried.
 func readEnterpriseHookGuardianRestoreRecordRetrying(path string) (enterpriseHookGuardianRestoreRecord, error) {
 	record, err := enterpriseHookGuardianRestoreRecordReader(path)
 	for _, wait := range enterpriseHookGuardianRestoreReadBackoff {
-		if err == nil || os.IsNotExist(err) {
+		if err == nil || os.IsNotExist(err) || errors.Is(err, errEnterpriseHookGuardianRestoreRecordInvalid) {
 			break
 		}
 		time.Sleep(wait)

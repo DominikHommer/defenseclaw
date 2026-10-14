@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,6 +196,144 @@ func TestEnterpriseHookGuardianRestoresReadRetriesATransientError(t *testing.T) 
 	if restores, err := readEnterpriseHookGuardianRestores(dataDir); restores != nil || !errors.Is(err, sharing) ||
 		calls != 1+len(enterpriseHookGuardianRestoreReadBackoff) {
 		t.Fatalf("persistent error: restores %v err %v after %d reads, want the error", restores, err, calls)
+	}
+}
+
+// The base negative-control overlay has the old recorder signature. This
+// helper lets the same assertions run against both signatures.
+func recordGuardianRestoresForRegressionTest(stderr io.Writer, dataDir string, rows []enterpriseHookReconcileRow, restored []enterpriseHookGuardianRestore) error {
+	switch record := any(recordEnterpriseHookGuardianRestores).(type) {
+	case func(io.Writer, string, []enterpriseHookReconcileRow, []enterpriseHookGuardianRestore) error:
+		return record(stderr, dataDir, rows, restored)
+	case func(io.Writer, string, []enterpriseHookReconcileRow, []enterpriseHookGuardianRestore):
+		record(stderr, dataDir, rows, restored)
+		return nil
+	default:
+		panic("unexpected guardian restore recorder signature")
+	}
+}
+
+func TestEnterpriseHookGuardianRestoresPreservesRecordAfterReadFailure(t *testing.T) {
+	enableEnterpriseHookGuardianRestores(t, true)
+	shortenGuardianRestoreBackoff(t)
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, hookGuardianRestoresFile)
+	const earlierSID, newSID = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	first := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
+	second := first.Add(10 * time.Minute)
+	rows := []enterpriseHookReconcileRow{
+		{SID: earlierSID, Connector: "hermes", OK: true},
+		{SID: newSID, Connector: "codex", OK: true},
+	}
+	if err := recordGuardianRestoresForRegressionTest(io.Discard, dataDir, rows,
+		[]enterpriseHookGuardianRestore{{SID: earlierSID, Connector: "hermes", RestoredAt: first.Format(time.RFC3339Nano)}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := enterpriseHookGuardianRestoreRecordReader
+	t.Cleanup(func() { enterpriseHookGuardianRestoreRecordReader = previous })
+	sharing := errors.New("sharing violation")
+	calls := 0
+	enterpriseHookGuardianRestoreRecordReader = func(string) (enterpriseHookGuardianRestoreRecord, error) {
+		calls++
+		return enterpriseHookGuardianRestoreRecord{}, sharing
+	}
+	if restores, err := readEnterpriseHookGuardianRestores(dataDir); restores != nil || !errors.Is(err, sharing) ||
+		calls != 1+len(enterpriseHookGuardianRestoreReadBackoff) {
+		t.Fatalf("status read = %v, %v after %d reads; want retried sharing error", restores, err, calls)
+	}
+	calls = 0
+	var warning bytes.Buffer
+	newRestore := []enterpriseHookGuardianRestore{{SID: newSID, Connector: "codex", RestoredAt: second.Format(time.RFC3339Nano)}}
+	err = recordGuardianRestoresForRegressionTest(&warning, dataDir, rows, newRestore)
+	if !errors.Is(err, sharing) || calls != 1+len(enterpriseHookGuardianRestoreReadBackoff) {
+		t.Errorf("recorder returned %v after %d reads; want the retried sharing error", err, calls)
+	}
+	if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("unreadable record changed: %q (%v)", after, err)
+	}
+	if got := warning.String(); !strings.Contains(got, path) || !strings.Contains(got, "left unchanged") ||
+		!strings.Contains(got, "restart status unknown") || strings.Count(got, "\n") != 1 {
+		t.Errorf("warning = %q, want one line naming the path, unchanged record, and unknown status", got)
+	}
+	enterpriseHookGuardianRestoreRecordReader = previous
+	if err := recordGuardianRestoresForRegressionTest(&warning, dataDir, rows, newRestore); err != nil {
+		t.Fatal(err)
+	}
+	restores := guardianRestoresForTest(t, dataDir)
+	if len(restores) != 2 || !restores[enterpriseHookGuardianRestoreKey(earlierSID, "hermes")].Equal(first) ||
+		!restores[enterpriseHookGuardianRestoreKey(newSID, "codex")].Equal(second) {
+		t.Fatalf("later readable record = %v, want both dated restores", restores)
+	}
+}
+
+func TestEnterpriseHookGuardianRestoresReplacesInvalidContentWithoutRetry(t *testing.T) {
+	enableEnterpriseHookGuardianRestores(t, true)
+	shortenGuardianRestoreBackoff(t)
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, hookGuardianRestoresFile)
+	const sid = "S-1-5-21-1-2-3-1001"
+	at := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
+	rows := []enterpriseHookReconcileRow{{SID: sid, Connector: "hermes", OK: true}}
+	restored := []enterpriseHookGuardianRestore{{SID: sid, Connector: "hermes", RestoredAt: at.Format(time.RFC3339Nano)}}
+	previous := enterpriseHookGuardianRestoreRecordReader
+	t.Cleanup(func() { enterpriseHookGuardianRestoreRecordReader = previous })
+	calls := 0
+	enterpriseHookGuardianRestoreRecordReader = func(path string) (enterpriseHookGuardianRestoreRecord, error) {
+		calls++
+		return readEnterpriseHookGuardianRestoreRecord(path)
+	}
+	for name, body := range map[string]string{
+		"json":     "not json",
+		"version":  `{"version":2,"targets":[]}`,
+		"oversize": strings.Repeat(" ", hookGuardianRestoresMaxBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			calls = 0
+			if restores, err := readEnterpriseHookGuardianRestores(dataDir); restores != nil || err == nil || calls != 1 {
+				t.Fatalf("invalid content read = %v, %v after %d reads; want one read and an error", restores, err, calls)
+			}
+			calls = 0
+			var warning bytes.Buffer
+			if err := recordGuardianRestoresForRegressionTest(&warning, dataDir, rows, restored); err != nil {
+				t.Fatalf("replace invalid content: %v", err)
+			}
+			if calls != 1 {
+				t.Errorf("invalid content was read %d times, want once", calls)
+			}
+			if got := warning.String(); !strings.Contains(got, path) || !strings.Contains(got, "replaced") ||
+				!strings.Contains(got, "could not be parsed") {
+				t.Errorf("warning = %q, want the replaced invalid record named", got)
+			}
+			record := readGuardianRestoreRecordForTest(t, dataDir)
+			if record.Version != 1 || len(record.Targets) != 1 || record.Targets[0].SID != sid {
+				t.Errorf("replacement record = %+v, want the current restored target", record)
+			}
+		})
+	}
+}
+
+func TestEnterpriseHookGuardianRestoresCreatesMissingRecordWithoutWarning(t *testing.T) {
+	enableEnterpriseHookGuardianRestores(t, true)
+	dataDir := t.TempDir()
+	const sid = "S-1-5-21-1-2-3-1001"
+	var warning bytes.Buffer
+	if err := recordGuardianRestoresForRegressionTest(&warning, dataDir,
+		[]enterpriseHookReconcileRow{{SID: sid, Connector: "hermes", OK: true}},
+		[]enterpriseHookGuardianRestore{{SID: sid, Connector: "hermes", RestoredAt: time.Now().UTC().Format(time.RFC3339Nano)}}); err != nil {
+		t.Fatal(err)
+	}
+	if warning.Len() != 0 {
+		t.Errorf("missing record warning = %q, want none", warning.String())
+	}
+	if record := readGuardianRestoreRecordForTest(t, dataDir); record.Version != 1 || len(record.Targets) != 1 {
+		t.Errorf("created record = %+v, want one restored target", record)
 	}
 }
 
