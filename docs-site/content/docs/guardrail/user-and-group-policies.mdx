@@ -26,6 +26,9 @@ DefenseClaw reads who a user is from the operating system and never calls
 Active Directory, Okta or Entra. Only facts the OS vouches for (`verified`)
 can select a profile. See
 [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources).
+Group assignments follow the OS-verified account ID. When two accounts share
+a visible name, use each uid or SID with `guardrail profile explain --user`
+to inspect their decisions separately.
 </Callout>
 
 ## A complete example
