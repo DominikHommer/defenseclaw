@@ -5,6 +5,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -47,6 +49,18 @@ var enterpriseHookGuardianRestoreReadBackoff = []time.Duration{10 * time.Millise
 // enterpriseHookGuardianRestoreRecordReader reads and checks the record once;
 // tests replace it.
 var enterpriseHookGuardianRestoreRecordReader = readEnterpriseHookGuardianRestoreRecord
+
+// Content failures may be replaced by the next restore. Read failures may
+// still hide earlier entries, so the recorder must preserve the file.
+var errEnterpriseHookGuardianRestoreRecordInvalid = errors.New("invalid hook guardian restore record")
+
+// The guardian is a long-lived watch loop, so memory carries restores across
+// passes. A one-shot reconcile or guardian restart before a readable record
+// can still lose them.
+var enterpriseHookGuardianRestorePending = struct {
+	sync.Mutex
+	byPath map[string]map[string]enterpriseHookGuardianRestore
+}{byPath: make(map[string]map[string]enterpriseHookGuardianRestore)}
 
 type enterpriseHookGuardianRestore struct {
 	SID        string `json:"sid,omitempty"`
@@ -106,6 +120,39 @@ func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string 
 	return entry.key()
 }
 
+func enterpriseHookGuardianRestoreTime(entry enterpriseHookGuardianRestore) time.Time {
+	at, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.RestoredAt))
+	return at
+}
+
+// The caller holds enterpriseHookGuardianRestorePending while changing its map.
+func mergeEnterpriseHookGuardianRestorePending(path string, restored []enterpriseHookGuardianRestore) {
+	if len(restored) == 0 {
+		return
+	}
+	pending := enterpriseHookGuardianRestorePending.byPath[path]
+	if pending == nil {
+		pending = make(map[string]enterpriseHookGuardianRestore, len(restored))
+		enterpriseHookGuardianRestorePending.byPath[path] = pending
+	}
+	for _, entry := range restored {
+		key := entry.key()
+		if old, ok := pending[key]; !ok || !enterpriseHookGuardianRestoreTime(entry).Before(enterpriseHookGuardianRestoreTime(old)) {
+			pending[key] = entry
+		}
+	}
+}
+
+func enterpriseHookGuardianRestoreEntriesEqual(a, b enterpriseHookGuardianRestore) bool {
+	if a.SID != b.SID || a.User != b.User || a.Connector != b.Connector || a.RestoredAt != b.RestoredAt {
+		return false
+	}
+	if a.UID == nil || b.UID == nil {
+		return a.UID == nil && b.UID == nil
+	}
+	return *a.UID == *b.UID
+}
+
 // recordEnterpriseHookGuardianRestores dates the targets this reconcile put
 // back (restored, from rows that verified before and were repaired) and
 // keeps the earlier entries of the other targets in rows. An entry whose
@@ -116,18 +163,30 @@ func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string 
 // a still-running session for good, as later clean passes repair nothing
 // (GAP-0499). A row whose account identity changed (RevokeProtection) keeps
 // nothing: the old uid may belong to another account now. It is best
-// effort: a failed write is logged and changes nothing else.
+// effort: a failed read or write is logged and returned.
 func recordEnterpriseHookGuardianRestores(
 	stderr io.Writer,
 	dataDir string,
 	rows []enterpriseHookReconcileRow,
 	restored []enterpriseHookGuardianRestore,
-) {
+) error {
 	dataDir = strings.TrimSpace(dataDir)
 	if !enterpriseHookGuardianRestoresEnabled() || dataDir == "" {
-		return
+		return nil
 	}
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
+	normalized := make([]enterpriseHookGuardianRestore, 0, len(restored))
+	for _, entry := range restored {
+		entry.SID = strings.ToUpper(strings.TrimSpace(entry.SID))
+		entry.Connector = strings.ToLower(strings.TrimSpace(entry.Connector))
+		if entry.key() != "" {
+			normalized = append(normalized, entry)
+		}
+	}
+	// Hold the lock through the read and write, so another pass cannot add an
+	// entry between this pass's pending snapshot and its successful clear.
+	enterpriseHookGuardianRestorePending.Lock()
+	defer enterpriseHookGuardianRestorePending.Unlock()
 	enrolled := make(map[string]bool, len(rows))
 	unresolved := map[string]bool{}
 	for _, row := range rows {
@@ -139,6 +198,7 @@ func recordEnterpriseHookGuardianRestores(
 	}
 	entries := map[string]enterpriseHookGuardianRestore{}
 	changed := false
+	var invalidErr error
 	if record, err := readEnterpriseHookGuardianRestoreRecordRetrying(path); err == nil {
 		for _, entry := range record.Targets {
 			key := entry.key()
@@ -148,22 +208,46 @@ func recordEnterpriseHookGuardianRestores(
 			}
 			entries[key] = entry
 		}
-	} else if !os.IsNotExist(err) {
-		// An unreadable record is replaced by this pass's entries.
+	} else if errors.Is(err, errEnterpriseHookGuardianRestoreRecordInvalid) {
+		invalidErr = err
 		changed = true
+	} else if !os.IsNotExist(err) {
+		mergeEnterpriseHookGuardianRestorePending(path, normalized)
+		fmt.Fprintf(stderr, "[hook-guardian] warn: could not read the restore record in %s: %v; record left unchanged, this pass's restored targets are kept in memory and recorded once it can be read (Windows status reports restart status unknown until then)\n", path, err)
+		return err
 	}
-	for _, entry := range restored {
-		entry.SID = strings.ToUpper(strings.TrimSpace(entry.SID))
-		entry.Connector = strings.ToLower(strings.TrimSpace(entry.Connector))
-		key := entry.key()
-		if key == "" {
+	// Pending entries obey the same enrollment rule as entries on disk.
+	combined := make(map[string]enterpriseHookGuardianRestore, len(normalized))
+	fromCurrent := make(map[string]bool, len(normalized))
+	for key, entry := range enterpriseHookGuardianRestorePending.byPath[path] {
+		if !enrolled[key] && !unresolved[enterpriseHookGuardianRestoreUserKey(entry.User, entry.Connector)] {
+			delete(enterpriseHookGuardianRestorePending.byPath[path], key)
 			continue
 		}
-		entries[key] = entry
-		changed = true
+		combined[key] = entry
+	}
+	for _, entry := range normalized {
+		key := entry.key()
+		if old, ok := combined[key]; !ok || !enterpriseHookGuardianRestoreTime(entry).Before(enterpriseHookGuardianRestoreTime(old)) {
+			combined[key] = entry
+			fromCurrent[key] = true
+		}
+	}
+	for key, entry := range combined {
+		old, exists := entries[key]
+		if fromCurrent[key] {
+			entries[key] = entry
+			changed = true
+		} else if !exists || !enterpriseHookGuardianRestoreTime(entry).Before(enterpriseHookGuardianRestoreTime(old)) {
+			if !exists || !enterpriseHookGuardianRestoreEntriesEqual(entry, old) {
+				changed = true
+			}
+			entries[key] = entry
+		}
 	}
 	if !changed {
-		return
+		delete(enterpriseHookGuardianRestorePending.byPath, path)
+		return nil
 	}
 	record := enterpriseHookGuardianRestoreRecord{Version: 1, Targets: make([]enterpriseHookGuardianRestore, 0, len(entries))}
 	for _, entry := range entries {
@@ -177,8 +261,15 @@ func recordEnterpriseHookGuardianRestores(
 		err = writeEnterpriseHookProtectedFile(path, data)
 	}
 	if err != nil {
+		mergeEnterpriseHookGuardianRestorePending(path, normalized)
 		fmt.Fprintf(stderr, "[hook-guardian] warn: could not record the restored targets in %s: %v\n", path, err)
+		return err
 	}
+	delete(enterpriseHookGuardianRestorePending.byPath, path)
+	if invalidErr != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] warn: replaced the restore record in %s that could not be parsed: %v\n", path, invalidErr)
+	}
+	return nil
 }
 
 // marshalEnterpriseHookGuardianRestoreRecord serializes record, sorted by
@@ -195,12 +286,8 @@ func marshalEnterpriseHookGuardianRestoreRecord(record enterpriseHookGuardianRes
 		return append(data, '\n'), 0, err
 	}
 	// Newest first; keep the longest prefix whose entries fit.
-	restoredAt := func(entry enterpriseHookGuardianRestore) time.Time {
-		at, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.RestoredAt))
-		return at
-	}
 	sort.SliceStable(record.Targets, func(i, j int) bool {
-		return restoredAt(record.Targets[i]).After(restoredAt(record.Targets[j]))
+		return enterpriseHookGuardianRestoreTime(record.Targets[i]).After(enterpriseHookGuardianRestoreTime(record.Targets[j]))
 	})
 	empty, _ := json.Marshal(enterpriseHookGuardianRestoreRecord{Version: record.Version, Targets: []enterpriseHookGuardianRestore{}})
 	size, keep := len(empty)+1, 0
@@ -227,26 +314,30 @@ func readEnterpriseHookGuardianRestoreRecord(path string) (enterpriseHookGuardia
 	if err != nil {
 		return enterpriseHookGuardianRestoreRecord{}, err
 	}
+	if info.Mode().IsRegular() && info.Size() > hookGuardianRestoresMaxBytes {
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: hook guardian restore record exceeds %d-byte limit", errEnterpriseHookGuardianRestoreRecordInvalid, hookGuardianRestoresMaxBytes)
+	}
 	data, err := readEnterpriseHookBoundedFile(path, info, hookGuardianRestoresMaxBytes, "hook guardian restore record")
 	if err != nil {
 		return enterpriseHookGuardianRestoreRecord{}, err
 	}
 	var record enterpriseHookGuardianRestoreRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return enterpriseHookGuardianRestoreRecord{}, err
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: %v", errEnterpriseHookGuardianRestoreRecordInvalid, err)
 	}
 	if record.Version != 1 {
-		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("hook guardian restore record has version %d", record.Version)
+		return enterpriseHookGuardianRestoreRecord{}, fmt.Errorf("%w: hook guardian restore record has version %d", errEnterpriseHookGuardianRestoreRecordInvalid, record.Version)
 	}
 	return record, nil
 }
 
 // readEnterpriseHookGuardianRestoreRecordRetrying reads the record, retrying
-// a failed read with a short backoff; a missing record is not retried.
+// a failed read with a short backoff; a missing or content-invalid record is
+// not retried.
 func readEnterpriseHookGuardianRestoreRecordRetrying(path string) (enterpriseHookGuardianRestoreRecord, error) {
 	record, err := enterpriseHookGuardianRestoreRecordReader(path)
 	for _, wait := range enterpriseHookGuardianRestoreReadBackoff {
-		if err == nil || os.IsNotExist(err) {
+		if err == nil || os.IsNotExist(err) || errors.Is(err, errEnterpriseHookGuardianRestoreRecordInvalid) {
 			break
 		}
 		time.Sleep(wait)
