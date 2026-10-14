@@ -1,0 +1,313 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+)
+
+const (
+	imageStoreMaxBytes = 4 << 20 // The image.Store limit; reading must never create its lock or owner.
+	imageRemoveTimeout = 10 * time.Minute
+	imageNameLimit     = 8
+)
+
+var (
+	sandboxImageOwnerRE = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	sandboxImageIDRE    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	sandboxImageRefRE   = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+	dockerAddressRE     = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
+)
+
+type sandboxImageStore struct {
+	Version int    `json:"version"`
+	Owner   string `json:"owner"`
+	Images  []struct {
+		Tag string `json:"tag"`
+	} `json:"images"`
+	RunImages []struct {
+		Tag   string `json:"tag"`
+		Alias bool   `json:"alias"`
+	} `json:"run_images"`
+}
+
+type sandboxDockerImage struct {
+	tag  string
+	id   string
+	rank int // run image, alias, overlay image
+}
+
+// openSandboxImageHome walks the entire path through descriptors. The purge's
+// walkDirs checks the account-owned folders below it; this also refuses a
+// symlink in an ancestor of the home before root reads an account's store.
+func (e *Env) openSandboxImageHome(a SandboxAccount) (int, error) {
+	path := filepath.Clean(e.P(a.Home))
+	if !filepath.IsAbs(path) || path == "/" || a.UID <= 0 {
+		return -1, errors.New("invalid account home")
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			_ = unix.Close(fd)
+			return -1, errors.New("invalid account home")
+		}
+		var next int
+		if i == len(parts)-1 {
+			next, err = openOwnedDir(fd, part, a.UID)
+		} else {
+			next, err = unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		}
+		_ = unix.Close(fd)
+		if err != nil || next < 0 {
+			if err == nil {
+				return -1, os.ErrNotExist
+			}
+			return -1, fmt.Errorf("account home component %s: %w", part, err)
+		}
+		fd = next
+	}
+	return fd, nil
+}
+
+// readSandboxImageStore reads only the owner and tag roles. It never creates
+// images.json or its lock, and only reads a regular file owned by the account.
+func (e *Env) readSandboxImageStore(a SandboxAccount) (sandboxImageStore, bool, error) {
+	home, err := e.openSandboxImageHome(a)
+	if err != nil {
+		return sandboxImageStore{}, !errors.Is(err, os.ErrNotExist), err
+	}
+	defer unix.Close(home)
+	parent, name, err := walkDirs(home, filepath.Join(userSandboxDataRel, "images.json"), a.UID)
+	if err != nil || parent < 0 {
+		return sandboxImageStore{}, err != nil, err
+	}
+	defer unix.Close(parent)
+	var before unix.Stat_t
+	if err := unix.Fstatat(parent, name, &before, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
+		return sandboxImageStore{}, false, nil
+	} else if err != nil {
+		return sandboxImageStore{}, true, err
+	}
+	if before.Mode&unix.S_IFMT != unix.S_IFREG || int(before.Uid) != a.UID {
+		return sandboxImageStore{}, true, errors.New("images.json is not a regular file owned by the account")
+	}
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return sandboxImageStore{}, false, nil
+	}
+	if err != nil {
+		return sandboxImageStore{}, true, fmt.Errorf("open images.json: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), "images.json")
+	defer f.Close()
+	doc, err := readSandboxImageStoreFile(f, a.UID, uint64(before.Dev), before.Ino) //nolint:unconvert // Dev is int32 on darwin
+	return doc, true, err
+}
+
+func readSandboxImageStoreFile(f *os.File, uid int, dev uint64, ino uint64) (sandboxImageStore, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
+		return sandboxImageStore{}, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || int(st.Uid) != uid || uint64(st.Dev) != dev || st.Ino != ino {
+		return sandboxImageStore{}, errors.New("images.json is not a regular file owned by the account")
+	}
+	if st.Size > imageStoreMaxBytes {
+		return sandboxImageStore{}, errors.New("images.json is too large")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, imageStoreMaxBytes+1))
+	if err != nil {
+		return sandboxImageStore{}, err
+	}
+	if len(data) > imageStoreMaxBytes {
+		return sandboxImageStore{}, errors.New("images.json is too large")
+	}
+	var doc sandboxImageStore
+	if err := json.Unmarshal(data, &doc); err != nil || doc.Version != 1 || !sandboxImageOwnerRE.MatchString(doc.Owner) {
+		return sandboxImageStore{}, errors.New("images.json has invalid version or no valid 16-hex owner")
+	}
+	return doc, nil
+}
+
+func sandboxImageListCommand(owner string) string {
+	return "docker image ls --filter label=" + image.LabelSandboxImage + "=1 --filter label=" + image.LabelOwner + "=" + owner
+}
+
+// sandboxDockerReason keeps one bounded Docker error line. A line resembling
+// a credential is withheld instead of putting it in an uninstall result.
+func sandboxDockerReason(result CommandResult, err error) string {
+	line := strings.TrimSpace(strings.SplitN(string(result.Stderr), "\n", 2)[0])
+	if line == "" {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "Docker timed out"
+		}
+		if err == nil {
+			return "Docker command failed"
+		}
+		line = strings.TrimSpace(strings.SplitN(err.Error(), "\n", 2)[0])
+	}
+	line = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, line)
+	lower := strings.ToLower(line)
+	for _, sensitive := range []string{"token", "secret", "password", "authorization", "bearer", "api_key", "apikey", "://"} {
+		if strings.Contains(lower, sensitive) {
+			return "Docker command failed (details withheld)"
+		}
+	}
+	if dockerAddressRE.MatchString(line) {
+		return "Docker command failed (details withheld)"
+	}
+	if len(line) > 240 {
+		line = line[:240]
+	}
+	return line
+}
+
+// purgeAccountSandboxImages removes only this account's labelled Docker
+// image tags. Linux's managed Docker is host-wide; on macOS Docker Desktop
+// belongs to the account, so the existing account-run teardown handles it.
+// Every failure is a warning: the local file purge must still finish.
+func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAccount) {
+	if l.env.GOOS != "linux" {
+		return
+	}
+	e, r := l.env, l.result
+	// Mirror purgeAccountSandbox's own-install guard (GAP-0490).
+	if _, err := os.Lstat(e.P(filepath.Join(a.Home, ".defenseclaw", "config.yaml"))); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	store, found, err := e.readSandboxImageStore(a)
+	if err != nil {
+		if found {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not safely read the sandbox image store of user %s: %v; no Docker image was removed for this account", a.Name, err))
+		}
+		return
+	}
+	if !found {
+		return
+	}
+	listCommand := sandboxImageListCommand(store.Owner)
+	docker := e.firstExisting(e.binCandidates("docker"))
+	if docker == "" {
+		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: Docker CLI is missing; as root run `%s`, then `docker image rm <tag>` for each listed tag", a.Name, listCommand))
+		return
+	}
+	args := []string{"image", "ls", "--filter", "label=" + image.LabelSandboxImage + "=1", "--filter", "label=" + image.LabelOwner + "=" + store.Owner,
+		"--no-trunc", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}"}
+	listed, err := e.longRunner(imageRemoveTimeout).Run(ctx, docker, args...)
+	if err != nil {
+		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: %s; as root run `%s`, then `docker image rm <tag>` for each listed tag", a.Name, sandboxDockerReason(listed, err), listCommand))
+		return
+	}
+	ranks := map[string]int{}
+	for _, rec := range store.Images {
+		ranks[rec.Tag] = 2
+	}
+	for _, rec := range store.RunImages {
+		if rec.Alias {
+			ranks[rec.Tag] = 1
+		} else {
+			ranks[rec.Tag] = 0
+		}
+	}
+	var candidates []sandboxDockerImage
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(listed.Stdout)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) != 2 || !sandboxImageRefRE.MatchString(parts[0]) || !sandboxImageIDRE.MatchString(parts[1]) {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not parse a Docker image row for user %s; no image was removed for that row; as root run `%s`", a.Name, listCommand))
+			continue
+		}
+		if seen[parts[0]] {
+			continue
+		}
+		seen[parts[0]] = true
+		ref, id := parts[0], parts[1]
+		inspected, inspectErr := e.longRunner(imageRemoveTimeout).Run(ctx, docker, "image", "inspect", "--format", "{{json .}}", ref)
+		if inspectErr != nil {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left DefenseClaw sandbox image %s (%s) of user %s: could not inspect it: %s; as root run `docker image rm %s` after checking `%s`", ref, id[7:19], a.Name, sandboxDockerReason(inspected, inspectErr), ref, listCommand))
+			continue
+		}
+		var facts struct {
+			ID     string `json:"Id"`
+			Config struct {
+				Labels map[string]string `json:"Labels"`
+			} `json:"Config"`
+		}
+		if json.Unmarshal(inspected.Stdout, &facts) != nil || facts.ID != id || facts.Config.Labels[image.LabelSandboxImage] != "1" ||
+			facts.Config.Labels[image.LabelOwner] != store.Owner || facts.Config.Labels[image.LabelUID] != strconv.Itoa(a.UID) {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left candidate sandbox image %s (%s) of user %s: its image ID, owner or account uid label did not match; check `%s` before removing it", ref, id[7:19], a.Name, listCommand))
+			continue
+		}
+		rank, ok := ranks[ref]
+		if !ok {
+			rank = 2
+		}
+		if facts.Config.Labels[image.LabelRunImage] != "" {
+			rank = 0
+		}
+		candidates = append(candidates, sandboxDockerImage{tag: ref, id: id, rank: rank})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		return candidates[i].tag < candidates[j].tag
+	})
+	var removed []string
+	for _, candidate := range candidates {
+		out, err := e.longRunner(imageRemoveTimeout).Run(ctx, docker, "image", "rm", candidate.tag)
+		if err != nil {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left DefenseClaw sandbox image %s (%s) of user %s: %s; as root run `docker image rm %s` (list this account's images with `%s`)", candidate.tag, candidate.id[7:19], a.Name, sandboxDockerReason(out, err), candidate.tag, listCommand))
+			continue
+		}
+		removed = append(removed, candidate.tag)
+	}
+	if len(removed) > 0 {
+		shown := removed
+		if len(shown) > imageNameLimit {
+			shown = shown[:imageNameLimit]
+		}
+		line := fmt.Sprintf("removed %d DefenseClaw sandbox images of user %s (%s", len(removed), a.Name, strings.Join(shown, ", "))
+		if len(removed) > len(shown) {
+			line += fmt.Sprintf(", and %d more", len(removed)-len(shown))
+		}
+		r.Changes = append(r.Changes, line+")")
+	}
+}

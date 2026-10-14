@@ -1097,12 +1097,17 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket); err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop the sandbox daemon of %s: %v; stop its user units by hand", a.Name, err))
 		}
+		l.purgeAccountSandboxImages(ctx, a)
 		l.purgeAccountSandbox(a)
 		if teardownErr != nil {
 			// Teardown's next step assumes its local state still exists.
 			// Purge removed those files independently, so describe the
 			// resources that may remain instead of repeating that step.
-			r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
+			if env.GOOS == "linux" {
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; Docker images are reported separately", a.Name))
+			} else {
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
+			}
 		}
 	}
 	switch {
