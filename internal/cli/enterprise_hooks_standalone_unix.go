@@ -325,7 +325,7 @@ func resolveEnterpriseHookStandaloneAccount(
 		home = account.Home
 	}
 	if strings.TrimSpace(account.Home) != "" && filepath.Clean(home) != filepath.Clean(account.Home) {
-		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: target %q home %s no longer matches the directory home %s", account.Name, home, account.Home)
+		return enterpriseHookWorkerAccount{}, "", &enterpriseHookTargetHomeChangedError{name: account.Name, home: home, directoryHome: account.Home}
 	}
 	if account.UID <= 0 {
 		return enterpriseHookWorkerAccount{}, "", fmt.Errorf("enterprise hooks: refusing to target uid %d", account.UID)
@@ -340,6 +340,18 @@ var (
 	errEnterpriseHookTargetNotFound   = errors.New("no such account")
 	errEnterpriseHookTargetUIDChanged = errors.New("the account's uid changed")
 )
+
+// enterpriseHookTargetHomeChangedError is a target whose recorded home is
+// not the home the directory now gives its account: a re-homed directory
+// account, or a removed macOS mobile account, whose Active Directory record
+// answers with /var/empty (GAP-0543). home is the recorded one.
+type enterpriseHookTargetHomeChangedError struct {
+	name, home, directoryHome string
+}
+
+func (e *enterpriseHookTargetHomeChangedError) Error() string {
+	return fmt.Sprintf("enterprise hooks: target %q home %s no longer matches the directory home %s", e.name, e.home, e.directoryHome)
+}
 
 // enterpriseHookStandaloneIdentityReassigned reports a failed resolution
 // after which the uid the target was last protected under may belong to

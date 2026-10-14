@@ -437,7 +437,9 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 // runEnterpriseHookPendingCleanups finishes the guardian's pending per-user
 // cleanups (registrations of targets the manifest no longer enrolls, which
 // the guardian retries while it runs; the uninstall stopped it), as each
-// user, and returns the uids whose cleanup failed.
+// user, and returns the uids whose cleanup failed. A cleanup of a removed
+// account (its recorded home is gone, or the directory gives it no home)
+// is pending as "user/connector: reason", so the uninstall warns and goes on.
 func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]bool {
 	failed := map[int]bool{}
 	if cfg == nil {
@@ -456,10 +458,21 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		}
 		label := strings.TrimSpace(entry.User) + "/" + name
 		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
-		switch outcome {
-		case enterpriseHookUserCleanupDone:
+		var kept *enterpriseHookCleanupHomeKeptError
+		switch {
+		case outcome == enterpriseHookUserCleanupDone && errors.Is(err, errEnterpriseHookCleanupHomeGone):
+			// Nothing was removed: the home is gone. The uninstall warns
+			// for that user and agent and goes on (GAP-0553).
+			report.Pending = append(report.Pending, fmt.Sprintf("%s: its recorded home %s is gone, so nothing was left to remove; if that home is restored, remove DefenseClaw's entries from the %s config in it",
+				label, filepath.Clean(strings.TrimSpace(entry.UserHome)), name))
+		case errors.As(err, &kept):
+			// A removed account whose home folder was kept: no one to
+			// remove it as, and the uninstall must not stop for it.
+			report.Pending = append(report.Pending, fmt.Sprintf("%s: the directory gives the account no home (%s), so it looks removed, but its recorded home %s is not gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if the account is gone",
+				label, kept.directoryHome, kept.home, name, kept.home))
+		case outcome == enterpriseHookUserCleanupDone:
 			report.Removed++
-		case enterpriseHookUserCleanupPending:
+		case outcome == enterpriseHookUserCleanupPending:
 			report.Pending = append(report.Pending, label)
 		default:
 			reason := "the cleanup failed"

@@ -3297,8 +3297,9 @@ func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
 // --purge on a purge) and reports what it could not do, one message per
 // account and connector: an error for a registration that is still in
-// place, a warning for an account whose home is unavailable or whose
-// per-user state stayed, and for a check that names no registration. It
+// place, a warning for an account whose home is unavailable, that was
+// removed (with the reason remove-all gives), or whose per-user state
+// stayed, and for a check that names no registration. It
 // returns whether any registration is left.
 func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	env, r := l.env, l.result
@@ -3347,7 +3348,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		left = true
 	}
 	for _, entry := range report.Pending {
-		user, connector, _, _ := cutPerUserEntry(entry)
+		user, connector, reason, _ := cutPerUserEntry(entry)
+		if reason != "" {
+			// A removed account: its reason names the home and the remedy.
+			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
+			continue
+		}
 		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
 	}
 	for _, entry := range report.StateFailed {
