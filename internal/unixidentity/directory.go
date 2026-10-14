@@ -597,8 +597,8 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 // belongs to the account's domain, or when neither account nor group has a
 // SID. A SID-less group of a SID-bearing account counts only if /etc/group
 // lists the account as a member or another configured NSS initgroups service
-// confirms its membership. This keeps LDAP-supplied groups without accepting
-// a group of another SSSD account with the same short name.
+// confirms its membership without resolving the name to a different uid.
+// This keeps LDAP-supplied groups for the account's uid.
 func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Account, domainSID string) ([]int, error) {
 	localAccounts, err := LocalAccounts(r.context())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -634,7 +634,7 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 	}
 	var other map[int]bool
 	if needOther && !nameSharedWithLocal {
-		other, err = r.otherNSSGroupMemberships(account.Name)
+		other, err = r.otherNSSGroupMemberships(account)
 		if err != nil {
 			return nil, err
 		}
@@ -652,9 +652,10 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 }
 
 // otherNSSGroupMemberships asks each configured non-SSSD initgroups service
-// for this account's groups. Looking up a group by gid alone would prove only
-// that the group exists, not that the account belongs to it.
-func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error) {
+// for this account's groups when that service does not resolve the name to a
+// different uid. Looking up a group by gid alone would prove only that the
+// group exists, not that the account belongs to it.
+func (r *NSSResolver) otherNSSGroupMemberships(account Account) (map[int]bool, error) {
 	services, err := nssInitgroupsServices()
 	if err != nil || services == nil {
 		return nil, err // no list: glibc defaults to files
@@ -664,19 +665,19 @@ func (r *NSSResolver) otherNSSGroupMemberships(name string) (map[int]bool, error
 		if service == "sss" || service == "files" || !validServiceName(service) {
 			continue
 		}
-		result, err := r.runner(r.context(), r.path, []string{"-s", service, "initgroups", name})
-		if err != nil {
-			return nil, fmt.Errorf("unixidentity: %s initgroups of %s: %w", service, name, err)
+		byName, err := r.LookupUserInService(service, account.Name)
+		if err != nil && !IsNotFound(err) {
+			return nil, err
 		}
-		if result.exitCode == getentExitNotFound {
+		if err == nil && byName.UID != account.UID {
 			continue
 		}
-		if result.exitCode != getentExitOK {
-			return nil, fmt.Errorf("unixidentity: getent -s %s initgroups %s exited %d", service, name, result.exitCode)
+		ids, err := r.groupIDsInService(service, account.Name)
+		if IsNotFound(err) {
+			continue
 		}
-		ids, err := ParseInitgroups(string(result.stdout), name)
 		if err != nil {
-			return nil, fmt.Errorf("unixidentity: %s initgroups of %s: %w", service, name, err)
+			return nil, err
 		}
 		for _, id := range ids {
 			groups[id] = true
