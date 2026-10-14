@@ -66,6 +66,16 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 					return true
 				}
 				program := programBase(programWords[0])
+				if (program == "sed" || program == "gsed") && sedReadsStdinScript(programWords) {
+					code, supplied, known := shellTextInput(stmt, context.source, home)
+					if !supplied || !known {
+						unknown = true
+					} else {
+						for _, name := range sedWriteFiles([]string{"sed", "-e", code}) {
+							add(name, cmdCWD)
+						}
+					}
+				}
 				language := literalLanguage(program)
 				if language == "" || !literalReadsStdin(programWords) {
 					return true
@@ -426,6 +436,32 @@ func sedInPlaceFiles(words []string) []string {
 		return nil
 	}
 	return files
+}
+
+func sedReadsStdinScript(words []string) bool {
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			return false
+		case word == "-f" || word == "--file":
+			i++
+			if i < len(words) && (words[i] == "-" || words[i] == "/dev/stdin") {
+				return true
+			}
+		case strings.HasPrefix(word, "--file="):
+			value := strings.TrimPrefix(word, "--file=")
+			if value == "-" || value == "/dev/stdin" {
+				return true
+			}
+		case strings.HasPrefix(word, "-f") && len(word) > 2:
+			value := word[2:]
+			if value == "-" || value == "/dev/stdin" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sedWriteFiles(words []string) []string {
