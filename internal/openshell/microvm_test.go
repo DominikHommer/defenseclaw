@@ -224,6 +224,9 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 		}, want: checkWant{"vm-driver", pass, filepath.Join(".local", "opt", "e2fsprogs", "sbin") + "; "}},
 		{name: "managed host: driver not signed", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				touchExecutable(f.t, filepath.Join(f.home, ".local", "opt", "e2fsprogs", "sbin", tool))
+			}
 			f.runner.On(codesign, f.vmDriverPath()+": code object is not signed at all", errors.New("exit status 1"))
 		}, want: checkWant{"vm-driver", fail, "openshell-driver-vm is not signed for Apple's Hypervisor"},
 			fix: &fixWant{text: "ask your administrator for an OpenShell whose MicroVM driver is signed", manual: true}},
