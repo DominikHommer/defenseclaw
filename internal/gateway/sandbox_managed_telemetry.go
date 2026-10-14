@@ -113,7 +113,7 @@ func (a *APIServer) trackManagedSandboxActive(ctx context.Context, auth *sandbox
 // recorder's phase map nor counts in sandbox.active; the daemon's deleted
 // record is not relied on.
 func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
-	a.sandboxGuestSignalGone(reg)
+	a.sandboxGuestSignalForget(reg)
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
 	}

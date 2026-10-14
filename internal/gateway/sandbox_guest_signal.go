@@ -106,9 +106,9 @@ func (a *APIServer) sandboxGuestSignal(ctx context.Context, auth *sandboxAuthori
 	signals.last[key] = now
 }
 
-// sandboxGuestSignalGone removes a registration's rate keys when its store
-// entry is revoked, removed or evicted.
-func (a *APIServer) sandboxGuestSignalGone(reg sandboxreg.Registration) {
+// sandboxGuestSignalForget removes a registration's rate keys when it has
+// been sighted, revoked, removed or evicted.
+func (a *APIServer) sandboxGuestSignalForget(reg sandboxreg.Registration) {
 	entry, ok := sandboxAuthorities.Load(a)
 	if !ok {
 		return
@@ -137,7 +137,7 @@ func (a *APIServer) sandboxMarkGuestSeen(reg sandboxreg.Registration, at time.Ti
 	if err == nil {
 		err = auth.store.MarkGuestSeen(reg.UID, reg.ID, at)
 		if err == nil {
-			a.sandboxGuestSignalGone(reg)
+			a.sandboxGuestSignalForget(reg)
 		}
 	}
 	sandboxRecordFailed("guest sighting", err)
