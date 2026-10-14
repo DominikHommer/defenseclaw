@@ -156,6 +156,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	for _, entry := range state.sortedPending() {
 		l.describePending(entry)
 	}
+	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
@@ -224,6 +225,11 @@ func (l *lifecycle) describePending(entry pending) {
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
 	})
+	if entry.Kind == "launchd" {
+		l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending launchd for user %s since %s (%s): %s; a root ensure, repair or reconcile run applies the LaunchAgent reload after this account's sandboxes stop. The first sandbox started after the running ones stop also reloads the job itself. If that reload fails, the start reports it and names `sudo %s`",
+			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
+		return
+	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }

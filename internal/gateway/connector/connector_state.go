@@ -264,7 +264,12 @@ type HookContractLockEntry struct {
 	DefenseClawVersion     string                   `json:"defenseclaw_version,omitempty"`
 	HookFailMode           string                   `json:"hook_fail_mode,omitempty"`
 	RegistrationPosture    *HookRegistrationPosture `json:"registration_posture,omitempty"`
-	UpdatedAt              string                   `json:"updated_at"`
+	// ManagedGatewayServiceName binds a Windows managed publication to the
+	// exact SCM gateway identity that owns its runtime. It contains no token
+	// material and remains stable across ordinary Guardian reconciles, while a
+	// different certification/production scope necessarily changes it.
+	ManagedGatewayServiceName string `json:"managed_gateway_service_name,omitempty"`
+	UpdatedAt                 string `json:"updated_at"`
 }
 
 // HookRegistrationPosture is the non-secret subset of SetupOpts that can
@@ -1129,7 +1134,61 @@ func NewHookContractLockEntryForMode(
 		return HookContractLockEntry{}, err
 	}
 	entry.HookScriptDigests = digests
+	if runtime.GOOS == "windows" {
+		serviceName := strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+		if err := ValidateWindowsManagedGatewayServiceName(serviceName); err != nil {
+			return HookContractLockEntry{}, fmt.Errorf(
+				"managed hook contract gateway service identity: %w",
+				err,
+			)
+		}
+		entry.ManagedGatewayServiceName = serviceName
+	}
 	return entry, nil
+}
+
+// ValidateWindowsManagedHookContractGatewayServiceBinding proves that a
+// protected managed hook-contract entry belongs to the exact gateway service
+// scope selected by the authenticated installer environment OR the policy-
+// resolved service name supplied by the caller. This is a post-publication
+// verification check: setup's preflight drift check deliberately does not
+// call it so a legacy entry without the binding remains repairable by an
+// authenticated Install/Repair operation.
+//
+// When `expectedOverride` is non-empty it takes precedence over
+// `WindowsGatewayServiceNameEnv`; runtime processes (Claude policy /
+// enforcement loops) resolve the expected name from the protected policy and
+// pass it here so a worker without the installer environment can still prove
+// the binding matches the active policy.
+func ValidateWindowsManagedHookContractGatewayServiceBinding(
+	entry HookContractLockEntry,
+	expectedOverride ...string,
+) error {
+	expected := ""
+	for _, candidate := range expectedOverride {
+		if value := strings.TrimSpace(candidate); value != "" {
+			expected = value
+			break
+		}
+	}
+	if expected == "" {
+		expected = strings.TrimSpace(os.Getenv(WindowsGatewayServiceNameEnv))
+	}
+	if err := ValidateWindowsManagedGatewayServiceName(expected); err != nil {
+		return fmt.Errorf("current managed gateway service identity: %w", err)
+	}
+	actual := entry.ManagedGatewayServiceName
+	if err := ValidateWindowsManagedGatewayServiceName(actual); err != nil {
+		return fmt.Errorf("persisted managed gateway service identity: %w", err)
+	}
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf(
+			"persisted managed gateway service %q does not match current service %q",
+			actual,
+			expected,
+		)
+	}
+	return nil
 }
 
 func newHookContractLockEntry(
@@ -1290,7 +1349,28 @@ func HookRuntimeRegistrationCurrent(
 	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
 		return false, ErrSetupSelectionSuperseded
 	}
-	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
+	expected, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		defenseClawVersion,
+		opts.ManagedEnterprise && runtime.GOOS == "windows",
+	)
+	if err != nil {
+		return false, fmt.Errorf("build current Codex hook contract: %w", err)
+	}
+	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		// A legacy entry from a pre-binding build carries an empty
+		// ManagedGatewayServiceName. Report "not current" (false, nil) so
+		// the caller's authenticated repair path can rewrite the entry with
+		// the current service identity; a hard error here would skip repair
+		// (healLocked only runs on `return false`), leaving the guard stuck.
+		if strings.TrimSpace(stored.ManagedGatewayServiceName) == "" {
+			return false, nil
+		}
+		if err := ValidateWindowsManagedHookContractGatewayServiceBinding(stored); err != nil {
+			return false, fmt.Errorf("verify Codex hook contract gateway binding: %w", err)
+		}
+	}
 	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
 	removeSharedHookScriptDigests(expected.HookScriptDigests)
 	stored.UpdatedAt = ""
@@ -1771,18 +1851,35 @@ func stableManagedArtifactDigestForOwner(
 	return stableManagedArtifactDigestWith(path, label, maxBytes, expectedOwnerSID, false)
 }
 
-// stableManagedArtifactDigestWith reads path twice and returns its digest
-// when both reads and the file identity agree. With memoize it returns the
-// digest of an earlier full read while the opened file keeps the version
-// stamp of that read (openManagedArtifactForDigest, GAP-0438).
+// stableManagedArtifactDigestWith uses the shared ten-minute target memo.
+// A guarded file with a full journal stamp, or an attribute-only stamp with
+// the ten-minute backstop, needs one read. Other files retain the two-pass
+// check against the opened identity (GAP-0438).
 func stableManagedArtifactDigestWith(
 	path, label string,
 	maxBytes int64,
 	expectedOwnerSID string,
 	memoize bool,
 ) (string, bool, error) {
+	return stableManagedArtifactDigestWithAge(
+		path, label, maxBytes, expectedOwnerSID, memoize, managedArtifactDigestMaxAge,
+	)
+}
+
+func stableManagedArtifactDigestWithAge(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+	maxAge time.Duration,
+) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
+	}
+	if memoize {
+		lock := managedArtifactDigestPathLock(path)
+		lock.Lock()
+		defer lock.Unlock()
 	}
 	expected, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1817,12 +1914,16 @@ func stableManagedArtifactDigestWith(
 	}
 	var stamp managedArtifactStamp
 	stamped := false
+	attributeOnly := false
+	fullStampAvailable := false
 	if memoize {
 		// A memo hit only takes the stamp. Ending the change epoch here
 		// would itself move the journal number and end every hit.
 		if guarded {
-			if seen, ok := managedArtifactStampOf(file); ok {
-				if digest, ok := rememberedManagedArtifactDigest(path, seen); ok {
+			seenFull, fullOK := managedArtifactStampOf(file)
+			fullStampAvailable = fullOK
+			if fullOK {
+				if digest, ok := rememberedManagedArtifactDigest(path, seenFull, maxAge, false, true); ok {
 					current, err := os.Lstat(path)
 					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
 						os.SameFile(opened, current) {
@@ -1830,15 +1931,38 @@ func stableManagedArtifactDigestWith(
 					}
 				}
 			}
+			if seenAttributes, ok := managedArtifactAttributeStampOf(file); ok {
+				seenAttributes.USN = 0
+				if digest, ok := rememberedManagedArtifactDigest(path, seenAttributes, maxAge, true, fullOK); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						noticeManagedArtifactDegraded(path)
+						return digest, true, nil
+					}
+				}
+			}
 		}
 		// A full read. It first ends the change epoch of the file on this
 		// deny-write handle, so the next change gets a new journal number
-		// even while another handle stays open, and takes the stamp after
-		// that. The digest is remembered only once both reads and the stamp
-		// after them agree; when the epoch cannot be ended nothing is.
+		// even while another handle stays open, and takes the full stamp
+		// after that. If the journal is unavailable, an attribute-only stamp
+		// under the same guarded handle permits one pass with a backstop.
+		// Without either guarded stamp, the two-pass check remains.
 		forgetManagedArtifactDigest(path)
-		if guarded && endManagedArtifactChangeEpoch(file) == nil {
-			stamp, stamped = managedArtifactStampOf(file)
+		if guarded {
+			if endManagedArtifactChangeEpoch(file) == nil {
+				stamp, stamped = managedArtifactStampOf(file)
+				fullStampAvailable = stamped
+			}
+			if !stamped {
+				stamp, stamped = managedArtifactAttributeStampOf(file)
+				attributeOnly = stamped
+				if stamped {
+					stamp.USN = 0
+					noticeManagedArtifactDegraded(path)
+				}
+			}
 		}
 	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
@@ -1846,7 +1970,7 @@ func stableManagedArtifactDigestWith(
 			return [sha256.Size]byte{}, 0, err
 		}
 		hash := sha256.New()
-		count, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+		count, err := managedArtifactDigestRead(hash, file, maxBytes)
 		if err != nil {
 			return [sha256.Size]byte{}, count, err
 		}
@@ -1865,13 +1989,18 @@ func stableManagedArtifactDigestWith(
 	if err != nil {
 		return "", true, err
 	}
-	between, err := file.Stat()
-	if err != nil {
-		return "", true, err
-	}
-	second, secondSize, err := hashOnce()
-	if err != nil {
-		return "", true, err
+	var between os.FileInfo
+	var second [sha256.Size]byte
+	var secondSize int64
+	if !stamped {
+		between, err = file.Stat()
+		if err != nil {
+			return "", true, err
+		}
+		second, secondSize, err = hashOnce()
+		if err != nil {
+			return "", true, err
+		}
 	}
 	after, err := file.Stat()
 	if err != nil {
@@ -1885,19 +2014,28 @@ func stableManagedArtifactDigestWith(
 		!current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||
 		firstSize != opened.Size() ||
-		secondSize != firstSize ||
-		between.Size() != opened.Size() ||
+		(!stamped && (secondSize != firstSize || between.Size() != opened.Size() ||
+			!between.ModTime().Equal(opened.ModTime()) || first != second)) ||
 		after.Size() != opened.Size() ||
-		!between.ModTime().Equal(opened.ModTime()) ||
-		!after.ModTime().Equal(opened.ModTime()) ||
-		first != second {
+		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
+	}
+	if stamped {
+		stampOf := managedArtifactStampOf
+		if attributeOnly {
+			stampOf = managedArtifactAttributeStampOf
+		}
+		later, ok := stampOf(file)
+		if attributeOnly {
+			later.USN = 0
+		}
+		if !ok || later != stamp {
+			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
 	if stamped {
-		if later, ok := managedArtifactStampOf(file); ok && later == stamp {
-			rememberManagedArtifactDigest(path, stamp, digest)
-		}
+		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
 	}
 	return digest, true, nil
 }

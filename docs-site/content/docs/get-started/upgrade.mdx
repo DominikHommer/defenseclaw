@@ -146,6 +146,12 @@ installed. Every path keeps your configuration and data.
 - The installer imports the 0.x install in place. Installs older than 0.8.5 get
   the schema-v8 observability conversion that `0.8.5` introduced, and an
   installed local observability bundle is refreshed.
+  The conversion omits the unchanged, disabled and empty `generic-otlp`
+  placeholder written by the 0.8.0 installer, including when Galileo or another
+  exporter has been added and resource attributes have been configured. It
+  reports `legacy_unconfigured_generic_otlp_placeholder_omitted` and preserves
+  the configured exporters and resources. Edited destinations and inherited
+  signal or batch settings still go through normal validation.
 - `config.yaml` becomes the only place your policy lives (`config_version: 9`).
   Under the derived admission gate, LOW and INFO skill findings now allow.
   With a judge, the skill scanner defaults to `quiet`; `warn` findings enter
@@ -191,6 +197,16 @@ installed. Every path keeps your configuration and data.
   `audit.db` (`audit.db.corrupt-<time>`), and `defenseclaw doctor` lists it
   without a warning; block/allow lists live in `config.yaml` and are not
   affected.
+
+  For any `audit.db.corrupt-<time>` archive, whether from a 0.x upgrade or a
+  later gateway start, copy the main file with its `-wal` and `-shm` files and
+  any `-journal` file to a new folder before opening it with SQLite tools;
+  SQLite can change files it opens, so work on the copy. If the first bytes
+  of the main file are zeroed and SQLite says "file is not a database",
+  repair the header on the copy, never on the original archive. A hot
+  rollback journal is rolled back when the gateway starts and is not
+  archived; if the store is still corrupt afterward, the start warning says
+  the pre-existing `-journal` was not preserved.
 - On a host that several accounts share, `defenseclaw-gateway start` and
   `restart` in 0.8.4 and older stop every `defenseclaw-gateway` process the
   account may signal, not only its own (0.8.5 and later stop only the gateway

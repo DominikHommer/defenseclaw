@@ -2208,6 +2208,14 @@ _REVIEW_BLOCK_ALLOW_LISTS = (
 )
 
 
+# SQLite changes the files it opens (it can fold a WAL into the main file), so recovery
+# works on a copy of the whole archive set, never on the archive itself (GAP-0575).
+_ARCHIVE_COPY_FIRST = (
+    "Copy the archive together with its -wal, -shm and any -journal files to a new folder before you "
+    "use SQLite tools, and work on the copy."
+)
+
+
 def _moved_store_block_allow_summary(moved: Path) -> str:
     """Say what the gateway's note (internal/audit/corrupt_store.go) recorded
     about the block/allow entries it carried over from a moved store."""
@@ -2254,8 +2262,9 @@ def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
         "0.x audit store archive",
         f"the audit store DefenseClaw 0.x wrote failed SQLite's integrity check during the upgrade, so it is kept as "
         f"an archive in {archive} ({size}). 1.0 starts a new audit history after a 0.x upgrade in any case, and "
-        f"block/allow lists live in config.yaml, so they are not affected. Read it with: sqlite3 {archive} .recover; "
-        f"delete {archive} and its -wal/-shm files when you no longer need it",
+        f"block/allow lists live in config.yaml, so they are not affected. {_ARCHIVE_COPY_FIRST} "
+        f"Then read the copy with: sqlite3 <copy> .recover. Delete {archive} and its -wal, -shm and -journal "
+        "files when you no longer need them",
         r=r,
         check_id="doctor.state.audit-db-archive",
         reason_code="audit-db-0x-archive",
@@ -2288,19 +2297,22 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     newest = moved[-1]
     size = _human_size(sum(p.stat().st_size for p in newest.parent.glob(newest.name + "*") if p.is_file()))
     count = f"{len(moved)} corrupt audit stores were" if len(moved) > 1 else "the audit store was corrupt and was"
-    recover = f"Recover them with: sqlite3 {newest} .recover"
+    recover = f"{_ARCHIVE_COPY_FIRST} Then recover them from the copy with: sqlite3 <copy> .recover"
     if shutil.which("sqlite3") is None:
         recover += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
     _emit(
         "warn",
         "Audit store moved aside",
         f"{count} moved aside by the gateway, which {_moved_store_block_allow_summary(newest)} "
-        f"Older audit records stay in {newest} ({size}). {recover}; "
-        f"delete {newest} and its -wal/-shm files when they are no longer needed",
+        f"Older audit records stay in {newest} ({size}). {recover}. "
+        f"Delete {newest} and its -wal, -shm and -journal files when they are no longer needed",
         r=r,
         check_id="doctor.state.audit-db-moved-aside",
         reason_code="audit-db-moved-aside",
-        remediation=f"sqlite3 {newest} .recover",
+        remediation=(
+            f"copy {newest} with its -wal, -shm and any -journal files to a new folder, "
+            "then run sqlite3 <copy> .recover on the copy"
+        ),
     )
 
 

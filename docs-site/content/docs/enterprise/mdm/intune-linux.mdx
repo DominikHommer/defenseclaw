@@ -248,10 +248,14 @@ install before the pack is restored.
 First remove the devices from the install script's assignment. Then assign a
 root platform script with `packaging/mdm/linux/uninstall.sh`. It stops and
 removes the services, removes DefenseClaw's hooks and machine-policy entries
-(administrator entries stay), removes the machine state (config, policies,
-key, state and logs) and the `defenseclaw` service account, and removes the deb
-or rpm. Set `DC_PURGE=1` in its settings block to also remove each enrolled
-user's `~/.defenseclaw` and per-user binaries. On a host with nothing installed
+(administrator entries stay), removes most of the machine state (config, policies, key, state and logs) and
+the `defenseclaw` service account, and removes the deb or rpm. If an account
+keeps sandboxes, the gateway's sandbox registration store
+(`/var/lib/defenseclaw/sandbox`) and its key
+(`/var/lib/defenseclaw/redaction-correlation.key`) stay, root-owned, until the
+next `ensure` adopts them. Set `DC_PURGE=1` in its settings block to also
+remove each enrolled user's `~/.defenseclaw`, per-user binaries and the kept
+sandbox store and key. On a host with nothing installed
 it exits `0`, so repeated runs are harmless. To keep the machine state for a
 reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
 

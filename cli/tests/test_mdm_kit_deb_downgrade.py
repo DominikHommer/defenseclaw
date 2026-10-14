@@ -20,7 +20,7 @@ def function(source: str, name: str) -> str:
 def test_deb_downgrade_refused_before_dpkg_install(tmp_path: Path) -> None:
     source = WRAPPER.read_text(encoding="utf-8")
     functions = "\n".join(function(source, name) for name in (
-        "dc_json_escape", "dc_log", "dc_fail_result", "dc_require_product_version",
+        "dc_json_escape", "dc_log", "dc_print_result", "dc_fail_result", "dc_require_product_version",
         "dc_package_release_version", "dc_install_package"
     ))
     stubs = {

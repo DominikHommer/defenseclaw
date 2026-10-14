@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -24,6 +25,59 @@ func windowsManagedArtifactStampOfPath(t *testing.T, path string) (managedArtifa
 	}
 	defer file.Close()
 	return windowsManagedArtifactStamp(file)
+}
+
+func windowsManagedArtifactAttributeStampOfPath(t *testing.T, path string) managedArtifactStamp {
+	t.Helper()
+	file, err := openWindowsManagedArtifactExclusive(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	stamp, ok := windowsManagedArtifactAttributeStamp(file)
+	if !ok {
+		t.Fatal("attribute-only stamp unavailable")
+	}
+	if stamp.USN != 0 {
+		t.Fatalf("attribute-only stamp has USN %d, want zero", stamp.USN)
+	}
+	return stamp
+}
+
+func TestWindowsManagedArtifactAttributeStampFollowsFileAttributes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	if err := os.WriteFile(path, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if err := os.WriteFile(path, []byte("release plus"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resized := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if resized.Size == first.Size {
+		t.Fatalf("size did not move: %+v then %+v", first, resized)
+	}
+	written := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(path, written, written); err != nil {
+		t.Fatal(err)
+	}
+	retimed := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if retimed.Written == resized.Written {
+		t.Fatalf("write time did not move: %+v then %+v", resized, retimed)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hiddenAttributes := retimed.Attributes&^windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_ATTRIBUTE_HIDDEN
+	if err := windows.SetFileAttributes(name, hiddenAttributes); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.SetFileAttributes(name, retimed.Attributes) })
+	hidden := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if hidden.Attributes == retimed.Attributes {
+		t.Fatalf("attributes did not move: %+v then %+v", retimed, hidden)
+	}
 }
 
 // useWindowsManagedArtifactDigestSeams runs one test with the real Windows
@@ -268,5 +322,47 @@ func TestWindowsManagedArtifactDigestMemoHitsAfterAFullRead(t *testing.T) {
 				t.Fatalf("a memo hit ended the change epoch (%d ends)", *ends)
 			}
 		})
+	}
+}
+
+// The guardian's target API shares the connector's post-epoch stamp, while
+// the protected copy has no independent ten-minute backstop.
+func TestWindowsManagedHookBinaryAPIsShareTargetAndDoNotExpireCopy(t *testing.T) {
+	clock, ends := useManagedArtifactDigestSeams(t,
+		windowsManagedArtifactStamp,
+		openWindowsManagedArtifactExclusive,
+		endWindowsManagedArtifactChangeEpoch,
+	)
+	managedArtifactDigestMemoEligible = func(string) bool { return true }
+	managedProtectedHookCopyEligible = func(string) bool { return true }
+	target := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	copyPath := filepath.Join(t.TempDir(), "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targetDigest := writeManagedArtifactFixture(t, target, 1)
+	copyDigest := writeManagedArtifactFixture(t, copyPath, 2)
+	if _, ok := windowsManagedArtifactStampOfPath(t, target); !ok {
+		t.Skip("the test volume keeps no change journal; the memo is off there")
+	}
+	if got, err := ManagedEnterpriseHookBinarySHA256Hex(target); err != nil || "sha256:"+got != targetDigest {
+		t.Fatalf("target digest %q, err %v", got, err)
+	}
+	if got, err := ManagedProtectedHookCopySHA256Hex(copyPath); err != nil || "sha256:"+got != copyDigest {
+		t.Fatalf("copy digest %q, err %v", got, err)
+	}
+	if *ends != 2 {
+		t.Fatalf("first reads ended %d epochs, want two", *ends)
+	}
+	setManagedArtifactDigestSentinel(t, copyPath)
+	*clock = clock.Add(11 * time.Minute)
+	if got, err := ManagedProtectedHookCopySHA256Hex(copyPath); err != nil || got != "remembered" {
+		t.Fatalf("copy expired after ten minutes: %q, %v", got, err)
+	}
+	if got, err := ManagedEnterpriseHookBinarySHA256Hex(target); err != nil || "sha256:"+got != targetDigest {
+		t.Fatalf("target backstop digest %q, err %v", got, err)
+	}
+	if *ends != 3 {
+		t.Fatalf("after target backstop, epochs %d, want three", *ends)
 	}
 }

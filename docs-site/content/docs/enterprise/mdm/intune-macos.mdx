@@ -269,9 +269,13 @@ and that removal stays in effect at the next check-in. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
-forgets the pkg receipt. It also removes the config, the key, the state and
-the logs. Set `DC_PURGE=1` in its settings block to also remove each enrolled
-user's `~/.defenseclaw` and per-user binaries. On a Mac with nothing installed
+forgets the pkg receipt. It also removes the config, the key, most of the state and the logs. If an
+account keeps sandboxes, the gateway's sandbox registration store
+(`/opt/cisco/defenseclaw/runtime/sandbox`) and its key
+(`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay, root-owned,
+until the next `ensure` adopts them. Set `DC_PURGE=1` in its settings block to
+also remove each enrolled user's `~/.defenseclaw`, per-user binaries and the
+kept sandbox store and key. On a Mac with nothing installed
 it exits `0`.
 
 ## Troubleshoot

@@ -16,7 +16,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,7 +27,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -74,28 +72,15 @@ func init() {
 var windowsHookBinaryCheckInterval = 5 * time.Second
 
 // windowsHookBinaryMu serializes the restore between the check and the
-// reconcile, and windowsHookFileHashes; windowsHookBinaryLastErr keeps the
-// check from logging the same failure every interval.
+// reconcile; windowsHookBinaryLastErr keeps the check from logging the same
+// failure every interval.
 var (
-	windowsHookBinaryMu      sync.Mutex
-	windowsHookBinaryLastErr string
+	windowsHookBinaryMu                sync.Mutex
+	windowsHookBinaryLastErr           string
+	windowsHookBinaryDigestRefusal     string
+	windowsHookBinaryLastDigestRefusal string
+	windowsHookBinarySharedDigestOK    bool
 )
-
-// windowsHookBinaryRehashInterval is the longest an unchanged hook binary,
-// and the protected copy of it, go without a full read.
-const windowsHookBinaryRehashInterval = 10 * time.Minute
-
-// windowsHookFileHashes is what the guardian last read of the hook binary
-// and its protected copy. A check reads a file only when its stamp changed,
-// so the guardian no longer reads 126 MB every interval and twice more
-// before every reconcile (GAP-0401); a replaced or edited binary has another
-// stamp and is still found at the next check.
-var windowsHookFileHashes = &hookFileHashCache{
-	stamp:  windowsHookFileStampOf,
-	hash:   windowsFileSHA256Hex,
-	now:    time.Now,
-	maxAge: windowsHookBinaryRehashInterval,
-}
 
 // watchWindowsStandaloneHookBinary restores a damaged hook binary, and an
 // edited or deleted Claude Code drop-in, within one check interval for the
@@ -172,6 +157,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	}
 	copyPath := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
+	reportWindowsHookBinaryDigestRefusal(stderr, target)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -182,6 +168,18 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	windowsHookBinaryLastErr = ""
 	if damage != "" {
 		fmt.Fprintf(stderr, "[hook-guardian] tamper: restored the hook binary %s, which was %s, from the guardian's protected copy (sha256 %s)\n", target, damage, want)
+	}
+}
+
+// The guardian calls this while holding windowsHookBinaryMu, once after each
+// target check. A repeated refusal with a healthy plain-read verdict is
+// reported once; a successful shared digest resets the suppression.
+func reportWindowsHookBinaryDigestRefusal(stderr io.Writer, target string) {
+	if windowsHookBinarySharedDigestOK {
+		windowsHookBinaryLastDigestRefusal = ""
+	} else if windowsHookBinaryDigestRefusal != "" && windowsHookBinaryDigestRefusal != windowsHookBinaryLastDigestRefusal {
+		windowsHookBinaryLastDigestRefusal = windowsHookBinaryDigestRefusal
+		fmt.Fprintf(stderr, "[hook-guardian] shared digest refused the hook binary %s: %s; a plain read verified its recorded hash and file structure\n", target, windowsHookBinaryDigestRefusal)
 	}
 }
 
@@ -241,27 +239,34 @@ func windowsRecordedArtifactHash(metadataPath, name string) (string, error) {
 // It reports what was wrong with the target it restored, or "".
 func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (string, error) {
 	damage := ""
+	missing := false
+	windowsHookBinaryDigestRefusal = ""
+	windowsHookBinarySharedDigestOK = false
 	info, err := os.Lstat(target)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		damage = "missing"
+		missing = true
 	case err != nil || !info.Mode().IsRegular():
 		return "", nil
 	case info.Size() == 0:
 		damage = "empty (0 bytes)"
 	default:
-		sum, err := windowsHookFileHashes.sha256(target)
+		verdict, err := decideGuardianTargetDigest(target, want,
+			guardianTargetHookSHA256Hex, windowsFileSHA256Hex, windowsHookBinaryStructuralDamage)
 		if err != nil {
-			return "", nil
+			return "", err
 		}
-		if sum != want {
-			damage = "not the recorded release (hash mismatch: sha256 " + sum + ")"
+		windowsHookBinarySharedDigestOK = verdict.refusal == ""
+		damage, missing = verdict.damage, verdict.missing
+		if damage != "" {
 			break
 		}
+		windowsHookBinaryDigestRefusal = verdict.refusal
 		if !refresh {
 			return "", nil
 		}
-		if sum, err := windowsHookFileHashes.sha256(copyPath); err == nil && sum == want {
+		if sum, err := guardianCopyHookSHA256Hex(copyPath); err == nil && sum == want {
 			return "", nil
 		}
 		if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
@@ -269,12 +274,15 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		}
 		return "", copyWindowsManagedFile(target, copyPath, "", true)
 	}
-	if sum, err := windowsHookFileHashes.sha256(copyPath); err != nil || sum != want {
+	// The protected copy has no periodic reread of its own. It is never
+	// executed, and its bytes are checked afresh before every restore; a
+	// hidden change with an unchanged identity is found when needed.
+	if sum, err := windowsFileSHA256Hex(copyPath); err != nil || sum != want {
 		return "", fmt.Errorf("the hook binary %s is %s and the guardian has no copy of the recorded release; agents run tool calls without DefenseClaw until Setup /repair restores it", target, damage)
 	}
 	// A missing binary is put back without replacing one that appeared
 	// meanwhile; a damaged one is replaced.
-	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, damage != "missing"); err != nil {
+	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, !missing); err != nil {
 		return "", fmt.Errorf("restore the hook binary %s, which is %s: %w", target, damage, err)
 	}
 	if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
@@ -282,6 +290,34 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		return "", fmt.Errorf("restore the hook binary %s: the restored file does not match the recorded release", target)
 	}
 	return damage, nil
+}
+
+// windowsHookBinaryStructuralDamage inspects the named file without opening
+// its data. A matching plain hash cannot make a hard link or reparse point a
+// healthy managed target.
+func windowsHookBinaryStructuralDamage(path string) (string, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return "", err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		return "not a plain regular file (reparse point or directory)", nil
+	}
+	if info.NumberOfLinks != 1 {
+		return fmt.Sprintf("linked to another name (links=%d)", info.NumberOfLinks), nil
+	}
+	return "", nil
 }
 
 // copyWindowsManagedFile copies source to destination through a temporary
@@ -333,99 +369,6 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 		return err
 	}
 	return nil
-}
-
-// windowsFileBasicInfo is FILE_BASIC_INFO.
-type windowsFileBasicInfo struct {
-	CreationTime   int64
-	LastAccessTime int64
-	LastWriteTime  int64
-	ChangeTime     int64
-	FileAttributes uint32
-	_              uint32
-}
-
-// windowsHookFileStampOf takes the stamp of path through a handle that may
-// read attributes only: it opens no file data (so antivirus does not scan
-// the file again), does not follow a link and shares every access with
-// Setup and antivirus.
-func windowsHookFileStampOf(path string) (hookFileStamp, error) {
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return hookFileStamp{}, err
-	}
-	handle, err := windows.CreateFile(
-		name,
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return hookFileStamp{}, err
-	}
-	defer windows.CloseHandle(handle)
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return hookFileStamp{}, err
-	}
-	var basic windowsFileBasicInfo
-	if err := windows.GetFileInformationByHandleEx(
-		handle,
-		windows.FileBasicInfo,
-		(*byte)(unsafe.Pointer(&basic)),
-		uint32(unsafe.Sizeof(basic)),
-	); err != nil {
-		return hookFileStamp{}, err
-	}
-	return hookFileStamp{
-		Volume:     info.VolumeSerialNumber,
-		ID:         uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
-		Size:       int64(info.FileSizeHigh)<<32 | int64(info.FileSizeLow),
-		Links:      info.NumberOfLinks,
-		Written:    basic.LastWriteTime,
-		Changed:    basic.ChangeTime,
-		USN:        windowsFileUSN(handle),
-		Attributes: basic.FileAttributes,
-	}, nil
-}
-
-// windowsFileUSN is the update sequence number the change journal of the
-// volume last recorded for the open file, or 0 when the volume keeps no
-// journal. Nobody can set it: every change of the file gives a new one.
-func windowsFileUSN(handle windows.Handle) int64 {
-	var record [128]uint64 // USN_RECORD_V2 or V3 with a file name of up to 255 characters
-	buffer := unsafe.Slice((*byte)(unsafe.Pointer(&record[0])), len(record)*8)
-	var returned uint32
-	if err := windows.DeviceIoControl(
-		handle,
-		windows.FSCTL_READ_FILE_USN_DATA,
-		nil,
-		0,
-		&buffer[0],
-		uint32(len(buffer)),
-		&returned,
-		nil,
-	); err != nil {
-		return 0
-	}
-	if returned < 8 {
-		return 0
-	}
-	// The record starts with its length (4 bytes) and major version (2).
-	switch binary.LittleEndian.Uint16(buffer[4:6]) {
-	case 2: // 64-bit file references
-		if returned >= 32 {
-			return int64(binary.LittleEndian.Uint64(buffer[24:32]))
-		}
-	case 3: // 128-bit file references
-		if returned >= 48 {
-			return int64(binary.LittleEndian.Uint64(buffer[40:48]))
-		}
-	}
-	return 0
 }
 
 func windowsFileSHA256Hex(path string) (string, error) {

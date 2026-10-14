@@ -20,7 +20,7 @@ def function(source: str, name: str) -> str:
 @pytest.mark.parametrize("origin", ["MDM inline config", "MDM standard input", "/trusted/config.yaml"])
 def test_config_migration_warning_names_the_administrator_source(tmp_path: Path, origin: str) -> None:
     source = WRAPPER.read_text(encoding="utf-8")
-    names = ["dc_emit_result"]
+    names = ["dc_print_result", "dc_emit_result"]
     if "dc_relabel_config_source()" in source:
         names.extend(["dc_json_escape", "dc_relabel_config_source"])
     functions = "\n".join(function(source, name) for name in names)

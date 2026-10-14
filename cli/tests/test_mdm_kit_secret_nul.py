@@ -20,7 +20,7 @@ def function(source: str, name: str) -> str:
 @pytest.mark.parametrize("source_kind", ["stdin", "file"])
 def test_secret_with_nul_is_refused_before_lifecycle(tmp_path: Path, source_kind: str) -> None:
     source = WRAPPER.read_text(encoding="utf-8")
-    names = ["dc_json_escape", "dc_log", "dc_fail_result"]
+    names = ["dc_json_escape", "dc_log", "dc_print_result", "dc_fail_result"]
     if "dc_read_secret()" in source:
         names.append("dc_read_secret")
         call = "dc_read_secret"
