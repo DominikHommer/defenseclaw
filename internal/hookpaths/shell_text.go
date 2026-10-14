@@ -148,6 +148,29 @@ func shellLiteralProducerCodeWithVars(stmt *syntax.Stmt, source, home, cwd strin
 	return "", false
 }
 
+func shellReadsStdin(words []string) bool {
+	if literalReadsStdin(words) {
+		return true
+	}
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if word == "--" || !strings.HasPrefix(word, "-") || word == "-" {
+			break
+		}
+		if word == "-o" || word == "-O" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(word, "--") || strings.ContainsRune(word[1:], 'c') {
+			continue
+		}
+		if strings.ContainsRune(word[1:], 's') {
+			return true
+		}
+	}
+	return false
+}
+
 // shellTextCallScript finds literal shell text supplied by a command's input
 // or by an earlier write in the same command. A dynamic source is incomplete.
 func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, source, cwd, home string,
@@ -169,7 +192,7 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 		return "", false, false
 	}
 	if script, supplied, known := shellTextInput(stmt, source, home, cwd, vars); supplied {
-		if shell && literalReadsStdin(words) || sourced && len(words) > 1 &&
+		if shell && shellReadsStdin(words) || sourced && len(words) > 1 &&
 			(words[1] == "/dev/stdin" || words[1] == "-") {
 			return script, true, known
 		}
@@ -186,7 +209,7 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 			return "", true, false
 		}
 	}
-	if stmt != nil && (shell && literalReadsStdin(words) || sourced && len(words) > 1 &&
+	if stmt != nil && (shell && shellReadsStdin(words) || sourced && len(words) > 1 &&
 		(words[1] == "/dev/stdin" || words[1] == "-")) {
 		for _, redirect := range stmt.Redirs {
 			if redirect.Op != syntax.RdrIn {
