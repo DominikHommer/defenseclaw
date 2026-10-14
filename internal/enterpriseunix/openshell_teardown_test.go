@@ -529,3 +529,67 @@ func TestSandboxPrerequisitesRecordIsTheGatewaysContract(t *testing.T) {
 		t.Errorf("record = %+v", record)
 	}
 }
+
+// GAP-0598 verify 2: rpm -e or apt remove (the MDM uninstall script runs
+// rpm -e) then an install. The non-purge uninstall removed the service
+// account and handed the kept data folder to root; the package's postinstall
+// runs systemd-sysusers, which creates a new account, and systemd-tmpfiles,
+// whose `d /var/lib/defenseclaw 0700 defenseclaw defenseclaw` line re-owns
+// the folder (not its contents) to that account before ensure runs. Ensure
+// must still adopt the kept sandbox store; an owner nobody accounts for is
+// still refused.
+func TestSandboxKeptStoreSurvivesAPackageReinstall(t *testing.T) {
+	for name, tc := range map[string]struct {
+		owner func(service Account) int
+		ok    bool
+	}{
+		"re-owned to the new service account": {owner: func(service Account) int { return service.UID }, ok: true},
+		"re-owned to an unrelated account":    {owner: func(Account) int { return 4242 }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newOSHost(t, "linux")
+			l := h.env.Layout
+			cfg := sandboxConfig(t, "linux", true, setupVMSettings)
+			requireOK(t, h.ensure(cfg))
+			h.registerSandboxUser(t, h.alice)
+			if _, err := redaction.LoadOrCreateCorrelationKey(h.env.P(l.DataDir)); err != nil {
+				t.Fatal(err)
+			}
+			registration := filepath.Join(l.DataDir, "sandbox", "registrations", fmt.Sprint(h.alice.UID)+".json")
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if _, ok := h.accounts.accounts[l.ServiceUser]; ok {
+				t.Fatal("uninstall kept the service account")
+			}
+			if uid, _, err := h.env.OwnerOf(h.env.P(l.DataDir)); err != nil || uid != 0 {
+				t.Fatalf("the kept data folder is owned by %d (%v), want root", uid, err)
+			}
+
+			// The reinstall's systemd-sysusers, then systemd-tmpfiles --create.
+			service := Account{Name: l.ServiceUser, UID: 977, GID: 977}
+			h.accounts.accounts[l.ServiceUser] = service
+			owner := tc.owner(service)
+			h.owners[h.env.P(l.DataDir)] = [2]int{owner, owner}
+
+			r := h.ensure(cfg)
+			if !tc.ok {
+				requireError(t, r, codeUnmanagedLayout)
+				if !h.exists(registration) {
+					t.Fatal("the refused ensure removed the kept registration")
+				}
+				return
+			}
+			requireOK(t, r)
+			if !h.exists(registration) || !h.exists(filepath.Join(l.DataDir, "redaction-correlation.key")) {
+				t.Fatal("ensure after the package reinstall lost the kept sandbox store")
+			}
+			for _, path := range []string{l.DataDir, registration} {
+				if uid, _, err := h.env.OwnerOf(h.env.P(path)); err != nil || uid != service.UID {
+					t.Errorf("after ensure %s is owned by uid %d (%v), want the service account %d", path, uid, err, service.UID)
+				}
+			}
+			if exists(h.env.retainedStatePath()) {
+				t.Fatal("the retained-state record survived the reinstall")
+			}
+		})
+	}
+}
