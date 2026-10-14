@@ -16,6 +16,8 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         text = page("enterprise/windows.mdx")
         self.assertIn("health.watcher.details.profile_roots_skipped: true", text)
         self.assertIn("enterprise `status` and `verify` results do not report that field separately", text)
+        self.assertIn("set `asset_policy.skill.runtime_detection.enabled: true` and "
+                      "`asset_policy.plugin.runtime_detection.enabled: true`", text)
         self.assertIn("A brokered scan as the enrolled user is planned for a later release", text)
         self.assertNotIn("gateway service watches the skill and plugin folders of every user", text)
 
@@ -23,7 +25,36 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         text = page("policies/admission.mdx")
         self.assertIn("assets there do not receive its install-admission scan", text)
         self.assertIn("keep shared skills outside profiles", text)
-        self.assertNotIn("on a managed computer only projects inside the user's home count", text)
+        self.assertIn("On managed Linux and macOS, only projects inside the caller's real home count, "
+                      "after links are resolved", text)
+        self.assertIn("Explicit `gateway.watcher.skill.dirs` prevent project folders from being added "
+                      "on every platform", text)
+
+    def test_gap_0957_managed_windows_profile_runtime_rules(self):
+        text = page("policies/admission.mdx")
+        self.assertIn("set `runtime_detection.enabled: true` so hooks apply default, registry and "
+                      "approval rules to profile assets", text)
+        self.assertIn("On managed Windows, profile assets have no install-watcher decision", text)
+        self.assertIn("MCP runtime detection defaults to true", text)
+        self.assertIn("Windows `status` and `verify` do not emit `asset_policy_not_enforced`", text)
+        self.assertIn("gateway log is the only warning on Windows", text)
+
+    def test_gap_0012_windows_scan_examples_exclude_profiles(self):
+        text = page("enterprise/windows.mdx")
+        self.assertIn("no per-user attribution", text)
+        self.assertIn("A profile asset is never admission-blocked in 1.0.2", text)
+        self.assertIn("C:\\\\ApprovedSkills\\\\reviewed-skill", text)
+        for phrase in ("copied into the profile", "elsewhere in the profile",
+                       "whose profile holds the asset", "asset_removal_deferred",
+                       "source_path_contains: [\"C:\\\\Users", "reason_code=install-block"):
+            self.assertNotIn(phrase, text)
+
+    def test_gap_0012_denied_config_rechecks_watched_roots_only(self):
+        text = page("policies/admission.mdx")
+        self.assertIn("For watched roots (per-user installs and managed Windows roots outside profiles)", text)
+        self.assertIn("Managed Windows profile assets and managed Linux/macOS connector assets are "
+                      "refused only by the hooks", text)
+        self.assertNotIn("(per-user installs and managed Windows), a config change", text)
 
     def test_gap_0012_skill_watcher_profile_roots(self):
         text = page("scanning/skill-scanner.mdx")
@@ -131,10 +162,13 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
                       "(a mobile account's included)", text)
 
-    def test_gap_1356_windows_page_keeps_the_unverified_project_skill_warning(self):
+    def test_gap_1356_windows_project_skill_roots_skipped(self):
         text = page("enterprise/windows.mdx")
-        self.assertIn("skills are refused: `enterprise windows status` and `verify` warn with "
-                      "`project_skill_root_unverified`, and the gateway log names the folder", text)
+        self.assertIn("project skill folders inside profiles are skipped before verification or registration", text)
+        self.assertIn("no install scan, no \"is not scanned yet\" refusal and no "
+                      "`project_skill_root_unverified` warning", text)
+        self.assertNotIn("skills are refused: `enterprise windows status` and `verify` warn with "
+                         "`project_skill_root_unverified`", text)
 
 
 if __name__ == "__main__":
