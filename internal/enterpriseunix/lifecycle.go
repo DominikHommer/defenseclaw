@@ -3340,7 +3340,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			left = true
 			continue
 		}
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause; for a pending guardian cleanup, fix the account's home to an existing directory it owns, without symlinks or group/other write, or remove the account; then rerun %s", connector, user, reason, rerun))
 		left = true
 	}
 	if err != nil && len(report.Failed) == 0 {
@@ -3354,7 +3354,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
 			continue
 		}
-		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
+		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is available, rerun %s", connector, user, rerun))
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")

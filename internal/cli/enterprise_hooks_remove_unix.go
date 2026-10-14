@@ -497,7 +497,13 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		default:
 			reason := "the cleanup failed"
 			if err != nil {
-				reason = boundedString(err.Error(), 256)
+				var rehomed *enterpriseHookTargetHomeChangedError
+				if errors.As(err, &rehomed) {
+					// Keep both homes and the clearing paths in the report.
+					reason = boundedEnterpriseHookUserCleanupText(err.Error())
+				} else {
+					reason = boundedString(err.Error(), 256)
+				}
 			}
 			report.Failed = append(report.Failed, label+": "+reason)
 			skip[entry.UID] = enterpriseHookPurgeSkipFailed
