@@ -30,13 +30,17 @@ const (
 	// osUserGroupBuffer is the number of groups os/user lists into on macOS. A
 	// list that fills it may be cut short.
 	osUserGroupBuffer = 256
+	// darwinNamedGroupMax bounds the named groups checked for one account.
+	darwinNamedGroupMax = 64
 )
 
 // platformAccountGroupIDs gets candidate gids from os/user, or id when its
-// fixed buffer is full, then confirms every supplementary membership against
-// the account's uid. Both candidate providers calculate groups by name; Open
-// Directory's uid membership check binds each group to the account instead.
-func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account *user.User, ids []string, listErr error) ([]string, error) {
+// fixed buffer is full, adds the gids of the named groups (the groups profile
+// assignments select by), then confirms every supplementary membership
+// against the account's uid. Both candidate providers calculate groups by
+// name and leave out nested memberships; Open Directory's uid membership
+// check binds each group to the account and answers nested ones (GAP-0528).
+func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account *user.User, ids []string, listErr error, named []string) ([]string, error) {
 	if listErr != nil || len(ids) >= osUserGroupBuffer {
 		if err := validName(account.Username); err != nil {
 			return nil, errors.Join(listErr, err)
@@ -56,12 +60,61 @@ func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account 
 			return nil, errors.Join(listErr, err)
 		}
 	}
-	return uidVerifiedGroupIDs(ctx, runner, account, ids)
+	extra, err := namedGroupIDs(named)
+	if err != nil {
+		return nil, err
+	}
+	return uidVerifiedGroupIDs(ctx, runner, account, ids, extra)
 }
 
-// uidVerifiedGroupIDs checks candidates through the Open Directory
-// membership API. The account's primary gid is held by its uid record.
-func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *user.User, candidates []string) ([]string, error) {
+// lookupNamedGroupGID resolves a group name through Open Directory; ok is
+// false when no group has the name. Tests replace it.
+var lookupNamedGroupGID = func(name string) (gid int, ok bool, err error) {
+	group, err := user.LookupGroup(name)
+	if err != nil {
+		if err = translateUserErr(err); errors.Is(err, ErrNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	gid, err = parseID(group.Gid, "gid")
+	return gid, err == nil, err
+}
+
+// namedGroupIDs resolves the named groups to gids, once each, at most
+// darwinNamedGroupMax of them. A name no group has adds nothing; the gateway
+// reports such an assignment group itself. A name with an @ is skipped:
+// macOS group names carry no DNS domain, so no group the account is in can
+// match it. A lookup that fails otherwise fails the listing, as a failed
+// membership check does: part of a membership must not select a profile.
+func namedGroupIDs(names []string) ([]int, error) {
+	var ids []int
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		key := strings.ToLower(name)
+		if name == "" || strings.Contains(name, "@") || seen[key] {
+			continue
+		}
+		if len(seen) == darwinNamedGroupMax {
+			break
+		}
+		seen[key] = true
+		gid, ok, err := lookupNamedGroupGID(name)
+		if err != nil {
+			return nil, fmt.Errorf("unixidentity: look up group %q: %w", name, err)
+		}
+		if ok {
+			ids = append(ids, gid)
+		}
+	}
+	return ids, nil
+}
+
+// uidVerifiedGroupIDs checks candidates, then the extra gids of named groups,
+// through the Open Directory membership API, once each. The account's
+// primary gid is held by its uid record.
+func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *user.User, candidates []string, extra []int) ([]string, error) {
 	uid, err := parseID(account.Uid, "uid")
 	if err != nil {
 		return nil, err
@@ -74,17 +127,25 @@ func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *use
 		return nil, err
 	}
 	ids := []int{primary}
+	listed := map[int]bool{primary: true}
 	for _, value := range candidates {
 		gid, err := parseID(value, "gid")
 		if err != nil {
 			return nil, err
 		}
-		if gid != primary {
+		if !listed[gid] {
+			listed[gid] = true
 			ids = append(ids, gid)
 		}
 	}
 	if len(ids) > maxDirectoryGroups {
 		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+	}
+	for _, gid := range extra {
+		if gid >= 0 && !listed[gid] {
+			listed[gid] = true
+			ids = append(ids, gid)
+		}
 	}
 	verified := make([]bool, len(ids))
 	verified[0] = true
@@ -119,11 +180,9 @@ func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *use
 		return nil, err
 	}
 	var out []string
-	seen := map[int]bool{}
 	for i, gid := range ids {
-		if verified[i] && !seen[gid] {
+		if verified[i] {
 			out = append(out, strconv.Itoa(gid))
-			seen[gid] = true
 		}
 	}
 	return out, nil

@@ -301,25 +301,50 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 		return useridentity.DirectoryFacts{}, false
 	}
 	key := strconv.Itoa(uid)
-	if !identityFactsEnabled.Load() {
-		return c.directoryCache().get(key, block)
-	}
-	if account, ok := c.account(uid); ok {
-		holder := account.Name + "\x00" + account.Home
-		c.mu.Lock()
-		previous, known := c.holders[uid]
-		if !known && len(c.holders) < managedHookPeerHomesMax || known && previous != holder {
-			if c.holders == nil {
-				c.holders = make(map[int]string)
-			}
-			c.holders[uid] = holder
-		}
-		c.mu.Unlock()
-		if known && previous != holder {
-			c.directoryCache().forget(key)
-		}
-	}
+	c.noteHolder(uid, key)
 	return c.directoryCache().get(key, block)
+}
+
+// explainDirectory is directory for `guardrail profile explain`: the facts a
+// hook call of uid gets after explain's own lookup (explainDirectoryFacts),
+// or why it gets none. Explain records the account it resolved as the holder
+// of uid's facts, as a hook call does. Explain's lookup refreshes the facts
+// hooks read, but only a hook call recorded whose they were, so an account
+// explained before a directory outage and not yet seen by a hook kept the
+// profile of those facts in its hooks while explain by name answered
+// default_lookup_failed: a looser live decision than the one explain showed
+// (GAP-0529).
+func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.DirectoryFacts, error) {
+	key := strconv.Itoa(uid)
+	c.noteHolder(uid, key)
+	return explainDirectoryFacts(c.directoryCache(), key)
+}
+
+// noteHolder records the account (name and home) that uid's cached
+// directory facts are used for, when the account database names uid now.
+// When another account holds the uid (a removed account's uid given to a new
+// one), its facts are dropped first (GAP-0720).
+func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
+	if uid < 0 || !identityFactsEnabled.Load() {
+		return
+	}
+	account, ok := c.account(uid)
+	if !ok {
+		return
+	}
+	holder := account.Name + "\x00" + account.Home
+	c.mu.Lock()
+	previous, known := c.holders[uid]
+	if !known && len(c.holders) < managedHookPeerHomesMax || known && previous != holder {
+		if c.holders == nil {
+			c.holders = make(map[int]string)
+		}
+		c.holders[uid] = holder
+	}
+	c.mu.Unlock()
+	if known && previous != holder {
+		c.directoryCache().forget(key)
+	}
 }
 
 // directoryCache returns the cache of verified directory facts per uid,

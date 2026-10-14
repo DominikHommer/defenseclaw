@@ -441,7 +441,11 @@ func (c *identityCache[T]) failing(key string) (since time.Time, reason string, 
 }
 
 // peek returns key's cached facts and when they were fetched, without
-// starting a lookup or waiting for one.
+// starting a lookup or waiting for one. Facts a request would no longer be
+// served (past maxAge, or built from a guardian record no longer trusted)
+// are dropped first, as get drops them: explain served them by name during
+// an outage while the hooks of the account had moved to
+// default_lookup_failed (GAP-0529).
 func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	var zero T
 	if c == nil {
@@ -450,7 +454,11 @@ func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry := c.entries[key]
-	if entry == nil || !entry.ok {
+	if entry == nil {
+		return zero, time.Time{}, false
+	}
+	c.dropAgedLocked(key, entry, c.now())
+	if !entry.ok {
 		return zero, time.Time{}, false
 	}
 	return entry.facts, entry.fetchedAt, true

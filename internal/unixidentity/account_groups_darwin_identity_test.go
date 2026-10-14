@@ -38,7 +38,7 @@ func TestDarwinGroupMembershipUsesAccountUID(t *testing.T) {
 		{"directory", &user.User{Username: "alex", Uid: "80001", Gid: "5000"}, []string{"5000", "6000"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := platformAccountGroupIDs(context.Background(), run, tc.account, strings.Fields("20 80 5000 6000"), nil)
+			got, err := platformAccountGroupIDs(context.Background(), run, tc.account, strings.Fields("20 80 5000 6000"), nil, nil)
 			if err != nil || !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("groups of uid %s = %v, %v; want %v", tc.account.Uid, got, err, tc.want)
 			}

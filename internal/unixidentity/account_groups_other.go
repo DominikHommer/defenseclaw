@@ -18,6 +18,6 @@ import (
 )
 
 // platformAccountGroupIDs uses os/user on other Unix systems.
-func platformAccountGroupIDs(_ context.Context, _ commandRunner, _ *user.User, ids []string, listErr error) ([]string, error) {
+func platformAccountGroupIDs(_ context.Context, _ commandRunner, _ *user.User, ids []string, listErr error, _ []string) ([]string, error) {
 	return ids, listErr
 }
