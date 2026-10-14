@@ -1631,10 +1631,10 @@ through to the harness.
   every shell's rc file. Open a new shell for it to take effect.
 
 For a non-exempt account, the host run is refused while sandboxes are available
-to the account, whatever the effective `when_unavailable` setting. When
-sandboxes are unavailable to the account, only an effective `alert` setting
-lifts that refusal. Managed registrations have a same-account limit in 1.0.2;
-see
+to the account, whether the effective `when_unavailable` setting is `refuse`
+or `alert`. An effective `alert` setting when sandboxes are unavailable to the
+account lifts that refusal. Managed registrations have a same-account limit in
+1.0.2; see
 [the registration limit](/docs/enterprise/sandboxes#require-sandboxes).
 
 In the TUI Sandboxes panel, `w` switches the wrappers for `claude` and

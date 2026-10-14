@@ -204,9 +204,9 @@ class R102DocsFinalDocsTest(unittest.TestCase):
     def test_guide_host_refusal_applies_while_sandboxes_are_available(self):
         text = page("sandboxes/guide.mdx")
         self.assertIn("the host run is refused while sandboxes are available to the account, "
-                      "whatever the effective `when_unavailable` setting", text)
-        self.assertIn("When sandboxes are unavailable to the account, only an effective `alert` "
-                      "setting lifts that refusal", text)
+                      "whether the effective `when_unavailable` setting is `refuse` or `alert`", text)
+        self.assertIn("An effective `alert` setting when sandboxes are unavailable to the account "
+                      "lifts that refusal", text)
         self.assertIn("[the registration limit](/docs/enterprise/sandboxes#require-sandboxes)", text)
         self.assertNotIn("that host refusal applies when the effective `when_unavailable` setting "
                          "is `refuse`", text)
