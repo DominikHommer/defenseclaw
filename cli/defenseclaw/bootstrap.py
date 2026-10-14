@@ -1405,10 +1405,12 @@ def _apply_first_run_choices(
     profile: str,
     scanner_mode: str,
 ) -> None:
-    # Re-running first-run for the connector already configured in a pinned
-    # workspace must keep that install's scope. Selecting another connector
-    # still starts at global scope, as it did before.
-    keep_workspace = bool(cfg.claw.workspace_dir and connector in cfg.active_connectors())
+    # Keep a pinned workspace only when every connector in the new first-run
+    # roster was already pinned. Adding a peer starts at global scope as before.
+    # The existing-roster check also requires a workspace pin.
+    keep_workspace = bool(cfg.claw.workspace_dir) and set(_first_run_connector_roster(options, connector)) <= set(
+        cfg.active_connectors()
+    )
     cfg.claw.mode = connector
     if not keep_workspace:
         cfg.claw.workspace_dir = ""

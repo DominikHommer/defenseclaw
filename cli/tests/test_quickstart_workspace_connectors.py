@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 from defenseclaw import bootstrap, connector_paths
-from defenseclaw.commands import cmd_doctor, cmd_status
+from defenseclaw.commands import cmd_doctor, cmd_init, cmd_status
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.config import default_config, load, prepare_fresh_v8_config
 
@@ -167,6 +167,80 @@ def test_quickstart_refuses_a_different_connector_without_moving_the_workspace(
     assert result.exit_code == 2, result.output
     assert "already guards: devin" in result.output
     assert load().claw.workspace_dir == str(workspace)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the staged golden case is POSIX")
+def test_init_adding_copilot_to_pinned_devin_starts_at_global_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _ = _stage_workspace(tmp_path, monkeypatch, "devin")
+
+    result = CliRunner().invoke(
+        cmd_init.init_cmd,
+        [
+            "--non-interactive",
+            "--action-connectors",
+            "devin,copilot",
+            "--no-start-gateway",
+            "--no-verify",
+            "--skip-install",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = load()
+    assert saved.claw.workspace_dir == ""
+    assert saved.active_connectors() == ["copilot", "devin"]
+    assert str(workspace) not in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the staged golden case is POSIX")
+def test_init_rerunning_pinned_devin_keeps_project_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, _ = _stage_workspace(tmp_path, monkeypatch, "devin")
+
+    result = CliRunner().invoke(
+        cmd_init.init_cmd,
+        ["--non-interactive", "--connector", "devin", "--no-start-gateway", "--skip-install"],
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = load()
+    assert saved.claw.workspace_dir == str(workspace)
+    assert saved.active_connectors() == ["devin"]
+    assert "Devin project hooks found" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the staged golden case is POSIX")
+def test_backend_adding_copilot_to_pinned_devin_starts_at_global_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage_workspace(tmp_path, monkeypatch, "devin")
+    primary = {
+        "connector": "devin",
+        "profile": "observe",
+        "fail_mode": None,
+        "human_approval": None,
+        "hilt_min_severity": None,
+    }
+    extra = {**primary, "connector": "copilot"}
+
+    report = bootstrap.run_first_run(
+        bootstrap.FirstRunOptions(
+            connector="devin",
+            connector_settings=[primary, extra],
+            profile="observe",
+            skip_install=True,
+            start_gateway=False,
+            verify=False,
+        )
+    )
+    assert report.status != "needs_attention", report.to_dict()
+    activated, _ = cmd_init._activate_additional_connectors(primary, [extra], start_gateway=False, quiet=True)
+
+    saved = load()
+    assert activated == ["copilot", "devin"]
+    assert saved.claw.workspace_dir == ""
+    assert saved.active_connectors() == ["copilot", "devin"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the staged golden case is POSIX")
