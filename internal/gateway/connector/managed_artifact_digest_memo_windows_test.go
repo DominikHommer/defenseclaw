@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -268,5 +269,47 @@ func TestWindowsManagedArtifactDigestMemoHitsAfterAFullRead(t *testing.T) {
 				t.Fatalf("a memo hit ended the change epoch (%d ends)", *ends)
 			}
 		})
+	}
+}
+
+// The guardian's target API shares the connector's post-epoch stamp, while
+// the protected copy has no independent ten-minute backstop.
+func TestWindowsManagedHookBinaryAPIsShareTargetAndDoNotExpireCopy(t *testing.T) {
+	clock, ends := useManagedArtifactDigestSeams(t,
+		windowsManagedArtifactStamp,
+		openWindowsManagedArtifactExclusive,
+		endWindowsManagedArtifactChangeEpoch,
+	)
+	managedArtifactDigestMemoEligible = func(string) bool { return true }
+	managedProtectedHookCopyEligible = func(string) bool { return true }
+	target := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	copyPath := filepath.Join(t.TempDir(), "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	targetDigest := writeManagedArtifactFixture(t, target, 1)
+	copyDigest := writeManagedArtifactFixture(t, copyPath, 2)
+	if _, ok := windowsManagedArtifactStampOfPath(t, target); !ok {
+		t.Skip("the test volume keeps no change journal; the memo is off there")
+	}
+	if got, err := ManagedEnterpriseHookBinarySHA256Hex(target); err != nil || "sha256:"+got != targetDigest {
+		t.Fatalf("target digest %q, err %v", got, err)
+	}
+	if got, err := ManagedProtectedHookCopySHA256Hex(copyPath); err != nil || "sha256:"+got != copyDigest {
+		t.Fatalf("copy digest %q, err %v", got, err)
+	}
+	if *ends != 2 {
+		t.Fatalf("first reads ended %d epochs, want two", *ends)
+	}
+	setManagedArtifactDigestSentinel(t, copyPath)
+	*clock = clock.Add(11 * time.Minute)
+	if got, err := ManagedProtectedHookCopySHA256Hex(copyPath); err != nil || got != "remembered" {
+		t.Fatalf("copy expired after ten minutes: %q, %v", got, err)
+	}
+	if got, err := ManagedEnterpriseHookBinarySHA256Hex(target); err != nil || "sha256:"+got != targetDigest {
+		t.Fatalf("target backstop digest %q, err %v", got, err)
+	}
+	if *ends != 3 {
+		t.Fatalf("after target backstop, epochs %d, want three", *ends)
 	}
 }

@@ -15,28 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// countWindowsHookFileReads makes the guardian record of the hook binary
-// fresh for the test and counts the full reads of each existing file.
-func countWindowsHookFileReads(t *testing.T) map[string]int {
-	t.Helper()
-	reads := map[string]int{}
-	saved := windowsHookFileHashes
-	windowsHookFileHashes = &hookFileHashCache{
-		stamp: windowsHookFileStampOf,
-		hash: func(path string) (string, error) {
-			sum, err := windowsFileSHA256Hex(path)
-			if err == nil {
-				reads[strings.ToLower(filepath.Clean(path))]++
-			}
-			return sum, err
-		},
-		now:    time.Now,
-		maxAge: windowsHookBinaryRehashInterval,
-	}
-	t.Cleanup(func() { windowsHookFileHashes = saved })
-	return reads
-}
-
 func writeWindowsHookBinaryFixture(t *testing.T, body string) (target, copyPath, want string) {
 	t.Helper()
 	root := t.TempDir()
@@ -55,24 +33,46 @@ func writeWindowsHookBinaryFixture(t *testing.T, body string) (target, copyPath,
 	return target, copyPath, want
 }
 
-// GAP-0401: an unchanged hook binary and its protected copy are read once,
-// not at every check and before every reconcile.
-func TestKeepWindowsManagedFileCopyReadsAnUnchangedBinaryOnce(t *testing.T) {
-	reads := countWindowsHookFileReads(t)
+func TestKeepWindowsManagedFileCopyUsesSharedTargetHash(t *testing.T) {
 	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
+	saved := guardianTargetHookSHA256Hex
+	calls := 0
+	guardianTargetHookSHA256Hex = func(path string) (string, error) {
+		if path != target {
+			t.Errorf("target hash path %q, want %q", path, target)
+		}
+		calls++
+		return saved(path)
+	}
+	t.Cleanup(func() { guardianTargetHookSHA256Hex = saved })
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("healthy target: damage %q, err %v", damage, err)
+	}
+	if calls != 1 {
+		t.Fatalf("guardian used the shared target hash %d times, want once", calls)
+	}
+}
+
+// The guardian leaves a healthy protected copy in place through repeated
+// five-second checks and reconciles. Portable connector tests count data
+// reads by both callers of the shared digest memo.
+func TestKeepWindowsManagedFileCopyKeepsAnUnchangedCopy(t *testing.T) {
+	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
+	var first os.FileInfo
 	for i := range 6 {
 		refresh := i%2 == 0 // the reconcile refreshes the copy, the 5 s check does not
 		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, refresh); err != nil || damage != "" {
 			t.Fatalf("check %d: restored %q, %v", i, damage, err)
 		}
-	}
-	key := func(path string) string { return strings.ToLower(filepath.Clean(path)) }
-	if reads[key(target)] != 1 {
-		t.Fatalf("the unchanged hook binary was read %d times, want 1", reads[key(target)])
-	}
-	// The first refresh creates the copy; the next one reads it once.
-	if reads[key(copyPath)] != 1 {
-		t.Fatalf("the unchanged protected copy was read %d times, want 1", reads[key(copyPath)])
+		current, err := os.Stat(copyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = current
+		} else if !os.SameFile(first, current) {
+			t.Fatal("a healthy protected copy was replaced")
+		}
 	}
 }
 
@@ -80,7 +80,6 @@ func TestKeepWindowsManagedFileCopyReadsAnUnchangedBinaryOnce(t *testing.T) {
 // place or by a rename with one of the same size, whose last-write time was
 // set back, is found at the next check and restored.
 func TestKeepWindowsManagedFileCopyFindsASameSizeReplacement(t *testing.T) {
-	countWindowsHookFileReads(t)
 	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release A")
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
 		t.Fatalf("keep copy: restored %q, %v", damage, err)
@@ -133,15 +132,16 @@ func TestKeepWindowsManagedFileCopyFindsASameSizeReplacement(t *testing.T) {
 	}
 }
 
-// GAP-0401: a time stamp change alone reads the binary again, reports no
-// damage and is not read again after that.
+// A time stamp change alone reports no damage and keeps the copy in place.
 func TestKeepWindowsManagedFileCopyHandlesATimeStampOnlyChange(t *testing.T) {
-	reads := countWindowsHookFileReads(t)
 	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
 		t.Fatalf("keep copy: restored %q, %v", damage, err)
 	}
-	key := strings.ToLower(filepath.Clean(target))
+	before, err := os.Stat(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	later := time.Now().Add(time.Hour)
 	if err := os.Chtimes(target, later, later); err != nil {
 		t.Fatal(err)
@@ -151,43 +151,33 @@ func TestKeepWindowsManagedFileCopyHandlesATimeStampOnlyChange(t *testing.T) {
 			t.Fatalf("time stamp change: restored %q, %v", damage, err)
 		}
 	}
-	if reads[key] != 2 {
-		t.Fatalf("the binary was read %d times, want 2 (once more after the time stamp change)", reads[key])
+	after, err := os.Stat(copyPath)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the time change replaced the protected copy: %v", err)
 	}
 }
 
-// The stamp names the file version: equal for the same file, different
-// after a write, and taken without opening the file data.
-func TestWindowsHookFileStampFollowsTheFileVersion(t *testing.T) {
-	target, _, _ := writeWindowsHookBinaryFixture(t, "hook release")
-	first, err := windowsHookFileStampOf(target)
-	if err != nil {
+// A stale copy memo must never authorize a restore. The restore branch reads
+// the source afresh before copying and leaves a missing target missing when
+// the protected copy has been damaged.
+func TestKeepWindowsManagedFileCopyChecksProtectedCopyBeforeRestore(t *testing.T) {
+	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release A")
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	saved := guardianCopyHookSHA256Hex
+	guardianCopyHookSHA256Hex = func(string) (string, error) { return want, nil }
+	t.Cleanup(func() { guardianCopyHookSHA256Hex = saved })
+	if err := os.WriteFile(copyPath, []byte("hook release B"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	again, err := windowsHookFileStampOf(target)
-	if err != nil || again != first {
-		t.Fatalf("stamp of an unchanged file changed: %+v, %+v, %v", first, again, err)
-	}
-	if first.ID == 0 || first.Size != int64(len("hook release")) || first.Links != 1 {
-		t.Fatalf("stamp = %+v", first)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if err := os.WriteFile(target, []byte("hook releasf"), 0o600); err != nil {
+	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}
-	after, err := windowsHookFileStampOf(target)
-	if err != nil || after == first {
-		t.Fatalf("stamp did not change after a write: %+v, %v", after, err)
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err == nil || damage != "" {
+		t.Fatalf("damaged copy restored the target: damage %q, err %v", damage, err)
 	}
-	// A handle that shares only reading does not stop the stamp: it opens
-	// attributes only.
-	name, _ := windows.UTF16PtrFromString(target)
-	handle, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer windows.CloseHandle(handle)
-	if _, err := windowsHookFileStampOf(target); err != nil {
-		t.Fatalf("stamp while the binary is open for read: %v", err)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("a damaged protected copy created a target: %v", err)
 	}
 }
