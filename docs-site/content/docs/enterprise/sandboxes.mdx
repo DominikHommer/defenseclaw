@@ -1352,7 +1352,20 @@ running sandbox counts again within the next minute.
   install). The kept sandboxes then start, review and pull as before. Only
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
-  it also removes the kept registrations, decisions and key.
+  it also removes the kept registrations, decisions and key. On Linux, purge
+  asks host Docker as root to remove each account's DefenseClaw-labelled
+  sandbox image tags before deleting that account's image records in the
+  daemon's state folder (and an older `~/.defenseclaw/sandboxes/images.json`
+  store when purge deletes it). An account's own installation keeps its
+  legacy store. If Docker is missing or cannot list images,
+  the result names each image tag recorded for the account, the reason and
+  the root `docker image rm <tag>` command, marks the image as not verified,
+  and gives the account's label-filtered `docker image ls` command. Warnings
+  show at most 32 recorded tags per account and count any others. If Docker
+  cannot remove a listed image, the warning names its tag, short ID, account,
+  reason and the root `docker image rm <tag>` command; purge still finishes.
+  A non-purge uninstall keeps the images. On macOS, each account's Docker
+  Desktop teardown remains responsible for its images.
 
 ## Troubleshooting
 

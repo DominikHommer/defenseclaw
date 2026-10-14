@@ -1129,12 +1129,17 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket); err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop the sandbox daemon of %s: %v; stop its user units by hand", a.Name, err))
 		}
+		l.purgeAccountSandboxImages(ctx, a)
 		l.purgeAccountSandbox(a)
 		if teardownErr != nil {
 			// Teardown's next step assumes its local state still exists.
 			// Purge removed those files independently, so describe the
 			// resources that may remain instead of repeating that step.
-			r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
+			if env.GOOS == "linux" {
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; any Docker images that could not be removed are reported separately", a.Name))
+			} else {
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
+			}
 		}
 	}
 	switch {
@@ -1186,8 +1191,9 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 // purgeAccountSandbox removes what the sandbox subsystem left in an account:
 // the daemon's state, MicroVM disks, CLI state and build logs, and the OpenShell
 // that DefenseClaw installed and its state. An OpenShell the account or its
-// administrator installed stays. Docker images and gateway resources are
-// removed by teardown, not by deleting these files.
+// administrator installed stays. Account teardown handles gateway resources;
+// on Linux the root image cleanup also handles labelled Docker images before
+// these files, including the image records, are removed.
 func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	env, r := l.env, l.result
 	removedAny := false
