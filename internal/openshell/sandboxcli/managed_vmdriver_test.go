@@ -73,6 +73,12 @@ func TestManagedDoctorRefusesStaleRenderedVMDriverDir(t *testing.T) {
 		!strings.Contains(row.Detail, "/usr/libexec/openshell") || row.Fix == nil || !strings.Contains(row.Fix.Summary, "enterprise linux ensure") {
 		t.Fatalf("stale rendered driver_dir: %+v", row)
 	}
+	app.GOOS = "darwin"
+	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusFail || row.Fix == nil ||
+		!strings.Contains(row.Fix.Summary, "enterprise macos ensure") || strings.Contains(row.Fix.Summary, "enterprise darwin ensure") {
+		t.Fatalf("macOS stale rendered driver_dir: %+v", row)
+	}
+	app.GOOS = "linux"
 	writeConfig(live)
 	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusPass {
 		t.Fatalf("current rendered driver_dir: %+v", row)

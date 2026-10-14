@@ -1055,7 +1055,7 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 	}
 	c.Status = openshell.StatusFail
 	c.Detail += "; but " + problem + ", so no MicroVM sandbox can start for you on this computer"
-	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + goos + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + openshell.EnterprisePlatformName(goos) + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
 	return c
 }
 
