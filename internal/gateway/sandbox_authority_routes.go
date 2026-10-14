@@ -791,6 +791,9 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 			return
 		}
+		if state.Running && reg.State != sandboxreg.StateRevoked {
+			a.sandboxGuestSignal(r.Context(), auth, reg, audit.SandboxGuestRunningWithoutGuest)
+		}
 	}
 	// A running sandbox counts again on its daemon's first poll after a
 	// gateway restart, not only at its next phase change (#1241).

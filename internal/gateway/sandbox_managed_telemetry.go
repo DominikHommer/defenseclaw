@@ -113,6 +113,7 @@ func (a *APIServer) trackManagedSandboxActive(ctx context.Context, auth *sandbox
 // recorder's phase map nor counts in sandbox.active; the daemon's deleted
 // record is not relied on.
 func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
+	a.sandboxGuestSignalGone(reg)
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
 	}
@@ -537,7 +538,16 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 		// the registration and the subject key alone.
 		sandboxRecordFailed(ev.Kind+" (stamped)", err)
 		identity.Managed = audit.SandboxManaged{RegistrationID: reg.ID, SubjectKey: reg.SubjectKey}
-		sandboxRecordFailed(ev.Kind, record(identity))
+		if err := record(identity); err != nil {
+			sandboxRecordFailed(ev.Kind, err)
+			return
+		}
+	}
+	// Only a record accepted for this bound sandbox after bind is a sighting.
+	// Tombstone telemetry still records the sandbox's last phases, but cannot
+	// establish a new sighting for a revoked registration.
+	if reg.State != sandboxreg.StateRevoked && !ev.Time.Before(reg.BoundAt) {
+		a.sandboxMarkGuestSeen(reg, ev.Time)
 	}
 }
 
