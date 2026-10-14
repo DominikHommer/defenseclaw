@@ -555,8 +555,11 @@ Which commands prompt and which are flag-only is listed in the
 ### Protected-file write proof
 
 The write proof checks command text before a tool runs. It does not see what
-child programs write. For protected files, use a sandbox or file permissions
-as an additional control.
+child programs write. A write inside a script, interpreter or shell built-in
+that the command only names is reported as partly checked. A rule that needs
+the complete action cannot block that inner write; a rule matching the
+complete outer argument list still can. For protected files,
+use a sandbox or file permissions as an additional control.
 
 ## Common follow-ups
 
