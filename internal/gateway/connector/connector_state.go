@@ -1772,8 +1772,9 @@ func stableManagedArtifactDigestForOwner(
 }
 
 // stableManagedArtifactDigestWith uses the shared ten-minute target memo.
-// Without a guarded stable stamp it still reads twice and compares both
-// reads with the opened file identity (GAP-0438).
+// A guarded file with a full journal stamp, or an attribute-only stamp with
+// the ten-minute backstop, needs one read. Other files retain the two-pass
+// check against the opened identity (GAP-0438).
 func stableManagedArtifactDigestWith(
 	path, label string,
 	maxBytes int64,
@@ -1833,12 +1834,16 @@ func stableManagedArtifactDigestWithAge(
 	}
 	var stamp managedArtifactStamp
 	stamped := false
+	attributeOnly := false
+	fullStampAvailable := false
 	if memoize {
 		// A memo hit only takes the stamp. Ending the change epoch here
 		// would itself move the journal number and end every hit.
 		if guarded {
-			if seen, ok := managedArtifactStampOf(file); ok {
-				if digest, ok := rememberedManagedArtifactDigest(path, seen, maxAge); ok {
+			seenFull, fullOK := managedArtifactStampOf(file)
+			fullStampAvailable = fullOK
+			if fullOK {
+				if digest, ok := rememberedManagedArtifactDigest(path, seenFull, maxAge, false, true); ok {
 					current, err := os.Lstat(path)
 					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
 						os.SameFile(opened, current) {
@@ -1846,15 +1851,38 @@ func stableManagedArtifactDigestWithAge(
 					}
 				}
 			}
+			if seenAttributes, ok := managedArtifactAttributeStampOf(file); ok {
+				seenAttributes.USN = 0
+				if digest, ok := rememberedManagedArtifactDigest(path, seenAttributes, maxAge, true, fullOK); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						noticeManagedArtifactDegraded(path)
+						return digest, true, nil
+					}
+				}
+			}
 		}
 		// A full read. It first ends the change epoch of the file on this
 		// deny-write handle, so the next change gets a new journal number
-		// even while another handle stays open, and takes the stamp after
-		// that. With a guarded stamp, one data pass and a matching later
-		// stamp suffice. Otherwise the original two-pass check remains.
+		// even while another handle stays open, and takes the full stamp
+		// after that. If the journal is unavailable, an attribute-only stamp
+		// under the same guarded handle permits one pass with a backstop.
+		// Without either guarded stamp, the two-pass check remains.
 		forgetManagedArtifactDigest(path)
-		if guarded && endManagedArtifactChangeEpoch(file) == nil {
-			stamp, stamped = managedArtifactStampOf(file)
+		if guarded {
+			if endManagedArtifactChangeEpoch(file) == nil {
+				stamp, stamped = managedArtifactStampOf(file)
+				fullStampAvailable = stamped
+			}
+			if !stamped {
+				stamp, stamped = managedArtifactAttributeStampOf(file)
+				attributeOnly = stamped
+				if stamped {
+					stamp.USN = 0
+					noticeManagedArtifactDegraded(path)
+				}
+			}
 		}
 	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
@@ -1913,13 +1941,21 @@ func stableManagedArtifactDigestWithAge(
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
 	if stamped {
-		if later, ok := managedArtifactStampOf(file); !ok || later != stamp {
+		stampOf := managedArtifactStampOf
+		if attributeOnly {
+			stampOf = managedArtifactAttributeStampOf
+		}
+		later, ok := stampOf(file)
+		if attributeOnly {
+			later.USN = 0
+		}
+		if !ok || later != stamp {
 			return "", true, fmt.Errorf("%s changed during bounded digest", label)
 		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
 	if stamped {
-		rememberManagedArtifactDigest(path, stamp, digest)
+		rememberManagedArtifactDigest(path, stamp, digest, attributeOnly, fullStampAvailable)
 	}
 	return digest, true, nil
 }

@@ -24,6 +24,7 @@ var (
 	managedProtectedHookCopyEligible  = managedEnterpriseHookCopyPath
 	openManagedArtifactExclusive      = openWindowsManagedArtifactExclusive
 	managedArtifactStampOf            = windowsManagedArtifactStamp
+	managedArtifactAttributeStampOf   = windowsManagedArtifactAttributeStamp
 	endManagedArtifactChangeEpoch     = endWindowsManagedArtifactChangeEpoch
 )
 
@@ -91,9 +92,9 @@ type windowsManagedArtifactFileBasicInfo struct {
 	_              uint32
 }
 
-// windowsManagedArtifactStamp takes the stamp of the open file. ok is false
-// when a value cannot be read or the volume keeps no change journal; the
-// caller then reads the file in full and memoizes nothing. An account that
+// windowsManagedArtifactStamp takes the full stamp of the open file. ok is
+// false when a value cannot be read or the volume keeps no change journal;
+// a guarded caller then tries the attribute-only ten-minute backstop. An account that
 // may write the file can set every time stamp back, but not the journal
 // number. That number names a change epoch, not a write: from the first
 // change of the file until its last handle closes, NTFS posts a new record
@@ -102,6 +103,17 @@ type windowsManagedArtifactFileBasicInfo struct {
 // So the stamp a full read remembers is taken after
 // endWindowsManagedArtifactChangeEpoch, and any later change moves it.
 func windowsManagedArtifactStamp(file *os.File) (managedArtifactStamp, bool) {
+	stamp, ok := windowsManagedArtifactAttributeStamp(file)
+	if !ok {
+		return managedArtifactStamp{}, false
+	}
+	stamp.USN = windowsManagedArtifactUSN(windows.Handle(file.Fd()))
+	return stamp, stamp.USN != 0
+}
+
+// windowsManagedArtifactAttributeStamp takes the same handle's identity and
+// attributes without opening or reading file data. It leaves USN at zero.
+func windowsManagedArtifactAttributeStamp(file *os.File) (managedArtifactStamp, bool) {
 	handle := windows.Handle(file.Fd())
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
@@ -116,10 +128,6 @@ func windowsManagedArtifactStamp(file *os.File) (managedArtifactStamp, bool) {
 	); err != nil {
 		return managedArtifactStamp{}, false
 	}
-	usn := windowsManagedArtifactUSN(handle)
-	if usn == 0 {
-		return managedArtifactStamp{}, false
-	}
 	return managedArtifactStamp{
 		Volume:     info.VolumeSerialNumber,
 		ID:         uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
@@ -127,7 +135,6 @@ func windowsManagedArtifactStamp(file *os.File) (managedArtifactStamp, bool) {
 		Links:      info.NumberOfLinks,
 		Written:    basic.LastWriteTime,
 		Changed:    basic.ChangeTime,
-		USN:        usn,
 		Attributes: basic.FileAttributes,
 	}, true
 }

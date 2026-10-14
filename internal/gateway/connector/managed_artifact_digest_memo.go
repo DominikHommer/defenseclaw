@@ -5,6 +5,7 @@ package connector
 
 import (
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -17,9 +18,13 @@ import (
 // the administrator-owned hook binary. Every call opens a deny-write handle
 // and checks identity, links and reparse attributes. The target is read in
 // full when its stamp changes or its last read is ten minutes old; a guarded
-// full read needs one data pass. The guardian's five-second check is unchanged.
+// full read needs one data pass. On a volume without a usable change journal,
+// the same handle supplies an attribute-only stamp with a ten-minute backstop.
+// An administrator who forges every attribute can hide a change until that
+// backstop, as with the guardian's former cache. Journaled checks are unchanged.
 
-// managedArtifactDigestMaxAge is the target's one shared full-read backstop.
+// managedArtifactDigestMaxAge is the one shared full-read backstop for the
+// target and for a protected copy in attribute-only mode.
 const managedArtifactDigestMaxAge = 10 * time.Minute
 
 // managedArtifactStamp is what the file system reports about one version of
@@ -37,9 +42,11 @@ type managedArtifactStamp struct {
 }
 
 type managedArtifactDigestEntry struct {
-	stamp  managedArtifactStamp
-	digest string
-	at     time.Time
+	stamp              managedArtifactStamp
+	digest             string
+	at                 time.Time
+	attributeOnly      bool
+	fullStampAvailable bool
 }
 
 // managedArtifactDigests is the digest of each memoized artifact with the
@@ -54,6 +61,19 @@ var managedArtifactDigests = struct {
 // the lookup, guarded open and full read. A waiter still takes its own handle
 // and checks the stamp before using the first caller's result.
 var managedArtifactDigestPathLocks sync.Map // map[string]*sync.Mutex
+
+// A notice is emitted once for each degraded path in this process. Tests
+// replace the logger and map without writing to the process logger.
+var managedArtifactDigestDegradedNotices = &sync.Map{}
+var managedArtifactDigestDegradedNotice = func(path string) {
+	log.Printf("managed hook artifact %s: no usable change journal; unchanged files are re-read every ten minutes", path)
+}
+
+func noticeManagedArtifactDegraded(path string) {
+	if _, loaded := managedArtifactDigestDegradedNotices.LoadOrStore(managedArtifactDigestKey(path), struct{}{}); !loaded {
+		managedArtifactDigestDegradedNotice(path)
+	}
+}
 
 func managedArtifactDigestPathLock(path string) *sync.Mutex {
 	key := managedArtifactDigestKey(path)
@@ -71,29 +91,36 @@ func managedArtifactDigestKey(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
-// rememberedManagedArtifactDigest returns the digest at this opened stamp.
-// A zero maxAge is used only for the protected restore copy.
-func rememberedManagedArtifactDigest(path string, stamp managedArtifactStamp, maxAge time.Duration) (string, bool) {
+// rememberedManagedArtifactDigest returns the digest for this stamp and mode.
+// A zero maxAge never expires a full journaled stamp, but attribute-only
+// entries always use the shared ten-minute backstop.
+func rememberedManagedArtifactDigest(path string, stamp managedArtifactStamp, maxAge time.Duration, attributeOnly, fullStampAvailable bool) (string, bool) {
 	managedArtifactDigests.Lock()
 	defer managedArtifactDigests.Unlock()
 	entry, ok := managedArtifactDigests.entries[managedArtifactDigestKey(path)]
-	if !ok || entry.stamp != stamp ||
+	if attributeOnly {
+		maxAge = managedArtifactDigestMaxAge
+	}
+	if !ok || entry.stamp != stamp || entry.attributeOnly != attributeOnly ||
+		(attributeOnly && entry.fullStampAvailable != fullStampAvailable) ||
 		(maxAge > 0 && managedArtifactDigests.now().Sub(entry.at) >= maxAge) {
 		return "", false
 	}
 	return entry.digest, true
 }
 
-func rememberManagedArtifactDigest(path string, stamp managedArtifactStamp, digest string) {
+func rememberManagedArtifactDigest(path string, stamp managedArtifactStamp, digest string, attributeOnly, fullStampAvailable bool) {
 	managedArtifactDigests.Lock()
 	defer managedArtifactDigests.Unlock()
 	if managedArtifactDigests.entries == nil {
 		managedArtifactDigests.entries = map[string]managedArtifactDigestEntry{}
 	}
 	managedArtifactDigests.entries[managedArtifactDigestKey(path)] = managedArtifactDigestEntry{
-		stamp:  stamp,
-		digest: digest,
-		at:     managedArtifactDigests.now(),
+		stamp:              stamp,
+		digest:             digest,
+		at:                 managedArtifactDigests.now(),
+		attributeOnly:      attributeOnly,
+		fullStampAvailable: fullStampAvailable,
 	}
 }
 
@@ -122,10 +149,10 @@ func ManagedEnterpriseHookBinarySHA256Hex(path string) (string, error) {
 }
 
 // ManagedProtectedHookCopySHA256Hex checks the guardian's protected restore
-// copy through the same guarded memo. Its unchanged identity has no periodic
-// expiry: the copy is never executed and a restore checks its bytes afresh
-// before use. A hidden change on a volume without a journal is therefore
-// found when the copy is needed, not within ten minutes.
+// copy through the same guarded memo. A full journaled stamp has no periodic
+// expiry: the copy is never executed and a restore checks its bytes afresh.
+// Without a usable journal, the copy has the shared ten-minute backstop;
+// a forged attribute-only stamp can hide a change for at most that long.
 func ManagedProtectedHookCopySHA256Hex(path string) (string, error) {
 	return managedHookBinarySHA256Hex(path, managedProtectedHookCopyEligible(path), managedProtectedArtifactMaxBytes, 0)
 }

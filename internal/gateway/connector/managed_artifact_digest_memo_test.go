@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,12 +29,16 @@ func useManagedArtifactDigestSeams(
 	end func(*os.File) error,
 ) (clock *time.Time, ends *int) {
 	t.Helper()
-	savedEligible, savedCopyEligible, savedStamp, savedOpen, savedEnd, savedNow := managedArtifactDigestMemoEligible,
+	savedEligible, savedCopyEligible, savedStamp, savedAttributes, savedOpen, savedEnd, savedNow := managedArtifactDigestMemoEligible,
 		managedProtectedHookCopyEligible,
-		managedArtifactStampOf, openManagedArtifactExclusive, endManagedArtifactChangeEpoch, managedArtifactDigests.now
+		managedArtifactStampOf, managedArtifactAttributeStampOf, openManagedArtifactExclusive, endManagedArtifactChangeEpoch, managedArtifactDigests.now
+	savedNotice, savedNotices := managedArtifactDigestDegradedNotice, managedArtifactDigestDegradedNotices
 	now := time.Unix(1_800_000_000, 0)
 	count := 0
 	managedArtifactStampOf, openManagedArtifactExclusive = stamp, exclusive
+	managedArtifactAttributeStampOf = func(*os.File) (managedArtifactStamp, bool) { return managedArtifactStamp{}, false }
+	managedArtifactDigestDegradedNotice = func(string) {}
+	managedArtifactDigestDegradedNotices = &sync.Map{}
 	endManagedArtifactChangeEpoch = func(file *os.File) error {
 		count++
 		return end(file)
@@ -45,13 +50,19 @@ func useManagedArtifactDigestSeams(
 	t.Cleanup(func() {
 		managedArtifactDigestMemoEligible, managedProtectedHookCopyEligible = savedEligible, savedCopyEligible
 		managedArtifactStampOf = savedStamp
+		managedArtifactAttributeStampOf = savedAttributes
 		openManagedArtifactExclusive, endManagedArtifactChangeEpoch = savedOpen, savedEnd
+		managedArtifactDigestDegradedNotice, managedArtifactDigestDegradedNotices = savedNotice, savedNotices
 		managedArtifactDigests.Lock()
 		managedArtifactDigests.entries = nil
 		managedArtifactDigests.now = savedNow
 		managedArtifactDigests.Unlock()
 	})
 	return &now, &count
+}
+
+func useManagedArtifactAttributeStampSeam(stamp func(*os.File) (managedArtifactStamp, bool)) {
+	managedArtifactAttributeStampOf = stamp
 }
 
 func countManagedArtifactDataReads(t *testing.T) *atomic.Int64 {
@@ -159,6 +170,7 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 		wantEnds  int
 		wantReads int64
 		changed   bool
+		degraded  bool
 	}{
 		{
 			name:      "not an eligible artifact",
@@ -187,7 +199,8 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 			exclusive: os.Open,
 			end:       endManagedArtifactChangeEpochFake,
 			wantEnds:  3,
-			wantReads: 6,
+			wantReads: 3,
+			degraded:  true,
 		},
 		{
 			name:      "the change epoch cannot be ended",
@@ -196,7 +209,8 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 			exclusive: os.Open,
 			end:       func(*os.File) error { return errors.ErrUnsupported },
 			wantEnds:  3,
-			wantReads: 6,
+			wantReads: 3,
+			degraded:  true,
 		},
 		{
 			name:    "the stamp moved during the read",
@@ -220,7 +234,14 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 			_, ends := useManagedArtifactDigestSeams(t, tc.stamp, tc.exclusive, tc.end)
 			reads := countManagedArtifactDataReads(t)
 			path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+			version := int64(0)
+			if tc.degraded {
+				useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) {
+					return managedArtifactStamp{ID: 1, Size: 2 << 20, Links: 1, Written: version}, true
+				})
+			}
 			for fill := byte(1); fill <= 3; fill++ {
+				version = int64(fill)
 				want := writeManagedArtifactFixture(t, path, fill)
 				got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", tc.memoize)
 				if tc.changed {
@@ -231,8 +252,12 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 					t.Fatalf("version %d: digest %s, exists %v, err %v; want %s", fill, got, exists, err, want)
 				}
 			}
-			if left := managedArtifactDigestEntries(); left != 0 {
-				t.Fatalf("%d memo entries kept", left)
+			wantEntries := 0
+			if tc.degraded {
+				wantEntries = 1
+			}
+			if left := managedArtifactDigestEntries(); left != wantEntries {
+				t.Fatalf("%d memo entries kept, want %d", left, wantEntries)
 			}
 			if *ends != tc.wantEnds {
 				t.Fatalf("%d change epochs ended, want %d", *ends, tc.wantEnds)
@@ -244,9 +269,9 @@ func TestManagedArtifactDigestMemoizesNothingWithoutAGuardedStableStamp(t *testi
 	}
 }
 
-// A full read that remembers nothing also drops the digest remembered for an
-// earlier version, so no later call can answer from it.
-func TestManagedArtifactDigestFullReadDropsTheRememberedDigest(t *testing.T) {
+// A full read of a new version replaces the earlier digest. A moving full
+// stamp remembers nothing; an unusable epoch remembers an attribute stamp.
+func TestManagedArtifactDigestFullReadReplacesTheRememberedDigest(t *testing.T) {
 	cases := []struct {
 		name    string
 		moving  bool // the stamp moves on every call: the read is not remembered
@@ -274,6 +299,9 @@ func TestManagedArtifactDigestFullReadDropsTheRememberedDigest(t *testing.T) {
 					return nil
 				},
 			)
+			useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) {
+				return managedArtifactStamp{ID: version.ID, Size: version.Size, Links: 1, Written: version.USN}, true
+			})
 			path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
 			writeManagedArtifactFixture(t, path, 1)
 			managedArtifactDigestOf(t, path, true)
@@ -294,8 +322,8 @@ func TestManagedArtifactDigestFullReadDropsTheRememberedDigest(t *testing.T) {
 			} else if err != nil || !exists || got != want {
 				t.Fatalf("digest %s, exists %v, err %v; want the full read %s", got, exists, err, want)
 			}
-			if managedArtifactDigestRemembered(path) {
-				t.Fatal("a full read that remembered nothing kept the earlier digest")
+			if remembered := managedArtifactDigestRemembered(path); remembered != tc.failEnd {
+				t.Fatalf("remembered new version = %v, want %v", remembered, tc.failEnd)
 			}
 		})
 	}
@@ -664,5 +692,211 @@ func TestManagedHookBinaryWriterHeldFallsBackToFreshTwoPassRead(t *testing.T) {
 	}
 	if reads.Load() != 4 || *ends != 0 || managedArtifactDigestRemembered(path) {
 		t.Fatalf("writer-held file: reads %d, epoch ends %d, memo %v", reads.Load(), *ends, managedArtifactDigestRemembered(path))
+	}
+}
+
+// The five-second guardian and ten-minute reconcile share one attribute-only
+// memo when no journal exists or its close record cannot be written. The copy
+// uses the same backstop in this mode, even though its journaled memo does not
+// expire.
+func TestManagedArtifactDigestDegradedThirtyMinuteBackstop(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fullOK bool
+	}{
+		{name: "no change journal"},
+		{name: "journal epoch cannot end", fullOK: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stamps := map[string]managedArtifactStamp{}
+			clock, ends := useManagedArtifactDigestSeams(t,
+				func(file *os.File) (managedArtifactStamp, bool) {
+					stamp := stamps[file.Name()]
+					stamp.USN = 42
+					return stamp, tc.fullOK
+				},
+				os.Open,
+				func(*os.File) error { return errors.ErrUnsupported },
+			)
+			useManagedArtifactAttributeStampSeam(func(file *os.File) (managedArtifactStamp, bool) {
+				return stamps[file.Name()], true
+			})
+			reads := countManagedArtifactDataReads(t)
+			managedArtifactDigestMemoEligible = func(string) bool { return true }
+			managedProtectedHookCopyEligible = func(string) bool { return true }
+			notices := map[string]int{}
+			managedArtifactDigestDegradedNotice = func(path string) { notices[path]++ }
+			target := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+			copyPath := filepath.Join(t.TempDir(), "hook-guardian", "payload", "defenseclaw-hook.exe")
+			if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			want := writeManagedArtifactFixture(t, target, 1)
+			copyWant := writeManagedArtifactFixture(t, copyPath, 1)
+			stamps[target] = managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: 100, Changed: 100}
+			stamps[copyPath] = managedArtifactStamp{Volume: 7, ID: 2, Size: 2 << 20, Links: 1, Written: 100, Changed: 100}
+			start := *clock
+			for tick := range 30 * 12 {
+				*clock = start.Add(time.Duration(tick) * 5 * time.Second)
+				before := reads.Load()
+				if got, err := ManagedEnterpriseHookBinarySHA256Hex(target); err != nil || "sha256:"+got != want {
+					t.Fatalf("tick %d target digest %q, err %v", tick, got, err)
+				}
+				wantTargetReads := int64(0)
+				if tick%120 == 0 {
+					wantTargetReads = 1
+				}
+				if delta := reads.Load() - before; delta != wantTargetReads {
+					t.Fatalf("tick %d target used %d data passes, want %d", tick, delta, wantTargetReads)
+				}
+				if tick%120 == 0 {
+					before = reads.Load()
+					if got, err := ManagedProtectedHookCopySHA256Hex(copyPath); err != nil || "sha256:"+got != copyWant {
+						t.Fatalf("tick %d copy digest %q, err %v", tick, got, err)
+					}
+					if delta := reads.Load() - before; delta != 1 {
+						t.Fatalf("tick %d copy used %d data passes, want one", tick, delta)
+					}
+				}
+			}
+			if got := reads.Load(); got != 6 || *ends != 6 {
+				t.Fatalf("30 minutes used %d data passes and %d epoch ends, want six each", got, *ends)
+			}
+			if notices[target] != 1 || notices[copyPath] != 1 {
+				t.Fatalf("degraded notices: target %d, copy %d; want one each", notices[target], notices[copyPath])
+			}
+		})
+	}
+}
+
+func TestManagedArtifactDigestDegradedStampFieldsForceOneRead(t *testing.T) {
+	stamp := managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: 100, Changed: 100, Attributes: 32}
+	useManagedArtifactDigestSeams(t,
+		func(*os.File) (managedArtifactStamp, bool) { return managedArtifactStamp{}, false },
+		os.Open,
+		func(*os.File) error { return errors.ErrUnsupported },
+	)
+	useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) { return stamp, true })
+	reads := countManagedArtifactDataReads(t)
+	managedArtifactDigestMemoEligible = func(string) bool { return true }
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	want := writeManagedArtifactFixture(t, path, 1)
+	for index, change := range []func(){
+		func() {},
+		func() { stamp.Size++ },
+		func() { stamp.ID++ },
+		func() { stamp.Volume++ },
+		func() { stamp.Written++ },
+		func() { stamp.Changed++ },
+		func() { stamp.Attributes++ },
+	} {
+		change()
+		if got, err := ManagedEnterpriseHookBinarySHA256Hex(path); err != nil || "sha256:"+got != want {
+			t.Fatalf("field %d digest %q, err %v", index, got, err)
+		}
+		if got := reads.Load(); got != int64(index+1) {
+			t.Fatalf("field %d used %d reads, want %d", index, got, index+1)
+		}
+	}
+	link := path + ".link"
+	if err := os.Link(path, link); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if _, err := ManagedEnterpriseHookBinarySHA256Hex(path); err == nil {
+		t.Fatal("a linked target was answered from the degraded memo")
+	}
+	if got := reads.Load(); got != 7 {
+		t.Fatalf("a linked target read %d times, want no new read after seven", got)
+	}
+}
+
+func TestManagedArtifactDigestDegradedAndJournaledEntriesDoNotCross(t *testing.T) {
+	fullOK := false
+	stamp := managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: 100, Changed: 100}
+	useManagedArtifactDigestSeams(t,
+		func(*os.File) (managedArtifactStamp, bool) {
+			full := stamp
+			full.USN = 42
+			return full, fullOK
+		},
+		os.Open,
+		func(*os.File) error {
+			if !fullOK {
+				return errors.ErrUnsupported
+			}
+			return nil
+		},
+	)
+	useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) { return stamp, true })
+	reads := countManagedArtifactDataReads(t)
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	want := writeManagedArtifactFixture(t, path, 1)
+	for index, mode := range []bool{false, true, false} {
+		fullOK = mode
+		if got := managedArtifactDigestOf(t, path, true); got != want {
+			t.Fatalf("mode %d digest %q, want %q", index, got, want)
+		}
+		if got := reads.Load(); got != int64(index+1) {
+			t.Fatalf("mode %d used %d reads, want %d", index, got, index+1)
+		}
+	}
+}
+
+func TestManagedArtifactDigestDegradedRejectsStampMovingDuringRead(t *testing.T) {
+	useManagedArtifactDigestSeams(t,
+		func(*os.File) (managedArtifactStamp, bool) { return managedArtifactStamp{}, false },
+		os.Open,
+		func(*os.File) error { return errors.ErrUnsupported },
+	)
+	reads := countManagedArtifactDataReads(t)
+	version := int64(0)
+	useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) {
+		version++
+		return managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: version}, true
+	})
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	writeManagedArtifactFixture(t, path, 1)
+	got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", true)
+	if err == nil || !strings.Contains(err.Error(), "changed during bounded digest") || got != "" || !exists {
+		t.Fatalf("moving attribute stamp: digest %q, exists %v, err %v", got, exists, err)
+	}
+	if reads.Load() != 1 || managedArtifactDigestRemembered(path) {
+		t.Fatalf("moving attribute stamp used %d reads, remembered %v; want one read and no memo", reads.Load(), managedArtifactDigestRemembered(path))
+	}
+}
+
+func TestManagedArtifactDigestDegradedConcurrentMissesShareOneDataRead(t *testing.T) {
+	stamp := managedArtifactStamp{Volume: 7, ID: 1, Size: 2 << 20, Links: 1, Written: 100}
+	_, ends := useManagedArtifactDigestSeams(t,
+		func(*os.File) (managedArtifactStamp, bool) { return managedArtifactStamp{}, false },
+		os.Open,
+		func(*os.File) error { return errors.ErrUnsupported },
+	)
+	useManagedArtifactAttributeStampSeam(func(*os.File) (managedArtifactStamp, bool) { return stamp, true })
+	reads := countManagedArtifactDataReads(t)
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	want := writeManagedArtifactFixture(t, path, 1)
+	start := make(chan struct{})
+	results := make(chan string, 11)
+	var workers sync.WaitGroup
+	for range 11 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			got, exists, err := stableManagedArtifactDigestWith(path, "managed hook runtime artifact", 4<<20, "", true)
+			if err != nil || !exists || got != want {
+				results <- got
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	for got := range results {
+		t.Errorf("concurrent caller got %q, want %q", got, want)
+	}
+	if got := reads.Load(); got != 1 || *ends != 1 {
+		t.Fatalf("concurrent degraded misses used %d data reads and %d epoch attempts, want one each", got, *ends)
 	}
 }

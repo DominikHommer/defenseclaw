@@ -27,6 +27,59 @@ func windowsManagedArtifactStampOfPath(t *testing.T, path string) (managedArtifa
 	return windowsManagedArtifactStamp(file)
 }
 
+func windowsManagedArtifactAttributeStampOfPath(t *testing.T, path string) managedArtifactStamp {
+	t.Helper()
+	file, err := openWindowsManagedArtifactExclusive(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	stamp, ok := windowsManagedArtifactAttributeStamp(file)
+	if !ok {
+		t.Fatal("attribute-only stamp unavailable")
+	}
+	if stamp.USN != 0 {
+		t.Fatalf("attribute-only stamp has USN %d, want zero", stamp.USN)
+	}
+	return stamp
+}
+
+func TestWindowsManagedArtifactAttributeStampFollowsFileAttributes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+	if err := os.WriteFile(path, []byte("release"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if err := os.WriteFile(path, []byte("release plus"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resized := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if resized.Size == first.Size {
+		t.Fatalf("size did not move: %+v then %+v", first, resized)
+	}
+	written := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(path, written, written); err != nil {
+		t.Fatal(err)
+	}
+	retimed := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if retimed.Written == resized.Written {
+		t.Fatalf("write time did not move: %+v then %+v", resized, retimed)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hiddenAttributes := retimed.Attributes&^windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_ATTRIBUTE_HIDDEN
+	if err := windows.SetFileAttributes(name, hiddenAttributes); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.SetFileAttributes(name, retimed.Attributes) })
+	hidden := windowsManagedArtifactAttributeStampOfPath(t, path)
+	if hidden.Attributes == retimed.Attributes {
+		t.Fatalf("attributes did not move: %+v then %+v", retimed, hidden)
+	}
+}
+
 // useWindowsManagedArtifactDigestSeams runs one test with the real Windows
 // memo seams: the deny-write open, the stamp and the change-epoch close.
 func useWindowsManagedArtifactDigestSeams(t *testing.T) (ends *int) {
