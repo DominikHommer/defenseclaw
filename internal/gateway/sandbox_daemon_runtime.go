@@ -182,8 +182,15 @@ type SandboxDaemon struct {
 	// generation (observeGeneration).
 	refresh chan struct{}
 	// leases is how fresh each registration's policy is for the new
-	// connections of its sandbox's egress proxy (confirmEgressPolicy).
+	// connections of its sandbox's egress proxy (confirmEgressPolicy), and
+	// each registration's turn for its policy requests (askPolicy).
 	leases egressLeases
+	// adoptMu serializes the adoptions of the running sandboxes' floor
+	// with the re-resolution of their policies (adoptLocked); adopted is
+	// the registration change count (daemonRegistrations.changeCount) the
+	// policies in force reflect.
+	adoptMu sync.Mutex
+	adopted atomic.Uint64
 
 	// floorMu guards floor, the organization floor the manager resolves
 	// against: the floor of the registrations of running sandboxes.
@@ -358,7 +365,7 @@ func newSandboxDaemonRuntime(d *SandboxDaemon) (*sandboxRuntime, error) {
 		onGeneration: d.observeGeneration,
 		// Every new connection of a sandbox's egress proxy is decided with
 		// the policy the managed gateway confirmed (GAP-0172).
-		egressRefresh: d.confirmEgressPolicy,
+		egressRefresh: d.egressRefresh,
 	}, d.opts.RuntimeOptions)
 }
 
@@ -1008,23 +1015,27 @@ func (d *SandboxDaemon) pollOnce(ctx context.Context) {
 // pollRegistrations asks policy/current for every live registration. A
 // registration the gateway no longer knows, revoked or expired, or whose
 // subject changed, is marked revoked and returned (its sandbox is to be
-// stopped); one it answers is confirmed and takes the live fields, which
-// renews its egress lease, and with adopt the floor of the sandboxes that
-// run becomes the manager's (adoptRunningFloor). A generation that moved
-// reads the managed settings again too. A transient refusal (429, 403, 5xx)
-// or an unreachable gateway changes nothing: the relayed hooks fail closed
-// meanwhile.
+// stopped); one it answers is confirmed and takes the live fields, each in
+// the registration's turn (askPolicy), and with adopt the floor of the
+// sandboxes that run becomes the manager's (adoptRunningFloor). A generation
+// that moved reads the managed settings again and re-resolves the policies.
+// A transient refusal (429, 403, 5xx) or an unreachable gateway changes
+// nothing: the relayed hooks fail closed meanwhile.
+//
+// The egress leases of the registrations it confirmed renew only once the
+// adoption returned. Renewed in the loop, a connection of a sandbox whose
+// answer had moved its policy took the lease's fast path while the poll
+// still waited on another registration's answer, and was decided under the
+// floor before the change (GAP-0172).
 func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []daemonRegistration {
 	var revoked []daemonRegistration
+	var answered []policyAnswer
 	moved := false
 	phases, listed := d.sandboxPhases(ctx)
 	for _, r := range d.regs.list() {
 		if r.Revoked {
 			continue
 		}
-		var cp sandboxrelay.CurrentPolicy
-		var err error
-		sent := time.Now()
 		running, report := sandboxStateReport(phases, listed, r.Sandbox)
 		if _, starting := d.starting.Load(r.Sandbox); starting {
 			// Start reported it running; a resumed MicroVM is listed stopped
@@ -1032,38 +1043,40 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 			// first hooks (403) right after `sandbox connect` (#1204).
 			running, report = true, true
 		}
-		if report {
-			// Tell the gateway whether the sandbox runs: a stopped one's
-			// registration authorizes no relayed call (GAP-0505).
-			cp, err = d.relay.Report(ctx, r.ID, running)
-		} else {
-			cp, err = d.relay.Current(ctx, r.ID)
-		}
-		reason, gone := registrationGone(err)
-		if !gone && err != nil {
-			continue
-		}
-		if !gone && cp.Revoked {
-			reason, gone = cp.RevokedReason, true
-		}
-		if gone {
-			d.regs.markRevoked(r.Sandbox, reason)
-			r.Revoked, r.RevokedReason = true, reason
+		// With report, tell the gateway whether the sandbox runs: a stopped
+		// one's registration authorizes no relayed call (GAP-0505).
+		ans := d.askPolicy(ctx, r, report, running)
+		if ans.gone {
+			d.regs.markRevoked(r.Sandbox, ans.reason)
+			r.Revoked, r.RevokedReason = true, ans.reason
 			revoked = append(revoked, r)
 			continue
 		}
-		moved = moved || (cp.Generation != 0 && cp.Generation != r.Generation)
-		d.regs.applyLive(r.Sandbox, cp)
-		d.leases.confirm(r.ID, sent)
+		if ans.err != nil {
+			continue
+		}
+		moved = moved || ans.moved
+		answered = append(answered, ans)
 	}
 	if moved {
 		d.refreshSettings(ctx)
 	}
 	if adopt {
 		// Unlisted (nil phases), no sandbox counts as running: only the
-		// closed start-up floor can change, as revalidate's does.
-		d.adoptRunningFloor(phases)
+		// closed start-up floor can change, as revalidate's does, and no
+		// lease renews.
+		d.adoptMu.Lock()
+		d.adoptLocked(phases, listed, moved)
+		d.adoptMu.Unlock()
+		if listed {
+			for _, a := range answered {
+				d.leases.renew(a.id, a.sent)
+			}
+		}
 	}
+	regs := d.regs.list()
+	d.leases.prune(regs)
+	d.regs.pruneApplied(regs)
 	return revoked
 }
 
@@ -1086,7 +1099,9 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 // organization does not let you run sandboxes" (strict, deny) until a start
 // or a restart (GAP-0462). An unconfirmed or revoked registration's floor
 // is never adopted: the floor stays closed. A new floor re-resolves every
-// sandbox's policy at once, and reports true.
+// sandbox's policy at once, and reports true. Callers hold adoptMu
+// (adoptLocked), so a later adoption never puts back the floor of an
+// earlier one that read the registrations before it.
 func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
 	floor := d.regs.newestFloor(func(name string) bool { return sandboxMayRun(phases[name]) })
 	var newest *config.OpenShellAdminConfig
@@ -2002,7 +2017,9 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
 	// Reported running before the start, so the agent's first hooks are
-	// admitted; a start that fails reports it stopped again.
+	// admitted; a start that fails reports it stopped again. Its answer is
+	// applied in the order of the registration's requests (applyOrdered).
+	seq := d.regs.nextSeq()
 	cp, err := d.relay.Report(ctx, r.ID, true)
 	if err == nil {
 		d.starting.Store(name, struct{}{})
@@ -2032,7 +2049,7 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
-	d.regs.applyLive(name, cp)
+	d.regs.applyOrdered(r, seq, cp)
 	r, _ = d.regs.get(name)
 	if d.floorConflicts(ctx, r.Floor, name) {
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Status: http.StatusConflict,
@@ -2459,6 +2476,13 @@ type daemonRegistrations struct {
 	path   string
 	mu     sync.Mutex
 	byName map[string]daemonRegistration
+	// seq numbers the policy requests (nextSeq); applied is, by
+	// registration id, the newest request whose answer was applied
+	// (applyOrdered, under mu); changes counts the changes applyLive made
+	// (changeCount).
+	seq     atomic.Uint64
+	applied map[string]uint64
+	changes atomic.Uint64
 }
 
 func loadDaemonRegistrations(path string) (*daemonRegistrations, error) {
@@ -2595,6 +2619,54 @@ func (r *daemonRegistrations) markRevoked(name, reason string) {
 func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPolicy) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.applyLiveLocked(name, cp)
+}
+
+// nextSeq numbers a policy request of a registration, taken before it is
+// sent (applyOrdered).
+func (r *daemonRegistrations) nextSeq() uint64 { return r.seq.Add(1) }
+
+// changeCount is how many changes applyLive made so far: a registration's
+// floor, digest, profile, generation, policy time or first confirmation,
+// any of which can move the floor the manager resolves against
+// (adoptApplied).
+func (r *daemonRegistrations) changeCount() uint64 { return r.changes.Load() }
+
+// applyOrdered is applyLive for the answer to the policy request of reg
+// numbered seq (nextSeq). An answer to a request older than one already
+// applied for the registration, or for a registration its sandbox's name no
+// longer holds, changes nothing: a late answer never undoes a newer one, so
+// a tightening a confirmation applied stays (GAP-0172).
+func (r *daemonRegistrations) applyOrdered(reg daemonRegistration, seq uint64, cp sandboxrelay.CurrentPolicy) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := r.byName[reg.Sandbox]; !ok || cur.ID != reg.ID || seq < r.applied[reg.ID] {
+		return false
+	}
+	if r.applied == nil {
+		r.applied = map[string]uint64{}
+	}
+	r.applied[reg.ID] = seq
+	return r.applyLiveLocked(reg.Sandbox, cp)
+}
+
+// pruneApplied forgets the request order of the registrations not in regs.
+func (r *daemonRegistrations) pruneApplied(regs []daemonRegistration) {
+	live := make(map[string]bool, len(regs))
+	for _, reg := range regs {
+		live[reg.ID] = true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id := range r.applied {
+		if !live[id] {
+			delete(r.applied, id)
+		}
+	}
+}
+
+// applyLiveLocked is applyLive under r.mu.
+func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.CurrentPolicy) bool {
 	reg, ok := r.byName[name]
 	if !ok {
 		return false
@@ -2630,6 +2702,9 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 		if moved {
 			_ = r.saveLocked()
 		}
+		if moved || confirmed {
+			r.changes.Add(1)
+		}
 		return confirmed
 	}
 	if digest != "" {
@@ -2640,6 +2715,7 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	}
 	r.byName[name] = reg
 	_ = r.saveLocked()
+	r.changes.Add(1)
 	return true
 }
 

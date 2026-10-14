@@ -19,6 +19,7 @@
 package egress
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,27 +27,29 @@ import (
 )
 
 // GAP-0172: Options.Refresh runs before a new tunnel or forwarded request is
-// decided. A policy it changed decides the request (the credential's new
-// decider), a refusal it returns answers like a suspended credential's, and
-// an unchanged policy keeps the decider the request authenticated with. A
-// request without a known credential never reaches it.
+// decided. The decider the credential maps to once the refresh returned
+// decides the request, a refusal it returns answers like a suspended
+// credential's, and a request without a known credential never reaches it.
 func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
-	var next func() (bool, *Decision)
+	var next func() *Decision
 	h := newHarness(t, func(c *harnessConfig) {
-		c.opts.Refresh = func(pr Principal) (bool, *Decision) {
+		c.opts.Refresh = func(ctx context.Context, pr Principal) *Decision {
+			if ctx == nil {
+				t.Error("Refresh without the request's context")
+			}
 			mu.Lock()
 			seen = append(seen, pr.BindingID)
 			fn := next
 			mu.Unlock()
 			if fn == nil {
-				return false, nil
+				return nil
 			}
 			return fn()
 		}
 	})
-	set := func(fn func() (bool, *Decision)) {
+	set := func(fn func() *Decision) {
 		mu.Lock()
 		next = fn
 		mu.Unlock()
@@ -60,11 +63,11 @@ func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 
 	// Tightened while the sandbox runs: the refresh registers the credential
 	// again with a decider that blocks example.com.
-	set(func() (bool, *Decision) {
+	set(func() *Decision {
 		pr := h.pr
 		pr.Decider = h.newDecider(DeciderOptions{Unblocks: h.unblocks, Block: []string{"example.com"}})
 		must(t, h.creds.Register(h.cred, pr))
-		return true, nil
+		return nil
 	})
 	if resp, body := h.refused(h.cred, "example.com:443"); resp.status != http.StatusForbidden || body.Host != "example.com" ||
 		body.Category == CategoryEgressOff {
@@ -75,7 +78,7 @@ func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 	}
 
 	// Changed and not confirmed: refused as a suspended credential is.
-	set(func() (bool, *Decision) { off := testEgressOff; return false, &off })
+	set(func() *Decision { off := testEgressOff; return &off })
 	if resp, body := h.refused(h.cred, "example.com:443"); resp.status != http.StatusForbidden || body.Category != CategoryEgressOff ||
 		body.Host != "example.com" || body.Port != 443 {
 		t.Fatalf("unconfirmed CONNECT = %d %+v", resp.status, body)
@@ -86,9 +89,9 @@ func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 	}
 
 	// Loosened again.
-	set(func() (bool, *Decision) {
+	set(func() *Decision {
 		must(t, h.creds.Register(h.cred, h.pr))
-		return true, nil
+		return nil
 	})
 	if conn, br := h.openTunnel(h.cred, "example.com:443", ""); !relays(conn, br) {
 		t.Fatal("no tunnel after the policy was loosened")
@@ -108,5 +111,34 @@ func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 		if id != h.pr.BindingID {
 			t.Fatalf("refreshed principals %v", seen)
 		}
+	}
+}
+
+// GAP-0172 (DELTA-15 verify r1): a request whose own refresh changed nothing
+// is still decided by the decider the credential maps to once the refresh
+// returned. A connection that waited for another one's confirmation, or
+// found the lease that confirmation renewed, kept the decider it had read
+// before the other connection's change was registered, and reached a
+// destination the new policy blocks.
+func TestProxyRefreshReadsTheCredentialAgainAfterAnotherRequestsChange(t *testing.T) {
+	var once sync.Once
+	var h *harness
+	h = newHarness(t, func(c *harnessConfig) {
+		c.opts.Refresh = func(context.Context, Principal) *Decision {
+			// Another connection's confirmation registers the tightened
+			// policy while this one waits; this one's own refresh has
+			// nothing to report.
+			once.Do(func() {
+				pr := h.pr
+				pr.Decider = h.newDecider(DeciderOptions{Unblocks: h.unblocks, Block: []string{"example.com"}})
+				must(t, h.creds.Register(h.cred, pr))
+			})
+			return nil
+		}
+	})
+	h.dialer.route(443, startEcho(t))
+	if resp, body := h.refused(h.cred, "example.com:443"); resp.status != http.StatusForbidden || body.Host != "example.com" ||
+		body.Category == CategoryEgressOff {
+		t.Fatalf("CONNECT after another request's change = %d %+v", resp.status, body)
 	}
 }

@@ -221,7 +221,7 @@ type sandboxRuntimeDeps struct {
 	// egressRefresh brings a sandbox's policy up to date before its egress
 	// proxy decides a new connection (egress.Options.Refresh): a managed
 	// daemon's; nil for the per-user gateway, whose policy is local.
-	egressRefresh func(egress.Principal) (bool, *egress.Decision)
+	egressRefresh func(context.Context, egress.Principal) *egress.Decision
 }
 
 // buildSandboxRuntime prepares the hook ingress, the egress proxy and the
