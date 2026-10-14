@@ -24,6 +24,9 @@ class Delta42DocsTest(unittest.TestCase):
             "A user who never ran sandboxes moves straight to `defenseclaw-managed`",
             "once their last 1.0.1 sandbox is deleted",
             "This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.",
+            "The bridge also survives an uninstall without `--purge`",
+            "`sandbox/openshell-default-namespace-bridge`",
+            "`--purge` removes the marker with the rest.",
         ):
             self.assertIn(phrase, bullet)
         for stale in ("cannot start, and OpenShell drops them", "before the upgrade", "pending switch"):
