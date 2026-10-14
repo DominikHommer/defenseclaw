@@ -71,6 +71,8 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 		{"running", target + " = {\n\tstate = running\n\truns = 1\n}\n", "pass", "running", nil, true},
 		{"running after prior kill", target + " = {\n\tstate = running\n\truns = 6\n\tlast exit reason = OS_REASON_CODESIGNING\n}\n", "pass", "running", nil, true},
 		{"cleanly idle", target + " = {\n\tstate = not running\n\truns = 1\n\tlast exit code = 0\n}\n", "pass", "loaded and idle", nil, true},
+		{"idle prerequisite exit", target + " = {\n\tstate = not running\n\truns = 1\n\tlast exit code = 78: EX_CONFIG\n}\n", "warn", "prerequisite of this account", nil, true},
+		{"idle other exit", target + " = {\n\tstate = not running\n\truns = 1\n\tlast exit code = 1\n}\n", "warn", "last exit code 1", nil, true},
 		{"not loaded", "Could not find service \"com.cisco.defenseclaw.openshell-gateway\" in domain for uid: 503", "", "", errors.New("exit status 113"), false},
 		{"no gui domain", "Could not find domain for port identifier: gui/503", "", "", errors.New("exit status 3"), false},
 		{"other inspection error", "permission denied", "warn", "could not inspect", errors.New("launchctl failed"), true},
@@ -99,8 +101,11 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 				if !rep.OK() {
 					t.Fatalf("doctor not ready for a nonfailed job: %+v", rep.Checks)
 				}
+				if row != nil && row.Fix != nil {
+					t.Fatalf("nonfailed job was sent to administrator repair: %+v", row.Fix)
+				}
 				has(t, ta.output(), "✓ ready for sandboxes")
-				lacks(t, ta.output(), "not ready for sandboxes")
+				lacks(t, ta.output(), "not ready for sandboxes", "sudo defenseclaw-gateway enterprise macos repair")
 			}
 			calls := runner.Calls()
 			if len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+target || openshelltest.Argv(calls[1]) != "launchctl print user/503/com.cisco.defenseclaw.openshell-gateway" || calls[0].Timeout != 10*time.Second || calls[1].Timeout != 10*time.Second {
@@ -176,4 +181,14 @@ func TestManagedMacDoctorLaunchAgentFailureExitsNonzero(t *testing.T) {
 	ta, _ := launchAgentDoctorFixture(t, "gui/503/com.cisco.defenseclaw.openshell-gateway = {\n\tstate = not running\n\truns = 5\n\tlast exit reason = OS_REASON_CODESIGNING\n}\n", nil)
 	wantExit(t, ta.RunDoctor(bg, DoctorOptions{}), 1)
 	has(t, ta.output(), "not ready for sandboxes: 1 check failed", "sudo defenseclaw-gateway enterprise macos repair")
+}
+
+func TestManagedMacDoctorIdleExit78RemainsReady(t *testing.T) {
+	withManagedHost(t)
+	ta, _ := launchAgentDoctorFixture(t, "gui/503/com.cisco.defenseclaw.openshell-gateway = {\n\tstate = not running\n\truns = 1\n\tlast exit code = 78: EX_CONFIG\n}\n", nil)
+	if err := ta.RunDoctor(bg, DoctorOptions{}); err != nil {
+		t.Fatalf("doctor failed for a deliberate idle exit: %v", err)
+	}
+	has(t, ta.output(), "ready for sandboxes", "prerequisite of this account")
+	lacks(t, ta.output(), "sudo defenseclaw-gateway enterprise macos repair")
 }

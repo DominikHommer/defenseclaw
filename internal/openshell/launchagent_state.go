@@ -57,16 +57,29 @@ func (s LaunchAgentState) Failure(expectedRunning bool) string {
 	if s.SpawnError != "" {
 		return "last spawn error: " + s.SpawnError
 	}
-	if s.ExitCode != "" && s.ExitCode != "0" && s.ExitCode != "(never exited)" {
-		return "last exit code " + s.ExitCode
-	}
 	if expectedRunning {
 		return "loaded but not running when it must be running"
 	}
-	if s.Runs > 0 && s.ExitCode == "(never exited)" {
-		return "loaded but not running after a failed start"
-	}
 	return ""
+}
+
+// Notice describes an idle job's previous exit without treating an on-demand
+// start as a failed LaunchAgent. EX_CONFIG is the exec shim's deliberate exit
+// when an account prerequisite is missing or untrusted.
+func (s LaunchAgentState) Notice() string {
+	if s.State != "not running" {
+		return ""
+	}
+	code, _, _ := strings.Cut(strings.TrimSpace(s.ExitCode), ":")
+	code, _, _ = strings.Cut(strings.TrimSpace(code), " ")
+	n, err := strconv.Atoi(code)
+	if err != nil || n == 0 {
+		return ""
+	}
+	if n == 78 {
+		return "last exit code 78 (EX_CONFIG): a prerequisite of this account is missing, so the last start stopped on purpose"
+	}
+	return "last exit code " + strconv.Itoa(n)
 }
 
 // CheckIDManagedLaunchAgent is the managed Mac's current-user gateway job.
@@ -111,6 +124,13 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
 			if failed == nil {
 				failed = c
+			}
+			continue
+		}
+		if notice := state.Notice(); notice != "" {
+			c.Status, c.Detail = StatusWarn, target+" is loaded and idle: "+notice+"; see the other doctor rows for the account prerequisite"
+			if warning == nil {
+				warning = c
 			}
 			continue
 		}

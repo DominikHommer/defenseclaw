@@ -274,6 +274,9 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 				} else {
 					l.result.AddError(codeSandboxUserState, message)
 				}
+			} else if notice := job.state.Notice(); notice != "" {
+				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "idle: " + notice})
+				l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s is loaded and idle: %s", job.label, a.Name, a.UID, job.domain, notice))
 			}
 		}
 	}
