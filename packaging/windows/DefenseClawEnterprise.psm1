@@ -19841,6 +19841,13 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($excused -lt 0) {
         $excused = [int64]0
     }
+    # So do the rows an earlier release protected that wait for their
+    # signed-out account's next sign-in, when the guardian repairs them
+    # (GAP-0644): status reports them as pending, not protected.
+    $awaitingSignIn = & $count $report 'awaiting_sign_in_failures'
+    if ($awaitingSignIn -gt 0) {
+        $excused += $awaitingSignIn
+    }
     # A reconcile that fails only because each failed target's account is
     # signed out stays failed until that account signs in, so a retry cannot
     # help: name the accounts, and say what to do first.
