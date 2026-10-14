@@ -92,10 +92,10 @@ func TestRenderedDockerGatewayKeepsItsObjectsInTheManagedNamespace(t *testing.T)
 	// on 17670 (OpenShell's default namespace), and those of a managed
 	// sandbox.
 	host := []dockerSweepContainer{
-		{"openshell-default--cdx-enforce-3d2e-supervisor", DefaultDockerNamespace, "supervisor"},
-		{"openshell-default--myapp-claude-0adf-supervisor", DefaultDockerNamespace, "supervisor"},
-		{"openshell-default--cdx-enforce-3d2e", DefaultDockerNamespace, "sandbox"},
-		{"openshell-default--pm26-claude-1a2b-supervisor", ManagedDockerNamespace, "supervisor"},
+		{"openshell-default--sbx-one-0001-supervisor", DefaultDockerNamespace, "supervisor"},
+		{"openshell-default--sbx-two-0002-supervisor", DefaultDockerNamespace, "supervisor"},
+		{"openshell-default--sbx-one-0001", DefaultDockerNamespace, "sandbox"},
+		{"openshell-default--sbx-three-0003-supervisor", ManagedDockerNamespace, "supervisor"},
 	}
 	removed := startupSweep(label, host)
 	for _, name := range removed {

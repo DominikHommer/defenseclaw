@@ -30,7 +30,6 @@ const hookGuardianNoticesFile = "hook_guardian_notices.json"
 
 type enterpriseHookGuardianNotice struct {
 	User      string `json:"user"`
-	UID       int    `json:"uid,omitempty"`
 	Connector string `json:"connector"`
 	// AgentConfig is a connector.AgentConfigStatus code, never free text:
 	// the per-user worker that reports it runs as the account.

@@ -35,8 +35,8 @@ func TestStatusAndVerifyReportAgentSettingsTheGuardianCouldNotPutBack(t *testing
 			ledger, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 2, "success_count": 2, "failure_count": 0})
 			h.publishLedger(ledger)
 			record, _ := json.Marshal(map[string]any{"version": 1, "updated_at": time.Now().UTC().Format(time.RFC3339Nano), "targets": []map[string]any{
-				{"user": "ctr1", "uid": 94404118, "connector": "hermes", "agent_config": "settings_lost"},
-				{"user": "bob", "uid": 1002, "connector": "devin", "agent_config": "restored_last_good"},
+				{"user": "erin", "connector": "hermes", "agent_config": "settings_lost"},
+				{"user": "bob", "connector": "devin", "agent_config": "restored_last_good"},
 				// A code the guardian does not write, and a connector without an
 				// agent config, are not worded.
 				{"user": "mallory", "connector": "hermes", "agent_config": "\u001b[31m anything"},
@@ -44,7 +44,7 @@ func TestStatusAndVerifyReportAgentSettingsTheGuardianCouldNotPutBack(t *testing
 			}})
 			state, _ := json.Marshal(map[string]any{"results": []map[string]any{
 				{"user": "alice", "connector": "codex", "ok": true},
-				{"user": "ctr1", "user_home": "/home/ctr1", "connector": "hermes", "ok": true},
+				{"user": "erin", "user_home": "/home/erin", "connector": "hermes", "ok": true},
 				{"user": "bob", "user_home": "/home/bob", "connector": "devin", "ok": true},
 			}})
 			receipt, _ := json.Marshal(map[string]any{"updated_at": time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano), "failure_count": 0})
@@ -61,7 +61,7 @@ func TestStatusAndVerifyReportAgentSettingsTheGuardianCouldNotPutBack(t *testing
 				r := h.run(Options{Action: action})
 				requireOK(t, r)
 				got := messagesOf(r.Warnings, codeAgentSettingsNotRestored)
-				if !strings.Contains(got, "hermes for user ctr1: the Hermes config.yaml went missing and DefenseClaw had no copy") ||
+				if !strings.Contains(got, "hermes for user erin: the Hermes config.yaml went missing and DefenseClaw had no copy") ||
 					!strings.Contains(got, "devin for user bob: the Devin config.json went missing; the guardian put back") {
 					t.Fatalf("%s warnings = %+v", action, r.Warnings)
 				}
@@ -87,7 +87,7 @@ func TestStateModesKeepTheGuardianNoticeRecordRootOwned(t *testing.T) {
 			writeFreshLedger(t, h)
 			account := h.accounts.accounts[h.env.Layout.ServiceUser]
 			canonical := filepath.Join(h.env.Layout.DataDir, guardianNoticesFile)
-			if err := os.WriteFile(h.env.P(canonical), []byte(`{"version":1,"updated_at":"2026-10-14T05:48:49Z","targets":[{"user":"u","uid":1001,"connector":"hermes","agent_config":"settings_lost"}]}`+"\n"), 0o600); err != nil {
+			if err := os.WriteFile(h.env.P(canonical), []byte(`{"version":1,"updated_at":"2026-10-14T05:48:49Z","targets":[{"user":"u","connector":"hermes","agent_config":"settings_lost"}]}`+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			h.owners[h.env.P(canonical)] = [2]int{0, 0}

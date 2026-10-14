@@ -783,7 +783,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 			verified[index] = slot.verifiable && !outcome.repaired
 			if outcome.agentConfig != "" {
-				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, UID: slot.account.UID, Connector: row.Connector, AgentConfig: outcome.agentConfig})
+				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, Connector: row.Connector, AgentConfig: outcome.agentConfig})
 			}
 		default:
 			row.Error = outcome.err
