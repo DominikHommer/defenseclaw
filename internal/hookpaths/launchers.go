@@ -884,72 +884,17 @@ func shellFunctionSource(function *syntax.FuncDecl, args []string, static []bool
 	if function == nil || function.Body == nil || !allStatic(static) {
 		return "", false
 	}
-	for _, arg := range args {
-		if strings.ContainsAny(arg, "*?[]\x00\r\n \t") {
-			return "", false
-		}
-	}
 	var rendered bytes.Buffer
 	if err := syntax.NewPrinter().Print(&rendered, function.Body); err != nil {
 		return "", false
 	}
-	file, ok := parseShell(rendered.String())
-	if !ok {
-		return "", false
+	name := ""
+	if function.Name != nil {
+		name = function.Name.Value
 	}
-	valid := true
-	syntax.Walk(file, func(node syntax.Node) bool {
-		word, ok := node.(*syntax.Word)
-		if !ok {
-			return true
-		}
-		var replace func([]syntax.WordPart, bool) []syntax.WordPart
-		replace = func(parts []syntax.WordPart, quoted bool) []syntax.WordPart {
-			for i, part := range parts {
-				switch part := part.(type) {
-				case *syntax.DblQuoted:
-					part.Parts = replace(part.Parts, true)
-				case *syntax.ParamExp:
-					if part.Param == nil || part.Exp != nil || part.Index != nil {
-						continue
-					}
-					name := part.Param.Value
-					index := 0
-					switch {
-					case name == "@" || name == "*":
-						if len(args) != 1 {
-							valid = false
-							continue
-						}
-					case len(name) == 1 && name[0] >= '1' && name[0] <= '9':
-						index = int(name[0] - '1')
-					default:
-						continue
-					}
-					value := ""
-					if index < len(args) {
-						value = args[index]
-					}
-					if quoted {
-						parts[i] = &syntax.Lit{Value: value}
-					} else {
-						parts[i] = &syntax.SglQuoted{Value: value}
-					}
-				}
-			}
-			return parts
-		}
-		word.Parts = replace(word.Parts, false)
-		return true
-	})
-	if !valid {
-		return "", false
-	}
-	rendered.Reset()
-	if err := syntax.NewPrinter().Print(&rendered, file); err != nil {
-		return "", false
-	}
-	return rendered.String(), true
+	bound := append([]string{name}, args...)
+	known := append([]bool{true}, static...)
+	return shellPositionalScript(rendered.String(), bound, known)
 }
 
 func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd, context shellScriptContext, home string) {

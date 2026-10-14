@@ -859,8 +859,74 @@ func shellProcessStraightStmt(
 		}
 		return
 	}
+	if subshell, ok := stmt.Cmd.(*syntax.Subshell); ok && shellStraightStmt(stmt) {
+		shellRecordRedirectWords(stmt, vars, states)
+		childVars := vars.clone()
+		for _, child := range subshell.Stmts {
+			shellProcessStraightStmt(child, home, childVars, poison, states)
+		}
+		return
+	}
+	if clause, ok := stmt.Cmd.(*syntax.IfClause); ok && shellStraightStmt(stmt) {
+		shellRecordRedirectWords(stmt, vars, states)
+		shellProcessIfClause(clause, home, vars, poison, states)
+		return
+	}
 	shellRecordStmtWords(stmt, vars, states)
 	shellApplyStraightStmt(stmt, home, vars, poison)
+}
+
+func shellProcessIfClause(clause *syntax.IfClause, home string, vars shellVariables, poison shellVariablePoison, states shellWordStateMap) {
+	if clause == nil {
+		return
+	}
+	conditionVars := vars.clone()
+	for _, stmt := range clause.Cond {
+		shellProcessStraightStmt(stmt, home, conditionVars, poison, states)
+	}
+	thenVars := conditionVars.clone()
+	for _, stmt := range clause.Then {
+		shellProcessStraightStmt(stmt, home, thenVars, poison, states)
+	}
+	elseVars := conditionVars.clone()
+	if clause.Else != nil {
+		shellProcessIfClause(clause.Else, home, elseVars, poison, states)
+	}
+	if len(clause.Cond) == 1 && clause.Cond[0] != nil {
+		if call, ok := clause.Cond[0].Cmd.(*syntax.CallExpr); ok && len(call.Args) == 1 && len(call.Assigns) == 0 {
+			if program, known := staticShellWordWithVars(call.Args[0], home, conditionVars, poison); known {
+				switch program {
+				case "true", ":":
+					shellCopyPositionals(vars, thenVars)
+					return
+				case "false":
+					shellCopyPositionals(vars, elseVars)
+					return
+				}
+			}
+		}
+	}
+	for i := 1; i <= 9; i++ {
+		name := strconv.Itoa(i)
+		left, leftOK := thenVars[name]
+		right, rightOK := elseVars[name]
+		if leftOK && rightOK && left == right {
+			vars[name] = left
+		} else {
+			delete(vars, name)
+		}
+	}
+}
+
+func shellCopyPositionals(dst, src shellVariables) {
+	for i := 1; i <= 9; i++ {
+		name := strconv.Itoa(i)
+		if value, ok := src[name]; ok {
+			dst[name] = value
+		} else {
+			delete(dst, name)
+		}
+	}
 }
 
 func shellRecordStmtWords(stmt *syntax.Stmt, vars shellVariables, states shellWordStateMap) {
@@ -893,21 +959,8 @@ func shellApplyStraightStmt(stmt *syntax.Stmt, home string, vars shellVariables,
 		shellApplyAssignments(call.Assigns, home, vars, poison)
 		return
 	}
-	if program, static := staticShellWordWithVars(call.Args[0], home, vars, poison); static && programBase(program) == "set" &&
-		len(call.Args) >= 2 {
-		if separator, known := staticShellWordWithVars(call.Args[1], home, vars, poison); known && separator == "--" {
-			for i := 1; i <= 9; i++ {
-				delete(vars, strconv.Itoa(i))
-			}
-			for i, arg := range call.Args[2:] {
-				if i >= 9 {
-					break
-				}
-				if value, known := staticShellWordWithVars(arg, home, vars, poison); known {
-					vars[strconv.Itoa(i+1)] = value
-				}
-			}
-		}
+	if program, static := staticShellWordWithVars(call.Args[0], home, vars, poison); static {
+		shellApplyPositionalCall(programBase(program), call.Args[1:], home, vars, poison)
 	}
 	if names, ok := shellUnsetNames(call, home, vars, poison); ok {
 		for _, name := range names {
