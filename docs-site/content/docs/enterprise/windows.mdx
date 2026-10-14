@@ -77,13 +77,17 @@ The four services:
 The gateway needs no "Log on as a service" grant. Existing virtual-account
 installs move to LocalSystem on upgrade or repair; the service SID remains
 the gateway's write boundary. The gateway refuses reads and scans inside
-user profiles; scan a profile project from the signed-in user's session or
-move it outside the profile. This keeps the former virtual-account boundary
-around other users' profiles. Readable paths outside profiles still scan.
+user profiles. Its install watcher skips profile roots for skills, plugins
+and MCP servers. `defenseclaw-gateway status --json` reports a degraded
+watcher with `health.watcher.details.profile_roots_skipped: true` when it skips
+them. The enterprise `status` and `verify` results do not report that field
+separately. For an administrator scan, copy the asset to a readable folder
+outside profiles and use the [scan commands](#scan-skills-mcp-servers-and-plugins).
+Keep shared skills outside profiles. A brokered scan as the enrolled user
+is planned for a later release.
 Scanner children inherit the write-restricted LocalSystem token and its
 single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
-to start a child as another user. The watcher skips profile roots and reports
-degraded health only when it skips one. Outside profiles, caller-supplied
+to start a child as another user. Outside profiles, caller-supplied
 paths that only administrators could read are now readable as LocalSystem;
 this extends the W-05 early-phase limitation.
 
@@ -357,6 +361,12 @@ result, `status` and `verify` name each such user and session with the
 agents. The same warning names a session that started before a later config
 change enabled its connector, or enrolled its account (for example one taken
 out of `exclude_users`), in that `ensure` result and every `status` after it.
+
+On Windows, the warning also names a Hermes or other per-user agent session
+started before the hook guardian restored hooks that the user changed or
+removed. `security_complete` stays `false` until that session restarts.
+Claude Code, Codex and Cursor use machine policy hooks, so this restore case
+does not apply to them.
 
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
@@ -792,12 +802,11 @@ for the folders the service may read in each profile.
 
 ## Scan skills, MCP servers and plugins
 
-The gateway service watches the skill and plugin folders of every user the
-hook guardian protects, for each connector, and the Codex, Claude Code and
-Devin MCP server lists in those users' profiles. A skill, plugin or MCP server that
-appears there goes through install admission with the scanners in the scanner
-runtime and the `admission` and `scanners` keys of the admin config, as on a
-per-user install:
+The LocalSystem gateway skips enrolled users' profile roots. The following
+install-admission behavior applies to skill, plugin and MCP server roots
+outside profiles that the gateway can watch. An asset there goes through
+the scanners in the scanner runtime and the `admission` and `scanners` keys
+of the admin config:
 
 - A verdict at a level whose `admission.<type>.actions` value is `block`
   blocks the asset. Its folder stays where the user put it
@@ -887,8 +896,9 @@ per-user install:
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
-  profile, every 30 seconds and publishes the servers to the gateway, so
-  `claude mcp add` (any scope) reaches admission within about a minute.
+  profile, every 30 seconds and publishes their inventory to the gateway.
+  The LocalSystem watcher still skips their profile paths, so publication
+  does not start an install scan.
   The enumerator opens each project folder and its `.mcp.json` under the
   enrolled user's own token, so it reads only what that user can read, and it
   never follows a project key that points to a network, mapped or substituted
@@ -906,23 +916,18 @@ per-user install:
 - Kiro keeps user MCP servers in `.kiro\settings\mcp.json`. For a user
   enrolled for Kiro, the hook guardian protects the `.kiro` folder, so the
   gateway service cannot read that file either. The hook enumerator reads and
-  publishes it the same way, so a server added with Kiro reaches admission
-  within about a minute. When the enumerator cannot read or parse the file,
-  DefenseClaw refuses that user's Kiro MCP tool calls, and status and
-  `verify` warn with `kiro_mcp_unreadable`.
-- A folder created after the gateway starts is picked up within about 30
-  seconds. The gateway never creates a folder in a user profile.
-- The skill and plugin folders of the agents in each profile are watched,
-  and the skill folders of a project inside the profile
-  (`<project>\.claude\skills`, `<project>\.agents\skills`) from the first
-  hook an agent sends from it: the hook guardian checks that no link leads to
-  the folder and lets the gateway read it, and the hooks refuse a skill there
-  until install admission has scanned it (or, for a folder that could not be
-  verified, always: `enterprise windows status` and `verify` warn with
-  `project_skill_root_unverified`, and the gateway log names the folder).
-  A project outside the profile gets no install
-  admission; the agent hooks still refuse a denied skill name there (see
-  [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
+  publishes it the same way, but the LocalSystem watcher skips its profile
+  path instead of scanning the server. When the enumerator cannot read or
+  parse the file, DefenseClaw refuses that user's Kiro MCP tool calls, and
+  status and `verify` warn with `kiro_mcp_unreadable`.
+- A watched folder outside profiles created after the gateway starts is
+  picked up within about 30 seconds. The gateway never creates a folder in
+  a user profile.
+- Project skill folders inside an enrolled user's profile are skipped by
+  the LocalSystem watcher, even after an agent's first hook. They receive
+  no install-admission scan. A project outside the profile gets no install
+  admission either; the agent hooks still refuse a denied skill name there
+  (see [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - Claude Code runs a plugin installed from a local marketplace folder from
   that folder, which DefenseClaw does not watch and never changes. When
   admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy
