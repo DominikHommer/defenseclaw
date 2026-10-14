@@ -109,8 +109,14 @@ func profileExplainUnresolved(name string, lookupErr error) (profileSubject, err
 // profileExplainDirectoryFacts returns the facts a verified request from uid
 // carries (the account database plus the guardian identity spool) from the
 // cache requests read, after a lookup of explain's own
-// (explainDirectoryFacts).
+// (explainDirectoryFacts). The account it resolves is recorded as the holder
+// of those facts, as a hook call records it, so explain by name during a
+// later outage serves what the hooks keep (profileExplainCachedSubject,
+// GAP-0529).
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
+	if uid, err := strconv.Atoi(id); err == nil && uid >= 0 && strconv.Itoa(uid) == id {
+		return managedHookPeerHomes.explainDirectory(uid)
+	}
 	return explainDirectoryFacts(peerDirectoryCache(), id)
 }
 
@@ -157,8 +163,10 @@ var profileExplainCachedSubject = func(name string, now time.Time) (profileSubje
 		return profileSubject{}, false
 	}
 	id := strconv.Itoa(uid)
+	// peek reports only facts a hook call would still get: within the hour,
+	// and from a guardian record still trusted.
 	facts, fetchedAt, ok := peerDirectoryCache().peek(id)
-	if !ok || now.Sub(fetchedAt) > identityDirectoryMaxAge {
+	if !ok {
 		return profileSubject{}, false
 	}
 	subject := profileSubjectFromVerified(VerifiedSubject{

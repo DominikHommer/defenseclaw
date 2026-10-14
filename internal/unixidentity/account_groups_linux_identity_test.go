@@ -29,7 +29,7 @@ func TestOSUserGroupsBindToLocalUID(t *testing.T) {
 		}
 	}
 	account := &user.User{Username: "alex", Uid: "2100", Gid: "2100"}
-	got, err := platformAccountGroupIDs(context.Background(), nil, account, []string{"2100", "5000", "7000"}, nil)
+	got, err := platformAccountGroupIDs(context.Background(), nil, account, []string{"2100", "5000", "7000"}, nil, nil)
 	if err != nil || !reflect.DeepEqual(got, []string{"2100", "7000"}) {
 		t.Fatalf("groups of local uid = %v, %v; want the local records", got, err)
 	}

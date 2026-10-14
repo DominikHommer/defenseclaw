@@ -38,7 +38,8 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return IdentitySpoolRecord{}, errors.New("account has no usable name")
 	}
 	in := useridentity.MacOSDirectoryInputs{
-		DSCL:       runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "UniqueID", "AuthenticationAuthority", "OriginalNodeName", "AltSecurityIdentities"),
+		DSCL: runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "UniqueID", "AuthenticationAuthority",
+			"OriginalNodeName", "AltSecurityIdentities", "dsAttrTypeNative:userPrincipalName"),
 		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
 		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
 	}
