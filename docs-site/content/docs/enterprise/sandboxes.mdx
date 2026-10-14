@@ -1268,6 +1268,17 @@ running sandbox counts again within the next minute.
   user runs; otherwise it reports "pending restart" and the launcher restarts
   an idle, outdated daemon on the next command. A MicroVM upgrade waits for
   running sandboxes.
+- **Upgrade from 1.0.1 with the docker driver or the docker fallback.** Managed
+  docker gateways now keep their containers and volumes in an OpenShell sandbox
+  namespace of their own, `defenseclaw-managed`, so one gateway's start no longer
+  removes another account's sandboxes. The sandboxes users kept under 1.0.1 are
+  in OpenShell's `default` namespace, which the upgraded gateway does not list.
+  For every user who ran sandboxes, `ensure` treats the change as a switch: it
+  waits while one of that user's sandboxes runs ("pending switch"), and after it
+  those sandboxes cannot start, and OpenShell drops them a few minutes later. Ask
+  users to bring back their work with `defenseclaw sandbox pull NAME` before the
+  upgrade. Their containers and volumes stay in Docker, labelled
+  `openshell.ai/sandbox-namespace=default`, until you remove them.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
