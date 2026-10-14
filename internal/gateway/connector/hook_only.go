@@ -2008,42 +2008,20 @@ func removeCursorHookArtifacts(opts SetupOpts) error {
 // there is no edit to protect: a plugin whose first line is DefenseClaw's
 // ownership marker is DefenseClaw's and is removed; any other file stays.
 func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
-	configPath := c.configPath(opts)
 	if _, err := os.Lstat(managedFileBackupPath(opts.DataDir, c.name, "config")); os.IsNotExist(err) {
-		return c.removeOwnedPluginWithoutBackup(configPath)
+		return c.removeOwnedPluginWithoutBackup(c.configPath(opts))
 	} else if err != nil {
 		return fmt.Errorf("%s inspect plugin backup: %w", c.name, err)
 	}
-	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", configPath)
-	// A copied data directory can carry a receipt for the former home. The
-	// worker may remove only the plugin in its own home; the former home's
-	// worker uses its own receipt to restore that file. Do not follow a
-	// copied receipt into another home, even when that home still exists.
-	if home := userHomeDir(); filepath.IsAbs(home) && filepath.IsAbs(configPath) &&
-		managedPathWithin(configPath, home) && !managedPathWithin(path, home) {
-		if err := c.removeOwnedPluginWithoutBackup(configPath); err != nil {
-			return err
-		}
-		if err := os.Remove(managedFileBackupPath(opts.DataDir, c.name, "config")); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("%s discard copied plugin backup: %w", c.name, err)
-		}
-		return c.VerifyClean(opts)
-	}
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
 	if err != nil {
 		return fmt.Errorf("%s restore plugin backup: %w", c.name, err)
 	}
 	if !restored {
-		// Preserve an edited plugin and its receipt for the operator. If it
-		// still contains DefenseClaw code, report incomplete cleanup so a
-		// re-homed guardian row cannot end while the old home loads it.
-		if err := c.VerifyClean(opts); err != nil {
-			if strings.Contains(err.Error(), "teardown incomplete: managed plugin still present") {
-				return fmt.Errorf("%s plugin %s still contains DefenseClaw code; remove its entries and rerun", c.name, path)
-			}
-			return fmt.Errorf("%s verify plugin cleanup at %s: %w", c.name, path, err)
-		}
-		discardManagedFileBackup(opts.DataDir, c.name, "config")
+		// The plugin was hand-edited after setup; leave it for the
+		// operator rather than clobbering their changes. Doctor surfaces
+		// the lingering managed plugin.
 		return nil
 	}
 	discardManagedFileBackup(opts.DataDir, c.name, "config")
