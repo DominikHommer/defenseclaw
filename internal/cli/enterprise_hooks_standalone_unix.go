@@ -430,6 +430,9 @@ func validateEnterpriseHookWorkerResult(target enterpriseHookWorkerTarget, resul
 	if err != nil || len(encoded) > enterpriseHookWorkerResultMaxBytes {
 		return errors.New("worker result is too large")
 	}
+	if !connector.ValidAgentConfigStatus(result.AgentConfig) {
+		return errors.New("worker result names an unknown agent config status")
+	}
 	return nil
 }
 
@@ -440,6 +443,8 @@ type enterpriseHookStandaloneOutcome struct {
 	repaired bool
 	err      string
 	result   *enterprisehooks.InstallResult
+	// agentConfig is the worker's connector.AgentConfigStatus code.
+	agentConfig string
 }
 
 // dispatchEnterpriseHookStandaloneJobs runs the worker pool and maps every
@@ -488,7 +493,7 @@ func dispatchEnterpriseHookStandaloneJobs(
 					outcomes[target.Index] = enterpriseHookStandaloneOutcome{err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result}
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result, agentConfig: result.AgentConfig}
 			}
 		}
 	}
@@ -755,6 +760,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	repairs := 0
 	var repaired []enterpriseHookGuardianRepair
 	var auditRepairs []enterpriseHookGuardianAuditReport
+	var notices []enterpriseHookGuardianNotice
 	verified := map[int]bool{}
 	for index, slot := range slots {
 		row := rows[index]
@@ -776,6 +782,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 				repairs++
 			}
 			verified[index] = slot.verifiable && !outcome.repaired
+			if outcome.agentConfig != "" {
+				notices = append(notices, enterpriseHookGuardianNotice{User: row.User, UID: slot.account.UID, Connector: row.Connector, AgentConfig: outcome.agentConfig})
+			}
 		default:
 			row.Error = outcome.err
 		}
@@ -804,6 +813,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 
 	bindingsErr := saveEnterpriseHookUnixBindings(next)
 	writeEnterpriseHookGuardianRepairs(cfg.DataDir, repaired)
+	writeEnterpriseHookGuardianNotices(cfg.DataDir, notices)
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
 	if stateErr == nil && bindingsErr != nil {

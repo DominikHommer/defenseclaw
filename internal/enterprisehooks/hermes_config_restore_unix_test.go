@@ -12,14 +12,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // GAP-0564: the standalone guardian's repair of a missing ~/.hermes/config.yaml
 // wrote the hooks key alone, so the account's model and Bedrock settings were
 // gone and the guardian state said nothing. The per-user worker's verify that
 // passes keeps the file as the last known good copy; the repair puts it back
-// with the hooks and says so in its result, which the guardian state carries
-// to the enterprise status and verify.
+// with the hooks and says so in its result, which the guardian records for
+// the enterprise status and verify.
 func TestStandaloneRepairPutsBackAMissingHermesConfigWithTheAccountsSettings(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
@@ -34,8 +36,8 @@ func TestStandaloneRepairPutsBackAMissingHermesConfigWithTheAccountsSettings(t *
 		t.Fatalf("install: %v", err)
 	}
 	verified, err := Verify(context.Background(), opts)
-	if err != nil || len(verified.Notices) != 0 {
-		t.Fatalf("verify after install = %+v %v", verified.Notices, err)
+	if err != nil || verified.AgentConfig != "" {
+		t.Fatalf("verify after install = %q %v", verified.AgentConfig, err)
 	}
 	if err := os.Rename(configPath, configPath+".bak"); err != nil {
 		t.Fatal(err)
@@ -58,11 +60,11 @@ func TestStandaloneRepairPutsBackAMissingHermesConfigWithTheAccountsSettings(t *
 			t.Fatalf("repaired config.yaml lacks %q:\n%s", key, data)
 		}
 	}
-	if len(repaired.Notices) != 1 || !strings.Contains(repaired.Notices[0], "put back its copy") {
-		t.Fatalf("repair notices = %v", repaired.Notices)
+	if repaired.AgentConfig != connector.AgentConfigRestoredLastGood {
+		t.Fatalf("repair agent config status = %q", repaired.AgentConfig)
 	}
 	verified, err = Verify(context.Background(), opts)
-	if err != nil || len(verified.Notices) != 0 {
-		t.Fatalf("verify after the repair = %+v %v", verified.Notices, err)
+	if err != nil || verified.AgentConfig != "" {
+		t.Fatalf("verify after the repair = %q %v", verified.AgentConfig, err)
 	}
 }

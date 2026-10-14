@@ -115,11 +115,13 @@ type InstallResult struct {
 	AgentVersionStatus         string `json:"agent_version_status,omitempty"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string `json:"hook_contract_entry_updated_at,omitempty"`
-	// Notices are what the account should know about its agent config that
-	// is no protection failure: a Hermes or Devin config put back from a
-	// copy, or recreated with DefenseClaw's hooks only (GAP-0564). The guardian
-	// state carries them, and the enterprise status and verify report them.
-	Notices []string `json:"notices,omitempty"`
+	// AgentConfig is what the account should know about its agent config
+	// that is no protection failure (connector.AgentConfigStatus: a Hermes
+	// or Devin config put back from a copy, or recreated with DefenseClaw's
+	// hooks only, GAP-0564). It is not serialized: the guardian state keeps
+	// the schema a prior binary reads strictly. The worker's answer carries
+	// it next to the result, and the guardian records it in its own file.
+	AgentConfig string `json:"-"`
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
@@ -327,7 +329,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				// last known good copy; one recreated without the
 				// account's settings stays reported until they are back
 				// (GAP-0564).
-				result.Notices = connector.AgentConfigNotices(conn.Name(), setupOpts, time.Time{}, true)
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, true)
 			}
 			return nil
 		})
@@ -637,7 +639,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				AgentVersionStatus: agentVersionStatus(conn.Name(), setupOpts.AgentVersion),
 			}
 			// An agent config this setup put back or recreated (GAP-0564).
-			result.Notices = connector.AgentConfigNotices(conn.Name(), setupOpts, setupStarted, false)
+			result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, setupStarted, false)
 			return nil
 		})
 	})

@@ -85,8 +85,8 @@ func TestHermesSetupPutsBackAMissingConfigFromTheLastKnownGoodCopy(t *testing.T)
 	if err := os.WriteFile(configPath, edited, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if notices := AgentConfigNotices("hermes", opts, time.Time{}, true); len(notices) != 0 {
-		t.Fatalf("notices for an intact config: %v", notices)
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status for an intact config: %q", status)
 	}
 	if err := os.Rename(configPath, configPath+".bak"); err != nil {
 		t.Fatal(err)
@@ -106,13 +106,12 @@ func TestHermesSetupPutsBackAMissingConfigFromTheLastKnownGoodCopy(t *testing.T)
 	if err != nil || !present {
 		t.Fatalf("hooks after the repair: %t %v", present, err)
 	}
-	notices := AgentConfigNotices("hermes", opts, started, false)
-	if len(notices) != 1 || !strings.Contains(notices[0], "put back its copy") {
-		t.Fatalf("repair notices = %v", notices)
+	if status := AgentConfigStatus("hermes", opts, started, false); status != AgentConfigRestoredLastGood {
+		t.Fatalf("repair status = %q", status)
 	}
 	// Reported by the repair only: the next verify is clean.
-	if notices := AgentConfigNotices("hermes", opts, time.Time{}, true); len(notices) != 0 {
-		t.Fatalf("notices after the next verify: %v", notices)
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after the next verify: %q", status)
 	}
 }
 
@@ -165,9 +164,8 @@ func TestHermesSetupReportsSettingsItCouldNotPutBack(t *testing.T) {
 		t.Fatalf("recreated config.yaml keys = %s", got)
 	}
 	for pass := 0; pass < 2; pass++ {
-		notices := AgentConfigNotices("hermes", opts, time.Time{}, true)
-		if len(notices) != 1 || !strings.Contains(notices[0], "must be entered again") {
-			t.Fatalf("verify pass %d notices = %v", pass, notices)
+		if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != AgentConfigSettingsLost {
+			t.Fatalf("verify pass %d status = %q", pass, status)
 		}
 	}
 	// The account enters its settings again: the notice goes.
@@ -175,8 +173,8 @@ func TestHermesSetupReportsSettingsItCouldNotPutBack(t *testing.T) {
 	if err := os.WriteFile(configPath, append([]byte("model:\n  default: x\n"), data...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if notices := AgentConfigNotices("hermes", opts, time.Time{}, true); len(notices) != 0 {
-		t.Fatalf("notices after the settings are back: %v", notices)
+	if status := AgentConfigStatus("hermes", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status after the settings are back: %q", status)
 	}
 	if _, ok := hermesSpec.readNotice(opts.DataDir); ok {
 		t.Fatal("the notice stayed after the settings came back")
@@ -204,8 +202,8 @@ func TestHermesFirstSetupAndEditedConfigAreNoRestore(t *testing.T) {
 	if got := hermesTopKeys(t, configPath); got != "hooks,model" {
 		t.Fatalf("edited config keys = %s", got)
 	}
-	if notices := AgentConfigNotices("hermes", opts, started, false); len(notices) != 0 {
-		t.Fatalf("notices for an edited config: %v", notices)
+	if status := AgentConfigStatus("hermes", opts, started, false); status != "" {
+		t.Fatalf("status for an edited config: %q", status)
 	}
 }
 
@@ -246,8 +244,8 @@ func TestDevinSetupPutsBackAMissingConfigWithTheAccountsSettings(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("first Setup: %v", err)
 	}
-	if notices := AgentConfigNotices("devin", opts, time.Time{}, true); len(notices) != 0 {
-		t.Fatalf("notices for an intact config: %v", notices)
+	if status := AgentConfigStatus("devin", opts, time.Time{}, true); status != "" {
+		t.Fatalf("status for an intact config: %q", status)
 	}
 	if err := os.Remove(configPath); err != nil {
 		t.Fatal(err)
@@ -265,8 +263,8 @@ func TestDevinSetupPutsBackAMissingConfigWithTheAccountsSettings(t *testing.T) {
 	if !ok || strings.Join(keys, ",") != "hooks,model,permissions" {
 		t.Fatalf("restored config.json keys = %v %t:\n%s", keys, ok, data)
 	}
-	if notices := AgentConfigNotices("devin", opts, started, false); len(notices) != 1 || !strings.Contains(notices[0], "Devin config") {
-		t.Fatalf("repair notices = %v", notices)
+	if status := AgentConfigStatus("devin", opts, started, false); status != AgentConfigRestoredLastGood {
+		t.Fatalf("repair status = %q", status)
 	}
 	spec, _ := agentConfigSpecFor("devin")
 	if err := conn.Teardown(context.Background(), opts); err != nil {

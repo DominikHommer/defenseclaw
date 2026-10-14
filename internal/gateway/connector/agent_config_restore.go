@@ -34,8 +34,9 @@ import (
 // managed backup record) and puts it back, else the file as it was before
 // DefenseClaw's first setup, before it registers its hooks again. With
 // neither, the hooks are restored alone and a notice records that the
-// account's settings could not be put back; the enterprise status and verify
-// report it until the account has settings in the file again.
+// account's settings could not be put back; the standalone guardian reports
+// it (AgentConfigStatus) and the enterprise status and verify warn about it
+// until the account has settings in the file again.
 //
 // Linux and macOS only: the Windows managed runtime's rollback removes only
 // the names it knows in connector_backups\<connector> and refuses any other.
@@ -326,37 +327,69 @@ func recordAgentConfigCopy(connectorName, dataDir, configPath string) {
 	}
 }
 
-// AgentConfigNotices is what the standalone guardian reports for an
+// What the standalone guardian reports for an account's agent config
+// (AgentConfigStatus). The enterprise status and verify word them; the
+// worker's answer carries only the code, as the account controls the worker.
+const (
+	// AgentConfigRestoredLastGood: the file went missing and the last
+	// known good copy was put back.
+	AgentConfigRestoredLastGood = "restored_last_good"
+	// AgentConfigRestoredPristine: the file went missing and the file as
+	// DefenseClaw's first setup found it was put back.
+	AgentConfigRestoredPristine = "restored_pristine"
+	// AgentConfigRecreatedHooksOnly: the file went missing and DefenseClaw
+	// had no copy of it, so it holds DefenseClaw's hooks only.
+	AgentConfigRecreatedHooksOnly = "recreated_hooks_only"
+	// AgentConfigSettingsLost: as AgentConfigRecreatedHooksOnly, and
+	// DefenseClaw saw settings of the account in it that it could not put
+	// back; reported until the account has settings in the file again.
+	AgentConfigSettingsLost = "settings_lost"
+)
+
+// ValidAgentConfigStatus reports whether code is one AgentConfigStatus
+// returns ("" included).
+func ValidAgentConfigStatus(code string) bool {
+	switch code {
+	case "", AgentConfigRestoredLastGood, AgentConfigRestoredPristine, AgentConfigRecreatedHooksOnly, AgentConfigSettingsLost:
+		return true
+	}
+	return false
+}
+
+// AgentConfigStatus is what the standalone guardian reports for an
 // account's agent config (Hermes, Devin) after setup (since: the setup's
-// start) or after a verify that passed (since zero, refresh): a file put back
-// from a copy at or after since, or recreated with DefenseClaw's hooks alone,
-// and, until the account has settings in it again, one recreated without the
-// settings DefenseClaw saw. After a verify that passed the file is kept as
-// the last known good copy, and a notice that no longer applies is removed.
-// Linux and macOS; nothing for other connectors or elsewhere.
-func AgentConfigNotices(connectorName string, opts SetupOpts, since time.Time, refresh bool) []string {
+// start) or after a verify that passed (since zero, refresh): a file this
+// setup put back from a copy or recreated with DefenseClaw's hooks alone,
+// and, until the account has settings in it again, one recreated without
+// the settings DefenseClaw saw (AgentConfigSettingsLost). After a verify
+// that passed the file is kept as the last known good copy, and a notice
+// that no longer applies is removed. "" when there is nothing to report,
+// for other connectors and on Windows.
+func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, refresh bool) string {
 	spec, ok := agentConfigSpecFor(connectorName)
 	if !ok || !agentConfigKeepsCopy {
-		return nil
+		return ""
 	}
 	configPath := spec.path(opts)
 	if strings.TrimSpace(configPath) == "" {
-		return nil
+		return ""
 	}
-	var notices []string
+	status := ""
 	if notice, ok := spec.readNotice(opts.DataDir); ok && sameManagedTargetPath(notice.Path, configPath) {
 		at, _ := time.Parse(time.RFC3339, notice.At)
 		data, info, _ := readManagedTarget(configPath)
 		settingsBack := info != nil && spec.hasSettings(data)
 		switch {
 		case notice.SettingsLost && !settingsBack:
-			notices = append(notices, fmt.Sprintf("%s %s went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: the account's own settings in it must be entered again (since %s)", spec.label, configPath, notice.At))
+			status = AgentConfigSettingsLost
 		case since.IsZero() || at.Before(since.Add(-time.Second)):
 			// Reported by the setup that recreated the file.
-		case notice.Source == AgentConfigHooksOnly:
-			notices = append(notices, fmt.Sprintf("%s %s went missing and DefenseClaw had no copy of it, so it was recreated with DefenseClaw's hooks only: if the account had settings in it, they must be entered again", spec.label, configPath))
+		case notice.Source == AgentConfigFromLastGood:
+			status = AgentConfigRestoredLastGood
+		case notice.Source == AgentConfigFromPristine:
+			status = AgentConfigRestoredPristine
 		default:
-			notices = append(notices, fmt.Sprintf("%s %s went missing; DefenseClaw put back its copy of %s with the account's settings, and changes made after that copy are not in it", spec.label, configPath, notice.CopiedAt))
+			status = AgentConfigRecreatedHooksOnly
 		}
 		if refresh && (!notice.SettingsLost || settingsBack) {
 			_ = os.Remove(spec.noticePath(opts.DataDir))
@@ -365,5 +398,5 @@ func AgentConfigNotices(connectorName string, opts SetupOpts, since time.Time, r
 	if refresh {
 		_ = spec.recordCopy(opts.DataDir, configPath)
 	}
-	return notices
+	return status
 }

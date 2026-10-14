@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -91,9 +92,6 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			Connector string `json:"connector"`
 			OK        bool   `json:"ok"`
 			Error     string `json:"error"`
-			Result    *struct {
-				Notices []string `json:"notices"`
-			} `json:"result"`
 		} `json:"results"`
 	}
 	if data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20); err == nil {
@@ -102,20 +100,10 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
 		attested = false
 	}
-	var unverified, failed, removed, userPaths, notices []string
+	var unverified, failed, removed, userPaths []string
 	stateFailed := map[string]bool{}
 	enumeration := enterprisehooks.LoadUnixEnumeratorState(env.P(filepath.Join(filepath.Dir(env.Layout.ManifestPath), enumeratorStateFile)))
 	for _, result := range state.Results {
-		if result.OK && result.Result != nil {
-			// A protected target whose agent config lost the account's
-			// own settings (a recreated Hermes config.yaml, GAP-0564) is
-			// that account's to fix: a warning, not a protection failure.
-			for _, notice := range result.Result.Notices {
-				if notice = strings.TrimSpace(notice); notice != "" {
-					notices = append(notices, fmt.Sprintf("%s for user %s: %s", result.Connector, result.User, boundedGuardianReason(notice)))
-				}
-			}
-		}
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
@@ -176,8 +164,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range userPaths {
 		r.AddWarning(codeGuardianTargetUserPath, message)
 	}
-	sort.Strings(notices)
-	for _, message := range notices {
+	for _, message := range l.agentConfigNotices() {
 		r.AddWarning(codeAgentSettingsNotRestored, message)
 	}
 	if len(unverified)+len(failed) == 0 {
@@ -198,6 +185,61 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 // guardian had to recreate or put back from a copy (GAP-0564): the hooks are
 // in place, but the account's own settings are missing or older.
 const codeAgentSettingsNotRestored = "agent_settings_not_restored"
+
+// guardianNoticesFile is the guardian's record of the protected targets
+// whose agent config its last reconcile put back from a copy or recreated
+// (hookGuardianNoticesFile in internal/cli).
+const guardianNoticesFile = "hook_guardian_notices.json"
+
+// agentConfigFiles names, per connector, the agent config the notices are
+// about.
+var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin": "Devin config.json"}
+
+// agentConfigNotices words the guardian's agent config notices, one per
+// account and connector, sorted. A protected target whose agent config lost
+// the account's own settings is that account's to fix: a warning, not a
+// protection failure. Only the known codes are worded: the per-user worker
+// that reports them runs as the account.
+func (l *lifecycle) agentConfigNotices() []string {
+	data, err := readBounded(l.env.P(filepath.Join(l.env.Layout.DataDir, guardianNoticesFile)), 1<<20)
+	if err != nil {
+		return nil
+	}
+	var record struct {
+		Version int `json:"version"`
+		Targets []struct {
+			User        string `json:"user"`
+			Connector   string `json:"connector"`
+			AgentConfig string `json:"agent_config"`
+		} `json:"targets"`
+	}
+	if json.Unmarshal(data, &record) != nil || record.Version != 1 {
+		return nil
+	}
+	var out []string
+	for _, target := range record.Targets {
+		file, ok := agentConfigFiles[target.Connector]
+		if !ok {
+			continue
+		}
+		var what string
+		switch target.AgentConfig {
+		case connector.AgentConfigSettingsLost:
+			what = "went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: that user must enter the account's own settings in it (model, provider) again"
+		case connector.AgentConfigRecreatedHooksOnly:
+			what = "went missing and DefenseClaw had no copy of it, so the guardian recreated it with DefenseClaw's hooks only: if that user had settings in it, they must be entered again"
+		case connector.AgentConfigRestoredLastGood:
+			what = "went missing; the guardian put back DefenseClaw's copy of it from when it last verified, with that user's settings, and changes made after that copy are not in it"
+		case connector.AgentConfigRestoredPristine:
+			what = "went missing; the guardian put back the file as DefenseClaw's first setup found it, and changes made after that are not in it"
+		default:
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s for user %s: the %s %s", target.Connector, boundedGuardianReason(target.User), file, what))
+	}
+	sort.Strings(out)
+	return out
+}
 
 // codeGuardianReportPending names a change whose guardian report did not
 // arrive in time.
