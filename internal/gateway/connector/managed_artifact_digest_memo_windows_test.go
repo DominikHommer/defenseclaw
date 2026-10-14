@@ -6,6 +6,8 @@
 package connector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -22,6 +24,58 @@ func windowsManagedArtifactStampOfPath(t *testing.T, path string) (managedArtifa
 	}
 	defer file.Close()
 	return windowsManagedArtifactStamp(file)
+}
+
+// useWindowsManagedArtifactDigestSeams runs one test with the real Windows
+// memo seams: the deny-write open, the stamp and the change-epoch close.
+func useWindowsManagedArtifactDigestSeams(t *testing.T) (ends *int) {
+	t.Helper()
+	_, ends = useManagedArtifactDigestSeams(t,
+		windowsManagedArtifactStamp,
+		openWindowsManagedArtifactExclusive,
+		endWindowsManagedArtifactChangeEpoch,
+	)
+	return ends
+}
+
+const managedArtifactDigestSentinel = "sha256:remembered"
+
+// setManagedArtifactDigestSentinel replaces the remembered digest of path, so
+// a later call that answers it proves the file was not read again.
+func setManagedArtifactDigestSentinel(t *testing.T, path string) {
+	t.Helper()
+	managedArtifactDigests.Lock()
+	defer managedArtifactDigests.Unlock()
+	entry, ok := managedArtifactDigests.entries[managedArtifactDigestKey(path)]
+	if !ok {
+		t.Fatal("a full read of an unwritten version was not remembered")
+	}
+	entry.digest = managedArtifactDigestSentinel
+	managedArtifactDigests.entries[managedArtifactDigestKey(path)] = entry
+}
+
+// holdManagedArtifact opens path with access and every share mode, as any
+// other reader might, until the end of the test.
+func holdManagedArtifact(t *testing.T, path string, access uint32) {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatalf("hold %s: %v", path, err)
+	}
+	t.Cleanup(func() { windows.CloseHandle(handle) })
+}
+
+var managedArtifactOtherHandles = []struct {
+	name   string
+	access uint32
+}{
+	{name: "read handle", access: windows.GENERIC_READ},
+	{name: "attribute handle", access: windows.FILE_READ_ATTRIBUTES},
 }
 
 // rewriteKeepingTimes changes one byte of path in place, keeps its size and
@@ -58,8 +112,9 @@ func rewriteKeepingTimes(t *testing.T, path string, fill byte) {
 	}
 }
 
-// GAP-0438: the stamp follows the file version: a same-size write whose
-// time stamps were put back still gets a new change-journal number.
+// GAP-0438: the stamp follows the file version: with no other handle open, a
+// same-size write whose time stamps were put back still gets a new
+// change-journal number when its writer closes the file.
 func TestWindowsManagedArtifactStampFollowsTheFileVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
 	writeManagedArtifactFixture(t, path, 1)
@@ -85,7 +140,7 @@ func TestWindowsManagedArtifactStampFollowsTheFileVersion(t *testing.T) {
 
 // The memo answers only for an unchanged file that no writer holds open.
 func TestWindowsManagedArtifactDigestMemoAnswersOnlyForAnUnwrittenVersion(t *testing.T) {
-	useManagedArtifactDigestSeams(t, windowsManagedArtifactStamp, openWindowsManagedArtifactExclusive)
+	useWindowsManagedArtifactDigestSeams(t)
 	path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
 	first := writeManagedArtifactFixture(t, path, 1)
 	if _, ok := windowsManagedArtifactStampOfPath(t, path); !ok {
@@ -94,20 +149,9 @@ func TestWindowsManagedArtifactDigestMemoAnswersOnlyForAnUnwrittenVersion(t *tes
 	if got := managedArtifactDigestOf(t, path, true); got != first {
 		t.Fatalf("digest %s, want %s", got, first)
 	}
-	const sentinel = "sha256:remembered"
-	setRemembered := func() {
-		t.Helper()
-		managedArtifactDigests.Lock()
-		defer managedArtifactDigests.Unlock()
-		entry, ok := managedArtifactDigests.entries[managedArtifactDigestKey(path)]
-		if !ok {
-			t.Fatal("a full read of an unwritten version was not remembered")
-		}
-		entry.digest = sentinel
-		managedArtifactDigests.entries[managedArtifactDigestKey(path)] = entry
-	}
+	setRemembered := func() { setManagedArtifactDigestSentinel(t, path) }
 	setRemembered()
-	if got := managedArtifactDigestOf(t, path, true); got != sentinel {
+	if got := managedArtifactDigestOf(t, path, true); got != managedArtifactDigestSentinel {
 		t.Fatalf("an unchanged version was read again: %s", got)
 	}
 
@@ -120,10 +164,7 @@ func TestWindowsManagedArtifactDigestMemoAnswersOnlyForAnUnwrittenVersion(t *tes
 	if got := managedArtifactDigestOf(t, path, true); got != first {
 		t.Fatalf("with a writer open: digest %s, want the full read %s", got, first)
 	}
-	managedArtifactDigests.Lock()
-	_, kept := managedArtifactDigests.entries[managedArtifactDigestKey(path)]
-	managedArtifactDigests.Unlock()
-	if kept {
+	if managedArtifactDigestRemembered(path) {
 		t.Fatal("a digest read while a writer held the file was remembered")
 	}
 	if err := writer.Close(); err != nil {
@@ -137,7 +178,7 @@ func TestWindowsManagedArtifactDigestMemoAnswersOnlyForAnUnwrittenVersion(t *tes
 	setRemembered()
 	rewriteKeepingTimes(t, path, 9)
 	got := managedArtifactDigestOf(t, path, true)
-	if got == sentinel || got == first {
+	if got == managedArtifactDigestSentinel || got == first {
 		t.Fatalf("a rewritten file with its times put back kept the remembered digest: %s", got)
 	}
 
@@ -150,5 +191,82 @@ func TestWindowsManagedArtifactDigestMemoAnswersOnlyForAnUnwrittenVersion(t *tes
 	}
 	if got := managedArtifactDigestOf(t, path, true); got != want {
 		t.Fatalf("a replaced file kept the remembered digest: %s, want %s", got, want)
+	}
+}
+
+// GAP-0438 (Codex F1): another open handle, even one that may only read
+// attributes, keeps the change epoch of the file open, and in that epoch a
+// second change of the same kind posts no new journal record. A full read
+// ends the epoch before it takes the stamp it remembers, so a write after it
+// still moves the journal number and is read again.
+func TestWindowsManagedArtifactDigestMemoSeesAWriteWhileAnotherHandleIsOpen(t *testing.T) {
+	for _, other := range managedArtifactOtherHandles {
+		t.Run(other.name, func(t *testing.T) {
+			useWindowsManagedArtifactDigestSeams(t)
+			path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+			clean := writeManagedArtifactFixture(t, path, 1)
+			if _, ok := windowsManagedArtifactStampOfPath(t, path); !ok {
+				t.Skip("the test volume keeps no change journal; the memo is off there")
+			}
+			holdManagedArtifact(t, path, other.access)
+			// A write and its revert, both with the times put back, open an
+			// epoch that the other handle keeps open.
+			rewriteKeepingTimes(t, path, 9)
+			rewriteKeepingTimes(t, path, 1)
+			if got := managedArtifactDigestOf(t, path, true); got != clean {
+				t.Fatalf("digest %s, want %s", got, clean)
+			}
+			if !managedArtifactDigestRemembered(path) {
+				t.Fatal("a full read of an unwritten version was not remembered")
+			}
+			rewriteKeepingTimes(t, path, 9)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(data)
+			want := "sha256:" + hex.EncodeToString(sum[:])
+			if got := managedArtifactDigestOf(t, path, true); got != want {
+				t.Fatalf("a write while another handle was open kept the remembered digest: %s, want %s (clean %s)", got, want, clean)
+			}
+		})
+	}
+}
+
+// Ending the change epoch moves the journal number once, in the full read.
+// Closing that read's own handle and a later memo hit move nothing, so the
+// next calls still answer from the memo, with or without another handle open.
+func TestWindowsManagedArtifactDigestMemoHitsAfterAFullRead(t *testing.T) {
+	cases := append([]struct {
+		name   string
+		access uint32
+	}{{name: "no other handle"}}, managedArtifactOtherHandles...)
+	for _, other := range cases {
+		t.Run(other.name, func(t *testing.T) {
+			ends := useWindowsManagedArtifactDigestSeams(t)
+			path := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+			first := writeManagedArtifactFixture(t, path, 1)
+			if _, ok := windowsManagedArtifactStampOfPath(t, path); !ok {
+				t.Skip("the test volume keeps no change journal; the memo is off there")
+			}
+			if other.access != 0 {
+				holdManagedArtifact(t, path, other.access)
+			}
+			if got := managedArtifactDigestOf(t, path, true); got != first {
+				t.Fatalf("digest %s, want %s", got, first)
+			}
+			if *ends != 1 {
+				t.Fatalf("the full read ended %d change epochs, want 1", *ends)
+			}
+			setManagedArtifactDigestSentinel(t, path)
+			for call := 1; call <= 3; call++ {
+				if got := managedArtifactDigestOf(t, path, true); got != managedArtifactDigestSentinel {
+					t.Fatalf("call %d after a full read with no write in between read the file again: %s", call, got)
+				}
+			}
+			if *ends != 1 {
+				t.Fatalf("a memo hit ended the change epoch (%d ends)", *ends)
+			}
+		})
 	}
 }

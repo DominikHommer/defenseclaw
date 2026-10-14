@@ -1818,21 +1818,28 @@ func stableManagedArtifactDigestWith(
 	var stamp managedArtifactStamp
 	stamped := false
 	if memoize {
+		// A memo hit only takes the stamp. Ending the change epoch here
+		// would itself move the journal number and end every hit.
 		if guarded {
-			stamp, stamped = managedArtifactStampOf(file)
-		}
-		if stamped {
-			if digest, ok := rememberedManagedArtifactDigest(path, stamp); ok {
-				current, err := os.Lstat(path)
-				if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
-					os.SameFile(opened, current) {
-					return digest, true, nil
+			if seen, ok := managedArtifactStampOf(file); ok {
+				if digest, ok := rememberedManagedArtifactDigest(path, seen); ok {
+					current, err := os.Lstat(path)
+					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+						os.SameFile(opened, current) {
+						return digest, true, nil
+					}
 				}
 			}
 		}
-		// A version read in full is remembered only once both reads and the
-		// stamp after them agree.
+		// A full read. It first ends the change epoch of the file on this
+		// deny-write handle, so the next change gets a new journal number
+		// even while another handle stays open, and takes the stamp after
+		// that. The digest is remembered only once both reads and the stamp
+		// after them agree; when the epoch cannot be ended nothing is.
 		forgetManagedArtifactDigest(path)
+		if guarded && endManagedArtifactChangeEpoch(file) == nil {
+			stamp, stamped = managedArtifactStampOf(file)
+		}
 	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {

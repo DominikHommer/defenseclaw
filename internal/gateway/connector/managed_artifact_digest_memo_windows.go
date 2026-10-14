@@ -15,11 +15,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// The three are replaced in tests.
+// The four are replaced in tests.
 var (
 	managedArtifactDigestMemoEligible = managedEnterpriseHookBinaryPath
 	openManagedArtifactExclusive      = openWindowsManagedArtifactExclusive
 	managedArtifactStampOf            = windowsManagedArtifactStamp
+	endManagedArtifactChangeEpoch     = endWindowsManagedArtifactChangeEpoch
 )
 
 // managedEnterpriseHookBinaryPath reports whether path is the hook binary of
@@ -71,10 +72,15 @@ type windowsManagedArtifactFileBasicInfo struct {
 }
 
 // windowsManagedArtifactStamp takes the stamp of the open file. ok is false
-// when a value cannot be read or the volume keeps no change journal: an
-// account that may write the file can set every time stamp back, but not the
-// journal number, which every write changes. The caller then reads the file
-// in full and memoizes nothing.
+// when a value cannot be read or the volume keeps no change journal; the
+// caller then reads the file in full and memoizes nothing. An account that
+// may write the file can set every time stamp back, but not the journal
+// number. That number names a change epoch, not a write: from the first
+// change of the file until its last handle closes, NTFS posts a new record
+// only for a kind of change the open record does not list yet, and any other
+// open handle, even one that may only read attributes, keeps the epoch open.
+// So the stamp a full read remembers is taken after
+// endWindowsManagedArtifactChangeEpoch, and any later change moves it.
 func windowsManagedArtifactStamp(file *os.File) (managedArtifactStamp, bool) {
 	handle := windows.Handle(file.Fd())
 	var info windows.ByHandleFileInformation
@@ -136,4 +142,25 @@ func windowsManagedArtifactUSN(handle windows.Handle) int64 {
 		}
 	}
 	return 0
+}
+
+// endWindowsManagedArtifactChangeEpoch writes a close record for the open
+// file to the change journal of its volume (FSCTL_WRITE_USN_CLOSE_RECORD),
+// as the last close of the file would: the next change of the file posts a
+// new record with a new number, whatever other handles stay open. It fails
+// on a volume without a journal. Only a full read calls it: the record moves
+// the number itself, so a call on a memo hit would end every hit.
+func endWindowsManagedArtifactChangeEpoch(file *os.File) error {
+	var usn int64
+	var returned uint32
+	return windows.DeviceIoControl(
+		windows.Handle(file.Fd()),
+		windows.FSCTL_WRITE_USN_CLOSE_RECORD,
+		nil,
+		0,
+		(*byte)(unsafe.Pointer(&usn)),
+		uint32(unsafe.Sizeof(usn)),
+		&returned,
+		nil,
+	)
 }

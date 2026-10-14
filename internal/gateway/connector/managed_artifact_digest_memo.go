@@ -101,9 +101,13 @@ func managedArtifactDigestMemoWanted(dataDir, path string) bool {
 // openManagedArtifactForDigest opens path for the stable digest. With
 // memoize it first opens a handle no writer can share: guarded reports it.
 // No handle could write the file when that one opened and none can while it
-// is open, so a stamp taken on it names the bytes read through it, and a
-// later write changes the change-journal number. While a writer holds the
-// file the usual open is used and nothing is memoized.
+// is open, so a stamp taken on it names the bytes read through it. A later
+// write does not always change the change-journal number: while any other
+// handle keeps the change epoch of the file open, a second change of the
+// same kind keeps it. A full read therefore ends the epoch on this handle
+// (endManagedArtifactChangeEpoch) before it takes the stamp it remembers;
+// the next change then gets a new number. While a writer holds the file the
+// usual open is used and nothing is memoized.
 func openManagedArtifactForDigest(path string, memoize bool) (*os.File, bool, error) {
 	if memoize {
 		if file, err := openManagedArtifactExclusive(path); err == nil {
