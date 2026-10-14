@@ -97,6 +97,10 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("Between releases from 1.0.1 on, rollback carries the sandbox setup", text)
         self.assertIn("each sandbox record and hook binding, harness image records, and undo point", text)
         self.assertIn("A release before 1.0.1 cannot take over that setup", text)
+        self.assertIn("For a return to 1.0.0, run `defenseclaw rollback` again", text)
+        self.assertIn("For 0.8.x, run `bash ~/.defenseclaw/previous/installer/install.sh --rollback`", text)
+        self.assertIn("only sandboxes in the `ready` phase while the gateway runs", text)
+        self.assertNotIn("tool calls are refused until you run `defenseclaw rollback` again", text)
 
     def test_gap_0554_enterprise_sandbox_docker_limit(self):
         text = page("enterprise/sandboxes.mdx")
