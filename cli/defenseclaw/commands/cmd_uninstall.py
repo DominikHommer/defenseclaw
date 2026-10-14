@@ -1545,15 +1545,40 @@ def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
     openshell = getattr(cfg, "openshell", None) if cfg is not None else None
     if openshell is not None and (getattr(openshell, "enabled", False) or getattr(openshell, "wrappers", None)):
         return True
-    # statecarry.StateDirs in Go contains the sandbox records and receipt,
-    # undo snapshots, and project shadows. Empty files and folders are not
-    # teardown state; a nonempty file or an unreadable entry is.
-    if any(_sandbox_tree_has_state(os.path.join(data_dir, name)) for name in ("sandboxes", "snapshots", "shadows")):
+    sandbox_dir = os.path.join(data_dir, "sandboxes")
+    try:
+        mode = os.lstat(sandbox_dir).st_mode
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(mode):
+        return True
+    if not stat.S_ISDIR(mode):
+        return False
+    if _sandbox_tree_has_state(sandbox_dir):
+        return True
+
+    # The old preflight ignored an empty tree and a single empty manager
+    # directory. Preserve that decision even if OpenShell has separate state.
+    # Other empty entries used to request teardown, so check for a related
+    # OpenShell setup before treating those entries as disposable markers.
+    try:
+        with os.scandir(sandbox_dir) as entries:
+            for entry in entries:
+                if entry.name != "manager":
+                    break
+                with os.scandir(entry.path) as manager_entries:
+                    if next(manager_entries, None) is not None:
+                        break
+            else:
+                return False
+    except OSError:
         return True
 
     home = os.path.expanduser("~")
-    # VMStateDir defaults to this OpenShell state tree. The upstream CLI may
-    # also use XDG_STATE_HOME; either tree can hold state outside data_dir.
+    # OpenShell state and user gateway config are tie-breakers for empty
+    # markers under sandboxes, not independent teardown triggers.
     state_roots = {os.path.join(home, ".local", "state", "openshell")}
     if xdg_state := os.environ.get("XDG_STATE_HOME"):
         if os.path.isabs(xdg_state):

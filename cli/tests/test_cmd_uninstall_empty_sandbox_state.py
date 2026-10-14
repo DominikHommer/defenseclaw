@@ -143,8 +143,6 @@ def test_uninstall_empty_sandbox_state_needs_no_teardown(install: SimpleNamespac
         "xdg-state",
         "enabled",
         "wrappers",
-        "snapshot",
-        "shadow",
     ],
 )
 def test_real_state_still_refuses_unreadable_list_and_skip_works(
@@ -188,14 +186,6 @@ def test_real_state_still_refuses_unreadable_list_and_skip_works(
         install.config_file.write_text("openshell:\n  enabled: true\n", encoding="utf-8")
     elif state == "wrappers":
         install.cfg.openshell.wrappers = ["claude"]
-    elif state == "snapshot":
-        snap = install.data_dir / "snapshots" / "kept"
-        snap.mkdir(parents=True)
-        (snap / "snapshot.json").write_text("{}", encoding="utf-8")
-    elif state == "shadow":
-        shadow = install.data_dir / "shadows"
-        shadow.mkdir()
-        (shadow / "project.git").write_text("git", encoding="utf-8")
 
     result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
     assert result.exit_code == 1, result.output
@@ -213,6 +203,34 @@ def test_real_state_still_refuses_unreadable_list_and_skip_works(
     assert not install.data_dir.exists()
     assert not install.gateway.exists() and not install.cli.exists()
     assert _calls(install) == ["sandbox list --output json", "sandbox teardown --help"]
+
+
+@pytest.mark.parametrize("trace", ["gateway-config", "openshell-state", "snapshots-and-shadows", "empty-manager"])
+def test_uninstall_preserves_no_teardown_without_sandbox_entries(install: SimpleNamespace, trace: str) -> None:
+    if trace in ("gateway-config", "empty-manager"):
+        config_dir = install.home / ".config" / "openshell"
+        config_dir.mkdir(parents=True)
+        (config_dir / "gateway.toml").write_text("[openshell]\n", encoding="utf-8")
+    if trace == "openshell-state":
+        disk = install.home / ".local" / "state" / "openshell" / "vm-driver" / "disk.img"
+        disk.parent.mkdir(parents=True)
+        disk.write_bytes(b"disk")
+    if trace == "snapshots-and-shadows":
+        snapshot = install.data_dir / "snapshots" / "kept" / "snapshot.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text("{}", encoding="utf-8")
+        shadow = install.data_dir / "shadows" / "project.git"
+        shadow.parent.mkdir()
+        shadow.write_text("git", encoding="utf-8")
+    if trace == "empty-manager":
+        (install.data_dir / "sandboxes" / "manager").mkdir(parents=True)
+
+    result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "sandbox teardown:    no (no OpenShell sandbox state)" in result.output
+    assert _calls(install) == []
+    assert not install.data_dir.exists()
+    assert not install.gateway.exists() and not install.cli.exists()
 
 
 def test_stop_sandboxes_still_runs_teardown(install: SimpleNamespace) -> None:
@@ -296,3 +314,32 @@ def test_sandbox_tree_state_scan_handles_empty_files_links_and_errors(tmp_path: 
 
     with patch.object(cmd_uninstall.os, "scandir", side_effect=unreadable):
         assert cmd_uninstall._sandbox_tree_has_state(str(root))
+
+
+def test_sandbox_state_helper_preserves_old_empty_tree_decision(
+    install: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = install.home / ".config" / "openshell"
+    config_dir.mkdir(parents=True)
+    (config_dir / "gateway.toml").write_text("[openshell]\n", encoding="utf-8")
+
+    def present() -> bool:
+        return cmd_uninstall._sandbox_state_present(install.cfg, str(install.data_dir), "linux")
+
+    assert not present()  # No sandboxes entry: external config alone is not a trigger.
+
+    manager = install.data_dir / "sandboxes" / "manager"
+    manager.mkdir(parents=True)
+    assert not present()  # The old preflight ignored one empty manager directory.
+    lock = manager.parent / "images.json.lock"
+    lock.touch()
+    assert present()  # A marker with gateway config still requests teardown.
+
+    lock.unlink()
+    (manager / "nested").mkdir()
+    assert present()  # Nested empty directories used to count as state.
+    (manager / "nested").rmdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", "relative-config")
+    assert not present()  # Relative XDG_CONFIG_HOME is not an independent trigger.
+    lock.touch()
+    assert present()
