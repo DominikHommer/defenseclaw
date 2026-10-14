@@ -232,14 +232,15 @@ rollback carries the sandbox setup to the restored install: its `openshell:`
 settings, each sandbox record and hook binding, harness image records, and
 undo point. A running sandbox stays managed, and its hooks work again when
 the gateway returns. The install you left keeps its own copy for a roll
-forward. A release before 1.0.1 cannot take over that setup: the installer
-names only sandboxes in the `ready` phase while the gateway runs and
-`sandbox list` answers. A sandbox in another phase, or one the installer
-cannot list, is affected the same way but is not named: its hooks fail closed
-and its agent's tool calls are refused. For a return to 1.0.0, run
-`defenseclaw rollback` again to restore the newer install. For 0.8.x, run
+forward. A release before 1.0.1 cannot take over that setup, so a running
+sandbox's hooks fail closed and its agent's tool calls are refused until you
+return to the newer install. The installer names only sandboxes in the
+`ready` phase, and only while the gateway runs and `sandbox list` answers; a
+sandbox in another phase, or one it cannot list, is not named. After a
+return to 1.0.0, run `defenseclaw rollback` again. After a return to 0.8.x,
+which has no rollback command, run
 `bash ~/.defenseclaw/previous/installer/install.sh --rollback` (the command
-the installer prints), or re-run the install command.
+the rollback prints), or run the install command again.
 
 Each install shows only its own audit events, so after a rollback the
 events the other install recorded are not in `defenseclaw-gateway audit export`.

@@ -40,6 +40,9 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("MCP runtime detection defaults to true", text)
         self.assertIn("Windows `status` and `verify` do not emit `asset_policy_not_enforced`", text)
         self.assertIn("gateway log is the only warning on Windows", text)
+        windows = page("enterprise/windows.mdx")
+        self.assertIn("Windows `status` and `verify` do not warn when a default or registry rule goes "
+                      "unenforced; the gateway log is the only signal", windows)
 
     def test_gap_0012_windows_scan_examples_exclude_profiles(self):
         text = page("enterprise/windows.mdx")
@@ -99,9 +102,10 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("Between releases from 1.0.1 on, rollback carries the sandbox setup", text)
         self.assertIn("each sandbox record and hook binding, harness image records, and undo point", text)
         self.assertIn("A release before 1.0.1 cannot take over that setup", text)
-        self.assertIn("For a return to 1.0.0, run `defenseclaw rollback` again", text)
-        self.assertIn("For 0.8.x, run `bash ~/.defenseclaw/previous/installer/install.sh --rollback`", text)
-        self.assertIn("only sandboxes in the `ready` phase while the gateway runs", text)
+        self.assertIn("After a return to 1.0.0, run `defenseclaw rollback` again", text)
+        self.assertIn("After a return to 0.8.x, which has no rollback command, run "
+                      "`bash ~/.defenseclaw/previous/installer/install.sh --rollback`", text)
+        self.assertIn("names only sandboxes in the `ready` phase, and only while the gateway runs", text)
         self.assertNotIn("tool calls are refused until you run `defenseclaw rollback` again", text)
 
     def test_gap_0554_enterprise_sandbox_docker_limit(self):

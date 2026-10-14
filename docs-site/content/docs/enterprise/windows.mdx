@@ -91,6 +91,8 @@ For skills and plugins in profiles, set
 registry and approval rules; set `asset_policy.mode: action` to block on those
 rules. Set `asset_policy.enabled: true` as well. MCP runtime detection already
 defaults to true. Hooks refuse denied names regardless of runtime detection.
+Windows `status` and `verify` do not warn when a default or registry rule
+goes unenforced; the gateway log is the only signal.
 
 Scanner children inherit the write-restricted LocalSystem token and its
 single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
@@ -851,10 +853,10 @@ of the admin config:
   also while a periodic rescan is running, such as the first one after an
   upgrade.
 - The MCP scanner does not connect to loopback, private, link-local or
-  multicast addresses. An HTTP or SSE server on `localhost` or an internal
-  address (or a name that resolves to one) is therefore never scanned: its
-  scan fails and it is blocked like any scanner failure. The
-  `install-scan-error` row says
+  multicast addresses. An HTTP or SSE server on `localhost`, `127.0.0.1` or an
+  internal address (`10.x`, `172.16-31.x`, `192.168.x`, or a name that
+  resolves to one) is therefore never scanned: its scan fails and it is
+  blocked like any scanner failure. The `install-scan-error` row says
   `the MCP scanner does not connect to loopback, private, link-local or
   multicast addresses ... so the server was not scanned`, and
   `install-blocked reason=scanner-error` follows. A stdio server (a `command`)
@@ -867,7 +869,7 @@ of the admin config:
     mcp:
       allowed:
         - name: notes
-          url: http://localhost:28561/mcp
+          url: http://127.0.0.1:28561/mcp
           reason: reviewed internal server
   ```
 
