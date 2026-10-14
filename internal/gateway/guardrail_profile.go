@@ -823,13 +823,13 @@ func lookupLocalProfileSubject(name string) (profileSubject, error) {
 }
 
 func localProfileSubject(account *osuser.User) profileSubject {
+	local, known := profileAccountLocality(account)
 	subject := profileSubject{
-		UserID:   account.Uid,
-		IDKind:   useridentity.KindForID(account.Uid),
-		UserName: useridentity.BareAccountName(account.Username),
-	}
-	if strings.ContainsAny(account.Username, `\@`) {
-		subject.Principal = account.Username
+		UserID:          account.Uid,
+		IDKind:          useridentity.KindForID(account.Uid),
+		UserName:        useridentity.BareAccountName(account.Username),
+		localAccount:    local,
+		nameUnconfirmed: !known,
 	}
 	groups, err := accountGroups(account)
 	subject.Groups = groups

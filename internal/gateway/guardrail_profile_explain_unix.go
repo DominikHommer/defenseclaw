@@ -55,7 +55,20 @@ var sameNameProfileAccounts = func(ctx context.Context, r unixidentity.Resolver,
 	if strings.ContainsAny(name, `@\`) || strings.Trim(name, "0123456789") == "" {
 		return nil
 	}
-	return unixidentity.SameNameAccounts(ctx, r, account)
+	twins := unixidentity.SameNameAccounts(ctx, r, account)
+	for _, cached := range managedHookPeerHomes.cachedNamesakes(name, account.UID) {
+		found := false
+		for _, twin := range twins {
+			if twin.UID == cached.UID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			twins = append(twins, cached)
+		}
+	}
+	return twins
 }
 
 // ambiguousAccount is the refusal of a bare name that names accounts.

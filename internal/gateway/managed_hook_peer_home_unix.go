@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -403,13 +404,42 @@ func (c *managedHookPeerHomeCache) cachedHolder(name string) (int, string, bool)
 	name = strings.TrimSpace(name)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if uid, err := strconv.Atoi(name); err == nil && strconv.Itoa(uid) == name {
+		if holder, ok := c.holders[uid]; ok {
+			holderName, _, _ := strings.Cut(holder, "\x00")
+			return uid, holderName, holderName != ""
+		}
+		return 0, "", false
+	}
+	var foundUID int
+	var foundName string
 	for uid, holder := range c.holders {
 		holderName, _, _ := strings.Cut(holder, "\x00")
-		if holderName != "" && (useridentity.EqualFold(holderName, name) || strconv.Itoa(uid) == name) {
-			return uid, holderName, true
+		if holderName != "" && useridentity.EqualFold(holderName, name) {
+			if foundName != "" {
+				return 0, "", false
+			}
+			foundUID, foundName = uid, holderName
 		}
 	}
-	return 0, "", false
+	return foundUID, foundName, foundName != ""
+}
+
+// cachedNamesakes lists other verified uids last held under a bare name.
+// The account database may temporarily stop answering for a directory uid,
+// while explain can still use its cached facts by that uid.
+func (c *managedHookPeerHomeCache) cachedNamesakes(name string, exceptUID int) []unixidentity.Account {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var accounts []unixidentity.Account
+	for uid, holder := range c.holders {
+		holderName, _, _ := strings.Cut(holder, "\x00")
+		if uid != exceptUID && holderName != "" && useridentity.EqualFold(holderName, name) {
+			accounts = append(accounts, unixidentity.Account{UID: uid, Name: holderName})
+		}
+	}
+	sort.Slice(accounts, func(i, j int) bool { return accounts[i].UID < accounts[j].UID })
+	return accounts
 }
 
 func (c *managedHookPeerHomeCache) lookupName(uid int) string {
