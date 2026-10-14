@@ -661,10 +661,17 @@ state:
 
 Prefer an image without that state: capture the template before you install
 DefenseClaw and install it on each clone at first boot (through your MDM or
-the first-boot script), or run `enterprise linux uninstall --json` (macOS:
-`enterprise macos uninstall --json`) on the template just before you capture
-it. The plain uninstall removes the machine state, the keys included; keep
-`--keep-state` off.
+the first-boot script), or run `enterprise linux uninstall --purge --json`
+(macOS: `enterprise macos uninstall --purge --json`) on the template just
+before you capture it. A plain uninstall removes most machine state, but if
+an account keeps sandboxes it keeps the gateway's registration store
+(`/var/lib/defenseclaw/sandbox` on Linux,
+`/opt/cisco/defenseclaw/runtime/sandbox` on macOS) and
+`redaction-correlation.key` (`/var/lib/defenseclaw/redaction-correlation.key`
+or `/opt/cisco/defenseclaw/runtime/redaction-correlation.key`). They are
+root-owned while the service account is gone; the next `ensure` adopts them.
+The key is per-machine; a clone must not share it. Use `--purge` for a clean
+image if the template ever held sandboxes, and keep `--keep-state` off.
 
 For clones that already run it, on each clone:
 
