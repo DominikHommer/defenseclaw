@@ -263,6 +263,21 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "sandboxes and keeps them", row)
         self.assertNotIn("checks group membership, tears down per user", row)
 
+    def test_enterprise_uninstall_names_the_kept_sandbox_store(self):
+        # rel-1-0-2:GAP-0598 (lead decision option a): a non-purge uninstall
+        # that keeps sandboxes keeps the registrations, decisions and key.
+        text = page("enterprise/sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        self.assertIn("also keeps the gateway's sandbox registrations and decisions "
+                      "(`sandbox/registrations` and `sandbox/decisions`) and their key "
+                      "(`redaction-correlation.key`); the rest of the machine state goes", bullet)
+        self.assertIn("which adopts them and gives them to the service account, also after a package "
+                      "reinstall (`rpm -e` or `apt remove`, then an install)", bullet)
+        self.assertIn("it also removes the kept registrations, decisions and key", bullet)
+        row = text.split("| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root |", 1)[1].split("\n", 1)[0]
+        self.assertIn("with the gateway's sandbox registrations, decisions and `redaction-correlation.key` "
+                      "(`--purge` removes those too)", row)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "

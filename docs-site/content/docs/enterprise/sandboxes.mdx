@@ -98,7 +98,7 @@ Okta through SSSD, and similar sources work. See
 | Managed gateway | The service account | The policy authority. Decides each person's profile, resolves the sandbox policy, keeps the registrations and decisions, judges relayed hooks. Starts no sandbox and uses no docker or KVM. |
 | Sandbox daemon, `defenseclaw-gateway sandbox-daemon` | The user | Runs the sandbox manager, the hook ingress, the egress proxy, discovery and the process tree. Has no API port, no guardrails and no config file. Its CLI socket is the user's alone. |
 | OpenShell gateway | The user | Creates the sandboxes. Rendered from `enterprise.openshell` (see below). |
-| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root | Verifies or installs the pieces, renders the OpenShell gateway settings, enables the user units, checks group membership. `uninstall --purge` tears down per user; `uninstall` alone stops running sandboxes and keeps them. |
+| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root | Verifies or installs the pieces, renders the OpenShell gateway settings, enables the user units, checks group membership. `uninstall --purge` tears down per user; `uninstall` alone stops running sandboxes and keeps them, with the gateway's sandbox registrations, decisions and `redaction-correlation.key` (`--purge` removes those too). |
 
 A sandbox run goes through five steps.
 
@@ -1312,9 +1312,18 @@ running sandbox counts again within the next minute.
   through the sandbox daemon, which syncs a MicroVM disk before stopping it.
   It then stops the daemon and the OpenShell gateway. Every sandbox stays with
   its records, disks and any copy-mode work not pulled yet for the next
-  activation of the deployment. Only `--purge` runs each user's teardown as
-  that user and removes the daemon state, MicroVM disks, images, both stores
-  and the rendered `gateway.toml`.
+  activation of the deployment. When an account keeps a sandbox, the gateway
+  data folder (`/var/lib/defenseclaw` on Linux,
+  `/opt/cisco/defenseclaw/runtime` on macOS) also keeps the gateway's sandbox
+  registrations and decisions (`sandbox/registrations` and `sandbox/decisions`)
+  and their key (`redaction-correlation.key`); the rest of the machine state
+  goes. If the uninstall removed the service account, those files are root's
+  until the next `ensure`, which adopts them and gives them to the service
+  account, also after a package reinstall (`rpm -e` or `apt remove`, then an
+  install). The kept sandboxes then start, review and pull as before. Only
+  `--purge` runs each user's teardown as that user and removes the daemon
+  state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
+  it also removes the kept registrations, decisions and key.
 
 ## Troubleshooting
 
