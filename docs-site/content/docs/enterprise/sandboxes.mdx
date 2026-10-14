@@ -424,7 +424,7 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.3"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
-| `e2fsprogs_dir` | macOS only. An absolute directory whose chain is owned by root. |
+| `e2fsprogs_dir` | macOS only. An absolute directory whose chain is owned by root: the e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses one without both tools. |
 
 These keys are lifecycle settings: changing one is applied by `ensure` and
 needs a restart of the user daemons, which waits for running sandboxes. The

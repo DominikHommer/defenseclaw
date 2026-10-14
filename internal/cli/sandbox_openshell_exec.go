@@ -286,17 +286,23 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 }
 
 // openShellE2fsprogs is the e2fsprogs directory the macOS MicroVM driver
-// gets first on its PATH (D5): the administrator's
-// enterprise.openshell.e2fsprogs_dir when it passes the managed trust
-// check, else the user's own ~/.local/opt/e2fsprogs build. Nothing else, so
-// the driver never picks up another account's Homebrew keg (GAP-0004).
+// gets first on its PATH (D5): the folder of the administrator's
+// enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
+// by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
+// when it passes the managed trust check, else the user's own
+// ~/.local/opt/e2fsprogs build. Nothing else, so the driver never picks up
+// another account's Homebrew keg (GAP-0004).
 func openShellE2fsprogs(adminDir, home string) (string, error) {
 	if adminDir != "" {
-		sbin := filepath.Join(adminDir, "sbin")
-		if err := openShellExecTrustedDir(sbin, "e2fsprogs"); err != nil {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s is not trusted: %v", errOpenShellPrerequisiteMissing, sbin, err)
+		tools := openshell.AdminE2fsprogsToolDir(adminDir, openshell.RegularFile)
+		if tools == "" {
+			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s holds no mke2fs and debugfs, in it or in its sbin or bin "+
+				"(an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, adminDir)
 		}
-		return sbin, nil
+		if err := openShellExecTrustedDir(tools, "e2fsprogs"); err != nil {
+			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s is not trusted: %v", errOpenShellPrerequisiteMissing, tools, err)
+		}
+		return tools, nil
 	}
 	sbin := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
 	if err := ownFileOnly(filepath.Join(sbin, "mke2fs")); err != nil {
