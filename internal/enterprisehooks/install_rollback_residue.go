@@ -17,8 +17,11 @@
 package enterprisehooks
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -133,4 +136,87 @@ func (s dataDirSnapshot) removeAdded() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// hookConfigFileMaxBytes bounds a hook config file a failed install
+// compares; a larger one counts as changed.
+const hookConfigFileMaxBytes = 16 << 20
+
+// hookConfigSnapshot is what the agent's hook config files and DefenseClaw
+// plugin artifacts held before a connector's Setup: nil for a missing file,
+// the SHA-256 of its bytes otherwise. A Setup that failed before it wrote
+// any of them registered nothing, so the files it added below the data
+// directory can go even when its teardown cannot run (GAP-0509: the teardown
+// of a Claude Code install fails on the same unparseable settings Setup
+// did).
+type hookConfigSnapshot struct {
+	sums map[string][]byte
+	ok   bool
+}
+
+func snapshotHookConfigs(paths []string) hookConfigSnapshot {
+	snap := hookConfigSnapshot{sums: map[string][]byte{}, ok: true}
+	for _, path := range paths {
+		sum, err := hookConfigSum(path)
+		if err != nil {
+			snap.ok = false
+			return snap
+		}
+		snap.sums[path] = sum
+	}
+	return snap
+}
+
+// unchanged reports whether every file holds what it held at the snapshot.
+// An unreadable file, then or now, counts as changed.
+func (s hookConfigSnapshot) unchanged() bool {
+	if !s.ok {
+		return false
+	}
+	for path, before := range s.sums {
+		now, err := hookConfigSum(path)
+		if err != nil || !bytes.Equal(before, now) {
+			return false
+		}
+	}
+	return true
+}
+
+// hookConfigSum is the SHA-256 of path's bytes, nil when it does not exist.
+// A folder hashes as its type only.
+func hookConfigSum(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case info.IsDir():
+		sum := sha256.Sum256([]byte("dir"))
+		return sum[:], nil
+	case info.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(path)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256([]byte("link\x00" + target))
+		return sum[:], nil
+	case !info.Mode().IsRegular():
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	case info.Size() > hookConfigFileMaxBytes:
+		return nil, fmt.Errorf("%s is too large to compare", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	h.Write([]byte("file\x00"))
+	if _, err := io.Copy(h, io.LimitReader(f, hookConfigFileMaxBytes+1)); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }

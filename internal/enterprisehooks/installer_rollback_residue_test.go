@@ -96,6 +96,104 @@ func TestFailedInstallRemovesTheFilesItAdded(t *testing.T) {
 	})
 }
 
+// A managed Claude Code install whose ~/.claude/settings.json does not parse
+// fails in Setup itself, after Setup wrote its hook scripts, token and
+// config files and the settings backup below the data directory. The
+// teardown fails on the same settings, so the rollback used to stop there
+// and the account kept all of it with no manifest row naming it (GAP-0509).
+// Setup wrote no registration (the settings are unchanged), so the files it
+// added go and the user's settings stay byte for byte.
+func TestFailedSetupRemovesTheFilesItAdded(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	previous := connector.ClaudeCodeManagedSettingsRootOverride
+	connector.ClaudeCodeManagedSettingsRootOverride = t.TempDir()
+	t.Cleanup(func() { connector.ClaudeCodeManagedSettingsRootOverride = previous })
+
+	brokenSettings := []byte(`{"permissions": {"allow": ["Bash(ls)"]}`)
+	run := func(t *testing.T, home string) {
+		t.Helper()
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settingsPath, brokenSettings, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Install(context.Background(), InstallOptions{
+			ConnectorName: "claudecode",
+			UserHome:      home,
+			OwnerUID:      os.Getuid(),
+			OwnerGID:      os.Getgid(),
+			APIAddr:       "127.0.0.1:18970",
+			APIToken:      "test-token",
+			AgentVersion:  "2.1.296",
+			Registry:      connector.NewDefaultRegistry(),
+		})
+		if err == nil || !strings.Contains(err.Error(), "setup failed") {
+			t.Fatalf("Install error = %v, want the Setup failure", err)
+		}
+		if got, err := os.ReadFile(settingsPath); err != nil || string(got) != string(brokenSettings) {
+			t.Fatalf("the user's Claude settings changed (%v): %s", err, got)
+		}
+	}
+
+	t.Run("an account without DefenseClaw state keeps none", func(t *testing.T) {
+		home := newTestHome(t)
+		run(t, home)
+		if left := treeBelow(t, filepath.Join(home, ".defenseclaw")); len(left) != 0 {
+			t.Fatalf("the failed install left %v", left)
+		}
+	})
+	t.Run("what was there stays", func(t *testing.T) {
+		home := newTestHome(t)
+		dataDir := filepath.Join(home, ".defenseclaw")
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dataDir, "session-facts.json"), []byte("kept"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(t, home)
+		if left := strings.Join(treeBelow(t, dataDir), " "); left != ". session-facts.json" {
+			t.Fatalf("after the failed install the data directory holds %q", left)
+		}
+	})
+}
+
+// A hook config snapshot tells a file Setup left alone from one it wrote,
+// created or removed; an unreadable file counts as changed.
+func TestHookConfigSnapshotUnchanged(t *testing.T) {
+	root := t.TempDir()
+	kept := filepath.Join(root, "settings.json")
+	if err := os.WriteFile(kept, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	absent := filepath.Join(root, "hooks.json")
+	snap := snapshotHookConfigs([]string{kept, absent})
+	if !snap.unchanged() {
+		t.Fatal("untouched files count as changed")
+	}
+	if err := os.WriteFile(absent, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if snap.unchanged() {
+		t.Fatal("a created file counts as unchanged")
+	}
+	if err := os.Remove(absent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if snap.unchanged() {
+		t.Fatal("a rewritten file counts as unchanged")
+	}
+	if (hookConfigSnapshot{}).unchanged() {
+		t.Fatal("a snapshot that could not be taken counts as unchanged")
+	}
+}
+
 // treeBelow lists dir's entries relative to it ("." for dir), nil when dir
 // does not exist.
 func treeBelow(t *testing.T, dir string) []string {
