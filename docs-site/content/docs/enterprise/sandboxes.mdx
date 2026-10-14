@@ -72,11 +72,12 @@ Okta through SSSD, and similar sources work. See
   registration is bound to and whether that sandbox runs. On a managed host,
   `sandbox.required_for` keeps normal host use of the listed agents out through
   the machine-owned hook. In 1.0.2 it does not stop a standard user who
-  deliberately presents a running-sandbox registration for their own account:
-  the relay route can then judge that account's hook calls under the
-  registration. This never reaches another account's policy; the audit record
-  names the account. A root-owned sandbox lifecycle service that vouches for
-  registrations is planned for a later release.
+  deliberately fakes a running-sandbox registration for their own account,
+  because this release has no root-owned sandbox lifecycle service to vouch
+  for registrations. The relay route can then judge that account's hook calls
+  under the registration. This never reaches another account's policy; the
+  audit record names the account. The root-owned service is planned for a
+  later release.
 - **No bundling.** DefenseClaw never ships OpenShell in its packages. You
   provide it (`prerequisite`) or let each user's daemon download NVIDIA's
   release at first use (`setup`).
