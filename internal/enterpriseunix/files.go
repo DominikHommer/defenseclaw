@@ -240,6 +240,9 @@ func (e *Env) copyFileAtomic(src, path string, mode os.FileMode, owner fileOwner
 	})
 }
 
+// renameAtomicFile is replaced only by tests that exercise a failed commit.
+var renameAtomicFile = os.Rename
+
 func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
@@ -276,7 +279,7 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	if err := e.Lchown(tmp, owner.UID, owner.GID); err != nil {
 		return fmt.Errorf("chown %s: %w", path, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameAtomicFile(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	committed = true

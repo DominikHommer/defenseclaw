@@ -156,6 +156,7 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	for _, entry := range state.sortedPending() {
 		l.describePending(entry)
 	}
+	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
 	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {

@@ -574,9 +574,10 @@ func (e *Env) systemDriver() (dir string, refused []string) {
 // to the sandbox subsystem and of the per-user changes waiting for sandboxes
 // to stop.
 type openshellState struct {
-	Version int                `json:"version"`
-	Applied *openshellApplied  `json:"applied,omitempty"`
-	Pending map[string]pending `json:"pending,omitempty"`
+	Version         int                `json:"version"`
+	Applied         *openshellApplied  `json:"applied,omitempty"`
+	Pending         map[string]pending `json:"pending,omitempty"`
+	GatewayIdentity string             `json:"gateway_identity,omitempty"`
 }
 
 // openshellApplied is the sandbox configuration the last committed

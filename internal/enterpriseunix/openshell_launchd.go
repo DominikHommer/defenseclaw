@@ -1,0 +1,325 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+)
+
+// launchAgentState describes only the top-level service fields of launchctl
+// print. The agents are on-demand: a loaded job with no failed start can be
+// idle. In particular, bootstrap leaves it not running with runs = 0.
+type launchAgentState struct {
+	state, exitReason, exitCode, spawnError string
+	runs                                    int
+}
+
+func parseLaunchAgentState(raw []byte) launchAgentState {
+	var s launchAgentState
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		key, value, ok := strings.Cut(line, " = ")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "state":
+			if s.state == "" {
+				s.state = value
+			}
+		case "runs":
+			s.runs, _ = strconv.Atoi(value)
+		case "last exit reason":
+			s.exitReason = value
+		case "last exit code":
+			s.exitCode = value
+		case "last spawn error":
+			s.spawnError = value
+		}
+	}
+	return s
+}
+
+func (s launchAgentState) failure(expectedRunning bool) string {
+	if strings.Contains(strings.ToUpper(s.exitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.spawnError), "CODESIGN") {
+		return "last start was killed for code signing (" + strings.TrimSpace(s.exitReason+" "+s.spawnError) + ")"
+	}
+	if s.spawnError != "" {
+		return "last spawn error: " + s.spawnError
+	}
+	if s.state == "running" {
+		return ""
+	}
+	if s.exitCode != "" && s.exitCode != "0" && s.exitCode != "(never exited)" {
+		return "last exit code " + s.exitCode
+	}
+	if expectedRunning {
+		return "loaded but not running when it must be running"
+	}
+	if s.runs > 0 && s.exitCode == "(never exited)" {
+		return "loaded but not running after a failed start"
+	}
+	return ""
+}
+
+func launchAgentDisabled(raw []byte, label string) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), " => ")
+		if !ok || strings.Trim(key, "\" ") != label {
+			continue
+		}
+		return strings.HasPrefix(value, "disabled") || strings.HasPrefix(value, "true")
+	}
+	return false
+}
+
+func (e *Env) gatewayFileIdentity() (string, error) {
+	path := e.P(filepath.Join(e.Layout.BinDir, binGateway))
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file", path)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("%s has no inode identity", path)
+	}
+	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
+}
+
+type loadedLaunchAgent struct {
+	label string
+	state launchAgentState
+}
+
+// loadedMacOSAgents inspects only the two DefenseClaw jobs in an existing GUI
+// domain. A logged-out account and a disabled or unloaded job are left alone.
+func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) (string, []loadedLaunchAgent, error) {
+	domain := "gui/" + strconv.Itoa(a.UID)
+	domainResult, err := e.Runner.Run(ctx, "launchctl", "print", domain)
+	if err != nil || !strings.Contains(string(domainResult.Stdout), domain+" = {") {
+		return domain, nil, nil
+	}
+	disabled, err := e.Runner.Run(ctx, "launchctl", "print-disabled", domain)
+	if err != nil {
+		return domain, nil, fmt.Errorf("check disabled LaunchAgents for %s: %w", a.Name, err)
+	}
+	var out []loadedLaunchAgent
+	for _, label := range []string{labelSandbox, labelOpenShellGateway} {
+		if launchAgentDisabled(disabled.Stdout, label) {
+			continue
+		}
+		res, err := e.Runner.Run(ctx, "launchctl", "print", domain+"/"+label)
+		if err != nil {
+			if launchdNotLoaded(err) || strings.Contains(string(res.Stderr), "Could not find") || strings.Contains(string(res.Stderr), "No such process") {
+				continue
+			}
+			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: %w", label, a.Name, err)
+		}
+		state := parseLaunchAgentState(res.Stdout)
+		if state.state == "" {
+			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: launchctl reported no service state", label, a.Name)
+		}
+		out = append(out, loadedLaunchAgent{label: label, state: state})
+	}
+	return domain, out, nil
+}
+
+// reloadMacOSAgent uses the same bootout/bootstrap sequence that recovered the
+// field failure. A failed job is kickstarted because neither plist has
+// RunAtLoad; an idle job remains idle until its next sandbox command.
+func (e *Env) reloadMacOSAgent(ctx context.Context, domain string, job loadedLaunchAgent, failed bool) error {
+	target := domain + "/" + job.label
+	if _, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil {
+		return fmt.Errorf("boot out %s: %w", target, err)
+	}
+	plist := e.P(filepath.Join("/Library/LaunchAgents", job.label+".plist"))
+	if _, err := e.Runner.Run(ctx, "launchctl", "bootstrap", domain, plist); err != nil {
+		return fmt.Errorf("bootstrap %s: %w", target, err)
+	}
+	if failed {
+		if _, err := e.Runner.Run(ctx, "launchctl", "kickstart", target); err != nil {
+			return fmt.Errorf("start %s after bootstrap: %w", target, err)
+		}
+	}
+	// launchctl can acknowledge a start before the process becomes running.
+	// A short bounded poll checks the result without delaying a healthy install.
+	for attempt := 0; attempt < 5; attempt++ {
+		res, err := e.Runner.Run(ctx, "launchctl", "print", target)
+		if err != nil {
+			return fmt.Errorf("check %s after bootstrap: %w", target, err)
+		}
+		state := parseLaunchAgentState(res.Stdout)
+		problem := state.failure(failed && job.label == labelOpenShellGateway)
+		if problem == "" && (!failed || state.state == "running" || job.label == labelSandbox && state.runs > 0 && state.exitCode == "0") {
+			return nil
+		}
+		if attempt == 4 || !failed {
+			return fmt.Errorf("%s after bootstrap: %s (state %q)", target, problem, state.state)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return nil
+}
+
+// reconcileMacOSAgents runs after the deployment commits or an ensure no-op.
+// The state holds the gateway inode seen at the last reload, so an old 1.0.1
+// state (no identity) and every pkg replacement reload once, while a second
+// ensure of the same inode leaves healthy jobs untouched.
+func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellState) bool {
+	e := l.env
+	if e.GOOS != "darwin" || state.Applied == nil || !state.Applied.Enabled {
+		return false
+	}
+	identity, err := e.gatewayFileIdentity()
+	if err != nil {
+		l.result.AddWarning(codeSandboxUserState, "could not inspect the LaunchAgent gateway binary: "+err.Error())
+		return false
+	}
+	changed := identity != state.GatewayIdentity
+	for _, a := range e.sandboxOps().Accounts(ctx) {
+		if !e.usableSandboxAccount(a) {
+			continue
+		}
+		domain, jobs, err := e.loadedMacOSAgents(ctx, a)
+		if err != nil {
+			if changed {
+				key := strconv.Itoa(a.UID)
+				if old, waiting := state.Pending[key]; !waiting || old.Kind == "launchd" || old.Kind == "restart" {
+					state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary changed (" + err.Error() + ")", Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: -1}
+				}
+			}
+			l.result.AddWarning(codeSandboxUserState, err.Error())
+			continue
+		}
+		var status SandboxStatus
+		var statusErr error
+		statusChecked := false
+		for _, job := range jobs {
+			if changed || job.label == labelOpenShellGateway && job.state.state != "running" {
+				status, statusErr = e.sandboxOps().Status(ctx, a)
+				statusChecked = true
+				break
+			}
+		}
+		var needed []loadedLaunchAgent
+		for _, job := range jobs {
+			if changed || job.state.failure(job.label == labelOpenShellGateway && status.Running > 0) != "" {
+				needed = append(needed, job)
+			}
+		}
+		if len(needed) == 0 {
+			continue
+		}
+		if !statusChecked {
+			status, statusErr = e.sandboxOps().Status(ctx, a)
+		}
+		key := strconv.Itoa(a.UID)
+		if old, waiting := state.Pending[key]; waiting {
+			if old.Kind == "switch" || old.Kind == "stop" {
+				// Those changes already boot out the gateway when safe.
+				continue
+			}
+			if old.Kind == "restart" {
+				old.Kind = "launchd"
+				old.Reason = "the signed gateway binary or a loaded LaunchAgent changed"
+				state.Pending[key] = old
+			}
+		}
+		if statusErr != nil || status.Running > 0 {
+			count := status.Running
+			if statusErr != nil {
+				count = -1
+			}
+			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed", Since: e.Now().UTC().Format(time.RFC3339), Sandboxes: count}
+			l.result.AddWarning(codeSandboxPending, fmt.Sprintf("LaunchAgent reload for %s waits for its running sandboxes to stop", a.Name))
+			continue
+		}
+		var failed error
+		for _, job := range needed {
+			if err := e.reloadMacOSAgent(ctx, domain, job, job.state.failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
+				failed = err
+				break
+			}
+			l.openshellChange("reloaded %s for %s after its program or job failed", job.label, a.Name)
+		}
+		if failed != nil {
+			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + failed.Error() + ")", Since: e.Now().UTC().Format(time.RFC3339)}
+			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not reload the LaunchAgent of %s: %v; repair retries it", a.Name, failed))
+		} else {
+			delete(state.Pending, key)
+		}
+	}
+	state.GatewayIdentity = identity
+	return changed
+}
+
+// describeMacOSAgents is read-only for status and verify. An ensure from a
+// package warns and records a failed reload for repair instead of failing the
+// package receipt solely because one user's GUI job cannot be reloaded.
+func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
+	if l.env.GOOS != "darwin" {
+		return
+	}
+	for _, a := range l.env.sandboxOps().Accounts(ctx) {
+		if !l.env.usableSandboxAccount(a) {
+			continue
+		}
+		_, jobs, err := l.env.loadedMacOSAgents(ctx, a)
+		if err != nil {
+			if l.opts.Action == ActionEnsure && l.opts.FromPackage {
+				l.result.AddWarning(codeSandboxUserState, err.Error())
+			} else {
+				l.result.AddError(codeSandboxUserState, err.Error())
+				l.result.SecurityComplete = false
+			}
+			continue
+		}
+		var running int
+		for _, job := range jobs {
+			if job.label == labelOpenShellGateway && job.state.state != "running" {
+				if status, err := l.env.sandboxOps().Status(ctx, a); err == nil {
+					running = status.Running
+				}
+				break
+			}
+		}
+		for _, job := range jobs {
+			if why := job.state.failure(job.label == labelOpenShellGateway && running > 0); why != "" {
+				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) is %s; run `%s`", job.label, a.Name, a.UID, why, l.env.lifecycleCommand(ActionRepair))
+				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.label, Kind: sandboxRowKind, State: "failed: " + why})
+				l.result.SecurityComplete = false
+				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
+					l.result.AddWarning(codeSandboxUserState, message)
+				} else {
+					l.result.AddError(codeSandboxUserState, message)
+				}
+			}
+		}
+	}
+}
