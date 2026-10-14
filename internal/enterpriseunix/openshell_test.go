@@ -189,6 +189,7 @@ func (h *osHost) payloadOnce() string {
 	}
 	dir := h.payload("1.0.0")
 	payloadDirs.Store(h.t.Name(), dir)
+	h.t.Cleanup(func() { payloadDirs.Delete(h.t.Name()) })
 	return dir
 }
 
