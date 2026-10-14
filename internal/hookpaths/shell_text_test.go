@@ -10,6 +10,7 @@ import (
 )
 
 func TestShellTextWriteOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, row := range []struct {

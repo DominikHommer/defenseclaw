@@ -10,6 +10,7 @@ import (
 )
 
 func TestUnresolvedProgramWordProof(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	linked := filepath.Join(cwd, "next.txt")

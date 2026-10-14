@@ -10,6 +10,7 @@ import (
 )
 
 func TestLauncherWriteOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	target := filepath.Join(cwd, "disklink")

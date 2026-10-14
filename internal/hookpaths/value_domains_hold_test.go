@@ -11,6 +11,7 @@ import (
 )
 
 func TestBoundedShellValueDomains(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	keys := filepath.Join(home, ".ssh", "authorized_keys")

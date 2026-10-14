@@ -11,6 +11,7 @@ import (
 )
 
 func TestLiteralGlobRedirectCandidates(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
@@ -64,6 +65,7 @@ func TestLiteralGlobRedirectCandidates(t *testing.T) {
 }
 
 func TestMissingGlobParent(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "missing", "project")
 	paths, unknown := ShellDynamicWriteOperands(`echo ok > out-*.txt`, cwd, home)

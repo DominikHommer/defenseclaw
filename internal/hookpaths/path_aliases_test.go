@@ -10,6 +10,7 @@ import (
 )
 
 func TestWorkingDirectoryPathAliases(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd, home := "/tmp/project", "/tmp/home"
 	for _, row := range []struct{ command, target string }{
 		{"echo x >> /proc/self/cwd/disklink", "disklink"},
@@ -29,6 +30,7 @@ func TestWorkingDirectoryPathAliases(t *testing.T) {
 }
 
 func TestSameUserLauncherValue(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd, home := "/tmp/project", "/tmp/home"
 	for _, command := range []string{
 		"sudo -n -u $USER tee -a disklink",

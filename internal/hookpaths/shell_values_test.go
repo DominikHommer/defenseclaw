@@ -11,6 +11,7 @@ import (
 )
 
 func TestShellVariableWriteCandidates(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	rows := []struct {
@@ -41,6 +42,7 @@ func TestShellVariableWriteCandidates(t *testing.T) {
 }
 
 func TestDynamicTargetDomains(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	for _, dir := range []string{"build", "logs", "out"} {

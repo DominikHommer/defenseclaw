@@ -10,6 +10,7 @@ import (
 )
 
 func TestLiteralWriterClasses(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	target := filepath.Join(cwd, "disklink")
@@ -69,6 +70,7 @@ func TestLiteralWriterClasses(t *testing.T) {
 }
 
 func TestLiteralWriterDynamicDestinations(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	rows := []string{
@@ -86,6 +88,7 @@ func TestLiteralWriterDynamicDestinations(t *testing.T) {
 }
 
 func TestLiteralWriterDirectoryDestinations(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	target := filepath.Join(home, ".ssh", "authorized_keys")

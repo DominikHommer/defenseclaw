@@ -10,6 +10,7 @@ import (
 )
 
 func TestLiteralWriterHoldout(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	protected := filepath.Join(cwd, "disklink")

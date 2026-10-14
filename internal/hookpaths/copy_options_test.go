@@ -9,6 +9,7 @@ import (
 )
 
 func TestCopyDestinationScope(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	rows := []struct {

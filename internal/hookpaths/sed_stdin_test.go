@@ -10,6 +10,7 @@ import (
 )
 
 func TestSedStdinScriptOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	rows := []struct {

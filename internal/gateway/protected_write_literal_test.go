@@ -14,6 +14,7 @@ import (
 )
 
 func TestProtectedWriteLiteralWriterDecisions(t *testing.T) {
+	skipWindowsProtectedWritePOSIX(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	key := filepath.Join(home, ".ssh", "authorized_keys")

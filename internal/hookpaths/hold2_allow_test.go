@@ -10,6 +10,7 @@ import (
 )
 
 func TestBoundedOrdinaryWriteTargets(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0700); err != nil {
@@ -37,6 +38,7 @@ func TestBoundedOrdinaryWriteTargets(t *testing.T) {
 }
 
 func TestBoundedValueProtectedAliases(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0700); err != nil {

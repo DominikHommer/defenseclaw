@@ -13,6 +13,7 @@ import (
 )
 
 func TestProtectedWriteLauncherDecisions(t *testing.T) {
+	skipWindowsProtectedWritePOSIX(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	key := filepath.Join(home, ".ssh", "authorized_keys")

@@ -11,6 +11,7 @@ import (
 )
 
 func TestShellProgramValuesAndOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	protected := filepath.Join(cwd, "disklink")
@@ -50,6 +51,7 @@ func TestShellProgramValuesAndOperands(t *testing.T) {
 }
 
 func TestLiteralChildWriterClasses(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	protected := filepath.Join(cwd, "disklink")

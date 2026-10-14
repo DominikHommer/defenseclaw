@@ -10,6 +10,7 @@ import (
 )
 
 func TestApplyPatchProjectTargets(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	project := filepath.Join(home, "proj")
 	keys := filepath.Join(home, ".ssh", "authorized_keys")

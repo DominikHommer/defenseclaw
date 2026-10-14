@@ -12,6 +12,7 @@ import (
 )
 
 func TestRedirectOnlyStatements(t *testing.T) {
+	skipWindowsShellFixture(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)

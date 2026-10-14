@@ -13,6 +13,7 @@ import (
 )
 
 func TestProtectedWriteGlobDecisions(t *testing.T) {
+	skipWindowsProtectedWritePOSIX(t)
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
 	key := filepath.Join(home, ".ssh", "authorized_keys")
@@ -61,6 +62,7 @@ func TestProtectedWriteGlobDecisions(t *testing.T) {
 }
 
 func TestProtectedWriteMissingProjectGlob(t *testing.T) {
+	skipWindowsProtectedWritePOSIX(t)
 	const connector = "protected-write-glob-test"
 	installToolCallCorpusProfileConnector(t, connector, "default")
 	project := filepath.Join(t.TempDir(), "missing", "project")

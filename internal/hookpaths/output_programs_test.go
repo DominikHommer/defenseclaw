@@ -10,6 +10,7 @@ import (
 )
 
 func TestProgramOutputOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := "/tmp/project"
 	for _, row := range []struct{ command, target string }{
 		{"sort -o disklink payload", "disklink"},

@@ -9,6 +9,7 @@ import (
 )
 
 func TestTarOptionScope(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	rows := []struct {
 		name  string

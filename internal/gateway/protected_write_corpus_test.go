@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -193,6 +194,18 @@ func decideProtectedCorpus(row protectedCorpusRow, home, connector, mode, osName
 func TestProtectedWriteCorpus(t *testing.T) {
 	started := time.Now()
 	rows := readProtectedCorpus(t)
+	if runtime.GOOS == "windows" {
+		windowsRows := rows[:0]
+		for _, row := range rows {
+			for _, osName := range row.OS {
+				if osName == "windows" {
+					windowsRows = append(windowsRows, row)
+					break
+				}
+			}
+		}
+		rows = windowsRows
+	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		installToolCallCorpusProfileConnector(t, connector, "default")
 	}
@@ -202,8 +215,13 @@ func TestProtectedWriteCorpus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
-	prepareProtectedCorpus(t, home, rows)
+	if runtime.GOOS != "windows" {
+		prepareProtectedCorpus(t, home, rows)
+	}
 	for _, row := range rows {
+		if runtime.GOOS == "windows" {
+			continue
+		}
 		body, err := json.Marshal(map[string]any{
 			"tool_name":  row.Tool,
 			"cwd":        filepath.Join(home, row.CWD),
@@ -230,6 +248,9 @@ func TestProtectedWriteCorpus(t *testing.T) {
 			defer workers.Done()
 			for row := range jobs {
 				for _, osName := range row.OS {
+					if runtime.GOOS == "windows" && osName != "windows" {
+						continue
+					}
 					for _, connector := range row.Connectors {
 						for _, mode := range row.Modes {
 							actual, err := decideProtectedCorpus(row, home, connector, mode, osName)

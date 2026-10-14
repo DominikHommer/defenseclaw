@@ -10,6 +10,7 @@ import (
 )
 
 func TestLauncherProgramFamilies(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	protected := filepath.Join(cwd, "disklink")
@@ -44,6 +45,7 @@ func TestLauncherProgramFamilies(t *testing.T) {
 }
 
 func TestTerminalProgramOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	for _, words := range [][]string{
 		{"groupmems", "-g", "sudo", "-a", "agent"},
 		{"usermod", "-g", "tee", "agent"},

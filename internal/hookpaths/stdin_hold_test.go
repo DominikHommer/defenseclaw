@@ -10,6 +10,7 @@ import (
 )
 
 func TestStdinProgramOperands(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	protected := filepath.Join(cwd, "disklink")
@@ -40,6 +41,7 @@ func TestStdinProgramOperands(t *testing.T) {
 }
 
 func TestStdinUnknownWritePositions(t *testing.T) {
+	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	rows := []struct {
