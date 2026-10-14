@@ -113,6 +113,7 @@ func (a *APIServer) trackManagedSandboxActive(ctx context.Context, auth *sandbox
 // recorder's phase map nor counts in sandbox.active; the daemon's deleted
 // record is not relied on.
 func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
+	a.sandboxGuestSignalForget(reg)
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
 	}
@@ -480,8 +481,8 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 // network profile or policy revision, which no registration vouches for. A
 // registration not bound to a sandbox yet takes no record (the daemon posts
 // only after the bind), and a record naming another sandbox than reg's is
-// dropped, so a caller can't make up sandboxes: each one would be a phase the
-// managed recorder tracks for every account (sandboxPhaseKey).
+// dropped, so a telemetry record cannot name a sandbox other than the one
+// held by the registration (sandboxPhaseKey).
 func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
 	var c sandboxTelemetryClaim
 	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &c) != nil {
@@ -537,7 +538,17 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 		// the registration and the subject key alone.
 		sandboxRecordFailed(ev.Kind+" (stamped)", err)
 		identity.Managed = audit.SandboxManaged{RegistrationID: reg.ID, SubjectKey: reg.SubjectKey}
-		sandboxRecordFailed(ev.Kind, record(identity))
+		if err := record(identity); err != nil {
+			sandboxRecordFailed(ev.Kind, err)
+			return
+		}
+	}
+	// Only a record accepted for this bound sandbox after bind is a sighting.
+	// The gateway stamps receipt time: queued creation records predate the bind.
+	// Tombstone telemetry still records the sandbox's last phases, but cannot
+	// establish a new sighting for a revoked registration.
+	if reg.State != sandboxreg.StateRevoked {
+		a.sandboxMarkGuestSeen(reg)
 	}
 }
 
