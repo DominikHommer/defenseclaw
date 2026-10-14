@@ -169,6 +169,16 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("The **DefenseClaw kernel policies** table counts policy-change events", text)
         self.assertIn("The stat and **Kernel controls per host (last 10 minutes)** show current host state", text)
 
+    def test_gap_0528_macos_bare_group_name_selects_local_and_domain_group(self):
+        text = page("guardrail/user-and-group-policies.mdx")
+        self.assertIn("selects the members of that local group", text)
+        self.assertIn("A bare name also selects, by its name part,", text)
+        self.assertIn("the members of the `DOMAIN\\name` Active Directory group the user is already listed in", text)
+        self.assertIn("Open Directory's search order only decides which group the extra nested-membership "
+                      "check resolves (the local one when both exist)", text)
+        self.assertIn("Write `DOMAIN\\name` to target only the Active Directory group", text)
+        self.assertNotIn("the local group is " "the one checked", text)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
