@@ -68,6 +68,14 @@ var managedHookPeerAccountsStamp = func() string {
 	return stamp
 }
 
+func managedHookPeerStamp() string {
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps main's lifetime (#1092).
+		return ""
+	}
+	return managedHookPeerAccountsStamp()
+}
+
 // managedHookPeerHome resolves the home directory of a kernel-verified
 // hook-socket caller through the platform account database (NSS on Linux,
 // DirectoryService-backed os/user on macOS). Directory users therefore
@@ -99,7 +107,7 @@ type managedHookPeerHomeCache struct {
 	mu          sync.Mutex
 	resolver    unixidentity.Resolver
 	resolvedAt  time.Time
-	stamp       string // managedHookPeerAccountsStamp when resolver was made
+	stamp       string // managedHookPeerStamp when resolver was made
 	newResolver func() unixidentity.Resolver
 	now         func() time.Time
 	// accounts holds one answer per uid. A lookup in flight is shared by
@@ -128,8 +136,8 @@ type managedHookPeerHomeCache struct {
 	homesFile   string
 	homesLoaded bool
 	// holders are useful only while the corresponding directory facts are
-	// still served. A local account database change also rechecks a holder
-	// before it can make a live namesake ambiguous.
+	// still served. Outside Secure Client, a local account database change
+	// also rechecks a holder before it can make a live namesake ambiguous.
 	holders map[int]managedHookPeerHolder
 }
 
@@ -240,7 +248,7 @@ func (c *managedHookPeerHomeCache) account(uid int) (unixidentity.Account, bool)
 	if uid < 0 {
 		return unixidentity.Account{}, false
 	}
-	stamp := managedHookPeerAccountsStamp()
+	stamp := managedHookPeerStamp()
 	c.mu.Lock()
 	now := c.now()
 	if c.resolver == nil || now.Sub(c.resolvedAt) > managedHookPeerHomeTTL || stamp != c.stamp {
@@ -333,7 +341,7 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	if !ok {
 		return
 	}
-	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerAccountsStamp(), notedAt: c.now()}
+	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp(), notedAt: c.now()}
 	c.mu.Lock()
 	previous, known := c.holders[uid]
 	changed := known && (previous.name != holder.name || previous.home != holder.home)
@@ -474,7 +482,7 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 		holders[uid] = holder
 	}
 	c.mu.Unlock()
-	stamp := managedHookPeerAccountsStamp()
+	stamp := managedHookPeerStamp()
 	for uid, holder := range holders {
 		facts, _, served := c.directoryCache().peek(strconv.Itoa(uid))
 		forgetFacts := false

@@ -136,3 +136,53 @@ func TestL1ExplainedDirectoryHolderSurvivesOutageOnlyWhileFactsAreServed(t *test
 		t.Fatal("explain used facts the hooks no longer serve")
 	}
 }
+
+func TestL1SecureClientAccountCacheIgnoresPasswdStamp(t *testing.T) {
+	previousManaged, previousStamp := ManagedEnterpriseActive(), managedHookPeerAccountsStamp
+	t.Cleanup(func() {
+		SetManagedEnterpriseActive(previousManaged)
+		managedHookPeerAccountsStamp = previousStamp
+	})
+	stamp := "before"
+	managedHookPeerAccountsStamp = func() string { return stamp }
+
+	for _, test := range []struct {
+		name             string
+		managed          bool
+		wantResolverRuns int
+		wantName         string
+	}{
+		{name: "Secure Client", managed: true, wantResolverRuns: 1, wantName: "alice"},
+		{name: "managed gateway", managed: false, wantResolverRuns: 2, wantName: "reassigned"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			SetManagedEnterpriseActive(test.managed)
+			stamp = "before"
+			const uid = 94021
+			resolverRuns := 0
+			now := time.Unix(1_000_000, 0)
+			cache := &managedHookPeerHomeCache{
+				newResolver: func() unixidentity.Resolver {
+					resolverRuns++
+					name := "alice"
+					if resolverRuns > 1 {
+						name = "reassigned"
+					}
+					return &changingHolderAccounts{accounts: map[int]unixidentity.Account{
+						uid: {Name: name, UID: uid, Home: "/home/" + name},
+					}}
+				},
+				now: func() time.Time { return now },
+			}
+			if account, ok := cache.account(uid); !ok || account.Name != "alice" {
+				t.Fatalf("first account = %+v, %t", account, ok)
+			}
+			stamp = "after"
+			account, ok := cache.account(uid)
+			if !ok || account.Name != test.wantName || resolverRuns != test.wantResolverRuns {
+				t.Fatalf("account after passwd change = %+v, %t; resolver runs = %d; want name %q and %d runs",
+					account, ok, resolverRuns, test.wantName, test.wantResolverRuns)
+			}
+		})
+	}
+}
