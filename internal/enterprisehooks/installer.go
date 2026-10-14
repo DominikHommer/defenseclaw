@@ -494,6 +494,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
+			var beforeSetup dataDirSnapshot
 			rollback := func(cause error) error {
 				failures := []error{cause}
 				if lockWriteAttempted {
@@ -509,6 +510,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				}
 				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+				} else if residueErr := beforeSetup.removeAdded(); residueErr != nil {
+					// Only once no registration names them: an agent
+					// still pointed at a removed script would fail its hook.
+					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
 				}
 				return errors.Join(failures...)
 			}
@@ -517,6 +522,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
 				return err
 			}
+			// A rollback removes what Setup adds below the data directory
+			// (GAP-0509).
+			beforeSetup = snapshotDataDir(dataDir)
 			// The folders Setup creates below the home (~/.codex in an
 			// account that never ran Codex, say) are recorded, so the purge
 			// and a per-user uninstall --all remove them once empty.
