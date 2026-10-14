@@ -48,6 +48,9 @@ import (
 const (
 	userCommandTimeout = 30 * time.Second
 	teardownTimeout    = 15 * time.Minute
+	// stopSandboxesTimeout bounds `sandbox-daemon stop-sandboxes`, which
+	// bounds itself at five minutes.
+	stopSandboxesTimeout = 6 * time.Minute
 )
 
 // SandboxAccount is an account the sandbox lifecycle acts on.
@@ -88,8 +91,15 @@ type SandboxUserOps interface {
 	Stop(ctx context.Context, a SandboxAccount, scope StopScope) error
 	// Reload makes the account's user manager read new unit files (Linux).
 	Reload(ctx context.Context, a SandboxAccount) error
-	// Teardown runs `defenseclaw sandbox teardown` as the account.
-	Teardown(ctx context.Context, a SandboxAccount, keepImages bool) error
+	// StopSandboxes stops the account's running sandboxes through its
+	// sandbox daemon, as the daemon unit's ExecStop does at logout (a
+	// MicroVM's disk is synced before its stop), and names the ones it
+	// stopped. The sandboxes, their records and their work stay.
+	StopSandboxes(ctx context.Context, a SandboxAccount) ([]string, error)
+	// Teardown runs `defenseclaw sandbox teardown` as the account, which
+	// deletes its sandboxes with their work, providers, profiles and
+	// images: only a purge runs it.
+	Teardown(ctx context.Context, a SandboxAccount) error
 	// Groups lists the account's groups.
 	Groups(ctx context.Context, a SandboxAccount) ([]string, error)
 }
@@ -374,25 +384,44 @@ func (o *commandUserOps) Reload(ctx context.Context, a SandboxAccount) error {
 	return err
 }
 
-func (o *commandUserOps) Teardown(ctx context.Context, a SandboxAccount, keepImages bool) error {
-	args := []string{o.env.launcherPath(), "sandbox", "teardown", "--yes"}
-	if keepImages {
-		args = append(args, "--keep-images")
-	}
-	res, err := o.runAs(ctx, a, teardownTimeout, args...)
+func (o *commandUserOps) Teardown(ctx context.Context, a SandboxAccount) error {
+	res, err := o.runAs(ctx, a, teardownTimeout, o.env.launcherPath(), "sandbox", "teardown", "--yes")
 	if err == nil || res.ExitCode <= 0 {
 		return err
 	}
-	// The teardown says why on stdout or stderr; the exit status alone left
-	// "exit 1: " with an empty reason (GAP-0490).
-	reason := lastLine(res.Stderr)
-	if reason == "" {
-		reason = lastLine(res.Stdout)
+	return fmt.Errorf("`defenseclaw sandbox teardown` exited %d: %s", res.ExitCode, commandReason(res))
+}
+
+// StopSandboxes runs the daemon unit's ExecStop as the account. It goes
+// without INVOCATION_ID: a lifecycle run that systemd started passes its own
+// on, and the command then takes itself for the ExecStop of a daemon that
+// exited by itself, which stops nothing.
+func (o *commandUserOps) StopSandboxes(ctx context.Context, a SandboxAccount) ([]string, error) {
+	res, err := o.runAs(ctx, a, stopSandboxesTimeout, "/usr/bin/env", "-u", "INVOCATION_ID",
+		filepath.Join(o.env.Layout.BinDir, binGateway), "sandbox-daemon", "stop-sandboxes")
+	var stopped []string
+	for _, line := range strings.Split(string(res.Stdout), "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "stopped sandbox "); ok && name != "" {
+			stopped = append(stopped, name)
+		}
 	}
-	if reason == "" {
-		reason = "it printed no reason"
+	if err != nil && res.ExitCode > 0 {
+		err = fmt.Errorf("`%s sandbox-daemon stop-sandboxes` exited %d: %s", binGateway, res.ExitCode, commandReason(res))
 	}
-	return fmt.Errorf("`defenseclaw sandbox teardown` exited %d: %s", res.ExitCode, reason)
+	return stopped, err
+}
+
+// commandReason is why a command run as the account failed: its last line
+// on stderr or stdout. The exit status alone left "exit 1: " with an empty
+// reason (GAP-0490).
+func commandReason(res CommandResult) string {
+	if reason := lastLine(res.Stderr); reason != "" {
+		return reason
+	}
+	if reason := lastLine(res.Stdout); reason != "" {
+		return reason
+	}
+	return "it printed no reason"
 }
 
 // lastLine is the last non-empty line of out, trimmed and bounded.
@@ -1036,12 +1065,22 @@ func (e *Env) manifestSandboxAccounts() []SandboxAccount {
 
 // teardownOpenShell takes the sandbox subsystem out of every account in
 // accounts (sandboxAccounts, read before the uninstall removed the records
-// that name them) before the binaries and units go. Per account the order
-// matters: `defenseclaw sandbox teardown` runs first, as the account, while
-// its sandbox daemon and OpenShell gateway still answer, because it lists and
-// deletes the sandboxes, providers and profiles through them; only then the
-// account's units stop (stopping the daemon stops its sandboxes first), and
-// on purge what the subsystem left in the account's home goes too. It never
+// that name them) before the binaries and units go.
+//
+// Without purge every account keeps its sandboxes: their records, MicroVM
+// disks, copy-mode work not pulled yet, providers and settings stay in its
+// home for the next activation of the deployment, and only what runs stops
+// (keepAccountSandboxes). It used to run `defenseclaw sandbox teardown`
+// there too, which deleted the sandboxes and their unpulled work while the
+// result said each account kept its sandbox state (GAP-0598). The gateway's
+// registrations of the kept sandboxes stay too (keepSandboxStore): without
+// them the next activation's gateway refused every kept sandbox.
+//
+// A purge runs `defenseclaw sandbox teardown` first, as the account, while
+// its sandbox daemon and OpenShell gateway still answer, because it lists
+// and deletes the sandboxes, providers and profiles through them; only then
+// the account's units stop (stopping the daemon stops its sandboxes first),
+// and what the subsystem left in the account's home goes too. It never
 // deletes anything it did not create.
 func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAccount) {
 	env, r := l.env, l.result
@@ -1053,6 +1092,7 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 	applied := state.Applied
 	ops := env.sandboxOps()
 	purge := l.opts.Purge
+	var kept []string
 	for _, a := range accounts {
 		if !env.hasHomeSandboxState(a) {
 			// The subsystem never served this account (a signed-in
@@ -1064,27 +1104,69 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			_ = ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket)
 			continue
 		}
-		teardownErr := ops.Teardown(ctx, a, !purge)
+		if !purge {
+			l.keepAccountSandboxes(ctx, a)
+			kept = append(kept, a.Name)
+			continue
+		}
+		teardownErr := ops.Teardown(ctx, a)
 		if teardownErr == nil {
 			r.Changes = append(r.Changes, fmt.Sprintf("ran `defenseclaw sandbox teardown` as user %s while its sandbox daemon and OpenShell gateway still answered", a.Name))
 		}
 		if err := ops.Stop(ctx, a, StopDaemon|StopGateway|StopSocket); err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop the sandbox daemon of %s: %v; stop its user units by hand", a.Name, err))
 		}
-		if purge {
-			l.purgeAccountSandbox(a)
-			if teardownErr != nil {
-				// Teardown's next step assumes its local state still exists.
-				// Purge removed those files independently, so describe the
-				// resources that may remain instead of repeating that step.
-				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
-			}
-		} else if teardownErr != nil {
-			r.AddWarning(codeSandboxUserState, fmt.Sprintf("the sandboxes of %s were not torn down: %v; run `defenseclaw sandbox teardown` as that user", a.Name, teardownErr))
+		l.purgeAccountSandbox(a)
+		if teardownErr != nil {
+			// Teardown's next step assumes its local state still exists.
+			// Purge removed those files independently, so describe the
+			// resources that may remain instead of repeating that step.
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
 		}
 	}
-	if applied != nil && applied.Enabled && !purge {
-		r.Changes = append(r.Changes, "stopped the sandbox subsystem; each account keeps its sandbox state until `uninstall --purge`")
+	switch {
+	case purge:
+	case len(kept) > 0:
+		// The gateway's registrations of these sandboxes stay with them
+		// (keepSandboxStore); the uninstall summary says so once they are
+		// kept (keptSandboxStoreLine).
+		l.sandboxesKept = kept
+		r.Changes = append(r.Changes, fmt.Sprintf("stopped the sandbox subsystem; kept the sandboxes of %s in their homes with their records, disks and any work not pulled yet; "+
+			"`%s --purge` of an active deployment deletes them",
+			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
+	case applied != nil && applied.Enabled:
+		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
+	}
+}
+
+// keepAccountSandboxes stops what runs of the sandbox subsystem in an
+// account whose sandboxes a non-purge uninstall keeps: its running
+// sandboxes first, through its daemon, which syncs a MicroVM's disk before
+// the stop so a copy's unpulled work survives it (openshell.Driver.
+// StopFlushes; the macOS agent's bootout stops none), then its units, the
+// daemon before the OpenShell gateway. Nothing in the account's home is
+// deleted.
+func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) {
+	r := l.result
+	ops := l.env.sandboxOps()
+	// A daemon that cannot say leaves it unknown whether a sandbox runs:
+	// the sandboxes are stopped as if one did.
+	if st, err := ops.Status(ctx, a); err != nil || st.Running > 0 {
+		stopped, err := ops.StopSandboxes(ctx, a)
+		if len(stopped) > 0 {
+			r.Changes = append(r.Changes, fmt.Sprintf("stopped the running sandboxes of user %s (%s); they are kept, with their work", a.Name, strings.Join(stopped, ", ")))
+		}
+		if err != nil {
+			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop every running sandbox of %s through its sandbox daemon: %v; its units stop next, and a MicroVM sandbox "+
+				"that was still running then may miss the files written in it since its disk was last synced", a.Name, err))
+		}
+	}
+	err := ops.Stop(ctx, a, StopDaemon|StopSocket)
+	if gwErr := ops.Stop(ctx, a, StopGateway); err == nil {
+		err = gwErr
+	}
+	if err != nil {
+		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not stop the sandbox daemon of %s: %v; stop its user units by hand", a.Name, err))
 	}
 }
 

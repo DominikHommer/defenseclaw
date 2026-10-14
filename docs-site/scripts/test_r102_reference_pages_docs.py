@@ -30,6 +30,17 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
             "## Common follow-ups", 1
         )[0]
         self.assertIn("child programs write", section)
+        normalized = " ".join(section.split())
+        self.assertIn(
+            "A write inside a script, interpreter or shell built-in that the command only names "
+            "cannot be fully checked from the command text", normalized
+        )
+        self.assertIn(
+            "A rule that needs the complete action cannot block that inner write; "
+            "an eligible rule about the complete outer argument list can still block the call "
+            "in action mode", normalized
+        )
+        self.assertNotIn("reported as partly checked", normalized)
         self.assertIn("use a sandbox or file permissions", section)
         for forbidden in (
             "xargs", "find -exec", "make", "git", "source", "ln -s",
