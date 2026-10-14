@@ -154,3 +154,117 @@ func TestStandaloneCleanupMovedCodexBootstrapAndTrustedProjects(t *testing.T) {
 		})
 	}
 }
+
+func writeFixup2StrayReceipt(t *testing.T, home, name, connectorName, kind string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".defenseclaw", "connector_backups", connectorName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name+".json")
+	content := []byte("{not json")
+	switch kind {
+	case "version zero":
+		content = []byte("{}")
+	case "wrong location":
+		content = []byte(`{"version":1,"connector":"other","logical_name":"config","path":"/tmp/sample-config"}`)
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestStandaloneCleanupSameHomeRemovesDespiteStrayReceipt(t *testing.T) {
+	for _, name := range []string{"opencode", "codex"} {
+		for _, kind := range []string{"invalid json", "version zero", "wrong location"} {
+			t.Run(name+"/"+kind, func(t *testing.T) {
+				var entry enterpriseHookUserCleanup
+				var resolver standaloneTestResolver
+				var artifact string
+				if name == "opencode" {
+					c := setupRehomedOpenCodeCase(t, false, false)
+					c.resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: c.entry.UID, GID: os.Getgid(), Home: c.oldHome}
+					entry, resolver, artifact = c.entry, c.resolver, c.oldPlugin
+				} else {
+					c := setupFixup2CodexCase(t, "model = \"gpt-5\"\n", false)
+					c.resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: c.entry.UID, GID: os.Getgid(), Home: c.oldHome}
+					entry, resolver, artifact = c.entry, c.resolver, filepath.Join(c.oldHome, ".codex", "config.toml")
+				}
+				stray := writeFixup2StrayReceipt(t, entry.UserHome, "notes", name, kind)
+				outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)
+				if outcome != enterpriseHookUserCleanupDone || err != nil {
+					t.Fatalf("same-home removal with %s = %v, %v", stray, outcome, err)
+				}
+				if name == "opencode" {
+					if _, err := os.Lstat(artifact); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("plugin remains: %v", err)
+					}
+				} else {
+					data, err := os.ReadFile(artifact)
+					if err != nil || strings.Contains(string(data), ".defenseclaw/") || strings.Contains(string(data), "x-defenseclaw-") {
+						t.Fatalf("Codex entries remain: %v, %q", err, data)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStandaloneCleanupRehomedStrayReceiptKeepsRow(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, location string
+		move                 bool
+	}{
+		{name: "copied current invalid", kind: "invalid json", location: "current"},
+		{name: "copied current version zero", kind: "version zero", location: "current"},
+		{name: "copied current wrong location", kind: "wrong location", location: "current"},
+		{name: "moved current invalid", kind: "invalid json", location: "current", move: true},
+		{name: "moved current version zero", kind: "version zero", location: "current", move: true},
+		{name: "moved current wrong location", kind: "wrong location", location: "current", move: true},
+		{name: "copied old wrong location", kind: "wrong location", location: "old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := setupRehomedOpenCodeCase(t, false, tc.move)
+			home := c.currentHome
+			if tc.location == "old" {
+				home = c.oldHome
+			}
+			stray := writeFixup2StrayReceipt(t, home, "notes", "opencode", tc.kind)
+			if tc.location == "current" {
+				previousRunner := enterpriseHookWorkerRunner
+				t.Cleanup(func() { enterpriseHookWorkerRunner = previousRunner })
+				calls := 0
+				enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+					calls++
+					return previousRunner(ctx, account, request)
+				}
+				defer func() {
+					if calls != 3 { // one worker on each attempt, then remove-all
+						t.Errorf("unverified reports triggered a retry: %d worker runs", calls)
+					}
+				}()
+			}
+			for attempt := 1; attempt <= 2; attempt++ {
+				outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, c.entry, c.resolver)
+				if outcome != enterpriseHookUserCleanupFailed || err == nil || !strings.Contains(err.Error(), stray) {
+					t.Fatalf("attempt %d = %v, %v; want unverified receipt %s", attempt, outcome, err, stray)
+				}
+			}
+			if _, err := os.Lstat(c.newPlugin); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("current plugin remains after two worker removals: %v", err)
+			}
+			if err := saveEnterpriseHookUserCleanups(c.fixture.dataDir, []enterpriseHookUserCleanup{c.entry}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			report := enterpriseHooksRemoveAllReport{}
+			skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
+			if report.Removed != 0 || len(report.Failed) != 1 || !strings.Contains(report.Failed[0], stray) ||
+				skip[c.entry.UID] != enterpriseHookPurgeSkipFailed {
+				t.Fatalf("remove-all lost unverified receipt: report %+v, skip %+v", report, skip)
+			}
+		})
+	}
+}

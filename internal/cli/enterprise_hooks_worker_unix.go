@@ -29,6 +29,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -233,6 +235,7 @@ type enterpriseHookWorkerTargetResult struct {
 	CleanedPaths  []string `json:"cleaned_paths,omitempty"`
 	PathsReported bool     `json:"paths_reported,omitempty"`
 	Remaining     string   `json:"remaining,omitempty"`
+	Unverified    string   `json:"unverified,omitempty"`
 }
 
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
@@ -575,14 +578,27 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				outcome.Repaired = err == nil
 			}
 		case enterpriseHookWorkerModeRemove:
-			var conn connector.Connector
-			var setupOpts connector.SetupOpts
-			conn, setupOpts, outcome.CleanedPaths, err = enterpriseHookWorkerRemoveSetupAndPaths(opts)
-			if err != nil {
+			conn, setupOpts, setupErr := enterpriseHookWorkerRemoveSetup(opts)
+			if setupErr == nil {
+				var reportErr error
+				outcome.CleanedPaths, reportErr = enterpriseHookWorkerRemovePaths(opts, conn, setupOpts)
+				if reportErr == nil {
+					outcome.PathsReported = true
+				} else {
+					outcome.CleanedPaths = nil
+					outcome.Unverified = enterpriseHookWorkerUnverifiedReason(reportErr)
+				}
+			}
+			// A report is needed only for a re-homed row. An unreadable
+			// receipt must not prevent ordinary teardown.
+			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
 				break
 			}
-			outcome.PathsReported = true
-			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
+			if setupErr != nil {
+				outcome.Unverified = enterpriseHookWorkerUnverifiedReason(setupErr)
+				break
+			}
+			if !outcome.PathsReported {
 				break
 			}
 			verifyErr := connector.WithUserHomeDir(opts.UserHome, func() error {
@@ -688,10 +704,9 @@ func blockPersonalClaudeHook(opts enterprisehooks.InstallOptions) error {
 	return configwrite.WriteFileDurable(path, []byte(blocked), 0o700)
 }
 
-// enterpriseHookWorkerRemoveSetupAndPaths resolves the same SetupOpts as
-// RemoveUserHooks. It runs in the per-user worker; the guardian never reads
-// the account's receipts or agent configuration.
-func enterpriseHookWorkerRemoveSetupAndPaths(opts enterprisehooks.InstallOptions) (connector.Connector, connector.SetupOpts, []string, error) {
+// enterpriseHookWorkerRemoveSetup resolves the same SetupOpts as
+// RemoveUserHooks. Its error never replaces the remover's own error.
+func enterpriseHookWorkerRemoveSetup(opts enterprisehooks.InstallOptions) (connector.Connector, connector.SetupOpts, error) {
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
 		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
@@ -699,7 +714,7 @@ func enterpriseHookWorkerRemoveSetupAndPaths(opts enterprisehooks.InstallOptions
 	var err error
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
-		return nil, connector.SetupOpts{}, nil, fmt.Errorf("resolve data dir: %w", err)
+		return nil, connector.SetupOpts{}, fmt.Errorf("resolve data dir: %w", err)
 	}
 	registry := opts.Registry
 	if registry == nil {
@@ -708,17 +723,23 @@ func enterpriseHookWorkerRemoveSetupAndPaths(opts enterprisehooks.InstallOptions
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	conn, ok := registry.Get(name)
 	if !ok {
-		return nil, connector.SetupOpts{}, nil, fmt.Errorf("unknown connector %q", name)
+		return nil, connector.SetupOpts{}, fmt.Errorf("unknown connector %q", name)
 	}
 	setupOpts := connector.SetupOpts{
 		DataDir: dataDir, Interactive: false, ManagedEnterprise: true,
 		WorkspaceDir: strings.TrimSpace(opts.WorkspaceDir), AgentVersion: strings.TrimSpace(opts.AgentVersion),
 		HookContractID: strings.TrimSpace(opts.HookContractID),
 	}
+	return conn, setupOpts, nil
+}
+
+// enterpriseHookWorkerRemovePaths runs as the account whose receipts and
+// config it reads. A failed collection is unverified, never a clean report.
+func enterpriseHookWorkerRemovePaths(opts enterprisehooks.InstallOptions, conn connector.Connector, setupOpts connector.SetupOpts) ([]string, error) {
 	var paths []string
-	err = connector.WithUserHomeDir(opts.UserHome, func() error {
+	err := connector.WithUserHomeDir(opts.UserHome, func() error {
 		paths = append(paths, connector.CleanupConfigPathsForConnector(conn, setupOpts)...)
-		receipts, readErr := connector.ManagedFileBackupTargetsForConnector(dataDir, conn.Name())
+		receipts, readErr := connector.ManagedFileBackupTargetsForConnector(setupOpts.DataDir, conn.Name())
 		if readErr != nil {
 			return readErr
 		}
@@ -726,13 +747,37 @@ func enterpriseHookWorkerRemoveSetupAndPaths(opts enterprisehooks.InstallOptions
 		return nil
 	})
 	if err != nil {
-		return nil, connector.SetupOpts{}, nil, err
+		return nil, err
 	}
 	paths = uniqueEnterpriseHookWorkerPaths(paths)
 	if err := validateEnterpriseHookWorkerRemoveReport(enterpriseHookWorkerTargetResult{PathsReported: true, CleanedPaths: paths}); err != nil {
-		return nil, connector.SetupOpts{}, nil, err
+		return nil, err
 	}
-	return conn, setupOpts, paths, nil
+	return paths, nil
+}
+
+func enterpriseHookWorkerUnverifiedReason(err error) string {
+	value := strings.ToValidUTF8(err.Error(), "\ufffd")
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	value = strings.TrimSpace(value)
+	if len(value) > enterpriseHookWorkerRemainingMax {
+		if path := enterpriseHookUnverifiedReceiptPath(value); path != "" {
+			value = strings.Replace(value, path, shortEnterpriseHookReportPath(path), 1)
+		}
+	}
+	if len(value) <= enterpriseHookWorkerRemainingMax {
+		return value
+	}
+	value = value[:enterpriseHookWorkerRemainingMax]
+	for !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func uniqueEnterpriseHookWorkerPaths(paths []string) []string {
