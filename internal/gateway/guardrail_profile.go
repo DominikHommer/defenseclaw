@@ -1704,11 +1704,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["match"] = ""
 		out["effective"] = profileEffectiveView(base, connectorName)
 		var warnings []string
-		if _, lookupFailed := out["lookup_error"]; !lookupFailed {
-			if enrollment, warning := profileEnrollmentExemption(base, subject, false); enrollment != nil {
-				out["enrollment"] = enrollment
-				warnings = append(warnings, warning)
-			}
+		if enrollment, warning := profileEnrollmentExemption(base, subject, false); enrollment != nil {
+			out["enrollment"] = enrollment
+			warnings = append(warnings, warning)
 		}
 		if note := inertHILTWarning(base, connectorName); note != "" {
 			warnings = append(warnings, note)

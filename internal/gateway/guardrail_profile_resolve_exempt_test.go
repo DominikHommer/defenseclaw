@@ -136,15 +136,19 @@ func TestProfileResolveWithoutProfilesReportsHookExemption(t *testing.T) {
 			}
 		})
 	}
-	// A failed account lookup does not gain a new exemption from the
-	// no-profile path, even if it returned a partial account identity.
+	// A failed directory lookup is reported, and the uid/account-name
+	// exemption the hook applies still shows, as it does with profiles.
 	lookup := profileExplainSubjectLookup
 	profileExplainSubjectLookup = func(string) (profileSubject, error) {
 		return profileSubject{UserID: "2201", IDKind: useridentity.KindPOSIXUID, UserName: "alice"}, errors.New("directory unavailable")
 	}
 	failed, body := resolve("alice")
-	if _, ok := failed["enrollment"]; ok || string(failed["lookup_error"]) != `"directory unavailable"` {
-		t.Fatalf("lookup-error answer changed: %s", body)
+	var failedEnrollment struct {
+		Exempt bool `json:"exempt"`
+	}
+	if err := json.Unmarshal(failed["enrollment"], &failedEnrollment); err != nil || !failedEnrollment.Exempt ||
+		string(failed["lookup_error"]) != `"directory unavailable"` {
+		t.Fatalf("lookup-error answer: %s", body)
 	}
 	profileExplainSubjectLookup = lookup
 	// The exemption warning and the existing inert-HILT warning coexist.
