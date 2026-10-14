@@ -17,6 +17,13 @@ class R102Delta15DocsTest(unittest.TestCase):
         self.assertIn("decides each new connection with the policy the managed gateway confirmed for it within the last second", text)
         self.assertIn("your organization changed this sandbox's policy and DefenseClaw could not confirm the new one yet; try again in a moment", text)
         self.assertNotIn("takes the changed policy on its next relayed hook call", text)
+        # DELTA-21: the lease renews once the policy is in force; no promise of
+        # zero staleness for a connection no hook preceded; the revoked text.
+        self.assertIn("A confirmation counts only once the new policy is in force for every running sandbox", text)
+        self.assertIn("is decided with a confirmation at most a second old", text)
+        self.assertNotIn("also one from `sandbox exec`", text)
+        # gateway/sandbox_daemon_policy_fresh.go sandboxEgressNotCovered.
+        self.assertIn("your organization's policy no longer covers this sandbox; delete it and start it again with defenseclaw sandbox run", text)
 
     def test_account_outage_refusal_matches_the_cli(self):
         text = page("enterprise/sandboxes.mdx")
