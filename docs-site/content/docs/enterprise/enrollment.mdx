@@ -568,9 +568,16 @@ the default agent setting), and the user's own hooks and settings stay.
 A home that is not available (not mounted, or not created yet) and a
 removal that fails are recorded in an administrator-owned list and retried.
 `status` and `verify` report each one as the warning
-`guardian_cleanup_pending` and do not fail on it. A record is dropped
-without a cleanup only when the account no longer exists, and a user who is
-enrolled again keeps the record until the guardian protects them again.
+`guardian_cleanup_pending` and do not fail on it. If a live account is
+re-homed to a trusted directory, the guardian cleans up as that user in the
+current home, logs the old and new homes once, and ends the record. If the
+current home is missing or untrusted, the record stays: fix the account's
+directory home to an existing directory it owns, without symlinks or
+group/other write, or remove the account, then rerun uninstall. A record is
+dropped without running cleanup when the account no longer exists, its name
+belongs to another uid, or the directory gives it no home and its recorded
+home is definitely gone. A user who is enrolled again keeps the record until
+the guardian protects them again.
 Uninstall removes the registrations of the users still in the manifest; see
 [Remove](/docs/enterprise/linux#remove).
 
