@@ -600,7 +600,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			} else {
 				// Some connectors validate only references to this data dir.
 				// A copied config can still name the former home's hook path.
-				outcome.Remaining = enterpriseHookWorkerRemainingConfigReference(opts.UserHome, outcome.CleanedPaths)
+				outcome.Remaining = enterpriseHookWorkerRemainingConfigReference(opts.UserHome, setupOpts.DataDir, outcome.CleanedPaths)
 			}
 		case enterpriseHookWorkerModeRemoveLeftover:
 			var leftover bool
@@ -751,8 +751,12 @@ func uniqueEnterpriseHookWorkerPaths(paths []string) []string {
 // of the config paths the worker resolved. It runs as the user and reads at
 // most 4 MiB from each regular file. An unreadable or nonregular config is
 // unverified rather than assumed clean.
-func enterpriseHookWorkerRemainingConfigReference(home string, paths []string) string {
+func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []string) string {
 	const maxConfigBytes = 4 << 20
+	customDataDir := ""
+	if filepath.Clean(dataDir) != filepath.Join(home, ".defenseclaw") {
+		customDataDir = filepath.Clean(dataDir)
+	}
 	for _, path := range paths {
 		if !enterpriseHookWorkerPathWithin(home, path) {
 			continue
@@ -776,11 +780,50 @@ func enterpriseHookWorkerRemainingConfigReference(home string, paths []string) s
 		if readErr != nil || len(data) > maxConfigBytes {
 			return path + ": agent config could not be checked within the read limit"
 		}
-		if bytes.Contains(bytes.ToLower(data), []byte("defenseclaw")) {
-			return path + ": DefenseClaw reference remains in agent config"
+		if line, marker := enterpriseHookWorkerConfigReferenceLine(data, customDataDir); line != 0 {
+			return fmt.Sprintf("%s:%d: DefenseClaw %s remains in agent config", path, line, marker)
 		}
 	}
 	return ""
+}
+
+// enterpriseHookWorkerConfigReferenceLine matches only connector-owned
+// markers and data-dir paths. Agent comments, including the Codex bootstrap
+// header, are inert. It does no I/O and is safe to exercise for every agent.
+func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) (int, string) {
+	markers := []string{
+		"defenseclaw-managed-hook", "x-defenseclaw-source", "x-defenseclaw-client",
+		"x-defenseclaw-token", "defenseclaw-hook", "defenseclaw-gateway",
+		"defenseclaw.js", "defenseclaw.ts", "defenseclaw.json",
+		"defenseclaw_omnigent_policy", "defenseclaw.listener-proof.v1",
+	}
+	for index, raw := range bytes.Split(data, []byte{'\n'}) {
+		line := strings.TrimSpace(string(raw))
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for start := 0; start < len(lower); {
+			found := strings.Index(lower[start:], ".defenseclaw")
+			if found < 0 {
+				break
+			}
+			end := start + found + len(".defenseclaw")
+			if end == len(lower) || strings.ContainsRune("/\\\"'", rune(lower[end])) {
+				return index + 1, "data-dir path"
+			}
+			start = end
+		}
+		if customDataDir != "" && strings.Contains(line, filepath.Clean(customDataDir)+string(filepath.Separator)) {
+			return index + 1, "data-dir path"
+		}
+		for _, marker := range markers {
+			if strings.Contains(lower, marker) {
+				return index + 1, "connector marker"
+			}
+		}
+	}
+	return 0, ""
 }
 
 // enterpriseHookWorkerManagedRegistration reports whether the user's hook
