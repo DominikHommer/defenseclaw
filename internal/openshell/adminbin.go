@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -92,15 +93,17 @@ func AdminVMDriverDirs(goos string) []string {
 // verify says the driver is missing (GAP-0481).
 func AdminVMDriver(goos string, exists func(path string) bool, trusted func(path string) error) (found string, refused []string) {
 	for _, dir := range AdminVMDriverDirs(goos) {
-		path := filepath.Join(dir, vmDriverBinary)
-		if !exists(path) {
+		// goos is linux or darwin, so the canonical path is a slash path
+		// whatever OS runs this (filepath.Join gave backslashes on Windows).
+		driver := path.Join(dir, vmDriverBinary)
+		if !exists(driver) {
 			continue
 		}
-		if err := trusted(path); err != nil {
-			refused = append(refused, fmt.Sprintf("%s (%v)", path, err))
+		if err := trusted(driver); err != nil {
+			refused = append(refused, fmt.Sprintf("%s (%v)", driver, err))
 			continue
 		}
-		return path, refused
+		return driver, refused
 	}
 	return "", refused
 }
