@@ -81,6 +81,7 @@ const (
 	CheckIDMTLS              = "mtls-permissions"
 	CheckIDGatewayVersion    = "gateway-version"
 	CheckIDGatewayDriver     = "gateway-driver"
+	CheckIDManagedE2fsprogs  = "managed-e2fsprogs"
 	CheckIDGlobalPolicy      = "global-policy"
 	CheckIDBindMounts        = "bind-mounts"
 	CheckIDTelemetry         = "telemetry"
@@ -395,6 +396,15 @@ type Doctor struct {
 	// processes and give fixes this account must not apply (GAP-0173,
 	// GAP-0174, GAP-0215).
 	Managed bool
+	// AdminE2fsprogsDir is the managed gateway's e2fsprogs_dir. Known is
+	// false when its settings call did not answer; an empty known value
+	// means only the account build is used, never a Homebrew keg (GAP-0004).
+	AdminE2fsprogsDir   string
+	AdminE2fsprogsKnown bool
+	// TrustedE2fsprogsDir is the exec shim's trusted-directory check.
+	// Tests can supply the same check for a rooted fixture.
+	TrustedE2fsprogsDir  func(path, label string) error
+	TrustedE2fsprogsFile func(path, label string) error
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
