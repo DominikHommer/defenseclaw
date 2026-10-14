@@ -21,6 +21,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +31,190 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+// DELTA-21 verifier: an ended registration stays refused until the poll
+// marks and stops it, even if the managed gateway later stops answering.
+func TestVerifyD21GoneThenOutage(t *testing.T) {
+	f := newFreshFixture(t)
+	f.confirm()
+	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+	f.set(sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusGone, Reason: sandboxrelay.ReasonRegistrationRevoked})
+	assertD21EndedRefusal(t, f, "ended")
+	calls := f.calls.Load()
+	f.set(sandboxrelay.CurrentPolicy{}, errors.New("dial: connection refused"))
+	assertD21EndedRefusal(t, f, "outage within the lease")
+	time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+	assertD21EndedRefusal(t, f, "outage after the lease")
+	if got := f.calls.Load(); got != calls {
+		t.Fatalf("ended registration asked the gateway again: calls %d -> %d", calls, got)
+	}
+	if r, _ := f.d.regs.get("dc-a"); r.Revoked {
+		t.Fatal("a connection marked the registration revoked before the poll could stop it")
+	}
+}
+
+func assertD21EndedRefusal(t *testing.T, f *freshFixture, step string) {
+	t.Helper()
+	_, off := f.confirm()
+	if off == nil || off.Allowed || off.Category != egress.CategoryEgressOff ||
+		off.Source != egress.SourceAdmin || off.Reason != sandboxEgressNotCovered {
+		t.Fatalf("%s: ended registration's connection = %+v", step, off)
+	}
+}
+
+func TestVerifyD21EveryEndedAnswerStaysRefused(t *testing.T) {
+	ended := []struct {
+		name   string
+		answer sandboxrelay.CurrentPolicy
+		err    error
+	}{
+		{"410 revoked", sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusGone, Reason: sandboxrelay.ReasonRegistrationRevoked}},
+		{"404 unknown", sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusNotFound, Reason: sandboxrelay.ReasonRegistrationUnknown}},
+		{"409 subject changed", sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusConflict, Reason: sandboxrelay.ReasonSubjectChanged}},
+		{"200 revoked", sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: sandboxrelay.ReasonRegistrationRevoked}, nil},
+	}
+	outages := []struct {
+		name string
+		err  error
+	}{
+		{"transport", errors.New("dial: connection refused")},
+		{"429", &sandboxrelay.Error{Status: http.StatusTooManyRequests, Reason: "enterprise_managed_rate_limited"}},
+	}
+	for _, answer := range ended {
+		for _, outage := range outages {
+			t.Run(answer.name+" then "+outage.name, func(t *testing.T) {
+				f := newFreshFixture(t)
+				f.confirm()
+				time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+				f.set(answer.answer, answer.err)
+				assertD21EndedRefusal(t, f, "ended answer")
+				calls := f.calls.Load()
+				f.set(sandboxrelay.CurrentPolicy{}, outage.err)
+				assertD21EndedRefusal(t, f, "immediately after the ended answer")
+				time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+				assertD21EndedRefusal(t, f, "after the lease")
+				if got := f.calls.Load(); got != calls {
+					t.Fatalf("ended registration asked the gateway again: calls %d -> %d", calls, got)
+				}
+				if r, _ := f.d.regs.get("dc-a"); r.Revoked {
+					t.Fatal("a connection marked the registration revoked")
+				}
+			})
+		}
+	}
+}
+
+func TestSandboxDaemonEgressEndedRegistrationIsStillStoppedByThePoll(t *testing.T) {
+	prepare := func(t *testing.T) *freshFixture {
+		t.Helper()
+		f := newFreshFixture(t)
+		f.confirm()
+		time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+		f.set(sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusGone, Reason: sandboxrelay.ReasonRegistrationRevoked})
+		assertD21EndedRefusal(t, f, "ended answer")
+		f.set(sandboxrelay.CurrentPolicy{}, errors.New("dial: connection refused"))
+		time.Sleep(sandboxEgressLease + 50*time.Millisecond)
+		assertD21EndedRefusal(t, f, "outage after the lease")
+		if r, _ := f.d.regs.get("dc-a"); r.Revoked {
+			t.Fatal("the registration was marked revoked before the poll")
+		}
+		f.set(sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusGone, Reason: sandboxrelay.ReasonRegistrationRevoked})
+		return f
+	}
+	t.Run("poll returns the registration", func(t *testing.T) {
+		f := prepare(t)
+		revoked := f.d.pollRegistrations(context.Background(), true)
+		if len(revoked) != 1 || revoked[0].ID != "reg-1" || !revoked[0].Revoked || revoked[0].RevokedReason != sandboxrelay.ReasonRegistrationRevoked {
+			t.Fatalf("poll returned revoked registrations = %+v", revoked)
+		}
+		if r, _ := f.d.regs.get("dc-a"); !r.Revoked || r.RevokedReason != sandboxrelay.ReasonRegistrationRevoked {
+			t.Fatalf("poll did not mark the registration revoked: %+v", r)
+		}
+		assertD21EndedRefusal(t, f, "after the poll")
+	})
+	t.Run("pollOnce stops the sandbox", func(t *testing.T) {
+		f := prepare(t)
+		var stops int
+		f.d.logf = func(format string, _ ...any) {
+			if strings.HasPrefix(format, "stop %s after its registration was revoked") ||
+				strings.HasPrefix(format, "stopped %s: its managed registration was revoked") {
+				stops++
+			}
+		}
+		f.d.pollOnce(context.Background())
+		if stops != 1 {
+			t.Fatalf("pollOnce reached stopRevoked %d times, want 1", stops)
+		}
+		if r, _ := f.d.regs.get("dc-a"); !r.Revoked || r.RevokedReason != sandboxrelay.ReasonRegistrationRevoked {
+			t.Fatalf("pollOnce did not mark the registration revoked: %+v", r)
+		}
+		assertD21EndedRefusal(t, f, "after pollOnce")
+	})
+}
+
+// An owner and its waiter must discard an allowed answer if the poll learns
+// that the registration ended while the owner is still adopting that answer.
+func TestVerifyD21WaiterRefusesGoneDuringSharedAnswer(t *testing.T) {
+	f := newFreshFixture(t)
+	adopting, release := make(chan struct{}), make(chan struct{})
+	releaseOwner := sync.OnceFunc(func() { close(release) })
+	defer releaseOwner()
+	var lists atomic.Int32
+	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
+		if lists.Add(1) == 1 {
+			close(adopting)
+			<-release
+		}
+		return map[string]string{"dc-a": "ready"}, true
+	}
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		if f.calls.Add(1) == 1 {
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2"}, nil
+		}
+		return sandboxrelay.CurrentPolicy{}, &sandboxrelay.Error{Status: http.StatusGone, Reason: sandboxrelay.ReasonRegistrationRevoked}
+	}
+	owner, waiter := make(chan *egress.Decision, 1), make(chan *egress.Decision, 1)
+	go func() { _, off := f.confirm(); owner <- off }()
+	select {
+	case <-adopting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the owner did not start adopting")
+	}
+	go func() { _, off := f.confirm(); waiter <- off }()
+	select {
+	case <-waiter:
+		t.Fatal("the waiter returned before the shared answer finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	pollDone := make(chan struct{})
+	go func() { f.d.pollRegistrations(context.Background(), true); close(pollDone) }()
+	deadline := time.After(5 * time.Second)
+	for {
+		if r, _ := f.d.regs.get("dc-a"); r.Revoked {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the poll did not mark the ended registration revoked")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	releaseOwner()
+	for name, result := range map[string]<-chan *egress.Decision{"owner": owner, "waiter": waiter} {
+		select {
+		case off := <-result:
+			if off == nil || off.Reason != sandboxEgressNotCovered {
+				t.Errorf("%s kept an allowed answer after the registration ended: %+v", name, off)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s did not finish", name)
+		}
+	}
+	<-pollDone
+	if got := f.calls.Load(); got != 2 {
+		t.Fatalf("policy requests = %d, want owner and poll only", got)
+	}
+}
 
 // The DELTA-15 verifier's probes for GAP-0172 (verify r1 TST-2872, verify r2
 // TST-2969), kept as regression tests under their names. Each failed on

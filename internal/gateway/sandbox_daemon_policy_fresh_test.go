@@ -335,7 +335,7 @@ func (f *freshFixture) leaseFresh(id string) bool {
 	f.d.leases.mu.Lock()
 	defer f.d.leases.mu.Unlock()
 	changing := !lease.stale.IsZero() && !lease.confirmed.After(lease.stale)
-	return !changing && !lease.confirmed.IsZero() && time.Since(lease.confirmed) < sandboxEgressLease
+	return !lease.gone && !changing && !lease.confirmed.IsZero() && time.Since(lease.confirmed) < sandboxEgressLease
 }
 
 // GAP-0172 (DELTA-15 verify r2, item 1): a connection's confirmation renews

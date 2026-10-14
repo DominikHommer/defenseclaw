@@ -35,7 +35,7 @@ import (
 // sandbox kept the old egress lists for 20-50 s after `ensure` reported the
 // new generation (a GitHub clone the new block forbids still ran; GAP-0172).
 //
-// Three rules keep a connection from being decided under a policy older than
+// Four rules keep a connection from being decided under a policy older than
 // the one the daemon holds:
 //
 //   - A lease renews only once the answer that renews it is in force: applied
@@ -52,6 +52,9 @@ import (
 //     (egress.Options.Refresh), so a connection that waited for another
 //     one's confirmation, or found the lease that confirmation renewed, is
 //     decided by the decider in force once its Refresh returned.
+//   - An answer that ended the registration stays on its egress lease until
+//     the poll marks it revoked and stops the sandbox. A later gateway error
+//     cannot allow another connection.
 const (
 	// sandboxEgressLease is how long a confirmation decides the new
 	// connections of a registration's sandbox, and how long the verdict of
@@ -92,14 +95,16 @@ type egressLeases struct {
 // was last known to have changed (expire). asked and ended are when the
 // connections' last confirmation was asked for and ended, failed whether it
 // put no answer in force, and off its verdict, which holds for a lease after
-// a failed one ended unless a change was named since it was asked for.
-// attempt is the connections' confirmation under way, which a burst of new
-// connections shares.
+// a failed one ended unless a change was named since it was asked for. gone
+// stays set once the gateway ended the registration, until prune drops the
+// lease. attempt is the connections' confirmation under way, which a burst
+// of new connections shares.
 type egressLease struct {
 	turn             chan struct{}
 	confirmed, stale time.Time
 	asked, ended     time.Time
 	failed           bool
+	gone             bool
 	off              *egress.Decision
 	attempt          *egressAttempt
 }
@@ -114,12 +119,12 @@ type egressAttempt struct {
 }
 
 // leaseVerdict is a lease at one instant (egressLeases.begin): fresh
-// (confirmed since the last change, within the lease), changing (the policy
-// changed after the last confirmation in force) and off (the last attempt's
-// verdict, while it holds).
+// (confirmed since the last change, within the lease), gone (the gateway
+// ended the registration), changing (the policy changed after the last
+// confirmation in force) and off (the last attempt's verdict, while it holds).
 type leaseVerdict struct {
-	fresh, changing bool
-	off             *egress.Decision
+	fresh, gone, changing bool
+	off                   *egress.Decision
 }
 
 func (l *egressLeases) lease(id string) *egressLease {
@@ -134,6 +139,19 @@ func (l *egressLeases) lease(id string) *egressLease {
 		l.byID[id] = lease
 	}
 	return lease
+}
+
+// markGone makes the gateway's ended answer sticky for id until its lease
+// is pruned. It reports whether this answer first marked the lease gone.
+func (l *egressLeases) markGone(id string) bool {
+	lease := l.lease(id)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if lease.gone {
+		return false
+	}
+	lease.gone = true
+	return true
 }
 
 // expire ends id's lease: the policy changed.
@@ -156,12 +174,16 @@ func (l *egressLeases) renew(id string, sent time.Time) {
 	}
 }
 
-// begin is lease at now for a new connection: fresh, the attempt under way
-// to wait for, a new attempt the caller runs (owner), or, while the last
+// begin is lease at now for a new connection: gone, fresh, the attempt under
+// way to wait for, a new attempt the caller runs (owner), or, while the last
 // failed attempt's verdict holds, that verdict (off).
 func (l *egressLeases) begin(lease *egressLease, now time.Time) (a *egressAttempt, owner bool, v leaseVerdict) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if lease.gone {
+		v.gone = true
+		return nil, false, v
+	}
 	v.changing = !lease.stale.IsZero() && !lease.confirmed.After(lease.stale)
 	if !v.changing && !lease.confirmed.IsZero() && now.Sub(lease.confirmed) < sandboxEgressLease {
 		v.fresh = true
@@ -196,12 +218,13 @@ func (l *egressLeases) end(lease *egressLease, a *egressAttempt, changed bool, o
 }
 
 // changedSince reports whether a relayed answer named another policy after
-// the attempt began. Check it after the attempt finishes: the change can
-// arrive while policy/current or the adoption is in flight.
+// the attempt began, or the gateway ended the registration. Check it after
+// the attempt finishes: either can arrive while policy/current or the
+// adoption is in flight.
 func (l *egressLeases) changedSince(lease *egressLease, asked time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return !lease.stale.IsZero() && !asked.After(lease.stale)
+	return lease.gone || (!lease.stale.IsZero() && !asked.After(lease.stale))
 }
 
 // prune drops the leases of registrations the daemon no longer has.
@@ -237,9 +260,16 @@ type policyAnswer struct {
 // report the state report (running), and applies the answer, in r's turn: a
 // registration's requests never overlap, so an answer is never older than
 // one applied before it. A registration the gateway ended is reported gone
-// and not marked here: the poll marks it and stops its sandbox.
+// and its egress lease is marked gone here. Its registration record stays
+// live so the poll can mark it revoked and stop its sandbox.
 func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, report, running bool) policyAnswer {
 	ans := policyAnswer{id: r.ID}
+	markGone := func(reason string) {
+		ans.gone, ans.reason = true, reason
+		if d.leases.markGone(r.ID) {
+			d.logf("sandbox %s: its managed registration ended (%s)", r.Sandbox, reason)
+		}
+	}
 	turn := d.leases.lease(r.ID).turn
 	select {
 	case turn <- struct{}{}:
@@ -262,14 +292,15 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		cp, ans.err = d.relay.Current(ctx, r.ID)
 	}
 	if reason, gone := registrationGone(ans.err); gone {
-		ans.err, ans.gone, ans.reason = nil, true, reason
+		ans.err = nil
+		markGone(reason)
 		return ans
 	}
 	if ans.err != nil {
 		return ans
 	}
 	if cp.Revoked {
-		ans.gone, ans.reason = true, cp.RevokedReason
+		markGone(cp.RevokedReason)
 		return ans
 	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation
@@ -340,8 +371,9 @@ func (d *SandboxDaemon) egressRefresh(ctx context.Context, pr egress.Principal) 
 // connection is refused (off) until the new one is confirmed, so a
 // tightening never waits for the gateway; the outcome holds for a lease
 // after that confirmation ended, without asking again. A registration the
-// gateway ended refuses, and the poll stops its sandbox; so does one the
-// daemon already marked revoked, whose sandbox's stop may have failed.
+// gateway ended stays refused across later gateway errors until the poll
+// marks it revoked and stops its sandbox; one already marked revoked is
+// refused too, even if its sandbox's stop failed.
 func (d *SandboxDaemon) confirmEgressPolicy(ctx context.Context, pr egress.Principal) (bool, *egress.Decision) {
 	r, ok := d.regs.get(pr.SandboxName)
 	switch {
@@ -372,6 +404,8 @@ func (d *SandboxDaemon) confirmLease(ctx context.Context, r daemonRegistration) 
 	for range sandboxEgressRounds {
 		a, owner, v := d.leases.begin(lease, time.Now())
 		switch {
+		case v.gone:
+			return false, sandboxEgressRevoked()
 		case v.fresh:
 			return false, nil
 		case a == nil:
