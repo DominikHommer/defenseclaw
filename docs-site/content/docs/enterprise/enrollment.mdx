@@ -576,9 +576,9 @@ re-homed to a trusted directory, the guardian cleans the current home as
 that user and, when its recorded home still exists and is trusted, cleans
 that home too. A copied OpenCode or Amp plugin receipt cannot direct one
 home's cleanup into the other home: each plugin is handled in its own home.
-The record ends after the current-home cleanup succeeds and the recorded
-home is definitely gone, or after both trusted homes are cleaned with no
-DefenseClaw plugin left loading. An edited plugin that still contains
+For those plugins, the record ends only when the current home's plugin is
+gone and either the recorded home is definitely gone or its plugin is also
+gone. An edited plugin that still contains
 DefenseClaw code keeps the record; the warning names its path. Remove
 DefenseClaw's entries from that plugin and rerun. The guardian logs both
 homes once when cleanup completes. If the recorded
