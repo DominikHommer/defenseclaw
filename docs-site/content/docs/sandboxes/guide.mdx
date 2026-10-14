@@ -228,6 +228,12 @@ What setup does, in order:
    (see [sandboxes on Linux](/docs/sandboxes/linux#understand-what-it-changed));
    sandboxes made on the old driver cannot start after the switch.
 
+   On Linux, setup gives each per-user Docker gateway its own sandbox
+   namespace, `defenseclaw-u<uid>`, when that account has no sandbox in
+   OpenShell's `default` namespace. If the gateway still has sandboxes there,
+   setup leaves its namespace in place and `defenseclaw sandbox doctor` warns
+   `docker-namespace` until those sandboxes are gone.
+
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
    `--non-interactive` take). Yes writes `compute_driver = "vm"` under
@@ -1739,7 +1745,8 @@ sandbox with `defenseclaw sandbox review NAME`, then run
 instead stops and deletes running sandboxes during teardown, including any
 copy-mode work that was not pulled. `reset` accepts the same flag.
 
-If DefenseClaw cannot read the sandbox list because the gateway or its
+This preflight runs only when sandbox teardown is planned. If DefenseClaw
+cannot read the sandbox list because the gateway or its
 sandbox daemon stopped, the list timed out, or its output could not be read,
 `uninstall` and `reset` stop before any change: teardown could otherwise
 delete a sandbox that still runs. Check with `defenseclaw sandbox list`
@@ -1749,7 +1756,15 @@ teardown stop and delete any that still run. A sandbox in `error`, `stopping`,
 `creating` or `deleting` counts as running; only `stopped`, `completed`,
 `deleted` and `missing` do not.
 
-`defenseclaw uninstall` runs teardown too,
+A per-user uninstall for an account that never set up sandboxes completes
+without a teardown override. Its sandbox directory is absent or holds only
+empty lock files and empty folders, no OpenShell state or user gateway config
+sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
+Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
+Records, snapshots, non-empty files, links or unreadable entries under the
+sandbox directory still trigger teardown; so do enabled OpenShell settings
+or an empty lock file alongside OpenShell state or a user gateway config.
+`defenseclaw uninstall` runs teardown when sandbox state is present,
 and stops if teardown fails (where sandboxes are not supported, such as
 Windows, it skips it). When Docker or OpenShell are
 gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the

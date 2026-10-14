@@ -172,9 +172,13 @@ cancels the run, it stops the lifecycle child and reports `mdm_cancelled`.
 ### DefenseClaw uninstall
 
 Upload `uninstall.sh` and add the same `set --` line to its settings block.
-The uninstall always removes the config, credentials, state and logs. Set
-`DC_PURGE=1` to also remove each enrolled user's `~/.defenseclaw` and per-user
-binaries.
+The uninstall always removes the config, credentials, most of the state and
+the logs. If an account keeps sandboxes, the gateway's sandbox registration
+store (`/opt/cisco/defenseclaw/runtime/sandbox`) and its key
+(`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`) stay, root-owned,
+until the next `ensure` adopts them. Set `DC_PURGE=1` to also remove each
+enrolled user's `~/.defenseclaw`, per-user binaries and the kept sandbox store
+and key.
 
 ## Install
 
