@@ -10,9 +10,11 @@ import (
 )
 
 var awkVariableOutput = regexp.MustCompile(`(?:>>|>)\s*([A-Za-z_][A-Za-z0-9_]*)`)
+var awkGroupedOutput = regexp.MustCompile(`(?:>>|>)\s*\(([^()]*)\)`)
 var awkLiteralAssignment = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*["']([^"']+)["']`)
+var awkOutputTerm = regexp.MustCompile(`(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]*"|'[^']*')`)
 
-func literalAwkVariableWrites(words []string, code string) []string {
+func literalAwkVariableWrites(words []string, code string) ([]string, bool) {
 	values := map[string]string{}
 	for i := 0; i < len(words); i++ {
 		assignment := ""
@@ -31,12 +33,43 @@ func literalAwkVariableWrites(words []string, code string) []string {
 		values[match[1]] = match[2]
 	}
 	var paths []string
+	unknown := false
 	for _, match := range awkVariableOutput.FindAllStringSubmatch(code, -1) {
 		if value := values[match[1]]; value != "" {
 			paths = append(paths, value)
+		} else {
+			unknown = true
 		}
 	}
-	return paths
+	for _, match := range awkGroupedOutput.FindAllStringSubmatch(code, -1) {
+		terms := awkOutputTerm.FindAllStringIndex(match[1], -1)
+		var result strings.Builder
+		consumed, exact := 0, len(terms) > 0
+		for _, term := range terms {
+			if strings.TrimSpace(match[1][consumed:term[0]]) != "" {
+				exact = false
+			}
+			word := match[1][term[0]:term[1]]
+			value, ok := literalString(word)
+			if !ok {
+				value, ok = values[word]
+			}
+			if !ok {
+				exact = false
+			}
+			result.WriteString(value)
+			consumed = term[1]
+		}
+		if strings.TrimSpace(match[1][consumed:]) != "" {
+			exact = false
+		}
+		if exact {
+			paths = append(paths, result.String())
+		} else {
+			unknown = true
+		}
+	}
+	return paths, unknown
 }
 
 type inlineString struct {

@@ -120,10 +120,10 @@ var (
 	literalNodeDestructure   = regexp.MustCompile(`\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(fs(?:\.promises)?)\b`)
 	literalNodeNamedImport   = regexp.MustCompile(`\bimport\s*\{([^}]+)\}\s*from\s*['"](?:node:)?fs(?:/promises)?['"]`)
 	literalNodeDefaultImport = regexp.MustCompile(`\bimport\s+(?:\*\s+as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"](?:node:)?fs(?:/promises)?['"]`)
-	literalPathMethod        = regexp.MustCompile(`^\s*\.\s*(open|write_text|write_bytes|touch)\s*\(`)
+	literalPathMethod        = regexp.MustCompile(`^((?:\s*/\s*(?:"[^"]*"|'[^']*'))*)\s*\)?\s*\.\s*(open|write_text|write_bytes|touch)\s*\(`)
 	literalReadOnlyFlag      = regexp.MustCompile(`^(?:(?:os|fs\.constants)\.)?O_RDONLY$`)
-	literalPerlOpen          = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalPerlOpen2         = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)([^'"]+)['"]`)
+	literalPerlBareOpen      = regexp.MustCompile(`\bopen\s+(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	literalPerlBareOpen2     = regexp.MustCompile(`\bopen\s+(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>|\+<)([^'"]+)['"]`)
 	literalPerlCopyUse       = regexp.MustCompile(`\buse\s+File::Copy(?:\s+qw\(([^)]*)\))?`)
 	literalIdentifier        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
@@ -312,7 +312,7 @@ func literalPythonBoundPath(prefix, name string) (string, bool) {
 		if end := strings.IndexAny(right, ";\n"); end >= 0 {
 			right = right[:end]
 		}
-		literal, ok := literalString(right)
+		literal, ok := literalExpression("python", right)
 		if !ok {
 			return "", false
 		}
@@ -349,7 +349,7 @@ func literalWriterEnabled(rule literalWriterRule, args []string) bool {
 		}
 		return literalWriteMode(mode)
 	case literalWriterPerlOpen:
-		mode, ok := literalString(modeArg)
+		mode, ok := literalExpression("perl", modeArg)
 		return !ok && modeArg != "" || ok && (mode == ">" || mode == ">>" || mode == "+<" || len(args) == 2 && (strings.HasPrefix(mode, ">") || strings.HasPrefix(mode, "+<")))
 	case literalWriterFlags:
 		return literalOSWriteFlags(modeArg) || modeArg != "" && modeArg != "0" && !literalReadOnlyFlag.MatchString(strings.TrimSpace(modeArg))
@@ -386,10 +386,12 @@ func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 				if mode, ok := literalString(args[1]); ok && (strings.HasPrefix(mode, ">") || strings.HasPrefix(mode, "+<")) {
 					pathArg = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(mode, ">"), ">"), "+<")
 					paths = append(paths, pathArg)
+				} else {
+					unknown = true
 				}
 				continue
 			}
-			path, knownPath := literalString(pathArg)
+			path, knownPath := literalExpression(language, pathArg)
 			if !knownPath && language == "python" {
 				path, knownPath = literalPythonBoundPath(code[:loc[0]], pathArg)
 			}
@@ -399,7 +401,7 @@ func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 				}
 				if rule.kind == literalWriterDestinationDirectory {
 					if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
-						if source, ok := literalString(literalWriterArg(args, 0, "src")); ok {
+						if source, ok := literalExpression(language, literalWriterArg(args, 0, "src")); ok {
 							paths = append(paths, filepath.Join(path, filepath.Base(source)))
 						} else {
 							unknown = true
@@ -459,7 +461,7 @@ func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 			if method == nil {
 				continue
 			}
-			methodName := code[start+method[2] : start+method[3]]
+			methodName := code[start+method[4] : start+method[5]]
 			methodCall, ok := literalBoundedCall(code, start+method[1]-1)
 			if !ok {
 				continue
@@ -471,7 +473,8 @@ func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 				if len(args) == 0 {
 					continue
 				}
-				if path, ok := literalString(args[0]); ok {
+				pathExpression := "Path(" + args[0] + ")" + code[start+method[2]:start+method[3]]
+				if path, ok := literalExpression(language, pathExpression); ok {
 					paths = append(paths, path)
 				} else {
 					unknown = true
@@ -480,14 +483,11 @@ func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 		}
 	}
 	if language == "perl" {
-		for _, match := range literalPerlOpen.FindAllStringSubmatchIndex(code, -1) {
-			if literalCodePosition(code, match[0]) {
-				paths = append(paths, code[match[2]:match[3]])
-			}
-		}
-		for _, match := range literalPerlOpen2.FindAllStringSubmatchIndex(code, -1) {
-			if literalCodePosition(code, match[0]) {
-				paths = append(paths, code[match[2]:match[3]])
+		for _, pattern := range []*regexp.Regexp{literalPerlBareOpen, literalPerlBareOpen2} {
+			for _, match := range pattern.FindAllStringSubmatchIndex(code, -1) {
+				if literalCodePosition(code, match[0]) {
+					paths = append(paths, code[match[2]:match[3]])
+				}
 			}
 		}
 	}

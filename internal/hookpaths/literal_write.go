@@ -161,7 +161,9 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 						for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
 							add(match[1], cmdCWD)
 						}
-						for _, name := range literalAwkVariableWrites(programWords[1:], arg) {
+						awkPaths, dynamic := literalAwkVariableWrites(programWords[1:], arg)
+						unknown = unknown || dynamic
+						for _, name := range awkPaths {
 							add(name, cmdCWD)
 						}
 					}
@@ -591,11 +593,12 @@ func literalString(arg string) (string, bool) {
 	if len(arg) < 2 || arg[0] != arg[len(arg)-1] || arg[0] != '\'' && arg[0] != '"' {
 		return "", false
 	}
-	value := arg[1 : len(arg)-1]
-	if strings.Contains(value, "\\") {
-		return "", false
+	for i := 1; i < len(arg)-1; i++ {
+		if arg[i] == '\\' || arg[i] == arg[0] {
+			return "", false
+		}
 	}
-	return value, true
+	return arg[1 : len(arg)-1], true
 }
 
 func literalBoundedCall(code string, open int) (string, bool) {
