@@ -66,14 +66,26 @@ Okta through SSSD, and similar sources work. See
   sandboxes need with either driver, can already do anything root can, the
   protected credentials included ([Docker group members](#what-users-see)).
   DefenseClaw contains the agent and keeps honest users inside the policy, and
-  it does not stop a hostile local user.
+  it does not stop a hostile local user. A member can run an agent in a plain
+  container outside DefenseClaw, bypassing `sandbox.required_for` too.
+  Administrators who need `required_for` to hold against deliberate users
+  must not give them Docker access. A root-owned image and lifecycle service
+  that closes this limit is planned for a later release.
 - **A registration vouches for the account, not for a VM.** The managed
-  gateway learns from the kernel who calls, but it can't see the user's
+  gateway learns from the kernel who calls, but it cannot see the user's
   sandboxes. It relies on the user's own daemon to say which sandbox a
-  registration is bound to and whether that sandbox runs. A user who
-  imitates their own daemon's calls can get hook verdicts for a sandbox that
-  doesn't exist, under their own profile only. That never loosens their
-  policy and never reaches another account, and the audit record names them.
+  registration is bound to and whether that sandbox runs. On a managed host,
+  `sandbox.required_for` refuses normal host use of a listed agent with a
+  machine-owned hook (Claude Code, Codex, Cursor, or Copilot) for a non-exempt
+  account when the effective `when_unavailable` setting is `refuse`. An `alert`
+  setting when sandboxes are unavailable, or an agent without a machine-owned
+  hook, allows the host run. In 1.0.2 the requirement does not stop a user who
+  deliberately fakes a running-sandbox registration for their own account,
+  because this release has no root-owned sandbox lifecycle service to vouch
+  for registrations. The relay route can then judge that account's hook calls
+  under the registration. This never reaches another account's policy; the
+  audit record names the account. The root-owned service is planned for a
+  later release.
 - **No bundling.** DefenseClaw never ships OpenShell in its packages. You
   provide it (`prerequisite`) or let each user's daemon download NVIDIA's
   release at first use (`setup`).
@@ -787,10 +799,35 @@ command to run is ready to paste.
   start still gets its full policy. `profile-explain` shows the exemption.
 - **It is a policy control, not an exec deny.** It covers the connectors that
   have a machine-owned hook (Claude Code, Codex, Cursor and Copilot).
-  A host run is refused even when it claims to be nested in a sandbox. A
+  For a non-exempt account, a host run is refused even when it claims to be
+  nested in a sandbox. A
   person who runs an agent that has no
   machine-owned hook is not stopped by it.
+- **A registration has a same-account limit in 1.0.2.** A listed agent with a
+  machine-owned hook is refused on the host for a non-exempt account when the
+  effective `when_unavailable` setting is `refuse`. When it is `alert` and
+  sandboxes are unavailable, or the agent has no machine-owned hook, the host
+  run can proceed. A standard user can deliberately present
+  a running-sandbox registration for their own account without a guest. Watch
+  the registration alert described below and keep the `docker` group limited
+  to accounts that run sandboxes ([What users see](#what-users-see)).
 - **Root is refused** on every sandbox route, including when you inspect.
+
+The managed gateway records `log.sandbox.registration_without_guest` with
+reason `relay_without_guest` when a watched registration is used on an admitted
+relay call without a guest sighting, or `running_without_guest` when it is
+reported running without one. The Sandboxes dashboard stat **Sandbox
+registrations without a guest** counts these records. Reporting starts five
+minutes after bind to allow the first guest record to arrive; a real sandbox
+whose lifecycle records were dropped can show once. The record is a tripwire
+for the simple case, not proof: the same account can also post lifecycle
+records. Root-owned lifecycle attestation is the planned protection.
+Only registrations bound by a build with this signal are watched. The first
+accepted guest record ends the watch for that registration, so a guest that
+disappears later is not reported by this tripwire for the simple case.
+Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not
+watched; re-create those sandboxes after the upgrade to bring them under the
+signal. Root-owned attestation in a later release replaces this signal.
 
 `ensure` warns about a `required_for` connector that has no machine-owned hook
 on the OS.
@@ -1316,6 +1353,12 @@ within about 30 seconds, so a fix takes effect on the next run.
 | `driver_unsupported` | The organization's `driver` isn't one this computer can run | Set a driver the OS supports ([the two modes](#install-openshell-the-two-modes)) |
 | `prerequisite_missing` | OpenShell or Docker is missing or not set up; the sentence names the piece | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
 | `account_busy` | Another account holds the sandbox ports | Clears when that account has no sandbox running |
+
+### Registration alert reasons
+
+| Reason code | Record | Meaning |
+| --- | --- | --- |
+| `relay_without_guest`, `running_without_guest` | `log.sandbox.registration_without_guest` | A watched registration was used on an admitted relay call or reported running after the guest grace without an accepted guest record since bind. The record names the account, connector, registration and sandbox; it changes no decision. |
 
 ### What `ensure`, `status` and `verify` report
 

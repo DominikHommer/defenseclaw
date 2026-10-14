@@ -226,6 +226,22 @@ were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back when you run `defenseclaw rollback`
 again; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
+
+Sandboxes keep running through a rollback. Between releases from 1.0.1 on,
+rollback carries the sandbox setup to the restored install: its `openshell:`
+settings, each sandbox record and hook binding, harness image records, and
+undo point. A running sandbox stays managed, and its hooks work again when
+the gateway returns. The install you left keeps its own copy for a roll
+forward. A release before 1.0.1 cannot take over that setup, so a running
+sandbox's hooks fail closed and its agent's tool calls are refused until you
+return to the newer install. The installer names only sandboxes in the
+`ready` phase, and only while the gateway runs and `sandbox list` answers; a
+sandbox in another phase, or one it cannot list, is not named. After a
+return to 1.0.0, run `defenseclaw rollback` again. After a return to 0.8.x,
+which has no rollback command, run
+`bash ~/.defenseclaw/previous/installer/install.sh --rollback` (the command
+the rollback prints), or run the install command again.
+
 Each install shows only its own audit events, so after a rollback the
 events the other install recorded are not in `defenseclaw-gateway audit export`.
 Read them from the install you left, with the newer build's gateway:

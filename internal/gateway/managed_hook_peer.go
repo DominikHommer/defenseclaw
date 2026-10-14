@@ -267,6 +267,15 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
 }
 
+// hostRunExempt reports whether the caller is exempt from enrollment as decide
+// marks a hook call exempt (managedHookDecision.Exempt), so the
+// require-sandbox gate allows its host runs: exempt_users names it and it is
+// not root, which enterprise.enrollment.root governs and exempt_users never
+// exempts. The policy views ask the same question (GAP-0555).
+func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
+	return peer.UID != 0 && z.exempt(peer)
+}
+
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
 // replace it.
@@ -305,7 +314,7 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 			return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
 		}
 	}
-	if z.exempt(peer) {
+	if z.hostRunExempt(peer) {
 		decision := allowManagedHook()
 		decision.Exempt = true
 		return decision
