@@ -389,10 +389,10 @@ yourself if DefenseClaw added them.
 When sandbox state is present, uninstall also removes DefenseClaw's OpenShell
 sandboxes and images (on Linux and macOS; there are none on Windows). If
 teardown fails with `--all` or `--binaries`, rerun uninstall with
-`--skip-sandbox-teardown` and without `--all` or `--binaries` to keep the
-data needed for later teardown. Once Docker and OpenShell work again, run
-`defenseclaw-gateway sandbox teardown`,
-then uninstall again. Before stopping a live-mounted sandbox, review its
+`--skip-sandbox-teardown` and without `--all` or `--binaries`
+to keep the data needed for later teardown. Once Docker and OpenShell
+work again, run `defenseclaw-gateway sandbox teardown`, then uninstall again.
+Before stopping a live-mounted sandbox, review its
 changes (`defenseclaw sandbox review NAME`) or undo them
 (`defenseclaw sandbox undo NAME`). Work its agent already wrote in your folder
 stays unless you undo it; the plan names those sandboxes.
