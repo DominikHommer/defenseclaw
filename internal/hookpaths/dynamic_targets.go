@@ -491,6 +491,10 @@ func shellCandidateReadInputs(file *syntax.File, home, cwd string, candidates *s
 					value, known = StaticWord(redirect.Hdoc, home)
 				}
 			case syntax.RdrIn:
+				if script, supplied, static := shellProcessScript(redirect.Word, "", home); supplied {
+					value, known = script, static
+					break
+				}
 				if name, ok := StaticWord(redirect.Word, home); ok {
 					path := OperandPath(name, cwd)
 					if first, written := writtenAt[path]; written && first < stmtIndex || unknownAt < stmtIndex {

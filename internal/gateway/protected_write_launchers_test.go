@@ -22,6 +22,9 @@ func TestProtectedWriteLauncherDecisions(t *testing.T) {
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(cwd, "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(key, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +47,8 @@ func TestProtectedWriteLauncherDecisions(t *testing.T) {
 		{"ordinary env", `env -i python3 -c 'open("notes.txt","a").write("x")'`, false},
 		{"ordinary command", `command -p cp payload notes.txt`, false},
 		{"ordinary xargs", `printf notes.txt | xargs -I{} cp payload {}`, false},
+		{"copy loop bounded source", `for f in *.txt; do cp "$f" build/; done; echo done > report.txt`, false},
+		{"copy literal destination", `find . -maxdepth 1 -name payload -print0 | xargs -0 -I{} cp {} disklink`, true},
 	}
 	for _, row := range rows {
 		for _, managed := range []bool{false, true} {

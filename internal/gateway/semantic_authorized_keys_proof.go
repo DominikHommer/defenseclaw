@@ -758,7 +758,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
-	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
+	writeTarget := func(target string, safeRedirect bool, copyScope string) bool {
 		if !filepath.IsAbs(target) {
 			return false
 		}
@@ -778,7 +778,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the link does not exist yet (GAP-1522). A character device such as
 		// /dev/null is not a link the command can replace; a link to one is,
 		// so the device is read without following links.
-		if !safeRedirect && (!ownCopy && links.OpaqueTarget(target) || ownCopy && links.OpaqueTargetExceptOwnCopy(target, target)) {
+		if !safeRedirect && (copyScope == "" && links.OpaqueTarget(target) || copyScope != "" && links.OpaqueTargetExceptOwnCopy(target, copyScope)) {
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
@@ -889,12 +889,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
-			if writeTarget(operand, safe, false) {
+			if writeTarget(operand, safe, "") {
 				return true
 			}
 		}
 		for _, operand := range dynamicOperands {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, "") {
 				return true
 			}
 		}
@@ -906,18 +906,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 		for _, operand := range literalOperands {
-			if writeTarget(operand, false, false) {
+			if writeTarget(operand, false, "") {
 				return true
 			}
 		}
 		for _, operand := range hookpaths.ShellExtraWriteOperands(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand.Path, false, operand.OwnCopy) {
+			if writeTarget(operand.Path, false, operand.CopyScope) {
 				return true
 			}
 		}
 		for operand, safe := range replacedBySed {
 			if (!safe || request.ResolvedWriteTargets[hookpaths.SedRelinkFactPrefix+operand] == "1") &&
-				writeTarget(operand, false, false) {
+				writeTarget(operand, false, "") {
 				return true
 			}
 		}
@@ -928,7 +928,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 		for _, operand := range directoryOperands {
-			if writeTarget(operand.Path, operand.Safe, false) {
+			if writeTarget(operand.Path, operand.Safe, "") {
 				return true
 			}
 		}
@@ -961,8 +961,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
 			target = raw
 		}
-		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
-			target == hookpaths.CopyDestination(command.Argv, clientCWD)
+		copyScope := ""
+		if (command.Program == "cp" || command.Program == "gcp") &&
+			target == hookpaths.CopyDestination(command.Argv, clientCWD) {
+			copyScope = target
+		}
 		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 			continue
 		}
@@ -970,7 +973,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			!isProtected(target) {
 			continue
 		}
-		if writeTarget(target, false, ownCopy) {
+		if writeTarget(target, false, copyScope) {
 			return true
 		}
 	}
@@ -984,7 +987,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	for _, target := range patchTargets {
-		if writeTarget(target, false, false) {
+		if writeTarget(target, false, "") {
 			return true
 		}
 	}

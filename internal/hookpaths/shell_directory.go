@@ -51,6 +51,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil, false
 	}
+	poison := shellVariablePoisonForFile(file, home)
+	states := shellWordStates(file, home, poison)
+	candidates := shellVariableCandidates(file, home, cwd)
 	physical := func(logical string) (string, bool) {
 		key := DirectoryFactPrefix + logical
 		if !record && directoryFacts != nil {
@@ -122,7 +125,15 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			default:
 				continue
 			}
-			name, ok := StaticWord(redirect.Word, home)
+			name, ok := shellStaticWordWithKnownCalls(redirect.Word, home, s.logical, states.varsFor(redirect.Word), poison)
+			if !ok && s.changed {
+				if names, dynamic := shellWordDynamicParamNames(redirect.Word, home); !dynamic && len(names) == 1 &&
+					!candidates.unknown[names[0]] && len(candidates.values[names[0]]) == 1 {
+					vars := states.varsFor(redirect.Word)
+					vars[names[0]] = candidates.values[names[0]][0]
+					name, ok = shellStaticWordWithKnownCalls(redirect.Word, home, s.logical, vars, shellVariablePoison{})
+				}
+			}
 			if !ok {
 				if s.changed && (!s.known || sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
 					unknown = true
@@ -501,6 +512,9 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 // the program word is not static. command -v and -V only describe a program.
 func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg int, ok bool) {
 	for arg < len(call.Args) {
+		if call.Args[arg].Lit() == "[" {
+			return "[", arg + 1, true
+		}
 		program, ok = StaticWord(call.Args[arg], home)
 		if !ok {
 			return "", arg, false

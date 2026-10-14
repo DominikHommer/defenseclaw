@@ -142,8 +142,8 @@ func shellWriteOccurrences(file *syntax.File, cwd, home string) []shellWriteOccu
 // ExtraWriteOperand preserves whether a destination belongs to the copy
 // operation itself. Later writers to the same path cannot claim that scope.
 type ExtraWriteOperand struct {
-	Path    string
-	OwnCopy bool
+	Path      string
+	CopyScope string
 }
 
 // ShellExtraWriteOperands lists destinations that the command-link proof
@@ -152,10 +152,20 @@ func ShellExtraWriteOperands(command, cwd, home string) (operands []ExtraWriteOp
 	defer recoverAnalysisPanic(func() {
 		operands = []ExtraWriteOperand{{Path: filepath.Join(home, ".ssh", "authorized_keys")}}
 	})
+	add := func(items []ExtraWriteOperand) {
+		for _, item := range items {
+			if !slices.ContainsFunc(operands, func(existing ExtraWriteOperand) bool {
+				return existing.Path == item.Path && existing.CopyScope == item.CopyScope
+			}) {
+				operands = append(operands, item)
+			}
+		}
+	}
 	contexts, _ := shellAnalysisScripts(command, cwd, home)
 	for _, context := range contexts {
 		poison := shellVariablePoisonForFile(context.file, home)
 		states := shellWordStates(context.file, home, poison)
+		candidates := shellVariableCandidates(context.file, home, context.cwd)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if _, declared := node.(*syntax.FuncDecl); declared {
 				return false
@@ -167,7 +177,26 @@ func ShellExtraWriteOperands(command, cwd, home string) (operands []ExtraWriteOp
 			if context.handled[int(call.Pos().Offset())] {
 				return true
 			}
-			operands = append(operands, shellCallExtraWriteOperands(call, context.cwd, home, states.varsFor(call.Args[0]), poison)...)
+			vars := states.varsFor(call.Args[0])
+			add(shellCallExtraWriteOperands(call, context.cwd, home, vars, poison))
+			seenNames := map[string]bool{}
+			syntax.Walk(call, func(inner syntax.Node) bool {
+				param, ok := inner.(*syntax.ParamExp)
+				if ok && param.Param != nil && param.Exp == nil {
+					seenNames[param.Param.Value] = true
+				}
+				return true
+			})
+			for name := range seenNames {
+				if candidates.unknown[name] || len(candidates.values[name]) > 64 {
+					continue
+				}
+				for _, value := range candidates.values[name] {
+					bounded := vars.clone()
+					bounded[name] = value
+					add(shellCallExtraWriteOperands(call, context.cwd, home, bounded, shellVariablePoison{}))
+				}
+			}
 			return true
 		})
 	}
@@ -333,9 +362,12 @@ func shellCallExtraWriteOperands(
 	operands := rawOutputs
 	var destination string
 	add := func(path string) {
-		operands = append(operands, ExtraWriteOperand{
-			Path: path, OwnCopy: program == "cp" || program == "gcp" || program == "rsync",
-		})
+		copyWrite := program == "cp" || program == "gcp" || program == "rsync"
+		scope := ""
+		if copyWrite {
+			scope = path
+		}
+		operands = append(operands, ExtraWriteOperand{Path: path, CopyScope: scope})
 	}
 	if program == "tee" && len(programWords) == len(call.Args) {
 		for i, word := range programWords[1:] {
@@ -352,6 +384,22 @@ func shellCallExtraWriteOperands(
 		}
 	}
 	if !allStatic(resolved.static) {
+		if (program == "cp" || program == "gcp" || program == "mv" || program == "gmv" || program == "install") &&
+			len(programWords) >= 3 && resolved.static[len(programWords)-1] {
+			targetDirectory := false
+			for _, word := range programWords[1 : len(programWords)-1] {
+				if word == "-t" || strings.HasPrefix(word, "-t") && len(word) > 2 ||
+					word == "--target-directory" || strings.HasPrefix(word, "--target-directory=") {
+					targetDirectory = true
+				}
+			}
+			if !targetDirectory {
+				last := OperandPath(programWords[len(programWords)-1], cmdCWD)
+				if resolved, ok := ResolveWriteTarget(last); ok && newProtectedFiles(home).has(resolved) {
+					add(last)
+				}
+			}
+		}
 		return operands
 	}
 	if _, known := outputProgramGrammars[program]; known && program != "script" {
@@ -382,6 +430,28 @@ func shellCallExtraWriteOperands(
 	case "cp", "gcp":
 		static := makeStatic(len(programWords) - 1)
 		destination = cpDestination(programWords[1:], static, cmdCWD)
+		if sources, target, _, ok := cpOperands(programWords[1:], static); ok {
+			if !filepath.IsAbs(target) {
+				target = OperandPath(target, cmdCWD)
+			}
+			isDirectory := false
+			if info, err := os.Stat(target); err == nil && info.IsDir() {
+				isDirectory = true
+			}
+			for _, arg := range programWords[1:] {
+				if arg == "-t" || arg == "--target-directory" || strings.HasPrefix(arg, "--target-directory=") {
+					isDirectory = true
+				}
+			}
+			if isDirectory {
+				for _, source := range sources {
+					if source != "" {
+						add(OperandPath(filepath.Join(target, filepath.Base(source)), cmdCWD))
+						operands[len(operands)-1].CopyScope = target
+					}
+				}
+			}
+		}
 	case "mv", "gmv", "install":
 		destination = finalOperandDestination(programWords[1:], cmdCWD)
 	case "dd":
@@ -582,24 +652,32 @@ func staticShellParam(param *syntax.ParamExp, haveHome bool, vars shellVariables
 	if homeParam(param, haveHome) {
 		return true
 	}
-	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
-		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
-		param.Index != nil && !shellZeroIndex(param.Index) || len(param.Modifiers) != 0 || param.Slice != nil ||
-		param.Repl != nil || param.Names != 0 {
+	if param == nil || param.Param == nil || param.NestedParam != nil || param.Names != 0 ||
+		param.Index != nil && !shellZeroIndex(param.Index) {
 		return false
 	}
 	name := param.Param.Value
 	if !shellIdentifier(name) || shellVolatileParam(name) || poison.poisoned(name) {
 		return false
 	}
+	if param.Excl {
+		indirect, ok := vars[name]
+		if !ok || !shellIdentifier(indirect) || poison.poisoned(indirect) {
+			return false
+		}
+		_, ok = vars[indirect]
+		return ok
+	}
 	if param.Exp == nil {
 		_, ok := vars[name]
 		return ok
 	}
 	switch param.Exp.Op {
-	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull:
+	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull,
+		syntax.AlternateUnset, syntax.AlternateUnsetOrNull:
 	default:
-		return false
+		_, ok := vars[name]
+		return ok
 	}
 	if param.Exp.Word == nil {
 		return true
@@ -965,6 +1043,29 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 				return true
 			}
 			for _, item := range iter.Items {
+				if shellHasLiteralGlob(item) && item.Lit() != "" {
+					pattern := item.Lit()
+					prefix := pattern[:strings.IndexAny(pattern, "*?[")]
+					if shellPatternTargetSafe(prefix, "", cwd, home, false) {
+						candidates.safePath[iter.Name.Value] = true
+					}
+					matches, err := filepath.Glob(OperandPath(pattern, cwd))
+					if err != nil || len(matches) > 256 {
+						candidates.unknown[iter.Name.Value] = true
+						continue
+					}
+					if len(matches) == 0 && !candidates.safePath[iter.Name.Value] {
+						candidates.unknown[iter.Name.Value] = true
+					}
+					for _, match := range matches {
+						value := match
+						if !filepath.IsAbs(pattern) {
+							value, _ = filepath.Rel(cwd, match)
+						}
+						candidates.add(iter.Name.Value, value)
+					}
+					continue
+				}
 				value, ok := staticShellWordWithVars(item, home, states.varsFor(item), shellVariablePoison{})
 				if ok {
 					candidates.add(iter.Name.Value, value)
@@ -1022,6 +1123,44 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 		return true
 	})
 	shellCandidateReadInputs(file, home, cwd, &candidates)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.DeclClause); ok {
+			nameref := decl.Variant != nil && decl.Variant.Value == "nameref"
+			for _, arg := range decl.Args {
+				if arg.Naked && arg.Value != nil && arg.Value.Lit() == "-n" {
+					nameref = true
+				}
+			}
+			if nameref {
+				for _, arg := range decl.Args {
+					if arg.Name != nil {
+						candidates.unknown[arg.Name.Value] = true
+					}
+				}
+			}
+			return true
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 || call.Args[0].Lit() != "declare" && call.Args[0].Lit() != "typeset" {
+			return true
+		}
+		nameref := false
+		for _, arg := range call.Args[1:] {
+			if arg.Lit() == "-n" {
+				nameref = true
+			}
+		}
+		if !nameref {
+			return true
+		}
+		syntax.Walk(call, func(inner syntax.Node) bool {
+			if assign, ok := inner.(*syntax.Assign); ok {
+				candidates.unknown[shellAssignName(assign)] = true
+			}
+			return true
+		})
+		return true
+	})
 	return candidates
 }
 
@@ -1052,6 +1191,9 @@ func shellCandidateAssignValue(assign *syntax.Assign, home, cwd string, states s
 		}
 		var ok bool
 		value, ok = staticShellWordWithVars(assign.Value, home, vars, shellVariablePoison{})
+		if !ok {
+			value, ok = shellStaticWordWithKnownCalls(assign.Value, home, cwd, vars, shellVariablePoison{})
+		}
 		if !ok {
 			value, kind = shellKnownAssignmentValue(assign.Value, home, cwd, vars)
 			if kind == shellValueUnknown && shellBoundedTargetSafe(assign.Value, home, cwd, vars) {
@@ -1146,6 +1288,12 @@ func shellCandidateCallMutation(
 			return
 		}
 	case "declare", "typeset", "local", "export", "readonly":
+		nameref := false
+		for _, option := range call.Args[1:] {
+			if value, ok := StaticWord(option, home); ok && (value == "-n" || strings.HasPrefix(value, "-n")) {
+				nameref = true
+			}
+		}
 		for _, arg := range call.Args[1:] {
 			word, ok := staticShellWordWithVars(arg, home, states.varsFor(arg), shellVariablePoison{})
 			if !ok {
@@ -1157,7 +1305,11 @@ func shellCandidateCallMutation(
 				continue
 			}
 			if name, value, found := strings.Cut(word, "="); found && shellIdentifier(name) {
-				candidates.add(name, value)
+				if nameref {
+					candidates.unknown[name] = true
+				} else {
+					candidates.add(name, value)
+				}
 			}
 		}
 	}
@@ -1240,6 +1392,9 @@ func shellAssignName(assign *syntax.Assign) string {
 func shellKnownProgram(call *syntax.CallExpr, home string, vars shellVariables) (string, bool) {
 	if call == nil || len(call.Args) == 0 {
 		return "", false
+	}
+	if call.Args[0].Lit() == "[" {
+		return "[", true
 	}
 	if value, ok := staticShellWordWithVars(call.Args[0], home, vars, shellVariablePoison{}); ok {
 		return value, true
@@ -1870,7 +2025,7 @@ func Resolve(payload []byte) (result string) {
 		len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
-	add := func(path string, literal, safeRedirect bool) {
+	add := func(path string, literal, safeRedirect bool, copyScope string) {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
@@ -1893,7 +2048,7 @@ func Resolve(payload []byte) (result string) {
 			if direct, directOK := resolveWritePath(path, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if links.opaque && (!links.opaqueTarget(path) || !links.opaqueTargetExceptCopy(path, path) && slices.Contains(links.copyDestinations, path)) {
+		} else if !links.opaqueTargetExceptCopy(path, copyScope) {
 			resolved, ok = links.resolve(path, protected)
 		}
 		if !ok {
@@ -1910,22 +2065,22 @@ func Resolve(payload []byte) (result string) {
 	// Exact shell operands take precedence over a duplicate PathFact. Their
 	// early-redirect exemption must not cover a later command writer.
 	for i, operand := range operands {
-		add(operand, true, i < len(safeRedirects) && safeRedirects[i].Safe)
+		add(operand, true, i < len(safeRedirects) && safeRedirects[i].Safe, "")
 	}
 	for _, operand := range dynamicOperands {
-		add(operand, true, false)
+		add(operand, true, false, "")
 	}
 	for _, operand := range literalOperands {
-		add(operand, true, false)
+		add(operand, true, false, "")
 	}
 	for _, operand := range extraOperands {
-		add(operand.Path, true, false)
+		add(operand.Path, true, false, operand.CopyScope)
 	}
 	for operand := range sedOperands {
-		add(operand, true, false)
+		add(operand, true, false, "")
 	}
 	for _, operand := range directoryOperands {
-		add(operand.Path, true, operand.Safe)
+		add(operand.Path, true, operand.Safe, "")
 	}
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -1938,17 +2093,18 @@ func Resolve(payload []byte) (result string) {
 		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
 			path = raw
 		}
-		if slices.Contains(operands, path) && pathFactIsRedirect(candidate, facts.Commands) {
+		if slices.Contains(operands, path) && pathFactIsRedirect(candidate, facts.Commands) ||
+			pathFactIsOwnCopy(candidate, facts.Commands, extraOperands, path) {
 			continue
 		}
-		add(path, false, false)
+		add(path, false, false, "")
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
 	truncated = truncated || !patchKnown
 	for _, target := range patchTargets {
-		add(target, true, false)
+		add(target, true, false, "")
 	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
@@ -2023,6 +2179,20 @@ func RawDotDotOperand(value, cwd string) (string, bool) {
 		return "", false
 	}
 	return OperandPath(value, cwd), true
+}
+
+func pathFactIsOwnCopy(candidate actionfacts.PathFact, commands []actionfacts.CommandFact, extras []ExtraWriteOperand, path string) bool {
+	for _, command := range commands {
+		if command.ID != candidate.CommandID || command.Program != "cp" && command.Program != "gcp" {
+			continue
+		}
+		for _, extra := range extras {
+			if extra.Path == path && extra.CopyScope == path {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {
@@ -2182,6 +2352,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	for _, context := range contexts {
 		callCWD := context.cwd
 		expandedWords := shellExpandedCallWords(context.file, home)
+		boundedWords := shellVariableCandidates(context.file, home, callCWD)
 		syntax.Walk(context.file, func(node syntax.Node) bool {
 			if _, declared := node.(*syntax.FuncDecl); declared {
 				return false
@@ -2206,6 +2377,22 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				}
 			}
 			normalizeSameUserLauncherOptions(words, static, call.Args)
+			if call.Args[0].Lit() == "[" {
+				words[0], static[0] = "[", true
+			}
+			for index, arg := range call.Args {
+				if static[index] {
+					continue
+				}
+				names, dynamic := shellWordDynamicParamNames(arg, home)
+				if dynamic || len(names) != 1 || boundedWords.unknown[names[0]] || len(boundedWords.values[names[0]]) != 1 {
+					continue
+				}
+				vars := shellVariables{names[0]: boundedWords.values[names[0]][0]}
+				if value, ok := shellStaticWordWithKnownCalls(arg, home, callCWD, vars, shellVariablePoison{}); ok {
+					words[index], static[index] = value, true
+				}
+			}
 			resolved := resolveLauncherWords(words, static, callCWD)
 			if !resolved.ok {
 				links.unknown(unresolvedProgramMayLink(words[1:], static[1:]))
