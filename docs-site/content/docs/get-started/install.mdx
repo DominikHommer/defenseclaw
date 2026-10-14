@@ -399,7 +399,8 @@ stays unless you undo it; the plan names those sandboxes.
 
 A per-user uninstall for an account that never set up sandboxes, with only
 empty lock files or empty folders under the sandbox directory and no OpenShell
-state or user gateway config, completes without a teardown override. Neither
+state or user gateway config, with no OpenShell sandbox setting or wrapper
+enabled, completes without a teardown override. Neither
 `uninstall` nor `reset` reads the sandbox list or runs teardown in that case.
 Sandbox records, snapshots, non-empty files, links or unreadable entries in
 that directory still trigger teardown, as do enabled OpenShell settings. An
