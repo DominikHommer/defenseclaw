@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os/user"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -30,14 +32,16 @@ func TestDarwinNamedGroupsAddVerifiedNestedMemberships(t *testing.T) {
 	previous := lookupNamedGroupGID
 	t.Cleanup(func() { lookupNamedGroupGID = previous })
 	groups := map[string]int{"dc-devs": 7000, `CORP\dc-admins`: 7100}
+	var mu sync.Mutex
 	var looked []string
-	lookupNamedGroupGID = func(name string) (int, bool, error) {
+	lookupNamedGroupGID = func(_ context.Context, name string) (int, bool, error) {
+		mu.Lock()
 		looked = append(looked, name)
+		mu.Unlock()
 		gid, ok := groups[name]
 		return gid, ok, nil
 	}
 	member := map[string]bool{"80002:7001": true, "80002:7000": true, "80001:7000": true, "2100:80": true}
-	var mu sync.Mutex
 	checked := map[string]int{}
 	run := func(_ context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
 		if path != darwinDSMemberUtil || len(args) != 5 || args[0] != "checkmembership" || args[1] != "-u" || args[3] != "-g" {
@@ -70,7 +74,8 @@ func TestDarwinNamedGroupsAddVerifiedNestedMemberships(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, []string{"5000", "7001", "7000"}) {
 		t.Fatalf("groups with the named groups = %v, %v; want the nested dc-devs confirmed by uid", got, err)
 	}
-	if want := []string{"dc-devs", `CORP\dc-admins`, "dc-gone"}; !reflect.DeepEqual(looked, want) {
+	slices.Sort(looked)
+	if want := []string{`CORP\dc-admins`, "dc-devs", "dc-gone"}; !reflect.DeepEqual(looked, want) {
 		t.Fatalf("looked up %q; want %q: each named group once, no UPN form and no blank", looked, want)
 	}
 
@@ -83,8 +88,70 @@ func TestDarwinNamedGroupsAddVerifiedNestedMemberships(t *testing.T) {
 		t.Fatalf("directory namesake groups = %v, %v; want its primary group and its own dc-devs", got, err)
 	}
 
-	lookupNamedGroupGID = func(string) (int, bool, error) { return 0, false, errors.New("opendirectoryd did not answer") }
+	lookupNamedGroupGID = func(context.Context, string) (int, bool, error) {
+		return 0, false, errors.New("opendirectoryd did not answer")
+	}
 	if got, err := platformAccountGroupIDs(context.Background(), run, eng2, []string{"5000", "7001"}, nil, []string{"dc-devs"}); err == nil {
 		t.Fatalf("a named group lookup that failed listed %v; want the listing to fail", got)
+	}
+}
+
+func TestDarwinNamedGroupsCheckAssignmentsPastSixtyFour(t *testing.T) {
+	if err := validateTrustedTool(darwinDSMemberUtil); err != nil {
+		t.Skip(err)
+	}
+	previous := lookupNamedGroupGID
+	t.Cleanup(func() { lookupNamedGroupGID = previous })
+	var names []string
+	for i := range 200 {
+		names = append(names, fmt.Sprintf("assignment-%03d", i))
+	}
+	var mu sync.Mutex
+	looked := map[string]bool{}
+	lookupNamedGroupGID = func(ctx context.Context, name string) (int, bool, error) {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		mu.Lock()
+		looked[name] = true
+		mu.Unlock()
+		var i int
+		_, err := fmt.Sscanf(name, "assignment-%03d", &i)
+		return 7000 + i, true, err
+	}
+	run := func(ctx context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
+		if err := ctx.Err(); err != nil {
+			return commandResult{}, err
+		}
+		if path != darwinDSMemberUtil {
+			return commandResult{}, fmt.Errorf("unexpected tool %s", path)
+		}
+		if args[4] == "7065" || args[4] == "7150" {
+			return commandResult{stdout: []byte("user is a member of the group\n")}, nil
+		}
+		return commandResult{stdout: []byte("user is not a member of the group\n")}, nil
+	}
+	account := &user.User{Username: "alice", Uid: "80002", Gid: "5000"}
+	got, err := platformAccountGroupIDs(context.Background(), run, account, []string{"5000"}, nil, names)
+	if err != nil || !reflect.DeepEqual(got, []string{"5000", "7065", "7150"}) {
+		t.Fatalf("all assignment memberships = %v, %v", got, err)
+	}
+	if len(looked) != len(names) {
+		t.Fatalf("looked up %d of %d assignment groups", len(looked), len(names))
+	}
+}
+
+func TestDarwinNamedGroupBoundIncludesTheExtras(t *testing.T) {
+	if err := validateTrustedTool(darwinDSMemberUtil); err != nil {
+		t.Skip(err)
+	}
+	account := &user.User{Username: "alice", Uid: "80002", Gid: "5000"}
+	extras := make([]int, maxDirectoryGroups)
+	for i := range extras {
+		extras[i] = 7000 + i
+	}
+	_, err := uidVerifiedGroupIDs(context.Background(), nil, account, []string{"5000"}, extras)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("in %d groups, more than the %d", maxDirectoryGroups+1, maxDirectoryGroups)) {
+		t.Fatalf("extra named groups evaded the bound: %v", err)
 	}
 }
