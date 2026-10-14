@@ -150,9 +150,10 @@ type Registration struct {
 	// policy is the one resolved at CreatedAt (PolicyUpdatedAt).
 	PolicyAt time.Time `json:"policy_at,omitzero"`
 	BoundAt  time.Time `json:"bound_at,omitzero"`
-	// GuestWatch marks registrations bound by this build. Older stored
-	// registrations remain exempt until root-owned attestation replaces this
-	// signal in a later release.
+	// GuestWatch marks registrations bound by this build. Registrations bound
+	// before the upgrade to 1.0.2 (for example by 1.0.1) are not watched;
+	// re-create those sandboxes after the upgrade to bring them under the
+	// signal. Root-owned attestation in a later release replaces this signal.
 	GuestWatch bool `json:"guest_watch,omitempty"`
 	// GuestSeenAt is the gateway receipt time of the first accepted lifecycle
 	// or egress record after bind. It ends this registration's watch.

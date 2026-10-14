@@ -792,6 +792,9 @@ records. Root-owned lifecycle attestation is the planned protection.
 Only registrations bound by a build with this signal are watched. The first
 accepted guest record ends the watch for that registration, so a guest that
 disappears later is not reported by this tripwire for the simple case.
+Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not
+watched; re-create those sandboxes after the upgrade to bring them under the
+signal. Root-owned attestation in a later release replaces this signal.
 
 `ensure` warns about a `required_for` connector that has no machine-owned hook
 on the OS.

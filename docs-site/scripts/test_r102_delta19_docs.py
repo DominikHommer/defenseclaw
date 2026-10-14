@@ -26,6 +26,8 @@ class Delta19DocsTest(unittest.TestCase):
         self.assertIn("whose lifecycle records were dropped can show once", text.lower())
         self.assertIn("Only registrations bound by a build with this signal are watched", text)
         self.assertNotIn("earlier pre-release", text)
+        self.assertIn("Registrations bound before the upgrade to 1.0.2 (for example by 1.0.1) are not", text)
+        self.assertIn("Root-owned attestation in a later release replaces this signal.", text)
         self.assertIn("The first\naccepted guest record ends the watch", text)
         self.assertIn("disappears later is not reported", text)
         for value in ("relay_without_guest", "running_without_guest", "Sandbox\nregistrations without a guest"):
@@ -41,6 +43,9 @@ class Delta19DocsTest(unittest.TestCase):
             self.assertIn("compliance.activity", text)
             self.assertIn("no outcome", text)
             self.assertNotIn("earlier pre-release", text)
+            self.assertIn("bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched", text)
+            self.assertIn("re-create those sandboxes after the upgrade", text)
+            self.assertIn("Root-owned attestation in a later release replaces this signal.", text)
             self.assertIn("first accepted record ends the watch", text.lower())
         self.assertIn("/docs/enterprise/sandboxes#require-sandboxes", guide)
         self.assertIn("non-exempt account", guide)
@@ -48,6 +53,7 @@ class Delta19DocsTest(unittest.TestCase):
         self.assertIn("effective `alert` setting when", guide)
         changelog = (ROOT / "CHANGELOG.md").read_text()
         self.assertNotIn("earlier pre-release", changelog)
+        self.assertIn("bound before the upgrade to 1.0.2 (for example by 1.0.1) are not watched", changelog)
 
 
 if __name__ == "__main__":
