@@ -74,3 +74,47 @@ func TestStatusNamesSessionsStartedBeforeAGuardianRestore(t *testing.T) {
 		t.Fatalf("a restarted session is still named: %q", got)
 	}
 }
+
+// GAP-0499 (verify r1 F1): the guardian writes its restore record root:root
+// 0600 in the data folder, as it writes its repair record. Without a rule of
+// its own the record fell under the service account's rule: after the first
+// restore verify failed with "hook_guardian_restores.json is 0600 0:0, want
+// 0600 <service>", ensure gave the record to the service account, and the
+// guardian's next write broke it again.
+func TestStateModesKeepTheGuardianRestoreRecordRootOwned(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			account := h.accounts.accounts[h.env.Layout.ServiceUser]
+			records := map[string]string{
+				guardianRestoresFile: `{"version":1,"targets":[{"uid":1001,"user":"u","connector":"hermes","restored_at":"2026-10-13T20:00:00Z"}]}`,
+				guardianRepairsFile:  `{"updated_at":"2026-10-13T20:00:00Z","repaired":[{"user":"u","connector":"hermes"}]}`,
+			}
+			for name, content := range records {
+				canonical := filepath.Join(h.env.Layout.DataDir, name)
+				if err := os.WriteFile(h.env.P(canonical), []byte(content+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				h.owners[h.env.P(canonical)] = [2]int{0, 0}
+			}
+			if problems := h.env.stateModeProblems(account); len(problems) != 0 {
+				t.Fatalf("state-mode problems with the guardian records as the guardian writes them: %v", problems)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			if got := messagesOf(verify.Errors, codeVerify); got != "" {
+				t.Fatalf("verify reports the guardian records: %s", got)
+			}
+			requireOK(t, verify)
+			requireOK(t, h.run(Options{Action: ActionEnsure}))
+			for name := range records {
+				canonical := filepath.Join(h.env.Layout.DataDir, name)
+				uid, gid, err := h.env.OwnerOf(h.env.P(canonical))
+				if err != nil || uid != 0 || gid != 0 || h.mode(canonical) != 0o600 {
+					t.Errorf("after ensure %s is %04o %d:%d (%v), want 0600 0:0", name, h.mode(canonical), uid, gid, err)
+				}
+			}
+		})
+	}
+}
