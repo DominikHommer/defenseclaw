@@ -196,6 +196,12 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	}
 	if managed && a.GOOS == "darwin" {
 		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		// The per-user job is outside the root gateway's readiness report.
+		// Read only this account's gui domain through the host doctor's runner.
+		d.GOOS, d.Geteuid = a.GOOS, a.Geteuid
+		if c := d.ManagedLaunchAgentCheck(ctx); c != nil {
+			rep.Checks = append(rep.Checks, *c)
+		}
 	}
 	return rep
 }

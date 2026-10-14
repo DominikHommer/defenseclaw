@@ -645,7 +645,7 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			return err
 		}
 		for _, job := range jobs {
-			if err := l.env.reloadMacOSAgent(ctx, domain, job, job.state.failure(false) != ""); err != nil {
+			if err := l.env.reloadMacOSAgent(ctx, domain, job, job.state.Failure(false) != ""); err != nil {
 				return err
 			}
 			l.openshellChange("reloaded %s for %s after its sandboxes stopped", job.label, a.Name)

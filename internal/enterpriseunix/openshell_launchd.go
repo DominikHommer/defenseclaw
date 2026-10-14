@@ -23,63 +23,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
-
-// launchAgentState describes only the top-level service fields of launchctl
-// print. The agents are on-demand: a loaded job with no failed start can be
-// idle. In particular, bootstrap leaves it not running with runs = 0.
-type launchAgentState struct {
-	state, exitReason, exitCode, spawnError string
-	runs                                    int
-}
-
-func parseLaunchAgentState(raw []byte) launchAgentState {
-	var s launchAgentState
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		key, value, ok := strings.Cut(line, " = ")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "state":
-			if s.state == "" {
-				s.state = value
-			}
-		case "runs":
-			s.runs, _ = strconv.Atoi(value)
-		case "last exit reason":
-			s.exitReason = value
-		case "last exit code":
-			s.exitCode = value
-		case "last spawn error":
-			s.spawnError = value
-		}
-	}
-	return s
-}
-
-func (s launchAgentState) failure(expectedRunning bool) string {
-	if strings.Contains(strings.ToUpper(s.exitReason), "CODESIGN") || strings.Contains(strings.ToUpper(s.spawnError), "CODESIGN") {
-		return "last start was killed for code signing (" + strings.TrimSpace(s.exitReason+" "+s.spawnError) + ")"
-	}
-	if s.spawnError != "" {
-		return "last spawn error: " + s.spawnError
-	}
-	if s.state == "running" {
-		return ""
-	}
-	if s.exitCode != "" && s.exitCode != "0" && s.exitCode != "(never exited)" {
-		return "last exit code " + s.exitCode
-	}
-	if expectedRunning {
-		return "loaded but not running when it must be running"
-	}
-	if s.runs > 0 && s.exitCode == "(never exited)" {
-		return "loaded but not running after a failed start"
-	}
-	return ""
-}
 
 func launchAgentDisabled(raw []byte, label string) bool {
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -110,7 +55,7 @@ func (e *Env) gatewayFileIdentity() (string, error) {
 
 type loadedLaunchAgent struct {
 	label string
-	state launchAgentState
+	state openshell.LaunchAgentState
 }
 
 // loadedMacOSAgents inspects only the two DefenseClaw jobs in an existing GUI
@@ -137,8 +82,8 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) (string, 
 			}
 			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: %w", label, a.Name, err)
 		}
-		state := parseLaunchAgentState(res.Stdout)
-		if state.state == "" {
+		state := openshell.ParseLaunchAgentState(res.Stdout)
+		if state.State == "" {
 			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: launchctl reported no service state", label, a.Name)
 		}
 		out = append(out, loadedLaunchAgent{label: label, state: state})
@@ -170,13 +115,13 @@ func (e *Env) reloadMacOSAgent(ctx context.Context, domain string, job loadedLau
 		if err != nil {
 			return fmt.Errorf("check %s after bootstrap: %w", target, err)
 		}
-		state := parseLaunchAgentState(res.Stdout)
-		problem := state.failure(failed && job.label == labelOpenShellGateway)
-		if problem == "" && (!failed || state.state == "running" || job.label == labelSandbox && state.runs > 0 && state.exitCode == "0") {
+		state := openshell.ParseLaunchAgentState(res.Stdout)
+		problem := state.Failure(failed && job.label == labelOpenShellGateway)
+		if problem == "" && (!failed || state.State == "running" || job.label == labelSandbox && state.Runs > 0 && state.ExitCode == "0") {
 			return nil
 		}
 		if attempt == 4 || !failed {
-			return fmt.Errorf("%s after bootstrap: %s (state %q)", target, problem, state.state)
+			return fmt.Errorf("%s after bootstrap: %s (state %q)", target, problem, state.State)
 		}
 		select {
 		case <-ctx.Done():
@@ -221,7 +166,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		var statusErr error
 		statusChecked := false
 		for _, job := range jobs {
-			if changed || job.label == labelOpenShellGateway && job.state.state != "running" {
+			if changed || job.label == labelOpenShellGateway && job.state.State != "running" {
 				status, statusErr = e.sandboxOps().Status(ctx, a)
 				statusChecked = true
 				break
@@ -229,7 +174,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		}
 		var needed []loadedLaunchAgent
 		for _, job := range jobs {
-			if changed || job.state.failure(job.label == labelOpenShellGateway && status.Running > 0) != "" {
+			if changed || job.state.Failure(job.label == labelOpenShellGateway && status.Running > 0) != "" {
 				needed = append(needed, job)
 			}
 		}
@@ -262,7 +207,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		}
 		var failed error
 		for _, job := range needed {
-			if err := e.reloadMacOSAgent(ctx, domain, job, job.state.failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
+			if err := e.reloadMacOSAgent(ctx, domain, job, job.state.Failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
 				failed = err
 				break
 			}
@@ -302,7 +247,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 		}
 		var running int
 		for _, job := range jobs {
-			if job.label == labelOpenShellGateway && job.state.state != "running" {
+			if job.label == labelOpenShellGateway && job.state.State != "running" {
 				if status, err := l.env.sandboxOps().Status(ctx, a); err == nil {
 					running = status.Running
 				}
@@ -310,7 +255,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 			}
 		}
 		for _, job := range jobs {
-			if why := job.state.failure(job.label == labelOpenShellGateway && running > 0); why != "" {
+			if why := job.state.Failure(job.label == labelOpenShellGateway && running > 0); why != "" {
 				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) is %s; run `%s`", job.label, a.Name, a.UID, why, l.env.lifecycleCommand(ActionRepair))
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.label, Kind: sandboxRowKind, State: "failed: " + why})
 				l.result.SecurityComplete = false
