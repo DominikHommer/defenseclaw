@@ -214,6 +214,13 @@ func TestSandboxGuestSightingRequiresMatchingLivePostBindRecord(t *testing.T) {
 	if err != nil || !reg.GuestSeenAt.IsZero() {
 		t.Fatalf("unmatched or pre-bind record counted: %+v %v", reg, err)
 	}
+	g.now = g.now.Add(sandboxGuestGrace)
+	if code, _ := g.f.report(sbxAlice, id, true); code != http.StatusOK {
+		t.Fatalf("state report: %d", code)
+	}
+	if rows := g.rows(t); len(rows) != 1 || rows[0].Structured["defenseclaw.sandbox.managed.reason"] != audit.SandboxGuestRunningWithoutGuest {
+		t.Fatalf("unmatched records suppressed the expected alert: %d rows", len(rows))
+	}
 	if err := g.auth.store.Revoke(sbxAlice.UID, id, sandboxreg.ReasonPolicyChanged); err != nil {
 		t.Fatal(err)
 	}
@@ -329,5 +336,11 @@ func TestSandboxGuestSignalRejectsOtherRegistrationsUnchanged(t *testing.T) {
 	}
 	if len(g.rows(t)) != 0 {
 		t.Fatalf("refused routes emitted %d guest alerts", len(g.rows(t)))
+	}
+	if code, _ := g.f.report(sbxAlice, live, true); code != http.StatusOK {
+		t.Fatalf("live state report: %d", code)
+	}
+	if rows := g.rows(t); len(rows) != 1 || rows[0].Structured["defenseclaw.sandbox.managed.reason"] != audit.SandboxGuestRunningWithoutGuest {
+		t.Fatalf("admitted state omitted the expected alert: %d rows", len(rows))
 	}
 }
