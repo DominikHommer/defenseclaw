@@ -66,7 +66,11 @@ Okta through SSSD, and similar sources work. See
   sandboxes need with either driver, can already do anything root can, the
   protected credentials included ([Docker group members](#what-users-see)).
   DefenseClaw contains the agent and keeps honest users inside the policy, and
-  it does not stop a hostile local user.
+  it does not stop a hostile local user. A member can run an agent in a plain
+  container outside DefenseClaw, bypassing `sandbox.required_for` too.
+  Administrators who need `required_for` to hold against deliberate users
+  must not give them Docker access. A root-owned image and lifecycle service
+  that closes this limit is planned for a later release.
 - **A registration vouches for the account, not for a VM.** The managed
   gateway learns from the kernel who calls, but it can't see the user's
   sandboxes. It relies on the user's own daemon to say which sandbox a
