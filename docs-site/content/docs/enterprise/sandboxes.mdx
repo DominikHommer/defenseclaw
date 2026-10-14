@@ -1308,9 +1308,13 @@ running sandbox counts again within the next minute.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
-- **Uninstall and purge.** Root runs each user's teardown as that user. `purge`
-  also removes the daemon state, MicroVM disks, images, both stores and the
-  rendered `gateway.toml`.
+- **Uninstall and purge.** Without `--purge`, uninstall stops running sandboxes
+  through the sandbox daemon, which syncs a MicroVM disk before stopping it.
+  It then stops the daemon and the OpenShell gateway. Every sandbox stays with
+  its records, disks and any copy-mode work not pulled yet for the next
+  activation of the deployment. Only `--purge` runs each user's teardown as
+  that user and removes the daemon state, MicroVM disks, images, both stores
+  and the rendered `gateway.toml`.
 
 ## Troubleshooting
 

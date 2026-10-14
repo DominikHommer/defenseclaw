@@ -244,6 +244,18 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "`when_unavailable` setting is `alert`, the gate alerts instead of refusing", gate)
         self.assertIn("rebuilt from a live registration skips the host-run gate", gate)
 
+    def test_enterprise_uninstall_keeps_sandboxes_until_purge(self):
+        text = page("enterprise/sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        self.assertIn("Without `--purge`, uninstall stops running sandboxes through the sandbox daemon, "
+                      "which syncs a MicroVM disk before stopping it", bullet)
+        self.assertIn("It then stops the daemon and the OpenShell gateway. Every sandbox stays with "
+                      "its records, disks and any copy-mode work not pulled yet for the next "
+                      "activation of the deployment", bullet)
+        self.assertIn("Only `--purge` runs each user's teardown as that user and removes the daemon state, "
+                      "MicroVM disks, images, both stores and the rendered `gateway.toml`", bullet)
+        self.assertNotIn("Root runs each user's teardown as that user", bullet)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
