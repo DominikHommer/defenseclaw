@@ -670,16 +670,22 @@ to keep the machine state for a reinstall instead.
   the package.
 - **macOS.** A pkg has no uninstaller. The lifecycle removes the binaries
   itself and forgets the package receipt (`com.cisco.defenseclaw.enterprise`).
-- **Registrations left (Linux and macOS).** Each user's registrations are
-  removed as that user. If one cannot be removed, the result has the error
-  `per_user_hooks_remaining` for that user and agent, with the reason, and
-  the uninstall stops before it removes the binaries those registrations run:
-  the deployment record and state stay. Fix the cause, or remove
-  DefenseClaw's entries from that user's agent config, and run the same
-  uninstall again. `ensure` restores the deployment instead. A user's worker
-  that runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage
-  after a reboot, say) is retried once with five minutes; one that times out
-  again says what usually holds it up.
+- **Registrations left, warning (Linux and macOS).** Each user's registrations
+  are removed as that user. If the user's home is unavailable, or a re-homed
+  account's current home was cleaned but its old home cannot be trusted,
+  uninstall warns with `per_user_hooks_remaining` and goes on. The warning
+  names what remains. When the home is available, remove DefenseClaw's
+  entries from the named agent config; for a re-homed account, follow the
+  current-home and old-home clearing paths in
+  [Warnings](/docs/enterprise/troubleshooting#warnings).
+- **Registrations left, error (Linux and macOS).** Other registration removal
+  failures report `per_user_hooks_remaining` for each user and agent and stop
+  uninstall before removing the binaries those registrations run. The
+  deployment record and state stay. Fix the reported cause and rerun the same
+  uninstall; `ensure` restores the deployment instead. A user's worker that
+  runs out of time (60 seconds; a large `~/.defenseclaw` on slow storage after
+  a reboot, say) is retried once with five minutes; one that times out again
+  says what usually holds it up.
 - **Manifest rows (Linux and macOS).** Uninstall resolves each row of
   `targets.yaml` to its account the way reconcile does, so a row with only
   `user` or `user_home` works. When a row does not resolve (the account does

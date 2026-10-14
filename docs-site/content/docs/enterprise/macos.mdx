@@ -361,6 +361,14 @@ enumerator enrolls accounts with a uid of 501 or higher by default. See
 waiting for the next minute, run
 `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
 
+`status` and `verify` also warn with `agent_settings_not_restored` if the
+guardian recreated a missing Hermes `config.yaml` without a copy, or put back
+a missing Devin `config.json` from its last good copy. The hooks are in place,
+but that user's own settings may be missing or older. This warning alone does
+not make `security_complete` false or `verify` fail. Ask the user to review
+their settings and restore any missing values from a backup; see
+[Warnings](/docs/enterprise/troubleshooting#warnings).
+
 A `guardrail.profile_assignments` group this Mac does not know (renamed or
 deleted in the directory) selects nobody, so its members get the default
 profile. `status` and `verify` warn `profile_assignment_unmatched` for it,
