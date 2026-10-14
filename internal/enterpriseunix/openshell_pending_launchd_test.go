@@ -19,13 +19,13 @@ func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
 	r := &enterprisestatus.Result{}
 	(&lifecycle{env: h.env, result: r}).describePending(entry)
 	message := messagesOf(r.Warnings, codeSandboxPending)
-	for _, want := range []string{"sudo " + h.env.lifecycleCommand(ActionRepair), "OS_REASON_CODESIGNING", "root ensure, repair or reconcile", "first sandbox started after the running ones stop"} {
+	for _, want := range []string{"sudo " + h.env.lifecycleCommand(ActionRepair), "root ensure, repair or reconcile", "first sandbox started after the running ones stop", "reloads the job itself", "If that reload fails, the start reports it"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("pending LaunchAgent advice %q misses %q", message, want)
 		}
 	}
-	if strings.Contains(message, "next `defenseclaw sandbox` command") {
-		t.Fatalf("LaunchAgent advice claims the user's command applies the reload: %q", message)
+	if strings.Contains(message, "does not apply the reload") || strings.Contains(message, "can fail with a code-signing exit") {
+		t.Fatalf("LaunchAgent advice retains the old first-use window: %q", message)
 	}
 
 	entry.Kind = "restart"

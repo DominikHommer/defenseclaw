@@ -73,11 +73,12 @@ import (
 // settings_drift).
 
 const (
-	openShellGatewayUnit  = "defenseclaw-openshell-gateway.service"
-	openShellGatewayLabel = "com.cisco.defenseclaw.openshell-gateway"
-	openShellGatewayPlist = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
-	daemonSystemctl       = "/usr/bin/systemctl"
-	daemonLaunchctl       = "/bin/launchctl"
+	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
+	openShellGatewayLabel         = "com.cisco.defenseclaw.openshell-gateway"
+	openShellGatewayPlist         = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
+	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
+	daemonSystemctl               = "/usr/bin/systemctl"
+	daemonLaunchctl               = "/bin/launchctl"
 
 	// openShellPrerequisiteReason is the refusal detail of a missing
 	// OpenShell prerequisite.
@@ -92,6 +93,7 @@ const (
 var (
 	openShellGatewayStartWait = 90 * time.Second
 	openShellGatewayPollEvery = 500 * time.Millisecond
+	openShellGatewayHealAfter = 3 * time.Second
 )
 
 // daemonOpenShell is what the daemon does with the account's OpenShell;
@@ -477,7 +479,8 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, e
 		}
 		return false, accountBusyError()
 	}
-	if err := o.startUnit(ctx); err != nil {
+	reloaded, err := o.startUnit(ctx)
+	if err != nil {
 		// The service manager's command line and job text stay in the log:
 		// they name nothing the person can act on (#1202).
 		o.logf("start your OpenShell gateway: %v", err)
@@ -486,10 +489,16 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, e
 			// had not stopped yet), so this account's could not bind it.
 			return true, accountBusyError()
 		}
+		var reloadErr *openShellLaunchAgentReloadError
+		if errors.As(err, &reloadErr) {
+			return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
+		}
 		return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); "+
 			"`defenseclaw sandbox doctor` shows why", o.unitState(ctx))
 	}
 	deadline := time.Now().Add(openShellGatewayStartWait)
+	healAt := time.Now().Add(openShellGatewayHealAfter)
+	healChecked := reloaded
 	for {
 		if holder, held := o.portHolder(port); held {
 			if holder == o.uid {
@@ -501,6 +510,22 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, e
 		if time.Now().After(deadline) {
 			return true, openShellPrerequisiteError("your OpenShell gateway did not start listening on 127.0.0.1:%d within %s (%s); "+
 				"`defenseclaw sandbox doctor` shows why", port, openShellGatewayStartWait, o.unitState(ctx))
+		}
+		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
+			healChecked = true
+			domain := o.launchDomain(ctx)
+			target := domain + "/" + openShellGatewayLabel
+			out, printErr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
+			if printErr == nil && openshell.ParseLaunchAgentState([]byte(out)).Failure(false) != "" {
+				if err := o.reloadLaunchAgent(ctx, domain); err != nil {
+					o.logf("reload your OpenShell gateway LaunchAgent: %v", err)
+					return true, openShellPrerequisiteError("your OpenShell gateway's LaunchAgent could not be reloaded; run `%s`", openShellGatewayRepairCommand)
+				}
+				if err := o.kickstartLaunchAgent(ctx, target); err != nil {
+					o.logf("start your reloaded OpenShell gateway LaunchAgent: %v", err)
+					return true, openShellPrerequisiteError("your OpenShell gateway could not be started (%s); `defenseclaw sandbox doctor` shows why", o.unitState(ctx))
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -661,24 +686,53 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 }
 
 // startUnit starts the account's OpenShell gateway unit.
-func (o *accountOpenShell) startUnit(ctx context.Context) error {
+func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 	switch o.goos {
 	case "linux":
 		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "start", openShellGatewayUnit}, userManagerEnv(o.uid))
-		return commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
+		return false, commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
 	case "darwin":
 		domain := o.launchDomain(ctx)
 		target := domain + "/" + openShellGatewayLabel
-		if _, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); err != nil {
+		printed, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
+		if err != nil {
 			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
 			if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
-				return err
+				return false, err
 			}
+		} else if openshell.ParseLaunchAgentState([]byte(printed)).Failure(false) != "" {
+			if err := o.reloadLaunchAgent(ctx, domain); err != nil {
+				return false, err
+			}
+			return true, o.kickstartLaunchAgent(ctx, target)
 		}
-		out, err := o.run(ctx, daemonLaunchctl, []string{"kickstart", target}, nil)
-		return commandError(daemonLaunchctl+" kickstart "+target, out, err)
+		return false, o.kickstartLaunchAgent(ctx, target)
 	}
-	return fmt.Errorf("sandboxes run on Linux and macOS only")
+	return false, fmt.Errorf("sandboxes run on Linux and macOS only")
+}
+
+type openShellLaunchAgentReloadError struct{ err error }
+
+func (e *openShellLaunchAgentReloadError) Error() string {
+	return "your OpenShell gateway's LaunchAgent could not be reloaded; run `" + openShellGatewayRepairCommand + "`: " + e.err.Error()
+}
+func (e *openShellLaunchAgentReloadError) Unwrap() error { return e.err }
+
+func (o *accountOpenShell) reloadLaunchAgent(ctx context.Context, domain string) error {
+	target := domain + "/" + openShellGatewayLabel
+	if out, err := o.run(ctx, daemonLaunchctl, []string{"bootout", target}, nil); err != nil {
+		o.logf("boot out your OpenShell gateway LaunchAgent: %v: %s", err, firstOutputLine(out))
+	}
+	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+	if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
+		return &openShellLaunchAgentReloadError{err: err}
+	}
+	return nil
+}
+
+func (o *accountOpenShell) kickstartLaunchAgent(ctx context.Context, target string) error {
+	out, err := o.run(ctx, daemonLaunchctl, []string{"kickstart", target}, nil)
+	return commandError(daemonLaunchctl+" kickstart "+target, out, err)
 }
 
 // launchDomain is the launchd domain of the account's agents: the graphical
