@@ -119,7 +119,7 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 		}
 	}
 	if len(report.Failed) != 1 || !strings.HasPrefix(report.Failed[0], "dcad-moved/hermes: ") ||
-		!failed[os.Getuid()+2] || failed[os.Getuid()+1] || failed[os.Getuid()] {
+		!failed[os.Getuid()+2] || !failed[os.Getuid()+1] || failed[os.Getuid()] {
 		t.Fatalf("only the re-homed live account may still fail: %+v, %v", report, failed)
 	}
 }

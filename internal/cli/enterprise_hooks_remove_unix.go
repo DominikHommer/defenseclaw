@@ -437,9 +437,10 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 // runEnterpriseHookPendingCleanups finishes the guardian's pending per-user
 // cleanups (registrations of targets the manifest no longer enrolls, which
 // the guardian retries while it runs; the uninstall stopped it), as each
-// user, and returns the uids whose cleanup failed. A cleanup of a removed
-// account (its recorded home is gone, or the directory gives it no home)
-// is pending as "user/connector: reason", so the uninstall warns and goes on.
+// user, and returns the uids whose state must not be purged because cleanup
+// failed or the directory gives the account no home while its recorded home
+// remains. A cleanup of a removed account is reported pending as
+// "user/connector: reason", so the uninstall warns and goes on.
 func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]bool {
 	failed := map[int]bool{}
 	if cfg == nil {
@@ -470,6 +471,7 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 			// remove it as, and the uninstall must not stop for it.
 			report.Pending = append(report.Pending, fmt.Sprintf("%s: the directory gives the account no home (%s), so it looks removed, but its recorded home %s is not gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if the account is gone",
 				label, kept.directoryHome, kept.home, name, kept.home))
+			failed[entry.UID] = true
 		case outcome == enterpriseHookUserCleanupDone:
 			report.Removed++
 		case outcome == enterpriseHookUserCleanupPending:
@@ -499,8 +501,8 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // addEnterpriseHookStatePurges ends the job of every account the manifest
 // enrolls with the purge of that account's DefenseClaw per-user state (each
 // data directory its rows name) and per-user binaries, except for the
-// accounts in skip, whose pending cleanup failed and whose backups a retry
-// still needs. Eligible accounts without a manifest row are not proof of
+// accounts in skip, whose pending cleanup still needs its state or backups.
+// Eligible accounts without a manifest row are not proof of
 // managed enrollment. It returns every enrolled account it did not add a purge
 // for, as "user: reason", so the report names each account whose data stays.
 func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, skip map[int]bool) []string {
