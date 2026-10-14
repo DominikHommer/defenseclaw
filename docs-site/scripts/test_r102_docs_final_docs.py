@@ -186,6 +186,12 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "and a `DOMAIN\\name` group in the user's group list", text)
         self.assertIn("If the source cannot be determined, `matched_group_source` is left out", text)
 
+    def test_guide_no_sandbox_bullet_names_both_host_run_exceptions(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("the host run is refused by the agent's machine-owned hook unless your account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to your account and "
+                      "the effective `when_unavailable` setting is `alert`", text)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
