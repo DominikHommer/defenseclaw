@@ -33,8 +33,9 @@ import (
 // now /var/empty: gone's recorded home no longer exists, kept's folder was
 // kept (sysadminctl -deleteUser -keepHome). dcad-moved is a live account
 // the directory re-homed to a real path while its recorded home is still
-// there. The sample accounts have real directory homes and missing recorded
-// homes, including one beneath an available automount parent.
+// there. The sample accounts have missing recorded homes, including one
+// beneath an available automount parent. Their new homes have the wrong
+// owner, so the guardian must not run a worker there.
 func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTestResolver, gone, kept, moved string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
@@ -50,6 +51,7 @@ func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTes
 	resolver.accounts["dcad-gone"] = unixidentity.Account{Name: "dcad-gone", UID: uid, GID: gid, Home: "/var/empty"}
 	resolver.accounts["dcad-kept"] = unixidentity.Account{Name: "dcad-kept", UID: uid + 1, GID: gid, Home: "/var/empty"}
 	resolver.accounts["dcad-moved"] = unixidentity.Account{Name: "dcad-moved", UID: uid + 2, GID: gid, Home: filepath.Join(f.homes, "dcad-moved-new")}
+	// Both new homes belong to the test uid, not the accounts' uid+3/+4.
 	resolver.accounts["sample-rehomed"] = unixidentity.Account{Name: "sample-rehomed", UID: uid + 3, GID: gid, Home: f.home(t, "sample-rehomed-new", 0o700)}
 	resolver.accounts["sample-automount"] = unixidentity.Account{Name: "sample-automount", UID: uid + 4, GID: gid, Home: f.home(t, "sample-automount-new", 0o700)}
 	f.writeManifest(t)
@@ -65,9 +67,10 @@ func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTes
 	return f, resolver, gone, kept, moved
 }
 
-// A live account re-homed to a real path keeps its cleanup even when the
-// recorded home is missing beneath an available parent.
-func TestStandaloneCleanupKeepsRehomedTargetsWhoseOldHomesAreMissing(t *testing.T) {
+// A live account with an untrusted new home keeps its cleanup when the
+// recorded home is missing. A trusted new home is covered by
+// TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow.
+func TestStandaloneCleanupKeepsRehomedTargetsWithUntrustedNewHomes(t *testing.T) {
 	f, resolver, _, _, _ := homeGoneFixture(t)
 	pending, err := loadEnterpriseHookUserCleanups(f.dataDir)
 	if err != nil {
@@ -85,7 +88,8 @@ func TestStandaloneCleanupKeepsRehomedTargetsWhoseOldHomesAreMissing(t *testing.
 			if outcome != enterpriseHookUserCleanupFailed || err == nil || errors.Is(err, errEnterpriseHookCleanupHomeGone) {
 				t.Fatalf("live re-homed cleanup = %v, %v; want failed without home-gone retirement", outcome, err)
 			}
-			if !strings.Contains(err.Error(), "no longer matches the directory home") || strings.Contains(log.String(), "home gone") {
+			if !strings.Contains(err.Error(), "no longer matches the directory home") ||
+				!strings.Contains(err.Error(), "owner uid=") || strings.Contains(log.String(), "home gone") {
 				t.Fatalf("unexpected cleanup error or retirement log: %v; %s", err, log.String())
 			}
 		})
@@ -94,7 +98,7 @@ func TestStandaloneCleanupKeepsRehomedTargetsWhoseOldHomesAreMissing(t *testing.
 		t.Fatalf("tested %d live re-homed accounts, want two", attempted)
 	}
 	if len(f.workerTargets()) != 0 {
-		t.Fatalf("no worker may run in a mismatched home: %+v", f.workerTargets())
+		t.Fatalf("no worker may run in an untrusted new home: %+v", f.workerTargets())
 	}
 }
 
@@ -102,7 +106,8 @@ func TestStandaloneCleanupKeepsRehomedTargetsWhoseOldHomesAreMissing(t *testing.
 // mobile account, whose recorded home is gone and whose directory home is
 // now /var/empty. It retires such a cleanup as "home gone", without also
 // saying the cleanup was done (Codex F8). A kept home and live re-homed
-// accounts keep their cleanups, as nothing proves their registrations went.
+// accounts whose new homes are missing or wrong-owner keep their cleanups;
+// no trusted worker could remove those registrations.
 func TestStandaloneCleanupRetiresATargetWhoseHomeIsGone(t *testing.T) {
 	f, resolver, _, kept, moved := homeGoneFixture(t)
 	var log bytes.Buffer
@@ -122,11 +127,12 @@ func TestStandaloneCleanupRetiresATargetWhoseHomeIsGone(t *testing.T) {
 		!strings.Contains(pending[0].LastError, "no longer matches the directory home /var/empty, which is no home") ||
 		pending[1].User != "dcad-moved" || pending[1].UserHome != moved ||
 		!strings.Contains(pending[1].LastError, "no longer matches the directory home") || strings.Contains(pending[1].LastError, "no home") {
-		t.Fatalf("the kept-home and live re-homed cleanups must stay with their errors: %+v", pending)
+		t.Fatalf("the kept-home and untrusted new-home cleanups must stay with their errors: %+v", pending)
 	}
 	for i, name := range []string{"sample-automount", "sample-rehomed"} {
 		entry := pending[i+2]
-		if entry.User != name || !strings.Contains(entry.LastError, "no longer matches the directory home") || strings.Contains(entry.LastError, "which is no home") {
+		if entry.User != name || !strings.Contains(entry.LastError, "no longer matches the directory home") ||
+			!strings.Contains(entry.LastError, "owner uid=") || strings.Contains(entry.LastError, "which is no home") {
 			t.Fatalf("live re-homed cleanup was retired or given the wrong error: %+v", entry)
 		}
 		if !strings.Contains(log.String(), "warn: per-user cleanup of hermes/"+name+": ") || strings.Contains(log.String(), "hermes/"+name+": home gone") {
@@ -152,7 +158,7 @@ func TestStandaloneCleanupRetiresATargetWhoseHomeIsGone(t *testing.T) {
 // reports them as pending, each with a reason that names the recorded home
 // (the uninstall warns and goes on): a home that is gone, and a kept home
 // of an account the directory now gives /var/empty. A live account
-// re-homed to a real path stays a failure.
+// re-homed to a missing or wrong-owner new home stays a failure.
 func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 	_, _, gone, kept, _ := homeGoneFixture(t)
 	cmd := &cobra.Command{}
@@ -175,7 +181,7 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 		!strings.HasPrefix(report.Failed[2], "sample-automount/hermes: ") ||
 		skip[os.Getuid()+2] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+3] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+4] != enterpriseHookPurgeSkipFailed ||
 		skip[os.Getuid()+1] != enterpriseHookPurgeSkipKeptHome || skip[os.Getuid()] != "" {
-		t.Fatalf("live re-homed accounts must fail, and a pending kept home must block purge: %+v, %v", report, skip)
+		t.Fatalf("untrusted new homes must fail, and a pending kept home must block purge: %+v, %v", report, skip)
 	}
 }
 

@@ -33,6 +33,26 @@ func rehomedTestUID(t *testing.T, home string) (int, int) {
 	return uid, gid
 }
 
+func writeRehomedTestRegistration(t *testing.T, home string, uid, gid int) string {
+	t.Helper()
+	dir := filepath.Join(home, ".hermes")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("hooks: defenseclaw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if os.Getuid() == 0 {
+		for _, path := range []string{dir, path} {
+			if err := os.Chown(path, uid, gid); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return path
+}
+
 func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 	for _, oldPresent := range []bool{false, true} {
 		name := "old-missing"
@@ -47,17 +67,16 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			oldHome := filepath.Join(f.homes, "sample-user-old")
 			if oldPresent {
 				oldHome = f.home(t, "sample-user-old", 0o755)
+				_, _ = rehomedTestUID(t, oldHome)
+				writeRehomedTestRegistration(t, oldHome, uid, gid)
 			}
 			if check := enterpriseHookCheckHome(newHome, uid); check.State != enterprisehooks.HomeAvailable {
 				t.Fatalf("current home must be trusted for this test: %+v", check)
 			}
 			resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: newHome}
 			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
-			wantDataDir := filepath.Join(newHome, ".defenseclaw")
-			if !oldPresent {
-				entry.DataDir = filepath.Join(oldHome, ".defenseclaw", "moved-state")
-				wantDataDir = filepath.Join(newHome, ".defenseclaw", "moved-state")
-			}
+			entry.DataDir = filepath.Join(oldHome, ".defenseclaw", "moved-state")
+			wantDataDir := filepath.Join(newHome, ".defenseclaw", "moved-state")
 			originalRunner := enterpriseHookWorkerRunner
 			var accounts []enterpriseHookWorkerAccount
 			enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -73,18 +92,34 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			if strings.Count(attemptLog.String(), wantAudit) != 1 {
 				t.Fatalf("re-home audit line = %q", attemptLog.String())
 			}
-			if len(accounts) != 1 || accounts[0].UID != uid || accounts[0].Home != newHome {
-				t.Fatalf("worker accounts = %+v, want uid %d in %s", accounts, uid, newHome)
+			wantHomes := []string{newHome}
+			if oldPresent {
+				wantHomes = append(wantHomes, oldHome)
+			}
+			if len(accounts) != len(wantHomes) {
+				t.Fatalf("worker accounts = %+v, want homes %v", accounts, wantHomes)
 			}
 			requests := f.requests
-			if len(requests) != 1 || requests[0].Operation != enterpriseHookWorkerOpApply || !requests[0].Standalone || len(requests[0].Targets) != 1 {
-				t.Fatalf("worker requests = %+v", requests)
+			if len(requests) != len(wantHomes) {
+				t.Fatalf("worker requests = %+v, want homes %v", requests, wantHomes)
 			}
-			target := requests[0].Targets[0]
-			if target.Mode != enterpriseHookWorkerModeRemove || target.Options.ConnectorName != "hermes" ||
-				target.Options.UserHome != newHome || target.Options.OwnerUID != uid || target.Options.OwnerGID != gid ||
-				target.Options.DataDir != wantDataDir {
-				t.Fatalf("cleanup worker target = %+v, want home %s data dir %s uid %d", target, newHome, wantDataDir, uid)
+			for i, wantHome := range wantHomes {
+				if accounts[i].UID != uid || accounts[i].GID != gid || accounts[i].Home != wantHome || accounts[i].User != "sample-user" {
+					t.Fatalf("worker account %d = %+v, want uid %d in %s", i, accounts[i], uid, wantHome)
+				}
+				if requests[i].Operation != enterpriseHookWorkerOpApply || !requests[i].Standalone || len(requests[i].Targets) != 1 {
+					t.Fatalf("worker request %d = %+v", i, requests[i])
+				}
+				target := requests[i].Targets[0]
+				dataDir := wantDataDir
+				if i == 1 {
+					dataDir = entry.DataDir
+				}
+				if target.Mode != enterpriseHookWorkerModeRemove || target.Options.ConnectorName != "hermes" ||
+					target.Options.UserHome != wantHome || target.Options.OwnerUID != uid || target.Options.OwnerGID != gid ||
+					target.Options.DataDir != dataDir {
+					t.Fatalf("cleanup worker target %d = %+v, want home %s data dir %s uid %d", i, target, wantHome, dataDir, uid)
+				}
 			}
 			f.writeManifest(t)
 			now := time.Now()
@@ -113,6 +148,226 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			}
 			if guardianLog.Len() != 0 {
 				t.Fatalf("second reconcile repeated the audit: %q", guardianLog.String())
+			}
+		})
+	}
+}
+
+func TestStandaloneCleanupReconcileRemovesRegistrationInBothHomes(t *testing.T) {
+	for _, newPresent := range []bool{false, true} {
+		name := "new-home-empty"
+		if newPresent {
+			name = "both-homes-registered"
+		}
+		t.Run(name, func(t *testing.T) {
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+			f := newStandaloneFixture(t, resolver)
+			newHome := f.home(t, "sample-user-new", 0o700)
+			uid, gid := rehomedTestUID(t, newHome)
+			oldHome := f.home(t, "sample-user-old", 0o700)
+			rehomedTestUID(t, oldHome)
+			oldConfig := writeRehomedTestRegistration(t, oldHome, uid, gid)
+			newConfig := filepath.Join(newHome, ".hermes", "config.yaml")
+			if newPresent {
+				writeRehomedTestRegistration(t, newHome, uid, gid)
+			}
+			resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: newHome}
+			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
+			originalRunner := enterpriseHookWorkerRunner
+			enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+				response, err := originalRunner(ctx, account, request)
+				if err == nil {
+					config := filepath.Join(account.Home, ".hermes", "config.yaml")
+					if err := os.Remove(config); err != nil && !errors.Is(err, os.ErrNotExist) {
+						t.Fatal(err)
+					}
+				}
+				return response, err
+			}
+			f.writeManifest(t)
+			now := time.Now()
+			if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{entry}, now); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisehooks.LoadManifest(f.manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var log bytes.Buffer
+			if err := reconcileEnterpriseHookStandaloneUnixCleanups(context.Background(), &log, manifest,
+				enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}, nil, resolver, now); err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+			if err != nil || len(remaining) != 0 {
+				t.Fatalf("cleanup ledger = %+v, %v", remaining, err)
+			}
+			if len(f.requests) != 2 || f.requests[0].Targets[0].Options.UserHome != newHome ||
+				f.requests[1].Targets[0].Options.UserHome != oldHome ||
+				f.requests[1].Targets[0].Options.DataDir != filepath.Join(oldHome, ".defenseclaw") {
+				t.Fatalf("worker requests = %+v, want current then recorded home", f.requests)
+			}
+			for _, config := range []string{oldConfig, newConfig} {
+				if _, err := os.Stat(config); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("registration %s remains: %v", config, err)
+				}
+			}
+			if strings.Count(log.String(), "the account was re-homed from "+oldHome+" to "+newHome) != 1 ||
+				strings.Count(log.String(), "no longer enrolled; per-user cleanup done") != 1 {
+				t.Fatalf("guardian audit = %q", log.String())
+			}
+		})
+	}
+}
+
+func TestStandaloneCleanupKeepsRowWhenRecordedHomeWorkerDoesNotFinish(t *testing.T) {
+	for _, kind := range []string{"error", "non-ok", "pending"} {
+		t.Run(kind, func(t *testing.T) {
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+			f := newStandaloneFixture(t, resolver)
+			newHome := f.home(t, "sample-user-new", 0o700)
+			uid, gid := rehomedTestUID(t, newHome)
+			oldHome := f.home(t, "sample-user-old", 0o700)
+			rehomedTestUID(t, oldHome)
+			resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: newHome}
+			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
+			originalRunner := enterpriseHookWorkerRunner
+			enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+				response, err := originalRunner(ctx, account, request)
+				if account.Home == oldHome {
+					switch kind {
+					case "error":
+						return enterpriseHookWorkerResponse{}, errors.New("recorded-home worker failed")
+					case "non-ok":
+						response.Targets[0].OK = false
+						response.Targets[0].Error = "recorded-home removal failed"
+					case "pending":
+						response.Targets[0].OK = false
+						response.Targets[0].Pending = true
+					}
+				}
+				return response, err
+			}
+			var attemptLog bytes.Buffer
+			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &attemptLog, entry, resolver)
+			want := enterpriseHookUserCleanupFailed
+			if kind == "pending" {
+				want = enterpriseHookUserCleanupPending
+			}
+			if outcome != want || kind == "pending" && err != nil || kind != "pending" && err == nil {
+				t.Fatalf("recorded-home worker %s = %v, %v", kind, outcome, err)
+			}
+			if len(f.requests) != 2 || f.requests[0].Targets[0].Options.UserHome != newHome ||
+				f.requests[1].Targets[0].Options.UserHome != oldHome || strings.Contains(attemptLog.String(), "the account was re-homed") {
+				t.Fatalf("worker requests = %+v, audit = %q", f.requests, attemptLog.String())
+			}
+			f.writeManifest(t)
+			now := time.Now()
+			if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{entry}, now); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisehooks.LoadManifest(f.manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var guardianLog bytes.Buffer
+			if err := reconcileEnterpriseHookStandaloneUnixCleanups(context.Background(), &guardianLog, manifest,
+				enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}, nil, resolver, now); err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+			if err != nil || len(remaining) != 1 || strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
+				t.Fatalf("unfinished recorded-home cleanup ended: %+v, %v, log %q", remaining, err, guardianLog.String())
+			}
+		})
+	}
+}
+
+func TestStandaloneCleanupKeepsUntrustedRecordedHomeAndReportsPending(t *testing.T) {
+	for _, kind := range []string{"symlink", "group-writable", "other-writable", "wrong-owner", "long-path"} {
+		t.Run(kind, func(t *testing.T) {
+			if kind == "wrong-owner" && os.Getuid() != 0 {
+				t.Skip("changing a home owner requires root")
+			}
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+			f := newStandaloneFixture(t, resolver)
+			newHome := f.home(t, "sample-user-new", 0o700)
+			uid, gid := rehomedTestUID(t, newHome)
+			oldName := "sample-user-old"
+			if kind == "long-path" {
+				oldName += strings.Repeat("x", 180)
+			}
+			oldHome := f.home(t, oldName, 0o700)
+			if kind != "wrong-owner" {
+				rehomedTestUID(t, oldHome)
+			}
+			switch kind {
+			case "symlink":
+				writeRehomedTestRegistration(t, oldHome, uid, gid)
+				link := filepath.Join(f.homes, "sample-user-old-link")
+				if err := os.Symlink(oldHome, link); err != nil {
+					t.Fatal(err)
+				}
+				oldHome = link
+			case "group-writable":
+				if err := os.Chmod(oldHome, 0o770); err != nil {
+					t.Fatal(err)
+				}
+			case "other-writable", "long-path":
+				if err := os.Chmod(oldHome, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: newHome}
+			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
+			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)
+			var oldKept *enterpriseHookCleanupOldHomeKeptError
+			var kept *enterpriseHookCleanupHomeKeptError
+			var changed *enterpriseHookTargetHomeChangedError
+			if outcome != enterpriseHookUserCleanupFailed || !errors.As(err, &oldKept) || errors.As(err, &kept) ||
+				errors.As(err, &changed) || errors.Is(err, errEnterpriseHookCleanupHomeGone) ||
+				!strings.Contains(err.Error(), oldHome) || !strings.Contains(err.Error(), newHome) || !strings.Contains(err.Error(), "hermes") {
+				t.Fatalf("untrusted recorded home = %v, %v", outcome, err)
+			}
+			if len(f.requests) != 1 || f.requests[0].Targets[0].Options.UserHome != newHome ||
+				f.requests[0].Targets[0].Options.OwnerUID != uid {
+				t.Fatalf("untrusted old home ran a worker: %+v", f.requests)
+			}
+			f.writeManifest(t)
+			now := time.Now()
+			if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{entry}, now); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := enterprisehooks.LoadManifest(f.manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var guardianLog bytes.Buffer
+			if err := reconcileEnterpriseHookStandaloneUnixCleanups(context.Background(), &guardianLog, manifest,
+				enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}, nil, resolver, now); err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+			if err != nil || len(remaining) != 1 ||
+				!strings.Contains(guardianLog.String(), "warn: per-user cleanup of hermes/sample-user:") ||
+				!strings.Contains(guardianLog.String(), oldHome) ||
+				strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
+				t.Fatalf("untrusted recorded-home guardian result = %+v, %v, log %q", remaining, err, guardianLog.String())
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			report := enterpriseHooksRemoveAllReport{}
+			skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
+			if report.Removed != 0 || len(report.Pending) != 1 || len(report.Failed) != 0 ||
+				!strings.Contains(report.Pending[0], oldHome) || !strings.Contains(report.Pending[0], newHome) ||
+				!strings.Contains(report.Pending[0], "hermes config") || skip[uid] != enterpriseHookPurgeSkipKeptHome ||
+				len(f.requests) != 3 {
+				t.Fatalf("untrusted recorded-home remove-all = %+v, skip = %+v, requests = %+v", report, skip, f.requests)
+			}
+			for _, request := range f.requests {
+				if request.Targets[0].Options.UserHome != newHome || request.Targets[0].Options.OwnerUID != uid {
+					t.Fatalf("worker entered an untrusted old home: %+v", request)
+				}
 			}
 		})
 	}
@@ -221,35 +476,44 @@ func TestStandaloneCleanupDropsGoneOrReassignedAccountsWithoutWorker(t *testing.
 }
 
 func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
-	for _, oldPresent := range []bool{false, true} {
-		name := "recorded-home-gone"
-		if oldPresent {
-			name = "recorded-home-kept"
-		}
-		t.Run(name, func(t *testing.T) {
-			uid, gid := os.Getuid()+1, os.Getgid()
-			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
-				"sample-user": {Name: "sample-user", UID: uid, GID: gid, Home: ""},
-			}}
+	for _, kind := range []string{"recorded-home-gone", "recorded-home-kept-trusted", "recorded-home-kept-untrusted"} {
+		t.Run(kind, func(t *testing.T) {
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 			f := newStandaloneFixture(t, resolver)
 			oldHome := filepath.Join(f.homes, "sample-user-old")
-			if oldPresent {
+			uid, gid := os.Getuid()+1, os.Getgid()
+			if kind != "recorded-home-gone" {
 				oldHome = f.home(t, "sample-user-old", 0o700)
+				uid, gid = rehomedTestUID(t, oldHome)
 			}
+			if kind == "recorded-home-kept-untrusted" {
+				if err := os.Chmod(oldHome, 0o777); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: ""}
 			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
 			var attemptLog bytes.Buffer
 			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &attemptLog, entry, resolver)
-			if oldPresent {
-				var kept *enterpriseHookCleanupHomeKeptError
-				if outcome != enterpriseHookUserCleanupFailed || !errors.As(err, &kept) {
-					t.Fatalf("empty directory home with kept recorded home = %v, %v", outcome, err)
+			switch kind {
+			case "recorded-home-kept-trusted":
+				if outcome != enterpriseHookUserCleanupDone || err != nil || len(f.requests) != 1 ||
+					f.requests[0].Targets[0].Options.UserHome != oldHome || f.requests[0].Targets[0].Options.OwnerUID != uid {
+					t.Fatalf("trusted recorded home = %v, %v, workers %+v", outcome, err, f.requests)
 				}
-			} else if outcome != enterpriseHookUserCleanupDone || !errors.Is(err, errEnterpriseHookCleanupHomeGone) ||
-				strings.Count(attemptLog.String(), "home gone:") != 1 {
-				t.Fatalf("empty directory home with gone recorded home = %v, %v, log %q", outcome, err, attemptLog.String())
-			}
-			if len(f.requests) != 0 {
-				t.Fatalf("an account without a directory home ran a worker: %+v", f.requests)
+			case "recorded-home-kept-untrusted":
+				var kept *enterpriseHookCleanupHomeKeptError
+				var changed *enterpriseHookTargetHomeChangedError
+				if outcome != enterpriseHookUserCleanupFailed || err == nil || !strings.Contains(err.Error(), "enterprise hooks:") ||
+					!strings.Contains(err.Error(), "group/other writable") || errors.As(err, &kept) || errors.As(err, &changed) ||
+					errors.Is(err, errEnterpriseHookCleanupHomeGone) || len(f.requests) != 0 {
+					t.Fatalf("untrusted recorded home = %v, %v, workers %+v", outcome, err, f.requests)
+				}
+			case "recorded-home-gone":
+				if outcome != enterpriseHookUserCleanupDone || !errors.Is(err, errEnterpriseHookCleanupHomeGone) ||
+					strings.Count(attemptLog.String(), "home gone:") != 1 || len(f.requests) != 0 {
+					t.Fatalf("gone recorded home = %v, %v, workers %+v, log %q", outcome, err, f.requests, attemptLog.String())
+				}
 			}
 			f.writeManifest(t)
 			now := time.Now()
@@ -260,11 +524,20 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 			cmd.SetContext(context.Background())
 			report := enterpriseHooksRemoveAllReport{}
 			skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
-			if len(report.Pending) != 1 || len(report.Failed) != 0 || report.Removed != 0 {
-				t.Fatalf("empty-home remove-all report = %+v", report)
-			}
-			if oldPresent && skip[uid] != enterpriseHookPurgeSkipKeptHome || !oldPresent && skip[uid] != "" {
-				t.Fatalf("empty-home purge skip = %+v", skip)
+			switch kind {
+			case "recorded-home-kept-trusted":
+				if report.Removed != 1 || len(report.Pending) != 0 || len(report.Failed) != 0 || skip[uid] != "" {
+					t.Fatalf("trusted recorded-home remove-all = %+v, skip %+v", report, skip)
+				}
+			case "recorded-home-kept-untrusted":
+				if report.Removed != 0 || len(report.Pending) != 0 || len(report.Failed) != 1 ||
+					skip[uid] != enterpriseHookPurgeSkipFailed {
+					t.Fatalf("untrusted recorded-home remove-all = %+v, skip %+v", report, skip)
+				}
+			case "recorded-home-gone":
+				if report.Removed != 0 || len(report.Pending) != 1 || len(report.Failed) != 0 || skip[uid] != "" {
+					t.Fatalf("gone recorded-home remove-all = %+v, skip %+v", report, skip)
+				}
 			}
 			manifest, err := enterprisehooks.LoadManifest(f.manifest)
 			if err != nil {
@@ -279,16 +552,21 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if oldPresent {
-				if len(remaining) != 1 || !strings.Contains(guardianLog.String(), "will retry") {
-					t.Fatalf("kept recorded home was retired: %+v, log %q", remaining, guardianLog.String())
+			switch kind {
+			case "recorded-home-kept-trusted":
+				if len(remaining) != 0 || strings.Count(guardianLog.String(), "no longer enrolled; per-user cleanup done") != 1 ||
+					len(f.requests) != 3 || f.requests[2].Targets[0].Options.UserHome != oldHome {
+					t.Fatalf("trusted recorded home did not finish: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
-			} else if len(remaining) != 0 || strings.Count(guardianLog.String(), "home gone:") != 1 ||
-				strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
-				t.Fatalf("gone recorded home was not retired once: %+v, log %q", remaining, guardianLog.String())
-			}
-			if len(f.requests) != 0 {
-				t.Fatalf("empty-home reconcile ran a worker: %+v", f.requests)
+			case "recorded-home-kept-untrusted":
+				if len(remaining) != 1 || !strings.Contains(guardianLog.String(), "will retry") || len(f.requests) != 0 {
+					t.Fatalf("untrusted recorded home was retired: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+				}
+			case "recorded-home-gone":
+				if len(remaining) != 0 || strings.Count(guardianLog.String(), "home gone:") != 1 ||
+					strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") || len(f.requests) != 0 {
+					t.Fatalf("gone recorded home was not retired once: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+				}
 			}
 		})
 	}
