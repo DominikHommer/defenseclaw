@@ -18,6 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // The administrator's ensure result, the real gateway exec plan and the
@@ -27,12 +28,7 @@ func TestManagedMacE2fsprogsEnsureGatewayDoctorAgree(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("the managed gateway exec shim refuses root")
 	}
-	root := t.TempDir()
-	for _, dir := range []string{root, filepath.Dir(root)} {
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	root := testenv.TraversableTempDir(t)
 	home, configDir := filepath.Join(root, "home"), filepath.Join(root, "etc")
 	if err := os.MkdirAll(filepath.Join(configDir, "openshell"), 0o700); err != nil {
 		t.Fatal(err)

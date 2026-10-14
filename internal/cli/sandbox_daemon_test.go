@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 type fakeSandboxStopper struct {
@@ -250,12 +251,9 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("the shim refuses root")
 	}
-	root := t.TempDir()
-	for _, dir := range []string{root, filepath.Dir(root)} {
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The administrator's e2fsprogs folder below must sit under ancestors
+	// every account can traverse, or the access rule refuses it first.
+	root := testenv.TraversableTempDir(t)
 	home := filepath.Join(root, "home")
 	configDir := filepath.Join(root, "etc")
 	for _, dir := range []string{filepath.Join(home, ".local", "bin"), filepath.Join(configDir, "openshell")} {
@@ -354,7 +352,7 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	// The administrator's e2fsprogs_dir follows the rule ensure checks
 	// (GAP-0506): its install prefix (tools in sbin) or the folder holding
 	// the tools both put that folder first; a folder without both refuses.
-	adminE2fs = filepath.Join(t.TempDir(), "e2fsprogs")
+	adminE2fs = filepath.Join(root, "e2fsprogs")
 	adminSbin := filepath.Join(adminE2fs, "sbin")
 	if err := os.MkdirAll(adminSbin, 0o755); err != nil {
 		t.Fatal(err)

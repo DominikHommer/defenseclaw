@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestManagedMacDoctorUsesTheGatewaysE2fsprogsSetting(t *testing.T) {
@@ -22,12 +23,9 @@ func TestManagedMacDoctorUsesTheGatewaysE2fsprogsSetting(t *testing.T) {
 	ta.GOOS = "darwin"
 	ta.daemon.status.Managed = managedStatusFixture()
 	ta.daemon.status.Managed.Driver = "vm"
-	root := t.TempDir()
-	for _, dir := range []string{root, filepath.Dir(root)} {
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The access rule refuses an administrator's folder under an ancestor
+	// some account cannot traverse, before the setting this test checks.
+	root := testenv.TraversableTempDir(t)
 	prefix, sbin := filepath.Join(root, "e2fsprogs"), filepath.Join(root, "e2fsprogs", "sbin")
 	if err := os.MkdirAll(sbin, 0o755); err != nil {
 		t.Fatal(err)
