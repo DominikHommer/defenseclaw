@@ -203,6 +203,10 @@ func dispatchTrustedAction(
 			// list: a profile only runs more commands before the body, so a
 			// match on the body counts.
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
+		} else if view, ok := actionfacts.OpaqueCMDWrapperArgvReduction(request.Input, facts); ok {
+			// cmd.exe /c has a complete outer argv even when AutoRun leaves
+			// its child opaque. Only a positive match on that argv counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if view, partialArgv, ok := actionfacts.StaticCommandSubsetReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate, subsetView = view, subsetReductionCandidate, true
 			if partialArgv {
