@@ -13,7 +13,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
+	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -51,6 +54,91 @@ var windowsCodexStandaloneReleaseName = regexp.MustCompile(
 // tests replace it.
 var windowsReadInstallJunction = os.Readlink
 
+// windowsInstallLongPathName returns the long spelling of an existing path;
+// tests replace it.
+var windowsInstallLongPathName = func(path string) (string, error) {
+	short, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, windows.MAX_PATH)
+	for {
+		n, err := windows.GetLongPathName(short, &buf[0], uint32(len(buf)))
+		if err != nil {
+			return "", err
+		}
+		if n < uint32(len(buf)) {
+			return windows.UTF16ToString(buf[:n]), nil
+		}
+		buf = make([]uint16, n)
+	}
+}
+
+// windowsInstallPathAttributes reads the attributes of path itself (a final
+// reparse point is not followed); tests replace it.
+var windowsInstallPathAttributes = func(path string) (uint32, error) {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return 0, err
+	}
+	return windows.GetFileAttributes(ptr)
+}
+
+// windowsInstallLocalDrivePath accepts a drive path, including its extended
+// spelling, without allowing a UNC or device namespace to become a local
+// relative path when the prefix is removed.
+func windowsInstallLocalDrivePath(path string) (string, error) {
+	path = filepath.FromSlash(path)
+	if strings.HasPrefix(path, `\\?\`) {
+		path = strings.TrimPrefix(path, `\\?\`)
+		if len(path) < 3 || path[1] != ':' || path[2] != '\\' {
+			return "", fmt.Errorf("path is not on a local drive letter")
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if volume := filepath.VolumeName(abs); len(volume) != 2 || volume[1] != ':' {
+		return "", fmt.Errorf("path is not on a local drive letter: %s", abs)
+	}
+	return abs, nil
+}
+
+// windowsRejectInstallReparseChain accepts only local drive-letter paths,
+// refusing UNC and device paths. It checks each element from the volume root
+// down and refuses a reparse point before reading anything below it. The
+// shared winpath.RejectReparseChain also walks root first, but permits paths
+// outside local drive letters. A missing element ends either walk.
+func windowsRejectInstallReparseChain(path string) error {
+	abs, err := windowsInstallLocalDrivePath(path)
+	if err != nil {
+		return err
+	}
+	var chain []string
+	for current := abs; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		attributes, err := windowsInstallPathAttributes(chain[i])
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return fmt.Errorf("reparse point in path: %s", chain[i])
+		}
+	}
+	return nil
+}
+
 // windowsCodexStandaloneRoot is install.ps1's per-user install root. The
 // installer moves it under CODEX_HOME when that is set; such a root is found
 // by its PATH folder (windowsCodexStandaloneVisibleBin) and reported.
@@ -71,7 +159,7 @@ func windowsCodexStandaloneVisibleBin(profileHome string) string {
 func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) {
 	root := windowsCodexStandaloneRoot(profileHome)
 	releases := filepath.Join(root, "releases")
-	if err := winpath.RejectReparseChain(releases); err != nil {
+	if err := windowsRejectInstallReparseChain(releases); err != nil {
 		return "", "the Codex standalone install folder has a refused reparse chain"
 	}
 	releasesInfo, err := os.Lstat(releases)
@@ -82,22 +170,37 @@ func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) 
 	if err != nil || strings.TrimSpace(target) == "" {
 		return "", "the Codex standalone install selects no release (its current junction is missing or unreadable)"
 	}
-	target = filepath.Clean(strings.TrimSpace(target))
+	target, err = windowsInstallLocalDrivePath(strings.TrimSpace(target))
+	if err != nil {
+		return "", "the Codex standalone current junction points outside its releases folder"
+	}
 	// The target is the user's, so nothing touches it before it is known to
 	// be on the profile's own local drive: a directory symbolic link (which a
 	// user in Developer Mode can create) may name a UNC path, and LocalSystem
 	// must never open one. Then the folder is compared by identity, not by
 	// spelling, as the junction may name it in a long or short (8.3) form.
-	volume := filepath.VolumeName(target)
-	if len(volume) != 2 || volume[1] != ':' || !strings.EqualFold(volume, filepath.VolumeName(releases)) {
+	releasesPath, err := windowsInstallLocalDrivePath(releases)
+	if err != nil || !strings.EqualFold(filepath.VolumeName(target), filepath.VolumeName(releasesPath)) {
 		return "", "the Codex standalone current junction points outside its releases folder"
 	}
-	if !strings.EqualFold(filepath.Dir(target), releases) {
+	// Check the junction target's own spelling before asking Windows to
+	// inspect its parent or expand its 8.3 name.
+	if windowsRejectInstallReparseChain(target) != nil {
+		return "", "the Codex standalone current junction points through a refused reparse chain"
+	}
+	if !strings.EqualFold(filepath.Dir(target), releasesPath) {
 		if parent, err := os.Lstat(filepath.Dir(target)); err != nil || !os.SameFile(parent, releasesInfo) {
 			return "", "the Codex standalone current junction points outside its releases folder"
 		}
 	}
 	match := windowsCodexStandaloneReleaseName.FindStringSubmatch(filepath.Base(target))
+	if match == nil && strings.Contains(filepath.Base(target), "~") {
+		// A junction may name the release by its 8.3 short spelling; the
+		// version is in the folder's long name.
+		if long, err := windowsInstallLongPathName(target); err == nil {
+			match = windowsCodexStandaloneReleaseName.FindStringSubmatch(filepath.Base(long))
+		}
+	}
 	if match == nil || !isValidWindowsAgentVersion(match[1]) {
 		return "", "the Codex standalone current release is not named <version>-<target>"
 	}
@@ -115,7 +218,7 @@ func windowsCodexStandaloneReleaseHasCLI(release string) bool {
 		filepath.Join(release, "bin", "codex.exe"),
 		filepath.Join(release, "codex.exe"),
 	} {
-		if winpath.RejectReparseChain(candidate) != nil {
+		if windowsRejectInstallReparseChain(candidate) != nil {
 			continue
 		}
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
@@ -190,11 +293,103 @@ func readWindowsWinGetPackageVersion(root registry.Key, path string, access uint
 	return best, best != ""
 }
 
+// windowsWinGetPackagesMaxEntries and windowsWinGetPackagesScanBudget bound
+// the listing of a user's WinGet Packages folder, which that user can fill
+// with entries: one user cannot delay the rows of the others.
+var (
+	windowsWinGetPackagesMaxEntries = 4096
+	windowsWinGetPackagesScanBudget = time.Second
+	// Tests replace the directory read to exercise a stalled filesystem call.
+	windowsWinGetReadPackageNames = func(dir *os.File, count int) ([]string, error) {
+		return dir.Readdirnames(count)
+	}
+)
+
+// windowsWinGetPackagesBatch is how many names one directory read returns.
+const windowsWinGetPackagesBatch = 256
+
+// findWindowsWinGetPackageFolder returns the first entry of packages named
+// "<packageID>_<source>" for one of packageIDs, and false when the folder was
+// not fully listed (more than windowsWinGetPackagesMaxEntries entries, or
+// not within windowsWinGetPackagesScanBudget) before one was found.
+func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (string, bool) {
+	budget, maxEntries := windowsWinGetPackagesScanBudget, windowsWinGetPackagesMaxEntries
+	if budget <= 0 || maxEntries <= 0 {
+		return "", false
+	}
+	deadline := time.Now().Add(budget)
+	readNames := windowsWinGetReadPackageNames
+	type scanResult struct {
+		match    string
+		complete bool
+	}
+	results := make(chan scanResult, 1)
+	var active atomic.Pointer[os.File]
+	go func() {
+		match, complete := scanWindowsWinGetPackageFolder(packages, packageIDs, maxEntries, deadline, readNames, &active)
+		results <- scanResult{match, complete}
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case found := <-results:
+		return found.match, found.complete
+	case <-timer.C:
+		if dir := active.Load(); dir != nil {
+			// Closing the handle releases an outstanding directory read. Do
+			// not let that close hold up the next account's enumeration.
+			go dir.Close()
+		}
+		return "", false
+	}
+}
+
+func scanWindowsWinGetPackageFolder(packages string, packageIDs []string, maxEntries int, deadline time.Time, readNames func(*os.File, int) ([]string, error), active *atomic.Pointer[os.File]) (string, bool) {
+	dir, err := os.Open(packages)
+	if err != nil {
+		return "", true
+	}
+	defer dir.Close()
+	active.Store(dir)
+	defer active.Store(nil)
+	prefixes := make([]string, 0, len(packageIDs))
+	for _, id := range packageIDs {
+		prefixes = append(prefixes, strings.ToLower(id)+"_")
+	}
+	listed := 0
+	for {
+		if !time.Now().Before(deadline) {
+			return "", false
+		}
+		names, err := readNames(dir, windowsWinGetPackagesBatch)
+		for _, name := range names {
+			listed++
+			if listed > maxEntries || !time.Now().Before(deadline) {
+				return "", false
+			}
+			lower := strings.ToLower(name)
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(lower, prefix) {
+					return filepath.Join(packages, name), true
+				}
+			}
+		}
+		if err != nil {
+			// io.EOF: listed in full; any other error lists no more.
+			return "", errors.Is(err, io.EOF)
+		}
+		if listed >= maxEntries {
+			return "", false
+		}
+	}
+}
+
 // windowsStandaloneInstalledAgent returns where the profile has a CLI of
 // connectorName installed that no version probe read, and what to do about
 // it, or "" when it finds none. Only presence is checked, never through a
 // junction: the install is then reported as unprotected instead of being a
-// silent gap.
+// silent gap. When the user's WinGet Packages folder could not be fully
+// listed, it returns "" and the reason the account was not fully scanned.
 func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string, string) {
 	profileHome = strings.TrimSpace(profileHome)
 	if !filepath.IsAbs(profileHome) {
@@ -227,12 +422,14 @@ func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string,
 		}
 	}
 	packages := filepath.Join(local, "Microsoft", "WinGet", "Packages")
-	if winpath.RejectReparseChain(packages) == nil {
-		for _, packageID := range windowsWinGetPackageIDs[connectorName] {
-			matches, _ := filepath.Glob(filepath.Join(packages, packageID+"_*"))
-			if len(matches) != 0 {
-				return matches[0], "its WinGet version is read from the user's registry while the user is signed in; the next enumeration after sign-in enrolls the account"
-			}
+	if ids := windowsWinGetPackageIDs[connectorName]; len(ids) != 0 && windowsRejectInstallReparseChain(packages) == nil {
+		match, complete := findWindowsWinGetPackageFolder(packages, ids)
+		if match != "" {
+			return match, "its WinGet version is read from the user's registry while the user is signed in; the next enumeration after sign-in enrolls the account"
+		}
+		if !complete {
+			return "", fmt.Sprintf("this account was not fully scanned for a per-user WinGet %s install: %s holds more entries than DefenseClaw lists (%d) or did not list within %s; remove the packages the user no longer needs, and the next enumeration scans it again",
+				connectorName, packages, windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget)
 		}
 	}
 	return "", ""
@@ -242,7 +439,7 @@ func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string,
 // chain; path itself may be a junction (install.ps1's), which is not
 // followed.
 func windowsInstallPathPresent(path string) bool {
-	if winpath.RejectReparseChain(filepath.Dir(path)) != nil {
+	if windowsRejectInstallReparseChain(filepath.Dir(path)) != nil {
 		return false
 	}
 	_, err := os.Lstat(path)

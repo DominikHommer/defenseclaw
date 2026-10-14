@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -249,5 +250,122 @@ func TestWindowsStandaloneUpgradeNamesNewConnectorSessions(t *testing.T) {
 			!strings.Contains(result.Warnings[0].Message, "claudecode (pid 42)") {
 			t.Fatalf("%s warnings = %+v, want restart for existing Claude Code session", result.Action, result.Warnings)
 		}
+	}
+}
+
+func TestWindowsStandaloneUsesOwnerSIDForPreActivationSession(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	activated := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	dir := t.TempDir()
+	metadata := filepath.Join(dir, "deployment.json")
+	record, err := json.Marshal(windowsEnterpriseActivationRecord{ActivatedAt: activated.Format(time.RFC3339Nano)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, windowsEnterpriseActivationFileName), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousRestores, previousSID := windowsEnterpriseGuardianRestores, windowsEnterpriseAccountSID
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseGuardianRestores, windowsEnterpriseAccountSID = previousRestores, previousSID
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{PID: 41, Connector: "codex", OwnerSID: sid, StartedAt: activated.Add(-time.Hour)}}, nil
+	}
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) { return nil, nil }
+	lookups := 0
+	windowsEnterpriseAccountSID = func(string) string { lookups++; return "" }
+
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed = true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+		!strings.Contains(result.Warnings[0].Message, "user "+sid+" runs codex (pid 41), started before") || lookups != 0 {
+		t.Fatalf("session owner SID warning = %+v, account lookups = %d", result.Warnings, lookups)
+	}
+}
+
+func TestWindowsStandaloneUnknownOwnerKeepsRestartStatusIncomplete(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousRestores, previousConnectors := windowsEnterpriseGuardianRestores, windowsEnterpriseEnrolledConnectors
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseGuardianRestores, windowsEnterpriseEnrolledConnectors = previousRestores, previousConnectors
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) { return nil, nil }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"codex", "claudecode"}, nil }
+	started := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			{PID: 44, Connector: "codex"},
+			{PID: 43, Connector: "codex", StartedAt: started},
+			{PID: 41, Connector: "claudecode", StartedAt: started},
+			{PID: 42, Connector: "codex", OwnerSID: "S-1-5-18", StartedAt: started},
+		}, nil
+	}
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if result.SecurityComplete || len(result.Warnings) != 2 {
+		t.Fatalf("unknown-owner restart status = %+v, security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+	first, second := result.Warnings[0], result.Warnings[1]
+	if first.Code != windowsAgentSessionsRestartCode || second.Code != windowsAgentSessionsRestartCode ||
+		!strings.HasPrefix(first.Message, "restart status unknown:") ||
+		!strings.HasPrefix(second.Message, "restart status unknown:") ||
+		!strings.Contains(first.Message, "claudecode (pid 41)") ||
+		!strings.Contains(second.Message, "codex (pid 43), codex (pid 44)") ||
+		!strings.Contains(second.Message, "account") ||
+		!strings.Contains(second.Message, "could not be identified") ||
+		!strings.Contains(second.Message, "restarted") ||
+		strings.Contains(second.Message, "pid 42") {
+		t.Fatalf("unknown-owner warnings are incomplete or unordered: %+v", result.Warnings)
+	}
+}
+
+func TestWindowsServiceSIDMatchesServiceIdentities(t *testing.T) {
+	for _, sid := range []string{"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-80-1", "S-1-5-90-1", "S-1-5-96-1"} {
+		if !windowsServiceSID(sid) {
+			t.Errorf("service SID %q was treated as an interactive account", sid)
+		}
+	}
+	if windowsServiceSID("S-1-5-21-1-2-3-1001") {
+		t.Fatal("interactive account SID was treated as a service")
+	}
+}
+
+func TestWindowsHotConnectorEnableJudgesUnknownAndSIDOwners(t *testing.T) {
+	previous := []byte("guardrail:\n  connectors:\n    codex:\n      enabled: false\n    claudecode: {}\n")
+	next := []byte("guardrail:\n  connectors:\n    codex:\n      enabled: true\n    claudecode: {}\n")
+	changedAt := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousProcesses := windowsEnterpriseAgentProcesses
+	t.Cleanup(func() { windowsEnterpriseAgentProcesses = previousProcesses })
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			{PID: 41, Connector: "codex", OwnerSID: sid, StartedAt: changedAt.Add(-time.Minute)},
+			{PID: 43, Connector: "codex"},
+			{PID: 42, Connector: "codex", StartedAt: changedAt.Add(-time.Minute)},
+			{PID: 44, Connector: "codex", OwnerSID: "S-1-5-80-1", StartedAt: changedAt.Add(-time.Minute)},
+			{PID: 45, Connector: "claudecode", StartedAt: changedAt.Add(-time.Minute)},
+		}, nil
+	}
+	result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.2")
+	result.SecurityComplete = true
+	warnWindowsEnterpriseHotAgentSessions(result, previous, next, changedAt)
+	if result.SecurityComplete || len(result.Warnings) != 2 ||
+		result.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+		!strings.Contains(result.Warnings[0].Message, "user "+sid+" runs codex (pid 41)") ||
+		result.Warnings[1].Code != windowsAgentSessionsRestartCode ||
+		!strings.HasPrefix(result.Warnings[1].Message, "restart status unknown:") ||
+		!strings.Contains(result.Warnings[1].Message, "codex (pid 42), codex (pid 43)") ||
+		strings.Contains(result.Warnings[1].Message, "pid 44") ||
+		strings.Contains(result.Warnings[1].Message, "pid 45") {
+		t.Fatalf("hot connector restart warnings = %+v, security_complete = %t", result.Warnings, result.SecurityComplete)
 	}
 }
