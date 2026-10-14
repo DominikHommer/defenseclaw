@@ -17511,5 +17511,3 @@ def _fix_acp_guard_pins(
     if not done:
         return ("skip", "the ACP guard pins are current")
     return ("pass", f"re-pinned the DefenseClaw ACP guard for {', '.join(done)}{suffix}")
-
-
