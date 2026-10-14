@@ -7,6 +7,7 @@ package openshell
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,9 @@ func TestAdminE2fsprogsToolDir(t *testing.T) {
 }
 
 func TestManagedE2fsprogsToolDirUsesTheGatewayOrder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed MicroVM e2fsprogs resolution is macOS and Linux only; os.Getuid is -1 on Windows")
+	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	own := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
