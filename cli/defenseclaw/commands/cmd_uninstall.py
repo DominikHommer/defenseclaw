@@ -1502,35 +1502,81 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _sandbox_tree_has_state(root: str, *, empty_files_are_state: bool = False) -> bool:
+    """Find state in a tree without following links out of it."""
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if path == root:
+                return False
+            return True  # an entry disappeared during the scan
+        except OSError:
+            return True
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                with os.scandir(path) as entries:
+                    pending.extend(entry.path for entry in entries)
+            except OSError:
+                return True  # let teardown report inaccessible state
+        elif not stat.S_ISREG(info.st_mode):
+            return True  # links and special files may hold state
+        elif info.st_size or empty_files_are_state:
+            return True
+        else:
+            try:
+                if not os.access(path, os.R_OK, follow_symlinks=False):
+                    return True
+            except (OSError, NotImplementedError):
+                return True
+    return False
+
+
 def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
     """Report whether DefenseClaw may hold OpenShell sandbox state.
 
-    OpenShell sandboxes run on Linux and macOS only. Teardown is planned when
-    sandboxes are enabled or the data directory holds sandbox state (images,
-    records, the setup receipt), so a host that never used them is untouched.
+    OpenShell sandboxes run on Linux and macOS only. A fresh install may have
+    an empty image-store lock even though it has never set up sandboxes.
     """
     if platform_name == "win32":
         return False
     openshell = getattr(cfg, "openshell", None) if cfg is not None else None
     if openshell is not None and (getattr(openshell, "enabled", False) or getattr(openshell, "wrappers", None)):
         return True
-    root = os.path.join(data_dir, "sandboxes")
-    if not os.path.isdir(root):
-        return False
-    try:
-        with os.scandir(root) as entries:
-            for entry in entries:
-                # The manager creates its directory before any sandbox. An
-                # empty directory is not a teardown receipt.
-                if entry.name == "manager" and entry.is_dir(follow_symlinks=False):
-                    with os.scandir(entry.path) as records:
-                        if any(records):
-                            return True
-                else:
-                    return True
-    except OSError:
-        return True  # let teardown report inaccessible state instead of deleting it
-    return False
+    # statecarry.StateDirs in Go contains the sandbox records and receipt,
+    # undo snapshots, and project shadows. Empty files and folders are not
+    # teardown state; a nonempty file or an unreadable entry is.
+    if any(_sandbox_tree_has_state(os.path.join(data_dir, name)) for name in ("sandboxes", "snapshots", "shadows")):
+        return True
+
+    home = os.path.expanduser("~")
+    # VMStateDir defaults to this OpenShell state tree. The upstream CLI may
+    # also use XDG_STATE_HOME; either tree can hold state outside data_dir.
+    state_roots = {os.path.join(home, ".local", "state", "openshell")}
+    if xdg_state := os.environ.get("XDG_STATE_HOME"):
+        if os.path.isabs(xdg_state):
+            state_roots.add(os.path.join(xdg_state, "openshell"))
+    # UserConfigDir in Go uses XDG_CONFIG_HOME, else ~/.config. Gateway
+    # registration and gateway.toml/env live here; their absence matters even
+    # when the DefenseClaw setup receipt has not been written. An empty
+    # config directory alone is not a gateway configuration.
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config and not os.path.isabs(xdg_config):
+        return True  # Go cannot resolve a relative XDG_CONFIG_HOME
+    config_roots = {os.path.join(home, ".config", "openshell")}
+    if xdg_config:
+        config_roots.add(os.path.join(xdg_config, "openshell"))
+    for path in state_roots:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    return any(_sandbox_tree_has_state(path, empty_files_are_state=True) for path in config_roots)
 
 
 def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
@@ -1791,6 +1837,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
+    else:
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (no OpenShell sandbox state)")
     feed = _sandbox_kernel_feed_hint(plan)
     if feed:
         ux.echo(f"  • {ux.bold('sandbox kernel feed:')} stays (a root service); {feed}")
