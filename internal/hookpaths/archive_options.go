@@ -10,17 +10,17 @@ import (
 )
 
 type tarOptionSpec struct {
-	name      string
-	short     byte
-	value     bool
-	directory bool
-	optional  bool
-	command   bool
-	transform bool
+	name       string
+	short      byte
+	value      bool
+	directory  bool
+	optional   bool
+	command    bool
+	compressor bool
+	transform  bool
 }
 
-// tarOptionSpecs lists options that cannot run a child program or move an
-// extracted member outside the selected destination.
+// tarOptionSpecs records option values and effects needed for archive scope.
 var tarOptionSpecs = []tarOptionSpec{
 	{name: "directory", short: 'C', value: true, directory: true},
 	{name: "dir", value: true, directory: true},
@@ -48,7 +48,7 @@ var tarOptionSpecs = []tarOptionSpec{
 	{name: "verbose", short: 'v'},
 	{name: "wildcards"},
 	{name: "to-command", value: true, command: true},
-	{name: "use-compress-program", short: 'I', value: true, command: true},
+	{name: "use-compress-program", short: 'I', value: true, command: true, compressor: true},
 	{name: "checkpoint-action", value: true, command: true},
 	{name: "info-script", short: 'F', value: true, command: true},
 	{name: "new-volume-script", value: true, command: true},
@@ -95,6 +95,16 @@ func tarProgram(program string) bool {
 		return true
 	}
 	return false
+}
+
+var tarKnownCompressors = map[string]struct{}{
+	"gzip": {}, "pigz": {}, "bzip2": {}, "pbzip2": {}, "xz": {}, "pixz": {},
+	"zstd": {}, "pzstd": {}, "lz4": {}, "lzma": {}, "compress": {},
+}
+
+func tarCompressorIsKnown(value string) bool {
+	_, known := tarKnownCompressors[value]
+	return known
 }
 
 func tarTransformRunsCommand(expression string) bool {

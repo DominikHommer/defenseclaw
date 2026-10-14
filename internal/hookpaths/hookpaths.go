@@ -3402,7 +3402,8 @@ func parseTarOptions(args []string, static []bool, cwd string) tarParsedOptions 
 			} else if joined && !option.optional {
 				return parsed.invalid()
 			}
-			parsed.executable = parsed.executable || option.command || option.transform && tarTransformRunsCommand(value)
+			parsed.executable = parsed.executable || option.command && !(option.compressor && tarCompressorIsKnown(value)) ||
+				option.transform && tarTransformRunsCommand(value)
 			parsed.opaque = parsed.opaque || option.transform
 			if option.directory && (option.value || joined) && !consume(value) {
 				return parsed.invalid()
@@ -3430,7 +3431,8 @@ func parseTarOptions(args []string, static []bool, cwd string) tarParsedOptions 
 				}
 				value = args[i]
 			}
-			parsed.executable = parsed.executable || option.command || option.transform && tarTransformRunsCommand(value)
+			parsed.executable = parsed.executable || option.command && !(option.compressor && tarCompressorIsKnown(value)) ||
+				option.transform && tarTransformRunsCommand(value)
 			parsed.opaque = parsed.opaque || option.transform
 			if option.directory && !consume(value) {
 				return parsed.invalid()

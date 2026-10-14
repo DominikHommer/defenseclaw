@@ -42,6 +42,11 @@ func TestProtectedWriteArchiveCommandOptions(t *testing.T) {
 		{"shell_string", `bash -c 'tar -cf out/a.tar --checkpoint-action="exec=printf x >> disklink" payload'`, true},
 		{"ordinary_create", `tar -cf out/a.tar --checkpoint=1 --totals -v payload`, false},
 		{"ordinary_transform", `tar -cf out/a.tar --transform='s,a,b,g' payload`, false},
+		{"ordinary_compressor_short", `tar -I zstd -cf out/a.tar payload`, false},
+		{"ordinary_compressor_long", `tar --use-compress-program=gzip -cf out/a.tar payload`, false},
+		{"ordinary_compressor_abbreviation", `tar --use-compress=xz -cf out/a.tar payload`, false},
+		{"ordinary_compressor_joined", `tar -Ibzip2 -cf out/a.tar payload`, false},
+		{"protected_archive_compressor", `tar -I gzip -cf disklink payload`, true},
 	}
 	for _, row := range rows {
 		for _, managed := range []bool{false, true} {
