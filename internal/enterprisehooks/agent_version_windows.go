@@ -127,9 +127,9 @@ var windowsMachineScopedCursorPackageJSON = `C:\Program Files\Cursor\resources\a
 //     — Bun global.
 //     3. `%LOCALAPPDATA%\Yarn\Data\global\node_modules\@openai\codex\package.json`
 //     — Yarn Classic global.
-//     MSIX-store install (`C:\Program Files\WindowsApps\OpenAI.Codex_…\`) still
-//     requires a glob-resolved lookup and stays out of scope here; a follow-up
-//     probe can add it once the glob-vs-reparse-chain interaction is worked out.
+//     The standalone profile also reads the official installer (install.ps1)
+//     and per-user WinGet packages (agent_install_windows.go); the Codex app's
+//     MSIX package is an app surface (agent_surface_windows.go).
 //
 //   - `cursor`:
 //     1. `%LOCALAPPDATA%\Programs\cursor\resources\app\package.json`
