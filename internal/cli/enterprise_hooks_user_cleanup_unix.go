@@ -347,8 +347,9 @@ func (e *enterpriseHookCleanupOldHomeKeptError) Error() string {
 // *enterpriseHookCleanupHomeKeptError, which an uninstall also only warns.
 // A live account re-homed to a trusted real path is cleaned in its current
 // home and also in its recorded home when that home still exists and is
-// trusted. An existing recorded home that cannot be trusted keeps the row
-// with a warning. An untrusted or unavailable new home keeps the row
+// trusted. An incomplete cleanup in either home keeps the row with the
+// affected path in its warning. An existing recorded home that cannot be
+// trusted also keeps the row. An untrusted or unavailable new home keeps it
 // fail-closed until the account is removed, its uid changes, or its home is
 // fixed.
 func attemptEnterpriseHookStandaloneUnixCleanup(
@@ -431,6 +432,9 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 	}
 	outcome, err := runEnterpriseHookStandaloneCleanupWorker(ctx, entry, account, dataDir)
 	if outcome != enterpriseHookUserCleanupDone {
+		if err != nil && homeChanged != nil {
+			return outcome, fmt.Errorf("%w: current-home cleanup failed: %v", homeChanged, err)
+		}
 		return outcome, err
 	}
 	if homeChanged != nil {
@@ -450,6 +454,9 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 			}
 			outcome, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, recordedAccount, recordedDataDir)
 			if outcome != enterpriseHookUserCleanupDone {
+				if err != nil {
+					return outcome, fmt.Errorf("%w: recorded-home cleanup failed: %v", homeChanged, err)
+				}
 				return outcome, err
 			}
 		}
