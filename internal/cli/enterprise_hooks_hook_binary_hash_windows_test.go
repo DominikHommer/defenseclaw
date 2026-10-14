@@ -6,6 +6,8 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,179 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func windowsHookBinaryLinkCount(t *testing.T, path string) uint32 {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		t.Fatal(err)
+	}
+	return info.NumberOfLinks
+}
+
+func TestKeepWindowsManagedFileCopyBreaksHardLinkedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		tamper  bool
+		message string
+	}{
+		{name: "changed through other name", tamper: true, message: "hash mismatch"},
+		{name: "recorded bytes under another name", message: "links=2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
+			if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+				t.Fatalf("keep copy: damage %q, err %v", damage, err)
+			}
+			other := target + ".other"
+			if err := os.Link(target, other); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			if links := windowsHookBinaryLinkCount(t, target); links != 2 {
+				t.Fatalf("fixture target has %d links, want two", links)
+			}
+			otherBody := "hook release"
+			if tc.tamper {
+				otherBody = "changed hook"
+				if err := os.WriteFile(other, []byte(otherBody), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+			if err != nil || !strings.Contains(damage, tc.message) || !strings.Contains(damage, "shared digest refused file") {
+				t.Fatalf("linked target: damage %q, err %v", damage, err)
+			}
+			if !tc.tamper && strings.Contains(damage, "hash mismatch") {
+				t.Fatalf("recorded bytes were incorrectly reported as a hash mismatch: %q", damage)
+			}
+			if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
+				t.Fatalf("restored target hash %q, err %v, want %q", sum, err, want)
+			}
+			if links := windowsHookBinaryLinkCount(t, target); links != 1 {
+				t.Fatalf("restored target has %d links, want one", links)
+			}
+			if body, err := os.ReadFile(other); err != nil || string(body) != otherBody {
+				t.Fatalf("other name changed to %q, err %v, want %q", body, err, otherBody)
+			}
+			left, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			right, err := os.Stat(other)
+			if err != nil || os.SameFile(left, right) {
+				t.Fatalf("restored target still names the other file: %v", err)
+			}
+		})
+	}
+}
+
+func TestKeepWindowsManagedFileCopyRecoversFromBoundedDigestRefusal(t *testing.T) {
+	refusal := errors.New("changed during bounded digest")
+	for _, tc := range []struct {
+		name   string
+		tamper bool
+	}{
+		{name: "tampered target is restored", tamper: true},
+		{name: "healthy target is retained"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
+			if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+				t.Fatalf("keep copy: damage %q, err %v", damage, err)
+			}
+			original, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.tamper {
+				if err := os.WriteFile(target, []byte("changed hook"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saved := guardianTargetHookSHA256Hex
+			guardianTargetHookSHA256Hex = func(string) (string, error) { return "", refusal }
+			t.Cleanup(func() { guardianTargetHookSHA256Hex = saved })
+			damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.tamper {
+				if !strings.Contains(damage, "hash mismatch") || !strings.Contains(damage, refusal.Error()) {
+					t.Fatalf("tampered target damage %q", damage)
+				}
+				if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
+					t.Fatalf("restored target hash %q, err %v", sum, err)
+				}
+				return
+			}
+			if damage != "" || windowsHookBinaryDigestRefusal != refusal.Error() {
+				t.Fatalf("healthy target damage %q, refusal %q", damage, windowsHookBinaryDigestRefusal)
+			}
+			current, err := os.Stat(target)
+			if err != nil || !os.SameFile(original, current) {
+				t.Fatalf("healthy target was replaced: %v", err)
+			}
+			windowsHookBinaryLastDigestRefusal = ""
+			var stderr bytes.Buffer
+			reportWindowsHookBinaryDigestRefusal(&stderr, target)
+			reportWindowsHookBinaryDigestRefusal(&stderr, target)
+			if strings.Count(stderr.String(), refusal.Error()) != 1 {
+				t.Fatalf("refusal logged %d times, want once: %s", strings.Count(stderr.String(), refusal.Error()), stderr.String())
+			}
+			guardianTargetHookSHA256Hex = saved
+			if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+				t.Fatalf("shared digest recovered: damage %q, err %v", damage, err)
+			}
+			reportWindowsHookBinaryDigestRefusal(&stderr, target)
+			if windowsHookBinaryLastDigestRefusal != "" {
+				t.Fatal("a successful shared digest did not reset refusal logging")
+			}
+		})
+	}
+}
+
+func TestKeepWindowsManagedFileCopyReportsPlainReadFailure(t *testing.T) {
+	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: damage %q, err %v", damage, err)
+	}
+	saved := guardianTargetHookSHA256Hex
+	guardianTargetHookSHA256Hex = func(string) (string, error) { return "", errors.New("changed during bounded digest") }
+	t.Cleanup(func() { guardianTargetHookSHA256Hex = saved })
+	name, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Skipf("exclusive read handle unavailable: %v", err)
+	}
+	defer windows.CloseHandle(handle)
+	if _, err := os.Lstat(target); err != nil {
+		t.Skipf("exclusive read handle prevents the initial metadata check: %v", err)
+	}
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+	if err == nil || damage != "" || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "changed during bounded digest") {
+		t.Fatalf("plain read failure: damage %q, err %v", damage, err)
+	}
+	if err := windows.CloseHandle(handle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("target removed after plain read failure: %v", err)
+	}
+}
 
 func writeWindowsHookBinaryFixture(t *testing.T, body string) (target, copyPath, want string) {
 	t.Helper()
