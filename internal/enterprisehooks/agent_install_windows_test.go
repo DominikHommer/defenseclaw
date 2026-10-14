@@ -142,6 +142,11 @@ func TestStandaloneWindowsCodexDiscoveryRefusesAForeignOrIncompleteSelection(t *
 		"no codex":    {target: incomplete, reason: "holds no codex.exe"},
 		"redirected":  {target: redirected, reason: "holds no codex.exe"},
 		"parent hops": {target: filepath.Join(releases, "..", "..", "..", "..", "x", testCodexStandaloneRelease), reason: "outside its releases folder"},
+		// A directory symbolic link may name a share; it is refused before
+		// anything opens it.
+		"unc":         {target: `\\127.0.0.1\c$\Users\x\.codex\packages\standalone\releases\` + testCodexStandaloneRelease, reason: "outside its releases folder"},
+		"device path": {target: `\\?\C:\x\` + testCodexStandaloneRelease, reason: "outside its releases folder"},
+		"other drive": {target: `Z:\x\releases\` + testCodexStandaloneRelease, reason: "outside its releases folder"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			windowsReadInstallJunction = func(string) (string, error) { return tc.target, tc.err }

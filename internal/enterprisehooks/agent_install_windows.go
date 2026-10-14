@@ -83,10 +83,19 @@ func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) 
 		return "", "the Codex standalone install selects no release (its current junction is missing or unreadable)"
 	}
 	target = filepath.Clean(strings.TrimSpace(target))
-	// Compared by identity, not by spelling: the junction may name the
-	// folder in a long or short (8.3) form.
-	if parent, err := os.Lstat(filepath.Dir(target)); err != nil || !os.SameFile(parent, releasesInfo) {
+	// The target is the user's, so nothing touches it before it is known to
+	// be on the profile's own local drive: a directory symbolic link (which a
+	// user in Developer Mode can create) may name a UNC path, and LocalSystem
+	// must never open one. Then the folder is compared by identity, not by
+	// spelling, as the junction may name it in a long or short (8.3) form.
+	volume := filepath.VolumeName(target)
+	if len(volume) != 2 || volume[1] != ':' || !strings.EqualFold(volume, filepath.VolumeName(releases)) {
 		return "", "the Codex standalone current junction points outside its releases folder"
+	}
+	if !strings.EqualFold(filepath.Dir(target), releases) {
+		if parent, err := os.Lstat(filepath.Dir(target)); err != nil || !os.SameFile(parent, releasesInfo) {
+			return "", "the Codex standalone current junction points outside its releases folder"
+		}
 	}
 	match := windowsCodexStandaloneReleaseName.FindStringSubmatch(filepath.Base(target))
 	if match == nil || !isValidWindowsAgentVersion(match[1]) {
