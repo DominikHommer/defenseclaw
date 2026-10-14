@@ -556,13 +556,15 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 	t.Run("Docker is missing", func(t *testing.T) {
 		h, docker := imageTestHost(t, "linux")
 		store, tags, invalid := unavailableImageStore(t, h)
+		// The same tags in both stores must produce one warning per tag.
+		legacy := writeLegacyImageStore(t, h, h.alice, sampleImageOwner, tags[2], tags[1], tags[0])
 		if err := os.Remove(h.env.P("/usr/bin/docker")); err != nil {
 			t.Fatal(err)
 		}
 		r := h.run(Options{Action: ActionUninstall, Purge: true})
 		requireOK(t, r)
 		assertUnavailableImageWarnings(t, r.Warnings, h.alice, sampleImageOwner, tags, invalid, "Docker CLI is missing")
-		if len(docker.calls) != 0 || h.exists(store) {
+		if len(docker.calls) != 0 || h.exists(store) || h.exists(legacy) {
 			t.Errorf("calls = %v, warnings = %+v", docker.calls, r.Warnings)
 		}
 	})
