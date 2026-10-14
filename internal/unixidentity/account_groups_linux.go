@@ -16,7 +16,7 @@ import (
 // platformAccountGroupIDs binds os/user's group candidates to the uid. Local
 // accounts use local group records; directory accounts use the verified NSS
 // owner of the uid. The original name-based candidate list is not reused.
-func platformAccountGroupIDs(ctx context.Context, _ commandRunner, account *user.User, _ []string, _ error) ([]string, error) {
+func platformAccountGroupIDs(ctx context.Context, _ commandRunner, account *user.User, _ []string, _ error, _ []string) ([]string, error) {
 	uid, err := parseID(account.Uid, "uid")
 	if err != nil {
 		return nil, err
