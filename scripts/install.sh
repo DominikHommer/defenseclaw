@@ -502,8 +502,12 @@ warn_running_sandboxes() {
     local one="while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back"
     local many="while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back"
     if [[ -n "${stranded}" ]]; then
-        one="DefenseClaw ${stranded} cannot take over its sandbox setup, so its hooks fail closed and its agent's tool calls are refused until you run 'defenseclaw rollback' again"
-        many="DefenseClaw ${stranded} cannot take over their sandbox setup, so their hooks fail closed and their agents' tool calls are refused until you run 'defenseclaw rollback' again"
+        local again="defenseclaw rollback"
+        if is_version "${stranded}" && version_lt "${stranded}" 1.0.0; then
+            again="bash ${PREVIOUS}/installer/install.sh --rollback"
+        fi
+        one="DefenseClaw ${stranded} cannot take over its sandbox setup, so its hooks fail closed and its agent's tool calls are refused until you run '${again}' again"
+        many="DefenseClaw ${stranded} cannot take over their sandbox setup, so their hooks fail closed and their agents' tool calls are refused until you run '${again}' again"
     fi
     [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
     names="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
@@ -520,6 +524,8 @@ print(" ".join(sorted(
 )))
 PY
 )" || return 0
+    # The validated names are space-separated for the count and message.
+    # shellcheck disable=SC2086
     set -- ${names}
     case $# in
         0) ;;
@@ -647,16 +653,18 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         ok "Now running DefenseClaw ${back_to}."
     fi
+    forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
-        info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        forward="bash ${PREVIOUS}/installer/install.sh --rollback"
+        info "To return to ${current:-1.x}, run: ${forward}"
     else
-        info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+        info "Run '${forward}' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
-        info "Data written since the upgrade is kept in ${PREVIOUS}; 'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
+        info "Data written since the upgrade is kept in ${PREVIOUS}; '${forward}' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
         [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
             && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else

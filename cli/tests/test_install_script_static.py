@@ -801,6 +801,43 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     assert [line for line in made if not line.endswith("connector prune-orphans --help")] == []
 
 
+def test_a_rollback_to_0_x_names_only_the_installer_command_to_return(tmp_path: Path) -> None:
+    # GAP-0585: a 0.x release has no rollback command to return to 1.x.
+    for name, current, back_to in (("legacy", "1.0.1", "0.8.10"), ("current", "1.0.2", "1.0.1")):
+        case = tmp_path / name
+        home = case / "home"
+        dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+        (dc_home / "previous" / "bin").mkdir(parents=True)
+        bin_dir.mkdir(parents=True)
+        for folder, version in ((bin_dir, current), (dc_home / "previous" / "bin", back_to)):
+            gateway = folder / "defenseclaw-gateway"
+            gateway.write_text(
+                f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; '
+                "start) exit 0 ;; esac\n",
+                encoding="utf-8",
+            )
+            gateway.chmod(0o755)
+        (dc_home / "previous" / "VERSION").write_text(f"{back_to}\n", encoding="utf-8")
+        if back_to == "1.0.1":
+            (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+        script = _stamped(case, current)
+
+        back = _run([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
+        out = back.stdout + back.stderr
+
+        assert back.returncode == 0, out
+        if back_to == "0.8.10":
+            command = f"bash {dc_home}/previous/installer/install.sh --rollback"
+            assert f"To return to 1.0.1, run: {command}" in out, out
+            assert f"kept in {dc_home}/previous; '{command}' again brings it back" in out, out
+            assert "defenseclaw rollback" not in out, out
+        else:
+            assert "Starting the gateway" in out, out
+            assert "Run 'defenseclaw rollback' again to return to 1.0.2." in out, out
+            assert "'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in out, out
+            assert "installer/install.sh --rollback" not in out, out
+
+
 def _damaged_audit_db(path: Path) -> bytes:
     import sqlite3
 
@@ -1861,9 +1898,10 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
 def test_rollback_says_a_later_upgrade_keeps_the_data_instead_of_bringing_it_back() -> None:
     # rel-1-0-1:GAP-0008: the rollback said the data comes back "if you roll
     # forward", but 'defenseclaw upgrade' after it parks that data in backups/.
+    # The end-to-end rollback test pins the rendered 1.x command.
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "comes back if you roll forward" not in text
-    assert "'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in text
+    assert "'${forward}' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now" in text
     assert "keep_rolled_back_data" in text[text.index("finish_swap() {") :][:600]
 
 
