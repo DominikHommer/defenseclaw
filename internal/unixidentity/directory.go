@@ -199,18 +199,24 @@ func (r *NSSResolver) directoryFactsForUID(uid int, now time.Time, includeGroups
 		}
 	}
 	if includeGroups {
-		ids, qualified, err := r.accountGroupIDs(account, inDomain)
-		if err == nil && sssd != nil && !qualified {
-			ids, err = r.sssdGroupsOfDomain(sssd, ids, account, sidDomain(sid))
+		if isLocal {
+			// Local account memberships come from the local group database.
+			// A name-only NSS lookup can combine groups of distinct accounts.
+			_, facts.Groups, err = localAccountGroups(account)
+		} else {
+			var ids []int
+			var qualified bool
+			ids, qualified, err = r.accountGroupIDs(account, inDomain)
+			if err == nil && sssd != nil && !qualified {
+				ids, err = r.sssdGroupsOfDomain(sssd, ids, account, sidDomain(sid))
+			}
+			if err == nil {
+				facts.Groups, err = r.groupNames(ids)
+			}
 		}
 		if err != nil {
 			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
 		}
-		groups, err := r.groupNames(ids)
-		if err != nil {
-			return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
-		}
-		facts.Groups = groups
 	}
 	if facts.Source == useridentity.SourceWinbind {
 		realms, realmErr := hostRealms(r.context())
@@ -554,7 +560,7 @@ func sssdAccountSID(sssd *sssdNSS, uid int) (string, error) {
 func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, bool, error) {
 	bare, _ := useridentity.SplitQualifiedName(account.Name)
 	if inDomain != "" {
-		ids, err := r.GroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
+		ids, err := r.rawGroupIDs(Account{Name: inDomain + `\` + bare, GID: account.GID})
 		if !IsNotFound(err) {
 			if err != nil {
 				return nil, false, err
@@ -565,8 +571,14 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 			}
 			var local []int
 			if nssReadsLocalGroups(services) {
-				if local, err = localGroupsListing(account.Name); err != nil {
-					return nil, false, err
+				accounts, lookupErr := LocalAccounts(r.context())
+				if lookupErr != nil && !errors.Is(lookupErr, os.ErrNotExist) {
+					return nil, false, lookupErr
+				}
+				if uid, found := accounts[account.Name]; !found || uid == account.UID {
+					if local, err = localGroupsListing(account.Name); err != nil {
+						return nil, false, err
+					}
 				}
 			}
 			ids = append(ids, local...)
@@ -588,9 +600,18 @@ func (r *NSSResolver) accountGroupIDs(account Account, inDomain string) ([]int, 
 // confirms its membership. This keeps LDAP-supplied groups without accepting
 // a group of another SSSD account with the same short name.
 func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Account, domainSID string) ([]int, error) {
-	localIDs, err := localGroupsListing(account.Name)
-	if err != nil {
+	localAccounts, err := LocalAccounts(r.context())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	}
+	localUID, localNameExists := localAccounts[account.Name]
+	nameSharedWithLocal := localNameExists && localUID != account.UID
+	var localIDs []int
+	if !nameSharedWithLocal {
+		localIDs, err = localGroupsListing(account.Name)
+		if err != nil {
+			return nil, err
+		}
 	}
 	local := make(map[int]bool, len(localIDs))
 	for _, id := range localIDs {
@@ -612,7 +633,7 @@ func (r *NSSResolver) sssdGroupsOfDomain(sssd *sssdNSS, ids []int, account Accou
 		}
 	}
 	var other map[int]bool
-	if needOther {
+	if needOther && !nameSharedWithLocal {
 		other, err = r.otherNSSGroupMemberships(account.Name)
 		if err != nil {
 			return nil, err
@@ -687,6 +708,54 @@ func nssInitgroupsServices() ([]string, error) {
 // too; glibc's default (no list) is files.
 func nssReadsLocalGroups(services []string) bool {
 	return len(services) == 0 || slices.Contains(services, "files") || slices.Contains(services, "compat")
+}
+
+// localAccountGroups lists a local account's primary and supplementary gids
+// and names in one reading of the local group database. A gid not named there
+// stays numeric; a directory group with that gid cannot name a local member.
+func localAccountGroups(account Account) ([]int, []string, error) {
+	services, err := nssInitgroupsServices()
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	ids := []int{account.GID}
+	namesByID := map[int]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		gid, name, ok := parseGroupName(line)
+		if !ok {
+			continue
+		}
+		if _, seen := namesByID[gid]; !seen {
+			namesByID[gid] = name
+		}
+		if !nssReadsLocalGroups(services) {
+			continue
+		}
+		members := strings.Split(line, ":")[3]
+		if slices.ContainsFunc(strings.Split(members, ","), func(member string) bool {
+			return strings.TrimLeft(member, " \t\n\v\f\r") == account.Name
+		}) {
+			ids = append(ids, gid)
+		}
+	}
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	if len(ids) > maxDirectoryGroups {
+		return nil, nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+	}
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name := namesByID[id]; name != "" {
+			names = append(names, name)
+		} else {
+			names = append(names, strconv.Itoa(id))
+		}
+	}
+	return ids, names, nil
 }
 
 // localGroupsListing returns the gids of the /etc/group entries whose member
