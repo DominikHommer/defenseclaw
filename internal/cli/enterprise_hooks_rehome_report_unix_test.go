@@ -113,6 +113,20 @@ func TestTypedRehomeFailuresKeepTheirRemediesWithLongHomes(t *testing.T) {
 	}
 }
 
+func TestUnreportedRehomeWarningNamesHomeAsDirectory(t *testing.T) {
+	oldHome, currentHome := longRehomeReportTestPath("old"), longRehomeReportTestPath("new")
+	changed := &enterpriseHookTargetHomeChangedError{name: "sample-user", home: oldHome, directoryHome: currentHome}
+	err := &enterpriseHookCleanupUnverifiedError{changed: changed, connector: "opencode",
+		home: currentHome, dataDir: filepath.Join(currentHome, ".defenseclaw"),
+		path: currentHome, configPath: currentHome, reason: "the worker did not report the paths it found"}
+	got := enterpriseHookUserCleanupFailureText(err)
+	if len(got) > enterpriseHookUserCleanupErrorMax || !strings.Contains(got, "config in the home") ||
+		strings.Contains(got, "config at "+currentHome) || !strings.Contains(got, "stale copied receipt") ||
+		!strings.Contains(got, "rerun") {
+		t.Fatalf("missing-report warning misstated the home or lost remedy: %q", got)
+	}
+}
+
 func TestRemoveAllRehomeReportKeepsTheFullRemedyWithLongHomes(t *testing.T) {
 	const remedy = "fix the account's home to an existing account-owned directory without symlinks or group/other write, or remove the account, then rerun"
 	for _, test := range []struct {

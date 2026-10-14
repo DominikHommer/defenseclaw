@@ -550,8 +550,9 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	if errors.As(err, &oldKept) {
 		paths = append(paths, oldKept.home, oldKept.currentHome)
 		if maxBytes == enterpriseHookUserCleanupErrorMax {
-			reason := strings.ReplaceAll(oldKept.reason, oldKept.home, "the recorded home")
-			raw = fmt.Sprintf("enterprise hooks: old home %s for %q untrusted (%s); new home %s cleaned; remove %s entries in old home, delete it if unused, or fix owner/permissions and rerun",
+			reason := strings.TrimPrefix(oldKept.reason, "user home "+oldKept.home+" ")
+			reason = strings.ReplaceAll(reason, oldKept.home, "the recorded home")
+			raw = fmt.Sprintf("enterprise hooks: old home %s for %q unverified (%s); new home %s cleaned; remove %s entries in old home, delete it if unused, or fix owner/permissions and rerun",
 				oldKept.home, oldKept.name, reason, oldKept.currentHome, oldKept.connector)
 		}
 	}
@@ -559,13 +560,17 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	keepConfigPath := ""
 	if errors.As(err, &unverified) {
 		paths = append(paths, unverified.path, unverified.dataDir, unverified.home, unverified.configPath)
-		if len(unverified.configPath) <= 180 {
+		if unverified.configPath != unverified.home && len(unverified.configPath) <= 180 {
 			keepConfigPath = unverified.configPath
 		}
 		if maxBytes == enterpriseHookUserCleanupErrorMax {
 			receiptDir := filepath.Join(unverified.dataDir, "connector_backups", unverified.connector) + string(filepath.Separator)
-			raw = fmt.Sprintf("enterprise hooks: cleanup report unverified at %s (%s); remove DefenseClaw's entries from that agent's config at %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
-				unverified.path, boundedString(unverified.reason, 96), unverified.configPath, receiptDir)
+			location := "in the home " + unverified.home
+			if unverified.configPath != unverified.home {
+				location = "at " + unverified.configPath
+			}
+			raw = fmt.Sprintf("enterprise hooks: cleanup report unverified at %s (%s); remove DefenseClaw's entries from that agent's config %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
+				unverified.path, boundedString(unverified.reason, 96), location, receiptDir)
 		}
 		if keepConfigPath != "" {
 			raw = strings.Replace(raw, "config at "+keepConfigPath, "config at <current-config-path>", 1)
