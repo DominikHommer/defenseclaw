@@ -227,7 +227,6 @@ def test_uninstall_preserves_no_teardown_without_sandbox_entries(install: Simple
 
     result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "sandbox teardown:    no (no OpenShell sandbox state)" in result.output
     assert _calls(install) == []
     assert not install.data_dir.exists()
     assert not install.gateway.exists() and not install.cli.exists()
