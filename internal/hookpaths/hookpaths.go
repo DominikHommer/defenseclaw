@@ -2067,6 +2067,7 @@ func Resolve(payload []byte) (result string) {
 				var literalUnknown bool
 				literalOperands, literalUnknown = LiteralWriteAnalysis(command, cwd, home)
 				truncated = truncated || literalUnknown
+				truncated = truncated || ShellExecutableOptionUnknown(command, cwd, home)
 				extraOperands = ShellExtraWriteOperands(command, cwd, home)
 				sedOperands = SedReplacedOperands(command, cwd, home)
 				for path, safe := range sedOperands {
@@ -3260,19 +3261,36 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 // old-style option words, and unique long-option abbreviations. Ambiguity
 // leaves the archive scope global.
 func tarDestination(args []string, static []bool, cwd string) (string, bool) {
-	destination := cwd
+	parsed := parseTarOptions(args, static, cwd)
+	return parsed.destination, parsed.known && !parsed.opaque && !parsed.executable
+}
+
+type tarParsedOptions struct {
+	destination string
+	known       bool
+	opaque      bool
+	executable  bool
+}
+
+func (parsed tarParsedOptions) invalid() tarParsedOptions {
+	parsed.known = false
+	return parsed
+}
+
+func parseTarOptions(args []string, static []bool, cwd string) tarParsedOptions {
+	parsed := tarParsedOptions{destination: cwd, known: true}
 	changed := false
 	consume := func(value string) bool {
 		if value == "" || changed {
 			return false
 		}
-		destination, changed = value, true
+		parsed.destination, changed = value, true
 		return true
 	}
 	options := true
 	for i := 0; i < len(args); i++ {
 		if !static[i] {
-			return "", false
+			return parsed.invalid()
 		}
 		arg := args[i]
 		if arg == "--" {
@@ -3286,24 +3304,26 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 			name, value, joined := strings.Cut(arg[2:], "=")
 			option, known := tarLongOption(name)
 			if !known {
-				return "", false
+				return parsed.invalid()
 			}
 			if option.value {
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
-						return "", false
+						return parsed.invalid()
 					}
 					value = args[i]
 				}
 				if value == "" {
-					return "", false
+					return parsed.invalid()
 				}
 			} else if joined && !option.optional {
-				return "", false
+				return parsed.invalid()
 			}
+			parsed.executable = parsed.executable || option.command || option.transform && tarTransformRunsCommand(value)
+			parsed.opaque = parsed.opaque || option.transform
 			if option.directory && (option.value || joined) && !consume(value) {
-				return "", false
+				return parsed.invalid()
 			}
 			continue
 		}
@@ -3313,40 +3333,32 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		cluster := strings.TrimPrefix(arg, "-")
 		for j := 0; j < len(cluster); j++ {
-			switch cluster[j] {
-			case 'C':
-				value := cluster[j+1:]
-				if oldStyle || value == "" {
-					i++
-					if i >= len(args) || !static[i] {
-						return "", false
-					}
-					value = args[i]
+			option, known := tarShortOption(cluster[j])
+			if !known {
+				return parsed.invalid()
+			}
+			if !option.value {
+				continue
+			}
+			value := cluster[j+1:]
+			if oldStyle || value == "" {
+				i++
+				if i >= len(args) || !static[i] {
+					return parsed.invalid()
 				}
-				if !consume(value) {
-					return "", false
-				}
-				if !oldStyle {
-					j = len(cluster)
-				}
-			case 'f':
-				if oldStyle || j+1 == len(cluster) {
-					i++
-					if i >= len(args) || !static[i] {
-						return "", false
-					}
-				}
-				if !oldStyle {
-					j = len(cluster)
-				}
-			case 'x', 'z', 'j', 'J', 'a', 'v', 'O', 't', 'c', 'p', 'h', 'k', 'm', 'w', 'U':
-			default:
-				// Unknown short options may consume a path.
-				return "", false
+				value = args[i]
+			}
+			parsed.executable = parsed.executable || option.command || option.transform && tarTransformRunsCommand(value)
+			parsed.opaque = parsed.opaque || option.transform
+			if option.directory && !consume(value) {
+				return parsed.invalid()
+			}
+			if !oldStyle {
+				j = len(cluster)
 			}
 		}
 	}
-	return destination, true
+	return parsed
 }
 
 // opaqueProgram is a Windows program that creates links from operands this
