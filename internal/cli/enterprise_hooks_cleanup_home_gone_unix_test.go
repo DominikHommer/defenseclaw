@@ -158,7 +158,7 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	report := enterpriseHooksRemoveAllReport{}
-	failed := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
+	skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
 	if len(report.Pending) != 2 || report.Removed != 0 ||
 		!strings.HasPrefix(report.Pending[0], "dcad-gone/hermes: its recorded home "+gone+" is gone") ||
 		!strings.HasPrefix(report.Pending[1], "dcad-kept/hermes: the directory gives the account no home (/var/empty)") ||
@@ -173,9 +173,9 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 	if len(report.Failed) != 3 || !strings.HasPrefix(report.Failed[0], "dcad-moved/hermes: ") ||
 		!strings.HasPrefix(report.Failed[1], "sample-rehomed/hermes: ") ||
 		!strings.HasPrefix(report.Failed[2], "sample-automount/hermes: ") ||
-		!failed[os.Getuid()+2] || !failed[os.Getuid()+3] || !failed[os.Getuid()+4] ||
-		!failed[os.Getuid()+1] || failed[os.Getuid()] {
-		t.Fatalf("live re-homed accounts must fail, and a pending kept home must block purge: %+v, %v", report, failed)
+		skip[os.Getuid()+2] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+3] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+4] != enterpriseHookPurgeSkipFailed ||
+		skip[os.Getuid()+1] != enterpriseHookPurgeSkipKeptHome || skip[os.Getuid()] != "" {
+		t.Fatalf("live re-homed accounts must fail, and a pending kept home must block purge: %+v, %v", report, skip)
 	}
 }
 

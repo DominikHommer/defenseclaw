@@ -65,10 +65,10 @@ func TestRemoveAllPurgeKeepsStateForAPendingCleanupWithAKeptHome(t *testing.T) {
 	cmd.SetContext(context.Background())
 	report := enterpriseHooksRemoveAllReport{}
 	failed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
-	if len(report.Pending) != 1 || !strings.HasPrefix(report.Pending[0], "sample-kept/hermes: ") || len(report.Failed) != 0 || !failed[keptUID] || failed[otherUID] {
+	if len(report.Pending) != 1 || !strings.HasPrefix(report.Pending[0], "sample-kept/hermes: ") || len(report.Failed) != 0 || failed[keptUID] != enterpriseHookPurgeSkipKeptHome || failed[otherUID] != "" {
 		t.Fatalf("pending cleanup must protect the kept home without failing uninstall: %+v, %v", report, failed)
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, rows, failed, report.purgeSkipReasons)
+	notPurged := addEnterpriseHookStatePurges(jobs, rows, failed)
 	if len(notPurged) != 1 || notPurged[0] != "sample-kept: "+enterpriseHookPurgeSkipKeptHome ||
 		strings.Contains(notPurged[0], enterpriseHookPurgeSkipFailed) {
 		t.Fatalf("purge must name the account whose state stays: %v", notPurged)
@@ -150,10 +150,10 @@ func TestRemoveAllPurgeKeepsStateWhenPendingDirectoryUnavailable(t *testing.T) {
 	report := enterpriseHooksRemoveAllReport{OK: true}
 	skip := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if !report.OK || len(report.Failed) != 0 || len(report.Pending) != 1 || report.Pending[0] != "sample-sssd/hermes" ||
-		!skip[uid] || skip[otherUID] {
+		skip[uid] != enterpriseHookPurgeSkipPending || skip[otherUID] != "" {
 		t.Fatalf("directory outage must leave cleanup pending and skip its uid: report=%+v skip=%v", report, skip)
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip, report.purgeSkipReasons)
+	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip)
 	if len(notPurged) != 1 || notPurged[0] != "sample-sssd: "+enterpriseHookPurgeSkipPending {
 		t.Fatalf("pending cleanup purge reason: %v", notPurged)
 	}
@@ -196,10 +196,10 @@ func TestRemoveAllPurgeKeepsStateWhenPendingHomeUnavailable(t *testing.T) {
 	report := enterpriseHooksRemoveAllReport{OK: true}
 	skip := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if checks < 2 || !report.OK || len(report.Failed) != 0 || len(report.Pending) != 1 || report.Pending[0] != "sample-slow/hermes" ||
-		!skip[uid] || skip[otherUID] {
+		skip[uid] != enterpriseHookPurgeSkipPending || skip[otherUID] != "" {
 		t.Fatalf("unavailable home must leave cleanup pending and skip its uid: checks=%d report=%+v skip=%v", checks, report, skip)
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip, report.purgeSkipReasons)
+	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip)
 	if len(notPurged) != 1 || notPurged[0] != "sample-slow: "+enterpriseHookPurgeSkipPending {
 		t.Fatalf("pending cleanup purge reason: %v", notPurged)
 	}
@@ -235,10 +235,10 @@ func TestRemoveAllPurgeSkipsEveryAccountWhenCleanupLedgerUnreadable(t *testing.T
 	report := enterpriseHooksRemoveAllReport{}
 	skip := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if len(report.Failed) != 1 || !strings.HasPrefix(report.Failed[0], "pending per-user cleanups: ") ||
-		!skip[uid] || !skip[otherUID] {
+		skip[uid] != enterpriseHookPurgeSkipUnreadableLedger || skip[otherUID] != enterpriseHookPurgeSkipUnreadableLedger {
 		t.Fatalf("unreadable ledger must skip every worker uid: report=%+v skip=%v", report, skip)
 	}
-	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip, report.purgeSkipReasons)
+	notPurged := addEnterpriseHookStatePurges(jobs, rows, skip)
 	if len(notPurged) != 2 || notPurged[0] != "sample-first: "+enterpriseHookPurgeSkipUnreadableLedger ||
 		notPurged[1] != "sample-second: "+enterpriseHookPurgeSkipUnreadableLedger {
 		t.Fatalf("unreadable ledger purge reasons: %v", notPurged)
@@ -280,8 +280,8 @@ func TestRemoveAllPurgeSkipReasonPrefersFailure(t *testing.T) {
 			cmd.SetContext(context.Background())
 			report := enterpriseHooksRemoveAllReport{}
 			skip := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
-			notPurged := addEnterpriseHookStatePurges(jobs, rows, skip, report.purgeSkipReasons)
-			if len(report.Failed) != 1 || len(report.Pending) != 1 || !skip[uid] || len(notPurged) != 1 ||
+			notPurged := addEnterpriseHookStatePurges(jobs, rows, skip)
+			if len(report.Failed) != 1 || len(report.Pending) != 1 || skip[uid] != enterpriseHookPurgeSkipFailed || len(notPurged) != 1 ||
 				notPurged[0] != "sample-order: "+enterpriseHookPurgeSkipFailed {
 				t.Fatalf("failure must take precedence: report=%+v skip=%v notPurged=%v", report, skip, notPurged)
 			}
