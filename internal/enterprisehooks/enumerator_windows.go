@@ -139,6 +139,13 @@ type EnumerateOptions struct {
 	// the cycle can take the gateway's inventory read access off it
 	// (GAP-1024).
 	ReportExcluded func(ManifestTarget)
+	// RunningAgents names, by account SID and connector, an agent session
+	// the cycle saw running (a label such as "codex (pid 4242)"). The
+	// standalone enumerator reports, through ReportUnprotected, a running
+	// agent of an enabled connector that no row enrolls and no other report
+	// names: an install discovery cannot read is then never a silent gap
+	// while status and verify say security_complete (GAP-0226).
+	RunningAgents map[string]map[string]string
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -261,6 +268,17 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		}
 		groups.pruneCache(listed)
 	}
+	running := map[string]map[string]string{}
+	for sid, agents := range opts.RunningAgents {
+		if canon := canonicalManifestTargetSID(sid); canon != "" {
+			for conn, label := range agents {
+				if running[canon] == nil {
+					running[canon] = map[string]string{}
+				}
+				running[canon][strings.ToLower(strings.TrimSpace(conn))] = label
+			}
+		}
+	}
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -315,6 +333,15 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
 			rowContext.report = nil
 		}
+		// The connectors this profile got a row or a report for, so a
+		// running agent of any other enabled connector is reported below.
+		covered := map[string]bool{}
+		if report := rowContext.report; report != nil {
+			rowContext.report = func(agent UnprotectedAgent) {
+				covered[strings.ToLower(strings.TrimSpace(agent.Connector))] = true
+				report(agent)
+			}
+		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
 			// An exempt user gets no new per-user connector rows, but keeps the
@@ -322,6 +349,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			// its hook registration stays in the user's own agent config and
 			// fails closed as unregistered.
 			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
+				covered[conn] = true
 				continue
 			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
@@ -352,7 +380,11 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				// skip.
 				continue
 			}
+			covered[conn] = true
 			targets = append(targets, row)
+		}
+		if standalone {
+			reportUnenrolledRunningAgents(profile, connectors, running[canonicalManifestTargetSID(profile.SID)], covered, decision, reason, rowContext)
 		}
 	}
 
@@ -364,6 +396,38 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	})
 
 	return Manifest{Version: 1, Targets: targets}, nil
+}
+
+// reportUnenrolledRunningAgents reports each agent session running for the
+// profile whose connector is enabled but got no row and no other report this
+// cycle: DefenseClaw found no install of it under the profile that it can
+// read, so nothing enrolls the account and its tool calls are not decided by
+// DefenseClaw.
+func reportUnenrolledRunningAgents(
+	profile windowsUserProfile,
+	connectors []string,
+	running map[string]string,
+	covered map[string]bool,
+	decision windowsEnrollmentDecision,
+	decisionReason string,
+	rowContext windowsStandaloneRowContext,
+) {
+	if len(running) == 0 || rowContext.report == nil {
+		return
+	}
+	for _, conn := range connectors {
+		label := strings.TrimSpace(running[conn])
+		if label == "" || covered[conn] {
+			continue
+		}
+		row := ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home), Connector: conn}
+		reason := fmt.Sprintf("%s runs for this account, but no %s install DefenseClaw can read was found in this profile; %s",
+			label, conn, windowsStandaloneInstallFix(conn))
+		if decision == windowsEnrollmentUndecided {
+			reason = fmt.Sprintf("%s runs for this account and its enrollment is pending: %s", label, decisionReason)
+		}
+		rowContext.unprotected(&row, "", reason)
+	}
 }
 
 // WriteTargetsManifestAtomic serialises `m` to YAML, compares it

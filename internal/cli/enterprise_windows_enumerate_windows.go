@@ -267,6 +267,8 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		enumerateOpts.ReportExcluded = func(target enterprisehooks.ManifestTarget) {
 			excluded = append(excluded, target)
 		}
+		// A running agent no row enrolls is recorded too (GAP-0226).
+		enumerateOpts.RunningAgents = enterpriseWindowsEnumerateRunningAgents(stderr)
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
