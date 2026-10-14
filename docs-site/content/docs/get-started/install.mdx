@@ -397,11 +397,11 @@ changes (`defenseclaw sandbox review NAME`) or undo them
 (`defenseclaw sandbox undo NAME`). Work its agent already wrote in your folder
 stays unless you undo it; the plan names those sandboxes.
 
-A per-user uninstall for an account that never set up sandboxes, with only
-empty lock files or empty folders under the sandbox directory and no OpenShell
-state or user gateway config, with no OpenShell sandbox setting or wrapper
-enabled, completes without a teardown override. Neither
-`uninstall` nor `reset` reads the sandbox list or runs teardown in that case.
+A per-user uninstall for an account that never set up sandboxes completes
+without a teardown override. Its sandbox directory is absent or holds only
+empty lock files and empty folders, no OpenShell state or user gateway config
+sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
+Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
 Sandbox records, snapshots, non-empty files, links or unreadable entries in
 that directory still trigger teardown, as do enabled OpenShell settings. An
 empty lock file alongside OpenShell state or a user gateway config does too.

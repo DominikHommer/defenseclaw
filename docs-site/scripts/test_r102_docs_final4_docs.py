@@ -45,8 +45,10 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
         guide_block = section(guide, "A per-user uninstall for an account", "`defenseclaw uninstall` runs teardown")
         for block in (install_block, guide_block):
             for phrase in (
-                "never set up sandboxes, with only empty lock files or empty folders under the sandbox directory and no OpenShell state or user gateway config, with no OpenShell sandbox setting or wrapper enabled, completes without a teardown override",
-                "Neither `uninstall` nor `reset` reads the sandbox list or runs teardown in that case",
+                "never set up sandboxes completes without a teardown override",
+                "Its sandbox directory is absent or holds only empty lock files and empty folders",
+                "no OpenShell state or user gateway config sits beside them, and no OpenShell sandbox setting or wrapper is enabled",
+                "Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then",
                 "records, snapshots, non-empty files, links or unreadable entries",
                 "enabled OpenShell settings",
                 "empty lock file alongside OpenShell state or a user gateway config",
