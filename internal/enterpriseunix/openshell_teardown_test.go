@@ -31,16 +31,16 @@ import (
 
 var setupVMSettings = map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"}
 
-// The account's sandboxes, providers and profiles are deleted through its
-// daemon and its OpenShell gateway, so `sandbox teardown` runs first, while
-// both answer; the units stop afterwards, and a purge removes the files last.
-func TestSandboxUninstallTearsDownBeforeTheUnitsStop(t *testing.T) {
-	for _, purge := range []bool{false, true} {
-		t.Run(fmt.Sprintf("purge=%v", purge), func(t *testing.T) {
-			h := newOSHost(t, "linux")
-			requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
+// A purge deletes the account's sandboxes, providers and profiles through
+// its daemon and its OpenShell gateway, so `sandbox teardown` runs first,
+// while both answer; the units stop afterwards, and the files go last.
+func TestSandboxPurgeTearsDownBeforeTheUnitsStop(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newOSHost(t, goos)
+			requireOK(t, h.ensure(sandboxConfig(t, goos, true, setupVMSettings)))
 			h.installTarballFiles(t, h.alice, "0.1.3")
-			r := h.run(Options{Action: ActionUninstall, Purge: purge})
+			r := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireOK(t, r)
 			if got := strings.Join(h.ops.events, ", "); got != "teardown alice, stop alice" {
 				t.Fatalf("order = %q, want the teardown before the stop", got)
@@ -48,27 +48,131 @@ func TestSandboxUninstallTearsDownBeforeTheUnitsStop(t *testing.T) {
 			if !containsLine(r.Changes, "ran `defenseclaw sandbox teardown` as user alice") {
 				t.Errorf("changes = %v", r.Changes)
 			}
-			if purge && h.exists(filepath.Join(h.alice.Home, ".local/bin/openshell")) {
+			if h.exists(filepath.Join(h.alice.Home, ".local/bin/openshell")) {
 				t.Error("the purge left the OpenShell DefenseClaw installed")
 			}
 		})
 	}
-	t.Run("a teardown that fails is reported and the units still stop", func(t *testing.T) {
-		h := newOSHost(t, "linux")
-		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
+}
+
+// GAP-0598: an uninstall without --purge ran `sandbox teardown --keep-images`
+// as each account, which deleted its sandboxes and the copy-mode work never
+// pulled back, while the result said each account kept its sandbox state.
+// It keeps every sandbox, running or stopped, with its records, disks and
+// work, stops the running ones through the daemon before the units, says so,
+// and a reactivation finds all of it again.
+func TestSandboxUninstallKeepsSandboxesAndUnpulledWork(t *testing.T) {
+	// Where each sandbox keeps its record, its MicroVM disk, its unpulled
+	// copy and the CLI's state of it.
+	sandboxFiles := func(h *osHost, name string) []string {
+		return []string{
+			filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", name, "record.json"),
+			filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", name, "copy", "added.txt"),
+			filepath.Join(h.alice.Home, openshellVMStateRel, name, "rootfs.ext4"),
+			filepath.Join(h.alice.Home, userSandboxDataRel, name, "handover.json"),
+		}
+	}
+	prepare := func(t *testing.T, goos string) *osHost {
+		t.Helper()
+		h := newOSHost(t, goos)
+		requireOK(t, h.ensure(sandboxConfig(t, goos, true, setupVMSettings)))
 		h.installTarballFiles(t, h.alice, "0.1.3")
-		h.ops.teardownErr = errors.New("the gateway did not answer")
+		for _, name := range []string{"sb-running", "sb-stopped"} {
+			for _, path := range sandboxFiles(h, name) {
+				writeHostFile(t, h.testHost, path, "work of "+name+"\n")
+			}
+		}
+		h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 1}
+		h.ops.running = map[int][]string{h.alice.UID: {"sb-running"}}
+		// What the real teardown does in the home: the sandboxes and the
+		// CLI's state of them go.
+		h.ops.onTeardown = func(a SandboxAccount) {
+			for _, rel := range []string{h.env.daemonStateRel(), openshellVMStateRel, userSandboxDataRel} {
+				_ = os.RemoveAll(h.env.P(filepath.Join(a.Home, rel)))
+			}
+		}
+		return h
+	}
+	requireKept := func(t *testing.T, h *osHost) {
+		t.Helper()
+		for _, name := range []string{"sb-running", "sb-stopped"} {
+			for _, path := range sandboxFiles(h, name) {
+				if !h.exists(path) {
+					t.Errorf("%s is gone", path)
+				} else if got := h.read(path); got != "work of "+name+"\n" {
+					t.Errorf("%s = %q", path, got)
+				}
+			}
+		}
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := prepare(t, goos)
+			r := h.run(Options{Action: ActionUninstall})
+			requireOK(t, r)
+			if len(h.ops.teardowns) != 0 {
+				t.Fatalf("a non-purge uninstall tore down %v", h.ops.teardowns)
+			}
+			if got := strings.Join(h.ops.events, ", "); got != "stop-sandboxes alice, stop alice, stop alice" {
+				t.Errorf("order = %q, want the sandboxes stopped through the daemon before its units", got)
+			}
+			if got := strings.Join(h.ops.stopped(), ", "); got != "alice:daemon+socket, alice:gateway" {
+				t.Errorf("stops = %q, want the daemon before the OpenShell gateway", got)
+			}
+			requireKept(t, h)
+			changes := strings.Join(r.Changes, "\n")
+			if !containsLine(r.Changes, "stopped the running sandboxes of user alice (sb-running); they are kept, with their work") ||
+				!containsLine(r.Changes, "stopped the sandbox subsystem; kept the sandboxes of alice with their records, disks and any work not pulled yet") ||
+				strings.Contains(changes, "teardown") || strings.Contains(changes, "removed local sandbox files") {
+				t.Errorf("changes = %v", r.Changes)
+			}
+			if hasWarning(r, codeSandboxUserState) {
+				t.Errorf("warnings = %+v", r.Warnings)
+			}
+			// The documented reactivation finds every sandbox again.
+			requireOK(t, h.ensure(sandboxConfig(t, goos, true, setupVMSettings)))
+			requireKept(t, h)
+		})
+	}
+	t.Run("an idle account stops no sandbox", func(t *testing.T) {
+		h := prepare(t, "linux")
+		h.ops.status[h.alice.UID] = SandboxStatus{Active: true}
 		r := h.run(Options{Action: ActionUninstall})
 		requireOK(t, r)
-		if got := strings.Join(h.ops.events, ", "); got != "teardown alice, stop alice" {
-			t.Errorf("order = %q", got)
+		if got := strings.Join(h.ops.events, ", "); got != "stop alice, stop alice" {
+			t.Errorf("events = %q", got)
 		}
-		if !hasWarning(r, codeSandboxUserState) || !strings.Contains(fmt.Sprint(r.Warnings), "were not torn down") {
+		if containsLine(r.Changes, "stopped the running sandboxes") {
+			t.Errorf("changes = %v", r.Changes)
+		}
+		requireKept(t, h)
+	})
+	t.Run("a daemon that cannot say is stopped as if a sandbox ran", func(t *testing.T) {
+		h := prepare(t, "linux")
+		h.ops.statusErr[h.alice.UID] = errors.New("the daemon did not answer")
+		requireOK(t, h.run(Options{Action: ActionUninstall}))
+		if got := strings.Join(h.ops.events, ", "); got != "stop-sandboxes alice, stop alice, stop alice" {
+			t.Errorf("events = %q", got)
+		}
+		requireKept(t, h)
+	})
+	t.Run("a stop that fails is reported and the sandboxes stay", func(t *testing.T) {
+		h := prepare(t, "darwin")
+		h.ops.running = nil
+		h.ops.stopSandboxesErr = errors.New("stop sb-running: the gateway did not answer")
+		r := h.run(Options{Action: ActionUninstall})
+		requireOK(t, r)
+		if warning := messagesOf(r.Warnings, codeSandboxUserState); !strings.Contains(warning, "could not stop every running sandbox of alice") ||
+			!strings.Contains(warning, "the gateway did not answer") {
 			t.Errorf("warnings = %+v", r.Warnings)
 		}
-		if containsLine(r.Changes, "ran `defenseclaw sandbox teardown`") {
-			t.Errorf("a failed teardown is reported as done: %v", r.Changes)
+		if containsLine(r.Changes, "stopped the running sandboxes") || len(h.ops.teardowns) != 0 {
+			t.Errorf("changes = %v, teardowns = %v", r.Changes, h.ops.teardowns)
 		}
+		if got := strings.Join(h.ops.stopped(), ", "); got != "alice:daemon+socket, alice:gateway" {
+			t.Errorf("stops = %q", got)
+		}
+		requireKept(t, h)
 	})
 }
 
