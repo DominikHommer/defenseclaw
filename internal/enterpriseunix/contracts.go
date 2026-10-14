@@ -91,6 +91,9 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			Connector string `json:"connector"`
 			OK        bool   `json:"ok"`
 			Error     string `json:"error"`
+			Result    *struct {
+				Notices []string `json:"notices"`
+			} `json:"result"`
 		} `json:"results"`
 	}
 	if data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20); err == nil {
@@ -99,10 +102,20 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
 		attested = false
 	}
-	var unverified, failed, removed, userPaths []string
+	var unverified, failed, removed, userPaths, notices []string
 	stateFailed := map[string]bool{}
 	enumeration := enterprisehooks.LoadUnixEnumeratorState(env.P(filepath.Join(filepath.Dir(env.Layout.ManifestPath), enumeratorStateFile)))
 	for _, result := range state.Results {
+		if result.OK && result.Result != nil {
+			// A protected target whose agent config lost the account's
+			// own settings (a recreated Hermes config.yaml, GAP-0564) is
+			// that account's to fix: a warning, not a protection failure.
+			for _, notice := range result.Result.Notices {
+				if notice = strings.TrimSpace(notice); notice != "" {
+					notices = append(notices, fmt.Sprintf("%s for user %s: %s", result.Connector, result.User, boundedGuardianReason(notice)))
+				}
+			}
+		}
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
@@ -163,6 +176,10 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	for _, message := range userPaths {
 		r.AddWarning(codeGuardianTargetUserPath, message)
 	}
+	sort.Strings(notices)
+	for _, message := range notices {
+		r.AddWarning(codeAgentSettingsNotRestored, message)
+	}
 	if len(unverified)+len(failed) == 0 {
 		return
 	}
@@ -176,6 +193,11 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	}
 	r.SecurityComplete = false
 }
+
+// codeAgentSettingsNotRestored names an account whose agent config the
+// guardian had to recreate or put back from a copy (GAP-0564): the hooks are
+// in place, but the account's own settings are missing or older.
+const codeAgentSettingsNotRestored = "agent_settings_not_restored"
 
 // codeGuardianReportPending names a change whose guardian report did not
 // arrive in time.

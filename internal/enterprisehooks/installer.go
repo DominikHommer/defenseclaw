@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -114,6 +115,11 @@ type InstallResult struct {
 	AgentVersionStatus         string `json:"agent_version_status,omitempty"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string `json:"hook_contract_entry_updated_at,omitempty"`
+	// Notices are what the account should know about its agent config that
+	// is no protection failure: a Hermes or Devin config put back from a
+	// copy, or recreated with DefenseClaw's hooks only (GAP-0564). The guardian
+	// state carries them, and the enterprise status and verify report them.
+	Notices []string `json:"notices,omitempty"`
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
@@ -315,6 +321,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				HookContractID:  lock.ContractID,
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), lock.RawAgentVersion),
+			}
+			if standalonePerUserRepair(uid) {
+				// The agent config that verified (Hermes, Devin) is the
+				// last known good copy; one recreated without the
+				// account's settings stays reported until they are back
+				// (GAP-0564).
+				result.Notices = connector.AgentConfigNotices(conn.Name(), setupOpts, time.Time{}, true)
 			}
 			return nil
 		})
@@ -535,6 +548,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// (GAP-0509).
 			beforeSetup = snapshotDataDir(dataDir)
 			beforeHookConfigs = snapshotHookConfigs(append(append([]string{}, paths...), pluginArtifacts...))
+			setupStarted := time.Now()
 			// The folders Setup creates below the home (~/.codex in an
 			// account that never ran Codex, say) are recorded, so the purge
 			// and a per-user uninstall --all remove them once empty.
@@ -622,6 +636,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), setupOpts.AgentVersion),
 			}
+			// An agent config this setup put back or recreated (GAP-0564).
+			result.Notices = connector.AgentConfigNotices(conn.Name(), setupOpts, setupStarted, false)
 			return nil
 		})
 	})
