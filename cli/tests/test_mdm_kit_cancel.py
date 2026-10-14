@@ -22,7 +22,7 @@ def function(source: str, name: str) -> str:
 def test_cancelled_lifecycle_stops_child_and_reports_failure(tmp_path: Path) -> None:
     source = WRAPPER.read_text(encoding="utf-8")
     functions = "\n".join(function(source, name) for name in (
-        "dc_json_escape", "dc_log", "dc_fail_result", "dc_stop_child", "dc_run_lifecycle"
+        "dc_json_escape", "dc_log", "dc_print_result", "dc_fail_result", "dc_stop_child", "dc_run_lifecycle"
     ))
     gateway = tmp_path / "defenseclaw-gateway"
     started = tmp_path / "started"

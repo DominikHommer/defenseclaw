@@ -402,12 +402,17 @@ ai_discovery:
 					{"ai_discovery.confidence_policy_path", cfg.AIDiscovery.ConfidencePolicyPath, "confidence.yaml"},
 					{"firewall.config_file", cfg.Firewall.ConfigFile, "firewall.yaml"},
 					{"firewall.rules_file", cfg.Firewall.RulesFile, "firewall.pf.conf"},
-					{"openshell.pack_dir", cfg.OpenShell.PackDir, path.Join("policies", config.DefaultOpenShellPackDirName)},
 					{"gateway.device_key_file", cfg.Gateway.DeviceKeyFile, "device.key"},
 				} {
 					if want := path.Join(root, field.suffix); field.got != want {
 						t.Errorf("%s = %q, want %q", field.name, field.got, want)
 					}
+				}
+				// On a standalone deployment an omitted openshell.pack_dir is
+				// <policy_dir>/sandbox, not a folder in data_dir
+				// (rel-1-0-2:GAP-0099).
+				if want := path.Join(cfg.PolicyDir, config.DefaultOpenShellPackDirName); cfg.OpenShell.PackDir != want {
+					t.Errorf("openshell.pack_dir = %q, want <policy_dir>/sandbox %q", cfg.OpenShell.PackDir, want)
 				}
 				// This check loads a Linux target even on a Windows signer;
 				// its omitted policy_dir must use the Unix vendor tree.

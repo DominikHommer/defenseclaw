@@ -33,7 +33,7 @@ def test_extract_payload_failure_reports_cause(
     wrapper = ROOT / f"packaging/mdm/{platform}/defenseclaw-enterprise.sh"
     source = wrapper.read_text(encoding="utf-8")
     helpers = "\n".join(function(source, name) for name in (
-        "dc_json_escape", "dc_log", "dc_fail_result", "dc_extract_payload",
+        "dc_json_escape", "dc_log", "dc_print_result", "dc_fail_result", "dc_extract_payload",
     ))
     stage = tmp_path / "stage"
     stage.mkdir()

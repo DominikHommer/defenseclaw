@@ -110,6 +110,7 @@ option (exit 2).
 | `unhealthy` | The deployment failed a required health check. |
 | `bundle-missing`, `bundle-mismatch`, `bundle-outdated`, `bundle-not-enforced` | With `--require-bundle`: the requested signed policy bundle is not the confirmed, enforcing bundle (see [Signed policy bundles](#signed-policy-bundles)). |
 | `unknown` | Detection could not assess the host; run the script as root. |
+| `sessions-need-restart` | With `--require-sessions-protected`: running agent sessions predate their managed hook settings and need a restart. Exits 1 in every format, as does an unknown session scan. |
 | `tetragon-not-ready:<check>` | The host is not ready for the requested Tetragon mode. |
 | `busy` | A lifecycle run holds the lock. Retry later; this is neither healthy nor unhealthy. In `exit` format the script exits 75. |
 
