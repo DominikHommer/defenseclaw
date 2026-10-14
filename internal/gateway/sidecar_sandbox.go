@@ -217,11 +217,7 @@ type sandboxRuntimeDeps struct {
 	// registration and onGeneration are forwarding mode's
 	// (SandboxIngressConfig.Registration, OnGeneration).
 	registration func(sandboxauth.Binding) (string, bool)
-	onGeneration func(string, uint64)
-	// egressRefresh brings a sandbox's policy up to date before its egress
-	// proxy decides a new connection (egress.Options.Refresh): a managed
-	// daemon's; nil for the per-user gateway, whose policy is local.
-	egressRefresh func(egress.Principal) (bool, *egress.Decision)
+	onGeneration func(uint64)
 }
 
 // buildSandboxRuntime prepares the hook ingress, the egress proxy and the
@@ -358,7 +354,6 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
 		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),
-		Refresh: deps.egressRefresh,
 	})
 	if err != nil {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})

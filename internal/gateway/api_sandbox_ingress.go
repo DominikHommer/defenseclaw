@@ -185,9 +185,8 @@ type SandboxIngressConfig struct {
 	Relay        sandboxrelay.Client
 	Registration func(sandboxauth.Binding) (string, bool)
 	// OnGeneration is told the policy generation each relayed answer
-	// carries (sandboxrelay.GenerationHeader) and the registration it is
-	// for, before the answer goes to the sandbox. It must not block.
-	OnGeneration func(registration string, generation uint64)
+	// carries (sandboxrelay.GenerationHeader). It must not block.
+	OnGeneration func(uint64)
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -272,7 +271,7 @@ type sandboxIngressState struct {
 	// (SandboxIngressConfig.Relay).
 	relay        sandboxrelay.Client
 	registration func(sandboxauth.Binding) (string, bool)
-	onGeneration func(string, uint64)
+	onGeneration func(uint64)
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -1136,7 +1135,7 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		}
 		if st.onGeneration != nil {
 			if g, err := strconv.ParseUint(resp.Header.Get(sandboxrelay.GenerationHeader), 10, 64); err == nil {
-				st.onGeneration(registration, g)
+				st.onGeneration(g)
 			}
 		}
 		if resp.Status >= 200 && resp.Status <= 299 && resp.Decision != nil && resp.Decision.EgressTold &&

@@ -177,13 +177,8 @@ type SandboxDaemon struct {
 	// or a create older than sandboxDaemonSettingsTTL reads them again.
 	settingsAt atomic.Int64
 	cfg        atomic.Pointer[config.Config]
-	// refresh asks the supervision for a policy poll of every registration
-	// now: a relayed answer or a confirmation named another policy
-	// generation (observeGeneration).
-	refresh chan struct{}
-	// leases is how fresh each registration's policy is for the new
-	// connections of its sandbox's egress proxy (confirmEgressPolicy).
-	leases egressLeases
+	generation atomic.Uint64
+	refresh    chan struct{}
 
 	// floorMu guards floor, the organization floor the manager resolves
 	// against: the floor of the registrations of running sandboxes.
@@ -307,6 +302,7 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 	if d.openShell == nil {
 		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
 	}
+	d.generation.Store(opts.Settings.Generation)
 	d.settingsAt.Store(time.Now().UnixNano())
 	// The registrations file is the user's own: its floors are adopted only
 	// after the managed gateway confirmed the registration (Run's
@@ -356,9 +352,6 @@ func newSandboxDaemonRuntime(d *SandboxDaemon) (*sandboxRuntime, error) {
 		persist:      d.decisionsClient(),
 		registration: d.registrationOf,
 		onGeneration: d.observeGeneration,
-		// Every new connection of a sandbox's egress proxy is decided with
-		// the policy the managed gateway confirmed (GAP-0172).
-		egressRefresh: d.confirmEgressPolicy,
 	}, d.opts.RuntimeOptions)
 }
 
@@ -512,33 +505,20 @@ func (d *SandboxDaemon) telemetryRegistration(name string) (string, bool) {
 	return r.ID, ok && r.ID != ""
 }
 
-// observeGeneration learns the policy generation a relayed answer for
-// registration carries. It is the managed gateway's view of the caller's own
-// policy (sandboxViewGeneration), a digest that only ever compares for
-// equality: ordered as a counter, a new policy whose digest happened to be
-// smaller than one seen before was ignored until the next minute's poll, and
-// a running sandbox kept the old egress lists 20-50 s after ensure
-// (GAP-0172). One that differs from the registration's ends its egress
-// lease, so its sandbox's next connection confirms the policy first
-// (confirmEgressPolicy), and asks for a poll of every registration now. It
-// does not block: the relayed answer is on its way to the sandbox.
-func (d *SandboxDaemon) observeGeneration(registration string, g uint64) {
-	if g == 0 {
-		return
-	}
-	r, ok := d.regs.byID(registration)
-	if !ok || r.Revoked || r.Generation == g {
-		return
-	}
-	d.leases.expire(registration)
-	d.askPoll()
-}
-
-// askPoll asks the supervision for a policy poll of every registration now.
-func (d *SandboxDaemon) askPoll() {
-	select {
-	case d.refresh <- struct{}{}:
-	default:
+// observeGeneration learns the policy generation from a relayed answer.
+func (d *SandboxDaemon) observeGeneration(g uint64) {
+	for {
+		have := d.generation.Load()
+		if g <= have {
+			return
+		}
+		if d.generation.CompareAndSwap(have, g) {
+			select {
+			case d.refresh <- struct{}{}:
+			default:
+			}
+			return
+		}
 	}
 }
 
@@ -803,7 +783,7 @@ func (d *SandboxDaemon) superviseLoop(ctx context.Context, serveErr <-chan error
 		case err := <-serveErr:
 			return fmt.Errorf("sandbox daemon: serve the CLI socket: %w", err)
 		case <-d.refresh:
-			d.pollOnce(ctx)
+			d.applyNewGeneration(ctx)
 		case <-tick.C:
 			if stop, err := d.check(ctx); stop {
 				return err
@@ -921,6 +901,18 @@ func sandboxMayRun(phase string) bool {
 	return false
 }
 
+// applyNewGeneration applies a policy generation a relayed answer (or a
+// poll) named that the daemon had not seen: the managed settings, and at
+// once every live registration's policy/current, so a running sandbox's
+// live fields (egress lists, approvals) switch with the first relayed call
+// after the administrator's change instead of on the next minute's poll
+// (es-demo:GAP-0012: a running sandbox took a loosened or tightened policy
+// 20-35 s after the ensure reported it applied).
+func (d *SandboxDaemon) applyNewGeneration(ctx context.Context) {
+	d.refreshSettings(ctx)
+	d.pollOnce(ctx)
+}
+
 // refreshSettings reads the managed gateway's settings after a generation
 // change. A change of what the daemon was started with (the OpenShell
 // install, driver or ports, or sandboxes turned off) is a restart, deferred
@@ -1008,15 +1000,12 @@ func (d *SandboxDaemon) pollOnce(ctx context.Context) {
 // pollRegistrations asks policy/current for every live registration. A
 // registration the gateway no longer knows, revoked or expired, or whose
 // subject changed, is marked revoked and returned (its sandbox is to be
-// stopped); one it answers is confirmed and takes the live fields, which
-// renews its egress lease, and with adopt the floor of the sandboxes that
-// run becomes the manager's (adoptRunningFloor). A generation that moved
-// reads the managed settings again too. A transient refusal (429, 403, 5xx)
-// or an unreachable gateway changes nothing: the relayed hooks fail closed
-// meanwhile.
+// stopped); one it answers is confirmed and takes the live fields, and with
+// adopt the floor of the sandboxes that run becomes the manager's
+// (adoptRunningFloor). A transient refusal (429, 403, 5xx) or an unreachable
+// gateway changes nothing: the relayed hooks fail closed meanwhile.
 func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []daemonRegistration {
 	var revoked []daemonRegistration
-	moved := false
 	phases, listed := d.sandboxPhases(ctx)
 	for _, r := range d.regs.list() {
 		if r.Revoked {
@@ -1024,7 +1013,6 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		}
 		var cp sandboxrelay.CurrentPolicy
 		var err error
-		sent := time.Now()
 		running, report := sandboxStateReport(phases, listed, r.Sandbox)
 		if _, starting := d.starting.Load(r.Sandbox); starting {
 			// Start reported it running; a resumed MicroVM is listed stopped
@@ -1052,12 +1040,8 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 			revoked = append(revoked, r)
 			continue
 		}
-		moved = moved || (cp.Generation != 0 && cp.Generation != r.Generation)
+		d.observeGeneration(cp.Generation)
 		d.regs.applyLive(r.Sandbox, cp)
-		d.leases.confirm(r.ID, sent)
-	}
-	if moved {
-		d.refreshSettings(ctx)
 	}
 	if adopt {
 		// Unlisted (nil phases), no sandbox counts as running: only the
@@ -1086,8 +1070,8 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 // organization does not let you run sandboxes" (strict, deny) until a start
 // or a restart (GAP-0462). An unconfirmed or revoked registration's floor
 // is never adopted: the floor stays closed. A new floor re-resolves every
-// sandbox's policy at once, and reports true.
-func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
+// sandbox's policy at once.
+func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) {
 	floor := d.regs.newestFloor(func(name string) bool { return sandboxMayRun(phases[name]) })
 	var newest *config.OpenShellAdminConfig
 	if floor == nil {
@@ -1106,7 +1090,6 @@ func (d *SandboxDaemon) adoptRunningFloor(phases map[string]string) bool {
 		d.reloadConfig()
 		d.rt.manager.RefreshPolicies()
 	}
-	return changed
 }
 
 // sandboxPhases is the phase of each of the user's sandboxes by name; ok is
@@ -1947,6 +1930,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	d.floor = &floor
 	d.floorMu.Unlock()
 	d.reloadConfig()
+	d.observeGeneration(resp.Generation)
 	if err := d.readyOpenShell(ctx, s, reg); err != nil {
 		undo()
 		return nil, err
@@ -2495,18 +2479,6 @@ func (r *daemonRegistrations) get(name string) (daemonRegistration, bool) {
 	return reg, ok
 }
 
-// byID is the registration with id.
-func (r *daemonRegistrations) byID(id string) (daemonRegistration, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, reg := range r.byName {
-		if reg.ID == id {
-			return reg, true
-		}
-	}
-	return daemonRegistration{}, false
-}
-
 func (r *daemonRegistrations) list() []daemonRegistration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2606,11 +2578,6 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	moved := !cp.UpdatedAt.IsZero() && !policyAt.Equal(reg.UpdatedAt)
 	if moved {
 		reg.UpdatedAt = policyAt
-	}
-	// The generation the live fields are now of, which a relayed answer's is
-	// compared with (observeGeneration).
-	if cp.Generation != 0 && cp.Generation != reg.Generation {
-		reg.Generation, moved = cp.Generation, true
 	}
 	before := reg.Floor
 	f := &reg.Floor
