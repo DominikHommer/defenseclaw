@@ -150,6 +150,13 @@ type Registration struct {
 	// policy is the one resolved at CreatedAt (PolicyUpdatedAt).
 	PolicyAt time.Time `json:"policy_at,omitzero"`
 	BoundAt  time.Time `json:"bound_at,omitzero"`
+	// GuestWatch marks registrations bound by this build. Older stored
+	// registrations remain exempt until root-owned attestation replaces this
+	// signal in a later release.
+	GuestWatch bool `json:"guest_watch,omitempty"`
+	// GuestSeenAt is the first accepted lifecycle or egress record for this
+	// sandbox after bind. It survives gateway restarts and quiet sessions.
+	GuestSeenAt time.Time `json:"guest_seen_at,omitzero"`
 	// SeenAt is when the daemon last reported the sandbox running; the
 	// LiveLease counts from it (from BoundAt before the first report).
 	SeenAt    time.Time `json:"seen_at,omitzero"`
