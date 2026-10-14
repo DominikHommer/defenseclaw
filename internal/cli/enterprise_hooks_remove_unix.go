@@ -473,12 +473,19 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		label := strings.TrimSpace(entry.User) + "/" + name
 		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
 		var kept *enterpriseHookCleanupHomeKeptError
+		var oldKept *enterpriseHookCleanupOldHomeKeptError
 		switch {
 		case outcome == enterpriseHookUserCleanupDone && errors.Is(err, errEnterpriseHookCleanupHomeGone):
 			// Nothing was removed: the home is gone. The uninstall warns
 			// for that user and agent and goes on (GAP-0553).
 			report.Pending = append(report.Pending, fmt.Sprintf("%s: its recorded home %s is gone, so nothing was left to remove; if that home is restored, remove DefenseClaw's entries from the %s config in it",
 				label, filepath.Clean(strings.TrimSpace(entry.UserHome)), name))
+		case errors.As(err, &oldKept):
+			report.Pending = append(report.Pending, fmt.Sprintf("%s: the account was re-homed to %s and cleaned there, but its recorded home %s still exists or cannot be confirmed gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if unused",
+				label, oldKept.currentHome, oldKept.home, name, oldKept.home))
+			if skip[entry.UID] != enterpriseHookPurgeSkipFailed {
+				skip[entry.UID] = enterpriseHookPurgeSkipKeptHome
+			}
 		case errors.As(err, &kept):
 			// A removed account whose home folder was kept: no one to
 			// remove it as, and the uninstall must not stop for it.
@@ -497,7 +504,13 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		default:
 			reason := "the cleanup failed"
 			if err != nil {
-				reason = boundedString(err.Error(), 256)
+				var rehomed *enterpriseHookTargetHomeChangedError
+				if errors.As(err, &rehomed) {
+					// Keep both homes and the clearing paths in the report.
+					reason = boundedEnterpriseHookUserCleanupText(err.Error())
+				} else {
+					reason = boundedString(err.Error(), 256)
+				}
 			}
 			report.Failed = append(report.Failed, label+": "+reason)
 			skip[entry.UID] = enterpriseHookPurgeSkipFailed
