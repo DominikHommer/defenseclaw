@@ -574,14 +574,19 @@ removal that fails are recorded in an administrator-owned list and retried.
 `guardian_cleanup_pending` and do not fail on it. If a live account is
 re-homed to a trusted directory, the guardian cleans the current home as
 that user and, when its recorded home still exists and is trusted, cleans
-that home too. A copied OpenCode or Amp plugin receipt cannot direct one
-home's cleanup into the other home: each plugin is handled in its own home.
-For those plugins, the record ends only when the current home's plugin is
-gone and either the recorded home is definitely gone or its plugin is also
-gone. An edited plugin that still contains
-DefenseClaw code keeps the record; the warning names its path. Remove
-DefenseClaw's entries from that plugin and rerun. The guardian logs both
-homes once when cleanup completes. If the recorded
+that home too. Each user's cleanup worker reports the agent config paths it
+found or edited. A copied backup receipt can first name a path in the other
+home; when removal succeeds, the guardian retries that home's cleanup once.
+The record ends only when every reported path lies in the home its worker
+cleaned, the current home has no DefenseClaw entries for that agent, and the
+recorded home is gone or its worker completed. An absent report, a path outside the home,
+or entries left in the current home keep the record. The warning names the
+path: remove DefenseClaw's entries from that agent's config in the current
+home, delete a stale copied receipt in its `.defenseclaw/connector_backups/`
+folder if it keeps naming the other home, and rerun. An operator-edited
+plugin left in the recorded home is left for the operator and does not alone
+keep the record after the current home is verified clean. The guardian logs
+both homes once when cleanup completes. If the recorded
 home may still exist but cannot be trusted, the record stays and the warning
 names it. Uninstall warns and goes on: remove DefenseClaw's entries from
 that agent's config in the recorded home, delete that home if unused, or
