@@ -84,3 +84,32 @@ func TestAdminVMDriverFixUsesThePinnedDigest(t *testing.T) {
 		t.Errorf("an Intel Mac gets a command: %+v", fix)
 	}
 }
+
+// The gateway uses an explicit rendered driver_dir, so an alternate driver
+// found by the administrator's search does not make a stale render usable.
+func TestRenderedAdminVMDriverUsesTheGatewayPath(t *testing.T) {
+	const live = "/usr/local/libexec/openshell/openshell-driver-vm"
+	exists := func(p string) bool { return p == live }
+	trusted := func(string) error { return nil }
+	if found, _ := AdminVMDriver("linux", exists, trusted); found != live {
+		t.Fatalf("administrator selection = %q", found)
+	}
+	for _, tc := range []struct {
+		dir, want string
+	}{
+		{"/usr/local/libexec/openshell", live},
+		{"/usr/libexec/openshell", ""},
+		{"", ""},
+		{"/tmp/unmanaged", ""},
+	} {
+		found, problem := RenderedAdminVMDriver("linux", tc.dir, exists, trusted)
+		if found != tc.want || (problem == "") != (tc.want != "") || (tc.want == "" && !strings.Contains(problem, "driver_dir")) {
+			t.Errorf("rendered %q: found %q, problem %q", tc.dir, found, problem)
+		}
+	}
+	if found, problem := RenderedAdminVMDriver("linux", "/usr/local/libexec/openshell", exists, func(string) error {
+		return errors.New("writable by group")
+	}); found != "" || !strings.Contains(problem, "not trusted") {
+		t.Fatalf("untrusted rendered driver: %q, %q", found, problem)
+	}
+}

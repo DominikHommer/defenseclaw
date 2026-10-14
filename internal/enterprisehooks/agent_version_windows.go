@@ -57,8 +57,8 @@ type windowsAgentPackageJSON struct {
 //     the bounded size, or fails JSON parse,
 //   - any ancestor of the probed path is a reparse point (Windows
 //     junction / mount point) — refused for the same reason
-//     `winpath.RejectReparseChain` is used elsewhere in the
-//     enumerator: a per-user reparse chain could redirect a read
+//     `winpath.RejectReparseChain` checks from the volume root down
+//     elsewhere in the enumerator: a per-user reparse chain could redirect a read
 //     into a system directory and let a user profile influence
 //     what the LocalSystem enumerator ingests.
 //

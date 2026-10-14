@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rel-1-0-2:GAP-0491: the WAL moved aside before the database, and a database
 // that then did not move stayed behind without it. Not parallel: it swaps the
 // package's rename seam.
 func TestQuarantineCorruptAuditDBPutsBackWhatMovedWhenAStepFails(t *testing.T) {
-	for _, failing := range []string{"-wal", "-shm", ""} {
+	for _, failing := range []string{"-wal", "-shm", "-journal", ""} {
 		for _, backFails := range []bool{false, true} {
 			if backFails && failing == "-wal" {
 				continue // the first step: nothing moved yet
@@ -27,7 +28,7 @@ func TestQuarantineCorruptAuditDBPutsBackWhatMovedWhenAStepFails(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				dir := t.TempDir()
 				db := filepath.Join(dir, "audit.db")
-				files := map[string]string{"": "db", "-wal": "wal", "-shm": "shm"}
+				files := map[string]string{"": "db", "-wal": "wal", "-shm": "shm", "-journal": "journal"}
 				for suffix, body := range files {
 					if err := os.WriteFile(db+suffix, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
@@ -74,7 +75,7 @@ func TestQuarantineCorruptAuditDBPutsBackWhatMovedWhenAStepFails(t *testing.T) {
 func TestQuarantineCorruptAuditDBMovesTheStoreWithItsSidecars(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "audit.db")
-	for _, suffix := range []string{"", "-wal"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		if err := os.WriteFile(db+suffix, []byte("x"+suffix), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -83,12 +84,41 @@ func TestQuarantineCorruptAuditDBMovesTheStoreWithItsSidecars(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quarantineCorruptAuditDB: %v", err)
 	}
-	for _, suffix := range []string{"", "-wal"} {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		if got, readErr := os.ReadFile(moved + suffix); readErr != nil || string(got) != "x"+suffix {
 			t.Fatalf("%s%s = %q, %v", moved, suffix, got, readErr)
 		}
 		if _, statErr := os.Stat(db + suffix); !os.IsNotExist(statErr) {
 			t.Fatalf("audit.db%s still at the original path (%v)", suffix, statErr)
+		}
+	}
+}
+
+func TestQuarantineCorruptAuditDBDoesNotReplaceAnOrphanArchiveSidecar(t *testing.T) {
+	dir := t.TempDir()
+	db := filepath.Join(dir, "audit.db")
+	for _, suffix := range []string{"", "-wal"} {
+		if err := os.WriteFile(db+suffix, []byte("original"+suffix), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := db + ".corrupt-" + time.Now().UTC().Format("20060102T150405Z")
+	if err := os.WriteFile(base+"-wal", []byte("other store's WAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := quarantineCorruptAuditDB(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved == base {
+		t.Fatal("quarantine reused a name with a pre-existing archive WAL")
+	}
+	if got, err := os.ReadFile(base + "-wal"); err != nil || string(got) != "other store's WAL" {
+		t.Fatalf("pre-existing archive WAL = %q, %v", got, err)
+	}
+	for _, suffix := range []string{"", "-wal"} {
+		if got, err := os.ReadFile(moved + suffix); err != nil || string(got) != "original"+suffix {
+			t.Fatalf("new archive%s = %q, %v", suffix, got, err)
 		}
 	}
 }

@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,12 +28,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// homeGoneFixture records three pending Hermes cleanups. dcad-gone and
+// homeGoneFixture records five pending Hermes cleanups. dcad-gone and
 // dcad-kept are removed macOS AD mobile accounts, whose directory home is
 // now /var/empty: gone's recorded home no longer exists, kept's folder was
 // kept (sysadminctl -deleteUser -keepHome). dcad-moved is a live account
 // the directory re-homed to a real path while its recorded home is still
-// there.
+// there. The sample accounts have real directory homes and missing recorded
+// homes, including one beneath an available automount parent.
 func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTestResolver, gone, kept, moved string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
@@ -41,25 +43,66 @@ func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTes
 	gone = filepath.Join(f.homes, "dcad-gone") // removed with the mobile account
 	kept = f.home(t, "dcad-kept", 0o700)
 	moved = f.home(t, "dcad-moved", 0o700)
+	automountParent := filepath.Join(f.homes, "sample-automount-parent")
+	if err := os.Mkdir(automountParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	resolver.accounts["dcad-gone"] = unixidentity.Account{Name: "dcad-gone", UID: uid, GID: gid, Home: "/var/empty"}
 	resolver.accounts["dcad-kept"] = unixidentity.Account{Name: "dcad-kept", UID: uid + 1, GID: gid, Home: "/var/empty"}
 	resolver.accounts["dcad-moved"] = unixidentity.Account{Name: "dcad-moved", UID: uid + 2, GID: gid, Home: filepath.Join(f.homes, "dcad-moved-new")}
+	resolver.accounts["sample-rehomed"] = unixidentity.Account{Name: "sample-rehomed", UID: uid + 3, GID: gid, Home: f.home(t, "sample-rehomed-new", 0o700)}
+	resolver.accounts["sample-automount"] = unixidentity.Account{Name: "sample-automount", UID: uid + 4, GID: gid, Home: f.home(t, "sample-automount-new", 0o700)}
 	f.writeManifest(t)
 	if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{
 		{Connector: "hermes", UID: uid, User: "dcad-gone", UserHome: gone, RecordedAt: "2026-10-14T00:00:00Z"},
 		{Connector: "hermes", UID: uid + 1, User: "dcad-kept", UserHome: kept, RecordedAt: "2026-10-14T00:00:00Z"},
 		{Connector: "hermes", UID: uid + 2, User: "dcad-moved", UserHome: moved, RecordedAt: "2026-10-14T00:00:00Z"},
+		{Connector: "hermes", UID: uid + 3, User: "sample-rehomed", UserHome: filepath.Join(f.homes, "sample-rehomed-old"), RecordedAt: "2026-10-14T00:00:00Z"},
+		{Connector: "hermes", UID: uid + 4, User: "sample-automount", UserHome: filepath.Join(automountParent, "sample-automount-old"), RecordedAt: "2026-10-14T00:00:00Z"},
 	}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return f, resolver, gone, kept, moved
 }
 
+// A live account re-homed to a real path keeps its cleanup even when the
+// recorded home is missing beneath an available parent.
+func TestStandaloneCleanupKeepsRehomedTargetsWhoseOldHomesAreMissing(t *testing.T) {
+	f, resolver, _, _, _ := homeGoneFixture(t)
+	pending, err := loadEnterpriseHookUserCleanups(f.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempted := 0
+	for _, entry := range pending {
+		if entry.User != "sample-rehomed" && entry.User != "sample-automount" {
+			continue
+		}
+		attempted++
+		t.Run(entry.User, func(t *testing.T) {
+			var log bytes.Buffer
+			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &log, entry, resolver)
+			if outcome != enterpriseHookUserCleanupFailed || err == nil || errors.Is(err, errEnterpriseHookCleanupHomeGone) {
+				t.Fatalf("live re-homed cleanup = %v, %v; want failed without home-gone retirement", outcome, err)
+			}
+			if !strings.Contains(err.Error(), "no longer matches the directory home") || strings.Contains(log.String(), "home gone") {
+				t.Fatalf("unexpected cleanup error or retirement log: %v; %s", err, log.String())
+			}
+		})
+	}
+	if attempted != 2 {
+		t.Fatalf("tested %d live re-homed accounts, want two", attempted)
+	}
+	if len(f.workerTargets()) != 0 {
+		t.Fatalf("no worker may run in a mismatched home: %+v", f.workerTargets())
+	}
+}
+
 // GAP-0543: the guardian retried forever the cleanup of a removed macOS AD
 // mobile account, whose recorded home is gone and whose directory home is
 // now /var/empty. It retires such a cleanup as "home gone", without also
-// saying the cleanup was done (Codex F8); a cleanup whose recorded home
-// still exists keeps failing, as nothing proves its registration went.
+// saying the cleanup was done (Codex F8). A kept home and live re-homed
+// accounts keep their cleanups, as nothing proves their registrations went.
 func TestStandaloneCleanupRetiresATargetWhoseHomeIsGone(t *testing.T) {
 	f, resolver, _, kept, moved := homeGoneFixture(t)
 	var log bytes.Buffer
@@ -75,11 +118,20 @@ func TestStandaloneCleanupRetiresATargetWhoseHomeIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 2 || pending[0].User != "dcad-kept" || pending[0].UserHome != kept ||
+	if len(pending) != 4 || pending[0].User != "dcad-kept" || pending[0].UserHome != kept ||
 		!strings.Contains(pending[0].LastError, "no longer matches the directory home /var/empty, which is no home") ||
 		pending[1].User != "dcad-moved" || pending[1].UserHome != moved ||
 		!strings.Contains(pending[1].LastError, "no longer matches the directory home") || strings.Contains(pending[1].LastError, "no home") {
-		t.Fatalf("only the cleanups whose recorded home still exists may stay, each with its error: %+v", pending)
+		t.Fatalf("the kept-home and live re-homed cleanups must stay with their errors: %+v", pending)
+	}
+	for i, name := range []string{"sample-automount", "sample-rehomed"} {
+		entry := pending[i+2]
+		if entry.User != name || !strings.Contains(entry.LastError, "no longer matches the directory home") || strings.Contains(entry.LastError, "which is no home") {
+			t.Fatalf("live re-homed cleanup was retired or given the wrong error: %+v", entry)
+		}
+		if !strings.Contains(log.String(), "warn: per-user cleanup of hermes/"+name+": ") || strings.Contains(log.String(), "hermes/"+name+": home gone") {
+			t.Fatalf("the guardian must warn and keep %s without retiring it: %s", name, log.String())
+		}
 	}
 	if !strings.Contains(log.String(), "hermes/dcad-gone: home gone") {
 		t.Fatalf("the guardian does not say why it retired the cleanup: %s", log.String())
@@ -106,7 +158,7 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	report := enterpriseHooksRemoveAllReport{}
-	failed := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
+	skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
 	if len(report.Pending) != 2 || report.Removed != 0 ||
 		!strings.HasPrefix(report.Pending[0], "dcad-gone/hermes: its recorded home "+gone+" is gone") ||
 		!strings.HasPrefix(report.Pending[1], "dcad-kept/hermes: the directory gives the account no home (/var/empty)") ||
@@ -118,9 +170,12 @@ func TestRemoveAllReportsAPendingCleanupWhoseHomeIsGoneAsPending(t *testing.T) {
 			t.Fatalf("a removed account's home will not become available: %q", entry)
 		}
 	}
-	if len(report.Failed) != 1 || !strings.HasPrefix(report.Failed[0], "dcad-moved/hermes: ") ||
-		!failed[os.Getuid()+2] || failed[os.Getuid()+1] || failed[os.Getuid()] {
-		t.Fatalf("only the re-homed live account may still fail: %+v, %v", report, failed)
+	if len(report.Failed) != 3 || !strings.HasPrefix(report.Failed[0], "dcad-moved/hermes: ") ||
+		!strings.HasPrefix(report.Failed[1], "sample-rehomed/hermes: ") ||
+		!strings.HasPrefix(report.Failed[2], "sample-automount/hermes: ") ||
+		skip[os.Getuid()+2] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+3] != enterpriseHookPurgeSkipFailed || skip[os.Getuid()+4] != enterpriseHookPurgeSkipFailed ||
+		skip[os.Getuid()+1] != enterpriseHookPurgeSkipKeptHome || skip[os.Getuid()] != "" {
+		t.Fatalf("live re-homed accounts must fail, and a pending kept home must block purge: %+v, %v", report, skip)
 	}
 }
 

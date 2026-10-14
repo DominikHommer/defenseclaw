@@ -35,8 +35,18 @@ import (
 const hookGuardianRestoresFile = "hook_guardian_restores.json"
 
 // hookGuardianRestoresMaxBytes bounds the record, which holds one entry per
-// enrolled target at most.
+// enrolled target at most. The writer keeps it under the bound, which both
+// readers (here and internal/enterpriseunix) enforce.
 const hookGuardianRestoresMaxBytes = 1 << 20
+
+// enterpriseHookGuardianRestoreReadBackoff spaces the retries of a failed
+// read of the record: on Windows a reader can meet a sharing violation while
+// the guardian replaces it. Tests shorten it.
+var enterpriseHookGuardianRestoreReadBackoff = []time.Duration{10 * time.Millisecond, 40 * time.Millisecond, 150 * time.Millisecond}
+
+// enterpriseHookGuardianRestoreRecordReader reads and checks the record once;
+// tests replace it.
+var enterpriseHookGuardianRestoreRecordReader = readEnterpriseHookGuardianRestoreRecord
 
 type enterpriseHookGuardianRestore struct {
 	SID        string `json:"sid,omitempty"`
@@ -129,7 +139,7 @@ func recordEnterpriseHookGuardianRestores(
 	}
 	entries := map[string]enterpriseHookGuardianRestore{}
 	changed := false
-	if record, err := readEnterpriseHookGuardianRestoreRecord(path); err == nil {
+	if record, err := readEnterpriseHookGuardianRestoreRecordRetrying(path); err == nil {
 		for _, entry := range record.Targets {
 			key := entry.key()
 			if key == "" || (!enrolled[key] && !unresolved[enterpriseHookGuardianRestoreUserKey(entry.User, entry.Connector)]) {
@@ -159,14 +169,57 @@ func recordEnterpriseHookGuardianRestores(
 	for _, entry := range entries {
 		record.Targets = append(record.Targets, entry)
 	}
-	sort.Slice(record.Targets, func(i, j int) bool { return record.Targets[i].key() < record.Targets[j].key() })
-	data, err := json.Marshal(record)
+	data, dropped, err := marshalEnterpriseHookGuardianRestoreRecord(record)
 	if err == nil {
-		err = writeEnterpriseHookProtectedFile(path, append(data, '\n'))
+		if dropped > 0 {
+			fmt.Fprintf(stderr, "[hook-guardian] warn: the restore record in %s would pass %d bytes; dropped its %d oldest entries\n", path, hookGuardianRestoresMaxBytes, dropped)
+		}
+		err = writeEnterpriseHookProtectedFile(path, data)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] warn: could not record the restored targets in %s: %v\n", path, err)
 	}
+}
+
+// marshalEnterpriseHookGuardianRestoreRecord serializes record, sorted by
+// key, within hookGuardianRestoresMaxBytes: a larger record is refused by
+// both readers, so status would name no restore at all. Past the bound it
+// drops the oldest restores first and returns how many it dropped.
+func marshalEnterpriseHookGuardianRestoreRecord(record enterpriseHookGuardianRestoreRecord) ([]byte, int, error) {
+	sortByKey := func() {
+		sort.Slice(record.Targets, func(i, j int) bool { return record.Targets[i].key() < record.Targets[j].key() })
+	}
+	sortByKey()
+	data, err := json.Marshal(record)
+	if err != nil || len(data) < hookGuardianRestoresMaxBytes {
+		return append(data, '\n'), 0, err
+	}
+	// Newest first; keep the longest prefix whose entries fit.
+	restoredAt := func(entry enterpriseHookGuardianRestore) time.Time {
+		at, _ := time.Parse(time.RFC3339Nano, strings.TrimSpace(entry.RestoredAt))
+		return at
+	}
+	sort.SliceStable(record.Targets, func(i, j int) bool {
+		return restoredAt(record.Targets[i]).After(restoredAt(record.Targets[j]))
+	})
+	empty, _ := json.Marshal(enterpriseHookGuardianRestoreRecord{Version: record.Version, Targets: []enterpriseHookGuardianRestore{}})
+	size, keep := len(empty)+1, 0
+	for _, entry := range record.Targets {
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return nil, 0, err
+		}
+		if size+len(encoded)+1 > hookGuardianRestoresMaxBytes {
+			break
+		}
+		size += len(encoded) + 1
+		keep++
+	}
+	dropped := len(record.Targets) - keep
+	record.Targets = record.Targets[:keep]
+	sortByKey()
+	data, err = json.Marshal(record)
+	return append(data, '\n'), dropped, err
 }
 
 func readEnterpriseHookGuardianRestoreRecord(path string) (enterpriseHookGuardianRestoreRecord, error) {
@@ -188,17 +241,36 @@ func readEnterpriseHookGuardianRestoreRecord(path string) (enterpriseHookGuardia
 	return record, nil
 }
 
+// readEnterpriseHookGuardianRestoreRecordRetrying reads the record, retrying
+// a failed read with a short backoff; a missing record is not retried.
+func readEnterpriseHookGuardianRestoreRecordRetrying(path string) (enterpriseHookGuardianRestoreRecord, error) {
+	record, err := enterpriseHookGuardianRestoreRecordReader(path)
+	for _, wait := range enterpriseHookGuardianRestoreReadBackoff {
+		if err == nil || os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(wait)
+		record, err = enterpriseHookGuardianRestoreRecordReader(path)
+	}
+	return record, err
+}
+
 // readEnterpriseHookGuardianRestores returns when the guardian last put back
 // each target's hooks, keyed as windowsEnterpriseManifestRowKey (Windows) or
-// enterpriseHookGuardianRestoreUIDKey; nil when there is no readable record.
-func readEnterpriseHookGuardianRestores(dataDir string) map[string]time.Time {
+// enterpriseHookGuardianRestoreUIDKey; nil without a record. A record that
+// stays unreadable or invalid after the retries is an error, so the caller
+// reports the restart status unknown instead of "no restore".
+func readEnterpriseHookGuardianRestores(dataDir string) (map[string]time.Time, error) {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
-		return nil
+		return nil, nil
 	}
-	record, err := readEnterpriseHookGuardianRestoreRecord(filepath.Join(dataDir, hookGuardianRestoresFile))
+	record, err := readEnterpriseHookGuardianRestoreRecordRetrying(filepath.Join(dataDir, hookGuardianRestoresFile))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	restores := make(map[string]time.Time, len(record.Targets))
 	for _, entry := range record.Targets {
@@ -209,5 +281,5 @@ func readEnterpriseHookGuardianRestores(dataDir string) map[string]time.Time {
 		}
 		restores[key] = at
 	}
-	return restores
+	return restores, nil
 }

@@ -87,7 +87,8 @@ func AdminVMDriverDirs(goos string) []string {
 // first of AdminVMDriverDirs whose driver exists and passes trusted (the
 // managed trust check); refused names, as "path (why)", every candidate
 // before it that exists but fails the check. exists and trusted get the
-// canonical path (a caller on a rooted test filesystem maps it). It is the
+// canonical path (a caller on a rooted test filesystem maps it). exists
+// must require a regular executable file. It is the
 // one check of the driver: the enterprise verify (as root) and a managed
 // user's `sandbox doctor` both run it, so the doctor cannot say ready where
 // verify says the driver is missing (GAP-0481).
@@ -106,6 +107,36 @@ func AdminVMDriver(goos string, exists func(path string) bool, trusted func(path
 		return driver, refused
 	}
 	return "", refused
+}
+
+// ExecutableVMDriver reports whether the gateway can execute a regular
+// openshell-driver-vm file. Callers use it as AdminVMDriver's exists check.
+func ExecutableVMDriver(path string) bool { return executable(path) }
+
+// RenderedAdminVMDriver checks the exact driver_dir passed to the managed
+// gateway. The lifecycle chooses that directory from AdminVMDriverDirs, but
+// an older render can outlive a moved driver. An alternate trusted driver
+// elsewhere does not help: OpenShell searches only an explicit driver_dir
+// and the gateway binary's sibling when driver_dir is set.
+func RenderedAdminVMDriver(goos, driverDir string, executable func(path string) bool, trusted func(path string) error) (string, string) {
+	allowed := false
+	for _, dir := range AdminVMDriverDirs(goos) {
+		if dir == driverDir {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Sprintf("the rendered MicroVM driver_dir %q is not one of the administrator's driver directories (%s)", driverDir, strings.Join(AdminVMDriverDirs(goos), ", "))
+	}
+	driver := path.Join(driverDir, vmDriverBinary)
+	if !executable(driver) {
+		return "", fmt.Sprintf("the rendered MicroVM driver_dir %q has no executable %s", driverDir, vmDriverBinary)
+	}
+	if err := trusted(driver); err != nil {
+		return "", fmt.Sprintf("the rendered MicroVM driver %s is not trusted: %v", driver, err)
+	}
+	return driver, ""
 }
 
 // adminVMDriverArchive is OpenShell's release archive of the MicroVM driver
