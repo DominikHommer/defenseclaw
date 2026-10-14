@@ -933,6 +933,13 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		RequestAccess:  sandboxRequestAccess(floor),
 		DriverFallback: sandboxDriverFallbackFor(cfg, runtime.GOOS, floor),
 	}
+	// Give the caller the same host-run gate the hook applies (GAP-0555).
+	if len(floor.RequiredFor) > 0 {
+		authorizer, _ := r.Context().Value(sandboxRouteAuthorizerKey{}).(*managedHookAuthorizer)
+		exempt := authorizer != nil && authorizer.hostRunExempt(peer)
+		out.HostRunGate = requireSandboxHostGate(true, exempt)
+		out.EnrollmentExempt = out.HostRunGate == requireSandboxExempt
+	}
 	// The posture is the authoritative resolution of the explained run
 	// under the caller's floor, its required pack and profile minimum
 	// included: the daemon cannot read the administrator's packs, and its

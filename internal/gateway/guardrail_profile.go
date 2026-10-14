@@ -772,7 +772,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 // explainEnrollmentExempt reports whether enterprise.enrollment.exempt_users
 // lists the explained account, matched as the gateway matches a caller:
 // on Linux and macOS by its uid or its account name as the account database
-// gives it (managedHookAuthorizer.exempt); on Windows by SID, account name or
+// gives it, never root (managedHookAuthorizer.hostRunExempt); on Windows by SID, account name or
 // DOMAIN\account (requireSandboxAccountListed). Explain names the exemption
 // and what it does not change (GAP-0328).
 func explainEnrollmentExempt(cfg *config.Config, subject *profileSubject) bool {
@@ -790,11 +790,13 @@ func explainEnrollmentExempt(cfg *config.Config, subject *profileSubject) bool {
 		})
 	}
 	uid, err := strconv.Atoi(subject.UserID)
-	if err != nil {
+	if err != nil || uid == 0 {
+		// Root is never exempt: enterprise.enrollment.root governs it, and
+		// the hook socket never marks its calls exempt (hostRunExempt).
 		return false
 	}
 	name := firstNonEmpty(subject.accountName, subject.UserName)
-	if (&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).exempt(managedHookPeer{UID: uid, Name: name}) {
+	if (&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(managedHookPeer{UID: uid, Name: name}) {
 		return true
 	}
 	// The explained subject's own facts, which the hook cache takes from
