@@ -38,6 +38,8 @@ func TestEnterpriseHookWorkerConfigReferenceLine(t *testing.T) {
 		{"plugin file", "plugin = '/home/sample-user/.config/opencode/plugins/defenseclaw.js'\n", "", 1},
 		{"project uppercase", "[projects.\"/srv/work/DefenseClaw\"]\ntrust_level = 'trusted'\n", "", 0},
 		{"project lowercase", "[projects.\"/home/sample-user/code/defenseclaw\"]\ntrust_level = 'trusted'\n", "", 0},
+		{"dotted project directory", "[projects.\"/srv/work/project.defenseclaw/hooks\"]\ntrust_level = 'trusted'\n", "", 0},
+		{"dotted filename", "value = 'www.defenseclaw'\n", "", 0},
 		{"similar dot directory", "value = '.defenseclaw-backup'\n", "", 0},
 		{"custom data dir", "command = '/home/sample-user/custom-hooks/hooks/agent.sh'\n", "/home/sample-user/custom-hooks", 1},
 		{"other data dir", "command = '/home/sample-user/custom-hooks/hooks/agent.sh'\n", "/home/sample-user/another-hooks", 0},
