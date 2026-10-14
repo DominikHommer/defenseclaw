@@ -6,12 +6,32 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// guardianRestoresForTest reads the restores of dataDir and fails the test
+// on a read error.
+func guardianRestoresForTest(t *testing.T, dataDir string) map[string]time.Time {
+	t.Helper()
+	restores, err := readEnterpriseHookGuardianRestores(dataDir)
+	if err != nil {
+		t.Fatalf("read restores: %v", err)
+	}
+	return restores
+}
+
+func shortenGuardianRestoreBackoff(t *testing.T) {
+	t.Helper()
+	previous := enterpriseHookGuardianRestoreReadBackoff
+	t.Cleanup(func() { enterpriseHookGuardianRestoreReadBackoff = previous })
+	enterpriseHookGuardianRestoreReadBackoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+}
 
 func enableEnterpriseHookGuardianRestores(t *testing.T, enabled bool) {
 	t.Helper()
@@ -51,7 +71,7 @@ func TestEnterpriseHookGuardianRestoresRecordEachRestoredTarget(t *testing.T) {
 	recordEnterpriseHookGuardianRestores(&log, dataDir, rows, []enterpriseHookGuardianRestore{
 		{SID: strings.ToLower(std1), Connector: "Hermes", RestoredAt: first.Format(time.RFC3339Nano)},
 	})
-	restores := readEnterpriseHookGuardianRestores(dataDir)
+	restores := guardianRestoresForTest(t, dataDir)
 	if len(restores) != 1 || !restores[enterpriseHookGuardianRestoreKey(std1, "hermes")].Equal(first) {
 		t.Fatalf("restores after the first repair = %v, want hermes of %s at %s", restores, std1, first)
 	}
@@ -61,7 +81,7 @@ func TestEnterpriseHookGuardianRestoresRecordEachRestoredTarget(t *testing.T) {
 	recordEnterpriseHookGuardianRestores(&log, dataDir, rows, []enterpriseHookGuardianRestore{
 		{SID: std2, Connector: "codex", RestoredAt: second.Format(time.RFC3339Nano)},
 	})
-	restores = readEnterpriseHookGuardianRestores(dataDir)
+	restores = guardianRestoresForTest(t, dataDir)
 	if len(restores) != 2 || !restores[enterpriseHookGuardianRestoreKey(std1, "hermes")].Equal(first) ||
 		!restores[enterpriseHookGuardianRestoreKey(std2, "codex")].Equal(second) {
 		t.Fatalf("restores after the second repair = %v", restores)
@@ -109,11 +129,16 @@ func TestEnterpriseHookGuardianRestoresWriteNothingWhenDisabled(t *testing.T) {
 	}
 }
 
-// A record status cannot trust is read as no restores; the next restore
-// replaces it.
+// A record status cannot trust names no restore and is an error, so status
+// reports the restart status unknown; the next restore replaces it. A
+// missing record is no restore and no error.
 func TestEnterpriseHookGuardianRestoresReadRejectsBadRecords(t *testing.T) {
 	enableEnterpriseHookGuardianRestores(t, true)
+	shortenGuardianRestoreBackoff(t)
 	dataDir := t.TempDir()
+	if restores, err := readEnterpriseHookGuardianRestores(dataDir); restores != nil || err != nil {
+		t.Fatalf("missing record = %v, %v; want none and no error", restores, err)
+	}
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	for _, body := range []string{
 		"not json",
@@ -123,8 +148,8 @@ func TestEnterpriseHookGuardianRestoresReadRejectsBadRecords(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if restores := readEnterpriseHookGuardianRestores(dataDir); len(restores) != 0 {
-			t.Fatalf("restores from %.40q = %v, want none", body, restores)
+		if restores, err := readEnterpriseHookGuardianRestores(dataDir); len(restores) != 0 || err == nil {
+			t.Fatalf("restores from %.40q = %v, %v; want none and an error", body, restores, err)
 		}
 	}
 	at := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
@@ -138,5 +163,72 @@ func TestEnterpriseHookGuardianRestoresReadRejectsBadRecords(t *testing.T) {
 	var record enterpriseHookGuardianRestoreRecord
 	if err := json.Unmarshal(data, &record); err != nil || record.Version != 1 || len(record.Targets) != 1 {
 		t.Fatalf("replaced record = %q (%v)", data, err)
+	}
+}
+
+// Pass-6 review: a read that fails while the guardian replaces the record (a
+// Windows sharing violation) is retried, and one that keeps failing is an
+// error, never "no restore", so the restart warning cannot silently vanish.
+func TestEnterpriseHookGuardianRestoresReadRetriesATransientError(t *testing.T) {
+	shortenGuardianRestoreBackoff(t)
+	dataDir := t.TempDir()
+	const sid = "S-1-5-21-1-2-3-1001"
+	at := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
+	previous := enterpriseHookGuardianRestoreRecordReader
+	t.Cleanup(func() { enterpriseHookGuardianRestoreRecordReader = previous })
+	sharing := errors.New("the process cannot access the file because it is being used by another process")
+	failures, calls := 2, 0
+	enterpriseHookGuardianRestoreRecordReader = func(string) (enterpriseHookGuardianRestoreRecord, error) {
+		calls++
+		if calls <= failures {
+			return enterpriseHookGuardianRestoreRecord{}, sharing
+		}
+		return enterpriseHookGuardianRestoreRecord{Version: 1, Targets: []enterpriseHookGuardianRestore{
+			{SID: sid, Connector: "hermes", RestoredAt: at.Format(time.RFC3339Nano)},
+		}}, nil
+	}
+	restores, err := readEnterpriseHookGuardianRestores(dataDir)
+	if err != nil || !restores[enterpriseHookGuardianRestoreKey(sid, "hermes")].Equal(at) || calls != 3 {
+		t.Fatalf("transient error: restores %v err %v after %d reads, want the record on the third read", restores, err, calls)
+	}
+	failures, calls = 100, 0
+	if restores, err := readEnterpriseHookGuardianRestores(dataDir); restores != nil || !errors.Is(err, sharing) ||
+		calls != 1+len(enterpriseHookGuardianRestoreReadBackoff) {
+		t.Fatalf("persistent error: restores %v err %v after %d reads, want the error", restores, err, calls)
+	}
+}
+
+// Pass-6 review: the writer keeps the record within the 1 MiB both readers
+// accept, dropping the oldest restores first; a record past it would be
+// refused whole.
+func TestEnterpriseHookGuardianRestoresWriterKeepsTheRecordWithinTheBound(t *testing.T) {
+	enableEnterpriseHookGuardianRestores(t, true)
+	dataDir := t.TempDir()
+	base := time.Date(2026, 10, 13, 0, 0, 0, 0, time.UTC)
+	var rows []enterpriseHookReconcileRow
+	var restored []enterpriseHookGuardianRestore
+	const targets = 12000
+	for i := 0; i < targets; i++ {
+		sid := fmt.Sprintf("S-1-5-21-1111111111-2222222222-3333333333-%d", 100000+i)
+		rows = append(rows, enterpriseHookReconcileRow{SID: sid, Connector: "hermes", OK: true})
+		restored = append(restored, enterpriseHookGuardianRestore{SID: sid, Connector: "hermes", RestoredAt: base.Add(time.Duration(i) * time.Second).Format(time.RFC3339Nano)})
+	}
+	var log bytes.Buffer
+	recordEnterpriseHookGuardianRestores(&log, dataDir, rows, restored)
+	info, err := os.Stat(filepath.Join(dataDir, hookGuardianRestoresFile))
+	if err != nil || info.Size() > hookGuardianRestoresMaxBytes {
+		t.Fatalf("record size %v (%v), want at most %d bytes", info, err, hookGuardianRestoresMaxBytes)
+	}
+	restores := guardianRestoresForTest(t, dataDir)
+	newest, oldest := restored[targets-1], restored[0]
+	if len(restores) == 0 || len(restores) >= targets ||
+		!restores[enterpriseHookGuardianRestoreKey(newest.SID, "hermes")].Equal(base.Add((targets-1)*time.Second)) {
+		t.Fatalf("kept %d restores, want the newest within the bound", len(restores))
+	}
+	if _, kept := restores[enterpriseHookGuardianRestoreKey(oldest.SID, "hermes")]; kept {
+		t.Fatalf("the oldest restore was kept over newer ones")
+	}
+	if !strings.Contains(log.String(), "dropped its") {
+		t.Fatalf("log %q, want the dropped entries named", log.String())
 	}
 }

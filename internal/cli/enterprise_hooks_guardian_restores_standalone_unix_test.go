@@ -49,7 +49,7 @@ func TestStandaloneReconcileRecordsTheTargetItRestored(t *testing.T) {
 	if run.Repairs != 1 {
 		t.Fatalf("run = %+v, want one repair", run)
 	}
-	restores := readEnterpriseHookGuardianRestores(f.dataDir)
+	restores := guardianRestoresForTest(t, f.dataDir)
 	restoredAt, ok := restores[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")]
 	if len(restores) != 1 || !ok || restoredAt.Before(before) || restoredAt.After(after) {
 		t.Fatalf("restores = %v, want hermes of uid %d between %s and %s", restores, uid, before, after)
@@ -59,7 +59,7 @@ func TestStandaloneReconcileRecordsTheTargetItRestored(t *testing.T) {
 	if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if again := readEnterpriseHookGuardianRestores(f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
+	if again := guardianRestoresForTest(t, f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
 		t.Fatalf("restores after a clean pass = %v, want the restore at %s", again, restoredAt)
 	}
 
@@ -76,7 +76,7 @@ func TestStandaloneReconcileRecordsTheTargetItRestored(t *testing.T) {
 	if run.Pending != 1 {
 		t.Fatalf("run during the outage = %+v, want alice pending", run)
 	}
-	if again := readEnterpriseHookGuardianRestores(f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
+	if again := guardianRestoresForTest(t, f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
 		t.Fatalf("restores after a pending pass = %v, want the restore at %s", again, restoredAt)
 	}
 	resolver.transient["alice"] = false
@@ -88,7 +88,7 @@ func TestStandaloneReconcileRecordsTheTargetItRestored(t *testing.T) {
 	if run.Failures != 1 {
 		t.Fatalf("run with alice's lookup failing = %+v, want alice failed", run)
 	}
-	if again := readEnterpriseHookGuardianRestores(f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
+	if again := guardianRestoresForTest(t, f.dataDir); len(again) != 1 || !again[enterpriseHookGuardianRestoreUIDKey(uid, "hermes")].Equal(restoredAt) {
 		t.Fatalf("restores after a failed pass = %v, want the restore at %s", again, restoredAt)
 	}
 }

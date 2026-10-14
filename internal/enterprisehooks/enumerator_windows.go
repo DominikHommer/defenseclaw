@@ -171,8 +171,8 @@ type EnumerateOptions struct {
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
 //     point, junction, or symlink; `winpath.RejectReparseChain`
-//     walks the ancestor chain up to the volume root — a junction
-//     anywhere in the path is refused).
+//     checks from the volume root down and refuses an ancestor before
+//     reading anything below it).
 //  5. `opts.ExcludeSIDs`: any SID listed here is dropped. Used by
 //     spec 005 F1's targeted uninstall.
 //

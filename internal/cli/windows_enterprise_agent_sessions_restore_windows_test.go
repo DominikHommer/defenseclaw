@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,11 +50,11 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 		}
 		return ""
 	}
-	windowsEnterpriseGuardianRestores = func() map[string]time.Time {
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
 		return map[string]time.Time{
 			enterpriseHookGuardianRestoreKey(std1SID, "hermes"): restoredAt,
 			enterpriseHookGuardianRestoreKey(std1SID, "codex"):  restoredAt,
-		}
+		}, nil
 	}
 	processes := []inventory.AgentProcess{
 		{PID: 61, Connector: "hermes", User: std1, StartedAt: restoredAt.Add(-2 * time.Minute)},
@@ -109,5 +110,101 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
 	if named := restartWarnings(result); len(named) != 0 || !result.SecurityComplete {
 		t.Fatalf("after the restart warnings = %+v security_complete = %t, want none and true", result.Warnings, result.SecurityComplete)
+	}
+
+	// Pass-6 review: a restore record that stays unreadable (a sharing
+	// violation while the guardian replaces it) names each session whose
+	// restart status is now unknown instead of none; Codex, whose hooks live
+	// in machine policy, is still not named.
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		return nil, errors.New("sharing violation")
+	}
+	processes = []inventory.AgentProcess{
+		{PID: 66, Connector: "hermes", User: std1, StartedAt: restoredAt.Add(3 * time.Minute)},
+		{PID: 67, Connector: "codex", User: std1, StartedAt: restoredAt.Add(-time.Minute)},
+	}
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed = true
+	result.SecurityComplete = true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], `user DCFC\dcw-std1 runs hermes (pid 66); restart status unknown`) ||
+		!strings.Contains(named[0], "sharing violation") || strings.Contains(named[0], "pid 67") || result.SecurityComplete {
+		t.Fatalf("unreadable record: warnings = %+v security_complete = %t, want hermes pid 66 named with its restart status unknown", result.Warnings, result.SecurityComplete)
+	}
+
+	// An account lookup can fail during the same sharing violation. The
+	// missing SID must not hide the unreadable record or leave status green.
+	windowsEnterpriseAccountSID = func(string) string { return "" }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "hermes (pid 66); restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unresolved account with unreadable record: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+
+	// Even with no visible agent sessions, an unreadable record leaves
+	// restart status unknown rather than certifying security_complete.
+	processes = nil
+	result = enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unreadable record without sessions: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) { return nil, errors.New("process snapshot unavailable") }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unreadable record and sessions: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+}
+
+func TestWindowsStandaloneRestoredSessionUsesSnapshotOwnerSID(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	restoredAt := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousConnectors, previousSID := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAccountSID
+	previousRestores := windowsEnterpriseGuardianRestores
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAccountSID = previousConnectors, previousSID
+		windowsEnterpriseGuardianRestores = previousRestores
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"hermes"}, nil }
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		return map[string]time.Time{enterpriseHookGuardianRestoreKey(sid, "hermes"): restoredAt}, nil
+	}
+	lookups := 0
+	windowsEnterpriseAccountSID = func(string) string {
+		lookups++
+		return "S-1-5-21-1-2-3-9999"
+	}
+
+	for _, tc := range []struct {
+		name, user, wantLabel string
+	}{
+		{name: "name unavailable", wantLabel: sid},
+		{name: "name available", user: "DOMAIN\\member", wantLabel: "DOMAIN\\member"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+				return []inventory.AgentProcess{{
+					PID: 61, Connector: "hermes", User: tc.user, OwnerSID: sid,
+					StartedAt: restoredAt.Add(-time.Minute),
+				}}, nil
+			}
+			result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+			result.Installed, result.SecurityComplete = true, true
+			applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+			if len(result.Warnings) != 1 || result.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+				!strings.Contains(result.Warnings[0].Message, "user "+tc.wantLabel+" runs hermes (pid 61), started before the hook guardian put back") ||
+				result.SecurityComplete || lookups != 0 {
+				t.Fatalf("restored session with snapshot SID = %+v, security_complete = %t, lookups = %d",
+					result.Warnings, result.SecurityComplete, lookups)
+			}
+		})
 	}
 }
