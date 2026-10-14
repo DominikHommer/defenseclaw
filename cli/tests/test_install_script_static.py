@@ -289,7 +289,7 @@ def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path,
     # GAP-0352: an upgrade restarted the daemon under a running sandbox, whose
     # hooks failed closed meanwhile; the user learned it from the end summary.
     text = INSTALL_SH.read_text(encoding="utf-8")
-    assert 'warn_running_sandboxes\n    ask_yes_no "${question}"' in text
+    assert 'warn_running_sandboxes "${stranded}"\n    ask_yes_no "${question}"' in text
     assert 'warn_running_sandboxes\nif [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]' in text
     start = text.index("warn_running_sandboxes() {")
     func = text[start : text.index("\n}\n", start) + 3]
