@@ -32,10 +32,10 @@ import (
 // dcad-kept are removed macOS AD mobile accounts, whose directory home is
 // now /var/empty: gone's recorded home no longer exists, kept's folder was
 // kept (sysadminctl -deleteUser -keepHome). dcad-moved is a live account
-// the directory re-homed to a real path while its recorded home is still
-// there. The sample accounts have missing recorded homes, including one
-// beneath an available automount parent. Their new homes have the wrong
-// owner, so the guardian must not run a worker there.
+// the directory re-homed to a path that does not exist while its recorded
+// home is still there. The sample accounts have missing recorded homes,
+// including one beneath an available automount parent. Their new homes
+// have the wrong owner, so the guardian must not run a worker there.
 func homeGoneFixture(t *testing.T) (f *standaloneFixture, resolver standaloneTestResolver, gone, kept, moved string) {
 	t.Helper()
 	uid, gid := os.Getuid(), os.Getgid()
