@@ -523,52 +523,80 @@ func TestWindowsWinGetPackageFolderLimitsStalledScansPerPath(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first Packages read did not start")
 	}
-	checkIncomplete := func(got result) {
+	checkIncomplete := func(t *testing.T, got result) {
 		t.Helper()
 		if got.match != "" || got.complete || got.elapsed > 500*time.Millisecond {
 			t.Errorf("stalled Packages scan = %+v, want an incomplete scan within 500 ms", got)
 		}
 	}
+	slotBusy := func() bool {
+		windowsWinGetPackageScans.Lock()
+		defer windowsWinGetPackageScans.Unlock()
+		return windowsWinGetPackageScans.inFlight[strings.ToLower(filepath.Clean(packagesA))]
+	}
 	select {
 	case got := <-first:
-		checkIncomplete(got)
+		checkIncomplete(t, got)
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("first stalled Packages scan exceeded its budget")
 	}
-	for i := 0; i < 25; i++ {
-		checkIncomplete(call(packagesA))
-	}
-	results := make(chan result, 25)
-	for i := 0; i < 25; i++ {
-		go func() { results <- call(packagesA) }()
-	}
-	for i := 0; i < 25; i++ {
-		select {
-		case got := <-results:
-			checkIncomplete(got)
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("concurrent stalled Packages scan exceeded its budget")
+	t.Run("OneScanForManyCalls", func(t *testing.T) {
+		bad := 0
+		check := func(got result) {
+			if got.match != "" || got.complete || got.elapsed > 500*time.Millisecond {
+				bad++
+			}
 		}
-	}
-	if got := reads.Load(); got != 1 {
-		t.Errorf("reader started %d scans for one stuck path, want exactly one", got)
-	}
-	if got := call(packagesB); got.match != filepath.Join(packagesB, name) || !got.complete {
-		t.Errorf("another Packages path = %+v, want its matching entry", got)
-	}
-	alias := strings.ToUpper(packagesA) + string(os.PathSeparator)
-	checkIncomplete(call(alias))
-	if got := reads.Load(); got != 1 {
-		t.Errorf("alternate-case path started scan %d, want one shared slot", got)
-	}
-	releaseOnce.Do(func() { close(release) })
-	waitWindowsWinGetPackageScanIdle(t, packagesA)
-	if got := call(packagesA); got.match != filepath.Join(packagesA, name) || !got.complete {
-		t.Errorf("rescan after the stuck reader returned = %+v, want its matching entry", got)
-	}
-	if got := reads.Load(); got != 2 {
-		t.Errorf("reader started %d scans after release, want one resumed scan", got)
-	}
+		for i := 0; i < 25; i++ {
+			check(call(packagesA))
+		}
+		results := make(chan result, 25)
+		for i := 0; i < 25; i++ {
+			go func() { results <- call(packagesA) }()
+		}
+		for i := 0; i < 25; i++ {
+			select {
+			case got := <-results:
+				check(got)
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("concurrent stalled Packages scan exceeded its budget")
+			}
+		}
+		if bad != 0 {
+			t.Errorf("%d of 50 stalled lookups returned a match, completed, or exceeded 500 ms", bad)
+		}
+		if got := reads.Load(); got != 1 {
+			t.Errorf("reader started %d scans for one stuck path, want exactly one", got)
+		}
+	})
+	t.Run("DifferentPathStillScans", func(t *testing.T) {
+		if !slotBusy() {
+			t.Error("stalled path has no in-flight slot")
+		}
+		if got := call(packagesB); got.match != filepath.Join(packagesB, name) || !got.complete {
+			t.Errorf("another Packages path = %+v, want its matching entry", got)
+		}
+	})
+	t.Run("AlternateSpellingSharesSlot", func(t *testing.T) {
+		alias := strings.ToUpper(packagesA) + string(os.PathSeparator)
+		checkIncomplete(t, call(alias))
+		if got := reads.Load(); got != 1 {
+			t.Errorf("alternate-case path started scan %d, want one shared slot", got)
+		}
+	})
+	t.Run("SlotClearsAfterStalledRead", func(t *testing.T) {
+		if !slotBusy() {
+			t.Error("stalled path has no in-flight slot")
+		}
+		releaseOnce.Do(func() { close(release) })
+		waitWindowsWinGetPackageScanIdle(t, packagesA)
+		if got := call(packagesA); got.match != filepath.Join(packagesA, name) || !got.complete {
+			t.Errorf("rescan after the stuck reader returned = %+v, want its matching entry", got)
+		}
+		if got := reads.Load(); got != 2 {
+			t.Errorf("reader started %d scans after release, want one resumed scan", got)
+		}
+	})
 }
 
 func TestWindowsWinGetPackageFolderClearsSlotBeforeResult(t *testing.T) {
@@ -577,6 +605,23 @@ func TestWindowsWinGetPackageFolderClearsSlotBeforeResult(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(packages, name), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The in-flight rejection is also part of the base negative control;
+	// the following normal calls check that each completed scan clears it.
+	key := strings.ToLower(filepath.Clean(packages))
+	windowsWinGetPackageScans.Lock()
+	windowsWinGetPackageScans.inFlight[key] = true
+	windowsWinGetPackageScans.Unlock()
+	t.Cleanup(func() {
+		windowsWinGetPackageScans.Lock()
+		delete(windowsWinGetPackageScans.inFlight, key)
+		windowsWinGetPackageScans.Unlock()
+	})
+	if match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
+		t.Errorf("occupied slot = %q, complete %t; want an incomplete scan", match, complete)
+	}
+	windowsWinGetPackageScans.Lock()
+	delete(windowsWinGetPackageScans.inFlight, key)
+	windowsWinGetPackageScans.Unlock()
 	for i := 0; i < 100; i++ {
 		match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
 		if match != filepath.Join(packages, name) || !complete {
