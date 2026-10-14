@@ -49,6 +49,8 @@ import (
 
 const (
 	// 2: the discover operation also answers app and extension surfaces.
+	// Remove reports are optional fields of this version. A mixed-version
+	// guardian rejects unknown fields or treats an absent report as unverified.
 	enterpriseHookWorkerProtocolVersion = 2
 	enterpriseHookWorkerRequestLimit    = 1 << 20
 	enterpriseHookWorkerResponseLimit   = 8 << 20
@@ -224,6 +226,11 @@ type enterpriseHookWorkerTargetResult struct {
 	// Purged is what a purge target found and removed (booleans only, so
 	// nothing the account controls reaches the administrator's output).
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
+	// Remove reports are produced as the account, before and after teardown.
+	// Presence distinguishes an empty path set from an older worker response.
+	CleanedPaths  []string `json:"cleaned_paths,omitempty"`
+	PathsReported bool     `json:"paths_reported,omitempty"`
+	Remaining     string   `json:"remaining,omitempty"`
 }
 
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
@@ -566,7 +573,33 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				outcome.Repaired = err == nil
 			}
 		case enterpriseHookWorkerModeRemove:
-			err = enterpriseHookWorkerRemover(ctx, opts)
+			var conn connector.Connector
+			var setupOpts connector.SetupOpts
+			conn, setupOpts, outcome.CleanedPaths, err = enterpriseHookWorkerRemoveSetupAndPaths(opts)
+			if err != nil {
+				break
+			}
+			outcome.PathsReported = true
+			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
+				break
+			}
+			verifyErr := connector.WithUserHomeDir(opts.UserHome, func() error {
+				return conn.VerifyClean(setupOpts)
+			})
+			if verifyErr != nil {
+				path := opts.UserHome
+				for _, candidate := range outcome.CleanedPaths {
+					if enterpriseHookWorkerPathWithin(opts.UserHome, candidate) {
+						path = candidate
+						break
+					}
+				}
+				outcome.Remaining = boundedString(strings.Join(strings.Fields(path+": "+verifyErr.Error()), " "), 1000)
+			} else {
+				// Some connectors validate only references to this data dir.
+				// A copied config can still name the former home's hook path.
+				outcome.Remaining = enterpriseHookWorkerRemainingConfigReference(opts.UserHome, outcome.CleanedPaths)
+			}
 		case enterpriseHookWorkerModeRemoveLeftover:
 			var leftover bool
 			if leftover, err = enterpriseHookWorkerManagedRegistration(opts); err == nil && leftover {
@@ -608,6 +641,101 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// enterpriseHookWorkerRemoveSetupAndPaths resolves the same SetupOpts as
+// RemoveUserHooks. It runs in the per-user worker; the guardian never reads
+// the account's receipts or agent configuration.
+func enterpriseHookWorkerRemoveSetupAndPaths(opts enterprisehooks.InstallOptions) (connector.Connector, connector.SetupOpts, []string, error) {
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(opts.UserHome, ".defenseclaw")
+	}
+	var err error
+	dataDir, err = filepath.Abs(dataDir)
+	if err != nil {
+		return nil, connector.SetupOpts{}, nil, fmt.Errorf("resolve data dir: %w", err)
+	}
+	registry := opts.Registry
+	if registry == nil {
+		registry = connector.NewDefaultRegistry()
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	conn, ok := registry.Get(name)
+	if !ok {
+		return nil, connector.SetupOpts{}, nil, fmt.Errorf("unknown connector %q", name)
+	}
+	setupOpts := connector.SetupOpts{
+		DataDir: dataDir, Interactive: false, ManagedEnterprise: true,
+		WorkspaceDir: strings.TrimSpace(opts.WorkspaceDir), AgentVersion: strings.TrimSpace(opts.AgentVersion),
+		HookContractID: strings.TrimSpace(opts.HookContractID),
+	}
+	var paths []string
+	err = connector.WithUserHomeDir(opts.UserHome, func() error {
+		paths = append(paths, connector.CleanupConfigPathsForConnector(conn, setupOpts)...)
+		receipts, readErr := connector.ManagedFileBackupTargetsForConnector(dataDir, conn.Name())
+		if readErr != nil {
+			return readErr
+		}
+		paths = append(paths, receipts...)
+		return nil
+	})
+	if err != nil {
+		return nil, connector.SetupOpts{}, nil, err
+	}
+	paths = uniqueEnterpriseHookWorkerPaths(paths)
+	if err := validateEnterpriseHookWorkerRemoveReport(enterpriseHookWorkerTargetResult{PathsReported: true, CleanedPaths: paths}); err != nil {
+		return nil, connector.SetupOpts{}, nil, err
+	}
+	return conn, setupOpts, paths, nil
+}
+
+func uniqueEnterpriseHookWorkerPaths(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !seen[path] {
+			seen[path] = true
+			unique = append(unique, path)
+		}
+	}
+	return unique
+}
+
+// enterpriseHookWorkerRemainingConfigReference is a conservative final check
+// of the config paths the worker resolved. It runs as the user and reads at
+// most 4 MiB from each regular file. An unreadable or nonregular config is
+// unverified rather than assumed clean.
+func enterpriseHookWorkerRemainingConfigReference(home string, paths []string) string {
+	const maxConfigBytes = 4 << 20
+	for _, path := range paths {
+		if !enterpriseHookWorkerPathWithin(home, path) {
+			continue
+		}
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return path + ": cannot inspect agent config"
+		}
+		if !info.Mode().IsRegular() {
+			return path + ": agent config is not a regular file"
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return path + ": cannot read agent config"
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxConfigBytes+1))
+		_ = file.Close()
+		if readErr != nil || len(data) > maxConfigBytes {
+			return path + ": agent config could not be checked within the read limit"
+		}
+		if bytes.Contains(bytes.ToLower(data), []byte("defenseclaw")) {
+			return path + ": DefenseClaw reference remains in agent config"
+		}
+	}
+	return ""
 }
 
 // enterpriseHookWorkerManagedRegistration reports whether the user's hook
