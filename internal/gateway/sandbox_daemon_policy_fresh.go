@@ -115,12 +115,11 @@ type egressAttempt struct {
 
 // leaseVerdict is a lease at one instant (egressLeases.begin): fresh
 // (confirmed since the last change, within the lease), changing (the policy
-// changed after the last confirmation in force), retry (the attempt joined
-// was asked for before that change, so its answer may predate it) and off
-// (the last attempt's verdict, while it holds).
+// changed after the last confirmation in force) and off (the last attempt's
+// verdict, while it holds).
 type leaseVerdict struct {
-	fresh, changing, retry bool
-	off                    *egress.Decision
+	fresh, changing bool
+	off             *egress.Decision
 }
 
 func (l *egressLeases) lease(id string) *egressLease {
@@ -169,7 +168,6 @@ func (l *egressLeases) begin(lease *egressLease, now time.Time) (a *egressAttemp
 		return nil, false, v
 	}
 	if lease.attempt != nil {
-		v.retry = !lease.attempt.asked.After(lease.stale)
 		return lease.attempt, false, v
 	}
 	// The retry interval of an attempt that put nothing in force runs from
@@ -195,6 +193,15 @@ func (l *egressLeases) end(lease *egressLease, a *egressAttempt, changed bool, o
 	lease.attempt, lease.ended, lease.failed, lease.off = nil, time.Now(), failed, off
 	l.mu.Unlock()
 	close(a.done)
+}
+
+// changedSince reports whether a relayed answer named another policy after
+// the attempt began. Check it after the attempt finishes: the change can
+// arrive while policy/current or the adoption is in flight.
+func (l *egressLeases) changedSince(lease *egressLease, asked time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return !lease.stale.IsZero() && !asked.After(lease.stale)
 }
 
 // prune drops the leases of registrations the daemon no longer has.
@@ -372,6 +379,9 @@ func (d *SandboxDaemon) confirmLease(ctx context.Context, r daemonRegistration) 
 		case owner:
 			changed, off, failed := d.confirmOnce(ctx, r, v.changing)
 			d.leases.end(lease, a, changed, off, failed)
+			if d.leases.changedSince(lease, a.asked) {
+				continue
+			}
 			return changed, off
 		}
 		select {
@@ -379,9 +389,10 @@ func (d *SandboxDaemon) confirmLease(ctx context.Context, r daemonRegistration) 
 		case <-ctx.Done():
 			return false, sandboxEgressRefusal()
 		}
-		if !v.retry {
-			return a.changed, a.off
+		if d.leases.changedSince(lease, a.asked) {
+			continue
 		}
+		return a.changed, a.off
 	}
 	// The policy kept changing under the confirmations this connection
 	// waited for.

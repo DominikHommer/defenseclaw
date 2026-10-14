@@ -448,3 +448,37 @@ func TestSandboxDaemonEgressAConnectionAfterTheChangeWaitsForANewerConfirmation(
 		t.Fatalf("confirmations %d, want 2", f.calls.Load())
 	}
 }
+
+// GAP-0172: a relayed hook can name a tightened generation while the first
+// connection's policy/current is still in flight. Its older answer must not
+// let that connection through under the old lists, even if no second
+// connection arrives to notice that the lease remained stale.
+func TestSandboxDaemonEgressInFlightAnswerAfterChangeIsRetried(t *testing.T) {
+	f := newFreshFixture(t)
+	firstAsked := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		if f.calls.Add(1) == 1 {
+			close(firstAsked)
+			<-releaseFirst
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1"}, nil
+		}
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2",
+			Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil
+	}
+	done := make(chan *egress.Decision, 1)
+	go func() {
+		_, off := f.confirm()
+		done <- off
+	}()
+	<-firstAsked
+	f.d.observeGeneration("reg-1", 3)
+	close(releaseFirst)
+	off := <-done
+	if off == nil && !f.floorBlocks("github.com") {
+		t.Fatal("the in-flight old answer let the connection through after the change was named")
+	}
+	if off == nil && f.calls.Load() != 2 {
+		t.Fatalf("admitted after %d policy requests, want a new confirmation", f.calls.Load())
+	}
+}
