@@ -342,10 +342,29 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if err != nil || !slices.Contains(plan.env, "PATH="+userSbin+":"+filepath.Join(home, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin") {
 		t.Fatalf("user e2fsprogs: %v %v", err, plan.env)
 	}
-	adminE2fs = "/opt/cisco/defenseclaw-deps/e2fsprogs"
-	plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
-	if err != nil || !strings.HasPrefix(envValue(plan.env, "PATH"), adminE2fs+"/sbin:") {
-		t.Fatalf("admin e2fsprogs: %v %v", err, plan.env)
+	// The administrator's e2fsprogs_dir follows the rule ensure checks
+	// (GAP-0506): its install prefix (tools in sbin) or the folder holding
+	// the tools both put that folder first; a folder without both refuses.
+	adminE2fs = filepath.Join(t.TempDir(), "e2fsprogs")
+	adminSbin := filepath.Join(adminE2fs, "sbin")
+	if err := os.MkdirAll(adminSbin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminSbin, "mke2fs"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("admin e2fsprogs without debugfs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(adminSbin, "debugfs"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range []string{adminE2fs, adminSbin} {
+		adminE2fs = configured
+		plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
+		if err != nil || !strings.HasPrefix(envValue(plan.env, "PATH"), adminSbin+":") {
+			t.Fatalf("admin e2fsprogs %s: %v %v", configured, err, plan.env)
+		}
 	}
 	openShellExecTrustedDir = func(string, string) error { return errors.New("owned by dcm-sv1") }
 	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
