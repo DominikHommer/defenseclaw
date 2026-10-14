@@ -256,6 +256,13 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "MicroVM disks, images, both stores and the rendered `gateway.toml`", bullet)
         self.assertNotIn("Root runs each user's teardown as that user", bullet)
 
+    def test_enterprise_lifecycle_row_does_not_say_every_uninstall_tears_down(self):
+        text = page("enterprise/sandboxes.mdx")
+        row = text.split("| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root |", 1)[1].split("\n", 1)[0]
+        self.assertIn("`uninstall --purge` tears down per user; `uninstall` alone stops running "
+                      "sandboxes and keeps them", row)
+        self.assertNotIn("checks group membership, tears down per user", row)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "

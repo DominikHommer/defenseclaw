@@ -98,7 +98,7 @@ Okta through SSSD, and similar sources work. See
 | Managed gateway | The service account | The policy authority. Decides each person's profile, resolves the sandbox policy, keeps the registrations and decisions, judges relayed hooks. Starts no sandbox and uses no docker or KVM. |
 | Sandbox daemon, `defenseclaw-gateway sandbox-daemon` | The user | Runs the sandbox manager, the hook ingress, the egress proxy, discovery and the process tree. Has no API port, no guardrails and no config file. Its CLI socket is the user's alone. |
 | OpenShell gateway | The user | Creates the sandboxes. Rendered from `enterprise.openshell` (see below). |
-| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root | Verifies or installs the pieces, renders the OpenShell gateway settings, enables the user units, checks group membership, tears down per user. |
+| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root | Verifies or installs the pieces, renders the OpenShell gateway settings, enables the user units, checks group membership. `uninstall --purge` tears down per user; `uninstall` alone stops running sandboxes and keeps them. |
 
 A sandbox run goes through five steps.
 
