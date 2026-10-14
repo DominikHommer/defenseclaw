@@ -964,12 +964,13 @@ asset_policy:
     allowed:
       - name: reviewed-skill
         reason: reviewed by security
-        source_path_contains: ["C:\\ApprovedSkills\\reviewed-skill"]
+        source_path_contains: ["C:\\ApprovedSkills\\<account>\\reviewed-skill"]
 ```
 
-Replace `reviewed-skill` with the installed skill folder name in both fields.
-This example assumes `C:\ApprovedSkills` is configured in
-`gateway.watcher.skill.dirs`.
+Replace `<account>` with the name of the folder that holds that account's
+reviewed skills, and `reviewed-skill` with the installed skill folder name in
+both fields. This example assumes the folder `C:\ApprovedSkills\<account>`
+is listed in `gateway.watcher.skill.dirs`.
 `source_path_contains` must match the reviewed copy's actual path; omit it
 only when the allow rule should cover every matching copy. A profile asset is
 never admission-blocked in 1.0.2, so there is no watcher block to release for

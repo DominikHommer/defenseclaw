@@ -48,7 +48,9 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         text = page("enterprise/windows.mdx")
         self.assertIn("no per-user attribution", text)
         self.assertIn("A profile asset is never admission-blocked in 1.0.2", text)
-        self.assertIn("C:\\\\ApprovedSkills\\\\reviewed-skill", text)
+        self.assertIn("C:\\\\ApprovedSkills\\\\<account>\\\\reviewed-skill", text)
+        self.assertIn("This example assumes the folder `C:\\ApprovedSkills\\<account>` is listed in "
+                      "`gateway.watcher.skill.dirs`", text)
         for phrase in ("copied into the profile", "elsewhere in the profile",
                        "whose profile holds the asset", "asset_removal_deferred",
                        "source_path_contains: [\"C:\\\\Users", "reason_code=install-block"):
