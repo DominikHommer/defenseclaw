@@ -70,8 +70,11 @@ Okta through SSSD, and similar sources work. See
   gateway learns from the kernel who calls, but it cannot see the user's
   sandboxes. It relies on the user's own daemon to say which sandbox a
   registration is bound to and whether that sandbox runs. On a managed host,
-  `sandbox.required_for` keeps normal host use of the listed agents out through
-  the machine-owned hook. In 1.0.2 it does not stop a standard user who
+  `sandbox.required_for` refuses normal host use of a listed agent with a
+  machine-owned hook (Claude Code, Codex, Cursor, or Copilot) for a non-exempt
+  account when the effective `when_unavailable` setting is `refuse`. An `alert`
+  setting when sandboxes are unavailable, or an agent without a machine-owned
+  hook, allows the host run. In 1.0.2 the requirement does not stop a user who
   deliberately fakes a running-sandbox registration for their own account,
   because this release has no root-owned sandbox lifecycle service to vouch
   for registrations. The relay route can then judge that account's hook calls
@@ -767,8 +770,11 @@ command to run is ready to paste.
   A host run is refused even when it claims to be nested in a sandbox. A
   person who runs an agent that has no
   machine-owned hook is not stopped by it.
-- **A registration has a same-account limit in 1.0.2.** Normal host use of a
-  listed agent remains refused, but a standard user can deliberately present
+- **A registration has a same-account limit in 1.0.2.** A listed agent with a
+  machine-owned hook is refused on the host for a non-exempt account when the
+  effective `when_unavailable` setting is `refuse`. When it is `alert` and
+  sandboxes are unavailable, or the agent has no machine-owned hook, the host
+  run can proceed. A standard user can deliberately present
   a running-sandbox registration for their own account without a guest. Watch
   the registration alert described below and keep the `docker` group limited
   to accounts that run sandboxes ([What users see](#what-users-see)).
@@ -783,6 +789,11 @@ minutes after bind to allow the first guest record to arrive; a real sandbox
 whose lifecycle records were dropped can show once. The record is a tripwire
 for the simple case, not proof: the same account can also post lifecycle
 records. Root-owned lifecycle attestation is the planned protection.
+Only registrations bound by a build with this signal are watched; a
+registration stored by an earlier pre-release build is not evaluated until
+root-owned attestation replaces this signal. The first accepted guest record
+ends the watch for that registration, so a guest that disappears later is not
+reported by this tripwire for the simple case.
 
 `ensure` warns about a `required_for` connector that has no machine-owned hook
 on the OS.
@@ -1273,7 +1284,7 @@ within about 30 seconds, so a fix takes effect on the next run.
 
 | Reason code | Record | Meaning |
 | --- | --- | --- |
-| `relay_without_guest`, `running_without_guest` | `log.sandbox.registration_without_guest` | A watched registration was used on an admitted relay call or reported running after the guest grace, without a guest sighting. The record names the account, connector, registration and sandbox; it changes no decision. |
+| `relay_without_guest`, `running_without_guest` | `log.sandbox.registration_without_guest` | A watched registration was used on an admitted relay call or reported running after the guest grace without an accepted guest record since bind. The record names the account, connector, registration and sandbox; it changes no decision. |
 
 ### What `ensure`, `status` and `verify` report
 

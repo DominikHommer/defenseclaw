@@ -1139,7 +1139,7 @@
       "id": 131,
       "type": "stat",
       "title": "Sandbox registrations without a guest",
-      "description": "Watched managed registration alerts during the selected range, after the guest grace. A record is a tripwire, not proof that a guest is absent. Zero means no alert was recorded.",
+      "description": "Alerts for registrations bound by a build with this signal that have had no accepted guest record since bind, after the grace period. The first accepted record ends the watch; later guest disappearance is outside this tripwire. Earlier pre-release registrations are not evaluated until root-owned attestation replaces the signal. Zero means no alert was recorded.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"

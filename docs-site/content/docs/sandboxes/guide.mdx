@@ -1616,9 +1616,10 @@ DefenseClaw gateway binary. Everything you type after `claude` is passed
 through to the harness.
 
 - `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once, where
-  your organization allows it. On a managed computer whose policy lists the
-  agent in `required_for`, the host run is refused by the agent's machine-owned
-  hook and the variable changes nothing (see
+  your organization allows it. On a managed computer, a non-exempt account
+  whose policy lists the agent in `required_for` is refused by its machine-owned
+  hook when the effective `when_unavailable` setting is `refuse`; an effective
+  `alert` setting when sandboxes are unavailable permits the host run (see
   [Require sandboxes](/docs/enterprise/sandboxes#require-sandboxes)).
   Managed registrations have a same-account limit in 1.0.2; see
   [the registration limit](/docs/enterprise/sandboxes#require-sandboxes).
