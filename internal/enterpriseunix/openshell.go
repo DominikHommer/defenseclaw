@@ -562,7 +562,7 @@ func (e *Env) systemDriverDir() string {
 // the managed trust check. It is openshell.AdminVMDriver, the check a
 // managed user's `sandbox doctor` runs too (GAP-0481), on this filesystem.
 func (e *Env) systemDriver() (dir string, refused []string) {
-	found, refused := openshell.AdminVMDriver(e.GOOS, func(p string) bool { return exists(e.P(p)) },
+	found, refused := openshell.AdminVMDriver(e.GOOS, func(p string) bool { return openshell.ExecutableVMDriver(e.P(p)) },
 		func(p string) error { return e.Trust(e.P(p), TrustAdminFile) })
 	if found == "" {
 		return "", refused

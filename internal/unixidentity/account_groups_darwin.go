@@ -30,8 +30,6 @@ const (
 	// osUserGroupBuffer is the number of groups os/user lists into on macOS. A
 	// list that fills it may be cut short.
 	osUserGroupBuffer = 256
-	// darwinNamedGroupMax bounds the named groups checked for one account.
-	darwinNamedGroupMax = 64
 )
 
 // platformAccountGroupIDs gets candidate gids from os/user, or id when its
@@ -41,6 +39,11 @@ const (
 // name and leave out nested memberships; Open Directory's uid membership
 // check binds each group to the account and answers nested ones (GAP-0528).
 func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account *user.User, ids []string, listErr error, named []string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	if listErr != nil || len(ids) >= osUserGroupBuffer {
 		if err := validName(account.Username); err != nil {
 			return nil, errors.Join(listErr, err)
@@ -60,7 +63,7 @@ func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account 
 			return nil, errors.Join(listErr, err)
 		}
 	}
-	extra, err := namedGroupIDs(named)
+	extra, err := namedGroupIDs(ctx, named, lookupNamedGroupGID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,46 +72,35 @@ func platformAccountGroupIDs(ctx context.Context, runner commandRunner, account 
 
 // lookupNamedGroupGID resolves a group name through Open Directory; ok is
 // false when no group has the name. Tests replace it.
-var lookupNamedGroupGID = func(name string) (gid int, ok bool, err error) {
-	group, err := user.LookupGroup(name)
-	if err != nil {
-		if err = translateUserErr(err); errors.Is(err, ErrNotFound) {
-			return 0, false, nil
-		}
-		return 0, false, err
+var lookupNamedGroupGID = func(ctx context.Context, name string) (gid int, ok bool, err error) {
+	// os/user uses Open Directory on macOS and has no context parameter.
+	// A bounded worker owns this call; the caller stops waiting at its
+	// deadline and fails closed even if Open Directory remains blocked.
+	type answer struct {
+		gid int
+		ok  bool
+		err error
 	}
-	gid, err = parseID(group.Gid, "gid")
-	return gid, err == nil, err
-}
-
-// namedGroupIDs resolves the named groups to gids, once each, at most
-// darwinNamedGroupMax of them. A name no group has adds nothing; the gateway
-// reports such an assignment group itself. A name with an @ is skipped:
-// macOS group names carry no DNS domain, so no group the account is in can
-// match it. A lookup that fails otherwise fails the listing, as a failed
-// membership check does: part of a membership must not select a profile.
-func namedGroupIDs(names []string) ([]int, error) {
-	var ids []int
-	seen := map[string]bool{}
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		key := strings.ToLower(name)
-		if name == "" || strings.Contains(name, "@") || seen[key] {
-			continue
-		}
-		if len(seen) == darwinNamedGroupMax {
-			break
-		}
-		seen[key] = true
-		gid, ok, err := lookupNamedGroupGID(name)
+	result := make(chan answer, 1)
+	go func() {
+		group, err := user.LookupGroup(name)
 		if err != nil {
-			return nil, fmt.Errorf("unixidentity: look up group %q: %w", name, err)
+			if err = translateUserErr(err); errors.Is(err, ErrNotFound) {
+				result <- answer{}
+				return
+			}
+			result <- answer{err: err}
+			return
 		}
-		if ok {
-			ids = append(ids, gid)
-		}
+		gid, err := parseID(group.Gid, "gid")
+		result <- answer{gid: gid, ok: err == nil, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return 0, false, ctx.Err()
+	case out := <-result:
+		return out.gid, out.ok, out.err
 	}
-	return ids, nil
 }
 
 // uidVerifiedGroupIDs checks candidates, then the extra gids of named groups,
@@ -138,22 +130,17 @@ func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *use
 			ids = append(ids, gid)
 		}
 	}
-	if len(ids) > maxDirectoryGroups {
-		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
-	}
 	for _, gid := range extra {
 		if gid >= 0 && !listed[gid] {
 			listed[gid] = true
 			ids = append(ids, gid)
 		}
 	}
+	if len(ids) > maxDirectoryGroups {
+		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
+	}
 	verified := make([]bool, len(ids))
 	verified[0] = true
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	g, groupCtx := errgroup.WithContext(ctx)
 	g.SetLimit(16)
 	for i := 1; i < len(ids); i++ {
@@ -177,6 +164,9 @@ func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *use
 		})
 	}
 	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var out []string
