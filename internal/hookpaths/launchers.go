@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -770,14 +771,15 @@ type shellScriptContext struct {
 }
 
 func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool) {
-	file, ok := parseShell(command)
+	budget := newShellAnalysisBudget()
+	file, ok, _ := parseShellWithinBudget(command, &budget)
 	if !ok {
 		return nil, true
 	}
 	queue := []shellScriptContext{{file: file, cwd: cwd, source: command}}
 	unknown := false
 	for i := 0; i < len(queue); i++ {
-		if i >= 16 {
+		if i >= 16 || budget.limited || time.Now().After(budget.deadline) {
 			return queue[:i], true
 		}
 		if queue[i].handled == nil {
@@ -829,7 +831,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			if script, handled, known := shellTextCallScript(stmt, words, static, context.source, context.cwd, home, writtenScripts); handled {
 				if !known {
 					unknown = true
-				} else if inner, parsed := parseShell(script); parsed {
+				} else if inner, parsed, _ := parseShellWithinBudget(script, &budget); parsed {
 					queue = append(queue, shellScriptContext{file: inner, cwd: context.cwd, source: script})
 					context.handled[int(call.Pos().Offset())] = true
 				} else {
@@ -839,7 +841,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			}
 			if function := functions[words[0]]; function != nil {
 				if source, ok := shellFunctionSource(function, words[1:], static[1:]); ok {
-					if inner, parsed := parseShell(source); parsed {
+					if inner, parsed, _ := parseShellWithinBudget(source, &budget); parsed {
 						queue = append(queue, shellScriptContext{file: inner, cwd: context.cwd, source: source})
 						context.handled[int(call.Pos().Offset())] = true
 					} else {
@@ -857,7 +859,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			}
 			if len(result.scripts) != 0 {
 				for _, child := range result.scripts {
-					inner, parsed := parseShell(child.source)
+					inner, parsed, _ := parseShellWithinBudget(child.source, &budget)
 					if !parsed {
 						unknown = true
 						continue
@@ -867,7 +869,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 				context.handled[int(call.Pos().Offset())] = true
 			}
 			if result.script != "" {
-				inner, parsed := parseShell(result.script)
+				inner, parsed, _ := parseShellWithinBudget(result.script, &budget)
 				if !parsed {
 					unknown = true
 				} else {

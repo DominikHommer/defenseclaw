@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/expand"
@@ -513,18 +514,38 @@ func OperandPath(name, cwd string) string {
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
 // POSIX sh.
 func parseShell(command string) (*syntax.File, bool) {
+	file, ok, _ := parseShellWithLimit(command)
+	return file, ok
+}
+
+func parseShellWithLimit(command string) (*syntax.File, bool, bool) {
+	budget := newShellAnalysisBudget()
+	return parseShellWithinBudget(command, &budget)
+}
+
+func parseShellWithinBudget(command string, budget *shellAnalysisBudget) (*syntax.File, bool, bool) {
 	if len(command) > MaxPayloadBytes {
-		return nil, false
+		return nil, false, true
+	}
+	budget.bytes += len(command)
+	if budget.bytes > maxAnalysisBytes || time.Now().After(budget.deadline) {
+		return nil, false, true
 	}
 	var file *syntax.File
 	var err error
 	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
 		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
 		if err == nil {
-			return file, true
+			if !budget.check(file) {
+				return nil, false, true
+			}
+			return file, true, false
+		}
+		if time.Now().After(budget.deadline) {
+			return nil, false, true
 		}
 	}
-	return nil, false
+	return nil, false, false
 }
 
 // staticShellWord expands a redirect word that names one fixed path: quotes,
@@ -2028,6 +2049,15 @@ func Resolve(payload []byte) (result string) {
 	if err != nil {
 		return incompleteEvidence(cwd)
 	}
+	var preflightArgs map[string]json.RawMessage
+	if json.Unmarshal(args, &preflightArgs) == nil {
+		for _, key := range []string{"command", "cmd"} {
+			var command string
+			if json.Unmarshal(preflightArgs[key], &command) == nil && command != "" && ShellAnalysisLimitReached(command) {
+				return incompleteEvidence(cwd)
+			}
+		}
+	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
 	facts := actionfacts.Analyze(input)
 	// A connector can name the shell text "cmd" while ActionFacts requires
@@ -2047,8 +2077,8 @@ func Resolve(payload []byte) (result string) {
 	}
 	var safeRedirects []RedirectOccurrence
 	var sedOperands map[string]bool
-	var toolArgs map[string]json.RawMessage
-	if json.Unmarshal(args, &toolArgs) == nil {
+	toolArgs := preflightArgs
+	if toolArgs != nil {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {

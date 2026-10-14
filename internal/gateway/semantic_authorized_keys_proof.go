@@ -855,6 +855,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	if input.Command != "" && (input.DialectHint == actionfacts.DialectPOSIX || facts.Parse.Dialect == actionfacts.DialectPOSIX) &&
+		hookpaths.ShellAnalysisLimitReached(input.Command) {
+		return true
+	}
 	// ProtectHome can make the gateway discard the event CWD before its
 	// first ActionFacts pass. Rebuild path facts with the authenticated
 	// client CWD so relative command destinations key the client's physical
