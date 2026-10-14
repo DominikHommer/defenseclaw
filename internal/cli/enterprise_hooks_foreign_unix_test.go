@@ -268,7 +268,7 @@ func TestStandaloneForeignCleanupBlocksPersonalClaudeWithoutManifestRow(t *testi
 		return runEnterpriseHookWorkerApply(ctx, request), nil
 	}
 	now := time.Now()
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now, enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now, enterprisehooks.Manifest{}, nil, "")
 	if !called {
 		t.Fatal("eligible user with no Claude manifest row did not get a blocking repair")
 	}
@@ -280,7 +280,7 @@ func TestStandaloneForeignCleanupBlocksPersonalClaudeWithoutManifestRow(t *testi
 	if err := os.WriteFile(path, old, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now.Add(enterpriseHookForeignCleanupInterval), enterprisehooks.Manifest{}, nil)
+	runEnterpriseHookStandaloneForeignCleanup(context.Background(), io.Discard, now.Add(enterpriseHookForeignCleanupInterval), enterprisehooks.Manifest{}, nil, "")
 	output, err = exec.Command("/bin/sh", path).CombinedOutput()
 	if !errors.As(err, &exit) || exit.ExitCode() != 2 || !bytes.Contains(output, []byte("this computer is managed")) {
 		t.Fatalf("reverted personal hook exit=%v output=%q", err, output)
