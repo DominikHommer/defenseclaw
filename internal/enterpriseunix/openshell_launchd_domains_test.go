@@ -8,8 +8,6 @@ package enterpriseunix
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,21 +23,6 @@ func sshOnlyLaunchdJob(h *osHost, f *fixtureLaunchdRunner, job *launchdJobFixtur
 	f.userDomains[uid] = true
 	f.userJobs[uid] = map[string]*launchdJobFixture{labelOpenShellGateway: job}
 	return "user/" + strconv.Itoa(uid)
-}
-
-func replaceGatewayInode(t *testing.T, h *osHost) {
-	t.Helper()
-	path := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path+".new", data, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(path+".new", path); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func TestMacOSUserDomainCodeSigningStatusVerifyRepair(t *testing.T) {

@@ -15,21 +15,21 @@ import (
 func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, int, error) {
 	var settings map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
-		return nil, 0, fmt.Errorf("Claude settings must be a JSON object: %v", err)
+		return nil, 0, fmt.Errorf("the Claude settings must be a JSON object: %v", err)
 	}
 	var events map[string]json.RawMessage
 	if err := json.Unmarshal(settings["hooks"], &events); err != nil {
 		if len(settings["hooks"]) == 0 {
 			return raw, 0, nil
 		}
-		return nil, 0, fmt.Errorf("Claude hooks must be a JSON object: %w", err)
+		return nil, 0, fmt.Errorf("the Claude hooks must be a JSON object: %w", err)
 	}
 	removed := 0
 	for event, value := range events {
 		eventRemoved := 0
 		var groups []json.RawMessage
 		if err := json.Unmarshal(value, &groups); err != nil {
-			return nil, 0, fmt.Errorf("Claude hooks.%s must be an array: %w", event, err)
+			return nil, 0, fmt.Errorf("the Claude hooks.%s must be an array: %w", event, err)
 		}
 		keptGroups := make([]json.RawMessage, 0, len(groups))
 		for _, group := range groups {
