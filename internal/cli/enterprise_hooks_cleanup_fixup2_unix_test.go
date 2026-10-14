@@ -9,11 +9,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -266,5 +268,35 @@ func TestStandaloneCleanupRehomedStrayReceiptKeepsRow(t *testing.T) {
 				t.Fatalf("remove-all lost unverified receipt: report %+v, skip %+v", report, skip)
 			}
 		})
+	}
+}
+
+func TestTypedRehomeLongUnverifiedReceiptKeepsRemedy(t *testing.T) {
+	oldHome, currentHome := longRehomeReportTestPath("old"), longRehomeReportTestPath("new")
+	receipt := filepath.Join(currentHome, ".defenseclaw", "connector_backups", "opencode", "notes.json")
+	report := enterpriseHookWorkerTargetResult{Unverified: enterpriseHookWorkerUnverifiedReason(
+		fmt.Errorf("load managed backup %s: %s", receipt, strings.Repeat("invalid receipt ", 100)))}
+	if err := validateEnterpriseHookWorkerRemoveReport(report); err != nil {
+		t.Fatalf("worker reason is invalid: %v", err)
+	}
+	path, problem := enterpriseHookCleanupReportProblem(report, currentHome, true)
+	changed := &enterpriseHookTargetHomeChangedError{name: "sample-user", home: oldHome, directoryHome: currentHome}
+	err := newEnterpriseHookCleanupUnverifiedError(changed,
+		enterpriseHookUserCleanup{Connector: "opencode", User: "sample-user"}, currentHome,
+		filepath.Join(currentHome, ".defenseclaw"), path, problem, report)
+	for _, tc := range []struct {
+		name string
+		max  int
+		text string
+	}{
+		{"ledger and guardian", enterpriseHookUserCleanupErrorMax, enterpriseHookUserCleanupFailureText(err)},
+		{"remove-all", 768, enterpriseHookRehomedReportReason(err)},
+	} {
+		if len(tc.text) > tc.max || !utf8.ValidString(tc.text) ||
+			!strings.Contains(tc.text, "notes.json") ||
+			!strings.Contains(tc.text, "delete the stale copied receipt under") ||
+			!strings.Contains(tc.text, "rerun") {
+			t.Fatalf("%s lost the receipt or remedy (%d bytes): %q", tc.name, len(tc.text), tc.text)
+		}
 	}
 }
