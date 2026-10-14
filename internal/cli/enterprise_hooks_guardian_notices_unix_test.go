@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ import (
 func TestGuardianRecordsAgentConfigNoticesInTheirOwnFile(t *testing.T) {
 	dataDir := t.TempDir()
 	path := filepath.Join(dataDir, hookGuardianNoticesFile)
-	writeEnterpriseHookGuardianNotices(dataDir, []enterpriseHookGuardianNotice{
+	writeEnterpriseHookGuardianNotices(io.Discard, dataDir, []enterpriseHookGuardianNotice{
 		{User: "erin", Connector: "hermes", AgentConfig: connector.AgentConfigSettingsLost},
 		{User: "bob", Connector: "devin", AgentConfig: "\x1b[31m not a code"},
 	})
@@ -37,11 +38,11 @@ func TestGuardianRecordsAgentConfigNoticesInTheirOwnFile(t *testing.T) {
 		t.Fatalf("record = %s (%v)", data, err)
 	}
 	// An unchanged set is not rewritten; a pass without notices removes it.
-	writeEnterpriseHookGuardianNotices(dataDir, []enterpriseHookGuardianNotice{{User: "erin", Connector: "hermes", AgentConfig: connector.AgentConfigSettingsLost}})
+	writeEnterpriseHookGuardianNotices(io.Discard, dataDir, []enterpriseHookGuardianNotice{{User: "erin", Connector: "hermes", AgentConfig: connector.AgentConfigSettingsLost}})
 	if again, _ := os.ReadFile(path); string(again) != string(data) {
 		t.Fatalf("an unchanged set was rewritten:\n%s\n%s", data, again)
 	}
-	writeEnterpriseHookGuardianNotices(dataDir, nil)
+	writeEnterpriseHookGuardianNotices(io.Discard, dataDir, nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("the record stayed after a pass without notices: %v", err)
 	}

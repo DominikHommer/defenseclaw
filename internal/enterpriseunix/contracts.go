@@ -191,10 +191,6 @@ const codeAgentSettingsNotRestored = "agent_settings_not_restored"
 // (hookGuardianNoticesFile in internal/cli).
 const guardianNoticesFile = "hook_guardian_notices.json"
 
-// agentConfigFiles names, per connector, the agent config the notices are
-// about.
-var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin": "Devin config.json"}
-
 // agentConfigNotices words the guardian's agent config notices, one per
 // account and connector, sorted. A protected target whose agent config lost
 // the account's own settings is that account's to fix: a warning, not a
@@ -218,24 +214,9 @@ func (l *lifecycle) agentConfigNotices() []string {
 	}
 	var out []string
 	for _, target := range record.Targets {
-		file, ok := agentConfigFiles[target.Connector]
-		if !ok {
-			continue
+		if message, ok := connector.AgentConfigNotice(target.Connector, boundedGuardianReason(target.User), target.AgentConfig); ok {
+			out = append(out, message)
 		}
-		var what string
-		switch target.AgentConfig {
-		case connector.AgentConfigSettingsLost:
-			what = "went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: that user must enter the account's own settings in it (model, provider) again"
-		case connector.AgentConfigRecreatedHooksOnly:
-			what = "went missing and DefenseClaw had no copy of it, so the guardian recreated it with DefenseClaw's hooks only: if that user had settings in it, they must be entered again"
-		case connector.AgentConfigRestoredLastGood:
-			what = "went missing; the guardian put back DefenseClaw's copy of it from when it last verified, with that user's settings, and changes made after that copy are not in it"
-		case connector.AgentConfigRestoredPristine:
-			what = "went missing; the guardian put back the file as DefenseClaw's first setup found it, and changes made after that are not in it"
-		default:
-			continue
-		}
-		out = append(out, fmt.Sprintf("%s for user %s: the %s %s", target.Connector, boundedGuardianReason(target.User), file, what))
 	}
 	sort.Strings(out)
 	return out

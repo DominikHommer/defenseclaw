@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -38,8 +37,10 @@ import (
 // it (AgentConfigStatus) and the enterprise status and verify warn about it
 // until the account has settings in the file again.
 //
-// Linux and macOS only: the Windows managed runtime's rollback removes only
-// the names it knows in connector_backups\<connector> and refuses any other.
+// Every OS keeps them: the Windows managed runtime's rollback of a first
+// install, which removes only the names it knows in
+// connector_backups\<connector>, knows theirs (AgentConfigBackupLeaves,
+// GAP-0588).
 
 // Where a missing agent config was put back from.
 const (
@@ -52,9 +53,6 @@ const (
 )
 
 const agentConfigCopyVersion = 1
-
-// agentConfigKeepsCopy is false where no copy is kept (a seam for tests).
-var agentConfigKeepsCopy = runtime.GOOS != "windows"
 
 // agentConfigSpec is a connector whose hook config is the agent's own
 // settings file.
@@ -112,6 +110,18 @@ func (s agentConfigSpec) copyPath(dataDir string) string {
 func (s agentConfigSpec) noticePath(dataDir string) string {
 	record := managedFileBackupPath(dataDir, s.connector, s.logical)
 	return strings.TrimSuffix(record, ".json") + ".restore-notice"
+}
+
+// AgentConfigBackupLeaves names the files the agent config of connectorName
+// keeps in connector_backups/<connector> beside its managed backup record
+// (the last known good copy and the restore notice); none for a connector
+// without one.
+func AgentConfigBackupLeaves(connectorName string) []string {
+	spec, ok := agentConfigSpecFor(connectorName)
+	if !ok {
+		return nil
+	}
+	return []string{filepath.Base(spec.copyPath("")), filepath.Base(spec.noticePath(""))}
 }
 
 // agentConfigMaxBytes bounds the files read and kept.
@@ -196,9 +206,6 @@ func (s agentConfigSpec) readCopy(dataDir, configPath string) (agentConfigCopy, 
 // after a loss, say) does not replace a copy that has them, so the next loss
 // still puts them back.
 func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
-	if !agentConfigKeepsCopy {
-		return nil
-	}
 	data, info, err := readManagedTarget(configPath)
 	if err != nil || info == nil {
 		return err
@@ -238,9 +245,6 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 // a file that is there changes nothing. It returns where the file came from
 // ("" when it did nothing).
 func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error) {
-	if !agentConfigKeepsCopy {
-		return "", nil
-	}
 	if _, err := os.Lstat(configPath); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return "", nil // there, a dangling link or unreadable: not a missing file
 	}
@@ -384,10 +388,10 @@ func ValidAgentConfigStatus(code string) bool {
 // the settings DefenseClaw saw (AgentConfigSettingsLost). After a verify
 // that passed the file is kept as the last known good copy, and a notice
 // that no longer applies is removed. "" when there is nothing to report,
-// for other connectors and on Windows.
+// for other connectors.
 func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, refresh bool) string {
 	spec, ok := agentConfigSpecFor(connectorName)
-	if !ok || !agentConfigKeepsCopy {
+	if !ok {
 		return ""
 	}
 	configPath := spec.path(opts)
@@ -419,4 +423,33 @@ func AgentConfigStatus(connectorName string, opts SetupOpts, since time.Time, re
 		_ = spec.recordCopy(opts.DataDir, configPath)
 	}
 	return status
+}
+
+// agentConfigFiles names, per connector, the agent config a notice is about.
+var agentConfigFiles = map[string]string{"hermes": "Hermes config.yaml", "devin": "Devin config.json"}
+
+// AgentConfigNotice words a guardian's agent config notice for the
+// administrator's status and verify (warning agent_settings_not_restored):
+// what happened to the agent config of connectorName for user (code, an
+// AgentConfigStatus code). False for a code or connector it does not word,
+// which the per-user side may have written: only the known ones are.
+func AgentConfigNotice(connectorName, user, code string) (string, bool) {
+	file, ok := agentConfigFiles[connectorName]
+	if !ok {
+		return "", false
+	}
+	var what string
+	switch code {
+	case AgentConfigSettingsLost:
+		what = "went missing and DefenseClaw had no copy of it to put back, so it holds DefenseClaw's hooks only: that user must enter the account's own settings in it (model, provider) again"
+	case AgentConfigRecreatedHooksOnly:
+		what = "went missing and DefenseClaw had no copy of it, so the guardian recreated it with DefenseClaw's hooks only: if that user had settings in it, they must be entered again"
+	case AgentConfigRestoredLastGood:
+		what = "went missing; the guardian put back DefenseClaw's last copy of it, with that user's settings, and changes made after that copy are not in it"
+	case AgentConfigRestoredPristine:
+		what = "went missing; the guardian put back the file as DefenseClaw's first setup found it, and changes made after that are not in it"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("%s for user %s: the %s %s", connectorName, user, file, what), true
 }

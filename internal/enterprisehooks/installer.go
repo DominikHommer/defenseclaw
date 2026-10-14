@@ -124,6 +124,11 @@ type InstallResult struct {
 	AgentConfig string `json:"-"`
 }
 
+// agentConfigReadOnVerify reports a guardian that verifies the accounts'
+// agent configs without writing in their data folders: the Windows
+// standalone one (agent_config_verify_windows.go).
+var agentConfigReadOnVerify = func() bool { return false }
+
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
 // policy registration. Per-user runtime files are intentionally retained as
 // recovery evidence; the protected SID allow-list makes them inert for a
@@ -324,12 +329,18 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), lock.RawAgentVersion),
 			}
-			if standalonePerUserRepair(uid) {
+			switch {
+			case standalonePerUserRepair(uid):
 				// The agent config that verified (Hermes, Devin) is the
 				// last known good copy; one recreated without the
 				// account's settings stays reported until they are back
 				// (GAP-0564).
 				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, true)
+			case agentConfigReadOnVerify():
+				// The Windows standalone guardian verifies for the account:
+				// it reads what to report and writes nothing (the copy is
+				// kept by its setup, GAP-0588).
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, false)
 			}
 			return nil
 		})
