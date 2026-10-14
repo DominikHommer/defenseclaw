@@ -27,7 +27,7 @@ func classifyGuardianTargetLstat(info fs.FileInfo, err error) (guardianTargetLst
 		return guardianTargetLstatDecision{}, err
 	}
 	if info == nil {
-		return guardianTargetLstatDecision{}, errors.New("Lstat returned no file information")
+		return guardianTargetLstatDecision{}, errors.New("lstat returned no file information")
 	}
 	mode := info.Mode()
 	if mode.IsRegular() {
