@@ -93,11 +93,11 @@ type agentConfigNotice struct {
 	Version int    `json:"version"`
 	Path    string `json:"path"`
 	Source  string `json:"source"`
-	// CopiedAt is when the copy put back was taken.
-	CopiedAt string `json:"copied_at,omitempty"`
 	// SettingsLost is set when DefenseClaw saw settings of the account in the
 	// file (before its first setup, or in a copy that no longer reads) and
-	// could not put them back.
+	// could not put them back. It stays set across another loss of the file
+	// until the account has settings in it again: the file recreated without
+	// them is then the copy, which holds DefenseClaw's hooks only.
 	SettingsLost bool   `json:"settings_lost,omitempty"`
 	At           string `json:"at"`
 }
@@ -191,7 +191,10 @@ func (s agentConfigSpec) readCopy(dataDir, configPath string) (agentConfigCopy, 
 }
 
 // recordCopy keeps the agent config as it is now as the last known good
-// copy. A missing or unparseable file is not kept.
+// copy. A missing or unparseable file is not kept, and a file without the
+// account's settings (DefenseClaw's hooks only, or empty: one recreated
+// after a loss, say) does not replace a copy that has them, so the next loss
+// still puts them back.
 func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 	if !agentConfigKeepsCopy {
 		return nil
@@ -206,7 +209,8 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 	if _, ok := s.keys(data); !ok {
 		return nil
 	}
-	if existing, ok := s.readCopy(dataDir, configPath); ok && bytes.Equal(existing.Bytes, data) {
+	if existing, ok := s.readCopy(dataDir, configPath); ok &&
+		(bytes.Equal(existing.Bytes, data) || (s.hasSettings(existing.Bytes) && !s.hasSettings(data))) {
 		return nil
 	}
 	body, err := json.Marshal(agentConfigCopy{
@@ -228,9 +232,11 @@ func (s agentConfigSpec) recordCopy(dataDir, configPath string) error {
 
 // seedMissing puts back an agent config that went missing after DefenseClaw
 // managed it, before setup registers the hooks in it again: the last known
-// good copy, else the file as DefenseClaw's first setup found it. A first
-// setup (no managed backup record) or a file that is there changes nothing.
-// It returns where the file came from ("" when it did nothing).
+// good copy, else the file as DefenseClaw's first setup found it. The copy
+// is bound to the file's path, so it is put back even when the managed
+// backup record is gone. A first setup (neither the record nor the copy) or
+// a file that is there changes nothing. It returns where the file came from
+// ("" when it did nothing).
 func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error) {
 	if !agentConfigKeepsCopy {
 		return "", nil
@@ -238,33 +244,47 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 	if _, err := os.Lstat(configPath); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return "", nil // there, a dangling link or unreadable: not a missing file
 	}
+	copy, haveCopy := s.readCopy(dataDir, configPath)
 	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, s.connector, s.logical))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+	switch {
+	case err == nil:
+		if _, err := validateManagedFileBackupTarget(backup, s.connector, s.logical, configPath); err != nil {
+			return "", err
 		}
+	case !os.IsNotExist(err):
 		return "", err
+	case !haveCopy:
+		return "", nil // a first setup
 	}
-	if _, err := validateManagedFileBackupTarget(backup, s.connector, s.logical, configPath); err != nil {
-		return "", err
-	}
+	haveRecord := err == nil
 	notice := agentConfigNotice{Version: agentConfigCopyVersion, Path: configPath, Source: AgentConfigHooksOnly,
 		At: time.Now().UTC().Format(time.RFC3339)}
 	var seed []byte
 	mode := os.FileMode(0o600)
-	if copy, ok := s.readCopy(dataDir, configPath); ok {
-		seed, notice.Source, notice.CopiedAt = copy.Bytes, AgentConfigFromLastGood, copy.SavedAt
-	} else if _, ok := s.keys(backup.PristineBytes); backup.Existed && ok && len(bytes.TrimSpace(backup.PristineBytes)) > 0 {
-		seed, notice.Source, notice.CopiedAt = backup.PristineBytes, AgentConfigFromPristine, backup.CapturedAt
-		if perm := os.FileMode(backup.Mode).Perm(); perm != 0 {
-			mode = perm
+	pristine := haveRecord && backup.Existed && len(bytes.TrimSpace(backup.PristineBytes)) > 0
+	switch {
+	case haveCopy:
+		seed, notice.Source = copy.Bytes, AgentConfigFromLastGood
+	case pristine:
+		if _, ok := s.keys(backup.PristineBytes); ok {
+			seed, notice.Source = backup.PristineBytes, AgentConfigFromPristine
+			if perm := os.FileMode(backup.Mode).Perm(); perm != 0 {
+				mode = perm
+			}
 		}
+	}
+	if previous, ok := s.readNotice(dataDir); ok && previous.SettingsLost && sameManagedTargetPath(previous.Path, configPath) &&
+		(seed == nil || !s.hasSettings(seed)) {
+		// The file was lost before without the account's settings, and they
+		// are not back: what is put back now (the copy taken of the file
+		// recreated then) has none either.
+		notice.SettingsLost = true
 	}
 	if seed == nil {
 		// DefenseClaw saw settings it cannot put back: a file before its
 		// first setup, or a copy that is there but no longer reads.
 		_, copyErr := os.Lstat(s.copyPath(dataDir))
-		notice.SettingsLost = (backup.Existed && len(bytes.TrimSpace(backup.PristineBytes)) > 0) || copyErr == nil
+		notice.SettingsLost = notice.SettingsLost || pristine || copyErr == nil
 	} else if err := atomicWriteFile(configPath, seed, mode); err != nil {
 		return "", fmt.Errorf("put back %s %s: %w", s.label, configPath, err)
 	}
