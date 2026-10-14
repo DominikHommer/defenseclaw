@@ -136,16 +136,26 @@ func assertUpgradeFloorView(t *testing.T, f *sandboxDaemonFixture, ctl *managedS
 		t.Fatal(err)
 	}
 	assertOrganizationPolicy(t, "the manager's stopped view", *raw)
+	assertUpgradePolicyFields(t, "the manager's stopped view", *raw)
 	sb, err := ctl.Get(context.Background(), "dc-claude-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertOrganizationPolicy(t, "stopped status", *sb)
+	assertUpgradePolicyFields(t, "stopped status", *sb)
 	list, err := ctl.List(context.Background())
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list = %+v, %v", list, err)
 	}
 	assertOrganizationPolicy(t, "stopped list", list[0])
+	assertUpgradePolicyFields(t, "stopped list", list[0])
+}
+
+func assertUpgradePolicyFields(t *testing.T, what string, v sandboxapi.Sandbox) {
+	t.Helper()
+	if v.Pack != "balanced" || v.Profile != "balanced" || v.NetworkMode != "allowlist" || v.Approvals != "triage" {
+		t.Fatalf("%s policy = %s/%s/%s/%s, want balanced/balanced/allowlist/triage", what, v.Pack, v.Profile, v.NetworkMode, v.Approvals)
+	}
 }
 
 func TestSandboxDaemonUpgradeFloorFromRC1Registration(t *testing.T) {
@@ -210,7 +220,7 @@ func assertUpgradeConfirming(t *testing.T, f *sandboxDaemonFixture, ctl *managed
 			t.Fatal(err)
 		}
 		if !slices.Contains(v.Warnings, sandboxConfirmingNote) ||
-			v.Profile != "balanced" || v.NetworkMode != "allowlist" || v.Approvals != "triage" ||
+			v.Pack != "balanced" || v.Profile != "balanced" || v.NetworkMode != "allowlist" || v.Approvals != "triage" ||
 			slices.ContainsFunc(v.Violations, closedFloorDeny) {
 			t.Fatalf("unconfirmed status = %+v", v)
 		}
