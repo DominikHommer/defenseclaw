@@ -1939,7 +1939,7 @@ def test_a_failed_audit_quarantine_keeps_the_store_with_its_wal(tmp_path: Path, 
     script.write_text(
         "set -euo pipefail\nwarn() { :; }\n"
         + f'mv() {{ [[ "$1" == "{home / failing}" ]] && return 1; command mv "$@"; }}\n'
-        + _install_sh_functions("quarantine_rolled_back_audit")
+        + _install_sh_functions("move_audit_store", "quarantine_rolled_back_audit")
         + f'DEFENSECLAW_HOME="{home}" back_to=0.8.10 QUARANTINED=""\n'
         + 'quarantine_rolled_back_audit && echo moved || echo "rc=$?"\n',
         encoding="utf-8",
@@ -1967,7 +1967,7 @@ def test_an_undone_rollback_puts_the_saved_audit_store_back_over_a_new_one(tmp_p
     script = tmp_path / "undo.sh"
     script.write_text(
         "set -euo pipefail\n"
-        + _install_sh_functions("undo_rollback")
+        + _install_sh_functions("move_audit_store", "undo_rollback")
         + "info() { :; }\nwarn() { :; }\nerr() { :; }\nok() { :; }\n"
         + "stop_gateway() { :; }\nswap_with_previous() { return 0; }\nstart_gateway() { return 0; }\nwarn_not_started() { :; }\n"
         + f'DEFENSECLAW_HOME="{home}" PREVIOUS="{home / "previous"}" BIN_DIR="{tmp_path / "bin"}" LOG=/dev/null\n'
@@ -1983,3 +1983,77 @@ def test_an_undone_rollback_puts_the_saved_audit_store_back_over_a_new_one(tmp_p
     assert (data / "audit.db-wal").read_text(encoding="utf-8") == "0.x wal"
     aside = list(data.glob("audit.db.failed-start-*"))
     assert [path.read_text(encoding="utf-8") for path in aside] == ["new"]
+
+
+@pytest.mark.parametrize(
+    "failing",
+    ["", "audit.db", "audit.db-wal", "audit.db.corrupt-fixture", "audit.db.corrupt-fixture-wal", "audit.db.corrupt-fixture-shm"],
+)
+def test_an_undone_rollback_moves_each_audit_store_as_one_unit(tmp_path: Path, failing: str) -> None:
+    # rel-1-0-2:GAP-0492 (the install.sh side of GAP-1398): each file moved on
+    # its own (|| true), so a move that failed midway left the saved store at
+    # audit.db without its WAL, or with the new store's WAL.
+    home = tmp_path / "dc"
+    data = home / "previous" / "data"
+    data.mkdir(parents=True)
+    kept = data / "audit.db.corrupt-fixture"
+    saved = {"": "0.x history", "-wal": "0.x wal", "-shm": "0.x shm"}
+    for suffix, body in saved.items():
+        Path(f"{kept}{suffix}").write_text(body, encoding="utf-8")
+    new = {"": "new", "-wal": "new wal"}
+    for suffix, body in new.items():
+        Path(f"{data / 'audit.db'}{suffix}").write_text(body, encoding="utf-8")
+    script = tmp_path / "undo.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + _install_sh_functions("move_audit_store", "undo_rollback")
+        + 'info() { :; }\nwarn() { echo "warn: $*"; }\nerr() { :; }\nok() { :; }\n'
+        + "stop_gateway() { :; }\nswap_with_previous() { return 0; }\nstart_gateway() { return 0; }\nwarn_not_started() { :; }\n"
+        + f'mv() {{ [[ "$1" == "{data / failing if failing else "none"}" ]] && return 1; command mv "$@"; }}\n'
+        + f'DEFENSECLAW_HOME="{home}" PREVIOUS="{home / "previous"}" BIN_DIR="{tmp_path / "bin"}" LOG=/dev/null\n'
+        + f'current=1.0.2 back_to=0.8.10 saved_was_running=false QUARANTINED="{home / kept.name}"\n'
+        + 'undo_rollback "The gateway of DefenseClaw 0.8.10 did not start"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run([str(script)], tmp_path)
+
+    def store_at(path: Path, store: dict[str, str]) -> bool:
+        return all(Path(f"{path}{suffix}").read_text(encoding="utf-8") == body for suffix, body in store.items())
+
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    fresh = [p for p in data.glob("audit.db.failed-start-*") if not p.name.endswith(("-wal", "-shm"))]
+    if not failing:
+        assert store_at(data / "audit.db", saved) and len(fresh) == 1 and store_at(fresh[0], new)
+        assert not list(data.glob("audit.db.corrupt-*")) and "is still" not in proc.stdout
+        return
+    assert store_at(kept, saved), sorted(p.name for p in data.iterdir())
+    assert f"warn: The saved 0.8.10 audit store is still {kept}" in proc.stdout
+    if failing.startswith("audit.db.corrupt-"):
+        assert not any(Path(f"{data / 'audit.db'}{suffix}").exists() for suffix in ("", "-wal", "-shm"))
+        assert len(fresh) == 1 and store_at(fresh[0], new)
+    else:
+        assert store_at(data / "audit.db", new) and fresh == []
+
+
+def test_a_failed_audit_quarantine_never_replaces_a_file(tmp_path: Path) -> None:
+    # rel-1-0-2:GAP-0491: mv replaces an existing target, so a left-over
+    # <moved>-wal would have been overwritten by the store's WAL.
+    home = tmp_path / "dc"
+    home.mkdir()
+    for suffix, body in {"": "db", "-wal": "wal", "-shm": "shm"}.items():
+        Path(f"{home / 'audit.db'}{suffix}").write_text(body, encoding="utf-8")
+    (home / "aside-shm").write_text("other", encoding="utf-8")
+    script = tmp_path / "move.sh"
+    script.write_text(
+        'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("move_audit_store")
+        + f'move_audit_store "{home / "audit.db"}" "{home / "aside"}" && echo moved || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert "rc=1" in out
+    assert [Path(f"{home / 'audit.db'}{s}").read_text(encoding="utf-8") for s in ("", "-wal", "-shm")] == ["db", "wal", "shm"]
+    assert sorted(p.name for p in home.iterdir()) == ["aside-shm", "audit.db", "audit.db-shm", "audit.db-wal"]
