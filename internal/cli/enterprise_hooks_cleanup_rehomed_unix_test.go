@@ -220,6 +220,80 @@ func TestStandaloneCleanupDropsGoneOrReassignedAccountsWithoutWorker(t *testing.
 	}
 }
 
+func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
+	for _, oldPresent := range []bool{false, true} {
+		name := "recorded-home-gone"
+		if oldPresent {
+			name = "recorded-home-kept"
+		}
+		t.Run(name, func(t *testing.T) {
+			uid, gid := os.Getuid()+1, os.Getgid()
+			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+				"sample-user": {Name: "sample-user", UID: uid, GID: gid, Home: ""},
+			}}
+			f := newStandaloneFixture(t, resolver)
+			oldHome := filepath.Join(f.homes, "sample-user-old")
+			if oldPresent {
+				oldHome = f.home(t, "sample-user-old", 0o700)
+			}
+			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: uid, UserHome: oldHome, RecordedAt: "2026-10-14T00:00:00Z"}
+			var attemptLog bytes.Buffer
+			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &attemptLog, entry, resolver)
+			if oldPresent {
+				var kept *enterpriseHookCleanupHomeKeptError
+				if outcome != enterpriseHookUserCleanupFailed || !errors.As(err, &kept) {
+					t.Fatalf("empty directory home with kept recorded home = %v, %v", outcome, err)
+				}
+			} else if outcome != enterpriseHookUserCleanupDone || !errors.Is(err, errEnterpriseHookCleanupHomeGone) ||
+				strings.Count(attemptLog.String(), "home gone:") != 1 {
+				t.Fatalf("empty directory home with gone recorded home = %v, %v, log %q", outcome, err, attemptLog.String())
+			}
+			if len(f.requests) != 0 {
+				t.Fatalf("an account without a directory home ran a worker: %+v", f.requests)
+			}
+			f.writeManifest(t)
+			now := time.Now()
+			if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{entry}, now); err != nil {
+				t.Fatal(err)
+			}
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			report := enterpriseHooksRemoveAllReport{}
+			skip := runEnterpriseHookPendingCleanups(cmd, &report, map[int]*enterpriseHookWorkerJob{})
+			if len(report.Pending) != 1 || len(report.Failed) != 0 || report.Removed != 0 {
+				t.Fatalf("empty-home remove-all report = %+v", report)
+			}
+			if oldPresent && skip[uid] != enterpriseHookPurgeSkipKeptHome || !oldPresent && skip[uid] != "" {
+				t.Fatalf("empty-home purge skip = %+v", skip)
+			}
+			manifest, err := enterprisehooks.LoadManifest(f.manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var guardianLog bytes.Buffer
+			if err := reconcileEnterpriseHookStandaloneUnixCleanups(context.Background(), &guardianLog, manifest,
+				enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}, nil, resolver, now); err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if oldPresent {
+				if len(remaining) != 1 || !strings.Contains(guardianLog.String(), "will retry") {
+					t.Fatalf("kept recorded home was retired: %+v, log %q", remaining, guardianLog.String())
+				}
+			} else if len(remaining) != 0 || strings.Count(guardianLog.String(), "home gone:") != 1 ||
+				strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
+				t.Fatalf("gone recorded home was not retired once: %+v, log %q", remaining, guardianLog.String())
+			}
+			if len(f.requests) != 0 {
+				t.Fatalf("empty-home reconcile ran a worker: %+v", f.requests)
+			}
+		})
+	}
+}
+
 func TestRemoveAllReportsTrustedRehomeRemovedAndUnsafeRehomeFailed(t *testing.T) {
 	for _, trusted := range []bool{true, false} {
 		name := "trusted"

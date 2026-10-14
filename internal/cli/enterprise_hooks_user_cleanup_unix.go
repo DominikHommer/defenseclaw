@@ -283,6 +283,32 @@ func enterpriseHookDirectoryNoHome(home string) bool {
 	return false
 }
 
+// The standalone resolver treats an empty directory home as an omitted
+// manifest home. For a recorded cleanup, capture the directory's actual
+// answer so that an empty home follows the existing no-home retirement or
+// kept-home path instead of running in the recorded home.
+type enterpriseHookCleanupHomeResolver struct {
+	unixidentity.Resolver
+	directoryHome string
+	lookedUp      bool
+}
+
+func (r *enterpriseHookCleanupHomeResolver) LookupUser(name string) (unixidentity.Account, error) {
+	account, err := r.Resolver.LookupUser(name)
+	if err == nil {
+		r.directoryHome, r.lookedUp = account.Home, true
+	}
+	return account, err
+}
+
+func (r *enterpriseHookCleanupHomeResolver) LookupUID(uid int) (unixidentity.Account, error) {
+	account, err := r.Resolver.LookupUID(uid)
+	if err == nil {
+		r.directoryHome, r.lookedUp = account.Home, true
+	}
+	return account, err
+}
+
 // enterpriseHookCleanupHomeKeptError is a cleanup of an account the
 // directory now gives no home (it looks removed) whose recorded home is not
 // gone: its folder was kept (sysadminctl -deleteUser -keepHome, dscl .
@@ -335,12 +361,19 @@ func attemptEnterpriseHookStandaloneUnixCleanupResult(
 ) (enterpriseHookUserCleanupOutcome, error, bool) {
 	home := filepath.Clean(strings.TrimSpace(entry.UserHome))
 	uid := entry.UID
+	homeResolver := &enterpriseHookCleanupHomeResolver{Resolver: resolver}
 	account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(
 		enterprisehooks.ManifestTarget{User: strings.TrimSpace(entry.User), UserHome: home, UID: &uid},
-		resolver,
+		homeResolver,
 	)
 	var homeChanged *enterpriseHookTargetHomeChangedError
 	errors.As(err, &homeChanged)
+	if err == nil && pendingReason == "" && homeResolver.lookedUp &&
+		strings.TrimSpace(homeResolver.directoryHome) == "" && filepath.IsAbs(home) {
+		homeChanged = &enterpriseHookTargetHomeChangedError{
+			name: firstNonEmpty(account.User, strings.TrimSpace(entry.User)), home: home, directoryHome: homeResolver.directoryHome,
+		}
+	}
 	switch {
 	case errors.Is(err, errEnterpriseHookTargetNotFound), errors.Is(err, errEnterpriseHookTargetUIDChanged):
 		fmt.Fprintf(log, "[hook-guardian] %s: %v; nothing to remove as that user\n", enterpriseHookUserCleanupLabel(entry), err)
