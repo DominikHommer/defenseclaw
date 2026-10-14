@@ -428,6 +428,15 @@ func TestSandboxImageStoreRefusesForeignOwnerAndOversizeFile(t *testing.T) {
 	}
 }
 
+func TestSandboxDockerReasonNamesTimeoutAndWithholdsSensitiveOutput(t *testing.T) {
+	if got := sandboxDockerReason(CommandResult{}, context.DeadlineExceeded); got != "Docker timed out" {
+		t.Errorf("timeout reason = %q", got)
+	}
+	if got := sandboxDockerReason(CommandResult{Stderr: []byte("password=sample-value\nmore")}, errors.New("exit 1")); got != "Docker command failed (details withheld)" {
+		t.Errorf("sensitive reason = %q", got)
+	}
+}
+
 func TestSandboxImageCleanupNonPurgeAndDarwinDoNotUseRootDocker(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {

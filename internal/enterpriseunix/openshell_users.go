@@ -1104,7 +1104,7 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			// Purge removed those files independently, so describe the
 			// resources that may remain instead of repeating that step.
 			if env.GOOS == "linux" {
-				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; Docker images are reported separately", a.Name))
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; any Docker images that could not be removed are reported separately", a.Name))
 			} else {
 				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
 			}

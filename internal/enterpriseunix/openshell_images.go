@@ -196,6 +196,18 @@ func sandboxDockerReason(result CommandResult, err error) string {
 	return line
 }
 
+func (e *Env) runSandboxDocker(ctx context.Context, docker string, args ...string) (CommandResult, error) {
+	// ExecRunner may report a killed process as an exit error without its
+	// deadline. Keep the outer deadline so the warning can name the timeout.
+	runCtx, cancel := context.WithTimeout(ctx, imageRemoveTimeout)
+	defer cancel()
+	out, err := e.longRunner(imageRemoveTimeout).Run(runCtx, docker, args...)
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return out, context.DeadlineExceeded
+	}
+	return out, err
+}
+
 // purgeAccountSandboxImages removes only this account's labelled Docker
 // image tags. Linux's managed Docker is host-wide; on macOS Docker Desktop
 // belongs to the account, so the existing account-run teardown handles it.
@@ -227,7 +239,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 	}
 	args := []string{"image", "ls", "--filter", "label=" + image.LabelSandboxImage + "=1", "--filter", "label=" + image.LabelOwner + "=" + store.Owner,
 		"--no-trunc", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}"}
-	listed, err := e.longRunner(imageRemoveTimeout).Run(ctx, docker, args...)
+	listed, err := e.runSandboxDocker(ctx, docker, args...)
 	if err != nil {
 		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: %s; as root run `%s`, then `docker image rm <tag>` for each listed tag", a.Name, sandboxDockerReason(listed, err), listCommand))
 		return
@@ -259,7 +271,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 		}
 		seen[parts[0]] = true
 		ref, id := parts[0], parts[1]
-		inspected, inspectErr := e.longRunner(imageRemoveTimeout).Run(ctx, docker, "image", "inspect", "--format", "{{json .}}", ref)
+		inspected, inspectErr := e.runSandboxDocker(ctx, docker, "image", "inspect", "--format", "{{json .}}", ref)
 		if inspectErr != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left DefenseClaw sandbox image %s (%s) of user %s: could not inspect it: %s; as root run `docker image rm %s` after checking `%s`", ref, id[7:19], a.Name, sandboxDockerReason(inspected, inspectErr), ref, listCommand))
 			continue
@@ -292,7 +304,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 	})
 	var removed []string
 	for _, candidate := range candidates {
-		out, err := e.longRunner(imageRemoveTimeout).Run(ctx, docker, "image", "rm", candidate.tag)
+		out, err := e.runSandboxDocker(ctx, docker, "image", "rm", candidate.tag)
 		if err != nil {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left DefenseClaw sandbox image %s (%s) of user %s: %s; as root run `docker image rm %s` (list this account's images with `%s`)", candidate.tag, candidate.id[7:19], a.Name, sandboxDockerReason(out, err), candidate.tag, listCommand))
 			continue
