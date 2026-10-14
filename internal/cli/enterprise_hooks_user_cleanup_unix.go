@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -230,12 +231,40 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 	return saveEnterpriseHookUserCleanups(cfg.DataDir, remaining, now)
 }
 
+// errEnterpriseHookCleanupHomeGone comes with a done outcome when the
+// cleanup was retired because the home it was recorded for is gone:
+// nothing was removed, and nothing is left to remove.
+var errEnterpriseHookCleanupHomeGone = errors.New("the recorded home no longer exists")
+
+// enterpriseHookRecordedHomeGone reports a recorded home that definitively
+// does not exist: its parent directory answers and the home itself is not
+// there. A home that does not answer in time, or whose parent is missing
+// too (an unmounted volume), is not gone.
+var enterpriseHookRecordedHomeGone = func(home string) bool {
+	home = filepath.Clean(home)
+	if !filepath.IsAbs(home) || home == filepath.Dir(home) {
+		return false
+	}
+	parent, err := enterprisehooks.BoundedLstat(filepath.Dir(home), enterpriseHookHomeCheckTimeout)
+	if err != nil || !parent.IsDir() {
+		return false
+	}
+	_, err = enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 // attemptEnterpriseHookStandaloneUnixCleanup removes one registration in
 // the per-user worker, with the user's credentials. An unavailable home or
 // directory is pending. An account that no longer exists (or whose name now
 // belongs to another uid) leaves no one to act as and no one whose agent
 // runs those hooks, so its entry is dropped: the enumerator revokes such a
-// row only after repeated definitive "no such account" answers.
+// row only after repeated definitive "no such account" answers. So is an
+// entry whose recorded home is gone while the directory now gives the
+// account another home (a removed macOS AD mobile account, whose directory
+// home is /var/empty): the registration went with that home, and a retry
+// could never succeed (GAP-0543); it is done with
+// errEnterpriseHookCleanupHomeGone, so an uninstall reports it with a
+// warning and goes on (GAP-0553).
 func attemptEnterpriseHookStandaloneUnixCleanup(
 	ctx context.Context,
 	log io.Writer,
@@ -248,10 +277,15 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 		enterprisehooks.ManifestTarget{User: strings.TrimSpace(entry.User), UserHome: home, UID: &uid},
 		resolver,
 	)
+	var homeChanged *enterpriseHookTargetHomeChangedError
 	switch {
 	case errors.Is(err, errEnterpriseHookTargetNotFound), errors.Is(err, errEnterpriseHookTargetUIDChanged):
 		fmt.Fprintf(log, "[hook-guardian] %s: %v; nothing to remove as that user\n", enterpriseHookUserCleanupLabel(entry), err)
 		return enterpriseHookUserCleanupDone, nil
+	case errors.As(err, &homeChanged) && enterpriseHookRecordedHomeGone(homeChanged.home):
+		fmt.Fprintf(log, "[hook-guardian] %s: home gone: the recorded home %s no longer exists and the directory now gives %s; the cleanup is retired, as nothing is left to remove\n",
+			enterpriseHookUserCleanupLabel(entry), homeChanged.home, homeChanged.directoryHome)
+		return enterpriseHookUserCleanupDone, errEnterpriseHookCleanupHomeGone
 	case err != nil:
 		return enterpriseHookUserCleanupFailed, err
 	case pendingReason != "":

@@ -456,10 +456,14 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		}
 		label := strings.TrimSpace(entry.User) + "/" + name
 		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
-		switch outcome {
-		case enterpriseHookUserCleanupDone:
+		switch {
+		case outcome == enterpriseHookUserCleanupDone && errors.Is(err, errEnterpriseHookCleanupHomeGone):
+			// Nothing was removed: the home is gone. The uninstall warns
+			// for that user and agent and goes on (GAP-0553).
+			report.Pending = append(report.Pending, label)
+		case outcome == enterpriseHookUserCleanupDone:
 			report.Removed++
-		case enterpriseHookUserCleanupPending:
+		case outcome == enterpriseHookUserCleanupPending:
 			report.Pending = append(report.Pending, label)
 		default:
 			reason := "the cleanup failed"
