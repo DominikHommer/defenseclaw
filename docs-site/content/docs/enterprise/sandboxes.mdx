@@ -1338,12 +1338,8 @@ running sandbox counts again within the next minute.
   user at the gateway's next start once their last 1.0.1 sandbox is deleted
   (`defenseclaw sandbox delete NAME`, after `defenseclaw sandbox pull NAME
   --apply` for work to keep) or purged. One account runs sandboxes at a time
-  either way. The bridge also survives an uninstall without `--purge`, also
-  with a package reinstall (`rpm -e` or `apt remove`, then an install): the
-  kept sandbox registrations hold a root-owned marker,
-  `sandbox/openshell-default-namespace-bridge`, which the next `ensure` reads
-  to render the bridge again. `--purge` removes the marker with the rest. This
-  is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.
+  either way. This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out
+  of support.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
