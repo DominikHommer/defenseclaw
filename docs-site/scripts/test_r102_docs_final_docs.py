@@ -49,6 +49,13 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                        "source_path_contains: [\"C:\\\\Users", "reason_code=install-block"):
             self.assertNotIn(phrase, text)
 
+    def test_gap_1188_link_refusal_only_in_watched_roots(self):
+        text = page("scanning/skill-scanner.mdx")
+        self.assertIn("For a per-user install, a link outside that account's watched skill folders", text)
+        self.assertIn('reason=link-outside-own-folders user=this account target="<path>"', text)
+        self.assertIn("Managed computers do not watch users' connector skill folders in 1.0.2", text)
+        self.assertNotIn("on Windows the hook guardian removes it as that user", text)
+
     def test_gap_0012_denied_config_rechecks_watched_roots_only(self):
         text = page("policies/admission.mdx")
         self.assertIn("For watched roots (per-user installs and managed Windows roots outside profiles)", text)
