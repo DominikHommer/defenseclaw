@@ -598,7 +598,7 @@ func resolveShellString(result *launcherResult) {
 		if strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--") {
 			for j := 1; j < len(word); j++ {
 				switch word[j] {
-				case 'l', 'x', 'e':
+				case 'l', 'x', 'e', 's':
 				case 'o', 'O':
 					if j+1 == len(word) {
 						i++
