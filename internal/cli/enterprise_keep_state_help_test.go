@@ -1,0 +1,37 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestEnterpriseUninstallKeepStateHelpNamesKeptSandboxException(t *testing.T) {
+	for _, platform := range []string{"linux", "macos"} {
+		t.Run(platform, func(t *testing.T) {
+			flag := newUnixLifecycleCommand(platform, "uninstall", "").Flags().Lookup("keep-state")
+			if flag == nil {
+				t.Fatal("--keep-state is missing")
+			}
+			for _, phrase := range []string{"sandbox registrations", "their key", "sandbox setup record", "while an account keeps sandboxes", "--purge removes those too"} {
+				if !strings.Contains(flag.Usage, phrase) {
+					t.Errorf("--keep-state help omits %q: %s", phrase, flag.Usage)
+				}
+			}
+			if strings.Contains(flag.Usage, "removes all of it") {
+				t.Errorf("--keep-state help promises total removal: %s", flag.Usage)
+			}
+		})
+	}
+}
