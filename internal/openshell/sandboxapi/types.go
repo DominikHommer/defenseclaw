@@ -1167,7 +1167,7 @@ func (m *ManagedExplain) HostRunRefused(connector string) bool {
 	}
 	connector = config.NormalizeConnectorName(connector)
 	return slices.ContainsFunc(m.RequiredFor, func(c string) bool { return config.NormalizeConnectorName(c) == connector }) &&
-		m.HostRunGate != "exempt" && !(m.HostRunGate == "" && m.EnrollmentExempt)
+		m.HostRunGate != "exempt" && (m.HostRunGate != "" || !m.EnrollmentExempt)
 }
 
 // ManagedPosture is the caller's own resolved sandbox posture as the
