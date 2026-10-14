@@ -11,6 +11,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,16 +61,93 @@ func TestEnterpriseWindowsEnumerateRunningAgentsBySID(t *testing.T) {
 	if len(got) != 2 || got[alice]["codex"] != "codex (pid 10)" || got[bob]["claudecode"] != "claudecode (pid 12)" {
 		t.Fatalf("running agents = %+v", got)
 	}
-	if len(unknown) != 1 || unknown[0].User != `DCLAB\gone` || unknown[0].Connector != "codex" || unknown[0].SID != "" ||
+	if len(unknown) != 2 || unknown[0].User != `DCLAB\gone` || unknown[0].Connector != "codex" || unknown[0].SID != "" ||
 		unknown[0].Code != enterprisehooks.UnprotectedCodeAgentUnprotected || !strings.Contains(unknown[0].Reason, "codex (pid 13)") ||
 		!strings.Contains(unknown[0].Reason, "could not be resolved") {
 		t.Fatalf("owner-unknown agents = %+v", unknown)
+	}
+	if unknown[1].User != "(unknown account)" || unknown[1].Connector != "codex" ||
+		unknown[1].Code != enterprisehooks.UnprotectedCodeAgentUnprotected || !strings.Contains(unknown[1].Reason, "codex (pid 14)") {
+		t.Fatalf("empty-account agent was dropped: %+v", unknown)
 	}
 
 	stderr := new(bytes.Buffer)
 	stubEnumerateRunningAgents(t, nil, errors.New("snapshot denied"), nil)
 	if got, unknown := enterpriseWindowsEnumerateRunningAgents(stderr, []string{"codex"}); got != nil || unknown != nil || !strings.Contains(stderr.String(), "running agent sessions are unreadable") {
 		t.Fatalf("unreadable sessions: %+v %+v, log %q", got, unknown, stderr.String())
+	}
+}
+
+func TestEnterpriseWindowsEnumerateRunningAgentWithoutOwner(t *testing.T) {
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{
+		{PID: 14, Connector: "codex"},
+		{PID: 15, Connector: "opencode"},
+	}, nil, nil)
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if len(got) != 0 || len(unknown) != 1 || unknown[0].User != "(unknown account)" ||
+		unknown[0].Connector != "codex" || unknown[0].Code != enterprisehooks.UnprotectedCodeAgentUnprotected ||
+		!strings.Contains(unknown[0].Reason, "codex (pid 14)") {
+		t.Fatalf("running agents with no account name or SID: %+v %+v", got, unknown)
+	}
+}
+
+func TestEnterpriseWindowsEnumerateRunningAgentUsesSnapshotSIDWithoutAccountName(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{{PID: 14, Connector: "codex", OwnerSID: sid}}, nil, nil)
+	var calls atomic.Int32
+	enterpriseWindowsEnumerateAccountSID = func(string) string {
+		calls.Add(1)
+		return ""
+	}
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if len(got) != 1 || got[sid]["codex"] != "codex (pid 14)" || len(unknown) != 0 || calls.Load() != 0 {
+		t.Fatalf("snapshot SID was not used directly: %+v %+v, lookups %d", got, unknown, calls.Load())
+	}
+}
+
+func TestEnterpriseWindowsEnumerateRunningAgentUsesSnapshotSIDWhenNameLookupStalls(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{{PID: 14, Connector: "codex", User: "DOMAIN\\user", OwnerSID: sid}}, nil, nil)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var calls atomic.Int32
+	enterpriseWindowsEnumerateAccountSID = func(string) string {
+		calls.Add(1)
+		<-release
+		return ""
+	}
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if len(got) != 1 || got[sid]["codex"] != "codex (pid 14)" || len(unknown) != 0 || calls.Load() != 0 {
+		t.Fatalf("snapshot SID waited for a name lookup: %+v %+v, lookups %d", got, unknown, calls.Load())
+	}
+}
+
+func TestEnterpriseWindowsEnumerateRunningAgentUnknownOwnerSurvivesRecord(t *testing.T) {
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{{PID: 14, Connector: "codex"}}, nil, nil)
+	_, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	data, err := enterprisehooks.MarshalUnprotectedAgents(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := enterprisehooks.ParseUnprotectedAgents(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != 1 || parsed[0].User != "(unknown account)" || parsed[0].Connector != "codex" ||
+		!strings.Contains(parsed[0].Message(), "codex") || !strings.Contains(parsed[0].Message(), "not protected") ||
+		!strings.Contains(parsed[0].Message(), "cannot tell whether a row enrolls it") {
+		t.Fatalf("owner-unknown record or message = %+v", parsed)
+	}
+}
+
+func TestEnterpriseWindowsEnumerateRunningAgentsDeduplicatesUnknownOwner(t *testing.T) {
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{
+		{PID: 14, Connector: "codex"},
+		{PID: 15, Connector: "codex"},
+	}, nil, nil)
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if len(got) != 0 || len(unknown) != 1 || unknown[0].User != "(unknown account)" {
+		t.Fatalf("duplicate owner-unknown entries: %+v %+v", got, unknown)
 	}
 }
 

@@ -78,8 +78,9 @@ func enterpriseWindowsEnumerateResolveSID(account, key string, remaining time.Du
 
 // enterpriseWindowsEnumerateRunningAgents returns, by account SID and
 // connector, a label of one running agent session ("codex (pid 4242)"). An
-// agent of an enabled connector whose account resolves to no SID this cycle
-// and none earlier is returned as an owner-unknown unprotected agent instead:
+// agent of an enabled connector whose snapshot has no owner SID and whose
+// account resolves to no SID this cycle or earlier is returned as an
+// owner-unknown unprotected agent instead:
 // no row can be matched to it, so it is not known to be protected.
 func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []string) (map[string]map[string]string, []enterprisehooks.UnprotectedAgent) {
 	processes, err := enterpriseWindowsEnumerateAgentProcesses()
@@ -99,26 +100,35 @@ func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []stri
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
 		connector := strings.ToLower(strings.TrimSpace(process.Connector))
-		if user == "" || connector == "" {
+		if connector == "" {
 			continue
 		}
 		key := strings.ToLower(user)
-		sid, resolved := sids[key]
-		if !resolved {
-			started := time.Now()
-			sid = enterpriseWindowsEnumerateResolveSID(user, key, enterpriseWindowsEnumerateRunningLookupBudget-spent)
-			spent += time.Since(started)
-			sids[key] = sid
+		sid := process.OwnerSID
+		if sid == "" && user != "" {
+			var resolved bool
+			sid, resolved = sids[key]
+			if !resolved {
+				started := time.Now()
+				sid = enterpriseWindowsEnumerateResolveSID(user, key, enterpriseWindowsEnumerateRunningLookupBudget-spent)
+				spent += time.Since(started)
+				sids[key] = sid
+			}
 		}
 		label := fmt.Sprintf("%s (pid %d)", connector, process.PID)
 		if sid == "" {
 			if enabled[connector] && !unknownSeen[key+"\x00"+connector] {
 				unknownSeen[key+"\x00"+connector] = true
+				reason := fmt.Sprintf("%s runs for this account, but its account SID could not be resolved this cycle (the lookup failed or did not answer in time), so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the lookup answers", label)
+				if user == "" {
+					user = "(unknown account)"
+					reason = fmt.Sprintf("%s runs, but the account behind the process could not be identified this cycle, so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the account is known", label)
+				}
 				unknown = append(unknown, enterprisehooks.UnprotectedAgent{
 					User:      user,
 					Connector: connector,
 					Code:      enterprisehooks.UnprotectedCodeAgentUnprotected,
-					Reason:    fmt.Sprintf("%s runs for this account, but its account SID could not be resolved this cycle (the lookup failed or did not answer in time), so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the lookup answers", label),
+					Reason:    reason,
 				})
 			}
 			continue
