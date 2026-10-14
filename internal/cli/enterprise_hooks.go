@@ -1945,7 +1945,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
-		return runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		started := time.Now()
+		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
+		if err == nil {
+			recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run)
+		}
+		return run, err
 	}
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
 		return run, err
@@ -1995,6 +2000,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	failures := 0
 	pending := 0
 	repairs := 0
+	var restored []enterpriseHookGuardianRestore
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
@@ -2098,6 +2104,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				if err == nil {
 					if repaired {
 						repairs++
+						restored = append(restored, enterpriseHookGuardianRestore{
+							SID:        row.SID,
+							Connector:  row.Connector,
+							RestoredAt: time.Now().UTC().Format(time.RFC3339Nano),
+						})
 					}
 					row.OK = true
 					row.UserHome = result.UserHome
@@ -2128,6 +2139,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		rows = append(rows, row)
 	}
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
+	recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
 
 	var enrollmentErr error
 	if failures == 0 {
@@ -3308,23 +3320,6 @@ func previousEnterpriseHookProtection(
 		return protection, nil
 	}
 	return protection, nil
-}
-
-func previousEnterpriseHookSuccess(
-	dataDir,
-	userName,
-	userHome,
-	sid,
-	connectorName string,
-) (bool, error) {
-	protection, err := previousEnterpriseHookProtection(
-		dataDir,
-		userName,
-		userHome,
-		sid,
-		connectorName,
-	)
-	return protection.PreviouslyProtected, err
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {

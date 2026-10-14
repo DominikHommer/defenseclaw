@@ -29,6 +29,14 @@ import (
 // ran a call the profile blocks, while status, verify and the Setup result
 // said nothing (GAP-0967). They now name each such session per account, as
 // the Linux and macOS lifecycles do (agent_sessions_restart_required).
+//
+// The same holds after the hook guardian puts back hooks a standard user
+// changed or removed: a Hermes session started while the hooks block was
+// empty kept running without DefenseClaw after the restore, and status read
+// security_complete (GAP-0440). Hermes keeps the callbacks it loaded and has
+// no reload the guardian could trigger, so status, verify and ensure name
+// that account's sessions of the connector that started before the restore
+// and report security_complete false until they are restarted.
 
 const windowsAgentSessionsRestartCode = "agent_sessions_restart_required"
 
@@ -97,7 +105,25 @@ var (
 		}
 		return sid.String()
 	}
+	// windowsEnterpriseGuardianRestores returns when the hook guardian last
+	// put back each target's hooks, keyed as windowsEnterpriseManifestRowKey.
+	windowsEnterpriseGuardianRestores = func() map[string]time.Time {
+		layout, err := managed.StandaloneWindowsLayout()
+		if err != nil {
+			return nil
+		}
+		return readEnterpriseHookGuardianRestores(layout.DataDir)
+	}
 )
+
+// windowsMachinePolicyHookConnectors keep DefenseClaw's hook registration in
+// administrator-owned vendor machine policy on a standalone Windows
+// deployment (Claude Code managed settings, Codex machine requirements,
+// Cursor's machine hooks file), which a standard user cannot change. Their
+// per-user target holds only the runtime the hook binary reads at each call,
+// so once the guardian puts that back a running session is inspected again
+// at its next call and needs no restart (GAP-0440).
+var windowsMachinePolicyHookConnectors = map[string]bool{"claudecode": true, "codex": true, "cursor": true}
 
 // windowsEnterpriseRecoveredFailedInstallCode is the warning an ensure adds
 // when its repair rolled back a failed initial install before it installed.
@@ -266,7 +292,8 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			result.AddWarning("activation_unrecorded", "could not record "+windowsEnterpriseActivationFileName+": "+err.Error())
 		}
 	}
-	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 {
+	restores := windowsEnterpriseGuardianRestores()
+	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 {
 		return
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
@@ -292,6 +319,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	byUser := map[string][]string{}
 	connectorSessions := map[string]map[string][]string{}
 	enrollmentSessions := map[string]map[string][]string{}
+	restoredSessions := map[string]map[string][]string{}
 	sids := map[string]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
@@ -317,7 +345,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			connectorSessions[user][name] = append(connectorSessions[user][name], label)
 			continue
 		}
-		if len(record.EnrollmentActivatedAt) == 0 {
+		if len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 {
 			continue
 		}
 		sid, resolved := sids[user]
@@ -334,6 +362,13 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				enrollmentSessions[user] = map[string][]string{}
 			}
 			enrollmentSessions[user][key] = append(enrollmentSessions[user][key], label)
+			continue
+		}
+		if at, ok := restores[key]; ok && !windowsMachinePolicyHookConnectors[name] && process.StartedAt.Before(at) {
+			if restoredSessions[user] == nil {
+				restoredSessions[user] = map[string][]string{}
+			}
+			restoredSessions[user][key] = append(restoredSessions[user][key], label)
 		}
 	}
 	users := make([]string, 0, len(byUser))
@@ -379,6 +414,27 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 				"user %s runs %s, started before the account was enrolled at %s; an agent reads its hooks when it starts, so ask that user to restart these sessions",
 				user, strings.Join(enrollmentSessions[user][key], ", "), record.EnrollmentActivatedAt[key]))
 		}
+	}
+	users = users[:0]
+	for user := range restoredSessions {
+		users = append(users, user)
+	}
+	sort.Strings(users)
+	for _, user := range users {
+		keys := make([]string, 0, len(restoredSessions[user]))
+		for key := range restoredSessions[user] {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			_, connectorName, _ := strings.Cut(key, "\x00")
+			result.AddWarning(windowsAgentSessionsRestartCode, fmt.Sprintf(
+				"user %s runs %s, started before the hook guardian put back the account's changed or removed %s hooks at %s; an agent keeps the hooks it loaded when it started, so a session started while they were missing runs without DefenseClaw until it is restarted: ask that user to restart these sessions",
+				user, strings.Join(restoredSessions[user][key], ", "), connectorName, restores[key].UTC().Format(time.RFC3339)))
+		}
+	}
+	if len(restoredSessions) > 0 {
+		result.SecurityComplete = false
 	}
 }
 
