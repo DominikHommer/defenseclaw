@@ -13,7 +13,6 @@
 from pathlib import Path
 
 import pytest
-
 from defenseclaw.tui.panels.setup import _cisco_ai_defense_fields
 
 
