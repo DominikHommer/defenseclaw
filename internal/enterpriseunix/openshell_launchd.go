@@ -54,53 +54,63 @@ func (e *Env) gatewayFileIdentity() (string, error) {
 }
 
 type loadedLaunchAgent struct {
-	label string
-	state openshell.LaunchAgentState
+	domain string
+	label  string
+	state  openshell.LaunchAgentState
 }
 
-// loadedMacOSAgents inspects only the two DefenseClaw jobs in an existing GUI
-// domain. A logged-out account and a disabled or unloaded job are left alone.
-func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) (string, []loadedLaunchAgent, error) {
-	domain := "gui/" + strconv.Itoa(a.UID)
-	domainResult, err := e.Runner.Run(ctx, "launchctl", "print", domain)
-	if err != nil || !strings.Contains(string(domainResult.Stdout), domain+" = {") {
-		return domain, nil, nil
-	}
-	disabled, err := e.Runner.Run(ctx, "launchctl", "print-disabled", domain)
-	if err != nil {
-		return domain, nil, fmt.Errorf("check disabled LaunchAgents for %s: %w", a.Name, err)
-	}
+// loadedMacOSAgents inspects only the two DefenseClaw jobs in both account
+// domains. A job can remain loaded in either domain after the session changes.
+func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loadedLaunchAgent, error) {
 	var out []loadedLaunchAgent
-	for _, label := range []string{labelSandbox, labelOpenShellGateway} {
-		if launchAgentDisabled(disabled.Stdout, label) {
-			continue
-		}
-		res, err := e.Runner.Run(ctx, "launchctl", "print", domain+"/"+label)
+	uid := strconv.Itoa(a.UID)
+	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
+		domainResult, err := e.Runner.Run(ctx, "launchctl", "print", domain)
 		if err != nil {
-			if launchdNotLoaded(err) || strings.Contains(string(res.Stderr), "Could not find") || strings.Contains(string(res.Stderr), "No such process") {
+			message := string(domainResult.Stdout) + " " + string(domainResult.Stderr) + " " + err.Error()
+			if strings.Contains(message, "Could not find domain") || strings.Contains(message, "No such process") || launchdNotLoaded(err) {
 				continue
 			}
-			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: %w", label, a.Name, err)
+			return nil, fmt.Errorf("inspect LaunchAgent domain %s of %s: %w", domain, a.Name, err)
 		}
-		state := openshell.ParseLaunchAgentState(res.Stdout)
-		if state.State == "" {
-			return domain, nil, fmt.Errorf("inspect LaunchAgent %s of %s: launchctl reported no service state", label, a.Name)
+		if !strings.Contains(string(domainResult.Stdout), domain+" = {") {
+			continue
 		}
-		out = append(out, loadedLaunchAgent{label: label, state: state})
+		disabled, err := e.Runner.Run(ctx, "launchctl", "print-disabled", domain)
+		if err != nil {
+			return nil, fmt.Errorf("check disabled LaunchAgents for %s in %s: %w", a.Name, domain, err)
+		}
+		for _, label := range []string{labelSandbox, labelOpenShellGateway} {
+			if launchAgentDisabled(disabled.Stdout, label) {
+				continue
+			}
+			res, err := e.Runner.Run(ctx, "launchctl", "print", domain+"/"+label)
+			if err != nil {
+				if launchdNotLoaded(err) || strings.Contains(string(res.Stderr), "Could not find service") || strings.Contains(string(res.Stderr), "No such process") {
+					continue
+				}
+				return nil, fmt.Errorf("inspect LaunchAgent %s of %s in %s: %w", label, a.Name, domain, err)
+			}
+			state := openshell.ParseLaunchAgentState(res.Stdout)
+			if state.State == "" {
+				return nil, fmt.Errorf("inspect LaunchAgent %s of %s in %s: launchctl reported no service state", label, a.Name, domain)
+			}
+			out = append(out, loadedLaunchAgent{domain: domain, label: label, state: state})
+		}
 	}
-	return domain, out, nil
+	return out, nil
 }
 
 // reloadMacOSAgent uses the same bootout/bootstrap sequence that recovered the
 // field failure. A failed job is kickstarted because neither plist has
 // RunAtLoad; an idle job remains idle until its next sandbox command.
-func (e *Env) reloadMacOSAgent(ctx context.Context, domain string, job loadedLaunchAgent, failed bool) error {
-	target := domain + "/" + job.label
+func (e *Env) reloadMacOSAgent(ctx context.Context, job loadedLaunchAgent, failed bool) error {
+	target := job.domain + "/" + job.label
 	if _, err := e.Runner.Run(ctx, "launchctl", "bootout", target); err != nil {
 		return fmt.Errorf("boot out %s: %w", target, err)
 	}
 	plist := e.P(filepath.Join("/Library/LaunchAgents", job.label+".plist"))
-	if _, err := e.Runner.Run(ctx, "launchctl", "bootstrap", domain, plist); err != nil {
+	if _, err := e.Runner.Run(ctx, "launchctl", "bootstrap", job.domain, plist); err != nil {
 		return fmt.Errorf("bootstrap %s: %w", target, err)
 	}
 	if failed {
@@ -151,7 +161,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		if !e.usableSandboxAccount(a) {
 			continue
 		}
-		domain, jobs, err := e.loadedMacOSAgents(ctx, a)
+		jobs, err := e.loadedMacOSAgents(ctx, a)
 		if err != nil {
 			if changed {
 				key := strconv.Itoa(a.UID)
@@ -207,7 +217,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		}
 		var failed error
 		for _, job := range needed {
-			if err := e.reloadMacOSAgent(ctx, domain, job, job.state.Failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
+			if err := e.reloadMacOSAgent(ctx, job, job.state.Failure(job.label == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
 				failed = err
 				break
 			}
@@ -226,7 +236,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 
 // describeMacOSAgents is read-only for status and verify. An ensure from a
 // package warns and records a failed reload for repair instead of failing the
-// package receipt solely because one user's GUI job cannot be reloaded.
+// package receipt solely because one user's loaded job cannot be reloaded.
 func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 	if l.env.GOOS != "darwin" {
 		return
@@ -235,7 +245,7 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 		if !l.env.usableSandboxAccount(a) {
 			continue
 		}
-		_, jobs, err := l.env.loadedMacOSAgents(ctx, a)
+		jobs, err := l.env.loadedMacOSAgents(ctx, a)
 		if err != nil {
 			if l.opts.Action == ActionEnsure && l.opts.FromPackage {
 				l.result.AddWarning(codeSandboxUserState, err.Error())
@@ -256,8 +266,8 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 		}
 		for _, job := range jobs {
 			if why := job.state.Failure(job.label == labelOpenShellGateway && running > 0); why != "" {
-				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) is %s; run `%s`", job.label, a.Name, a.UID, why, l.env.lifecycleCommand(ActionRepair))
-				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.label, Kind: sandboxRowKind, State: "failed: " + why})
+				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s is %s; run `%s`", job.label, a.Name, a.UID, job.domain, why, l.env.lifecycleCommand(ActionRepair))
+				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
 				l.result.SecurityComplete = false
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {
 					l.result.AddWarning(codeSandboxUserState, message)

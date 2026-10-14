@@ -74,40 +74,63 @@ const CheckIDManagedLaunchAgent = "managed-openshell-launchagent"
 
 const managedLaunchAgentLabel = "com.cisco.defenseclaw.openshell-gateway"
 
-// ManagedLaunchAgentCheck reads only the current user's loaded gateway job.
+// ManagedLaunchAgentCheck reads the current user's loaded gateway job in both
+// launchd domains; an ssh session can leave it in user/<uid>.
 // The administrator's enterprise repair owns all launchctl mutations.
 func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 	if !d.Managed || d.GOOS != "darwin" {
 		return nil
 	}
 	d.defaults()
-	target := "gui/" + strconv.Itoa(d.Geteuid()) + "/" + managedLaunchAgentLabel
-	raw, err := d.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", target}, Timeout: 10 * time.Second})
-	if err != nil && launchAgentMissing(raw, err) {
-		return nil
+	uid := strconv.Itoa(d.Geteuid())
+	var failed, warning, healthy *Check
+	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
+		target := domain + "/" + managedLaunchAgentLabel
+		raw, err := d.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", target}, Timeout: 10 * time.Second})
+		if err != nil && launchAgentMissing(raw, err) {
+			continue
+		}
+		c := &Check{ID: CheckIDManagedLaunchAgent, Title: "OpenShell LaunchAgent"}
+		if err != nil {
+			c.Status, c.Detail = StatusWarn, "could not inspect "+target+": "+err.Error()
+			if warning == nil {
+				warning = c
+			}
+			continue
+		}
+		state := ParseLaunchAgentState(raw)
+		if state.State == "" {
+			c.Status, c.Detail = StatusWarn, "launchctl returned no service state for "+target
+			if warning == nil {
+				warning = c
+			}
+			continue
+		}
+		if why := state.Failure(false); why != "" {
+			c.Status, c.Detail = StatusFail, target+" is "+why
+			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
+			if failed == nil {
+				failed = c
+			}
+			continue
+		}
+		c.Status = StatusPass
+		if state.State == "running" {
+			c.Detail = target + " is running"
+		} else {
+			c.Detail = target + " is loaded and idle; starts with the next sandbox command"
+		}
+		if healthy == nil {
+			healthy = c
+		}
 	}
-	c := &Check{ID: CheckIDManagedLaunchAgent, Title: "OpenShell LaunchAgent"}
-	if err != nil {
-		c.Status, c.Detail = StatusWarn, "could not inspect "+target+": "+err.Error()
-		return c
+	if failed != nil {
+		return failed
 	}
-	state := ParseLaunchAgentState(raw)
-	if state.State == "" {
-		c.Status, c.Detail = StatusWarn, "launchctl returned no service state for "+target
-		return c
+	if warning != nil {
+		return warning
 	}
-	if why := state.Failure(false); why != "" {
-		c.Status, c.Detail = StatusFail, target+" is "+why
-		c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
-		return c
-	}
-	c.Status = StatusPass
-	if state.State == "running" {
-		c.Detail = "running"
-	} else {
-		c.Detail = "loaded and idle; starts with the next sandbox command"
-	}
-	return c
+	return healthy
 }
 
 func launchAgentMissing(raw []byte, err error) bool {

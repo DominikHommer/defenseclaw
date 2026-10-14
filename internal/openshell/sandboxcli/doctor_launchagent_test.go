@@ -49,6 +49,7 @@ func launchAgentDoctorFixture(t *testing.T, output string, launchErr error) (*te
 	ta.ManagedAccountHome = func() (string, error) { return ta.home, nil }
 	runner := &openshelltest.Runner{}
 	runner.On("launchctl print gui/503/com.cisco.defenseclaw.openshell-gateway", output, launchErr)
+	runner.On("launchctl print user/503/com.cisco.defenseclaw.openshell-gateway", "Could not find service \"com.cisco.defenseclaw.openshell-gateway\" in domain for uid: 503", errors.New("exit status 113"))
 	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
 		d.Runner = runner
 		d.TrustedE2fsprogsDir = func(string, string) error { return nil }
@@ -102,7 +103,7 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 				lacks(t, ta.output(), "not ready for sandboxes")
 			}
 			calls := runner.Calls()
-			if len(calls) != 1 || openshelltest.Argv(calls[0]) != "launchctl print "+target || calls[0].Timeout != 10*time.Second {
+			if len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+target || openshelltest.Argv(calls[1]) != "launchctl print user/503/com.cisco.defenseclaw.openshell-gateway" || calls[0].Timeout != 10*time.Second || calls[1].Timeout != 10*time.Second {
 				t.Fatalf("launchctl calls = %+v", calls)
 			}
 		})
@@ -128,6 +129,44 @@ func TestManagedMacDoctorLaunchAgentVerdict(t *testing.T) {
 		}
 		if calls := runner.Calls(); len(calls) != 0 {
 			t.Fatalf("unmanaged doctor ran launchctl: %+v", calls)
+		}
+	})
+}
+
+func TestManagedMacDoctorUserDomainLaunchAgent(t *testing.T) {
+	withManagedHost(t)
+	const gui = "gui/503/com.cisco.defenseclaw.openshell-gateway"
+	const user = "user/503/com.cisco.defenseclaw.openshell-gateway"
+	t.Run("ssh-only code signing", func(t *testing.T) {
+		ta, runner := launchAgentDoctorFixture(t, "Bad request.\nCould not find domain for user gui: 503", errors.New("exit status 112"))
+		runner.On("launchctl print "+user, user+" = {\n\tstate = not running\n\truns = 5\n\tlast exit reason = OS_REASON_CODESIGNING\n}\n", nil)
+		rep := ta.runDoctor(bg)
+		row := rep.Get(openshell.CheckIDManagedLaunchAgent)
+		if row == nil || row.Status != openshell.StatusFail || !strings.Contains(row.Detail, user) || row.Fix == nil || !strings.Contains(row.Fix.Command, "enterprise macos repair") || rep.OK() {
+			t.Fatalf("doctor missed failed user-domain job: %+v", row)
+		}
+		ta.printDoctor(rep)
+		has(t, ta.output(), "not ready for sandboxes", "sudo defenseclaw-gateway enterprise macos repair")
+		if calls := runner.Calls(); len(calls) != 2 || openshelltest.Argv(calls[0]) != "launchctl print "+gui || openshelltest.Argv(calls[1]) != "launchctl print "+user {
+			t.Fatalf("domain inspection calls = %+v", calls)
+		}
+	})
+	t.Run("both domains missing", func(t *testing.T) {
+		ta, runner := launchAgentDoctorFixture(t, "Could not find domain for user gui: 503", errors.New("exit status 112"))
+		if row := ta.runDoctor(bg).Get(openshell.CheckIDManagedLaunchAgent); row != nil {
+			t.Fatalf("unexpected row: %+v", row)
+		}
+		if len(runner.Calls()) != 2 {
+			t.Fatalf("did not inspect both domains: %+v", runner.Calls())
+		}
+	})
+	t.Run("user domain inspection error", func(t *testing.T) {
+		ta, runner := launchAgentDoctorFixture(t, "Could not find domain for user gui: 503", errors.New("exit status 112"))
+		runner.On("launchctl print "+user, "permission denied", errors.New("launchctl failed"))
+		rep := ta.runDoctor(bg)
+		row := rep.Get(openshell.CheckIDManagedLaunchAgent)
+		if row == nil || row.Status != openshell.StatusWarn || !strings.Contains(row.Detail, user) || !rep.OK() || row.Fix != nil {
+			t.Fatalf("unexpected inspection verdict: %+v", row)
 		}
 	})
 }

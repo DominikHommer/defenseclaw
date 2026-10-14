@@ -26,30 +26,45 @@ import (
 
 type launchdJobFixture struct {
 	loaded, disabled, stubborn bool
-	state, reason, code        string
+	state, reason, code, spawn string
 	runs                       int
 }
 
-// fixtureLaunchdRunner handles only GUI LaunchAgents; the host fake keeps
+// fixtureLaunchdRunner handles both account domains; the host fake keeps
 // answering all other lifecycle commands.
 type fixtureLaunchdRunner struct {
 	base          Runner
 	domains       map[int]bool
 	jobs          map[int]map[string]*launchdJobFixture
+	userDomains   map[int]bool
+	userJobs      map[int]map[string]*launchdJobFixture
+	domainMissing map[string]bool
+	domainErrors  map[string]error
+	calls         []string
 	mutated       []string
 	disabledError bool
 }
 
 func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
-	if name != "launchctl" || len(args) < 2 || !strings.HasPrefix(args[1], "gui/") {
+	if name != "launchctl" || len(args) < 2 || !strings.HasPrefix(args[1], "gui/") && !strings.HasPrefix(args[1], "user/") {
 		return f.base.Run(ctx, name, args...)
 	}
-	uidText, label, _ := strings.Cut(strings.TrimPrefix(args[1], "gui/"), "/")
+	f.calls = append(f.calls, "launchctl "+strings.Join(args, " "))
+	domainKind, rest, _ := strings.Cut(args[1], "/")
+	uidText, label, _ := strings.Cut(rest, "/")
 	uid, _ := strconv.Atoi(uidText)
-	if !f.domains[uid] {
-		return CommandResult{}, errors.New("no GUI domain")
+	domain := domainKind + "/" + uidText
+	if !f.domains[uid] && domainKind == "gui" || !f.userDomains[uid] && domainKind == "user" || f.domainMissing[domain] {
+		return CommandResult{Stderr: []byte("Bad request.\nCould not find domain for user " + domainKind + ": " + uidText)}, errors.New("exit status 112: Could not find domain")
 	}
-	job := f.jobs[uid][label]
+	if err := f.domainErrors[domain]; err != nil && args[0] == "print" && label == "" {
+		return CommandResult{Stderr: []byte("launchctl inspection failed")}, err
+	}
+	jobs := f.jobs[uid]
+	if domainKind == "user" {
+		jobs = f.userJobs[uid]
+	}
+	job := jobs[label]
 	switch args[0] {
 	case "print-disabled":
 		if f.disabledError {
@@ -57,7 +72,7 @@ func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...str
 		}
 		var body strings.Builder
 		body.WriteString("disabled services = {\n")
-		for key, item := range f.jobs[uid] {
+		for key, item := range jobs {
 			if item.disabled {
 				fmt.Fprintf(&body, "  %q => disabled\n", key)
 			}
@@ -66,12 +81,24 @@ func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...str
 		return CommandResult{Stdout: []byte(body.String())}, nil
 	case "print":
 		if label == "" {
-			return CommandResult{Stdout: []byte(fmt.Sprintf("gui/%d = {\n}\n", uid))}, nil
+			return CommandResult{Stdout: []byte(fmt.Sprintf("%s = {\n}\n", domain))}, nil
 		}
 		if job == nil || !job.loaded {
-			return CommandResult{}, errors.New("Could not find service")
+			return CommandResult{Stderr: []byte("Could not find service \"" + label + "\" in domain for uid: " + uidText)}, errors.New("exit status 113: Could not find service")
 		}
-		return CommandResult{Stdout: []byte(fmt.Sprintf("gui/%d/%s = {\n\tstate = %s\n\truns = %d\n\tlast exit reason = %s\n\tlast exit code = %s\n}\n", uid, label, job.state, job.runs, job.reason, job.code))}, nil
+		var body strings.Builder
+		fmt.Fprintf(&body, "%s/%s = {\n\tstate = %s\n\truns = %d\n", domain, label, job.state, job.runs)
+		if job.reason != "" {
+			fmt.Fprintf(&body, "\tlast exit reason = %s\n", job.reason)
+		}
+		if job.code != "" {
+			fmt.Fprintf(&body, "\tlast exit code = %s\n", job.code)
+		}
+		if job.spawn != "" {
+			fmt.Fprintf(&body, "\tlast spawn error = %s\n", job.spawn)
+		}
+		body.WriteString("}\n")
+		return CommandResult{Stdout: []byte(body.String())}, nil
 	case "bootout":
 		if job == nil || !job.loaded {
 			return CommandResult{}, errors.New("service not loaded")
@@ -84,12 +111,12 @@ func (f *fixtureLaunchdRunner) Run(ctx context.Context, name string, args ...str
 			return CommandResult{}, errors.New("missing plist")
 		}
 		label = strings.TrimSuffix(filepath.Base(args[2]), ".plist")
-		job = f.jobs[uid][label]
+		job = jobs[label]
 		if job == nil {
 			return CommandResult{}, errors.New("unrecognized label")
 		}
 		f.mutated = append(f.mutated, "launchctl "+strings.Join(args, " "))
-		job.loaded, job.state, job.reason, job.code, job.runs = true, "not running", "", "(never exited)", 0
+		job.loaded, job.state, job.reason, job.code, job.spawn, job.runs = true, "not running", "", "(never exited)", "", 0
 		return CommandResult{}, nil
 	case "kickstart":
 		if job == nil || !job.loaded {
