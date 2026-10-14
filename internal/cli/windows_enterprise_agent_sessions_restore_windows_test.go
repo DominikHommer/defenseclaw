@@ -159,3 +159,52 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 		t.Fatalf("unreadable record and sessions: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
 	}
 }
+
+func TestWindowsStandaloneRestoredSessionUsesSnapshotOwnerSID(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	restoredAt := time.Date(2026, 10, 13, 13, 24, 30, 0, time.UTC)
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	previousConnectors, previousSID := windowsEnterpriseEnrolledConnectors, windowsEnterpriseAccountSID
+	previousRestores := windowsEnterpriseGuardianRestores
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+		windowsEnterpriseEnrolledConnectors, windowsEnterpriseAccountSID = previousConnectors, previousSID
+		windowsEnterpriseGuardianRestores = previousRestores
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return []string{"hermes"}, nil }
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		return map[string]time.Time{enterpriseHookGuardianRestoreKey(sid, "hermes"): restoredAt}, nil
+	}
+	lookups := 0
+	windowsEnterpriseAccountSID = func(string) string {
+		lookups++
+		return "S-1-5-21-1-2-3-9999"
+	}
+
+	for _, tc := range []struct {
+		name, user, wantLabel string
+	}{
+		{name: "name unavailable", wantLabel: sid},
+		{name: "name available", user: "DOMAIN\\member", wantLabel: "DOMAIN\\member"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+				return []inventory.AgentProcess{{
+					PID: 61, Connector: "hermes", User: tc.user, OwnerSID: sid,
+					StartedAt: restoredAt.Add(-time.Minute),
+				}}, nil
+			}
+			result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+			result.Installed, result.SecurityComplete = true, true
+			applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+			if len(result.Warnings) != 1 || result.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+				!strings.Contains(result.Warnings[0].Message, "user "+tc.wantLabel+" runs hermes (pid 61), started before the hook guardian put back") ||
+				result.SecurityComplete || lookups != 0 {
+				t.Fatalf("restored session with snapshot SID = %+v, security_complete = %t, lookups = %d",
+					result.Warnings, result.SecurityComplete, lookups)
+			}
+		})
+	}
+}
