@@ -143,7 +143,6 @@ type managedHookPeerHomeCache struct {
 
 type managedHookPeerHolder struct {
 	name, home string
-	notedAt    time.Time
 	stamp      string
 }
 
@@ -341,7 +340,7 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	if !ok {
 		return
 	}
-	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp(), notedAt: c.now()}
+	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp()}
 	c.mu.Lock()
 	previous, known := c.holders[uid]
 	changed := known && (previous.name != holder.name || previous.home != holder.home)
