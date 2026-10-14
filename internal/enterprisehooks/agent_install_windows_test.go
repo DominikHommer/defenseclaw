@@ -141,7 +141,7 @@ func TestStandaloneWindowsCodexDiscoveryRefusesAForeignOrIncompleteSelection(t *
 		"foreign":     {target: foreign, reason: "outside its releases folder"},
 		"misnamed":    {target: misnamed, reason: "not named <version>-<target>"},
 		"no codex":    {target: incomplete, reason: "holds no codex.exe"},
-		"redirected":  {target: redirected, reason: "holds no codex.exe"},
+		"redirected":  {target: redirected, reason: "refused reparse chain"},
 		"parent hops": {target: filepath.Join(releases, "..", "..", "..", "..", "x", testCodexStandaloneRelease), reason: "outside its releases folder"},
 		// A directory symbolic link may name a share; it is refused before
 		// anything opens it.

@@ -214,6 +214,8 @@ func TestEnterpriseWindowsEnumerateCyclePassesRunningAgents(t *testing.T) {
 	// reach the published record, survive its wire format, and make status
 	// and verify security-incomplete without a SID.
 	resetEnumerateKnownSIDs(t)
+	// The cycle only reports an agent of an enabled connector.
+	cfg.Guardrail.Connector = "codex"
 	enterpriseWindowsEnumerateAccountSID = func(string) string { return "" }
 	enterpriseWindowsEnumerateAgentProcesses = func() ([]inventory.AgentProcess, error) {
 		return []inventory.AgentProcess{
