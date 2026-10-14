@@ -46,11 +46,12 @@ type testDockerImage struct {
 // The fake applies each Docker label filter; a missing or wrong filter lets
 // another account's image into the reply and makes the assertions fail.
 type imageDockerRunner struct {
-	other   Runner
-	images  map[string]*testDockerImage
-	calls   [][]string
-	onImage func([]string)
-	listErr string
+	other       Runner
+	images      map[string]*testDockerImage
+	calls       [][]string
+	onImage     func([]string)
+	listErr     string
+	listTimeout bool
 }
 
 func (d *imageDockerRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
@@ -63,6 +64,9 @@ func (d *imageDockerRunner) Run(ctx context.Context, name string, args ...string
 	}
 	switch args[1] {
 	case "ls":
+		if d.listTimeout {
+			return CommandResult{Stderr: []byte("Docker socket did not answer")}, context.DeadlineExceeded
+		}
 		if d.listErr != "" {
 			return CommandResult{Stderr: []byte(d.listErr), ExitCode: 1}, errors.New("Docker list failed")
 		}
@@ -153,6 +157,16 @@ func imageTestHost(t *testing.T, goos string) (*osHost, *imageDockerRunner) {
 
 func writeImageStore(t *testing.T, h *osHost, a SandboxAccount, owner string, overlay, alias, run string) string {
 	t.Helper()
+	return writeImageStoreAt(t, h, a, filepath.Join(h.env.daemonStateRel(), "sandboxes", "images.json"), owner, overlay, alias, run)
+}
+
+func writeLegacyImageStore(t *testing.T, h *osHost, a SandboxAccount, owner string, overlay, alias, run string) string {
+	t.Helper()
+	return writeImageStoreAt(t, h, a, filepath.Join(userSandboxDataRel, "images.json"), owner, overlay, alias, run)
+}
+
+func writeImageStoreAt(t *testing.T, h *osHost, a SandboxAccount, rel, owner, overlay, alias, run string) string {
+	t.Helper()
 	writeHostFile(t, h.testHost, filepath.Join(a.Home, h.env.daemonStateRel(), "state.json"), "{}")
 	doc := map[string]any{"version": 1, "owner": owner}
 	if overlay != "" {
@@ -172,14 +186,14 @@ func writeImageStore(t *testing.T, h *osHost, a SandboxAccount, owner string, ov
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(a.Home, userSandboxDataRel, "images.json")
+	path := filepath.Join(a.Home, rel)
 	writeHostFile(t, h.testHost, path, string(data))
 	return path
 }
 
 func imageHomeTree(t *testing.T, h *osHost) []string {
 	t.Helper()
-	root := h.env.P(filepath.Join(h.alice.Home, ".defenseclaw"))
+	root := h.env.P(h.alice.Home)
 	var entries []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if errors.Is(walkErr, os.ErrNotExist) && path == root {
@@ -234,6 +248,131 @@ func (d *imageDockerRunner) removals() []string {
 	return out
 }
 
+func (d *imageDockerRunner) listCount(owner string) int {
+	count := 0
+	for _, call := range d.calls {
+		if len(call) > 1 && call[1] == "ls" && containsSequence(call, "--filter", "label="+image.LabelOwner+"="+owner) {
+			count++
+		}
+	}
+	return count
+}
+
+func TestSandboxPurgeCleansImagesOfTheDaemonStore(t *testing.T) {
+	h, docker := imageTestHost(t, "linux")
+	tag := "defenseclaw/sandbox:managed-u1000"
+	foreign := "ordinary/base:latest"
+	store := writeImageStore(t, h, h.alice, sampleImageOwner, tag, "", "")
+	legacy := filepath.Join(h.alice.Home, userSandboxDataRel, "images.json")
+	if h.exists(legacy) {
+		t.Fatal("managed-store fixture also has a legacy store")
+	}
+	docker.add(tag, sampleImageOwner, h.alice.UID, "a", false)
+	docker.add(foreign, otherImageOwner, h.alice.UID, "b", false)
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	if got := docker.removals(); !reflect.DeepEqual(got, []string{tag}) {
+		t.Errorf("image rm calls = %v, want only %s", got, tag)
+	}
+	if docker.images[tag] != nil || docker.images[foreign] == nil || h.exists(store) {
+		t.Errorf("managed image removal or local purge failed")
+	}
+	if !containsLine(r.Changes, "removed 1 DefenseClaw sandbox images of user alice") ||
+		!strings.Contains(strings.Join(r.Changes, "\n"), tag) || len(r.Warnings) != 0 {
+		t.Errorf("changes = %v, warnings = %+v", r.Changes, r.Warnings)
+	}
+}
+
+func TestSandboxPurgeReadsLegacyAndBothStores(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withDaemon bool
+		sameOwner  bool
+	}{
+		{"legacy only", false, false},
+		{"two owners", true, false},
+		{"same owner", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, docker := imageTestHost(t, "linux")
+			legacyTag := "defenseclaw/sandbox:legacy-u1000"
+			daemonTag := "defenseclaw/sandbox:daemon-u1000"
+			owner := otherImageOwner
+			if tc.sameOwner {
+				owner = sampleImageOwner
+			}
+			legacy := writeLegacyImageStore(t, h, h.alice, owner, legacyTag, "", "")
+			docker.add(legacyTag, owner, h.alice.UID, "a", false)
+			want := []string{legacyTag}
+			if tc.withDaemon {
+				writeImageStore(t, h, h.alice, sampleImageOwner, daemonTag, "", "")
+				docker.add(daemonTag, sampleImageOwner, h.alice.UID, "b", false)
+				want = []string{daemonTag, legacyTag}
+				if tc.sameOwner {
+					// A tag recorded in both stores is listed and removed once.
+					writeLegacyImageStore(t, h, h.alice, owner, daemonTag, "", legacyTag)
+					want = []string{legacyTag, daemonTag}
+				}
+			}
+			foreign := "defenseclaw/sandbox:foreign-u1000"
+			docker.add(foreign, "cccccccccccccccc", h.alice.UID, "c", false)
+			r := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, r)
+			if got := docker.removals(); !reflect.DeepEqual(got, want) {
+				t.Errorf("image removals = %v, want %v", got, want)
+			}
+			if docker.images[foreign] == nil || h.exists(legacy) || len(r.Warnings) != 0 {
+				t.Errorf("foreign image, legacy store or warnings: image = %v, store = %v, warnings = %+v", docker.images[foreign], h.exists(legacy), r.Warnings)
+			}
+			if tc.sameOwner && docker.listCount(sampleImageOwner) != 1 {
+				t.Errorf("same owner had %d Docker image lists, want one", docker.listCount(sampleImageOwner))
+			}
+		})
+	}
+}
+
+func TestSandboxPurgeCleansGoodStoreBesideUnsafeStore(t *testing.T) {
+	h, docker := imageTestHost(t, "linux")
+	tag := "defenseclaw/sandbox:good-u1000"
+	writeImageStore(t, h, h.alice, sampleImageOwner, tag, "", "")
+	legacy := writeLegacyImageStore(t, h, h.alice, otherImageOwner, "defenseclaw/sandbox:legacy-u1000", "", "")
+	parent := filepath.Dir(h.env.P(legacy))
+	if err := os.Rename(parent, parent+".target"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(parent)+".target", parent); err != nil {
+		t.Fatal(err)
+	}
+	docker.add(tag, sampleImageOwner, h.alice.UID, "a", false)
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	if got := docker.removals(); !reflect.DeepEqual(got, []string{tag}) {
+		t.Errorf("good store image was not removed: %v", got)
+	}
+	if warning := messagesOf(r.Warnings, codeSandboxUserState); !strings.Contains(warning, "legacy store") || !strings.Contains(warning, "could not safely read") {
+		t.Errorf("unsafe legacy store warning = %s", warning)
+	}
+}
+
+func TestSandboxPurgeOwnInstallKeepsLegacyButCleansDaemonStore(t *testing.T) {
+	h, docker := imageTestHost(t, "linux")
+	daemonTag := "defenseclaw/sandbox:managed-u1000"
+	legacyTag := "defenseclaw/sandbox:own-install-u1000"
+	daemon := writeImageStore(t, h, h.alice, sampleImageOwner, daemonTag, "", "")
+	legacy := writeLegacyImageStore(t, h, h.alice, otherImageOwner, legacyTag, "", "")
+	writeHostFile(t, h.testHost, filepath.Join(h.alice.Home, ".defenseclaw/config.yaml"), "own install\n")
+	docker.add(daemonTag, sampleImageOwner, h.alice.UID, "a", false)
+	docker.add(legacyTag, otherImageOwner, h.alice.UID, "b", false)
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	if got := docker.removals(); !reflect.DeepEqual(got, []string{daemonTag}) {
+		t.Errorf("own-install image removals = %v", got)
+	}
+	if h.exists(daemon) || !h.exists(legacy) || docker.images[legacyTag] == nil {
+		t.Errorf("own-install store handling: daemon = %v, legacy = %v, legacy image = %v", h.exists(daemon), h.exists(legacy), docker.images[legacyTag])
+	}
+}
+
 func TestSandboxPurgeRemovesOnlyAccountImagesInDependencyOrder(t *testing.T) {
 	h, docker := imageTestHost(t, "linux")
 	overlay := "defenseclaw/sandbox:sample-u1000"
@@ -247,12 +386,12 @@ func TestSandboxPurgeRemovesOnlyAccountImagesInDependencyOrder(t *testing.T) {
 	docker.add("defenseclaw/sandbox:other-uid", sampleImageOwner, h.alice.UID+1, "d", false)
 	docker.images["ordinary/base:latest"] = &testDockerImage{tag: "ordinary/base:latest", id: "sha256:" + strings.Repeat("e", 64), labels: map[string]string{}}
 	docker.onImage = func(args []string) {
-		if args[1] == "ls" {
+		if args[1] == "ls" || args[1] == "rm" {
 			if !reflect.DeepEqual(h.ops.events, []string{"teardown alice", "stop alice"}) {
-				t.Errorf("Docker list ran before teardown and unit stop: %v", h.ops.events)
+				t.Errorf("Docker image operation ran before teardown and unit stop: %v", h.ops.events)
 			}
 			if _, err := os.Stat(h.env.P(store)); err != nil {
-				t.Errorf("image store was removed before Docker list: %v", err)
+				t.Errorf("daemon image store was removed before Docker image operation: %v", err)
 			}
 		}
 	}
@@ -381,7 +520,7 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			return path
 		}, wantWarn: "could not safely read"},
 		{name: "own installation", prepare: func(t *testing.T, h *osHost) string {
-			path := writeImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
+			path := writeLegacyImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
 			writeHostFile(t, h.testHost, filepath.Join(h.alice.Home, ".defenseclaw/config.yaml"), "own install\n")
 			return path
 		}},
@@ -391,7 +530,8 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			path := tc.prepare(t, h)
 			before := imageHomeTree(t, h)
 			r := enterprisestatus.New(ActionUninstall, "", "linux", "1.0.2")
-			if path == "" && h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json")) {
+			if path == "" && (h.exists(filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", "images.json")) ||
+				h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json"))) {
 				t.Fatal("no-store fixture already has an image store")
 			}
 			(&lifecycle{env: h.env, result: r}).purgeAccountSandboxImages(context.Background(), h.alice)
@@ -401,37 +541,169 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			if after := imageHomeTree(t, h); !reflect.DeepEqual(after, before) {
 				t.Errorf("cleanup changed the account's tree: before %v, after %v", before, after)
 			}
-			if path == "" && h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json")) {
+			if path == "" && (h.exists(filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", "images.json")) ||
+				h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json"))) {
 				t.Error("cleanup created an image store")
 			}
 			if tc.wantWarn != "" && !strings.Contains(messagesOf(r.Warnings, codeSandboxUserState), tc.wantWarn) {
 				t.Errorf("warnings = %+v, want %q", r.Warnings, tc.wantWarn)
 			}
+			if tc.wantWarn == "" && len(r.Warnings) != 0 {
+				t.Errorf("unexpected warnings = %+v", r.Warnings)
+			}
 		})
 	}
 	t.Run("Docker is missing", func(t *testing.T) {
 		h, docker := imageTestHost(t, "linux")
-		store := writeImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
+		store, tags, invalid := unavailableImageStore(t, h)
 		if err := os.Remove(h.env.P("/usr/bin/docker")); err != nil {
 			t.Fatal(err)
 		}
 		r := h.run(Options{Action: ActionUninstall, Purge: true})
 		requireOK(t, r)
-		if len(docker.calls) != 0 || !strings.Contains(messagesOf(r.Warnings, codeSandboxUserState), "Docker CLI is missing") ||
-			!strings.Contains(messagesOf(r.Warnings, codeSandboxUserState), "docker image ls --filter") || h.exists(store) {
+		assertUnavailableImageWarnings(t, r.Warnings, h.alice, sampleImageOwner, tags, invalid, "Docker CLI is missing")
+		if len(docker.calls) != 0 || h.exists(store) {
 			t.Errorf("calls = %v, warnings = %+v", docker.calls, r.Warnings)
 		}
 	})
 	t.Run("Docker is not running", func(t *testing.T) {
 		h, docker := imageTestHost(t, "linux")
-		store := writeImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
-		docker.listErr = "Cannot connect to the Docker daemon"
+		store, tags, invalid := unavailableImageStore(t, h)
+		docker.listErr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
 		r := h.run(Options{Action: ActionUninstall, Purge: true})
 		requireOK(t, r)
-		if !strings.Contains(messagesOf(r.Warnings, codeSandboxUserState), docker.listErr) || len(docker.removals()) != 0 || h.exists(store) {
+		assertUnavailableImageWarnings(t, r.Warnings, h.alice, sampleImageOwner, tags, invalid, docker.listErr)
+		if docker.listCount(sampleImageOwner) != 1 || len(docker.removals()) != 0 || h.exists(store) {
 			t.Errorf("removals = %v, warnings = %+v", docker.removals(), r.Warnings)
 		}
 	})
+	t.Run("Docker times out", func(t *testing.T) {
+		h, docker := imageTestHost(t, "linux")
+		store, tags, invalid := unavailableImageStore(t, h)
+		docker.listTimeout = true
+		r := h.run(Options{Action: ActionUninstall, Purge: true})
+		requireOK(t, r)
+		assertUnavailableImageWarnings(t, r.Warnings, h.alice, sampleImageOwner, tags, invalid, "Docker timed out")
+		if docker.listCount(sampleImageOwner) != 1 || len(docker.removals()) != 0 || h.exists(store) {
+			t.Errorf("removals = %v, warnings = %+v", docker.removals(), r.Warnings)
+		}
+	})
+}
+
+func TestSandboxDockerUnavailableUnionsStoresAndBoundsWarnings(t *testing.T) {
+	t.Run("same owner in both stores", func(t *testing.T) {
+		h, docker := imageTestHost(t, "linux")
+		tags := []string{"defenseclaw/sandbox-run:managed-u1000", "defenseclaw/sandbox:legacy-alias-u1000", "defenseclaw/sandbox:legacy-overlay-u1000"}
+		writeImageStore(t, h, h.alice, sampleImageOwner, "", "", tags[0])
+		writeLegacyImageStore(t, h, h.alice, sampleImageOwner, tags[2], tags[1], tags[0])
+		if err := os.Remove(h.env.P("/usr/bin/docker")); err != nil {
+			t.Fatal(err)
+		}
+		r := h.run(Options{Action: ActionUninstall, Purge: true})
+		requireOK(t, r)
+		assertUnavailableImageWarnings(t, r.Warnings, h.alice, sampleImageOwner, tags, "", "Docker CLI is missing")
+		if len(docker.calls) != 0 || len(r.Warnings) != len(tags)+1 {
+			t.Errorf("Docker calls = %v, warnings = %+v", docker.calls, r.Warnings)
+		}
+	})
+	t.Run("at most 32 valid tags", func(t *testing.T) {
+		h, _ := imageTestHost(t, "linux")
+		store := writeImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
+		doc := map[string]any{"version": 1, "owner": sampleImageOwner}
+		var images []map[string]string
+		for i := range 40 {
+			images = append(images, map[string]string{"tag": fmt.Sprintf("defenseclaw/sandbox:recorded-%02d", i)})
+		}
+		images = append(images, map[string]string{"tag": "INVALID-REF"})
+		doc["images"] = images
+		data, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(h.env.P(store), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(h.env.P("/usr/bin/docker")); err != nil {
+			t.Fatal(err)
+		}
+		r := h.run(Options{Action: ActionUninstall, Purge: true})
+		requireOK(t, r)
+		if got := len(r.Warnings); got != imageWarningLimit+1 {
+			t.Errorf("warning count = %d, want %d: %+v", got, imageWarningLimit+1, r.Warnings)
+		}
+		all := messagesOf(r.Warnings, codeSandboxUserState)
+		for _, want := range []string{"recorded-00", "recorded-31", "and 8 more recorded tags", "1 recorded tag(s) were not shown", sandboxImageListCommand(sampleImageOwner)} {
+			if !strings.Contains(all, want) {
+				t.Errorf("warnings lack %q: %s", want, all)
+			}
+		}
+		for _, unwanted := range []string{"recorded-32", "INVALID-REF"} {
+			if strings.Contains(all, unwanted) {
+				t.Errorf("warnings printed hidden tag %q", unwanted)
+			}
+		}
+	})
+}
+
+func unavailableImageStore(t *testing.T, h *osHost) (string, []string, string) {
+	t.Helper()
+	tags := []string{"defenseclaw/sandbox-run:recorded-u1000", "defenseclaw.invalid/sandbox:alias-u1000", "defenseclaw/sandbox:overlay-u1000"}
+	invalid := "INVALID-REF"
+	store := writeImageStore(t, h, h.alice, sampleImageOwner, tags[2], tags[1], tags[0])
+	data, err := os.ReadFile(h.env.P(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["images"] = append(doc["images"].([]any), map[string]any{"tag": invalid})
+	data, err = json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(store), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return store, tags, invalid
+}
+
+func assertUnavailableImageWarnings(t *testing.T, warnings []enterprisestatus.Message, a SandboxAccount, owner string, tags []string, invalid, reason string) {
+	t.Helper()
+	listCommand := sandboxImageListCommand(owner)
+	var seen []string
+	for _, warning := range warnings {
+		if warning.Code != codeSandboxUserState {
+			continue
+		}
+		for _, tag := range tags {
+			if strings.Contains(warning.Message, "docker image rm "+tag) {
+				seen = append(seen, tag)
+				for _, want := range []string{tag, a.Name, reason, "docker image rm " + tag, listCommand, "not verified"} {
+					if !strings.Contains(warning.Message, want) {
+						t.Errorf("warning %q lacks %q", warning.Message, want)
+					}
+				}
+			}
+		}
+		if invalid != "" && strings.Contains(warning.Message, invalid) {
+			t.Errorf("invalid image reference was printed: %q", warning.Message)
+		}
+	}
+	if !reflect.DeepEqual(seen, tags) {
+		t.Errorf("recorded image warnings = %v, want %v", seen, tags)
+	}
+	all := messagesOf(warnings, codeSandboxUserState)
+	wants := []string{"could not list the DefenseClaw sandbox images", a.Name, reason, listCommand}
+	if invalid != "" {
+		wants = append(wants, "1 recorded tag(s) were not shown")
+	}
+	for _, want := range wants {
+		if !strings.Contains(all, want) {
+			t.Errorf("warnings %q lack %q", all, want)
+		}
+	}
 }
 
 func TestSandboxImageStoreRefusesForeignOwnerAndOversizeFile(t *testing.T) {
@@ -465,6 +737,15 @@ func TestSandboxDockerReasonNamesTimeoutAndWithholdsSensitiveOutput(t *testing.T
 	}
 	if got := sandboxDockerReason(CommandResult{Stderr: []byte("password=sample-value\nmore")}, errors.New("exit 1")); got != "Docker command failed (details withheld)" {
 		t.Errorf("sensitive reason = %q", got)
+	}
+	for _, line := range []string{"https://sample.invalid/path", "unix:///var/run/docker.sock?token=sample-value", "unix://sample-user@sample-host/socket"} {
+		if got := sandboxDockerReason(CommandResult{Stderr: []byte(line)}, errors.New("exit 1")); got != "Docker command failed (details withheld)" {
+			t.Errorf("sensitive reason for %q = %q", line, got)
+		}
+	}
+	line := "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+	if got := sandboxDockerReason(CommandResult{Stderr: []byte(line)}, errors.New("exit 1")); got != line {
+		t.Errorf("Unix socket reason = %q", got)
 	}
 }
 

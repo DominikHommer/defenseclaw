@@ -35,6 +35,7 @@ const (
 	imageStoreMaxBytes = 4 << 20 // The image.Store limit; reading must never create its lock or owner.
 	imageRemoveTimeout = 10 * time.Minute
 	imageNameLimit     = 8
+	imageWarningLimit  = 32
 )
 
 var (
@@ -42,6 +43,8 @@ var (
 	sandboxImageIDRE    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	sandboxImageRefRE   = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 	dockerAddressRE     = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}`)
+	dockerUnixSocketRE  = regexp.MustCompile(`unix:///[a-zA-Z0-9_./-]+`)
+	dockerUnixQueryRE   = regexp.MustCompile(`unix:///[a-zA-Z0-9_./-]+[?#]`)
 )
 
 type sandboxImageStore struct {
@@ -100,13 +103,13 @@ func (e *Env) openSandboxImageHome(a SandboxAccount) (int, error) {
 
 // readSandboxImageStore reads only the owner and tag roles. It never creates
 // images.json or its lock, and only reads a regular file owned by the account.
-func (e *Env) readSandboxImageStore(a SandboxAccount) (sandboxImageStore, bool, error) {
+func (e *Env) readSandboxImageStore(a SandboxAccount, rel string) (sandboxImageStore, bool, error) {
 	home, err := e.openSandboxImageHome(a)
 	if err != nil {
 		return sandboxImageStore{}, !errors.Is(err, os.ErrNotExist), err
 	}
 	defer unix.Close(home)
-	parent, name, err := walkDirs(home, filepath.Join(userSandboxDataRel, "images.json"), a.UID)
+	parent, name, err := walkDirs(home, rel, a.UID)
 	if err != nil || parent < 0 {
 		return sandboxImageStore{}, err != nil, err
 	}
@@ -165,11 +168,11 @@ func sandboxImageListCommand(owner string) string {
 // sandboxDockerReason keeps one bounded Docker error line. A line resembling
 // a credential is withheld instead of putting it in an uninstall result.
 func sandboxDockerReason(result CommandResult, err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "Docker timed out"
+	}
 	line := strings.TrimSpace(strings.SplitN(string(result.Stderr), "\n", 2)[0])
 	if line == "" {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return "Docker timed out"
-		}
 		if err == nil {
 			return "Docker command failed"
 		}
@@ -182,12 +185,12 @@ func sandboxDockerReason(result CommandResult, err error) string {
 		return r
 	}, line)
 	lower := strings.ToLower(line)
-	for _, sensitive := range []string{"token", "secret", "password", "authorization", "bearer", "api_key", "apikey", "://"} {
+	for _, sensitive := range []string{"token", "secret", "password", "authorization", "bearer", "api_key", "apikey", "@"} {
 		if strings.Contains(lower, sensitive) {
 			return "Docker command failed (details withheld)"
 		}
 	}
-	if dockerAddressRE.MatchString(line) {
+	if dockerUnixQueryRE.MatchString(lower) || strings.Contains(dockerUnixSocketRE.ReplaceAllString(lower, ""), "://") || dockerAddressRE.MatchString(line) {
 		return "Docker command failed (details withheld)"
 	}
 	if len(line) > 240 {
@@ -208,6 +211,54 @@ func (e *Env) runSandboxDocker(ctx context.Context, docker string, args ...strin
 	return out, err
 }
 
+func sandboxImageRanks(store sandboxImageStore, ranks map[string]int) {
+	setRank := func(tag string, rank int) {
+		if old, ok := ranks[tag]; !ok || rank < old {
+			ranks[tag] = rank
+		}
+	}
+	for _, rec := range store.Images {
+		setRank(rec.Tag, 2)
+	}
+	for _, rec := range store.RunImages {
+		if rec.Alias {
+			setRank(rec.Tag, 1)
+		} else {
+			setRank(rec.Tag, 0)
+		}
+	}
+}
+
+func (l *lifecycle) warnSandboxDockerUnavailable(a SandboxAccount, owner string, ranks map[string]int, reason string) {
+	listCommand := sandboxImageListCommand(owner)
+	var tags []string
+	invalid := 0
+	for tag := range ranks {
+		if sandboxImageRefRE.MatchString(tag) {
+			tags = append(tags, tag)
+		} else {
+			invalid++
+		}
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		if ranks[tags[i]] != ranks[tags[j]] {
+			return ranks[tags[i]] < ranks[tags[j]]
+		}
+		return tags[i] < tags[j]
+	})
+	for _, tag := range tags[:min(len(tags), imageWarningLimit)] {
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("left recorded DefenseClaw sandbox image %s of user %s: %s; this image was not verified because Docker could not list it; as root check `%s`, then run `docker image rm %s` if it belongs to this account", tag, a.Name, reason, listCommand, tag))
+	}
+	message := fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: %s; as root run `%s`, then remove each listed tag with `docker image rm <tag>`", a.Name, reason, listCommand)
+	if invalid > 0 {
+		message += fmt.Sprintf("; %d recorded tag(s) were not shown because they are not valid image names", invalid)
+	}
+	if len(tags) > imageWarningLimit {
+		message += fmt.Sprintf("; and %d more recorded tags; use the list command", len(tags)-imageWarningLimit)
+	}
+	l.result.AddWarning(codeSandboxUserState, message)
+}
+
 // purgeAccountSandboxImages removes only this account's labelled Docker
 // image tags. Linux's managed Docker is host-wide; on macOS Docker Desktop
 // belongs to the account, so the existing account-run teardown handles it.
@@ -217,43 +268,51 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 		return
 	}
 	e, r := l.env, l.result
-	// Mirror purgeAccountSandbox's own-install guard (GAP-0490).
-	if _, err := os.Lstat(e.P(filepath.Join(a.Home, ".defenseclaw", "config.yaml"))); !errors.Is(err, os.ErrNotExist) {
-		return
+	stores := []struct{ name, rel string }{{"daemon state store", filepath.Join(e.daemonStateRel(), "sandboxes", "images.json")}}
+	// Stores written before GAP-0548 (1.0.0 to 1.0.1) remain an upgrade path
+	// until those builds are no longer upgraded from. Purge keeps this legacy
+	// folder when the account has its own DefenseClaw install (GAP-0490).
+	if _, err := os.Lstat(e.P(filepath.Join(a.Home, ".defenseclaw", "config.yaml"))); errors.Is(err, os.ErrNotExist) {
+		stores = append(stores, struct{ name, rel string }{"legacy store", filepath.Join(userSandboxDataRel, "images.json")})
 	}
-	store, found, err := e.readSandboxImageStore(a)
-	if err != nil {
-		if found {
-			r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not safely read the sandbox image store of user %s: %v; no Docker image was removed for this account", a.Name, err))
+	owners := map[string]map[string]int{}
+	var ownerOrder []string
+	for _, path := range stores {
+		store, found, err := e.readSandboxImageStore(a, path.rel)
+		if err != nil {
+			if found {
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not safely read the sandbox image store of user %s (%s): %v; no Docker image was removed for this store", a.Name, path.name, err))
+			}
+			continue
 		}
-		return
+		if !found {
+			continue
+		}
+		if _, ok := owners[store.Owner]; !ok {
+			owners[store.Owner] = map[string]int{}
+			ownerOrder = append(ownerOrder, store.Owner)
+		}
+		sandboxImageRanks(store, owners[store.Owner])
 	}
-	if !found {
-		return
+	for _, owner := range ownerOrder {
+		l.purgeSandboxOwnerImages(ctx, a, owner, owners[owner])
 	}
-	listCommand := sandboxImageListCommand(store.Owner)
+}
+
+func (l *lifecycle) purgeSandboxOwnerImages(ctx context.Context, a SandboxAccount, owner string, ranks map[string]int) {
+	e, r := l.env, l.result
+	listCommand := sandboxImageListCommand(owner)
 	docker := e.firstExisting(e.binCandidates("docker"))
 	if docker == "" {
-		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: Docker CLI is missing; as root run `%s`, then `docker image rm <tag>` for each listed tag", a.Name, listCommand))
+		l.warnSandboxDockerUnavailable(a, owner, ranks, "Docker CLI is missing")
 		return
 	}
-	args := []string{"image", "ls", "--filter", "label=" + image.LabelSandboxImage + "=1", "--filter", "label=" + image.LabelOwner + "=" + store.Owner,
+	args := []string{"image", "ls", "--filter", "label=" + image.LabelSandboxImage + "=1", "--filter", "label=" + image.LabelOwner + "=" + owner,
 		"--no-trunc", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}"}
 	listed, err := e.runSandboxDocker(ctx, docker, args...)
 	if err != nil {
-		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the DefenseClaw sandbox images of user %s: %s; as root run `%s`, then `docker image rm <tag>` for each listed tag", a.Name, sandboxDockerReason(listed, err), listCommand))
+		l.warnSandboxDockerUnavailable(a, owner, ranks, sandboxDockerReason(listed, err))
 		return
-	}
-	ranks := map[string]int{}
-	for _, rec := range store.Images {
-		ranks[rec.Tag] = 2
-	}
-	for _, rec := range store.RunImages {
-		if rec.Alias {
-			ranks[rec.Tag] = 1
-		} else {
-			ranks[rec.Tag] = 0
-		}
 	}
 	var candidates []sandboxDockerImage
 	seen := map[string]bool{}
@@ -283,7 +342,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 			} `json:"Config"`
 		}
 		if json.Unmarshal(inspected.Stdout, &facts) != nil || facts.ID != id || facts.Config.Labels[image.LabelSandboxImage] != "1" ||
-			facts.Config.Labels[image.LabelOwner] != store.Owner || facts.Config.Labels[image.LabelUID] != strconv.Itoa(a.UID) {
+			facts.Config.Labels[image.LabelOwner] != owner || facts.Config.Labels[image.LabelUID] != strconv.Itoa(a.UID) {
 			r.AddWarning(codeSandboxUserState, fmt.Sprintf("left candidate sandbox image %s (%s) of user %s: its image ID, owner or account uid label did not match; check `%s` before removing it", ref, id[7:19], a.Name, listCommand))
 			continue
 		}
