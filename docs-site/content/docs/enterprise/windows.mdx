@@ -383,6 +383,14 @@ and set `security_complete` to `false`, even when no session was listed. A
 running agent with no account name is checked by its owner SID when available;
 with neither an account name nor a SID, its restart status is unknown.
 
+Windows `status`, `verify`, `ensure` and `repair` also report
+`agent_settings_not_restored` when the hook guardian puts back a missing
+Hermes `config.yaml` or Devin `config.json` from its last known good copy or
+the pristine backup, or recreates the file with hooks only when no copy is
+available. The warning tells the account to review settings that may not
+have been restored; it does not by itself change `security_complete`, the
+exit code or MDM detection.
+
 With `JSON=1`, Setup prints the lifecycle result document on standard output.
 The exit code follows Windows Installer conventions:
 

@@ -228,6 +228,12 @@ What setup does, in order:
    (see [sandboxes on Linux](/docs/sandboxes/linux#understand-what-it-changed));
    sandboxes made on the old driver cannot start after the switch.
 
+   On Linux, setup gives each per-user Docker gateway its own sandbox
+   namespace, `defenseclaw-u<uid>`, when that account has no sandbox in
+   OpenShell's `default` namespace. If the gateway still has sandboxes there,
+   setup leaves its namespace in place and `defenseclaw sandbox doctor` warns
+   `docker-namespace` until those sandboxes are gone.
+
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
    `--non-interactive` take). Yes writes `compute_driver = "vm"` under
