@@ -789,11 +789,9 @@ minutes after bind to allow the first guest record to arrive; a real sandbox
 whose lifecycle records were dropped can show once. The record is a tripwire
 for the simple case, not proof: the same account can also post lifecycle
 records. Root-owned lifecycle attestation is the planned protection.
-Only registrations bound by a build with this signal are watched; a
-registration stored by an earlier pre-release build is not evaluated until
-root-owned attestation replaces this signal. The first accepted guest record
-ends the watch for that registration, so a guest that disappears later is not
-reported by this tripwire for the simple case.
+Only registrations bound by a build with this signal are watched. The first
+accepted guest record ends the watch for that registration, so a guest that
+disappears later is not reported by this tripwire for the simple case.
 
 `ensure` warns about a `required_for` connector that has no machine-owned hook
 on the OS.

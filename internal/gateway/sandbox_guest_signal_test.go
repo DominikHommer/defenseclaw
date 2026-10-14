@@ -530,8 +530,7 @@ func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	if remaining != 0 {
 		t.Fatalf("gone registration left %d rate keys", remaining)
 	}
-	// A registration stored by an earlier pre-release build has no watch
-	// marker and is outside this signal until root-owned attestation replaces it.
+	// An older store file has no watch marker and is never evaluated.
 	oldID := boundRegistration(t, g.f, sbxAlice, 2)
 	path := filepath.Join(sandboxreg.RegistrationsDir(g.f.cfg.DataDir), fmt.Sprintf("%d.json", sbxAlice.UID))
 	blob, err := os.ReadFile(path)

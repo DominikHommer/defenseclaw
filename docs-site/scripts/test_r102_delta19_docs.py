@@ -25,9 +25,9 @@ class Delta19DocsTest(unittest.TestCase):
         self.assertIn("keep the `docker` group limited", text)
         self.assertIn("whose lifecycle records were dropped can show once", text.lower())
         self.assertIn("Only registrations bound by a build with this signal are watched", text)
-        self.assertIn("earlier pre-release build is not evaluated", text)
-        self.assertIn("The first accepted guest record\nends the watch", text)
-        self.assertIn("a guest that disappears later is not\nreported", text)
+        self.assertNotIn("earlier pre-release", text)
+        self.assertIn("The first\naccepted guest record ends the watch", text)
+        self.assertIn("disappears later is not reported", text)
         for value in ("relay_without_guest", "running_without_guest", "Sandbox\nregistrations without a guest"):
             self.assertIn(value, text)
 
@@ -40,14 +40,14 @@ class Delta19DocsTest(unittest.TestCase):
                 self.assertIn(value, text)
             self.assertIn("compliance.activity", text)
             self.assertIn("no outcome", text)
-            self.assertIn("earlier pre-release registrations are not evaluated", text)
+            self.assertNotIn("earlier pre-release", text)
             self.assertIn("first accepted record ends the watch", text.lower())
         self.assertIn("/docs/enterprise/sandboxes#require-sandboxes", guide)
         self.assertIn("non-exempt account", guide)
         self.assertIn("`when_unavailable` setting is `refuse`", guide)
         self.assertIn("effective `alert` setting when", guide)
         changelog = (ROOT / "CHANGELOG.md").read_text()
-        self.assertIn("earlier pre-release registrations await root-owned attestation", changelog)
+        self.assertNotIn("earlier pre-release", changelog)
 
 
 if __name__ == "__main__":
