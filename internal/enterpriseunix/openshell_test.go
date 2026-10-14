@@ -1041,7 +1041,8 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		}
 		r = h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "e2fsprogs_dir": dir}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox e2fsprogs"); state != "ok: "+dir {
+		// The row names the folder the gateway runs the driver with (GAP-0506).
+		if state, _ := rowState(r, "sandbox e2fsprogs"); state != "ok: "+dir+"/sbin" {
 			t.Errorf("e2fsprogs row = %q", state)
 		}
 		h.env.Trust = func(path string, kind TrustKind) error {

@@ -506,19 +506,16 @@ func (e *Env) checkE2fsprogs(ctx context.Context, s openshellSettings) []prereqR
 		return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", s.E2fsprogsDir, err),
 			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}}
 	}
-	for _, tool := range []string{"mke2fs", "debugfs"} {
-		found := false
-		for _, sub := range []string{"sbin", "bin", ""} {
-			if exists(e.P(filepath.Join(s.E2fsprogsDir, sub, tool))) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s has no %s", s.E2fsprogsDir, tool), Fix: "install e2fsprogs 1.43 or newer there"}}
-		}
+	// The folder the gateway's exec shim puts first on the driver's PATH,
+	// found by the same rule (GAP-0506): ensure used to accept the tools in
+	// any of sbin, bin or the folder itself while the shim took only sbin,
+	// so an accepted e2fsprogs_dir could leave the gateway unable to start.
+	tools := openshell.AdminE2fsprogsToolDir(s.E2fsprogsDir, func(p string) bool { return openshell.RegularFile(e.P(p)) })
+	if tools == "" {
+		return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s holds no mke2fs and debugfs side by side, in it or in its sbin or bin", s.E2fsprogsDir),
+			Fix: "install e2fsprogs 1.43 or newer there, or set enterprise.openshell.e2fsprogs_dir to its install prefix or to the folder that holds both mke2fs and debugfs"}}
 	}
-	return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: s.E2fsprogsDir}}
+	return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: tools}}
 }
 
 // kvmDevice is the device a MicroVM needs.
