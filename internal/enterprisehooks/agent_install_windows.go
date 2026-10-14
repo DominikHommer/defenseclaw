@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -56,7 +57,7 @@ var windowsReadInstallJunction = os.Readlink
 // windowsInstallLongPathName returns the long spelling of an existing path;
 // tests replace it.
 var windowsInstallLongPathName = func(path string) (string, error) {
-	short, err := windows.UTF16PtrFromString(path)
+	short, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return "", err
 	}
@@ -66,7 +67,7 @@ var windowsInstallLongPathName = func(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if n <= uint32(len(buf)) {
+		if n < uint32(len(buf)) {
 			return windows.UTF16ToString(buf[:n]), nil
 		}
 		buf = make([]uint16, n)
@@ -83,6 +84,27 @@ var windowsInstallPathAttributes = func(path string) (uint32, error) {
 	return windows.GetFileAttributes(ptr)
 }
 
+// windowsInstallLocalDrivePath accepts a drive path, including its extended
+// spelling, without allowing a UNC or device namespace to become a local
+// relative path when the prefix is removed.
+func windowsInstallLocalDrivePath(path string) (string, error) {
+	path = filepath.FromSlash(path)
+	if strings.HasPrefix(path, `\\?\`) {
+		path = strings.TrimPrefix(path, `\\?\`)
+		if len(path) < 3 || path[1] != ':' || path[2] != '\\' {
+			return "", fmt.Errorf("path is not on a local drive letter")
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if volume := filepath.VolumeName(abs); len(volume) != 2 || volume[1] != ':' {
+		return "", fmt.Errorf("path is not on a local drive letter: %s", abs)
+	}
+	return abs, nil
+}
+
 // windowsRejectInstallReparseChain refuses a reparse point anywhere on path
 // below a local drive letter. Every folder is checked from the volume root
 // down before the one below it is touched, so a link a user made in the
@@ -91,12 +113,9 @@ var windowsInstallPathAttributes = func(path string) (uint32, error) {
 // checks the leaf first, which already resolves the whole chain as
 // LocalSystem. A missing element ends the walk: nothing exists below it.
 func windowsRejectInstallReparseChain(path string) error {
-	abs, err := filepath.Abs(path)
+	abs, err := windowsInstallLocalDrivePath(path)
 	if err != nil {
 		return err
-	}
-	if volume := filepath.VolumeName(abs); len(volume) != 2 || volume[1] != ':' {
-		return fmt.Errorf("path is not on a local drive letter: %s", abs)
 	}
 	var chain []string
 	for current := abs; ; {
@@ -153,17 +172,25 @@ func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) 
 	if err != nil || strings.TrimSpace(target) == "" {
 		return "", "the Codex standalone install selects no release (its current junction is missing or unreadable)"
 	}
-	target = filepath.Clean(strings.TrimSpace(target))
+	target, err = windowsInstallLocalDrivePath(strings.TrimSpace(target))
+	if err != nil {
+		return "", "the Codex standalone current junction points outside its releases folder"
+	}
 	// The target is the user's, so nothing touches it before it is known to
 	// be on the profile's own local drive: a directory symbolic link (which a
 	// user in Developer Mode can create) may name a UNC path, and LocalSystem
 	// must never open one. Then the folder is compared by identity, not by
 	// spelling, as the junction may name it in a long or short (8.3) form.
-	volume := filepath.VolumeName(target)
-	if len(volume) != 2 || volume[1] != ':' || !strings.EqualFold(volume, filepath.VolumeName(releases)) {
+	releasesPath, err := windowsInstallLocalDrivePath(releases)
+	if err != nil || !strings.EqualFold(filepath.VolumeName(target), filepath.VolumeName(releasesPath)) {
 		return "", "the Codex standalone current junction points outside its releases folder"
 	}
-	if !strings.EqualFold(filepath.Dir(target), releases) {
+	// Check the junction target's own spelling before asking Windows to
+	// inspect its parent or expand its 8.3 name.
+	if windowsRejectInstallReparseChain(target) != nil {
+		return "", "the Codex standalone current junction points through a refused reparse chain"
+	}
+	if !strings.EqualFold(filepath.Dir(target), releasesPath) {
 		if parent, err := os.Lstat(filepath.Dir(target)); err != nil || !os.SameFile(parent, releasesInfo) {
 			return "", "the Codex standalone current junction points outside its releases folder"
 		}
@@ -274,6 +301,10 @@ func readWindowsWinGetPackageVersion(root registry.Key, path string, access uint
 var (
 	windowsWinGetPackagesMaxEntries = 4096
 	windowsWinGetPackagesScanBudget = time.Second
+	// Tests replace the directory read to exercise a stalled filesystem call.
+	windowsWinGetReadPackageNames = func(dir *os.File, count int) ([]string, error) {
+		return dir.Readdirnames(count)
+	}
 )
 
 // windowsWinGetPackagesBatch is how many names one directory read returns.
@@ -284,20 +315,60 @@ const windowsWinGetPackagesBatch = 256
 // not fully listed (more than windowsWinGetPackagesMaxEntries entries, or
 // not within windowsWinGetPackagesScanBudget) before one was found.
 func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (string, bool) {
+	budget, maxEntries := windowsWinGetPackagesScanBudget, windowsWinGetPackagesMaxEntries
+	if budget <= 0 || maxEntries <= 0 {
+		return "", false
+	}
+	deadline := time.Now().Add(budget)
+	readNames := windowsWinGetReadPackageNames
+	type scanResult struct {
+		match    string
+		complete bool
+	}
+	results := make(chan scanResult, 1)
+	var active atomic.Pointer[os.File]
+	go func() {
+		match, complete := scanWindowsWinGetPackageFolder(packages, packageIDs, maxEntries, deadline, readNames, &active)
+		results <- scanResult{match, complete}
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case found := <-results:
+		return found.match, found.complete
+	case <-timer.C:
+		if dir := active.Load(); dir != nil {
+			// Closing the handle releases an outstanding directory read. Do
+			// not let that close hold up the next account's enumeration.
+			go dir.Close()
+		}
+		return "", false
+	}
+}
+
+func scanWindowsWinGetPackageFolder(packages string, packageIDs []string, maxEntries int, deadline time.Time, readNames func(*os.File, int) ([]string, error), active *atomic.Pointer[os.File]) (string, bool) {
 	dir, err := os.Open(packages)
 	if err != nil {
 		return "", true
 	}
 	defer dir.Close()
+	active.Store(dir)
+	defer active.Store(nil)
 	prefixes := make([]string, 0, len(packageIDs))
 	for _, id := range packageIDs {
 		prefixes = append(prefixes, strings.ToLower(id)+"_")
 	}
-	deadline := time.Now().Add(windowsWinGetPackagesScanBudget)
 	listed := 0
 	for {
-		names, err := dir.Readdirnames(windowsWinGetPackagesBatch)
+		if !time.Now().Before(deadline) {
+			return "", false
+		}
+		names, err := readNames(dir, windowsWinGetPackagesBatch)
 		for _, name := range names {
+			listed++
+			if listed > maxEntries || !time.Now().Before(deadline) {
+				return "", false
+			}
 			lower := strings.ToLower(name)
 			for _, prefix := range prefixes {
 				if strings.HasPrefix(lower, prefix) {
@@ -309,8 +380,7 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 			// io.EOF: listed in full; any other error lists no more.
 			return "", errors.Is(err, io.EOF)
 		}
-		listed += len(names)
-		if listed >= windowsWinGetPackagesMaxEntries || !time.Now().Before(deadline) {
+		if listed >= maxEntries {
 			return "", false
 		}
 	}

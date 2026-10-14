@@ -131,4 +131,31 @@ func TestWindowsStandaloneNamesSessionsStartedBeforeAGuardianRestore(t *testing.
 		!strings.Contains(named[0], "sharing violation") || strings.Contains(named[0], "pid 67") || result.SecurityComplete {
 		t.Fatalf("unreadable record: warnings = %+v security_complete = %t, want hermes pid 66 named with its restart status unknown", result.Warnings, result.SecurityComplete)
 	}
+
+	// An account lookup can fail during the same sharing violation. The
+	// missing SID must not hide the unreadable record or leave status green.
+	windowsEnterpriseAccountSID = func(string) string { return "" }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "hermes (pid 66); restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unresolved account with unreadable record: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+
+	// Even with no visible agent sessions, an unreadable record leaves
+	// restart status unknown rather than certifying security_complete.
+	processes = nil
+	result = enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unreadable record without sessions: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) { return nil, errors.New("process snapshot unavailable") }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.2")
+	result.Installed, result.SecurityComplete = true, true
+	applyWindowsEnterpriseAgentSessions(result, &windowsEnterpriseLifecycleOptions{})
+	if named := restartWarnings(result); len(named) != 1 || !strings.Contains(named[0], "restart status unknown") || result.SecurityComplete {
+		t.Fatalf("unreadable record and sessions: warnings = %+v security_complete = %t", result.Warnings, result.SecurityComplete)
+	}
 }

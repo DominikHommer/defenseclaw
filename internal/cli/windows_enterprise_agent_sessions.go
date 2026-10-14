@@ -111,7 +111,7 @@ var (
 	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
 		layout, err := managed.StandaloneWindowsLayout()
 		if err != nil {
-			return nil, nil
+			return nil, err
 		}
 		return readEnterpriseHookGuardianRestores(layout.DataDir)
 	}
@@ -296,11 +296,17 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	// An unreadable restore record leaves each session's restart status
 	// unknown, which is named instead of read as "no restore".
 	restores, restoresErr := windowsEnterpriseGuardianRestores()
+	if restoresErr != nil {
+		result.SecurityComplete = false
+	}
 	if activated.IsZero() && len(record.ConnectorActivatedAt) == 0 && len(record.EnrollmentActivatedAt) == 0 && len(restores) == 0 && restoresErr == nil {
 		return
 	}
 	processes, err := windowsEnterpriseAgentProcesses()
 	if err != nil {
+		if restoresErr != nil {
+			result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record and running agent sessions could not be read")
+		}
 		return
 	}
 	// A session another warning of this run already names (the hot config
@@ -358,6 +364,9 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			sids[user] = sid
 		}
 		if sid == "" {
+			if restoresErr != nil && !windowsMachinePolicyHookConnectors[name] {
+				unknownSessions[user] = append(unknownSessions[user], label)
+			}
 			continue
 		}
 		key := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: sid, Connector: name})
@@ -454,7 +463,10 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 			"user %s runs %s; restart status unknown: the hook guardian's restore record could not be read (%v), so DefenseClaw cannot tell whether these sessions started before the guardian put back the account's hooks and run without DefenseClaw: ask that user to restart them",
 			user, strings.Join(unknownSessions[user], ", "), restoresErr))
 	}
-	if len(restoredSessions) > 0 || len(unknownSessions) > 0 {
+	if restoresErr != nil && len(unknownSessions) == 0 {
+		result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record could not be read")
+	}
+	if len(restoredSessions) > 0 {
 		result.SecurityComplete = false
 	}
 }

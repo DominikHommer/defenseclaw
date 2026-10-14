@@ -16,7 +16,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func stubEnumerateRunningAgents(t *testing.T, processes []inventory.AgentProcess, processErr error, sids map[string]string) {
@@ -125,6 +127,39 @@ func TestEnterpriseWindowsEnumerateRunningAgentLookupIsBounded(t *testing.T) {
 	}
 }
 
+func TestEnterpriseWindowsEnumerateRunningAgentBudgetExhaustedForLaterAccount(t *testing.T) {
+	previousBudget, previousTimeout := enterpriseWindowsEnumerateRunningLookupBudget, enterpriseWindowsEnumerateRunningLookupTimeout
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateRunningLookupBudget, enterpriseWindowsEnumerateRunningLookupTimeout = previousBudget, previousTimeout
+	})
+	enterpriseWindowsEnumerateRunningLookupBudget = 20 * time.Millisecond
+	enterpriseWindowsEnumerateRunningLookupTimeout = 20 * time.Millisecond
+	const knownSID = "S-1-5-21-1-2-3-1009"
+	stubEnumerateRunningAgents(t, []inventory.AgentProcess{
+		{PID: 1, Connector: "codex", User: `DCLAB\slow`},
+		{PID: 2, Connector: "codex", User: `DCLAB\later`},
+	}, nil, nil)
+	known := &enterpriseWindowsEnumerateKnownSIDs
+	known.Lock()
+	known.byAccount[`dclab\later`] = knownSID
+	known.Unlock()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	enterpriseWindowsEnumerateAccountSID = func(string) string {
+		<-release
+		return ""
+	}
+	got, unknown := enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if got[knownSID]["codex"] != "codex (pid 2)" || len(unknown) != 1 || unknown[0].User != `DCLAB\slow` {
+		t.Fatalf("budget exhausted with a cached later account: rows %+v, unknown %+v", got, unknown)
+	}
+	resetEnumerateKnownSIDs(t)
+	got, unknown = enterpriseWindowsEnumerateRunningAgents(new(bytes.Buffer), []string{"codex"})
+	if len(got) != 0 || len(unknown) != 2 || unknown[1].User != `DCLAB\later` {
+		t.Fatalf("budget exhausted without a cached later account: rows %+v, unknown %+v", got, unknown)
+	}
+}
+
 // The standalone cycle hands the running sessions to the enumerator; the
 // Secure Client profile does not.
 func TestEnterpriseWindowsEnumerateCyclePassesRunningAgents(t *testing.T) {
@@ -173,5 +208,43 @@ func TestEnterpriseWindowsEnumerateCyclePassesRunningAgents(t *testing.T) {
 	}
 	if len(published) != 1 || published[0].Connector != "codex" || !strings.Contains(published[0].Reason, "codex (pid 10)") {
 		t.Fatalf("published = %+v", published)
+	}
+
+	// No cycle ever resolved this account. The owner-unknown entry must
+	// reach the published record, survive its wire format, and make status
+	// and verify security-incomplete without a SID.
+	resetEnumerateKnownSIDs(t)
+	enterpriseWindowsEnumerateAccountSID = func(string) string { return "" }
+	enterpriseWindowsEnumerateAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{
+			{PID: 10, Connector: "codex", User: `AzureAD\EntraAlice`},
+			{PID: 11, Connector: "codex", User: `azuread\entraalice`},
+		}, nil
+	}
+	published = nil
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+		t.Fatalf("owner-unknown cycle: %v", err)
+	}
+	if len(published) != 1 || published[0].SID != "" || published[0].Connector != "codex" {
+		t.Fatalf("published owner-unknown entries = %+v, want one with no SID", published)
+	}
+	data, err := enterprisehooks.MarshalUnprotectedAgents(published)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := enterprisehooks.ParseUnprotectedAgents(data)
+	if err != nil || len(parsed) != 1 || parsed[0].SID != "" || !strings.Contains(parsed[0].Message(), "could not be resolved") {
+		t.Fatalf("read owner-unknown record = %+v, %v", parsed, err)
+	}
+	previousReader := windowsEnterpriseUnprotectedAgentsReader
+	t.Cleanup(func() { windowsEnterpriseUnprotectedAgentsReader = previousReader })
+	windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) { return parsed, nil }
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.2")
+		result.SecurityComplete = true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		if result.SecurityComplete || len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0].Message, "could not be resolved") {
+			t.Fatalf("%s owner-unknown status = %+v", action, result)
+		}
 	}
 }

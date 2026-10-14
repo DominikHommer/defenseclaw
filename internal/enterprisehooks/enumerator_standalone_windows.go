@@ -114,8 +114,11 @@ func (c windowsStandaloneRowContext) pending(row *ManifestTarget, reason string)
 	version, _ := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
 	if version == "" {
 		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path == "" {
-			if installed, why := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed == "" && why == "" {
-				return
+			if installed, why := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed == "" {
+				if why == "" {
+					return
+				}
+				reason += "; " + why
 			}
 		}
 	}
