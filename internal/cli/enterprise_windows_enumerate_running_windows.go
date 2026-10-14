@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -42,16 +44,57 @@ var (
 	}
 )
 
+// enterpriseWindowsEnumerateKnownSIDs keeps, for the life of the enumerator
+// process (the interval loop), the SID each account resolved to. A lookup that
+// fails or times out in a later cycle (an unreachable domain controller) uses
+// it, so that account's running agent is still judged against its rows instead
+// of dropping out of the unprotected record for the cycle.
+var enterpriseWindowsEnumerateKnownSIDs = struct {
+	sync.Mutex
+	byAccount map[string]string
+}{byAccount: map[string]string{}}
+
+// enterpriseWindowsEnumerateKnownSIDsMax bounds that cache; past it the cache
+// starts over.
+const enterpriseWindowsEnumerateKnownSIDsMax = 4096
+
+// enterpriseWindowsEnumerateResolveSID resolves account (key is its lowercase
+// spelling) within remaining, or returns the SID an earlier cycle resolved,
+// or "" when neither is known.
+func enterpriseWindowsEnumerateResolveSID(account, key string, remaining time.Duration) string {
+	sid := enterpriseWindowsEnumerateLookupWithin(account, remaining)
+	known := &enterpriseWindowsEnumerateKnownSIDs
+	known.Lock()
+	defer known.Unlock()
+	if sid == "" {
+		return known.byAccount[key]
+	}
+	if len(known.byAccount) >= enterpriseWindowsEnumerateKnownSIDsMax {
+		known.byAccount = map[string]string{}
+	}
+	known.byAccount[key] = sid
+	return sid
+}
+
 // enterpriseWindowsEnumerateRunningAgents returns, by account SID and
-// connector, a label of one running agent session ("codex (pid 4242)").
-func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer) map[string]map[string]string {
+// connector, a label of one running agent session ("codex (pid 4242)"). An
+// agent of an enabled connector whose account resolves to no SID this cycle
+// and none earlier is returned as an owner-unknown unprotected agent instead:
+// no row can be matched to it, so it is not known to be protected.
+func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []string) (map[string]map[string]string, []enterprisehooks.UnprotectedAgent) {
 	processes, err := enterpriseWindowsEnumerateAgentProcesses()
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN running agent sessions are unreadable this cycle; only installs are checked for unenrolled agents: %v\n", err)
-		return nil
+		return nil, nil
+	}
+	enabled := make(map[string]bool, len(connectors))
+	for _, name := range connectors {
+		enabled[strings.ToLower(strings.TrimSpace(name))] = true
 	}
 	out := map[string]map[string]string{}
 	sids := map[string]string{}
+	var unknown []enterprisehooks.UnprotectedAgent
+	unknownSeen := map[string]bool{}
 	var spent time.Duration
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
@@ -63,21 +106,31 @@ func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer) map[string]map[st
 		sid, resolved := sids[key]
 		if !resolved {
 			started := time.Now()
-			sid = enterpriseWindowsEnumerateLookupWithin(user, enterpriseWindowsEnumerateRunningLookupBudget-spent)
+			sid = enterpriseWindowsEnumerateResolveSID(user, key, enterpriseWindowsEnumerateRunningLookupBudget-spent)
 			spent += time.Since(started)
 			sids[key] = sid
 		}
+		label := fmt.Sprintf("%s (pid %d)", connector, process.PID)
 		if sid == "" {
+			if enabled[connector] && !unknownSeen[key+"\x00"+connector] {
+				unknownSeen[key+"\x00"+connector] = true
+				unknown = append(unknown, enterprisehooks.UnprotectedAgent{
+					User:      user,
+					Connector: connector,
+					Code:      enterprisehooks.UnprotectedCodeAgentUnprotected,
+					Reason:    fmt.Sprintf("%s runs for this account, but its account SID could not be resolved this cycle (the lookup failed or did not answer in time), so DefenseClaw cannot tell whether a row enrolls it; it counts as unprotected until the lookup answers", label),
+				})
+			}
 			continue
 		}
 		if out[sid] == nil {
 			out[sid] = map[string]string{}
 		}
 		if _, seen := out[sid][connector]; !seen {
-			out[sid][connector] = fmt.Sprintf("%s (pid %d)", connector, process.PID)
+			out[sid][connector] = label
 		}
 	}
-	return out
+	return out, unknown
 }
 
 // enterpriseWindowsEnumerateLookupWithin resolves account to its SID, or ""
