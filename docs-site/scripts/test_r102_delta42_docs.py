@@ -23,6 +23,8 @@ class Delta42DocsTest(unittest.TestCase):
             "the upgrade is a plain restart (\"pending restart\" while a sandbox runs), not a switch",
             "A user who never ran sandboxes moves straight to `defenseclaw-managed`",
             "once their last 1.0.1 sandbox is deleted",
+            "The bridge lives in the setup's applied record, which an uninstall removes",
+            "before an uninstall, pull the work you want to keep from the sandboxes kept under 1.0.1",
             "This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.",
         ):
             self.assertIn(phrase, bullet)
