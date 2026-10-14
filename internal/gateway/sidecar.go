@@ -111,6 +111,12 @@ type Sidecar struct {
 	configMgr     *ConfigManager
 	modelRouter   ModelRouter
 
+	// inventoryPublish is the managed_enterprise inventory change gate. It is nil
+	// in every other deployment mode. It lives here, not inside the emitter
+	// closures, because those closures are rebuilt on every config reload while
+	// the publish memory must survive reloads.
+	inventoryPublish *managedInventoryPublishState
+
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
 	ipcRunner IPCRunner
@@ -528,6 +534,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		webhooks:                webhooks,
 		hilt:                    hilt,
 		aiDiscovery:             aiDiscovery,
+		inventoryPublish:        newManagedInventoryPublishState(cfg),
 		osNotifier:              osNotifier,
 		apiRestartCh:            make(chan struct{}, 1),
 		fleetReloadCh:           make(chan struct{}, 1),
@@ -1014,7 +1021,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		if discovery != nil {
 			snapshotFn = discovery.Snapshot
 		}
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		inventoryEmit := makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+		)
 		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
@@ -1924,11 +1933,13 @@ func buildInitialSidecarJudge(
 }
 
 // generationUnchanged reports a rebuild that matches the live generation: the
-// same effective digest and the same reason (if any) the Rego policy did not
-// load, so a new failure to load it is published, not swallowed.
+// same effective digest, bundle identity, and policy-load errors. A newly
+// signed bundle still needs a published generation and an apply audit event
+// even when its effective policy bytes happen to match the live one.
 func generationUnchanged(live, next *Generation) bool {
 	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError &&
-		live.scannerPinError == next.scannerPinError
+		live.scannerPinError == next.scannerPinError && live.BundleID == next.BundleID &&
+		live.BundleVersion == next.BundleVersion
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -2271,7 +2282,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
-			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter()))
+			nextAIDiscovery.BindObservabilityV8(newAIDiscoveryV8Adapter(s.observabilityV8Emitter(), s.inventoryPublish))
 			// Before the swap, so the restart worker never runs the
 			// replacement with a stale scan-history window.
 			s.applyAIDiscoveryHistoryRetention(nextAIDiscovery)
@@ -2344,7 +2355,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if svc != nil {
 			snapshotFn = svc.Snapshot
 		}
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		inventoryEmit := makeEndpointInventoryEmitter(
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+		)
 		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
@@ -2469,7 +2482,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 			oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 			!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 			!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
-			oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+			!equalConfigPathForDiff(oldG.RulePackDir, newG.RulePackDir, runtime.GOOS) || oldG.HookSelfHeal != newG.HookSelfHeal ||
 			oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 			!reflect.DeepEqual(oldG.Judge, newG.Judge)
 	}

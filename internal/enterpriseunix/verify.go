@@ -1046,6 +1046,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.Enrollment = l.enrollmentCounts()
 	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
