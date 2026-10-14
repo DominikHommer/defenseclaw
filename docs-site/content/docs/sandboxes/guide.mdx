@@ -1629,6 +1629,12 @@ through to the harness.
 - `defenseclaw sandbox disable claude` removes the `claude` wrapper from
   every shell's rc file. Open a new shell for it to take effect.
 
+For a non-exempt account, that host refusal applies when the effective
+`when_unavailable` setting is `refuse`; an effective `alert` setting when
+sandboxes are unavailable permits the host run. Managed registrations have a
+same-account limit in 1.0.2; see
+[the registration limit](/docs/enterprise/sandboxes#require-sandboxes).
+
 In the TUI Sandboxes panel, `w` switches the wrappers for `claude` and
 `codex` on and off. `defenseclaw sandbox doctor` reports the installed
 wrappers.
