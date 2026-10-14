@@ -172,6 +172,11 @@ type lifecycle struct {
 	// policiesKept is set when a Linux uninstall kept the administrator
 	// policies in Layout.PolicyDir (GAP-0960).
 	policiesKept bool
+	// sandboxesKept names the accounts whose sandboxes a non-purge
+	// uninstall kept; sandboxStoreKept is set once it kept the gateway's
+	// registrations of them with it (GAP-0598).
+	sandboxesKept    []string
+	sandboxStoreKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -507,9 +512,17 @@ func (e *Env) removeLifecycleStateKeepingLock() error {
 }
 
 // removeInstallRootKeepingLock preserves the lock when macOS stores its
-// lifecycle directory inside the install root.
-func (e *Env) removeInstallRootKeepingLock() error {
-	if filepath.Dir(e.Layout.LifecycleDir) != e.Layout.InstallRoot {
+// lifecycle directory inside the install root, and each folder in keep
+// that is a direct child of the install root (the macOS data folder with
+// the kept sandbox registrations, GAP-0598).
+func (e *Env) removeInstallRootKeepingLock(keep ...string) error {
+	skip := map[string]bool{}
+	for _, dir := range append([]string{e.Layout.LifecycleDir}, keep...) {
+		if filepath.Dir(dir) == e.Layout.InstallRoot {
+			skip[filepath.Base(dir)] = true
+		}
+	}
+	if len(skip) == 0 {
 		return os.RemoveAll(e.P(e.Layout.InstallRoot))
 	}
 	root := e.P(e.Layout.InstallRoot)
@@ -528,7 +541,7 @@ func (e *Env) removeInstallRootKeepingLock() error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == filepath.Base(e.Layout.LifecycleDir) {
+		if skip[entry.Name()] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
@@ -2984,6 +2997,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				// config that names them turns the deployment on again
 				// (GAP-0960). A purge removes them.
 				l.policiesKept, err = removeAllExcept(env.P(dir), env.P(env.Layout.PolicyDir))
+			} else if dir == env.Layout.DataDir && l.keepSandboxStore() {
+				// The sandboxes the accounts keep need the gateway's
+				// registrations of them and their key at the next
+				// activation (GAP-0598). A purge removes them.
+				l.sandboxStoreKept, err = removeDataDirKeepingSandboxStore(env.P(dir))
 			} else {
 				err = os.RemoveAll(env.P(dir))
 			}
@@ -3001,7 +3019,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			errs = append(errs, err)
 		}
 		if !packageManaged {
-			if err := env.removeInstallRootKeepingLock(); err != nil {
+			var keep []string
+			if l.sandboxStoreKept {
+				keep = append(keep, env.Layout.DataDir)
+			}
+			if err := env.removeInstallRootKeepingLock(keep...); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -3032,6 +3054,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				if err != nil {
 					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
 				}
+			}
+		}
+		if l.sandboxStoreKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
+			// The account that owned the kept registrations is gone.
+			if err := env.handSandboxStoreToRoot(); err != nil {
+				r.AddWarning(codeLeftovers, fmt.Sprintf("could not hand the kept sandbox registrations in %s to root: %v; before the next ensure run `chown -R root:root %s`",
+					env.Layout.DataDir, err, env.Layout.DataDir))
 			}
 		}
 		if l.policiesKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
@@ -3067,7 +3096,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	_ = removeFile(env.deploymentPath())
 	_ = removeFile(env.policyStatePath())
-	if l.opts.KeepState && record != nil {
+	if (l.opts.KeepState || l.sandboxStoreKept) && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.
 		if err := env.recordRetainedState(); err != nil {
@@ -3164,6 +3193,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 			reenable = "installing the payload again with the same config, `<payload>/" + binGateway + " enterprise linux ensure --payload <payload> --config <file>`, turns the deployment on again"
 		}
 		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so "+reenable+"; --purge removes them")
+	}
+	if kept := l.keptSandboxStoreLine(); kept != "" {
+		lines = append(lines, kept)
 	}
 	if !l.opts.Purge {
 		if kept := l.keptPerUserLine(record); kept != "" {
@@ -3340,7 +3372,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			left = true
 			continue
 		}
-		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause (or remove DefenseClaw's entries from that account's %s config) and rerun %s", connector, user, reason, connector, rerun))
+		r.AddError(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s; fix the cause; for a pending guardian cleanup, fix the account's home to an existing directory it owns, without symlinks or group/other write, or remove the account; then rerun %s", connector, user, reason, rerun))
 		left = true
 	}
 	if err != nil && len(report.Failed) == 0 {
