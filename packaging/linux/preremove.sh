@@ -24,11 +24,14 @@
 # registrations then name a deleted binary until they are removed by hand.
 #
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
-# and apt purge, and rpm has no purge. It removes the machine state (config,
-# secrets, gateway and guardian state, logs, lifecycle state) and the
-# service account; the administrator policies in /etc/defenseclaw/policies
-# stay (apt purge deletes them), and each enrolled account keeps its
-# ~/.defenseclaw and per-user binaries. To remove those too, run
+# and apt purge, and rpm has no purge. It removes the config, secrets, most
+# gateway and guardian state, logs, lifecycle state and the service account.
+# When an account keeps sandboxes, the sandbox registration store and key
+# stay with their root-owned setup record for the next ensure. Administrator
+# policies in /etc/defenseclaw/policies also stay (apt purge deletes them),
+# and each enrolled account keeps ~/.defenseclaw and per-user binaries.
+# postremove.sh removes /var/lib/defenseclaw on apt purge. To remove user data
+# and the kept sandbox state before package removal, run
 # `defenseclaw-gateway enterprise linux uninstall --purge` before removing
 # the package; it names every account it purged or left alone.
 #

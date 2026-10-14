@@ -9,11 +9,13 @@
 # stops the services and removes DefenseClaw's hooks and machine-policy
 # entries while preserving administrator-owned entries, then removes the
 # package (dpkg / rpm; the macOS lifecycle forgets its pkg receipt itself).
-# The uninstall also removes the administrator config, credentials, state,
-# logs and the service account. --purge also removes each enrolled
-# account's ~/.defenseclaw and per-user binaries (the lifecycle purge runs
-# before the package goes, so it can act as each user). Without it each
-# account keeps ~/.defenseclaw.
+# The uninstall also removes the administrator config, credentials, most
+# state, logs and the service account. When an account keeps sandboxes, the
+# gateway's sandbox registration store, key and root-owned setup record stay
+# for the next ensure. --purge removes them and each enrolled account's
+# ~/.defenseclaw and per-user binaries (the lifecycle purge runs before the
+# package goes, so it can act as each user). Without it each account keeps
+# ~/.defenseclaw and its sandboxes.
 #
 # Idempotent: on a host without the deployment it prints a no-op result and
 # exits 0. Exit codes: 0 removed or nothing to do, 1 failure, 2 invalid
