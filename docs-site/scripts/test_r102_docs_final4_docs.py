@@ -141,6 +141,30 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             self.assertIn(phrase, namespace)
         self.assert_public(lifecycle, warning, namespace)
 
+    def test_gap_0598_mdm_uninstall_pages_name_the_kept_sandbox_store_and_key(self):
+        linux = ("`/var/lib/defenseclaw/sandbox`", "`/var/lib/defenseclaw/redaction-correlation.key`")
+        mac = ("`/opt/cisco/defenseclaw/runtime/sandbox`", "`/opt/cisco/defenseclaw/runtime/redaction-correlation.key`")
+        pages = {
+            "enterprise/mdm/linux-config-management.mdx": linux,
+            "enterprise/mdm/intune-linux.mdx": linux,
+            "enterprise/mdm/kandji.mdx": mac,
+            "enterprise/mdm/jamf.mdx": mac,
+            "enterprise/mdm/intune-macos.mdx": mac,
+        }
+        for name, paths in pages.items():
+            text = page(name)
+            for path in paths:
+                self.assertIn(path, text, name)
+            self.assertIn("If an account keeps sandboxes, the gateway's sandbox registration store", text, name)
+            self.assertIn("stay, root-owned, until the next `ensure` adopts them", text, name)
+            self.assertIn("the kept sandbox store and key", text, name)
+        self.assertIn("use `--purge` for a clean image", page("enterprise/mdm/linux-config-management.mdx"))
+        self.assertNotIn("removes the machine state (config, credentials, state and logs)",
+                         page("enterprise/mdm/linux-config-management.mdx"))
+        self.assertNotIn("removes the machine state (config, policies, key, state and logs)",
+                         page("enterprise/mdm/intune-linux.mdx"))
+        self.assertNotIn("The uninstall always removes the config, credentials, state and logs", page("enterprise/mdm/jamf.mdx"))
+
 
 if __name__ == "__main__":
     unittest.main()
