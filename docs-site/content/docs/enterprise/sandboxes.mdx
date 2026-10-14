@@ -787,7 +787,8 @@ command to run is ready to paste.
   start still gets its full policy. `profile-explain` shows the exemption.
 - **It is a policy control, not an exec deny.** It covers the connectors that
   have a machine-owned hook (Claude Code, Codex, Cursor and Copilot).
-  A host run is refused even when it claims to be nested in a sandbox. A
+  For a non-exempt account, a host run is refused even when it claims to be
+  nested in a sandbox. A
   person who runs an agent that has no
   machine-owned hook is not stopped by it.
 - **Root is refused** on every sandbox route, including when you inspect.
