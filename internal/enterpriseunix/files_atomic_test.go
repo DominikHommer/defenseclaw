@@ -13,7 +13,6 @@
 package enterpriseunix
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,14 +70,22 @@ func TestCopyFileAtomicReplacesBinaryInode(t *testing.T) {
 	}
 	assertNoAtomicTemps(t, dir)
 
-	previousRename := renameAtomicFile
-	renameAtomicFile = func(string, string) error { return errors.New("rename refused") }
-	defer func() { renameAtomicFile = previousRename }()
-	if err := e.copyFileAtomic(src, dst, 0o755, owner); err == nil || !strings.Contains(err.Error(), "rename refused") {
+	blocked := filepath.Join(dir, "blocked-destination")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kept := filepath.Join(blocked, "keep")
+	if err := os.WriteFile(kept, []byte("keep this file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.copyFileAtomic(src, blocked, 0o755, owner); err == nil || !strings.Contains(err.Error(), "replace "+blocked) {
 		t.Fatalf("failed rename = %v", err)
 	}
-	if got, _ := os.ReadFile(dst); string(got) != "new signed binary" {
-		t.Fatalf("failed rename changed installed binary: %q", got)
+	if info, err := os.Stat(blocked); err != nil || !info.IsDir() {
+		t.Fatalf("failed rename changed destination directory: %v, %v", info, err)
+	}
+	if got, err := os.ReadFile(kept); err != nil || string(got) != "keep this file" {
+		t.Fatalf("failed rename changed directory contents: %q, %v", got, err)
 	}
 	assertNoAtomicTemps(t, dir)
 }
