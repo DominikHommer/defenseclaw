@@ -203,6 +203,19 @@ func TestProtectedWriteCorpus(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Setenv("HOME", oldHome) })
 	prepareProtectedCorpus(t, home, rows)
+	for _, row := range rows {
+		body, err := json.Marshal(map[string]any{
+			"tool_name":  row.Tool,
+			"cwd":        filepath.Join(home, row.CWD),
+			"tool_input": protectedCorpusToolInput(row, home),
+		})
+		if err != nil {
+			t.Fatalf("%s: encode tool input: %v", row.ID, err)
+		}
+		if _, ok := hookpaths.Decode(hookpaths.Resolve(body)); !ok {
+			t.Fatalf("%s: invalid resolved writes", row.ID)
+		}
+	}
 
 	type result struct {
 		id, connector, mode, osName, expected, actual string
