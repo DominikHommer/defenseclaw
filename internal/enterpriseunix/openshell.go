@@ -812,7 +812,7 @@ func (e *Env) desiredLinks(channel string, socket []byte) []desiredLink {
 // root-only kept name for the next ensure. The unit files and rendered config
 // are in the deployment record and go with it. A link someone else made is
 // left alone.
-func (l *lifecycle) removeOpenShellFiles(record *Deployment) error {
+func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 	env := l.env
 	channel := ChannelPayload
 	if record != nil {
@@ -833,7 +833,11 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) error {
 			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/user", u.Name+".d")))
 		}
 	}
-	var err error
-	l.openshellRecordKept, err = env.removeOpenShellMachineState(channel, !l.opts.Purge && len(l.sandboxesKept) > 0)
-	return err
+	kept, err := env.removeOpenShellMachineState(channel, !l.opts.Purge && len(l.sandboxesKept) > 0)
+	l.openshellRecordKept = kept
+	if err != nil {
+		// The record only helps the next activation report a changed setup;
+		// a problem with it must not stop an uninstall or a package removal.
+		l.result.AddWarning(codeOpenShell, err.Error())
+	}
 }
