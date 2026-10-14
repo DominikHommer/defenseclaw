@@ -93,7 +93,7 @@ func TestEnterpriseHookReconcileRecordsTheTargetsItRestored(t *testing.T) {
 	if err != nil || run.Failures != 0 || run.Repairs != 1 || strings.Join(installs, ",") != "hermes,codex" {
 		t.Fatalf("first pass: run=%+v installs=%v err=%v, want the Hermes repair and the Codex install", run, installs, err)
 	}
-	restores := readEnterpriseHookGuardianRestores(dataDir)
+	restores := guardianRestoresForTest(t, dataDir)
 	restoredAt, ok := restores[enterpriseHookGuardianRestoreKey(sid, "hermes")]
 	if len(restores) != 1 || !ok || restoredAt.Before(before) || restoredAt.After(after) {
 		t.Fatalf("restores = %v, want only Hermes of %s between %s and %s", restores, sid, before, after)
@@ -107,7 +107,7 @@ func TestEnterpriseHookReconcileRecordsTheTargetsItRestored(t *testing.T) {
 	if err != nil || run.Failures != 0 || run.Repairs != 0 || len(installs) != 0 {
 		t.Fatalf("second pass: run=%+v installs=%v err=%v, want no change", run, installs, err)
 	}
-	if again := readEnterpriseHookGuardianRestores(dataDir); len(again) != 1 ||
+	if again := guardianRestoresForTest(t, dataDir); len(again) != 1 ||
 		!again[enterpriseHookGuardianRestoreKey(sid, "hermes")].Equal(restoredAt) {
 		t.Fatalf("restores after a clean pass = %v, want the Hermes restore at %s", again, restoredAt)
 	}
