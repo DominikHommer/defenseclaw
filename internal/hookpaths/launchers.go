@@ -5,8 +5,11 @@ package hookpaths
 
 import (
 	"bytes"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -75,6 +78,7 @@ type launcherResult struct {
 	static  []bool
 	cwd     string
 	script  string
+	scripts []shellScriptContext
 	ok      bool
 	noExec  bool
 	stdin   bool
@@ -131,7 +135,7 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		}
 		if spec.kind == launcherFind {
 			resolveFindCommand(&result)
-			if result.script != "" || !result.ok || result.noExec {
+			if result.script != "" || len(result.scripts) != 0 || !result.ok || result.noExec {
 				return result
 			}
 			continue
@@ -590,56 +594,170 @@ func resolveShellString(result *launcherResult) {
 }
 
 func resolveFindCommand(result *launcherResult) {
-	var searchPaths []string
-	namePattern := ""
-	for i := 1; i < len(result.words); i++ {
-		switch result.words[i] {
-		case "-name", "-iname":
-			if i+1 < len(result.words) && result.static[i+1] {
-				namePattern = result.words[i+1]
-			}
-		case "-exec", "-execdir", "-ok", "-okdir":
-			start := i + 1
-			for i = start; i < len(result.words); i++ {
-				if !result.static[i] {
-					result.ok = false
-					return
-				}
-				if result.words[i] == ";" || result.words[i] == "+" {
-					break
-				}
-			}
-			if i >= len(result.words) || i == start {
+	words, static := result.words, result.static
+	if !slices.ContainsFunc(words, func(word string) bool {
+		return word == "-exec" || word == "-execdir" || word == "-ok" || word == "-okdir"
+	}) {
+		result.words, result.static, result.noExec = nil, nil, true
+		return
+	}
+	firstExpr := 1
+	for firstExpr < len(words) && !strings.HasPrefix(words[firstExpr], "-") && words[firstExpr] != "!" && words[firstExpr] != "(" {
+		if !static[firstExpr] {
+			result.ok = false
+			return
+		}
+		firstExpr++
+	}
+	roots := words[1:firstExpr]
+	if len(roots) == 0 {
+		roots = []string{"."}
+	}
+	maxDepth, minDepth := -1, 0
+	namePattern, typeFilter, execKind := "", "", ""
+	caseInsensitive := false
+	execStart, execEnd := -1, -1
+	for i := firstExpr; i < len(words); i++ {
+		if !static[i] {
+			result.ok = false
+			return
+		}
+		switch words[i] {
+		case "-maxdepth", "-mindepth", "-name", "-iname", "-type":
+			if i+1 >= len(words) || !static[i+1] {
 				result.ok = false
 				return
 			}
-			result.words, result.static = result.words[start:i], result.static[start:i]
-			if len(searchPaths) == 1 && namePattern != "" {
-				searchPath := searchPaths[0]
-				searchPaths = nil
-				pattern := OperandPath(filepath.Join(searchPath, namePattern), result.cwd)
-				if matches, err := filepath.Glob(pattern); err == nil && len(matches) == 1 {
-					if relative, err := filepath.Rel(result.cwd, matches[0]); err == nil {
-						searchPaths = []string{relative}
-					}
+			option, value := words[i], words[i+1]
+			i++
+			switch option {
+			case "-maxdepth", "-mindepth":
+				n, err := strconv.Atoi(value)
+				if err != nil || n < 0 {
+					result.ok = false
+					return
 				}
-			}
-			for j, word := range result.words {
-				if !strings.Contains(word, "{}") {
-					continue
-				}
-				if len(searchPaths) == 1 {
-					result.words[j] = strings.ReplaceAll(word, "{}", searchPaths[0])
-					result.static[j] = true
+				if option == "-maxdepth" {
+					maxDepth = n
 				} else {
-					result.static[j] = false
+					minDepth = n
+				}
+			case "-name":
+				namePattern = value
+			case "-iname":
+				namePattern, caseInsensitive = strings.ToLower(value), true
+			case "-type":
+				typeFilter = value
+			}
+		case "-exec", "-execdir", "-ok", "-okdir":
+			execKind, execStart = words[i], i+1
+			for i++; i < len(words) && words[i] != ";" && words[i] != "+"; i++ {
+				if !static[i] {
+					result.ok = false
+					return
 				}
 			}
+			if i >= len(words) || i == execStart {
+				result.ok = false
+				return
+			}
+			execEnd = i
+		default:
+			// Other predicates can only reduce the candidate set. Keep the
+			// wider set when the command's write target is a found path.
+		}
+		if execStart >= 0 {
+			break
+		}
+	}
+	if execStart < 0 {
+		result.words, result.static, result.noExec = nil, nil, true
+		return
+	}
+	child := words[execStart:execEnd]
+	placeholder := slices.ContainsFunc(child, func(word string) bool { return strings.Contains(word, "{}") })
+	if !placeholder {
+		result.words, result.static = child, makeStatic(len(child))
+		return
+	}
+	groups := map[string][]string{}
+	var order []string
+	count := 0
+	for _, root := range roots {
+		absolute := OperandPath(root, result.cwd)
+		err := filepath.WalkDir(absolute, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(absolute, path)
+			if err != nil {
+				return err
+			}
+			depth := 0
+			if rel != "." {
+				depth = strings.Count(rel, string(filepath.Separator)) + 1
+			}
+			if maxDepth >= 0 && depth > maxDepth {
+				if entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if depth < minDepth {
+				return nil
+			}
+			if namePattern != "" {
+				name := entry.Name()
+				if caseInsensitive {
+					name = strings.ToLower(name)
+				}
+				matched, err := filepath.Match(namePattern, name)
+				if err != nil {
+					return err
+				}
+				if !matched {
+					return nil
+				}
+			}
+			switch typeFilter {
+			case "l":
+				if entry.Type()&fs.ModeSymlink == 0 {
+					return nil
+				}
+			case "d":
+				if !entry.IsDir() {
+					return nil
+				}
+			case "f":
+				if !entry.Type().IsRegular() {
+					return nil
+				}
+			}
+			count++
+			if count > 512 {
+				return fs.ErrInvalid
+			}
+			childCWD, replacement := result.cwd, path
+			if execKind == "-execdir" || execKind == "-okdir" {
+				childCWD, replacement = filepath.Dir(path), "."+string(filepath.Separator)+filepath.Base(path)
+			}
+			command := slices.Clone(child)
+			for j := range command {
+				command[j] = strings.ReplaceAll(command[j], "{}", replacement)
+			}
+			if _, exists := groups[childCWD]; !exists {
+				order = append(order, childCWD)
+			}
+			groups[childCWD] = append(groups[childCWD], launcherQuotedWords(command))
+			return nil
+		})
+		if err != nil && !os.IsNotExist(err) {
+			result.ok = false
 			return
 		}
-		if !strings.HasPrefix(result.words[i], "-") && result.static[i] && len(searchPaths) == i-1 {
-			searchPaths = append(searchPaths, result.words[i])
-		}
+	}
+	for _, childCWD := range order {
+		result.scripts = append(result.scripts, shellScriptContext{cwd: childCWD, source: strings.Join(groups[childCWD], "\n")})
 	}
 	result.words, result.static, result.noExec = nil, nil, true
 }
@@ -736,6 +854,17 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			if !result.ok {
 				unknown = true
 				return true
+			}
+			if len(result.scripts) != 0 {
+				for _, child := range result.scripts {
+					inner, parsed := parseShell(child.source)
+					if !parsed {
+						unknown = true
+						continue
+					}
+					queue = append(queue, shellScriptContext{file: inner, cwd: child.cwd, source: child.source})
+				}
+				context.handled[int(call.Pos().Offset())] = true
 			}
 			if result.script != "" {
 				inner, parsed := parseShell(result.script)

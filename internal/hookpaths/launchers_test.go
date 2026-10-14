@@ -41,6 +41,8 @@ func TestLauncherWriteOperands(t *testing.T) {
 		{"shell positional ordinary", `bash -c 'echo x >> $1' _ out/one`, false},
 		{"multicall", `busybox cp payload disklink`, true},
 		{"find child", `find disklink -exec cp payload {} \;`, true},
+		{"find linked member", `find . -maxdepth 1 -type l -exec cp payload {} \;`, true},
+		{"find ordinary source", `find . -maxdepth 1 -type l -exec cp {} out/ \;`, false},
 		{"xargs child", `printf disklink | xargs -I{} cp payload {}`, true},
 		{"numa prefix", `numactl --localalloc cp payload disklink`, true},
 		{"flock command", `flock lockfile -c 'cp payload disklink'`, true},
