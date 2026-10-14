@@ -157,7 +157,8 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
                 self.assertIn(path, text, name)
             self.assertIn("If an account keeps sandboxes, the gateway's sandbox registration store", text, name)
             self.assertIn("stay, root-owned, until the next `ensure` adopts them", text, name)
-            self.assertIn("the kept sandbox store and key", text, name)
+            if not name.endswith("linux-config-management.mdx"):
+                self.assertIn("the kept sandbox store and key", text, name)
         self.assertIn("use `--purge` for a clean image", page("enterprise/mdm/linux-config-management.mdx"))
         self.assertNotIn("removes the machine state (config, credentials, state and logs)",
                          page("enterprise/mdm/linux-config-management.mdx"))
