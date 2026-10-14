@@ -14,6 +14,9 @@ package enterpriseunix
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
 
 var setupVMSettings = map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"}
@@ -122,7 +127,8 @@ func TestSandboxUninstallKeepsSandboxesAndUnpulledWork(t *testing.T) {
 			requireKept(t, h)
 			changes := strings.Join(r.Changes, "\n")
 			if !containsLine(r.Changes, "stopped the running sandboxes of user alice (sb-running); they are kept, with their work") ||
-				!containsLine(r.Changes, "stopped the sandbox subsystem; kept the sandboxes of alice with their records, disks and any work not pulled yet") ||
+				!containsLine(r.Changes, "stopped the sandbox subsystem; kept the sandboxes of alice in their homes with their records, disks and any work not pulled yet") ||
+				strings.Contains(changes, "come back") ||
 				strings.Contains(changes, "teardown") || strings.Contains(changes, "removed local sandbox files") {
 				t.Errorf("changes = %v", r.Changes)
 			}
@@ -173,6 +179,157 @@ func TestSandboxUninstallKeepsSandboxesAndUnpulledWork(t *testing.T) {
 			t.Errorf("stops = %q", got)
 		}
 		requireKept(t, h)
+	})
+}
+
+// GAP-0598 (F1): a sandbox kept by a non-purge uninstall is started, reviewed
+// and pulled through its daemon, which names it to the gateway by the
+// registration id the gateway gave it. The uninstall deleted the whole data
+// folder, with the registration store and the correlation key the
+// registrations' subject keys are HMACs of: the gateway of the next
+// activation answered sandbox_registration_unknown, the daemon revoked every
+// kept sandbox, and a stopped copy-mode MicroVM, whose review and pull have
+// to start it, could not be reached any more. The store and the key stay
+// (root's while the service account is gone), the rest of the machine state
+// goes, the next ensure gives them to the account it creates, the gateway
+// knows the registration again and its subject still matches the account,
+// and a purge removes them.
+func TestSandboxUninstallKeepsTheRegistrationStoreForTheNextActivation(t *testing.T) {
+	subjectKey := func(key []byte, uid int, account string) string {
+		mac := hmac.New(sha256.New, key)
+		_, _ = fmt.Fprintf(mac, "%s|%d|%s|%s", sandboxreg.SubjectKeyVersion, uid, strings.ToLower(account), "")
+		return sandboxreg.DigestPrefix + hex.EncodeToString(mac.Sum(nil))
+	}
+	gatewayKey := func(t *testing.T, data string) redaction.CorrelationKey {
+		t.Helper()
+		key, err := redaction.LoadOrCreateCorrelationKey(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newOSHost(t, goos)
+			l := h.env.Layout
+			uid := h.alice.UID
+			cfg := sandboxConfig(t, goos, true, setupVMSettings)
+			requireOK(t, h.ensure(cfg))
+			data := h.env.P(l.DataDir)
+			// What the gateway wrote for alice's stopped copy-mode sandbox,
+			// and the daemon's record of it in her home.
+			key := gatewayKey(t, data)
+			material, _ := key.Material()
+			id, err := sandboxreg.NewID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(data))
+			if err := store.Create(uid, sandboxreg.Registration{ID: id, SubjectKey: subjectKey(material[:], uid, "alice"), Connector: "claudecode", UserName: "alice"}); err != nil {
+				t.Fatal(err)
+			}
+			decisions := filepath.Join(l.DataDir, "sandbox", "decisions", fmt.Sprint(uid)+".json")
+			writeHostFile(t, h.testHost, decisions, `{"v":1,"decisions":[]}`+"\n")
+			daemonRecord := filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", "sb-stopped", "record.json")
+			writeHostFile(t, h.testHost, daemonRecord, `{"registration":"`+id+`"}`+"\n")
+			writeHostFile(t, h.testHost, filepath.Join(l.DataDir, "audit.db"), "audit\n")
+			h.ops.status[uid] = SandboxStatus{Active: true}
+			kept := []string{
+				filepath.Join(l.DataDir, "sandbox", "registrations", fmt.Sprint(uid)+".json"),
+				decisions,
+				filepath.Join(l.DataDir, "redaction-correlation.key"),
+			}
+
+			r := h.run(Options{Action: ActionUninstall})
+			requireOK(t, r)
+			for _, path := range append(kept, daemonRecord) {
+				if !h.exists(path) {
+					t.Fatalf("a non-purge uninstall that keeps a sandbox removed %s", path)
+				}
+			}
+			// The service account is gone: the kept store is root's, so an
+			// account created later with its uid cannot read it.
+			if _, ok := h.accounts.accounts[l.ServiceUser]; ok {
+				t.Fatal("uninstall kept the service account")
+			}
+			for _, path := range append([]string{l.DataDir}, kept...) {
+				if uid, gid, err := h.env.OwnerOf(h.env.P(path)); err != nil || uid != 0 || gid != 0 {
+					t.Errorf("%s is owned by %d:%d (%v), want root", path, uid, gid, err)
+				}
+			}
+			// Only the store and its key stay of the machine state.
+			for _, path := range []string{filepath.Join(l.DataDir, "audit.db"), l.ConfigDir, l.GuardianAuthDir, l.LogDir} {
+				if h.exists(path) {
+					t.Errorf("uninstall kept %s", path)
+				}
+			}
+			if !containsLine(r.Changes, "kept the gateway's sandbox registrations ("+filepath.Join(l.DataDir, "sandbox")+") and their key ("+
+				filepath.Join(l.DataDir, "redaction-correlation.key")+") for the sandboxes the accounts keep: once the deployment is activated again") {
+				t.Errorf("changes = %v", r.Changes)
+			}
+
+			// The documented reactivation adopts the kept folder and gives it
+			// to the service account it creates.
+			again := h.ensure(cfg)
+			requireOK(t, again)
+			service, ok := h.accounts.accounts[l.ServiceUser]
+			if !ok {
+				t.Fatal("ensure created no service account")
+			}
+			for _, path := range append([]string{l.DataDir}, kept...) {
+				if uid, _, err := h.env.OwnerOf(h.env.P(path)); err != nil || uid != service.UID {
+					t.Errorf("after ensure %s is owned by uid %d (%v), want the service account %d", path, uid, err, service.UID)
+				}
+			}
+			// The gateway of the new activation has the same key and knows
+			// the kept registration, whose subject is still alice's: the
+			// daemon's id resolves, so the sandbox starts.
+			if again := gatewayKey(t, data); again.ID() != key.ID() {
+				t.Fatalf("the correlation key changed across the uninstall: %s, was %s", again.ID(), key.ID())
+			}
+			reg, found, err := sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(data)).Get(uid, id)
+			if err != nil || !found {
+				t.Fatalf("the next activation's gateway does not know registration %s: found=%v err=%v", id, found, err)
+			}
+			if reg.SubjectKey != subjectKey(material[:], uid, "alice") || reg.State == sandboxreg.StateRevoked {
+				t.Fatalf("registration = %+v", reg)
+			}
+			if !h.exists(daemonRecord) {
+				t.Fatal("the daemon's record of the sandbox is gone")
+			}
+
+			// A purge removes the store with the rest.
+			requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+			if h.exists(l.DataDir) {
+				t.Fatalf("purge left %s", l.DataDir)
+			}
+		})
+	}
+	t.Run("without kept sandboxes the data folder goes", func(t *testing.T) {
+		h := newOSHost(t, "darwin")
+		l := h.env.Layout
+		requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, setupVMSettings)))
+		gatewayKey(t, h.env.P(l.DataDir))
+		r := h.run(Options{Action: ActionUninstall})
+		requireOK(t, r)
+		if h.exists(l.DataDir) || containsLine(r.Changes, "kept the gateway's sandbox registrations") {
+			t.Fatalf("an uninstall that keeps no sandbox kept %s: %v", l.DataDir, r.Changes)
+		}
+	})
+	t.Run("a later purge of the uninstalled deployment removes the kept store", func(t *testing.T) {
+		h := newOSHost(t, "linux")
+		l := h.env.Layout
+		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVMSettings)))
+		h.registerSandboxUser(t, h.alice)
+		gatewayKey(t, h.env.P(l.DataDir))
+		requireOK(t, h.run(Options{Action: ActionUninstall}))
+		if !h.exists(filepath.Join(l.DataDir, "redaction-correlation.key")) {
+			t.Fatal("the uninstall did not keep the key")
+		}
+		requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+		if h.exists(l.DataDir) || exists(h.env.retainedStatePath()) {
+			t.Fatalf("the purge left %s or the retained-state record", l.DataDir)
+		}
 	})
 }
 

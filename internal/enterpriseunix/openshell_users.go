@@ -1053,7 +1053,9 @@ func (e *Env) manifestSandboxAccounts() []SandboxAccount {
 // home for the next activation of the deployment, and only what runs stops
 // (keepAccountSandboxes). It used to run `defenseclaw sandbox teardown`
 // there too, which deleted the sandboxes and their unpulled work while the
-// result said each account kept its sandbox state (GAP-0598).
+// result said each account kept its sandbox state (GAP-0598). The gateway's
+// registrations of the kept sandboxes stay too (keepSandboxStore): without
+// them the next activation's gateway refused every kept sandbox.
 //
 // A purge runs `defenseclaw sandbox teardown` first, as the account, while
 // its sandbox daemon and OpenShell gateway still answer, because it lists
@@ -1106,8 +1108,12 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 	switch {
 	case purge:
 	case len(kept) > 0:
-		r.Changes = append(r.Changes, fmt.Sprintf("stopped the sandbox subsystem; kept the sandboxes of %s with their records, disks and any work not pulled yet: "+
-			"they come back when the deployment is activated again, and `%s --purge` of an active deployment deletes them",
+		// The gateway's registrations of these sandboxes stay with them
+		// (keepSandboxStore); the uninstall summary says so once they are
+		// kept (keptSandboxStoreLine).
+		l.sandboxesKept = kept
+		r.Changes = append(r.Changes, fmt.Sprintf("stopped the sandbox subsystem; kept the sandboxes of %s in their homes with their records, disks and any work not pulled yet; "+
+			"`%s --purge` of an active deployment deletes them",
 			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
 	case applied != nil && applied.Enabled:
 		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
