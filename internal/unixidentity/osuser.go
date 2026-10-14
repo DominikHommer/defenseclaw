@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os/user"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,6 +151,9 @@ func (r *OSUserResolver) GroupIDs(account Account) ([]int, error) {
 // it holds, so an account in more fails (a mobile Active Directory account) or
 // comes back cut at 256 (a local one) without an error (GAP-0201).
 func AccountGroupIDs(ctx context.Context, account *user.User) ([]string, error) {
+	if runtime.GOOS == "linux" {
+		return platformAccountGroupIDs(ctx, runTrustedCommand, account, nil, nil)
+	}
 	ids, err := account.GroupIds()
 	return platformAccountGroupIDs(ctx, runTrustedCommand, account, ids, err)
 }

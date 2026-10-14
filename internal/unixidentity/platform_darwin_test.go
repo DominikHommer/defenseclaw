@@ -85,6 +85,9 @@ func TestAccountGroupIDsListPastTheOSUserLimit(t *testing.T) {
 	var gotArgs []string
 	runWith := func(gids int, exitCode int) commandRunner {
 		return func(_ context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
+			if path == darwinDSMemberUtil {
+				return commandResult{stdout: []byte("user is a member of the group\n")}, nil
+			}
 			gotArgs = args
 			var out strings.Builder
 			for gid := 20; gid < 20+gids; gid++ {
