@@ -18,6 +18,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("enterprise `status` and `verify` results do not report that field separately", text)
         self.assertIn("set `asset_policy.skill.runtime_detection.enabled: true` and "
                       "`asset_policy.plugin.runtime_detection.enabled: true`", text)
+        self.assertIn("Set `asset_policy.enabled: true` as well", text)
         self.assertIn("A brokered scan as the enrolled user is planned for a later release", text)
         self.assertNotIn("gateway service watches the skill and plugin folders of every user", text)
 
@@ -34,6 +35,7 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         text = page("policies/admission.mdx")
         self.assertIn("set `runtime_detection.enabled: true` so hooks apply default, registry and "
                       "approval rules to profile assets", text)
+        self.assertIn("Set `asset_policy.enabled: true` as well", text)
         self.assertIn("On managed Windows, profile assets have no install-watcher decision", text)
         self.assertIn("MCP runtime detection defaults to true", text)
         self.assertIn("Windows `status` and `verify` do not emit `asset_policy_not_enforced`", text)

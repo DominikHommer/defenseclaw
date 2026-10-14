@@ -116,8 +116,9 @@ Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-
 and keep shared skills outside profiles. For policy on profile assets, set
 `runtime_detection.enabled: true` so hooks apply default, registry and
 approval rules to profile assets; use `asset_policy.mode: action` to block.
-Denied names are refused by hooks even with runtime detection off. A brokered
-scan as the enrolled user is planned for a later release.
+Set `asset_policy.enabled: true` as well. Denied names are refused by hooks
+even with runtime detection off. A brokered scan as the enrolled user is
+planned for a later release.
 
 ## The admission block
 
@@ -529,11 +530,12 @@ At install time, those rules apply only to assets the watcher admits: per-user
 installs and, on managed Windows, watched roots outside profiles. On managed
 Windows, profile assets have no install-watcher decision, so a skill or plugin
 `default: deny` or `registry_required` blocks nothing there until you set
-`runtime_detection.enabled: true` and `asset_policy.mode: action`. Managed
-Linux and macOS do not watch connector skill or plugin folders, so the same
-hook settings are needed for those assets. MCP runtime detection defaults to
-true, so MCP hook rules apply to profile servers unless an administrator
-turns it off.
+`asset_policy.enabled: true`, `runtime_detection.enabled: true` and
+`asset_policy.mode: action`. Managed Linux and macOS do not watch connector
+skill or plugin folders, so the same hook settings are needed for those
+assets. MCP runtime detection defaults to true, so configured MCP default and
+registry rules can apply to profile servers at the hook when asset policy is
+enabled, unless an administrator turns runtime detection off.
 On managed Linux and macOS, `ensure`, `status` and `verify` emit
 `asset_policy_not_enforced` for these rules when runtime detection is off
 and no explicit watcher folder admits that type.

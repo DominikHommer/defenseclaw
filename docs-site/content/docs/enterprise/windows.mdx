@@ -89,8 +89,8 @@ For skills and plugins in profiles, set
 `asset_policy.skill.runtime_detection.enabled: true` and
 `asset_policy.plugin.runtime_detection.enabled: true` so hooks apply default,
 registry and approval rules; set `asset_policy.mode: action` to block on those
-rules. MCP runtime detection already defaults to true. Denied names are
-refused by the hooks regardless of runtime detection.
+rules. Set `asset_policy.enabled: true` as well. MCP runtime detection already
+defaults to true. Hooks refuse denied names regardless of runtime detection.
 
 Scanner children inherit the write-restricted LocalSystem token and its
 single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
