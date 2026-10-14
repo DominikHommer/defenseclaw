@@ -179,6 +179,13 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("Write `DOMAIN\\name` to target only the Active Directory group", text)
         self.assertNotIn("the local group is " "the one checked", text)
 
+    def test_gap_0595_matched_group_source_lists_every_value(self):
+        text = page("guardrail/user-and-group-policies.mdx")
+        self.assertIn("`matched_group_source` (`local`, `directory` or `local and directory`)", text)
+        self.assertIn("`local and directory` means that the bare name matched both a local group "
+                      "and a `DOMAIN\\name` group in the user's group list", text)
+        self.assertIn("If the source cannot be determined, `matched_group_source` is left out", text)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
