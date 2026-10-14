@@ -76,6 +76,11 @@ On Linux and macOS, a user's sandbox daemon is not restarted while that user has
 a sandbox running; `ensure` reports "pending restart" and the launcher restarts
 an idle, outdated daemon on the next command. Rollback and uninstall cover the
 sandbox units, the `defenseclaw` launcher and the rendered OpenShell settings.
+An upgrade from 1.0.1 with the docker driver or the docker fallback keeps the
+sandboxes users kept under 1.0.1 working: each such user's gateway stays in
+OpenShell's `default` namespace until they keep no sandbox there, so nothing
+needs to be pulled before the upgrade (the 1.0.1 upgrade bridge, removed when
+1.0.1 is out of support).
 See [Upgrade, roll back, uninstall](/docs/enterprise/sandboxes#upgrade-roll-back-uninstall).
 
 ### Windows
