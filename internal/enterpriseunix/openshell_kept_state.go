@@ -96,12 +96,17 @@ func (l *lifecycle) openShellStateForSettle() (*openshellState, bool) {
 	return state, true
 }
 
-// settleOpenShell calls this from its first lines, after its normal save has
-// returned. The active file must contain exactly the state it tried to save;
-// a failed atomic save leaves it absent (or different) and keeps the record.
-func (l *lifecycle) discardKeptOpenShellStateAfterSave(state *openshellState) {
+// settleOpenShell defers this from its first lines. The active file must
+// contain exactly the state it tried to save; an early return or a failed
+// atomic save leaves the kept record for another run.
+func (l *lifecycle) discardKeptOpenShellStateAfterSave(state *openshellState, hadContent bool) {
 	env := l.env
 	if state.Applied == nil && len(state.Pending) == 0 {
+		// An empty candidate with the subsystem off returns from settle
+		// before saveOpenShellState. Keep it for an enabled retry.
+		if !hadContent {
+			return
+		}
 		if _, err := os.Lstat(env.openshellStatePath()); !os.IsNotExist(err) {
 			return
 		}

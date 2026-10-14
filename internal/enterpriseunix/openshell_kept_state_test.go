@@ -13,6 +13,7 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -109,10 +110,18 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 					t.Fatalf("direct switch omitted namespace leftovers: %q", wantLine)
 				}
 				kept := keptDockerHost(t, goos, true)
+				before, err := os.ReadFile(kept.env.openshellStatePath())
+				if err != nil {
+					t.Fatal(err)
+				}
 				uninstall := kept.run(Options{Action: ActionUninstall})
 				requireOK(t, uninstall)
 				if physicalExists(kept.env.openshellStatePath()) || !physicalExists(kept.env.openshellKeptStatePath()) {
 					t.Fatalf("uninstall did not move the active sandbox record: changes %v", uninstall.Changes)
+				}
+				after, err := os.ReadFile(kept.env.openshellKeptStatePath())
+				if err != nil || !bytes.Equal(after, before) {
+					t.Errorf("kept record content changed on move: %v", err)
 				}
 				if got := physicalMode(t, kept.env.openshellKeptStatePath()); got != 0o600 {
 					t.Errorf("kept record mode = %04o", got)
@@ -266,6 +275,12 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 					t.Fatal(err)
 				}
 			}},
+			{"unknown field", func(t *testing.T, h *osHost) {
+				t.Helper()
+				if err := os.WriteFile(h.env.openshellKeptStatePath(), []byte(`{"version":1,"applied":{"enabled":true,"install":"setup","driver":"docker","gateway_port":17671},"unexpected":true}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
 			{"oversize", func(t *testing.T, h *osHost) {
 				t.Helper()
 				if err := os.Truncate(h.env.openshellKeptStatePath(), maxInputBytes+1); err != nil {
@@ -298,6 +313,9 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
 				h := keptDockerHost(t, goos, true)
 				requireOK(t, h.run(Options{Action: ActionUninstall}))
+				if !physicalExists(h.env.openshellKeptStatePath()) {
+					t.Fatal("uninstall did not keep the sandbox setup record")
+				}
 				tc.mutate(t, h)
 				r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
 				requireOK(t, r)
@@ -309,6 +327,9 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 		t.Run(goos+"/stale active state", func(t *testing.T) {
 			h := keptDockerHost(t, goos, true)
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if !physicalExists(h.env.openshellKeptStatePath()) {
+				t.Fatal("uninstall did not keep the sandbox setup record")
+			}
 			active := h.env.loadOpenShellState()
 			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.3", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
 			if err := h.env.saveOpenShellState(active); err != nil {
@@ -333,22 +354,42 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 				t.Errorf("rollback did not leave a readable record for a later attempt: %+v", kept)
 			}
 		})
+		t.Run(goos+"/no save leaves invalid record", func(t *testing.T) {
+			h := keptDockerHost(t, goos, true)
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			if !physicalExists(h.env.openshellKeptStatePath()) {
+				t.Fatal("uninstall did not keep the sandbox setup record")
+			}
+			if err := os.WriteFile(h.env.openshellKeptStatePath(), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := sandboxConfig(t, goos, false, nil)
+			r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.2"), ConfigFile: writeTempConfig(t, cfg)})
+			requireOK(t, r)
+			if !physicalExists(h.env.openshellKeptStatePath()) {
+				t.Error("an early return with no state save removed the kept file")
+			}
+		})
 	}
 }
 
 func TestKeptOpenShellSetupCarriesPendingRestart(t *testing.T) {
-	h := keptDockerHost(t, "linux", true)
-	state := h.env.loadOpenShellState()
-	state.Pending[strconv.Itoa(h.alice.UID)] = pending{User: h.alice.Name, UID: h.alice.UID, Home: h.alice.Home, Kind: "restart", Reason: "old unit inputs changed", Since: "2026-10-14T00:00:00Z"}
-	if err := h.env.saveOpenShellState(state); err != nil {
-		t.Fatal(err)
-	}
-	requireOK(t, h.run(Options{Action: ActionUninstall}))
-	// The uninstall stopped the daemon. Its pending restart needs no stop.
-	h.ops.status[h.alice.UID] = SandboxStatus{}
-	r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
-	requireOK(t, r)
-	if len(h.env.loadOpenShellState().Pending) != 0 || !containsLine(r.Changes, "switched the sandbox setup") {
-		t.Errorf("kept pending entry blocked the new switch: %v", r.Changes)
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := keptDockerHost(t, goos, true)
+			state := h.env.loadOpenShellState()
+			state.Pending[strconv.Itoa(h.alice.UID)] = pending{User: h.alice.Name, UID: h.alice.UID, Home: h.alice.Home, Kind: "restart", Reason: "old unit inputs changed", Since: "2026-10-14T00:00:00Z"}
+			if err := h.env.saveOpenShellState(state); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			// The uninstall stopped the daemon. Its pending restart needs no stop.
+			h.ops.status[h.alice.UID] = SandboxStatus{}
+			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+			requireOK(t, r)
+			if len(h.env.loadOpenShellState().Pending) != 0 || !containsLine(r.Changes, "switched the sandbox setup") {
+				t.Errorf("kept pending entry blocked the new switch: %v", r.Changes)
+			}
+		})
 	}
 }

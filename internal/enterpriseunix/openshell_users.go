@@ -462,7 +462,7 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	env := l.env
 	state, kept := l.openShellStateForSettle()
 	if kept {
-		defer l.discardKeptOpenShellStateAfterSave(state)
+		defer l.discardKeptOpenShellStateAfterSave(state, state.Applied != nil || len(state.Pending) != 0)
 	}
 	prev := state.Applied
 	cur := appliedOf(op)
