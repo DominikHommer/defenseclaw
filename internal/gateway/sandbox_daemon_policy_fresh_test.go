@@ -368,43 +368,31 @@ func TestSandboxDaemonEgressLeaseRenewsAfterTheAdoption(t *testing.T) {
 }
 
 // GAP-0172 (DELTA-15 verify r2, item 2): the poll renews the leases it
-// confirmed only once its adoption returned: while it still waits on another
-// registration's answer, the lease of the one whose answer moved the policy
-// is not fresh, and is once the poll adopted it.
+// confirmed only once its adoption returned: between its loop and its
+// adoption (here held in the settings read a moved generation makes), the
+// lease of the registration whose answer moved the policy is not fresh,
+// and is once the poll adopted it.
 func TestSandboxDaemonEgressPollRenewsAfterTheAdoption(t *testing.T) {
 	f := newFreshFixture(t)
-	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) {
-		return map[string]string{"dc-a": "ready", "dc-b": "ready"}, true
-	}
-	if err := f.d.regs.put(daemonRegistration{ID: "reg-2", Sandbox: "dc-b", Digest: "sha256:v1", Generation: 7,
-		UpdatedAt: time.Now().Add(-time.Hour), Confirmed: true}); err != nil {
-		t.Fatal(err)
-	}
 	f.confirm()
-	newA := sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2", UpdatedAt: time.Now(),
-		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}
-	release, asked := make(chan struct{}), make(chan struct{})
+	reading, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	f.relay.current = func(id string) (sandboxrelay.CurrentPolicy, error) {
-		if id == "reg-2" {
-			<-release
-			return sandboxrelay.CurrentPolicy{V: 1, Generation: 7, Digest: "sha256:v1"}, nil
-		}
-		once.Do(func() { close(asked) })
-		return newA, nil
+	f.relay.settings = func() (sandboxrelay.DaemonSettings, error) {
+		once.Do(func() { close(reading) })
+		<-release
+		return f.d.currentSettings(), nil
 	}
+	f.set(sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:v2", UpdatedAt: time.Now(),
+		Live: sandboxrelay.LiveFields{EgressBlock: []string{"github.com"}}}, nil)
 	f.d.observeGeneration("reg-1", 3)
 	pollDone := make(chan struct{})
 	go func() { f.d.pollRegistrations(context.Background(), true); close(pollDone) }()
-	// reg-1 answered, or the poll waits on reg-2 first: either way no lease
-	// renews before the adoption.
-	select {
-	case <-asked:
-	case <-time.After(200 * time.Millisecond):
+	<-reading
+	if r, _ := f.d.regs.get("dc-a"); r.Generation != 3 {
+		t.Fatalf("the poll's loop did not apply the answer: %+v", r)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if f.leaseFresh("reg-1") {
-		t.Fatal("the poll renewed reg-1's lease before its adoption")
+	if f.leaseFresh("reg-1") || f.floorBlocks("github.com") {
+		t.Fatalf("before the adoption: lease fresh %v, floor %+v", f.leaseFresh("reg-1"), f.d.floor)
 	}
 	close(release)
 	<-pollDone
