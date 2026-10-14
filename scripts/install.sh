@@ -524,6 +524,8 @@ print(" ".join(sorted(
 )))
 PY
 )" || return 0
+    # The validated names are space-separated for the count and message.
+    # shellcheck disable=SC2086
     set -- ${names}
     case $# in
         0) ;;
@@ -651,16 +653,18 @@ if [[ "${ROLLBACK}" == true ]]; then
     else
         ok "Now running DefenseClaw ${back_to}."
     fi
+    forward="defenseclaw rollback"
     if version_lt "${back_to}" 1.0.0; then
-        info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        forward="bash ${PREVIOUS}/installer/install.sh --rollback"
+        info "To return to ${current:-1.x}, run: ${forward}"
     else
-        info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
+        info "Run '${forward}' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
     # Each install shows only its own audit window, so say how to read the
     # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
-        info "Data written since the upgrade is kept in ${PREVIOUS}; 'defenseclaw rollback' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
+        info "Data written since the upgrade is kept in ${PREVIOUS}; '${forward}' again brings it back (a new 'defenseclaw upgrade' starts from the data you have now and keeps that copy in ${DEFENSECLAW_HOME}/backups)."
         [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
             && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
