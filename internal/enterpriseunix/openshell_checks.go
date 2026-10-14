@@ -511,24 +511,53 @@ func (e *Env) checkE2fsprogs(ctx context.Context, s openshellSettings) []prereqR
 		}
 		return []prereqRow{{Name: "e2fsprogs", Detail: "mke2fs is not installed", Fix: "install e2fsprogs 1.43 or newer"}}
 	}
-	if s.E2fsprogsDir == "" {
-		return []prereqRow{{Name: "e2fsprogs", Detail: "enterprise.openshell.e2fsprogs_dir is not set, so only an e2fsprogs each user builds in ~/.local/opt/e2fsprogs is found",
-			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to it"}}
+	result := e.CheckE2fsprogsDir(s.E2fsprogsDir)
+	if result.ToolDir != "" {
+		return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: result.ToolDir}}
 	}
-	if err := e.Trust(e.P(s.E2fsprogsDir), TrustRulePack); err != nil {
-		return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", s.E2fsprogsDir, err),
-			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}}
+	return []prereqRow{{Name: "e2fsprogs", Detail: result.Problem, Fix: result.Fix}}
+}
+
+// E2fsprogsCheckResult is the administrator's macOS prerequisite verdict.
+// ToolDir is the exact folder the managed gateway uses; when empty, Problem
+// and Fix explain the refusal. The cross-component regression test checks
+// this verdict against the real gateway plan and managed doctor row.
+type E2fsprogsCheckResult struct {
+	ToolDir, Problem, Fix string
+}
+
+// CheckE2fsprogsDir is checkE2fsprogs's macOS directory decision.
+func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
+	if dir == "" {
+		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build or a trusted Homebrew keg",
+			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to its install prefix or the folder that holds both mke2fs and debugfs"}
+	}
+	trust := e.Trust
+	if trust == nil {
+		trust = defaultTrust
+	}
+	if err := trust(e.P(dir), TrustRulePack); err != nil {
+		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", dir, err),
+			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}
+	}
+	if problem := openshell.AdminE2fsprogsCandidateAccessProblem(dir, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
+		return E2fsprogsCheckResult{Problem: problem,
+			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable by sandbox accounts (chmod o+x)"}
 	}
 	// The folder the gateway's exec shim puts first on the driver's PATH,
 	// found by the same rule (GAP-0506): ensure used to accept the tools in
 	// any of sbin, bin or the folder itself while the shim took only sbin,
 	// so an accepted e2fsprogs_dir could leave the gateway unable to start.
-	tools := openshell.AdminE2fsprogsToolDir(s.E2fsprogsDir, func(p string) bool { return openshell.RegularFile(e.P(p)) })
+	tools := openshell.AdminE2fsprogsToolDir(dir, func(p string) bool { return openshell.RegularFile(e.P(p)) })
 	if tools == "" {
-		return []prereqRow{{Name: "e2fsprogs", Detail: fmt.Sprintf("%s holds no mke2fs and debugfs side by side, in it or in its sbin or bin", s.E2fsprogsDir),
-			Fix: "install e2fsprogs 1.43 or newer there, or set enterprise.openshell.e2fsprogs_dir to its install prefix or to the folder that holds both mke2fs and debugfs"}}
+		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s holds no mke2fs and debugfs side by side, in it or in its sbin or bin", dir),
+			Fix: "install e2fsprogs 1.43 or newer there, or set enterprise.openshell.e2fsprogs_dir to its install prefix or to the folder that holds both mke2fs and debugfs"}
 	}
-	return []prereqRow{{Name: "e2fsprogs", OK: true, Detail: tools}}
+	if problem := openshell.E2fsprogsAccessProblem(tools, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
+		return E2fsprogsCheckResult{Problem: problem,
+			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x)"}
+	}
+	return E2fsprogsCheckResult{ToolDir: tools}
 }
 
 // kvmDevice is the device a MicroVM needs.

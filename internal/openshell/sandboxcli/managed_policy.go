@@ -951,10 +951,16 @@ func managedDriverCheck(m *sandboxapi.ManagedStatus) *openshell.Check {
 // check `enterprise verify` runs (openshell.AdminVMDriver); a seam for tests.
 var managedAdminVMDriver = func(goos string) (found string, refused []string) {
 	return openshell.AdminVMDriver(goos, func(p string) bool {
-		_, err := os.Lstat(p)
-		return err == nil
+		return openshell.ExecutableVMDriver(p)
 	}, func(p string) error { return managed.ValidateTrustedFilePath(p, "managed file") })
 }
+
+var managedRenderedVMDriver = func(goos, dir string) (string, string) {
+	return openshell.RenderedAdminVMDriver(goos, dir, openshell.ExecutableVMDriver,
+		func(p string) error { return managed.ValidateTrustedFilePath(p, "OpenShell MicroVM driver") })
+}
+
+var managedRenderedVMConfigTrust = managed.ValidateTrustedFilePath
 
 // managedVMDriverGoarch is the CPU architecture the driver fix names; a seam
 // for tests.
@@ -1009,6 +1015,47 @@ func (a *App) withAdminVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus)
 	}
 	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; an administrator step (" + contact + "): " + fix.Summary,
 		Command: fix.Command, Sudo: true}
+	return c
+}
+
+// withRenderedVMDriver checks the path OpenShell will actually search. The
+// administrator's shared search can find a later driver after the rendered
+// driver_dir has gone stale; the gateway cannot use that later driver until
+// enterprise ensure refreshes the render (GAP-0573).
+func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStatus, paths *openshell.RenderedPaths) *openshell.Check {
+	if c == nil || c.Status != openshell.StatusPass || m.InstallMode != config.EnterpriseOpenShellInstallPrerequisite ||
+		(m.Driver != config.EnterpriseOpenShellDriverVM && m.Driver != config.EnterpriseOpenShellDriverAuto) || openshell.IsFallbackReason(m.DriverReason) {
+		return c
+	}
+	goos := a.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	if goos != "linux" && goos != "darwin" {
+		return c
+	}
+	problem := ""
+	if paths == nil || paths.TOML == "" {
+		problem = "the administrator's rendered gateway configuration is unavailable"
+	} else if err := managedRenderedVMConfigTrust(paths.TOML, "OpenShell gateway configuration"); err != nil {
+		problem = fmt.Sprintf("the administrator's rendered gateway configuration %s is not trusted: %v", paths.TOML, err)
+	} else if data, err := os.ReadFile(paths.TOML); err != nil {
+		problem = fmt.Sprintf("cannot read the administrator's rendered gateway configuration %s: %v", paths.TOML, err)
+	} else if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil {
+		problem = err.Error()
+	} else if err := rendered.Validate(); err != nil {
+		problem = err.Error()
+	} else if rendered.ComputeDriver != openshell.DriverVM {
+		problem = "the administrator's rendered gateway configuration does not select the MicroVM driver"
+	} else {
+		_, problem = managedRenderedVMDriver(goos, rendered.DriverDir)
+	}
+	if problem == "" {
+		return c
+	}
+	c.Status = openshell.StatusFail
+	c.Detail += "; but " + problem + ", so no MicroVM sandbox can start for you on this computer"
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + goos + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
 	return c
 }
 
