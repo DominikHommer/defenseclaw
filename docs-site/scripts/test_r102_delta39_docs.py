@@ -16,6 +16,8 @@ class Delta39DocsTest(unittest.TestCase):
         self.assertIn("the current home has no DefenseClaw entries for that agent", text)
         self.assertIn("An absent report, a path outside the home, or entries left in the current home keep the record", text)
         self.assertIn("delete a stale copied receipt in its `.defenseclaw/connector_backups/` folder", text)
+        self.assertIn("If a backup receipt is unreadable or invalid, removal still runs, but a re-homed record stays", text)
+        self.assertIn("the named receipt is corrected or removed", text)
         self.assertIn("An operator-edited plugin left in the recorded home is left for the operator and does not alone keep the record", text)
         self.assertNotIn("both cleanups succeed", text)
         self.assertNotIn("An edited plugin that still contains DefenseClaw code keeps the record", text)
@@ -23,6 +25,9 @@ class Delta39DocsTest(unittest.TestCase):
     def test_troubleshooting_explains_copied_receipt_and_remedy(self):
         text = " ".join((DOCS / "enterprise/troubleshooting.mdx").read_text().split())
         self.assertIn("A copied backup receipt can name a config path in another home", text)
+        self.assertIn("An unreadable or invalid backup receipt does not stop teardown, but keeps a re-homed row unverified", text)
+        self.assertIn("including one caused by an unreadable or invalid backup receipt", text)
+        self.assertIn("correct or remove a named invalid receipt", text)
         self.assertIn("If a reported path still lies outside the home its worker cleaned, a report is absent, or the current home still has DefenseClaw entries, the cleanup row stays", text)
         self.assertIn("The row ends only when every path reported by each worker lies inside the home it cleaned and the current-home worker found no DefenseClaw entries left", text)
         self.assertIn("delete a stale copied receipt under its `.defenseclaw/connector_backups/<agent>/`", text)
