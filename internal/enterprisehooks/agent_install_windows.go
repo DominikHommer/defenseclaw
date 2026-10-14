@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -303,6 +304,11 @@ var (
 	windowsWinGetReadPackageNames = func(dir *os.File, count int) ([]string, error) {
 		return dir.Readdirnames(count)
 	}
+	// A stalled read keeps its path occupied until the scan goroutine exits.
+	windowsWinGetPackageScans = struct {
+		sync.Mutex
+		inFlight map[string]bool
+	}{inFlight: make(map[string]bool)}
 )
 
 // windowsWinGetPackagesBatch is how many names one directory read returns.
@@ -317,6 +323,14 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 	if budget <= 0 || maxEntries <= 0 {
 		return "", false
 	}
+	key := strings.ToLower(filepath.Clean(packages))
+	windowsWinGetPackageScans.Lock()
+	if windowsWinGetPackageScans.inFlight[key] {
+		windowsWinGetPackageScans.Unlock()
+		return "", false
+	}
+	windowsWinGetPackageScans.inFlight[key] = true
+	windowsWinGetPackageScans.Unlock()
 	deadline := time.Now().Add(budget)
 	readNames := windowsWinGetReadPackageNames
 	type scanResult struct {
@@ -326,7 +340,14 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 	results := make(chan scanResult, 1)
 	var active atomic.Pointer[os.File]
 	go func() {
-		match, complete := scanWindowsWinGetPackageFolder(packages, packageIDs, maxEntries, deadline, readNames, &active)
+		match, complete := func() (string, bool) {
+			defer func() {
+				windowsWinGetPackageScans.Lock()
+				delete(windowsWinGetPackageScans.inFlight, key)
+				windowsWinGetPackageScans.Unlock()
+			}()
+			return scanWindowsWinGetPackageFolder(packages, packageIDs, maxEntries, deadline, readNames, &active)
+		}()
 		results <- scanResult{match, complete}
 	}()
 	timer := time.NewTimer(budget)
