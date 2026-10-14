@@ -1,4 +1,4 @@
-"""Regression checks for the round 1.0.2 DELTA-15 docs (GAP-0505, GAP-0510)."""
+"""Regression checks for the round 1.0.2 DELTA-15 docs (GAP-0172, GAP-0505, GAP-0510)."""
 
 import unittest
 from pathlib import Path
@@ -11,6 +11,13 @@ def page(path):
 
 
 class R102Delta15DocsTest(unittest.TestCase):
+    def test_live_fields_reach_the_next_connection(self):
+        text = page("enterprise/sandboxes.mdx")
+        # gateway/sandbox_daemon_policy_fresh.go confirmEgressPolicy, sandboxEgressPolicyChanging.
+        self.assertIn("decides each new connection with the policy the managed gateway confirmed for it within the last second", text)
+        self.assertIn("your organization changed this sandbox's policy and DefenseClaw could not confirm the new one yet; try again in a moment", text)
+        self.assertNotIn("takes the changed policy on its next relayed hook call", text)
+
     def test_account_outage_refusal_matches_the_cli(self):
         text = page("enterprise/sandboxes.mdx")
         # openshell/sandboxcli/managed_errors.go accountOutage.

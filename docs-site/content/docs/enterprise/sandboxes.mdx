@@ -924,8 +924,17 @@ learns of it from the next relayed hook or from a poll every 60 seconds. A
 renamed or recycled account is different: the registration is revoked (see the
 last paragraph of this section), not re-matched.
 
-A running managed sandbox takes the changed policy on its next relayed hook
-call; an idle sandbox picks it up on its next poll.
+A running managed sandbox takes a changed live field before its next
+connection: its egress proxy decides each new connection with the policy the
+managed gateway confirmed for it within the last second, and confirms it again
+first when a relayed hook names another policy. The first `git clone` or `curl`
+after `ensure` reported the new configuration meets the new lists, tighter or
+looser, also one from `sandbox exec`. While the managed gateway does not
+answer, the policy in force stays, except after a relayed hook said it changed:
+then new connections are refused with "your organization changed this
+sandbox's policy and DefenseClaw could not confirm the new one yet; try again
+in a moment" until the new one is confirmed. A sandbox that makes no
+connection picks the change up on its next poll.
 
 | Kind of field | What happens |
 | --- | --- |
@@ -1125,6 +1134,7 @@ or request-access contact when applicable.
 | Another account holds the ports | "Sandboxes aren't available for your account on this computer right now: another account is using them" and "Try again when that account has no sandbox running." |
 | Directory lookup is provisional | "Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment." |
 | Account can't be looked up on the computer (a new run) | "Your account can't be looked up on this computer right now. Try again in a moment." and "This isn't your organization's sandbox policy." |
+| Changed policy not confirmed yet (a new connection) | "your organization changed this sandbox's policy and DefenseClaw could not confirm the new one yet; try again in a moment" |
 | Access request exceeds the profile | "You can't approve this."; the notice gives the request-access contact and the caller's profile, rule, host and sandbox to quote |
 
 What a second account sees while the first holds the sandbox ports. The text
