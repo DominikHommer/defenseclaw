@@ -14,6 +14,37 @@ type shellWrittenScript struct {
 	known bool
 }
 
+func shellStartupScript(call *syntax.CallExpr, words []string, static []bool, cwd, home string,
+	written map[string]shellWrittenScript) (string, bool, bool) {
+	if call == nil || len(words) == 0 || !static[0] {
+		return "", false, false
+	}
+	program := programBase(words[0])
+	name := ""
+	switch program {
+	case "bash":
+		name = "BASH_ENV"
+	case "sh", "dash", "ksh", "zsh":
+		name = "ENV"
+	default:
+		return "", false, false
+	}
+	for _, assign := range call.Assigns {
+		if assign.Name == nil || assign.Name.Value != name || assign.Value == nil {
+			continue
+		}
+		path, ok := StaticWord(assign.Value, home)
+		if !ok || path == "" {
+			return "", true, false
+		}
+		if script, exists := written[OperandPath(path, cwd)]; exists {
+			return script.code, true, script.known
+		}
+		return "", true, false
+	}
+	return "", false, false
+}
+
 func recordShellScriptWrite(scripts map[string]shellWrittenScript, stmt *syntax.Stmt, source, cwd, home string) {
 	if stmt == nil || len(stmt.Redirs) == 0 {
 		return
@@ -50,18 +81,30 @@ func shellTextInput(stmt *syntax.Stmt, source, home string) (string, bool, bool)
 			code, ok := StaticWord(redirect.Word, home)
 			return code, true, ok
 		case syntax.Hdoc, syntax.DashHdoc:
-			if redirect.Hdoc == nil {
-				return "", true, false
-			}
-			start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
-			if start < 0 || end > len(source) || end <= start {
-				return "", true, false
-			}
-			code := source[start:end]
-			return code, true, !strings.ContainsAny(code, "$`")
+			code, ok := shellHereDocumentBody(redirect, source, home)
+			return code, true, ok && !strings.ContainsAny(code, "$`")
 		}
 	}
 	return "", false, false
+}
+
+func shellHereDocumentBody(redirect *syntax.Redirect, source, home string) (string, bool) {
+	if redirect == nil || redirect.Hdoc == nil || redirect.Word == nil {
+		return "", false
+	}
+	start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
+	if start < 0 || end > len(source) || end <= start {
+		return "", false
+	}
+	delimiter, ok := StaticWord(redirect.Word, home)
+	if !ok || delimiter == "" {
+		return "", false
+	}
+	body := strings.TrimSuffix(source[start:end], "\n")
+	if !strings.HasSuffix(body, delimiter) {
+		return "", false
+	}
+	return strings.TrimSuffix(body, delimiter), true
 }
 
 func shellProcessScript(word *syntax.Word, source, home string) (string, bool, bool) {
@@ -86,6 +129,10 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 	if len(words) == 0 || !static[0] {
 		return "", false, false
 	}
+	resolved := resolveLauncherWords(words, static, cwd)
+	if resolved.ok && len(resolved.words) > 0 {
+		words, static = resolved.words, resolved.static
+	}
 	program := programBase(words[0])
 	shell := program == "bash" || program == "sh" || program == "dash" || program == "zsh" || program == "ksh"
 	sourced := program == "source" || program == "."
@@ -96,7 +143,7 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 		return "", false, false
 	}
 	if script, supplied, known := shellTextInput(stmt, source, home); supplied {
-		if shell && len(words) == 1 || sourced && len(words) > 1 &&
+		if shell && literalReadsStdin(words) || sourced && len(words) > 1 &&
 			(words[1] == "/dev/stdin" || words[1] == "-") {
 			return script, true, known
 		}
@@ -111,6 +158,27 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 				return strings.Join(recipe, "\n"), true, known
 			}
 			return "", true, false
+		}
+	}
+	if stmt != nil && (shell && literalReadsStdin(words) || sourced && len(words) > 1 &&
+		(words[1] == "/dev/stdin" || words[1] == "-")) {
+		for _, redirect := range stmt.Redirs {
+			if redirect.Op != syntax.RdrIn {
+				continue
+			}
+			path, known := StaticWord(redirect.Word, home)
+			if !known || path == "" {
+				return "", true, false
+			}
+			path = OperandPath(path, cwd)
+			if script, found := written[path]; found {
+				return script.code, true, script.known
+			}
+			data, known := readRegularCommandFile(path, 64*1024)
+			if !known {
+				return "", true, false
+			}
+			return string(data), true, true
 		}
 	}
 	if stmt != nil {

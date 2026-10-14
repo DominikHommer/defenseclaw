@@ -50,15 +50,23 @@ var launcherSpecs = map[string]launcherSpec{
 	"setsid":      {shortFlags: "cfw", longFlags: []string{"ctty", "fork", "wait"}},
 	"chrt":        {shortFlags: "abfiorvmp", shortArgs: "TtP", longFlags: []string{"all-tasks", "batch", "fifo", "idle", "other", "rr", "verbose", "max", "pid", "help", "version"}, longArgs: []string{"sched-runtime", "sched-deadline", "sched-period"}, positionals: 1},
 	"ionice":      {shortFlags: "t", shortArgs: "cnpP", longFlags: []string{"ignore", "help", "version"}, longArgs: []string{"class", "classdata", "pid", "pgid", "uid"}},
-	"taskset":     {shortFlags: "acp", longFlags: []string{"all-tasks", "cpu-list", "pid", "help", "version"}, positionals: 1},
-	"numactl":     {shortFlags: "HVs", longFlags: []string{"show", "hardware", "length", "strict", "relative", "all", "balancing", "touch", "dump", "dump-nodes", "localalloc", "help", "version"}, longArgs: []string{"membind", "cpunodebind", "physcpubind", "interleave", "preferred", "preferred-many", "weighted-interleave", "file", "offset", "shmmode", "shmid", "huge", "nodes", "cpus"}},
+	"taskset":     {shortFlags: "ap", shortArgs: "c", longFlags: []string{"all-tasks", "pid", "help", "version"}, longArgs: []string{"cpu-list"}, positionals: 1},
+	"numactl":     {shortFlags: "HVs", shortArgs: "CNmip", longFlags: []string{"show", "hardware", "length", "strict", "relative", "all", "balancing", "touch", "dump", "dump-nodes", "localalloc", "help", "version"}, longArgs: []string{"membind", "cpunodebind", "physcpubind", "interleave", "preferred", "preferred-many", "weighted-interleave", "file", "offset", "shmmode", "shmid", "huge", "nodes", "cpus"}},
+	"schedtool":   {shortFlags: "RNDBFIea", shortArgs: "np", longFlags: []string{"normal", "fifo", "round-robin", "batch", "idle", "execute", "help", "version"}, longArgs: []string{"priority", "pid"}},
+	"cpulimit":    {shortFlags: "bqvzik", shortArgs: "lpref", longFlags: []string{"background", "quiet", "verbose", "lazy", "include-children", "kill", "help", "version"}, longArgs: []string{"limit", "pid", "process", "exe", "frequency"}},
+	"prlimit":     {longFlags: []string{"help", "version"}, longArgs: []string{"pid", "core", "cpu", "data", "fsize", "locks", "memlock", "msgqueue", "nice", "nofile", "nproc", "rss", "rtprio", "rttime", "sigpending", "stack"}},
 	"flock":       {kind: launcherFlock, shortFlags: "sxunwEoF", shortArgs: "cw", longFlags: []string{"shared", "exclusive", "unlock", "nonblock", "no-fork", "close", "verbose", "help", "version"}, longArgs: []string{"timeout", "conflict-exit-code", "command"}},
-	"unshare":     {shortFlags: "imnpuUfrR", longFlags: []string{"mount", "uts", "ipc", "net", "pid", "user", "cgroup", "time", "fork", "map-root-user", "map-current-user", "kill-child", "mount-proc", "propagation", "setgroups", "keep-caps", "root", "wd", "setuid", "setgid", "help", "version"}},
+	"unshare":     {shortFlags: "imnpuUfrR", longFlags: []string{"mount", "uts", "ipc", "net", "pid", "user", "cgroup", "time", "fork", "map-root-user", "map-current-user", "kill-child", "mount-proc", "keep-caps", "help", "version"}, longArgs: []string{"propagation", "setgroups", "root", "wd", "setuid", "setgid"}},
 	"nsenter":     {shortFlags: "aminupCT", shortArgs: "trwSFG", longFlags: []string{"all", "no-fork", "help", "version"}, longArgs: []string{"target", "setuid", "setgid"}, longOptional: []string{"mount", "uts", "ipc", "net", "pid", "cgroup", "time", "root", "wd", "follow-context", "preserve-credentials"}},
 	"xargs":       {kind: launcherXargs, shortFlags: "0prt", shortArgs: "IinPLdEas", longFlags: []string{"null", "open-tty", "no-run-if-empty", "verbose", "interactive", "show-limits", "help", "version"}, longArgs: []string{"replace", "max-args", "max-procs", "max-lines", "delimiter", "eof", "arg-file", "max-chars"}},
 	"sudo":        {shortFlags: "EHnSkbhilsVv", shortArgs: "ugpC", longFlags: []string{"preserve-env", "set-home", "non-interactive", "stdin", "reset-timestamp", "background", "help", "login", "list", "shell", "version", "validate"}, longArgs: []string{"user", "group", "prompt", "close-from"}},
 	"doas":        {shortFlags: "nLs", shortArgs: "u"},
 	"su":          {kind: launcherScript, shortFlags: "lmps", shortArgs: "cgw", longFlags: []string{"login", "preserve-environment", "help", "version"}, longArgs: []string{"command", "group", "supp-group", "shell"}},
+	"runuser":     {kind: launcherScript, shortFlags: "lmp", shortArgs: "cgw", longFlags: []string{"login", "preserve-environment", "help", "version"}, longArgs: []string{"command", "group", "supp-group", "shell"}},
+	"sg":          {kind: launcherScript},
+	"newgrp":      {kind: launcherScript},
+	"chroot":      {positionals: 1, longFlags: []string{"skip-chdir", "help", "version"}, longArgs: []string{"userspec", "groups"}},
+	"setpriv":     {longFlags: []string{"no-new-privs", "keep-groups", "clear-groups", "init-groups", "reset-env", "help", "version"}, longArgs: []string{"reuid", "euid", "ruid", "regid", "egid", "rgid", "groups", "inh-caps", "ambient-caps", "bounding-set", "securebits", "pdeathsig", "selinux-label", "apparmor-profile"}},
 	"find":        {kind: launcherFind},
 	"watch":       {kind: launcherScript, shortFlags: "bdgntpxe", shortArgs: "n", longFlags: []string{"beep", "color", "differences", "no-title", "precise", "exec", "help", "version"}, longArgs: []string{"interval"}},
 	"script":      {kind: launcherScript, shortFlags: "aeqf", shortArgs: "ctIoO", longFlags: []string{"append", "return", "quiet", "flush", "force", "echo", "help", "version"}, longArgs: []string{"command", "command-limit", "timing", "log-in", "log-out", "log-io"}},
@@ -92,7 +100,7 @@ var terminalAccountPrograms = []string{"groupadd", "groupdel", "groupmems", "gro
 
 func resolveLauncherWords(words []string, static []bool, cwd string) launcherResult {
 	result := launcherResult{words: words, static: static, cwd: cwd, ok: true}
-	for depth := 0; depth < 16 && len(result.words) > 0; depth++ {
+	for depth := 0; depth < 64 && len(result.words) > 0; depth++ {
 		if !result.static[0] {
 			result.ok = false
 			return result
@@ -134,6 +142,10 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 			resolveShellString(&result)
 			return result
 		}
+		if program == "sg" || program == "newgrp" {
+			resolveGroupCommand(&result, program)
+			return result
+		}
 		if spec.kind == launcherFind {
 			resolveFindCommand(&result)
 			if result.script != "" || len(result.scripts) != 0 || !result.ok || result.noExec {
@@ -155,6 +167,11 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		}
 		if program == "sudo" && (values["i"] != "" || values["s"] != "") {
 			result.ok = false
+			return result
+		}
+		if program == "taskset" && (values["p"] != "" || values["pid"] != "") {
+			result.noExec = true
+			result.words, result.static = nil, nil
 			return result
 		}
 		if spec.kind == launcherScript {
@@ -201,7 +218,11 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		if spec.kind == launcherXargs {
 			result.stdin = true
 		}
-		for skip := 0; skip < spec.positionals; skip++ {
+		positionals := spec.positionals
+		if program == "taskset" && (values["c"] != "" || values["cpu-list"] != "") {
+			positionals = 0
+		}
+		for skip := 0; skip < positionals; skip++ {
 			if index >= len(result.words) || !result.static[index] {
 				result.ok = false
 				return result
@@ -242,6 +263,30 @@ func resolveLauncherWords(words []string, static []bool, cwd string) launcherRes
 		result.ok = false
 	}
 	return result
+}
+
+func resolveGroupCommand(result *launcherResult, program string) {
+	words, static := result.words, result.static
+	index := 1
+	if program == "sg" {
+		if index >= len(words) || !static[index] || strings.HasPrefix(words[index], "-") {
+			result.ok = false
+			return
+		}
+		index++
+	} else if index < len(words) && words[index] != "-c" {
+		if !static[index] || strings.HasPrefix(words[index], "-") {
+			result.ok = false
+			return
+		}
+		index++
+	}
+	if index+1 >= len(words) || words[index] != "-c" || !static[index+1] {
+		result.ok = false
+		return
+	}
+	result.script = words[index+1]
+	result.words, result.static = nil, nil
 }
 
 func allStatic(static []bool) bool { return !slices.Contains(static, false) }
@@ -768,6 +813,7 @@ type shellScriptContext struct {
 	cwd     string
 	source  string
 	handled map[int]bool
+	written map[string]shellWrittenScript
 }
 
 func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool) {
@@ -828,6 +874,15 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			}
 			stmt := callStatements[int(call.Pos().Offset())]
 			recordShellScriptWrite(writtenScripts, stmt, context.source, context.cwd, home)
+			if script, supplied, known := shellStartupScript(call, words, static, context.cwd, home, writtenScripts); supplied {
+				if !known {
+					unknown = true
+				} else if inner, parsed, _ := parseShellWithinBudget(script, &budget); parsed {
+					queue = append(queue, shellScriptContext{file: inner, cwd: context.cwd, source: script})
+				} else {
+					unknown = true
+				}
+			}
 			if script, handled, known := shellTextCallScript(stmt, words, static, context.source, context.cwd, home, writtenScripts); handled {
 				if !known {
 					unknown = true
@@ -878,6 +933,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			}
 			return true
 		})
+		queue[i].written = writtenScripts
 	}
 	return queue, unknown
 }

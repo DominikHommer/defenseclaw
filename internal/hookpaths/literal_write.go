@@ -84,11 +84,11 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 					if (redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc) || redirect.Hdoc == nil {
 						continue
 					}
-					start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
-					if start < 0 || end > len(command) || end <= start {
+					code, ok := shellHereDocumentBody(redirect, context.source, home)
+					if !ok {
 						continue
 					}
-					paths, dynamic := literalInterpreterAnalysis(language, command[start:end], cmdCWD, home)
+					paths, dynamic := literalInterpreterAnalysis(language, code, cmdCWD, home)
 					unknown = unknown || dynamic
 					for _, name := range paths {
 						add(name, cmdCWD)
@@ -137,6 +137,18 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 					for _, name := range paths {
 						add(name, cmdCWD)
 					}
+				} else if name, ok := literalInterpreterScriptFile(programWords); ok {
+					if script, exists := context.written[OperandPath(name, cmdCWD)]; exists {
+						if !script.known {
+							unknown = true
+						} else {
+							paths, dynamic := literalInterpreterAnalysis(literalLanguage(program), script.code, cmdCWD, home)
+							unknown = unknown || dynamic
+							for _, name := range paths {
+								add(name, cmdCWD)
+							}
+						}
+					}
 				}
 			case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
 				for _, arg := range programWords[1:] {
@@ -168,6 +180,19 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 		})
 	}
 	return operands, unknown
+}
+
+func literalInterpreterScriptFile(words []string) (string, bool) {
+	for _, word := range words[1:] {
+		if word == "--" {
+			continue
+		}
+		if word == "-" || strings.HasPrefix(word, "-") {
+			return "", false
+		}
+		return word, true
+	}
+	return "", false
 }
 
 func literalUnresolvedProgramWrites(args []*syntax.Word, cwd, home string) ([]string, bool) {
@@ -248,7 +273,7 @@ func literalInterpreterCode(program string, words []string) (string, bool) {
 
 func literalReadsStdin(words []string) bool {
 	sawOperand := false
-	for _, word := range words[1:] {
+	for i, word := range words[1:] {
 		if word == "-c" || word == "-e" || word == "-E" || word == "-p" || word == "--eval" ||
 			strings.HasPrefix(word, "--eval=") {
 			return false
@@ -257,6 +282,9 @@ func literalReadsStdin(words []string) bool {
 			return true
 		}
 		if word == "--" {
+			if i == len(words)-2 {
+				return true
+			}
 			sawOperand = true
 			continue
 		}
@@ -309,15 +337,37 @@ func literalProducerCode(stmt *syntax.Stmt, command, home string) (string, bool)
 		if len(words) < 2 || strings.Contains(words[1], "%") {
 			return "", false
 		}
-		return words[1], true
-	case "cat":
-		for _, redirect := range stmt.Redirs {
-			if (redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc) || redirect.Hdoc == nil {
+		var output strings.Builder
+		for i := 0; i < len(words[1]); i++ {
+			if words[1][i] != '\\' {
+				output.WriteByte(words[1][i])
 				continue
 			}
-			start, end := int(redirect.Hdoc.Pos().Offset()), int(redirect.Hdoc.End().Offset())
-			if start >= 0 && end <= len(command) && end > start {
-				return command[start:end], true
+			i++
+			if i >= len(words[1]) {
+				return "", false
+			}
+			switch words[1][i] {
+			case 'n':
+				output.WriteByte('\n')
+			case 't':
+				output.WriteByte('\t')
+			case 'r':
+				output.WriteByte('\r')
+			case '\\':
+				output.WriteByte('\\')
+			default:
+				return "", false
+			}
+		}
+		return output.String(), true
+	case "cat":
+		for _, redirect := range stmt.Redirs {
+			if redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc {
+				continue
+			}
+			if code, ok := shellHereDocumentBody(redirect, command, home); ok {
+				return code, !strings.ContainsAny(code, "$`")
 			}
 		}
 	}

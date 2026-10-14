@@ -144,6 +144,9 @@ func ShellExecutableOptionUnknown(command, cwd, home string) (unknown bool) {
 			static := make([]bool, len(call.Args))
 			for i, word := range call.Args {
 				words[i], static[i] = shellStaticWordWithKnownCalls(word, home, context.cwd, states.varsFor(word), shellVariablePoison{})
+				if !static[i] {
+					words[i] = launcherAssignmentPrefix(word)
+				}
 			}
 			if !static[0] {
 				return true
@@ -153,6 +156,16 @@ func ShellExecutableOptionUnknown(command, cwd, home string) (unknown bool) {
 				if tarProgram(programBase(words[0])) {
 					unknown = true
 					return false
+				}
+				if _, launcher := launcherSpecs[programBase(words[0])]; launcher {
+					for _, candidate := range words[1:] {
+						name := programBase(candidate)
+						if launcherWriterProgram(name) || launcherSpecs[name].kind == launcherShell ||
+							launcherSpecs[name].kind == launcherScript || name == "eval" {
+							unknown = true
+							return false
+						}
+					}
 				}
 				return true
 			}
