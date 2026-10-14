@@ -471,11 +471,11 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if err := os.WriteFile(admin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin := sandboxDaemonHost, openShellExecHome,
-		openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary
+	restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin, restoreVMDriver := sandboxDaemonHost, openShellExecHome,
+		openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary, openShellExecRenderedVMDriver
 	t.Cleanup(func() {
-		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary =
-			restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin
+		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecSettings, openShellExecAdminBinary, openShellExecRenderedVMDriver =
+			restoreHost, restoreHome, restoreFile, restoreSettings, restoreAdmin, restoreVMDriver
 	})
 	sandboxDaemonHost = func(string) (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{ConfigDir: configDir}, &managed.RuntimeDescriptor{}, nil
@@ -505,12 +505,23 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".local", "bin", "openshell-gateway"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	cfgPath := filepath.Join(configDir, "openshell", "gateway.toml")
+	writeConfig := func(driver openshell.ComputeDriver, dir string) {
+		t.Helper()
+		data, err := (openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: driver, DriverDir: dir}).TOML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(openshell.DriverDocker, "")
 
 	plan, err := planSandboxOpenShellExec(context.Background(), "linux", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := filepath.Join(configDir, "openshell", "gateway.toml")
 	if plan.binary != admin || !slices.Equal(plan.argv, []string{admin, "--config", cfgPath}) {
 		t.Fatalf("plan = %+v", plan)
 	}
@@ -525,6 +536,26 @@ func TestPlanSandboxOpenShellExecPrerequisite(t *testing.T) {
 	if strings.Contains(envValue(plan.env, "PATH"), ".local") {
 		t.Fatalf("PATH holds the account's folder: %s", envValue(plan.env, "PATH"))
 	}
+
+	// An older rendered VM path overrides OpenShell's conventional search.
+	// The shim refuses it before the gateway would wait and exit, even when
+	// the administrator has moved the trusted driver to another accepted dir.
+	openShellExecRenderedVMDriver = func(_, dir string) (string, string) {
+		if dir == "/usr/local/libexec/openshell" {
+			return dir + "/openshell-driver-vm", ""
+		}
+		return "", "the rendered MicroVM driver_dir " + dir + " has no executable openshell-driver-vm"
+	}
+	writeConfig(openshell.DriverVM, "/usr/libexec/openshell")
+	if _, err := planSandboxOpenShellExec(context.Background(), "linux", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) ||
+		!strings.Contains(err.Error(), "/usr/libexec/openshell") {
+		t.Fatalf("stale rendered driver_dir: %v", err)
+	}
+	writeConfig(openshell.DriverVM, "/usr/local/libexec/openshell")
+	if _, err := planSandboxOpenShellExec(context.Background(), "linux", nil); err != nil {
+		t.Fatalf("rendered driver_dir with the trusted driver: %v", err)
+	}
+	writeConfig(openshell.DriverDocker, "")
 
 	// The administrator's binary an account could change is refused, with
 	// what to do.

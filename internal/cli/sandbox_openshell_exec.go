@@ -124,13 +124,17 @@ func generateOpenShellCerts(plan openShellExecPlan) error {
 
 // Seams for tests.
 var (
-	openShellExecHome        = sandboxAccountHome
-	openShellExecTrustedFile = managed.ValidateTrustedFilePath
-	openShellExecTrustedDir  = managed.ValidateTrustedRuntimeDir
-	openShellExecSettings    = sandboxOpenShellAdminSettings
-	openShellExecAdminBinary = openshell.AdminBinary
-	openShellExecRenderedEnv = openshell.RenderedEnvironment
-	openShellExecVMProbe     = sandboxOpenShellVMProbe
+	openShellExecHome             = sandboxAccountHome
+	openShellExecTrustedFile      = managed.ValidateTrustedFilePath
+	openShellExecTrustedDir       = managed.ValidateTrustedRuntimeDir
+	openShellExecSettings         = sandboxOpenShellAdminSettings
+	openShellExecAdminBinary      = openshell.AdminBinary
+	openShellExecRenderedEnv      = openshell.RenderedEnvironment
+	openShellExecVMProbe          = sandboxOpenShellVMProbe
+	openShellExecRenderedVMDriver = func(goos, dir string) (string, string) {
+		return openshell.RenderedAdminVMDriver(goos, dir, openshell.ExecutableVMDriver,
+			func(p string) error { return openShellExecTrustedFile(p, "OpenShell MicroVM driver") })
+	}
 	// openShellExecUpstreamTelemetry reports whether the account's own
 	// floor allows OpenShell's own telemetry (es:GAP-0144).
 	openShellExecUpstreamTelemetry = sandboxOpenShellUpstreamTelemetry
@@ -169,6 +173,11 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		install = config.EnterpriseOpenShellInstallPrerequisite
 		if ownFileOnly(filepath.Join(home, ".local", "bin", openshell.GatewayBinary)) == nil {
 			install = config.EnterpriseOpenShellInstallSetup
+		}
+	}
+	if goos == "linux" && install == config.EnterpriseOpenShellInstallPrerequisite {
+		if err := openShellExecVMDriver(configPath, goos); err != nil {
+			return openShellExecPlan{}, fmt.Errorf("%w: %v (an administrator refreshes it with `enterprise linux ensure`)", errOpenShellPrerequisiteMissing, err)
 		}
 	}
 	var binary, binDir string
@@ -249,6 +258,30 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	argv := append([]string{binary, "--config", configPath}, args...)
 	certs := []string{"generate-certs", "--output-dir", tlsDir, "--server-san", openShellServerSAN}
 	return openShellExecPlan{binary: binary, argv: argv, env: env, tlsDir: tlsDir, certs: certs}, nil
+}
+
+// openShellExecVMDriver checks the driver_dir the gateway will actually
+// read. An explicit stale path overrides OpenShell's conventional search,
+// even when another trusted driver is installed elsewhere (GAP-0573).
+func openShellExecVMDriver(configPath, goos string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read the administrator's rendered gateway configuration %s: %w", configPath, err)
+	}
+	rendered, err := openshell.ParseRenderedGateway(data, nil)
+	if err != nil {
+		return err
+	}
+	if err := rendered.Validate(); err != nil {
+		return err
+	}
+	if rendered.ComputeDriver != openshell.DriverVM {
+		return nil
+	}
+	if _, problem := openShellExecRenderedVMDriver(goos, rendered.DriverDir); problem != "" {
+		return errors.New(problem)
+	}
+	return nil
 }
 
 // dockerContextHost is the Docker endpoint the account's gateway is to use:

@@ -170,6 +170,7 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 			// from the daemon, never from a configuration they cannot read.
 			rep.Checks = append(rep.Checks, a.managedPolicyCheck(st.managed), managedRuntimeCheck(st.managed))
 			if c := a.withAdminVMDriver(managedDriverCheck(st.managed), st.managed); c != nil {
+				c = a.withRenderedVMDriver(c, st.managed, d.Rendered)
 				rep.Checks = append(rep.Checks, *c)
 			}
 			if c := otherGatewaysCheck(st.managed); c != nil {
