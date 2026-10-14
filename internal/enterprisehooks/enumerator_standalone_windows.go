@@ -114,7 +114,7 @@ func (c windowsStandaloneRowContext) pending(row *ManifestTarget, reason string)
 	version, _ := standaloneWindowsAgentVersionExplainFor(row.SID, row.UserHome, row.Connector)
 	if version == "" {
 		if path, _ := windowsStandalonePerUserManagedExecutable(row.UserHome, row.Connector); path == "" {
-			if installed, _ := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed == "" {
+			if installed, why := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed == "" && why == "" {
 				return
 			}
 		}
@@ -258,6 +258,9 @@ func applyStandaloneRowStateFor(row *ManifestTarget, previous map[string]Manifes
 		// without a reason.
 		if installed, fix := windowsStandaloneInstalledAgent(row.UserHome, row.Connector); installed != "" {
 			rowContext.unprotected(row, "", fmt.Sprintf("%s is installed, but its version could not be read; %s", installed, fix))
+		} else if fix != "" {
+			// The user's WinGet Packages folder was not fully listed.
+			rowContext.unprotected(row, "", fix)
 		}
 		return false
 	}

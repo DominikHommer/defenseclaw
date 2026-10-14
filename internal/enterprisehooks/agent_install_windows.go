@@ -13,7 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -51,6 +53,75 @@ var windowsCodexStandaloneReleaseName = regexp.MustCompile(
 // tests replace it.
 var windowsReadInstallJunction = os.Readlink
 
+// windowsInstallLongPathName returns the long spelling of an existing path;
+// tests replace it.
+var windowsInstallLongPathName = func(path string) (string, error) {
+	short, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, windows.MAX_PATH)
+	for {
+		n, err := windows.GetLongPathName(short, &buf[0], uint32(len(buf)))
+		if err != nil {
+			return "", err
+		}
+		if n <= uint32(len(buf)) {
+			return windows.UTF16ToString(buf[:n]), nil
+		}
+		buf = make([]uint16, n)
+	}
+}
+
+// windowsInstallPathAttributes reads the attributes of path itself (a final
+// reparse point is not followed); tests replace it.
+var windowsInstallPathAttributes = func(path string) (uint32, error) {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return 0, err
+	}
+	return windows.GetFileAttributes(ptr)
+}
+
+// windowsRejectInstallReparseChain refuses a reparse point anywhere on path
+// below a local drive letter. Every folder is checked from the volume root
+// down before the one below it is touched, so a link a user made in the
+// middle of the chain (a directory symbolic link that names a UNC share) is
+// refused before anything is opened through it; winpath.RejectReparseChain
+// checks the leaf first, which already resolves the whole chain as
+// LocalSystem. A missing element ends the walk: nothing exists below it.
+func windowsRejectInstallReparseChain(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if volume := filepath.VolumeName(abs); len(volume) != 2 || volume[1] != ':' {
+		return fmt.Errorf("path is not on a local drive letter: %s", abs)
+	}
+	var chain []string
+	for current := abs; ; {
+		chain = append(chain, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		attributes, err := windowsInstallPathAttributes(chain[i])
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return fmt.Errorf("reparse point in path: %s", chain[i])
+		}
+	}
+	return nil
+}
+
 // windowsCodexStandaloneRoot is install.ps1's per-user install root. The
 // installer moves it under CODEX_HOME when that is set; such a root is found
 // by its PATH folder (windowsCodexStandaloneVisibleBin) and reported.
@@ -71,7 +142,7 @@ func windowsCodexStandaloneVisibleBin(profileHome string) string {
 func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) {
 	root := windowsCodexStandaloneRoot(profileHome)
 	releases := filepath.Join(root, "releases")
-	if err := winpath.RejectReparseChain(releases); err != nil {
+	if err := windowsRejectInstallReparseChain(releases); err != nil {
 		return "", "the Codex standalone install folder has a refused reparse chain"
 	}
 	releasesInfo, err := os.Lstat(releases)
@@ -98,6 +169,13 @@ func discoverWindowsCodexStandaloneVersion(profileHome string) (string, string) 
 		}
 	}
 	match := windowsCodexStandaloneReleaseName.FindStringSubmatch(filepath.Base(target))
+	if match == nil && strings.Contains(filepath.Base(target), "~") {
+		// A junction may name the release by its 8.3 short spelling; the
+		// version is in the folder's long name.
+		if long, err := windowsInstallLongPathName(target); err == nil {
+			match = windowsCodexStandaloneReleaseName.FindStringSubmatch(filepath.Base(long))
+		}
+	}
 	if match == nil || !isValidWindowsAgentVersion(match[1]) {
 		return "", "the Codex standalone current release is not named <version>-<target>"
 	}
@@ -115,7 +193,7 @@ func windowsCodexStandaloneReleaseHasCLI(release string) bool {
 		filepath.Join(release, "bin", "codex.exe"),
 		filepath.Join(release, "codex.exe"),
 	} {
-		if winpath.RejectReparseChain(candidate) != nil {
+		if windowsRejectInstallReparseChain(candidate) != nil {
 			continue
 		}
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
@@ -190,11 +268,60 @@ func readWindowsWinGetPackageVersion(root registry.Key, path string, access uint
 	return best, best != ""
 }
 
+// windowsWinGetPackagesMaxEntries and windowsWinGetPackagesScanBudget bound
+// the listing of a user's WinGet Packages folder, which that user can fill
+// with entries: one user cannot delay the rows of the others.
+var (
+	windowsWinGetPackagesMaxEntries = 4096
+	windowsWinGetPackagesScanBudget = time.Second
+)
+
+// windowsWinGetPackagesBatch is how many names one directory read returns.
+const windowsWinGetPackagesBatch = 256
+
+// findWindowsWinGetPackageFolder returns the first entry of packages named
+// "<packageID>_<source>" for one of packageIDs, and false when the folder was
+// not fully listed (more than windowsWinGetPackagesMaxEntries entries, or
+// not within windowsWinGetPackagesScanBudget) before one was found.
+func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (string, bool) {
+	dir, err := os.Open(packages)
+	if err != nil {
+		return "", true
+	}
+	defer dir.Close()
+	prefixes := make([]string, 0, len(packageIDs))
+	for _, id := range packageIDs {
+		prefixes = append(prefixes, strings.ToLower(id)+"_")
+	}
+	deadline := time.Now().Add(windowsWinGetPackagesScanBudget)
+	listed := 0
+	for {
+		names, err := dir.Readdirnames(windowsWinGetPackagesBatch)
+		for _, name := range names {
+			lower := strings.ToLower(name)
+			for _, prefix := range prefixes {
+				if strings.HasPrefix(lower, prefix) {
+					return filepath.Join(packages, name), true
+				}
+			}
+		}
+		if err != nil {
+			// io.EOF: listed in full; any other error lists no more.
+			return "", errors.Is(err, io.EOF)
+		}
+		listed += len(names)
+		if listed >= windowsWinGetPackagesMaxEntries || !time.Now().Before(deadline) {
+			return "", false
+		}
+	}
+}
+
 // windowsStandaloneInstalledAgent returns where the profile has a CLI of
 // connectorName installed that no version probe read, and what to do about
 // it, or "" when it finds none. Only presence is checked, never through a
 // junction: the install is then reported as unprotected instead of being a
-// silent gap.
+// silent gap. When the user's WinGet Packages folder could not be fully
+// listed, it returns "" and the reason the account was not fully scanned.
 func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string, string) {
 	profileHome = strings.TrimSpace(profileHome)
 	if !filepath.IsAbs(profileHome) {
@@ -227,12 +354,14 @@ func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string,
 		}
 	}
 	packages := filepath.Join(local, "Microsoft", "WinGet", "Packages")
-	if winpath.RejectReparseChain(packages) == nil {
-		for _, packageID := range windowsWinGetPackageIDs[connectorName] {
-			matches, _ := filepath.Glob(filepath.Join(packages, packageID+"_*"))
-			if len(matches) != 0 {
-				return matches[0], "its WinGet version is read from the user's registry while the user is signed in; the next enumeration after sign-in enrolls the account"
-			}
+	if ids := windowsWinGetPackageIDs[connectorName]; len(ids) != 0 && windowsRejectInstallReparseChain(packages) == nil {
+		match, complete := findWindowsWinGetPackageFolder(packages, ids)
+		if match != "" {
+			return match, "its WinGet version is read from the user's registry while the user is signed in; the next enumeration after sign-in enrolls the account"
+		}
+		if !complete {
+			return "", fmt.Sprintf("this account was not fully scanned for a per-user WinGet %s install: %s holds more entries than DefenseClaw lists (%d) or did not list within %s; remove the packages the user no longer needs, and the next enumeration scans it again",
+				connectorName, packages, windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget)
 		}
 	}
 	return "", ""
@@ -242,7 +371,7 @@ func windowsStandaloneInstalledAgent(profileHome, connectorName string) (string,
 // chain; path itself may be a junction (install.ps1's), which is not
 // followed.
 func windowsInstallPathPresent(path string) bool {
-	if winpath.RejectReparseChain(filepath.Dir(path)) != nil {
+	if windowsRejectInstallReparseChain(filepath.Dir(path)) != nil {
 		return false
 	}
 	_, err := os.Lstat(path)
