@@ -307,8 +307,11 @@ func (e *enterpriseHookCleanupHomeKeptError) Error() string {
 // warning and goes on (GAP-0553). An entry whose directory home is no home
 // while its recorded home is not gone fails with
 // *enterpriseHookCleanupHomeKeptError, which an uninstall also only warns.
-// A live account re-homed to a real path keeps its cleanup until the
-// registration is removed, even when its recorded home is gone.
+// A live account re-homed to a real path keeps its row, the guardian warns
+// on each reconcile, and remove-all reports it failed until the account is
+// removed, its uid changes, or its directory home matches the recorded home
+// again, even when the recorded home is gone. GAP-0596 tracks whether such
+// a row needs another way to end.
 func attemptEnterpriseHookStandaloneUnixCleanup(
 	ctx context.Context,
 	log io.Writer,
