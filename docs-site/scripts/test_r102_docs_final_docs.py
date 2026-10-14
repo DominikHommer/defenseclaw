@@ -1,9 +1,11 @@
 """Regression checks for rel-1-0-2 docs hand-offs and GAP-0554."""
 
+import json
 import unittest
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[2]
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -208,6 +210,39 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("[the registration limit](/docs/enterprise/sandboxes#require-sandboxes)", text)
         self.assertNotIn("that host refusal applies when the effective `when_unavailable` setting "
                          "is `refuse`", text)
+
+    def test_no_sandbox_registry_names_both_host_run_exceptions(self):
+        registry = json.loads((ROOT / "internal/envvars/registry.json").read_text())
+        entry = next(item for item in registry["entries"]
+                     if item["name"] == "DEFENSECLAW_NO_SANDBOX")
+        self.assertIn("host run is still refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", entry["purpose"])
+
+    def test_no_sandbox_generated_env_vars_row_names_both_exceptions(self):
+        text = page("reference/env-vars.mdx")
+        row = text.split("`DEFENSECLAW_NO_SANDBOX`", 1)[1].split(" | ", 1)[1]
+        self.assertIn("host run is still refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", row)
+
+    def test_no_sandbox_changelog_bullet_names_both_exceptions(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        release = changelog.split("## [1.0.2]", 1)[1].split("\n## [", 1)[0]
+        bullet = release.split("- `DEFENSECLAW_NO_SANDBOX=1`", 1)[1].split("\n- ", 1)[0]
+        bullet = " ".join(bullet.split())
+        self.assertIn("It is not an exemption", bullet)
+        self.assertIn("host run is refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", bullet)
+
+    def test_sandbox_gate_doc_names_exempt_and_alert_outcomes(self):
+        text = " ".join((ROOT / "docs/SANDBOX.md").read_text().split())
+        gate = text.split("The require-sandbox gate", 1)[1].split("### OpenShell under management", 1)[0]
+        self.assertIn("An account in `enterprise.enrollment.exempt_users` is not refused", gate)
+        self.assertIn("When sandboxes are unavailable to the account and the effective "
+                      "`when_unavailable` setting is `alert`, the gate alerts instead of refusing", gate)
+        self.assertIn("rebuilt from a live registration skips the host-run gate", gate)
 
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")

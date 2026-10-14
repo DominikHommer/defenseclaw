@@ -147,7 +147,9 @@ in the admin `config.yaml`; there is no MDM step. See
 - `DEFENSECLAW_NO_SANDBOX=1` is a one-time bypass of the shell wrapper where
   the organization allows a host run. It is not an exemption: on a managed
   computer whose policy lists the agent in `required_for`, the host run is
-  refused.
+  refused unless the account is in `enterprise.enrollment.exempt_users`, or
+  sandboxes are unavailable to the account and the effective
+  `when_unavailable` setting is `alert`.
 - Managed `sandbox run` has no mount flag and no skip-permissions flag to
   loosen the policy: it works on a copy, `--safe` keeps the agent's prompts,
   and `--context`, `--host-port` and `--pack` are checked against the policy.
