@@ -800,9 +800,9 @@ command to run is ready to paste.
 - **It is a policy control, not an exec deny.** It covers the connectors that
   have a machine-owned hook (Claude Code, Codex, Cursor and Copilot).
   For a non-exempt account, a host run is refused even when it claims to be
-  nested in a sandbox. A
-  person who runs an agent that has no
-  machine-owned hook is not stopped by it.
+  nested in a sandbox, unless sandboxes are unavailable to the account and
+  the effective `when_unavailable` setting is `alert`. A person who runs an
+  agent that has no machine-owned hook is not stopped by it.
 - **A registration has a same-account limit in 1.0.2.** A listed agent with a
   machine-owned hook is refused on the host for a non-exempt account when the
   effective `when_unavailable` setting is `refuse`. When it is `alert` and

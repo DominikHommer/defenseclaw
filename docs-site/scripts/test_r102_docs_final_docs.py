@@ -192,6 +192,23 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to your account and "
                       "the effective `when_unavailable` setting is `alert`", text)
 
+    def test_enterprise_non_exempt_host_refusal_names_unavailable_alert_exception(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("For a non-exempt account, a host run is refused even when it claims to be "
+                      "nested in a sandbox, unless sandboxes are unavailable to the account and "
+                      "the effective `when_unavailable` setting is `alert`", text)
+        self.assertIn("an agent that has no machine-owned hook is not stopped by it", text)
+
+    def test_guide_host_refusal_applies_while_sandboxes_are_available(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("the host run is refused while sandboxes are available to the account, "
+                      "whatever the effective `when_unavailable` setting", text)
+        self.assertIn("When sandboxes are unavailable to the account, only an effective `alert` "
+                      "setting lifts that refusal", text)
+        self.assertIn("[the registration limit](/docs/enterprise/sandboxes#require-sandboxes)", text)
+        self.assertNotIn("that host refusal applies when the effective `when_unavailable` setting "
+                         "is `refuse`", text)
+
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")
         self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
