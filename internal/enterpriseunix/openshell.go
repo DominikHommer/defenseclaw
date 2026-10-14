@@ -809,9 +809,9 @@ func (e *Env) desiredLinks(channel string, socket []byte) []desiredLink {
 // removeOpenShellFiles removes, on uninstall, the links the lifecycle made
 // and the folders its user units left empty, and removes the lifecycle's own
 // sandbox records. When sandboxes stay, their applied setup record moves to a
-// root-only kept name for the next ensure. The unit files and rendered config
-// are in the deployment record and go with it. A link someone else made is
-// left alone.
+// root-only kept name for the next ensure; a rerun of a failed uninstall keeps
+// the record moved by the first run. The unit files and rendered config are in
+// the deployment record and go with it. A link someone else made is left alone.
 func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 	env := l.env
 	channel := ChannelPayload
