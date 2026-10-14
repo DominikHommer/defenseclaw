@@ -350,7 +350,7 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
-	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied, env.keptBridgeMarker())
 	p.openshell = op
 	l.osPlan = op
 
@@ -639,8 +639,10 @@ func (a *openshellApplied) usesDocker() bool {
 // dockerBridgeHolds reports whether a render on settings s, after the
 // applied record prev, carries the 1.0.1 upgrade bridge (GAP-0587): prev is
 // a docker record of 1.0.1 (or of the 1.0.2 release candidates 1 to 3),
-// which names no docker namespace, or already carries the bridge, and s
-// still starts docker gateways on Linux. 1.0.1's managed docker gateways had
+// which names no docker namespace, or already carries the bridge
+// (carriesBridge), or there is no record and a non-purge uninstall of a
+// bridged deployment left the bridge marker (keptBridge, keptBridgeMarker),
+// and s still starts docker gateways on Linux. 1.0.1's managed docker gateways had
 // no sandbox_label, so the sandboxes their accounts kept are in OpenShell's
 // default namespace, which the managed namespace's gateway does not list.
 // Moving such an account was a switch that stranded them (their unpulled
@@ -651,11 +653,46 @@ func (a *openshellApplied) usesDocker() bool {
 // turned on again; a setup without docker gateways ends it (a driver switch
 // says what it does to the sandboxes made before). 1.0.1 upgrade bridge,
 // remove when 1.0.1 is out of support.
-func dockerBridgeHolds(goos string, s openshellSettings, prev *openshellApplied) bool {
-	if goos != "linux" || prev == nil || !(prev.DefaultNamespaceBridge || (prev.usesDocker() && prev.DockerNamespace == "")) {
+func dockerBridgeHolds(goos string, s openshellSettings, prev *openshellApplied, keptBridge bool) bool {
+	if goos != "linux" || !(prev.carriesBridge() || prev == nil && keptBridge) {
 		return false
 	}
 	return !s.Enabled || s.Driver == config.EnterpriseOpenShellDriverDocker || s.dockerFallback()
+}
+
+// carriesBridge reports whether the setup a records carries the 1.0.1
+// upgrade bridge on to the next render: a docker record of 1.0.1 (no docker
+// namespace) or a record that carries the bridge. 1.0.1 upgrade bridge,
+// remove when 1.0.1 is out of support.
+func (a *openshellApplied) carriesBridge() bool {
+	return a != nil && (a.DefaultNamespaceBridge || (a.usesDocker() && a.DockerNamespace == ""))
+}
+
+// bridgeMarkerName is the 1.0.1 upgrade bridge marker in the gateway's
+// sandbox registration store (keepDefaultNamespaceBridge). 1.0.1 upgrade
+// bridge, remove when 1.0.1 is out of support.
+const bridgeMarkerName = "openshell-default-namespace-bridge"
+
+func (e *Env) bridgeMarkerPath() string {
+	return filepath.Join(e.P(e.Layout.DataDir), sandboxStoreDirName, bridgeMarkerName)
+}
+
+// keptBridgeMarker reports whether a non-purge uninstall of a bridged
+// deployment left the bridge marker on this Linux host: a regular file owned
+// by root (never through a symlink). The service account, which can write
+// the data folder, cannot leave one of root's. 1.0.1 upgrade bridge, remove
+// when 1.0.1 is out of support.
+func (e *Env) keptBridgeMarker() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	path := e.bridgeMarkerPath()
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	uid, _, err := e.OwnerOf(path)
+	return err == nil && uid == 0
 }
 
 // switchKey changes when the account's OpenShell has to be replaced rather

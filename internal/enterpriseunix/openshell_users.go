@@ -521,7 +521,12 @@ func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	l.reconcileMacOSAgents(ctx, state)
 	if err := env.saveOpenShellState(state); err != nil {
 		l.result.AddWarning(codeState, "could not record the applied sandbox configuration: "+err.Error())
+		return
 	}
+	// The applied record says whether the bridge holds now; the marker a
+	// non-purge uninstall left for it has done its job. 1.0.1 upgrade
+	// bridge, remove when 1.0.1 is out of support.
+	_ = removeFile(env.bridgeMarkerPath())
 }
 
 // supersedeSwitch handles a switch for an account that still waits for an
@@ -1123,6 +1128,9 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			}
 		}
 	}
+	if !purge {
+		l.keepDefaultNamespaceBridge(len(kept) > 0 && applied.carriesBridge())
+	}
 	switch {
 	case purge:
 	case len(kept) > 0:
@@ -1135,6 +1143,46 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
 	case applied != nil && applied.Enabled:
 		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
+	}
+}
+
+// keepDefaultNamespaceBridge leaves, when keep is set, a root-owned marker
+// of the 1.0.1 upgrade bridge in the gateway's sandbox registration store,
+// which a non-purge uninstall keeps for the kept sandboxes (keepSandboxStore,
+// and the whole data folder with --keep-state), and removes a stale one
+// otherwise. The uninstall removes the applied record
+// (removeOpenShellMachineState), so before the marker the next activation
+// rendered no bridge (dockerBridgeHolds): an account's gateway started in
+// the managed namespace, its kept 1.0.1 sandboxes in OpenShell's default
+// namespace went to ComputeResourceMissing, and OpenShell dropped them with
+// their unpulled work (GAP-0587). The next ensure reads the marker while
+// there is no record and removes it once the record carries the bridge
+// (settleOpenShell); a purge removes it with the data folder. 1.0.1 upgrade
+// bridge, remove when 1.0.1 is out of support.
+func (l *lifecycle) keepDefaultNamespaceBridge(keep bool) {
+	env := l.env
+	path := env.bridgeMarkerPath()
+	if !keep || env.GOOS != "linux" {
+		_ = removeFile(path)
+		return
+	}
+	// The store's folder keeps its owner (the service account's, or root's
+	// once the account goes, handSandboxStoreToRoot); only a missing one is
+	// made, as root's, and a symlink or file in its place is refused.
+	dir := filepath.Dir(path)
+	info, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		err = env.ensureDir(dir, 0o700, rootOwner())
+	case err == nil && !info.IsDir():
+		err = fmt.Errorf("%s is not a directory", dir)
+	}
+	if err == nil {
+		err = env.writeFileAtomic(path, []byte("1.0.1 upgrade bridge: the kept docker sandboxes are in OpenShell's default namespace\n"), 0o600, rootOwner())
+	}
+	if err != nil {
+		l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not record that the kept docker sandboxes are in OpenShell's default namespace (%s): %v; "+
+			"after the next install their accounts' gateways start in the managed namespace and do not list them", path, err))
 	}
 }
 
