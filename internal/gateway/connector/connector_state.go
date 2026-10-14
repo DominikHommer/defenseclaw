@@ -1655,10 +1655,12 @@ func managedHookScriptDigests(
 		if pathInsideConnectorDataDir(opts.DataDir, path) {
 			limit = managedHookRuntimeArtifactMaxBytes
 		}
-		digest, exists, err := stableManagedArtifactDigest(
+		digest, exists, err := stableManagedArtifactDigestWith(
 			path,
 			"managed hook runtime artifact",
 			limit,
+			"",
+			managedArtifactDigestMemoWanted(opts.DataDir, path),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("digest managed hook artifact %s: %w", path, err)
@@ -1761,17 +1763,23 @@ func pathInsideConnectorDataDir(dataDir, path string) bool {
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func stableManagedArtifactDigest(
-	path, label string,
-	maxBytes int64,
-) (string, bool, error) {
-	return stableManagedArtifactDigestForOwner(path, label, maxBytes, "")
-}
-
 func stableManagedArtifactDigestForOwner(
 	path, label string,
 	maxBytes int64,
 	expectedOwnerSID string,
+) (string, bool, error) {
+	return stableManagedArtifactDigestWith(path, label, maxBytes, expectedOwnerSID, false)
+}
+
+// stableManagedArtifactDigestWith reads path twice and returns its digest
+// when both reads and the file identity agree. With memoize it returns the
+// digest of an earlier full read while the opened file keeps the version
+// stamp of that read (openManagedArtifactForDigest, GAP-0438).
+func stableManagedArtifactDigestWith(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
 ) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
@@ -1789,7 +1797,7 @@ func stableManagedArtifactDigestForOwner(
 	if expected.Size() < 0 || expected.Size() > maxBytes {
 		return "", true, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
-	file, err := os.Open(path)
+	file, guarded, err := openManagedArtifactForDigest(path, memoize)
 	if err != nil {
 		return "", true, err
 	}
@@ -1806,6 +1814,25 @@ func stableManagedArtifactDigestForOwner(
 	}
 	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
 		return "", true, err
+	}
+	var stamp managedArtifactStamp
+	stamped := false
+	if memoize {
+		if guarded {
+			stamp, stamped = managedArtifactStampOf(file)
+		}
+		if stamped {
+			if digest, ok := rememberedManagedArtifactDigest(path, stamp); ok {
+				current, err := os.Lstat(path)
+				if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
+					os.SameFile(opened, current) {
+					return digest, true, nil
+				}
+			}
+		}
+		// A version read in full is remembered only once both reads and the
+		// stamp after them agree.
+		forgetManagedArtifactDigest(path)
 	}
 	hashOnce := func() ([sha256.Size]byte, int64, error) {
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -1859,7 +1886,13 @@ func stableManagedArtifactDigestForOwner(
 		first != second {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
 	}
-	return "sha256:" + hex.EncodeToString(first[:]), true, nil
+	digest := "sha256:" + hex.EncodeToString(first[:])
+	if stamped {
+		if later, ok := managedArtifactStampOf(file); ok && later == stamp {
+			rememberManagedArtifactDigest(path, stamp, digest)
+		}
+	}
+	return digest, true, nil
 }
 
 func sharedHookScriptName(name string) bool {
