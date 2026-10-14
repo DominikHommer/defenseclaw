@@ -787,10 +787,12 @@ func (e *Env) desiredLinks(channel string, socket []byte) []desiredLink {
 }
 
 // removeOpenShellFiles removes, on uninstall, the links the lifecycle made
-// and the folders its user units left empty, and the lifecycle's own sandbox
-// records. The unit files and the rendered configuration are in the
-// deployment record and go with it. A link someone else made is left alone.
-func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
+// and the folders its user units left empty, and removes the lifecycle's own
+// sandbox records. When sandboxes stay, their applied setup record moves to a
+// root-only kept name for the next ensure. The unit files and rendered config
+// are in the deployment record and go with it. A link someone else made is
+// left alone.
+func (l *lifecycle) removeOpenShellFiles(record *Deployment) error {
 	env := l.env
 	channel := ChannelPayload
 	if record != nil {
@@ -811,5 +813,7 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/user", u.Name+".d")))
 		}
 	}
-	env.removeOpenShellMachineState(channel)
+	var err error
+	l.openshellRecordKept, err = env.removeOpenShellMachineState(channel, !l.opts.Purge && len(l.sandboxesKept) > 0)
+	return err
 }
