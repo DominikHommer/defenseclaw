@@ -44,7 +44,8 @@ class Delta19DocsTest(unittest.TestCase):
             self.assertIn("first accepted record ends the watch", text.lower())
         self.assertIn("/docs/enterprise/sandboxes#require-sandboxes", guide)
         self.assertIn("non-exempt account", guide)
-        self.assertIn("effective `when_unavailable` setting is `refuse`", guide)
+        self.assertIn("`when_unavailable` setting is `refuse`", guide)
+        self.assertIn("effective `alert` setting when", guide)
         changelog = (ROOT / "CHANGELOG.md").read_text()
         self.assertIn("earlier pre-release registrations await root-owned attestation", changelog)
 
