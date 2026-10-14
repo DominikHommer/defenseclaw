@@ -82,8 +82,16 @@ type enterpriseHooksRemoveAllReport struct {
 	StateFailed []string `json:"state_failed,omitempty"`
 	// PurgedDetail is what the purge found and removed for each user in
 	// Purged, so the uninstall names only that.
-	PurgedDetail map[string]enterpriseHookPurgeDetail `json:"purged_detail,omitempty"`
+	PurgedDetail     map[string]enterpriseHookPurgeDetail `json:"purged_detail,omitempty"`
+	purgeSkipReasons map[int]string
 }
+
+const (
+	enterpriseHookPurgeSkipFailed           = "its pending hook cleanup failed; the state stays for a retry"
+	enterpriseHookPurgeSkipKeptHome         = "its recorded home may still hold a hook registration; the state stays while cleanup is unresolved"
+	enterpriseHookPurgeSkipPending          = "its hook cleanup is still pending; the state stays until it finishes"
+	enterpriseHookPurgeSkipUnreadableLedger = "the pending cleanup ledger could not be read; the state stays until it can be checked"
+)
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 	report, err := removeAllEnterpriseHookTargets(cmd)
@@ -162,7 +170,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, cleanupFailed)...)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, cleanupFailed, report.purgeSkipReasons)...)
 	}
 	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
 	for _, run := range runs {
@@ -438,17 +446,23 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 // cleanups (registrations of targets the manifest no longer enrolls, which
 // the guardian retries while it runs; the uninstall stopped it), as each
 // user, and returns the uids whose state must not be purged because cleanup
-// failed or the directory gives the account no home while its recorded home
-// remains. A cleanup of a removed account is reported pending as
-// "user/connector: reason", so the uninstall warns and goes on.
+// failed, its recorded home was kept, or cleanup is still pending. An
+// unreadable cleanup ledger also blocks every worker job's purge. The report
+// records each uid's purge-skip reason. A cleanup of a removed account is
+// reported pending as "user/connector: reason", so uninstall warns and goes on.
 func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]bool {
 	failed := map[int]bool{}
+	report.purgeSkipReasons = map[int]string{}
 	if cfg == nil {
 		return failed
 	}
 	pending, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
 	if err != nil {
 		report.Failed = append(report.Failed, "pending per-user cleanups: "+boundedString(err.Error(), 256))
+		for uid := range jobs {
+			failed[uid] = true
+			report.purgeSkipReasons[uid] = enterpriseHookPurgeSkipUnreadableLedger
+		}
 		return failed
 	}
 	resolver := enterprisehooks.StandaloneResolver()
@@ -472,10 +486,17 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 			report.Pending = append(report.Pending, fmt.Sprintf("%s: the directory gives the account no home (%s), so it looks removed, but its recorded home %s is not gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if the account is gone",
 				label, kept.directoryHome, kept.home, name, kept.home))
 			failed[entry.UID] = true
+			if report.purgeSkipReasons[entry.UID] != enterpriseHookPurgeSkipFailed {
+				report.purgeSkipReasons[entry.UID] = enterpriseHookPurgeSkipKeptHome
+			}
 		case outcome == enterpriseHookUserCleanupDone:
 			report.Removed++
 		case outcome == enterpriseHookUserCleanupPending:
 			report.Pending = append(report.Pending, label)
+			failed[entry.UID] = true
+			if report.purgeSkipReasons[entry.UID] == "" {
+				report.purgeSkipReasons[entry.UID] = enterpriseHookPurgeSkipPending
+			}
 		default:
 			reason := "the cleanup failed"
 			if err != nil {
@@ -483,6 +504,7 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 			}
 			report.Failed = append(report.Failed, label+": "+reason)
 			failed[entry.UID] = true
+			report.purgeSkipReasons[entry.UID] = enterpriseHookPurgeSkipFailed
 		}
 	}
 	return failed
@@ -502,10 +524,12 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // enrolls with the purge of that account's DefenseClaw per-user state (each
 // data directory its rows name) and per-user binaries, except for the
 // accounts in skip, whose pending cleanup still needs its state or backups.
+// Reasons explains why each skipped uid keeps its state; a missing reason
+// uses the failed-cleanup wording for callers with an existing skip set.
 // Eligible accounts without a manifest row are not proof of
 // managed enrollment. It returns every enrolled account it did not add a purge
 // for, as "user: reason", so the report names each account whose data stays.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, skip map[int]bool) []string {
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, skip map[int]bool, reasons map[int]string) []string {
 	dataDirs := map[int][]string{}
 	notPurged := map[string]string{}
 	for _, row := range rows {
@@ -529,7 +553,11 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 			continue
 		}
 		if skip[*target.UID] {
-			notPurged[job.Account.User] = "its pending hook cleanup failed; the state stays for a retry"
+			reason := reasons[*target.UID]
+			if reason == "" {
+				reason = enterpriseHookPurgeSkipFailed
+			}
+			notPurged[job.Account.User] = reason
 			continue
 		}
 		dataDir := strings.TrimSpace(target.DataDir)
