@@ -2934,9 +2934,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 
 // uninstall stops and removes the deployment, with its machine state (the
 // config, secrets, gateway and guardian state, logs and lifecycle state) and
-// the service account. Each account keeps its own ~/.defenseclaw and
-// per-user binaries unless purge is set. KeepState keeps the machine state
-// for a reinstall to resume with.
+// the service account. Without purge each account keeps its ~/.defenseclaw,
+// per-user binaries and sandboxes; the gateway's sandbox registrations and
+// key stay for those sandboxes, and Linux keeps administrator policies.
+// KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
@@ -3075,10 +3076,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
-	// The sandbox subsystem goes before the binaries it runs: each account's
-	// daemon and OpenShell gateway stop (its sandboxes first), the account's
-	// sandboxes are torn down as the account, and a purge removes what the
-	// subsystem left in the account's home.
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
 	l.teardownOpenShell(ctx, sandboxAccounts)
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
