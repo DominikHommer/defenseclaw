@@ -28,6 +28,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Free space the MicroVM driver's state directory needs: the first start
@@ -362,30 +364,63 @@ func hasE2fsprogs(dir string) bool {
 	return (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs"))
 }
 
-// managedE2fsprogs is the e2fsprogs a managed sandbox uses (spec D5): the
-// user's own build in ~/.local/opt/e2fsprogs, else the first of
-// E2fsprogsDirs whose tools only root or this user can change. A keg in
-// another account's Homebrew (the Cellar is that account's, and writable by
-// the admin group) is refused, never used silently (GAP-0004); refused
-// names it.
+// managedE2fsprogs uses the exact folder decision of the managed gateway
+// exec shim, including the administrator's authoritative setting.
 func (r *doctorRun) managedE2fsprogs() (dir, refused string) {
-	var dirs []string
-	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin"))
+	home, _ := r.HomeDir()
+	adminDir := ""
+	if r.AdminE2fsprogsKnown {
+		adminDir = r.AdminE2fsprogsDir
 	}
-	for _, d := range append(dirs, r.E2fsprogsDirs...) {
-		if !hasE2fsprogs(d) {
-			continue
+	dir, _, refused = ManagedE2fsprogsToolDir(adminDir, home, r.E2fsprogsDirs, os.Getuid(), r.trustManagedE2fsprogs)
+	return dir, refused
+}
+
+func (d *Doctor) trustManagedE2fsprogs(path string, file bool) error {
+	if file {
+		trust := d.TrustedE2fsprogsFile
+		if trust == nil {
+			trust = managed.ValidateTrustedFilePath
 		}
-		if err := ownedByRootOrUser(filepath.Join(d, "debugfs"), os.Geteuid()); err != nil {
-			if refused == "" {
-				refused = fmt.Sprintf("%s (%v)", d, err)
-			}
-			continue
-		}
-		return d, refused
+		return trust(path, "e2fsprogs tool")
 	}
-	return "", refused
+	trust := d.TrustedE2fsprogsDir
+	if trust == nil {
+		trust = managed.ValidateTrustedRuntimeDir
+	}
+	return trust(path, "e2fsprogs")
+}
+
+// ManagedE2fsprogsCheck reports the managed Mac gateway's actual e2fsprogs
+// folder. It is called after the daemon identifies the managed VM driver;
+// Doctor.Run omits host checks on managed computers.
+func (d *Doctor) ManagedE2fsprogsCheck() Check {
+	d.defaults()
+	c := Check{ID: CheckIDManagedE2fsprogs, Title: "e2fsprogs", Status: StatusFail}
+	if !d.AdminE2fsprogsKnown {
+		c.Detail = "the managed gateway did not answer its e2fsprogs_dir settings; cannot verify which folder its exec shim uses"
+		c.Fix = &Fix{Summary: "ask your administrator to restore the managed gateway settings service, then run sandbox doctor again"}
+		return c
+	}
+	home, _ := d.HomeDir()
+	dir, problem, refused := ManagedE2fsprogsToolDir(d.AdminE2fsprogsDir, home, d.E2fsprogsDirs, os.Getuid(),
+		d.trustManagedE2fsprogs)
+	if dir != "" {
+		c.Status, c.Detail = StatusPass, "the managed gateway uses e2fsprogs in "+dir
+		return c
+	}
+	c.Detail = problem
+	if refused != "" {
+		c.Detail += "; refused " + refused
+	}
+	fix := "ask your administrator to install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools; or use an account build in ~/.local/opt/e2fsprogs/sbin when e2fsprogs_dir is unset"
+	if strings.Contains(problem, "not trusted") {
+		fix = "ask your administrator to make the e2fsprogs directory and both tools root-owned, without symlinks or group/other write access; enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	} else if strings.Contains(problem, "cannot be traversed") || strings.Contains(problem, "cannot be executed") {
+		fix = "ask your administrator to make the e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x); enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
+	}
+	c.Fix = &Fix{Summary: fix}
+	return c
 }
 
 // ownedByRootOrUser checks that path, after its links, and every folder

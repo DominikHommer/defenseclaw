@@ -51,6 +51,26 @@ func TestCheckE2fsprogsFollowsTheGatewayRule(t *testing.T) {
 	if row := check(prefix + "/sbin"); !row.OK || row.Detail != prefix+"/sbin" {
 		t.Errorf("tool folder: %+v, want ok naming it", row)
 	}
+	// Root can see a private or non-executable tool; the account's
+	// gateway cannot use it, so ensure must reject it first.
+	if err := os.Chmod(h.env.P(prefix+"/sbin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if row := check(prefix); row.OK || !strings.Contains(row.Detail, "cannot be traversed") {
+		t.Errorf("root-only tool folder passed ensure: %+v", row)
+	}
+	if err := os.Chmod(h.env.P(prefix+"/sbin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(h.env.P(prefix+"/sbin/mke2fs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if row := check(prefix); row.OK || !strings.Contains(row.Detail, "cannot be executed") {
+		t.Errorf("root-only tool file passed ensure: %+v", row)
+	}
+	if err := os.Chmod(h.env.P(prefix+"/sbin/mke2fs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	// Tools the shim could not put on one PATH entry are refused, with the fix.
 	split := write("sbin/mke2fs", "bin/debugfs")
 	if row := check(split); row.OK || !strings.Contains(row.Detail, "no mke2fs and debugfs side by side") || !strings.Contains(row.Fix, "install prefix") {

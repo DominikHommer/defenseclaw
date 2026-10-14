@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -250,6 +251,11 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 		t.Skip("the shim refuses root")
 	}
 	root := t.TempDir()
+	for _, dir := range []string{root, filepath.Dir(root)} {
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	home := filepath.Join(root, "home")
 	configDir := filepath.Join(root, "etc")
 	for _, dir := range []string{filepath.Join(home, ".local", "bin"), filepath.Join(configDir, "openshell")} {
@@ -338,6 +344,9 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(userSbin, "mke2fs"), nil, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(userSbin, "debugfs"), nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	plan, err = planSandboxOpenShellExec(context.Background(), "darwin", nil)
 	if err != nil || !slices.Contains(plan.env, "PATH="+userSbin+":"+filepath.Join(home, ".local", "bin")+":/usr/bin:/bin:/usr/sbin:/sbin") {
 		t.Fatalf("user e2fsprogs: %v %v", err, plan.env)
@@ -356,6 +365,15 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
 		t.Fatalf("admin e2fsprogs without debugfs: %v", err)
 	}
+	checkDoctor := func(admin string) openshell.Check {
+		d := &openshell.Doctor{GOOS: "darwin", Managed: true, AdminE2fsprogsKnown: true,
+			AdminE2fsprogsDir: admin, HomeDir: func() (string, error) { return home, nil },
+			TrustedE2fsprogsDir: openShellExecTrustedDir, TrustedE2fsprogsFile: openShellExecTrustedFile}
+		return d.ManagedE2fsprogsCheck()
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, adminE2fs) || row.Fix == nil || !strings.Contains(row.Fix.Summary, "install prefix or the folder") {
+		t.Fatalf("doctor accepted the missing debugfs: %+v", row)
+	}
 	if err := os.WriteFile(filepath.Join(adminSbin, "debugfs"), nil, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -365,11 +383,56 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 		if err != nil || !strings.HasPrefix(envValue(plan.env, "PATH"), adminSbin+":") {
 			t.Fatalf("admin e2fsprogs %s: %v %v", configured, err, plan.env)
 		}
+		if row := checkDoctor(configured); row.Status != openshell.StatusPass || !strings.Contains(row.Detail, adminSbin) {
+			t.Fatalf("doctor and gateway disagree on %s: %+v", configured, row)
+		}
+	}
+	if err := os.Chmod(adminSbin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("private admin tool folder: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "cannot be traversed") || row.Fix == nil || !strings.Contains(row.Fix.Summary, "chmod o+x") {
+		t.Fatalf("doctor accepted the private tool folder: %+v", row)
+	}
+	if err := os.Chmod(adminSbin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(adminSbin, "debugfs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("non-executable admin tool: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "cannot be executed") {
+		t.Fatalf("doctor accepted the non-executable tool: %+v", row)
+	}
+	if err := os.Chmod(filepath.Join(adminSbin, "debugfs"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	openShellExecTrustedDir = func(string, string) error { return errors.New("owned by dcm-sv1") }
 	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
 		t.Fatalf("untrusted admin e2fsprogs: %v", err)
 	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "not trusted") {
+		t.Fatalf("doctor accepted the untrusted folder: %+v", row)
+	}
+	openShellExecTrustedDir = func(string, string) error { return nil }
+	baseTrustedFile := openShellExecTrustedFile
+	openShellExecTrustedFile = func(path, label string) error {
+		if path == filepath.Join(adminSbin, "debugfs") {
+			return errors.New("owned by a user")
+		}
+		return baseTrustedFile(path, label)
+	}
+	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
+		t.Fatalf("untrusted admin tool: %v", err)
+	}
+	if row := checkDoctor(adminE2fs); row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "not trusted") {
+		t.Fatalf("doctor accepted the untrusted tool: %+v", row)
+	}
+	openShellExecTrustedFile = baseTrustedFile
 
 	// An untrusted rendered config or a binary another account can change
 	// refuses.

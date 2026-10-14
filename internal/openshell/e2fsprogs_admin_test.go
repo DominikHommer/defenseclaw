@@ -5,7 +5,9 @@
 package openshell
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,5 +40,37 @@ func TestAdminE2fsprogsToolDir(t *testing.T) {
 		if got := AdminE2fsprogsToolDir(filepath.FromSlash(c.dir), c.isFile); got != filepath.FromSlash(c.want) {
 			t.Errorf("%s: AdminE2fsprogsToolDir(%q) = %q, want %q", c.name, c.dir, got, c.want)
 		}
+	}
+}
+
+func TestManagedE2fsprogsToolDirUsesTheGatewayOrder(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	own := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
+	keg := filepath.Join(root, "keg", "sbin")
+	for _, dir := range []string{own, keg} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range AdminE2fsprogsTools {
+			if err := os.WriteFile(filepath.Join(dir, tool), []byte("tool"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	trust := func(string, bool) error { return nil }
+	uid := os.Getuid()
+	if dir, problem, _ := ManagedE2fsprogsToolDir("", home, []string{keg}, uid, trust); dir != own || problem != "" {
+		t.Fatalf("account build = %q, %q", dir, problem)
+	}
+	if err := os.Remove(filepath.Join(own, "debugfs")); err != nil {
+		t.Fatal(err)
+	}
+	if dir, problem, _ := ManagedE2fsprogsToolDir("", home, []string{keg}, uid, trust); dir != keg || problem != "" {
+		t.Fatalf("trusted keg = %q, %q", dir, problem)
+	}
+	admin := filepath.Join(root, "bad-admin")
+	if dir, problem, _ := ManagedE2fsprogsToolDir(admin, home, []string{keg}, uid, trust); dir != "" || !strings.Contains(problem, admin) {
+		t.Fatalf("broken configured directory fell back to keg: %q, %q", dir, problem)
 	}
 }

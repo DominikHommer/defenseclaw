@@ -122,6 +122,12 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	// them from the managed gateway, the facts the administrator's verify
 	// reads (GAP-0173, GAP-0174, GAP-0215, GAP-0367).
 	d.Managed = managed
+	if managed && a.ManagedAccountHome != nil {
+		d.HomeDir = a.ManagedAccountHome
+	}
+	if managed && a.GOOS == "darwin" && a.ManagedE2fsprogsDir != nil {
+		d.AdminE2fsprogsDir, d.AdminE2fsprogsKnown = a.ManagedE2fsprogsDir(ctx)
+	}
 	rep := a.HostDoctor(ctx, d)
 	rep.Managed = rep.Managed || managed
 	// The host checks set it; the Docker access row below asks it again.
@@ -148,8 +154,8 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		if st.available {
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
 		}
-		d, _ := openshell.LookupDriver(string(rep.Driver))
-		images := a.imagesCheck(ctx, image.MicroVMTarget(d))
+		runDriver, _ := openshell.LookupDriver(string(rep.Driver))
+		images := a.imagesCheck(ctx, image.MicroVMTarget(runDriver))
 		if st.managed != nil && st.managed.Unavailable != "" && images.Status == openshell.StatusWarn {
 			// Nothing builds while sandboxes can't run for the account (no
 			// docker or kvm access): the Sandbox runtime row names why and
@@ -186,6 +192,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		default:
 			rep.Checks = append(rep.Checks, a.adminCheck())
 		}
+	}
+	if managed && a.GOOS == "darwin" {
+		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
 	}
 	return rep
 }

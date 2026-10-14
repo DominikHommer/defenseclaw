@@ -17,6 +17,7 @@
 package openshell
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -58,4 +59,133 @@ func AdminE2fsprogsToolDir(dir string, isFile func(path string) bool) string {
 func RegularFile(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+// ManagedE2fsprogsToolDir chooses the tools put first on a managed Mac
+// gateway's PATH. An administrator's configured directory is authoritative:
+// a broken one never falls back to a user's build or a Homebrew keg.
+// trustedAdmin checks the chosen directory and both tool files by the same
+// managed rules used by the exec shim. A tool the account owns or a symlink
+// to one must not become a command on an administrator's PATH.
+// Without an administrator value, the account's own build takes precedence
+// over a trusted Homebrew keg. refused records the first keg the account
+// cannot safely use.
+func ManagedE2fsprogsToolDir(adminDir, home string, kegs []string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem, refused string) {
+	if adminDir != "" {
+		if problem := AdminE2fsprogsCandidateAccessProblem(adminDir, os.Stat); problem != "" {
+			return "", problem, ""
+		}
+		tools := AdminE2fsprogsToolDir(adminDir, RegularFile)
+		if tools == "" {
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir), ""
+		}
+		if trustedAdmin == nil {
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s cannot be trusted without a directory check", tools), ""
+		}
+		if err := trustedAdmin(tools, false); err != nil {
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s is not trusted: %v", tools, err), ""
+		}
+		for _, name := range AdminE2fsprogsTools {
+			path := filepath.Join(tools, name)
+			if err := trustedAdmin(path, true); err != nil {
+				return "", fmt.Sprintf("the administrator's e2fsprogs tool %s is not trusted: %v", path, err), ""
+			}
+		}
+		if problem := E2fsprogsAccessProblem(tools, os.Stat); problem != "" {
+			return "", problem, ""
+		}
+		return tools, "", ""
+	}
+	if filepath.IsAbs(home) {
+		own := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
+		if ownedE2fsprogsTools(own, uid) {
+			return own, "", ""
+		}
+	}
+	if kegs == nil {
+		kegs = e2fsprogsDirs
+	}
+	for _, keg := range kegs {
+		if !hasE2fsprogs(keg) {
+			continue
+		}
+		mke2fs := filepath.Join(keg, "mke2fs")
+		if !executable(mke2fs) {
+			mke2fs = filepath.Join(keg, "mkfs.ext4")
+		}
+		for _, tool := range []string{mke2fs, filepath.Join(keg, "debugfs")} {
+			if err := ownedByRootOrUser(tool, uid); err != nil {
+				if refused == "" {
+					refused = fmt.Sprintf("%s (%v)", keg, err)
+				}
+				break
+			}
+			if tool == filepath.Join(keg, "debugfs") {
+				return keg, "", refused
+			}
+		}
+	}
+	return "", "MicroVM sandboxes need mke2fs and debugfs in your own ~/.local/opt/e2fsprogs/sbin or a trusted Homebrew keg", refused
+}
+
+// AdminE2fsprogsCandidateAccessProblem refuses an inaccessible candidate
+// before selecting another one. Root can see tools in a private sbin that
+// an account cannot see, so skipping it could give ensure and the gateway
+// different answers for the same install prefix.
+func AdminE2fsprogsCandidateAccessProblem(adminDir string, stat func(string) (os.FileInfo, error)) string {
+	for _, candidate := range []string{filepath.Join(adminDir, "sbin"), filepath.Join(adminDir, "bin"), adminDir} {
+		info, err := stat(candidate)
+		if err != nil && !os.IsNotExist(err) {
+			return candidate + " cannot be traversed by every account: " + err.Error()
+		}
+		if err == nil && info.IsDir() {
+			if problem := e2fsprogsDirectoryAccessProblem(candidate, stat); problem != "" {
+				return problem
+			}
+		}
+	}
+	return ""
+}
+
+// E2fsprogsAccessProblem is the account-access check shared by ensure,
+// doctor and the gateway shim. Root can see a private tool directory that
+// the accounts' gateways cannot traverse; every sandbox account must be
+// able to reach and execute both tools. stat maps canonical paths under
+// ensure's test root, or is os.Stat in the account process.
+func E2fsprogsAccessProblem(tools string, stat func(string) (os.FileInfo, error)) string {
+	if problem := e2fsprogsDirectoryAccessProblem(tools, stat); problem != "" {
+		return problem
+	}
+	for _, name := range AdminE2fsprogsTools {
+		path := filepath.Join(tools, name)
+		info, err := stat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o001 == 0 {
+			return path + " cannot be executed by every account"
+		}
+	}
+	return ""
+}
+
+func e2fsprogsDirectoryAccessProblem(tools string, stat func(string) (os.FileInfo, error)) string {
+	for dir := tools; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		info, err := stat(dir)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0o001 == 0 {
+			return dir + " cannot be traversed by every account"
+		}
+	}
+	return ""
+}
+
+func ownedE2fsprogsTools(dir string, uid int) bool {
+	for _, name := range AdminE2fsprogsTools {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Mode().Perm()&0o100 == 0 {
+			return false
+		}
+		owner, ok := fileUID(info)
+		if !ok || owner != uid {
+			return false
+		}
+	}
+	return true
 }

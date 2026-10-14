@@ -289,27 +289,24 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 // gets first on its PATH (D5): the folder of the administrator's
 // enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
 // by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
-// when it passes the managed trust check, else the user's own
-// ~/.local/opt/e2fsprogs build. Nothing else, so the driver never picks up
-// another account's Homebrew keg (GAP-0004).
+// when it passes the managed trust check. Without an administrator value,
+// the account's own build or a trusted Homebrew keg is used. The managed
+// doctor calls the same selection rule.
 func openShellE2fsprogs(adminDir, home string) (string, error) {
-	if adminDir != "" {
-		tools := openshell.AdminE2fsprogsToolDir(adminDir, openshell.RegularFile)
-		if tools == "" {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s holds no mke2fs and debugfs, in it or in its sbin or bin "+
-				"(an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, adminDir)
+	dir, problem, refused := openshell.ManagedE2fsprogsToolDir(adminDir, home, nil, os.Getuid(),
+		func(path string, file bool) error {
+			if file {
+				return openShellExecTrustedFile(path, "e2fsprogs tool")
+			}
+			return openShellExecTrustedDir(path, "e2fsprogs")
+		})
+	if dir == "" {
+		if refused != "" {
+			problem += "; refused " + refused
 		}
-		if err := openShellExecTrustedDir(tools, "e2fsprogs"); err != nil {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s is not trusted: %v", errOpenShellPrerequisiteMissing, tools, err)
-		}
-		return tools, nil
+		return "", fmt.Errorf("%w: %s (an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, problem)
 	}
-	sbin := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
-	if err := ownFileOnly(filepath.Join(sbin, "mke2fs")); err != nil {
-		return "", fmt.Errorf("%w: MicroVM sandboxes need e2fsprogs: your administrator sets enterprise.openshell.e2fsprogs_dir, "+
-			"or you build it into ~/.local/opt/e2fsprogs (%v)", errOpenShellPrerequisiteMissing, err)
-	}
-	return sbin, nil
+	return dir, nil
 }
 
 // openShellExecConfigFor is the rendered configuration this account's
