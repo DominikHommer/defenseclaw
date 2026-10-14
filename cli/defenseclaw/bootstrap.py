@@ -555,7 +555,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config)
+        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger)
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -2388,7 +2388,7 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
     report.splunk_bridge_dest = dest
 
 
-def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
+def _apply_gateway_defaults(cfg: Config, is_new_config: bool, logger: Logger | None = None) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
     Returns True when a gateway token was detected (either from
@@ -2408,12 +2408,16 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
       auto-generates on first boot, so the Python and Go halves now
       agree out of the box instead of needing Phase 4's migration to
       reconcile them.
+
+    A running gateway keeps the token it loaded until it restarts, so
+    *logger* sends this run's audit events with that one (GAP-0490).
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
         _resolve_gateway_for_connector,
     )
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+    from defenseclaw.logger import keep_running_gateway_token
 
     # SU-03/ND-2: this used to read openclaw.json unconditionally and pin
     # OPENCLAW_GATEWAY_TOKEN whenever a token was reachable — with NO connector
@@ -2430,6 +2434,7 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
     token_configured = False
     token = gw.get("token", "")
     if token:
+        keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"

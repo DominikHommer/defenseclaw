@@ -20,6 +20,11 @@ fixtures/hook_layouts/hook_layouts.json holds the agent config file each
 Bedrock connector's Go Setup writes on a POSIX host (Claude Code, Codex,
 Copilot, Hermes, OpenCode), the same files with the hook entries removed but
 other DefenseClaw text left (GAP-1311), and the Windows launcher commands.
+internal/gateway/connector/testdata/claudecode_windows_handlers.json holds the
+two handlers per-user Windows Setup writes for Claude Code: the cmd.exe launcher
+guard of 1.0.1 and later and the exec form of 1.0.0; the Go test
+TestClaudeCodeWindowsHandlersMatchTheSharedGolden checks it against Setup
+(GAP-0463).
 """
 
 from __future__ import annotations
@@ -35,6 +40,16 @@ from defenseclaw.hook_integrity import hook_command_problems, hook_registration_
 
 _LAYOUTS = json.loads(
     (Path(__file__).resolve().parent / "fixtures" / "hook_layouts" / "hook_layouts.json").read_text(encoding="utf-8")
+)
+_CLAUDE_WINDOWS = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "internal"
+        / "gateway"
+        / "connector"
+        / "testdata"
+        / "claudecode_windows_handlers.json"
+    ).read_text(encoding="utf-8")
 )
 _CONNECTORS = ["claudecode", "codex", "copilot", "hermes", "opencode"]
 _REMOVABLE = ["claudecode", "codex", "copilot", "hermes"]
@@ -166,3 +181,82 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
         removed = "mcp_servers:\n  defenseclaw:\n    command: defenseclaw\n"
     config.write_text(removed, encoding="utf-8")
     assert hook_registration_problems(cfg, connector) == [f"no DefenseClaw hooks are registered in {config}"]
+
+
+def _with_launcher(value, launcher: str):
+    if isinstance(value, dict):
+        return {key: _with_launcher(item, launcher) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_with_launcher(item, launcher) for item in value]
+    return launcher if value == _CLAUDE_WINDOWS["launcher"] else value
+
+
+def _claude_windows_settings(handler: dict, launcher: str) -> str:
+    entry = _with_launcher(handler, launcher)
+    hooks = {event: [{"matcher": "*", "hooks": [entry]}] for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit")}
+    env = {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode"}
+    return json.dumps({"env": env, "hooks": hooks})
+
+
+@pytest.mark.parametrize("form", ["guard", "exec"])
+def test_windows_claude_code_handlers_setup_writes_are_registered(tmp_path, monkeypatch, form):
+    # GAP-0463: since 1.0.1 per-user Windows Setup runs the launcher through
+    # cmd.exe (command = cmd.exe, launcher only in args). status read only the
+    # command key and reported "no DefenseClaw hooks are registered" while
+    # doctor passed the same 29 handlers. 1.0.0 wrote the exec form.
+    from defenseclaw.commands.cmd_status import _hook_runtime_degraded_suffix
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    launcher = tmp_path / "bin" / "defenseclaw-hook.exe"
+    launcher.parent.mkdir()
+    launcher.write_bytes(b"MZ")
+    handler = _CLAUDE_WINDOWS[form]
+    cfg, config = _install(tmp_path, "claudecode", _claude_windows_settings(handler, str(launcher)))
+    assert hook_registration_problems(cfg, "claudecode") == []
+    assert _hook_runtime_degraded_suffix(cfg, "claudecode") == ""
+
+    removed = {"env": {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode"}, "hooks": {}}
+    config.write_text(json.dumps(removed), encoding="utf-8")
+    assert hook_registration_problems(cfg, "claudecode") == [f"no DefenseClaw hooks are registered in {config}"]
+    assert "DEGRADED" in _hook_runtime_degraded_suffix(cfg, "claudecode")
+
+
+def test_status_and_doctor_read_the_claude_launcher_guard_the_same_way(monkeypatch):
+    # One guard parser for both: doctor's hook matrix and the status check.
+    import subprocess
+
+    from defenseclaw import doctor_hooks
+
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    golden = _CLAUDE_WINDOWS
+    assert doctor_hooks.claude_launcher_guard_view is hook_integrity.claude_launcher_guard_view
+    assert not hasattr(doctor_hooks, "_claude_launcher_guard_view")
+    view = hook_integrity.claude_launcher_guard_view(golden["guard"])
+    assert view == golden["exec"]
+    expected = [subprocess.list2cmdline([golden["launcher"], "hook", "--connector", "claudecode"])]
+    assert hook_integrity.hook_handler_command_lines(golden["guard"], "claudecode") == expected
+    assert hook_integrity.hook_handler_command_lines(golden["exec"], "claudecode") == expected
+    # An edited guard is not the view doctor validates; status still sees the launcher it names.
+    edited = {**golden["guard"], "args": [*golden["guard"]["args"][:-2], "0", ")"]}
+    assert hook_integrity.claude_launcher_guard_view(edited) is edited
+    assert golden["launcher"] in hook_integrity.hook_handler_command_lines(edited, "claudecode")[0]
+
+
+def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):
+    # The Windows Copilot entry runs the PowerShell adapter in the data
+    # directory's hooks folder; only the data directory names DefenseClaw, and
+    # DEFENSECLAW_HOME may not. Doctor reads the adapter, so status must too.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    data_dir = tmp_path / "agent-guard"
+    adapter = data_dir / "hooks" / "copilot-hook.ps1"
+    command = f"& '{adapter}' -Event 'preToolUse'"
+    if "defenseclaw" in command.lower():
+        pytest.skip("the temporary folder names DefenseClaw")
+    document = json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "powershell": command}]}})
+    cfg, config = _install(tmp_path, "copilot", document, data_dir=data_dir)
+    assert hook_registration_problems(cfg, "copilot") == []
+    config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
+    assert hook_registration_problems(cfg, "copilot") == [f"no DefenseClaw hooks are registered in {config}"]
