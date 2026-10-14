@@ -1159,8 +1159,9 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 // purgeAccountSandbox removes what the sandbox subsystem left in an account:
 // the daemon's state, MicroVM disks, CLI state and build logs, and the OpenShell
 // that DefenseClaw installed and its state. An OpenShell the account or its
-// administrator installed stays. Docker images and gateway resources are
-// removed by teardown, not by deleting these files.
+// administrator installed stays. Account teardown handles gateway resources;
+// on Linux the root image cleanup also handles labelled Docker images before
+// these files, including the image records, are removed.
 func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	env, r := l.env, l.result
 	removedAny := false

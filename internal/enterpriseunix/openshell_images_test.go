@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -174,6 +175,45 @@ func writeImageStore(t *testing.T, h *osHost, a SandboxAccount, owner string, ov
 	path := filepath.Join(a.Home, userSandboxDataRel, "images.json")
 	writeHostFile(t, h.testHost, path, string(data))
 	return path
+}
+
+func imageHomeTree(t *testing.T, h *osHost) []string {
+	t.Helper()
+	root := h.env.P(filepath.Join(h.alice.Home, ".defenseclaw"))
+	var entries []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) && path == root {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		line := rel + ":" + entry.Type().String()
+		switch {
+		case entry.Type()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			line += "->" + target
+		case entry.Type().IsRegular():
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			line += ":" + string(data)
+		}
+		entries = append(entries, line)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }
 
 func (d *imageDockerRunner) add(tag, owner string, uid int, idDigit string, run bool) {
@@ -349,13 +389,7 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, docker := imageTestHost(t, "linux")
 			path := tc.prepare(t, h)
-			before := ""
-			if path != "" {
-				data, err := os.ReadFile(h.env.P(path))
-				if err == nil {
-					before = string(data)
-				}
-			}
+			before := imageHomeTree(t, h)
 			r := enterprisestatus.New(ActionUninstall, "", "linux", "1.0.2")
 			if path == "" && h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json")) {
 				t.Fatal("no-store fixture already has an image store")
@@ -364,11 +398,8 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			if len(docker.calls) != 0 {
 				t.Errorf("unexpected Docker calls: %v", docker.calls)
 			}
-			if path != "" {
-				data, err := os.ReadFile(h.env.P(path))
-				if err == nil && string(data) != before {
-					t.Errorf("cleanup changed the image store")
-				}
+			if after := imageHomeTree(t, h); !reflect.DeepEqual(after, before) {
+				t.Errorf("cleanup changed the account's tree: before %v, after %v", before, after)
 			}
 			if path == "" && h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json")) {
 				t.Error("cleanup created an image store")
