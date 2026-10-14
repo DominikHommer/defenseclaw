@@ -549,6 +549,11 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// The reconcile's deferred-session check and machine-enrollment steps.
+	// Tests replace them.
+	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookDeferredTargetSessionAvailable
+	enterpriseHookReconcileStageDeferredPolicies    = stageEnterpriseHookDeferredManagedPolicies
+	enterpriseHookReconcileSyncEnrollments          = syncEnterpriseHookManagedEnrollments
 )
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -562,6 +567,10 @@ var (
 // stays authorized for that repair). The error goes on to say the session
 // is unavailable, as every signed-out repair error does.
 const enterpriseHookAwaitingSignInPrefix = "enterprise hooks: protected target waits for its account's next sign-in"
+
+// errEnterpriseHookAwaitingSignIn marks the reconcile error of such a
+// target, so the reconcile counts exactly the rows it left waiting.
+var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPrefix)
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
@@ -593,10 +602,10 @@ func enterpriseHookVerifyOrRepairTarget(
 		if target.IsDeferred() {
 			if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
 				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-					"%s: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
 						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
 						"it at the account's next sign-in (verification: %v)",
-					enterpriseHookAwaitingSignInPrefix, written, verifyErr,
+					errEnterpriseHookAwaitingSignIn, written, verifyErr,
 				)
 			}
 		}
@@ -2100,7 +2109,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
-	if err := syncEnterpriseHookManagedEnrollments(manifest, apiAddr, false); err != nil {
+	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
 		return run, fmt.Errorf(
 			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
 			err,
@@ -2120,6 +2129,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
+	// awaitingSignIn counts the failures that wait for their signed-out
+	// account's next sign-in (errEnterpriseHookAwaitingSignIn).
+	awaitingSignIn := 0
 	pending := 0
 	repairs := 0
 	var restored []enterpriseHookGuardianRestore
@@ -2162,7 +2174,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
 			var available bool
-			available, err = enterpriseHookDeferredTargetSessionAvailable(target)
+			available, err = enterpriseHookReconcileDeferredSessionAvailable(target)
 			if err == nil && !available {
 				row.Pending = true
 				pending++
@@ -2261,6 +2273,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		if err != nil {
 			failures++
+			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+				awaitingSignIn++
+			}
 			row.OK = false
 			row.Error = err.Error()
 		}
@@ -2274,15 +2289,21 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		writeEnterpriseHookGuardianNotices(os.Stderr, cfg.DataDir, notices)
 	}
 
+	// A target an earlier release protected that waits for its signed-out
+	// account (GAP-0644) keeps the SID enrollment that release published, and
+	// the exact set covers every enabled target, so such failures alone do
+	// not hold back staging new pending targets or publishing the exact set.
+	// Without that, one account that never signs in again keeps every new
+	// target unenrolled and verify failing. Any other failure blocks both.
 	var enrollmentErr error
-	if failures == 0 {
-		enrollmentErr = stageEnterpriseHookDeferredManagedPolicies(
+	if failures == awaitingSignIn {
+		enrollmentErr = enterpriseHookReconcileStageDeferredPolicies(
 			manifest,
 			pendingTargets,
 			apiAddr,
 		)
 		if enrollmentErr == nil {
-			enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+			enrollmentErr = enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, true)
 		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
