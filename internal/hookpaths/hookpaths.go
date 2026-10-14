@@ -668,21 +668,41 @@ func staticShellParam(param *syntax.ParamExp, haveHome bool, vars shellVariables
 		_, ok = vars[indirect]
 		return ok
 	}
+	value, known := vars[name]
+	if name == "HOME" && haveHome {
+		value, known = "/", true
+	}
 	if param.Exp == nil {
-		_, ok := vars[name]
-		return ok
+		return known
 	}
 	switch param.Exp.Op {
-	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull,
-		syntax.AlternateUnset, syntax.AlternateUnsetOrNull:
+	case syntax.DefaultUnset, syntax.AssignUnset:
+		if known {
+			return true
+		}
+	case syntax.DefaultUnsetOrNull, syntax.AssignUnsetOrNull:
+		if known && value != "" {
+			return true
+		}
+	case syntax.AlternateUnset:
+		if !known {
+			return true
+		}
+	case syntax.AlternateUnsetOrNull:
+		if !known || value == "" {
+			return true
+		}
 	default:
-		_, ok := vars[name]
-		return ok
+		return known
 	}
 	if param.Exp.Word == nil {
 		return true
 	}
-	_, ok := staticShellWordWithVars(param.Exp.Word, "", vars, poison)
+	validationHome := ""
+	if haveHome {
+		validationHome = "/known-home"
+	}
+	_, ok := staticShellWordWithVars(param.Exp.Word, validationHome, vars, poison)
 	return ok
 }
 

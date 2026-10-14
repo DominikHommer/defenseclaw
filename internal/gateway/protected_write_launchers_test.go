@@ -48,6 +48,8 @@ func TestProtectedWriteLauncherDecisions(t *testing.T) {
 		{"find ordinary source", `find . -maxdepth 1 -type l -exec cp {} build/ \;`, false},
 		{"resolved link target", `tee -a $(readlink -f disklink) < payload`, true},
 		{"resolved link ordinary", `cp payload $(readlink -f build)/out`, false},
+		{"known home error ordinary", `echo x >> ${HOME:?}/proj/build/log`, false},
+		{"known home default protected", `echo x >> ${HOME:-/tmp}/.ssh/authorized_keys`, true},
 		{"xargs child", `printf disklink | xargs -I{} cp payload {}`, true},
 		{"numa prefix", `numactl --localalloc cp payload disklink`, true},
 		{"flock command", `flock lockfile -c 'cp payload disklink'`, true},

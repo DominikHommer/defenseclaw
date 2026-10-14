@@ -118,3 +118,21 @@ func TestDynamicTargetDomains(t *testing.T) {
 		t.Fatal("numeric target with a linked member must stay unknown")
 	}
 }
+
+func TestKnownHomeOperators(t *testing.T) {
+	skipWindowsShellFixture(t)
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, row := range []struct{ command, target string }{
+		{`echo ok >> ${HOME:?}/proj/out/x`, "proj/out/x"},
+		{`echo ok >> ${HOME:-/tmp}/proj/out/y`, "proj/out/y"},
+		{`echo ok >> ${HOME:?}/.ssh/authorized_keys`, ".ssh/authorized_keys"},
+	} {
+		t.Run(row.command, func(t *testing.T) {
+			paths, parsed, dynamic := ShellWriteOperands(row.command, cwd, home)
+			if !parsed || dynamic || !slices.Contains(paths, filepath.Join(home, row.target)) {
+				t.Fatalf("paths=%v parsed=%v dynamic=%v", paths, parsed, dynamic)
+			}
+		})
+	}
+}
