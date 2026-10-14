@@ -83,7 +83,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 			return true
 		}
 		switch redirect.Op {
-		case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 		default:
 			return true
 		}
@@ -1029,7 +1029,7 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	for _, stmt := range statements {
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
-			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 			default:
 				continue
 			}
@@ -1070,7 +1070,7 @@ func ArchiveBeforeWrite(command, home string) bool {
 		if extracted {
 			for _, redirect := range stmt.Redirs {
 				switch redirect.Op {
-				case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+				case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 					return true
 				}
 			}

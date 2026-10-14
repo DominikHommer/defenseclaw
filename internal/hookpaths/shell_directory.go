@@ -111,7 +111,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		redirects := make([]string, 0, len(stmt.Redirs))
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
-			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 			default:
 				continue
 			}
