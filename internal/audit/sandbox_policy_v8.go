@@ -1129,8 +1129,8 @@ func (recorder *SandboxRecorder) RecordSandboxSettingsDrift(ctx context.Context,
 }
 
 // SandboxRegistrationWithoutGuestEvent is a watched registration used or
-// reported running after grace without an accepted guest record. It is an
-// alert only; its outcome does not imply an enforcement action.
+// reported running after grace without an accepted guest record since bind.
+// It is an alert only.
 type SandboxRegistrationWithoutGuestEvent struct {
 	Sandbox   SandboxIdentity
 	Subject   SandboxManagedSubject
@@ -1163,14 +1163,13 @@ func (recorder *SandboxRecorder) RecordSandboxRegistrationWithoutGuest(ctx conte
 	event := recorder.newEvent(ctx, ActionSandboxManaged, identity, identity.Name, "MEDIUM", input.Timestamp)
 	policyDigest, policyGeneration := livePolicyStamp()
 	log := sandboxV8Log{
-		action: ActionSandboxManaged, event: event, bucket: observability.BucketEnforcementAction,
+		action: ActionSandboxManaged, event: event, bucket: observability.BucketComplianceActivity,
 		eventName: observability.TelemetryEventSandboxRegistrationWithoutGuest, phase: "watch",
-		outcome: observability.OutcomeSkipped,
 		build: func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput,
 			severity observability.Optional[observability.Severity], logLevel observability.Optional[observability.LogLevel],
 		) (observability.Record, error) {
 			return builder.BuildLogSandboxRegistrationWithoutGuest(observability.LogSandboxRegistrationWithoutGuestInput{
-				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: observability.OutcomeSkipped,
+				Envelope: envelope, Severity: severity, LogLevel: logLevel,
 				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
 				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name, DefenseClawSandboxRuntime: fields.runtime,

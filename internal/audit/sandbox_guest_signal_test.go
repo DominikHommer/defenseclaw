@@ -24,7 +24,7 @@ func TestSandboxRegistrationWithoutGuestRecord(t *testing.T) {
 	}
 	_, record := onlySandboxRecord(t, runtime)
 	if record.EventName() != observability.EventName(observability.TelemetryEventSandboxRegistrationWithoutGuest) ||
-		record.Bucket() != observability.BucketEnforcementAction || record.Mandatory() || record.Outcome() != observability.OutcomeSkipped {
+		record.Bucket() != observability.BucketComplianceActivity || record.Mandatory() || record.Outcome() != "" {
 		t.Fatalf("record identity/outcome: %s %s %v %s", record.EventName(), record.Bucket(), record.Mandatory(), record.Outcome())
 	}
 	assertSandboxFields(t, sandboxBody(t, record), map[string]any{

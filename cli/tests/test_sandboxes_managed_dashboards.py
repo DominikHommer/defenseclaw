@@ -78,6 +78,7 @@ def test_board_counts_registrations_without_a_guest() -> None:
     assert panel["type"] == "stat"
     assert panel["fieldConfig"]["defaults"]["noValue"] == "0"
     assert 'defenseclaw_event_name="sandbox.registration_without_guest"' in panel["targets"][0]["expr"]
+    assert "defenseclaw_bucket" not in panel["targets"][0]["expr"]
     assert "or vector(0)" in panel["targets"][0]["expr"]
 
 
