@@ -225,6 +225,11 @@ func (l *lifecycle) describePending(entry pending) {
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
 	})
+	if entry.Kind == "launchd" {
+		l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending launchd for user %s since %s (%s): %s; a root ensure, repair or reconcile run applies the LaunchAgent reload after this account's sandboxes stop. Run `sudo %s` then. The user's next sandbox command does not apply the reload; until that root run, the first sandbox started after the running ones stop can fail with a code-signing exit (OS_REASON_CODESIGNING), which the repair command clears",
+			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
+		return
+	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
