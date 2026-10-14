@@ -460,7 +460,10 @@ var pendingKinds = map[string]int{"restart": 1, "launchd": 2, "switch": 3, "stop
 // runs a sandbox keeps running it; its change waits.
 func (l *lifecycle) settleOpenShell(ctx context.Context, op *openshellPlan) {
 	env := l.env
-	state := env.loadOpenShellState()
+	state, kept := l.openShellStateForSettle()
+	if kept {
+		defer l.discardKeptOpenShellStateAfterSave(state)
+	}
 	prev := state.Applied
 	cur := appliedOf(op)
 	kind, reason := "", ""
@@ -1266,15 +1269,24 @@ func (e *Env) sandboxImageLogRels(a SandboxAccount) ([]string, error) {
 	return rels, nil
 }
 
-// removeOpenShellMachineState removes the lifecycle's own sandbox files that
-// no deployment record lists, and their directory unless the package owns it
-// (the package erase removes it then).
-func (e *Env) removeOpenShellMachineState(channel string) {
+// removeOpenShellMachineState removes the lifecycle's sandbox files that no
+// deployment record lists. When keepRecord is true it moves the applied
+// setup record aside for the kept sandboxes, where only settleOpenShell reads
+// it. The OpenShell directory goes unless the package owns it.
+func (e *Env) removeOpenShellMachineState(channel string, keepRecord bool) (bool, error) {
 	_ = removeFile(e.P(e.prerequisitesPath()))
-	_ = removeFile(e.openshellStatePath())
+	var kept bool
+	var err error
+	if keepRecord {
+		kept, err = e.keepOpenShellState()
+	} else {
+		_ = removeFile(e.openshellStatePath())
+		err = removeFile(e.openshellKeptStatePath())
+	}
 	if !e.packageOwnsOpenShellDir(channel) {
 		_ = removeDirIfEmpty(e.P(e.openshellDir()))
 	}
+	return kept, err
 }
 
 // removeEmptyBelowHome removes the folder rel below the account's home when
