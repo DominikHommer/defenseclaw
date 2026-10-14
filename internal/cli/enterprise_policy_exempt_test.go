@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os/user"
 	"strconv"
 	"strings"
@@ -27,6 +29,107 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
+
+// Captured from TestProfileResolveWithoutProfilesReportsHookExemption/alice
+// against the real no-profile gateway handler. The CLI asks this route with
+// no connector, and enterprisePolicySandboxProfile decodes its enrollment.
+const noProfileExemptResolveJSON = `{"agent":"","connector":"","effective":{"alert_at":"","block_at":"","hilt":{"enabled":false,"min_severity":""},"mode":"observe","resolved_block_at":"CRITICAL","rule_pack_dir":""},"enrollment":{"exempt":true},"match":"","profile":"","profiles_configured":false,"subject":{"directory":"","group_count":0,"groups":null,"principal":"","upn":"","user_id":"2201","user_name":"alice"},"user":"alice","warnings":["this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses its host runs, but its calls are still inspected under the guardrail settings and logged (defenseclaw.user.enrollment: exempt)"]}`
+
+func noProfileResolveJSONFor(t *testing.T, account string, uid int, exempt bool) []byte {
+	t.Helper()
+	var answer map[string]any
+	if err := json.Unmarshal([]byte(noProfileExemptResolveJSON), &answer); err != nil {
+		t.Fatal(err)
+	}
+	answer["user"] = account
+	subject := answer["subject"].(map[string]any)
+	subject["user_id"] = strconv.Itoa(uid)
+	subject["user_name"] = account
+	if !exempt {
+		delete(answer, "enrollment")
+		delete(answer, "warnings")
+	}
+	body, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func stubNoProfileResolve(t *testing.T, responses map[string][]byte) {
+	t.Helper()
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		u, err := url.Parse(path)
+		if err != nil || u.Path != "/api/v1/guardrail/profiles/resolve" {
+			return "", fmt.Errorf("unexpected profile resolve path %q: %v", path, err)
+		}
+		body, ok := responses[u.Query().Get("user")]
+		if !ok {
+			return "", fmt.Errorf("unexpected profile resolve account %q", u.Query().Get("user"))
+		}
+		return "", json.Unmarshal(body, out)
+	}
+}
+
+func requiredSandboxRow(t *testing.T, sb *enterprisePolicySandbox, connector string) enterprisePolicySandboxRow {
+	t.Helper()
+	if sb == nil {
+		t.Fatal("missing sandbox policy")
+	}
+	for _, row := range sb.Rows {
+		if row.Check == "required" && row.Connector == connector {
+			return row
+		}
+	}
+	t.Fatalf("missing required row for %s: %+v", connector, sb.Rows)
+	return enterprisePolicySandboxRow{}
+}
+
+func TestPolicySandboxDecodesNoProfileResolveExemption(t *testing.T) {
+	previousGroups := enterpriseAccountGroups
+	t.Cleanup(func() { enterpriseAccountGroups = previousGroups })
+	enterpriseAccountGroups = func(int) ([]string, error) { return []string{"docker"}, nil }
+	states := []enterprisepolicy.State{{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true}}
+	for _, tc := range []struct {
+		name, account string
+		uid           int
+		listed        []string
+		gatewayExempt bool
+		wantExempt    bool
+	}{
+		{"gateway directory name", "alice@corp.example", 2201, []string{`CORP\alice`}, true, true},
+		{"non-exempt", "bob", 2202, []string{"alice"}, false, false},
+		{"older gateway by uid", "carol", 2203, []string{"2203"}, false, true},
+		{"older gateway by account name", "dave", 2204, []string{"dave"}, false, true},
+		{"root", "root", 0, []string{"root", "0"}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}
+			c.Enterprise.Profile = managed.ProfileStandalone
+			c.OpenShell.Enabled = true
+			c.OpenShell.Admin.RequiredFor = []string{"claudecode"}
+			c.Enterprise.Enrollment.ExemptUsers = tc.listed
+			if tc.name == "gateway directory name" && gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, tc.uid, tc.account) {
+				t.Fatal("directory-name case must need the gateway's verified facts")
+			}
+			stubNoProfileResolve(t, map[string][]byte{tc.account: noProfileResolveJSONFor(t, tc.account, tc.uid, tc.gatewayExempt)})
+			sb := buildEnterprisePolicySandbox(c, "linux", tc.account, tc.uid, states)
+			row := requiredSandboxRow(t, sb, "claudecode")
+			if sb.EnrollmentExempt != tc.wantExempt || (row.State == sandboxRowWarn) != tc.wantExempt {
+				t.Fatalf("sandbox exempt=%t, row=%+v, want exempt=%t", sb.EnrollmentExempt, row, tc.wantExempt)
+			}
+			if tc.wantExempt {
+				if !strings.Contains(row.Detail, "required_for doesn't apply: a host run is allowed") || strings.Contains(row.Detail, "a host run is refused") {
+					t.Fatalf("exempt row: %+v", row)
+				}
+			} else if !strings.Contains(row.Detail, "a host run is refused") {
+				t.Fatalf("non-exempt row: %+v", row)
+			}
+		})
+	}
+}
 
 // GAP-0555: `enterprise linux policy show --user ACCOUNT --connector
 // claudecode` printed "enrollment: exempt" and, two lines below, "sandbox ok
@@ -169,25 +272,50 @@ func TestUnixEnrollmentExclusionRootInExemptUsers(t *testing.T) {
 // The administrator's preview of what a registration's user sees says when
 // exempt_users lifts required_for, as the managed gateway tells that user.
 func TestRegistrationExplainOfAnExemptAccount(t *testing.T) {
-	previous := enterprisePolicySandboxProfile
-	t.Cleanup(func() { enterprisePolicySandboxProfile = previous })
-	enterprisePolicySandboxProfile = func(name string) (string, string, string, bool, error) {
-		return "contractors", "group", "contractors", name == "contractor", nil
+	previousFloor := sandboxFloorFor
+	t.Cleanup(func() { sandboxFloorFor = previousFloor })
+	sandboxFloorFor = func(c *config.Config, _ string) (config.OpenShellAdminConfig, string, error) {
+		return c.OpenShell.Admin, "sha256:fixture", nil
 	}
-	c := &config.Config{}
-	c.OpenShell.Enabled = true
-	c.OpenShell.Admin.RequiredFor = []string{"claudecode"}
-	c.Enterprise.Enrollment.ExemptUsers = []string{`CORP\contractor`}
-	for name, want := range map[string]bool{"contractor": true, "employee": false} {
-		e := explainRegistration(c, sandboxreg.Registration{ID: "r1", UID: 94404076, UserName: name})
-		gate := gateway.RequireSandboxHostRunRefused
-		if want {
-			gate = gateway.RequireSandboxHostRunExempt
-		}
-		if e.Managed == nil || e.Managed.EnrollmentExempt != want || e.Managed.HostRunGate != gate ||
-			e.Managed.HostRunRefused("claudecode") == want {
-			t.Errorf("%s: preview %+v", name, e.Managed)
-		}
+	for _, tc := range []struct {
+		name, account string
+		uid           int
+		listed        []string
+		gatewayExempt bool
+		wantExempt    bool
+		gatewayCalls  int
+	}{
+		{"gateway directory name", "contractor@corp.example", 94404076, []string{`CORP\contractor`}, true, true, 1},
+		{"non-exempt", "employee", 94404077, []string{`CORP\contractor`}, false, false, 1},
+		{"root", "root", 0, []string{"root", "0"}, true, false, 0},
+		{"older gateway local name", "local", 94404078, []string{"local"}, false, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &config.Config{DeploymentMode: string(config.DeploymentModeManagedEnterprise)}
+			c.Enterprise.Profile = managed.ProfileStandalone
+			c.OpenShell.Enabled = true
+			c.OpenShell.Admin.RequiredFor = []string{"claudecode"}
+			c.Enterprise.Enrollment.ExemptUsers = tc.listed
+			if tc.name == "gateway directory name" && gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, tc.uid, tc.account) {
+				t.Fatal("directory-name case must need the gateway's verified facts")
+			}
+			stubNoProfileResolve(t, map[string][]byte{tc.account: noProfileResolveJSONFor(t, tc.account, tc.uid, tc.gatewayExempt)})
+			get := enterpriseIdentityViewGet
+			calls := 0
+			enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+				calls++
+				return get(path, out)
+			}
+			e := explainRegistration(c, sandboxreg.Registration{ID: "r1", UID: tc.uid, UserName: tc.account})
+			gate := gateway.RequireSandboxHostRunRefused
+			if tc.wantExempt {
+				gate = gateway.RequireSandboxHostRunExempt
+			}
+			if e.Managed == nil || e.Managed.EnrollmentExempt != tc.wantExempt || e.Managed.HostRunGate != gate ||
+				e.Managed.HostRunRefused("claudecode") == tc.wantExempt || calls != tc.gatewayCalls {
+				t.Fatalf("%s: preview %+v, gateway calls %d (want %d)", tc.name, e.Managed, calls, tc.gatewayCalls)
+			}
+		})
 	}
 }
 
@@ -206,16 +334,15 @@ func TestPolicyShowCommandReportsExemptHostRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousConfig, previousProfile := cfg, enterprisePolicySandboxProfile
-	t.Cleanup(func() { cfg, enterprisePolicySandboxProfile = previousConfig, previousProfile })
+	previousConfig := cfg
+	t.Cleanup(func() { cfg = previousConfig })
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.OpenShell.Enabled = true
 	cfg.OpenShell.Admin.RequiredFor = []string{"claudecode"}
 	cfg.Enterprise.Enrollment.ExemptUsers = []string{current.Username, current.Uid}
-	enterprisePolicySandboxProfile = func(string) (string, string, string, bool, error) {
-		return "", "default", "", true, nil
-	}
+	responses := map[string][]byte{current.Username: noProfileResolveJSONFor(t, current.Username, uid, true)}
+	stubNoProfileResolve(t, responses)
 	_, show, _, _ := newEnterprisePolicyGroup("linux")
 	if err := show.Flags().Set("user", current.Username); err != nil {
 		t.Fatal(err)
@@ -233,5 +360,14 @@ func TestPolicyShowCommandReportsExemptHostRun(t *testing.T) {
 		!strings.Contains(out, "required_for doesn't apply: a host run is allowed") ||
 		strings.Contains(out, "a host run is refused") {
 		t.Fatalf("show --user --connector, uid %d:\n%s", uid, out)
+	}
+	cfg.Enterprise.Enrollment.ExemptUsers = nil
+	responses[current.Username] = noProfileResolveJSONFor(t, current.Username, uid, false)
+	output.Reset()
+	if err := show.RunE(show, nil); err != nil {
+		t.Fatal(err)
+	}
+	if out := output.String(); !strings.Contains(out, "a host run is refused") || strings.Contains(out, "required_for doesn't apply: a host run is allowed") {
+		t.Fatalf("non-exempt show --user --connector, uid %d:\n%s", uid, out)
 	}
 }

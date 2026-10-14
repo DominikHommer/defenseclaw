@@ -43,8 +43,8 @@ type enterprisePolicySandbox struct {
 	// Note says why the profile is not known (the gateway did not answer).
 	Note string `json:"note,omitempty"`
 	// EnrollmentExempt says enterprise.enrollment.exempt_users exempts the
-	// account as the hook socket matches it (the gateway's answer, else its
-	// uid or name): required_for refuses none of its host runs (GAP-0555).
+	// account as the hook socket matches it (the gateway's answer or its
+	// uid or account-database name): required_for refuses none of its host runs (GAP-0555).
 	EnrollmentExempt bool `json:"enrollment_exempt,omitempty"`
 	// FloorDigest is the digest of the resolved sandbox floor F, Pack and
 	// PackDigest the required pack it names and that pack's content digest,
@@ -118,14 +118,11 @@ func buildEnterprisePolicySandbox(c *config.Config, goos, account string, uid in
 	name, match, group, exempt, err := enterprisePolicySandboxProfile(account)
 	if err != nil {
 		out.Note = "the profile of " + account + " could not be resolved (" + err.Error() + "); the organization's keys apply as the default profile would"
-		// Without the gateway's answer, the exemption by uid or name.
-		exempt = gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, uid, account)
 	}
-	if uid == 0 {
-		// Root's host-run gate is controlled by enrollment.root even if a
-		// stale profile answer says it matched exempt_users.
-		exempt = gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, uid, account)
-	}
+	// The local uid/account-name rule is a subset of the hook's rule and
+	// covers older gateways that omit enrollment on a no-profile answer.
+	// Discard any partial gateway bit on an error; root follows enrollment.root.
+	exempt = uid != 0 && ((err == nil && exempt) || gateway.EnrollmentExemptFromSandbox(c.Enterprise.Enrollment, uid, account))
 	out.Profile, out.Match, out.Group, out.EnrollmentExempt = name, match, group, exempt
 	view := sandboxPolicyOf(c, name)
 	floor := view.floor
