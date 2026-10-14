@@ -1728,6 +1728,17 @@ sandbox with `defenseclaw sandbox review NAME`, then run
 `defenseclaw sandbox stop NAME` and uninstall again. `--stop-sandboxes`
 instead stops and deletes running sandboxes during teardown, including any
 copy-mode work that was not pulled. `reset` accepts the same flag.
+
+If DefenseClaw cannot read the sandbox list because the gateway or its
+sandbox daemon stopped, the list timed out, or its output could not be read,
+`uninstall` and `reset` stop before any change: teardown could otherwise
+delete a sandbox that still runs. Check with `defenseclaw sandbox list`
+(start the gateway first if it says so), pull back work or stop the
+sandboxes you want to keep, then retry. Or use `--stop-sandboxes` to let
+teardown stop and delete any that still run. A sandbox in `error`, `stopping`,
+`creating` or `deleting` counts as running; only `stopped`, `completed`,
+`deleted` and `missing` do not.
+
 `defenseclaw uninstall` runs teardown too,
 and stops if teardown fails (where sandboxes are not supported, such as
 Windows, it skips it). When Docker or OpenShell are
