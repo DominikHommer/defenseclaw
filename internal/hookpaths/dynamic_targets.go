@@ -578,10 +578,8 @@ func shellCandidateReadInputs(file *syntax.File, home, cwd string, candidates *s
 					if first, written := writtenAt[path]; written && first < stmtIndex || unknownAt < stmtIndex {
 						continue
 					}
-					if info, err := os.Stat(path); err == nil && info.Size() <= 4096 {
-						if data, err := os.ReadFile(path); err == nil {
-							value, known = string(data), true
-						}
+					if data, ok := readRegularCommandFile(path, 4096); ok {
+						value, known = string(data), true
 					}
 				}
 			}
