@@ -61,7 +61,7 @@ func TestAccountOpenShellStartFailureIsWordedForThePerson(t *testing.T) {
 			}
 			r.holder = tc.holder
 			r.fail["systemctl --user start "] = job
-			_, err := r.o.ensureRunning(context.Background(), 17670)
+			_, err := r.o.ensureRunning(context.Background(), 17670, "")
 			var apiErr *sandboxapi.Error
 			if !errors.As(err, &apiErr) {
 				t.Fatalf("start failure = %v, want a sandbox API refusal", err)

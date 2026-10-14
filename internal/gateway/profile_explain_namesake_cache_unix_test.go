@@ -8,17 +8,26 @@ package gateway
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestProfileExplainCachedNamesBindToUID(t *testing.T) {
-	previous := managedHookPeerHomes
-	managedHookPeerHomes = &managedHookPeerHomeCache{holders: map[int]string{
-		2100:  "alex\x00/home/local",
-		80001: "alex\x00/home/directory",
+	previous, enabled := managedHookPeerHomes, identityFactsEnabled.Load()
+	resolver := &changingHolderAccounts{accounts: map[int]unixidentity.Account{
+		2100:  {UID: 2100, Name: "alex", Home: "/home/local"},
+		80001: {UID: 80001, Name: "alex", Home: "/home/directory"},
 	}}
-	t.Cleanup(func() { managedHookPeerHomes = previous })
+	managedHookPeerHomes = holderTestCache(t, resolver, useridentity.DirectoryLocal, time.Now)
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { managedHookPeerHomes = previous; setIdentityFactsEnabled(enabled) })
+	for _, uid := range []int{2100, 80001} {
+		if _, err := managedHookPeerHomes.explainDirectory(uid); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if uid, _, ok := managedHookPeerHomes.cachedHolder("alex"); ok {
 		t.Fatalf("ambiguous cached account name selected uid %d", uid)
 	}

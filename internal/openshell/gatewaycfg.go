@@ -465,6 +465,10 @@ type GatewayConfigState struct {
 	// compute_driver. Empty when neither names one: the gateway then
 	// detects one, which is never vm.
 	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
+	// DockerNamespace is [openshell.drivers.docker] sandbox_label, the
+	// sandbox namespace of the docker driver's containers and volumes; empty
+	// when unset, which OpenShell reads as DefaultDockerNamespace.
+	DockerNamespace string `json:"docker_namespace,omitempty"`
 	// VM is the MicroVM (vm) driver's configuration.
 	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
@@ -655,6 +659,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 						SupervisorImage     string `toml:"supervisor_image"`
 						SandboxRuntimeImage string `toml:"sandbox_runtime_image"`
 						SupervisorBin       string `toml:"supervisor_bin"`
+						SandboxLabel        string `toml:"sandbox_label"`
 					} `toml:"docker"`
 					VM struct {
 						SandboxUID     *int64 `toml:"sandbox_uid"`
@@ -679,6 +684,7 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
 		}
 		st.docker = dockerRuntime{SupervisorImage: d.SupervisorImage, SandboxRuntimeImage: d.SandboxRuntimeImage, SupervisorBin: d.SupervisorBin}
+		st.DockerNamespace = strings.TrimSpace(d.SandboxLabel)
 		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
 	st.overrideFromEnv()
@@ -742,6 +748,11 @@ type GatewayChanges struct {
 	Env map[string]string
 	// UnsetEnv removes gateway.env entries.
 	UnsetEnv []string
+	// DockerNamespace sets the docker driver's sandbox namespace
+	// ([openshell.drivers.docker] sandbox_label; AccountDockerNamespace).
+	// The gateway lists only its namespace's sandboxes, so it is set only
+	// on a gateway without sandboxes in the namespace it leaves.
+	DockerNamespace string
 }
 
 // tomlSettings are the gateway.toml assignments the changes make. Where
@@ -753,6 +764,12 @@ func (ch GatewayChanges) tomlSettings() ([]tomlSetting, error) {
 	}
 	if ch.ComputeDriver != "" {
 		out = append(out, tomlSetting{Table: gatewayTable, Key: "compute_driver", Value: string(ch.ComputeDriver)})
+	}
+	if ns := ch.DockerNamespace; ns != "" {
+		if !validDockerNamespace(ns) {
+			return nil, fmt.Errorf("openshell: %q is not a docker sandbox namespace (lowercase letters, digits, '.', '_' and '-')", ns)
+		}
+		out = append(out, tomlSetting{Table: dockerDriverTable, Key: "sandbox_label", Value: ns})
 	}
 	if id := ch.VMIdentity; id != nil {
 		if id.UID <= 0 || id.GID <= 0 {

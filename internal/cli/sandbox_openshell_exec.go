@@ -124,13 +124,17 @@ func generateOpenShellCerts(plan openShellExecPlan) error {
 
 // Seams for tests.
 var (
-	openShellExecHome        = sandboxAccountHome
-	openShellExecTrustedFile = managed.ValidateTrustedFilePath
-	openShellExecTrustedDir  = managed.ValidateTrustedRuntimeDir
-	openShellExecSettings    = sandboxOpenShellAdminSettings
-	openShellExecAdminBinary = openshell.AdminBinary
-	openShellExecRenderedEnv = openshell.RenderedEnvironment
-	openShellExecVMProbe     = sandboxOpenShellVMProbe
+	openShellExecHome             = sandboxAccountHome
+	openShellExecTrustedFile      = managed.ValidateTrustedFilePath
+	openShellExecTrustedDir       = managed.ValidateTrustedRuntimeDir
+	openShellExecSettings         = sandboxOpenShellAdminSettings
+	openShellExecAdminBinary      = openshell.AdminBinary
+	openShellExecRenderedEnv      = openshell.RenderedEnvironment
+	openShellExecVMProbe          = sandboxOpenShellVMProbe
+	openShellExecRenderedVMDriver = func(goos, dir string) (string, string) {
+		return openshell.RenderedAdminVMDriver(goos, dir, openshell.ExecutableVMDriver,
+			func(p string) error { return openShellExecTrustedFile(p, "OpenShell MicroVM driver") })
+	}
 	// openShellExecUpstreamTelemetry reports whether the account's own
 	// floor allows OpenShell's own telemetry (es:GAP-0144).
 	openShellExecUpstreamTelemetry = sandboxOpenShellUpstreamTelemetry
@@ -152,7 +156,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	configPath := filepath.Join(layout.ConfigDir, "openshell", "gateway.toml")
 	if err := openShellExecTrustedFile(configPath, "OpenShell gateway configuration"); err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway configuration %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	home, err := openShellExecHome()
 	if err != nil {
@@ -169,6 +173,11 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		install = config.EnterpriseOpenShellInstallPrerequisite
 		if ownFileOnly(filepath.Join(home, ".local", "bin", openshell.GatewayBinary)) == nil {
 			install = config.EnterpriseOpenShellInstallSetup
+		}
+	}
+	if goos == "linux" && install == config.EnterpriseOpenShellInstallPrerequisite {
+		if err := openShellExecVMDriver(configPath, goos); err != nil {
+			return openShellExecPlan{}, fmt.Errorf("%w: %v (an administrator refreshes it with `enterprise linux ensure`)", errOpenShellPrerequisiteMissing, err)
 		}
 	}
 	var binary, binDir string
@@ -223,7 +232,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	rendered, err := openShellExecRenderedEnv(envPath)
 	if err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway environment %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	env = append(env, rendered...)
 	if !openShellExecUpstreamTelemetry(ctx) {
@@ -249,6 +258,30 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	argv := append([]string{binary, "--config", configPath}, args...)
 	certs := []string{"generate-certs", "--output-dir", tlsDir, "--server-san", openShellServerSAN}
 	return openShellExecPlan{binary: binary, argv: argv, env: env, tlsDir: tlsDir, certs: certs}, nil
+}
+
+// openShellExecVMDriver checks the driver_dir the gateway will actually
+// read. An explicit stale path overrides OpenShell's conventional search,
+// even when another trusted driver is installed elsewhere (GAP-0573).
+func openShellExecVMDriver(configPath, goos string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read the administrator's rendered gateway configuration %s: %w", configPath, err)
+	}
+	rendered, err := openshell.ParseRenderedGateway(data, nil)
+	if err != nil {
+		return err
+	}
+	if err := rendered.Validate(); err != nil {
+		return err
+	}
+	if rendered.ComputeDriver != openshell.DriverVM {
+		return nil
+	}
+	if _, problem := openShellExecRenderedVMDriver(goos, rendered.DriverDir); problem != "" {
+		return errors.New(problem)
+	}
+	return nil
 }
 
 // dockerContextHost is the Docker endpoint the account's gateway is to use:
@@ -289,27 +322,21 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 // gets first on its PATH (D5): the folder of the administrator's
 // enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
 // by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
-// when it passes the managed trust check, else the user's own
-// ~/.local/opt/e2fsprogs build. Nothing else, so the driver never picks up
-// another account's Homebrew keg (GAP-0004).
+// when it passes the managed trust check. Without an administrator value,
+// only the account's own build is used, never a Homebrew keg (GAP-0004).
+// The managed doctor calls the same selection rule.
 func openShellE2fsprogs(adminDir, home string) (string, error) {
-	if adminDir != "" {
-		tools := openshell.AdminE2fsprogsToolDir(adminDir, openshell.RegularFile)
-		if tools == "" {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s holds no mke2fs and debugfs, in it or in its sbin or bin "+
-				"(an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, adminDir)
-		}
-		if err := openShellExecTrustedDir(tools, "e2fsprogs"); err != nil {
-			return "", fmt.Errorf("%w: the administrator's e2fsprogs %s is not trusted: %v", errOpenShellPrerequisiteMissing, tools, err)
-		}
-		return tools, nil
+	dir, problem := openshell.ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(),
+		func(path string, file bool) error {
+			if file {
+				return openShellExecTrustedFile(path, "e2fsprogs tool")
+			}
+			return openShellExecTrustedDir(path, "e2fsprogs")
+		})
+	if dir == "" {
+		return "", fmt.Errorf("%w: %s (an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, problem)
 	}
-	sbin := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
-	if err := ownFileOnly(filepath.Join(sbin, "mke2fs")); err != nil {
-		return "", fmt.Errorf("%w: MicroVM sandboxes need e2fsprogs: your administrator sets enterprise.openshell.e2fsprogs_dir, "+
-			"or you build it into ~/.local/opt/e2fsprogs (%v)", errOpenShellPrerequisiteMissing, err)
-	}
-	return sbin, nil
+	return dir, nil
 }
 
 // openShellExecConfigFor is the rendered configuration this account's
@@ -406,12 +433,4 @@ func ownFileOnly(path string) error {
 		return fmt.Errorf("%s is not a file of your own that only you can change", path)
 	}
 	return nil
-}
-
-// sandboxPlatformName is the `enterprise` subcommand of goos.
-func sandboxPlatformName(goos string) string {
-	if goos == "darwin" {
-		return "macos"
-	}
-	return goos
 }

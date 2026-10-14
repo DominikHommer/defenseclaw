@@ -571,6 +571,11 @@ func describeSwitch(from, to *openshellApplied) string {
 		// already says why the fallback went or came (GAP-0463).
 		parts = append(parts, fmt.Sprintf("driver_fallback %s -> %s", from.Fallback, to.Fallback))
 	}
+	if f, t := from.dockerNamespace(), to.dockerNamespace(); f != t && f != "" && t != "" {
+		// Only where both start docker gateways: a driver or fallback change
+		// already says why docker went or came (GAP-0587).
+		parts = append(parts, fmt.Sprintf("docker sandbox namespace %s -> %s", f, t))
+	}
 	if len(parts) == 0 {
 		return "the sandbox setup changed"
 	}
@@ -586,6 +591,9 @@ func fallbackOnlySwitch(from, to *openshellApplied) bool {
 	}
 	f, t := *from, *to
 	f.Fallback, t.Fallback = "", ""
+	// The namespace of a docker fallback that went or came is the
+	// fallback's, not a change of its own.
+	f.DockerNamespace, t.DockerNamespace = "", ""
 	return f.switchKey() == t.switchKey()
 }
 
@@ -679,10 +687,21 @@ func (l *lifecycle) performAccountChange(ctx context.Context, ops SandboxUserOps
 			l.openshellChange("restarted the sandbox daemon and OpenShell gateway of %s on the new fallback (%s)", a.Name, entry.reasonBase())
 			break
 		}
-		l.openshellChange("switched the sandbox setup of %s (%s); %s", a.Name, entry.reasonBase(), sandboxSwitchLeftovers)
+		leftovers := sandboxSwitchLeftovers
+		if f, t := from.dockerNamespace(), cur.dockerNamespace(); f != t && f != "" && t != "" {
+			leftovers += fmt.Sprintf(dockerNamespaceLeftovers, f)
+		}
+		l.openshellChange("switched the sandbox setup of %s (%s); %s", a.Name, entry.reasonBase(), leftovers)
 	}
 	return nil
 }
+
+// dockerNamespaceLeftovers adds, to a switch of the docker sandbox
+// namespace, where the previous namespace's Docker objects stay: OpenShell
+// lists only its own namespace's, and the new one's gateway removes none of
+// them (GAP-0587).
+const dockerNamespaceLeftovers = "; their Docker containers and volumes stay in OpenShell's %q sandbox namespace " +
+	"(label openshell.ai/sandbox-namespace) until they are removed with docker"
 
 // sandboxSwitchLeftovers is what a switch does to the sandboxes made under
 // the previous setup. They stay in `defenseclaw sandbox list`, but they

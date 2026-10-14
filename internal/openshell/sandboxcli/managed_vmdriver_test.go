@@ -19,6 +19,9 @@
 package sandboxcli
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -32,6 +35,54 @@ func withAdminVMDriverAt(t *testing.T, found string, refused ...string) {
 	prev := managedAdminVMDriver
 	managedAdminVMDriver = func(string) (string, []string) { return found, refused }
 	t.Cleanup(func() { managedAdminVMDriver = prev })
+}
+
+func TestManagedDoctorRefusesStaleRenderedVMDriverDir(t *testing.T) {
+	withManagedHost(t)
+	app := newTestApp(t, "")
+	app.GOOS = "linux"
+	app.daemon.status.Managed = vmPrerequisiteStatus("none")
+	app.HostDoctor = hostReport(nil)
+	const live = "/usr/local/libexec/openshell"
+	withAdminVMDriverAt(t, live+"/openshell-driver-vm")
+	prevCheck, prevTrust, prevPaths := managedRenderedVMDriver, managedRenderedVMConfigTrust, managedRenderedGateway
+	t.Cleanup(func() {
+		managedRenderedVMDriver, managedRenderedVMConfigTrust, managedRenderedGateway = prevCheck, prevTrust, prevPaths
+	})
+	managedRenderedVMDriver = func(_, dir string) (string, string) {
+		if dir == live {
+			return live + "/openshell-driver-vm", ""
+		}
+		return "", "the rendered MicroVM driver_dir " + dir + " has no executable openshell-driver-vm"
+	}
+	managedRenderedVMConfigTrust = func(string, string) error { return nil }
+	configPath := filepath.Join(t.TempDir(), "gateway.toml")
+	managedRenderedGateway = func() *openshell.RenderedPaths { return &openshell.RenderedPaths{TOML: configPath} }
+	writeConfig := func(dir string) {
+		t.Helper()
+		data, err := (openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: openshell.DriverVM, DriverDir: dir}).TOML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig("/usr/libexec/openshell")
+	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusFail ||
+		!strings.Contains(row.Detail, "/usr/libexec/openshell") || row.Fix == nil || !strings.Contains(row.Fix.Summary, "enterprise linux ensure") {
+		t.Fatalf("stale rendered driver_dir: %+v", row)
+	}
+	app.GOOS = "darwin"
+	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusFail || row.Fix == nil ||
+		!strings.Contains(row.Fix.Summary, "enterprise macos ensure") || strings.Contains(row.Fix.Summary, "enterprise darwin ensure") {
+		t.Fatalf("macOS stale rendered driver_dir: %+v", row)
+	}
+	app.GOOS = "linux"
+	writeConfig(live)
+	if row := app.runDoctor(bg).Get("managed-driver"); row == nil || row.Status != openshell.StatusPass {
+		t.Fatalf("current rendered driver_dir: %+v", row)
+	}
 }
 
 func vmPrerequisiteStatus(fallback string) *sandboxapi.ManagedStatus {
