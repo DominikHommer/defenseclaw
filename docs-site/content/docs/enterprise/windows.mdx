@@ -928,6 +928,10 @@ of the admin config:
   no install-admission scan. A project outside the profile gets no install
   admission either; the agent hooks still refuse a denied skill name there
   (see [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
+  A project skill folder the hook guardian cannot verify (a link in its
+  path, or a folder outside the user's own profile) is not watched and its
+  skills are refused: `enterprise windows status` and `verify` warn with
+  `project_skill_root_unverified`, and the gateway log names the folder.
 - Claude Code runs a plugin installed from a local marketplace folder from
   that folder, which DefenseClaw does not watch and never changes. When
   admission blocks such a plugin, or `asset_policy.plugin` denies it, its copy

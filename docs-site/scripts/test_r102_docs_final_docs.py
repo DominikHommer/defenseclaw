@@ -119,5 +119,23 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("The **DefenseClaw kernel policies** table counts policy-change events", text)
         self.assertIn("The stat and **Kernel controls per host (last 10 minutes)** show current host state", text)
 
+    def test_gap_0528_macos_nested_groups_and_bare_name_order(self):
+        text = page("guardrail/user-and-group-policies.mdx")
+        self.assertIn("Nested Active Directory groups select their profile too", text)
+        self.assertIn("A bare name is looked up in Open Directory's search order", text)
+        self.assertIn("write `DOMAIN\\name` to target the Active Directory group", text)
+        self.assertIn("A name written with `@` cannot match a macOS group", text)
+
+    def test_gap_0534_macos_users_entry_names_the_upn(self):
+        text = page("guardrail/user-and-group-policies.mdx")
+        self.assertIn("and by its UPN, which the hook guardian reads from the account's domain record "
+                      "(a mobile account's included)", text)
+
+    def test_gap_1356_windows_page_keeps_the_unverified_project_skill_warning(self):
+        text = page("enterprise/windows.mdx")
+        self.assertIn("skills are refused: `enterprise windows status` and `verify` warn with "
+                      "`project_skill_root_unverified`, and the gateway log names the folder", text)
+
+
 if __name__ == "__main__":
     unittest.main()
