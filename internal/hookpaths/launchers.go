@@ -834,6 +834,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 		context := queue[i]
 		poison := shellVariablePoisonForFile(context.file, home)
 		states := shellWordStates(context.file, home, poison)
+		scriptStates := shellScriptWordStates(context.file, home, context.cwd)
 		writtenScripts := map[string]shellWrittenScript{}
 		callStatements := map[int]*syntax.Stmt{}
 		functions := map[string]*syntax.FuncDecl{}
@@ -867,8 +868,13 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			}
 			words := make([]string, len(call.Args))
 			static := make([]bool, len(call.Args))
+			callVars, ordered := scriptStates[int(call.Args[0].Pos().Offset())]
 			for j, arg := range call.Args {
-				words[j], static[j] = shellStaticWordWithKnownCalls(arg, home, context.cwd, states.varsFor(arg), poison)
+				vars, wordPoison := states.varsFor(arg), poison
+				if ordered {
+					vars, wordPoison = callVars, shellVariablePoison{}
+				}
+				words[j], static[j] = shellStaticWordWithKnownCalls(arg, home, context.cwd, vars, wordPoison)
 				if !static[j] {
 					words[j] = launcherAssignmentPrefix(arg)
 				}
@@ -888,7 +894,7 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 					unknown = true
 				}
 			}
-			if script, handled, known := shellTextCallScript(stmt, words, static, context.source, context.cwd, home, writtenScripts); handled {
+			if script, handled, known := shellTextCallScript(stmt, words, static, context.source, context.cwd, home, callVars, writtenScripts); handled {
 				if !known {
 					unknown = true
 				} else if inner, parsed, _ := parseShellWithinBudget(script, &budget); parsed {
@@ -934,6 +940,9 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 					unknown = true
 				} else {
 					queue = append(queue, shellScriptContext{file: inner, cwd: result.cwd, source: result.script})
+					if !result.stdin && !launcherChainHasOwnOutput(words, static) {
+						context.handled[int(call.Pos().Offset())] = true
+					}
 				}
 			}
 			return true
@@ -941,6 +950,22 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 		queue[i].written = writtenScripts
 	}
 	return queue, unknown
+}
+
+func launcherChainHasOwnOutput(words []string, static []bool) bool {
+	for i, word := range words {
+		if !static[i] {
+			continue
+		}
+		name := programBase(word)
+		if _, launcher := launcherSpecs[name]; !launcher {
+			continue
+		}
+		if _, output := outputProgramGrammars[name]; output {
+			return true
+		}
+	}
+	return false
 }
 
 func shellFunctionSource(function *syntax.FuncDecl, args []string, static []bool) (string, bool) {

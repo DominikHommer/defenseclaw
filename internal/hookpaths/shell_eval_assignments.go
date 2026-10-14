@@ -22,6 +22,10 @@ func shellLiteralEvalAssignments(call *syntax.CallExpr, home string) (map[string
 		words = append(words, value)
 	}
 	script := strings.Join(words, " ")
+	return shellEvalAssignmentText(script, home)
+}
+
+func shellEvalAssignmentText(script, home string) (map[string]string, bool) {
 	budget := newShellAnalysisBudget()
 	file, ok, _ := parseShellWithinBudget(script, &budget)
 	if !ok || len(file.Stmts) == 0 {

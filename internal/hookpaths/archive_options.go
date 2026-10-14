@@ -129,7 +129,10 @@ func tarTransformRunsCommand(expression string) bool {
 // or whose grammar is not known. Both the hook and gateway use this result.
 func ShellExecutableOptionUnknown(command, cwd, home string) (unknown bool) {
 	defer recoverAnalysisPanic(func() { unknown = true })
-	contexts, _ := shellAnalysisScripts(command, cwd, home)
+	contexts, scriptUnknown := shellAnalysisScripts(command, cwd, home)
+	if scriptUnknown && len(contexts) > 0 && shellScriptConsumerPresent(contexts[0].file, home) {
+		return true
+	}
 	for _, context := range contexts {
 		states := shellWordStates(context.file, home, shellVariablePoison{})
 		syntax.Walk(context.file, func(node syntax.Node) bool {
@@ -183,4 +186,27 @@ func ShellExecutableOptionUnknown(command, cwd, home string) (unknown bool) {
 		}
 	}
 	return false
+}
+
+func shellScriptConsumerPresent(file *syntax.File, home string) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, declared := node.(*syntax.FuncDecl); declared {
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static {
+			return true
+		}
+		switch programBase(program) {
+		case "eval", "source", ".", "bash", "sh", "dash", "zsh", "ksh", "watch", "script", "sg", "newgrp", "make":
+			found = true
+		}
+		return !found
+	})
+	return found
 }

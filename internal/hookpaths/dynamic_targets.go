@@ -573,7 +573,7 @@ func shellCandidateReadInputs(file *syntax.File, home, cwd string, candidates *s
 					value, known = StaticWord(redirect.Hdoc, home)
 				}
 			case syntax.RdrIn:
-				if script, supplied, static := shellProcessScript(redirect.Word, "", home); supplied {
+				if script, supplied, static := shellProcessScript(redirect.Word, "", home, cwd, nil); supplied {
 					value, known = script, static
 					break
 				}

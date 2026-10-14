@@ -71,14 +71,14 @@ func recordShellScriptWrite(scripts map[string]shellWrittenScript, stmt *syntax.
 	}
 }
 
-func shellTextInput(stmt *syntax.Stmt, source, home string) (string, bool, bool) {
+func shellTextInput(stmt *syntax.Stmt, source, home, cwd string, vars shellVariables) (string, bool, bool) {
 	if stmt == nil {
 		return "", false, false
 	}
 	for _, redirect := range stmt.Redirs {
 		switch redirect.Op {
 		case syntax.WordHdoc:
-			code, ok := StaticWord(redirect.Word, home)
+			code, ok := shellStaticWordWithKnownCalls(redirect.Word, home, cwd, vars, shellVariablePoison{})
 			return code, true, ok
 		case syntax.Hdoc, syntax.DashHdoc:
 			code, ok := shellHereDocumentBody(redirect, source, home)
@@ -107,7 +107,7 @@ func shellHereDocumentBody(redirect *syntax.Redirect, source, home string) (stri
 	return strings.TrimSuffix(body, delimiter), true
 }
 
-func shellProcessScript(word *syntax.Word, source, home string) (string, bool, bool) {
+func shellProcessScript(word *syntax.Word, source, home, cwd string, vars shellVariables) (string, bool, bool) {
 	if word == nil || len(word.Parts) != 1 {
 		return "", false, false
 	}
@@ -118,14 +118,40 @@ func shellProcessScript(word *syntax.Word, source, home string) (string, bool, b
 	if len(part.Stmts) != 1 {
 		return "", true, false
 	}
-	code, known := literalProducerCode(part.Stmts[0], source, home)
+	code, known := shellLiteralProducerCodeWithVars(part.Stmts[0], source, home, cwd, vars)
 	return code, true, known
+}
+
+func shellLiteralProducerCodeWithVars(stmt *syntax.Stmt, source, home, cwd string, vars shellVariables) (string, bool) {
+	if code, ok := literalProducerCode(stmt, source, home); ok {
+		return code, true
+	}
+	if stmt == nil {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return "", false
+	}
+	words := shellScriptExactWords(call.Args, home, cwd, vars)
+	if len(words) == 0 {
+		return "", false
+	}
+	switch programBase(words[0]) {
+	case "echo":
+		return strings.Join(words[1:], " ") + "\n", true
+	case "printf":
+		if len(words) >= 2 {
+			return shellPrintfValue(words[1], words[2:])
+		}
+	}
+	return "", false
 }
 
 // shellTextCallScript finds literal shell text supplied by a command's input
 // or by an earlier write in the same command. A dynamic source is incomplete.
 func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, source, cwd, home string,
-	written map[string]shellWrittenScript) (string, bool, bool) {
+	vars shellVariables, written map[string]shellWrittenScript) (string, bool, bool) {
 	if len(words) == 0 || !static[0] {
 		return "", false, false
 	}
@@ -142,7 +168,7 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 	if !(shell || sourced || strings.Contains(words[0], "/") && !strings.HasPrefix(words[0], "/")) && program != "make" {
 		return "", false, false
 	}
-	if script, supplied, known := shellTextInput(stmt, source, home); supplied {
+	if script, supplied, known := shellTextInput(stmt, source, home, cwd, vars); supplied {
 		if shell && literalReadsStdin(words) || sourced && len(words) > 1 &&
 			(words[1] == "/dev/stdin" || words[1] == "-") {
 			return script, true, known
@@ -183,7 +209,7 @@ func shellTextCallScript(stmt *syntax.Stmt, words []string, static []bool, sourc
 	}
 	if stmt != nil {
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && (shell || sourced) && len(call.Args) > 1 {
-			if code, supplied, known := shellProcessScript(call.Args[1], source, home); supplied {
+			if code, supplied, known := shellProcessScript(call.Args[1], source, home, cwd, vars); supplied {
 				return code, true, known
 			}
 		}

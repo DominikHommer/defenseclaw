@@ -67,7 +67,7 @@ func LiteralWriteAnalysis(command, cwd, home string) (operands []string, unknown
 				}
 				program := programBase(programWords[0])
 				if (program == "sed" || program == "gsed") && sedReadsStdinScript(programWords) {
-					code, supplied, known := shellTextInput(stmt, context.source, home)
+					code, supplied, known := shellTextInput(stmt, context.source, home, cmdCWD, states.varsFor(call.Args[0]))
 					if !supplied || !known {
 						unknown = true
 					} else {
