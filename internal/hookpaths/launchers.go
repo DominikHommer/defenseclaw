@@ -832,6 +832,8 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			queue[i].handled = map[int]bool{}
 		}
 		context := queue[i]
+		poison := shellVariablePoisonForFile(context.file, home)
+		states := shellWordStates(context.file, home, poison)
 		writtenScripts := map[string]shellWrittenScript{}
 		callStatements := map[int]*syntax.Stmt{}
 		functions := map[string]*syntax.FuncDecl{}
@@ -860,10 +862,13 @@ func shellAnalysisScripts(command, cwd, home string) ([]shellScriptContext, bool
 			if !ok || len(call.Args) == 0 {
 				return true
 			}
+			if context.handled[int(call.Pos().Offset())] {
+				return true
+			}
 			words := make([]string, len(call.Args))
 			static := make([]bool, len(call.Args))
 			for j, arg := range call.Args {
-				words[j], static[j] = StaticWord(arg, home)
+				words[j], static[j] = shellStaticWordWithKnownCalls(arg, home, context.cwd, states.varsFor(arg), poison)
 				if !static[j] {
 					words[j] = launcherAssignmentPrefix(arg)
 				}
@@ -985,26 +990,29 @@ func appendXargsInputScript(queue *[]shellScriptContext, pipe *syntax.BinaryCmd,
 	if !static[0] || programBase(words[0]) != "xargs" {
 		return
 	}
-	result := resolveLauncherWords(words, static, context.cwd)
-	if !result.ok || len(result.words) == 0 {
+	index, options, ok := launcherOptions(words, static, launcherSpecs["xargs"])
+	if !ok || index >= len(words) || !allStatic(static[index:]) {
 		return
 	}
-	if result.replace == "" {
-		result.words = append(result.words, values[0])
-		result.static = append(result.static, true)
+	child := slices.Clone(words[index:])
+	replace := options["I"]
+	if replace == "" {
+		replace = options["i"]
+	}
+	if replace == "" {
+		replace = options["replace"]
+	}
+	if replace == "" {
+		child = append(child, values[0])
 	} else {
-		for j, word := range result.words {
-			result.words[j] = strings.ReplaceAll(word, result.replace, values[0])
-			result.static[j] = true
+		for j, word := range child {
+			child[j] = strings.ReplaceAll(word, replace, values[0])
 		}
 	}
-	if !allStatic(result.static) {
-		return
-	}
-	source := launcherQuotedWords(result.words)
+	source := launcherQuotedWords(child)
 	inner, parsed := parseShell(source)
 	if parsed {
-		*queue = append(*queue, shellScriptContext{file: inner, cwd: result.cwd, source: source})
+		*queue = append(*queue, shellScriptContext{file: inner, cwd: context.cwd, source: source})
 		context.handled[int(call.Pos().Offset())] = true
 	}
 }

@@ -102,15 +102,7 @@ func inlineReadCall(language, name string, args []string) bool {
 	case "print", "console.log", "console.info", "console.error", "puts", "warn":
 		return true
 	case "open", "builtins.open", "__builtins__.open", "io.open", "io.FileIO", "pathlib.Path.open", "File.open":
-		mode := ""
-		if len(args) > 1 {
-			mode = args[1]
-		}
-		for _, arg := range args {
-			if value, ok := strings.CutPrefix(strings.ReplaceAll(arg, " ", ""), "mode="); ok {
-				mode = value
-			}
-		}
+		mode := literalWriterArg(args, 1, "mode")
 		if mode == "" {
 			return true
 		}
@@ -211,6 +203,6 @@ func inlineProtectedUseUnknown(language, code, cwd, home string) bool {
 }
 
 func literalInterpreterAnalysis(language, code, cwd, home string) ([]string, bool) {
-	paths, unknown := literalInterpreterWrites(language, code)
+	paths, unknown := literalInterpreterWrites(language, code, cwd)
 	return paths, unknown || inlineProtectedUseUnknown(language, code, cwd, home)
 }

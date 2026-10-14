@@ -263,6 +263,15 @@ var (
 // text shell, so an apply_patch in it counts as a call of its own, and the
 // envelope binds no call.
 func patchShellInvocationsKnown(text string) bool {
+	if file, ok := parseShell(text); ok {
+		dataOnly := len(file.Stmts) > 0
+		for _, stmt := range file.Stmts {
+			dataOnly = dataOnly && dataStatement(stmt, "")
+		}
+		if dataOnly {
+			return true
+		}
+	}
 	lines := strings.Split(text, "\n")
 	bound := make([]int, len(lines))
 	body := make([]bool, len(lines))

@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -73,16 +74,22 @@ func TestLiteralWriterDynamicDestinations(t *testing.T) {
 	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
-	rows := []string{
-		`python3 -c 'p="disklink"; open(p,"w").write("x")'`,
-		`node -e 'const p="disklink"; require("fs").copyFileSync("source",p)'`,
-		`perl -e 'use File::Copy; my $p="disklink"; copy("source",$p)'`,
-		`ruby -e 'p="disklink"; IO.binwrite(p,"x")'`,
+	rows := []struct {
+		command string
+		unknown bool
+	}{
+		{`python3 -c 'p="disklink"; open(p,"w").write("x")'`, false},
+		{`node -e 'const p="disklink"; require("fs").copyFileSync("source",p)'`, true},
+		{`perl -e 'use File::Copy; my $p="disklink"; copy("source",$p)'`, true},
+		{`ruby -e 'p="disklink"; IO.binwrite(p,"x")'`, true},
 	}
-	for _, command := range rows {
-		_, unknown := LiteralWriteAnalysis(command, cwd, home)
-		if !unknown {
-			t.Errorf("unknown destination not reported for %q", command)
+	for _, row := range rows {
+		paths, unknown := LiteralWriteAnalysis(row.command, cwd, home)
+		if unknown != row.unknown {
+			t.Errorf("unknown destination = %v, want %v for %q", unknown, row.unknown, row.command)
+		}
+		if !row.unknown && !slices.Contains(paths, filepath.Join(cwd, "disklink")) {
+			t.Errorf("known destination not listed for %q", row.command)
 		}
 	}
 }
@@ -91,6 +98,11 @@ func TestLiteralWriterDirectoryDestinations(t *testing.T) {
 	skipWindowsShellFixture(t)
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
+	for _, dir := range []string{cwd, filepath.Join(home, ".ssh")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	target := filepath.Join(home, ".ssh", "authorized_keys")
 	rows := []struct {
 		name, command string

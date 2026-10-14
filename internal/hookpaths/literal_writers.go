@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -124,6 +125,7 @@ var (
 	literalPerlOpen          = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	literalPerlOpen2         = regexp.MustCompile(`\bopen\s*(?:\(\s*)?(?:my\s+)?\$?\w+\s*,\s*['"](?:>>|>)([^'"]+)['"]`)
 	literalPerlCopyUse       = regexp.MustCompile(`\buse\s+File::Copy(?:\s+qw\(([^)]*)\))?`)
+	literalIdentifier        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 )
 
 type literalShellRunnerRule struct {
@@ -258,16 +260,65 @@ func literalCanonicalName(name string, aliases map[string]string) string {
 func literalWriterArg(args []string, index int, keyword string) string {
 	if keyword != "" {
 		for _, arg := range args {
-			parts := strings.SplitN(arg, "=", 2)
-			if len(parts) == 2 && strings.TrimSpace(parts[0]) == keyword {
-				return strings.TrimSpace(parts[1])
+			if name, value, ok := literalKeywordArgument(arg); ok && name == keyword {
+				return value
 			}
 		}
 	}
-	if index >= 0 && index < len(args) {
-		return args[index]
+	position := 0
+	for _, arg := range args {
+		if _, _, ok := literalKeywordArgument(arg); ok {
+			continue
+		}
+		if position == index {
+			return arg
+		}
+		position++
 	}
 	return ""
+}
+
+func literalKeywordArgument(arg string) (string, string, bool) {
+	left, right, found := strings.Cut(arg, "=")
+	name := strings.TrimSpace(left)
+	if !found || name == "" || strings.HasPrefix(right, "=") {
+		return "", "", false
+	}
+	for i, char := range name {
+		if !(char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char == '_' ||
+			i > 0 && char >= '0' && char <= '9') {
+			return "", "", false
+		}
+	}
+	return name, strings.TrimSpace(right), true
+}
+
+func literalPythonBoundPath(prefix, name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if !literalIdentifier.MatchString(name) {
+		return "", false
+	}
+	assignments := regexp.MustCompile(`\b`+regexp.QuoteMeta(name)+`\s*=`).FindAllStringIndex(prefix, -1)
+	value, found := "", false
+	for _, assignment := range assignments {
+		if assignment[1] < len(prefix) && prefix[assignment[1]] == '=' {
+			continue
+		}
+		start := strings.LastIndexAny(prefix[:assignment[0]], ";\n") + 1
+		if strings.TrimSpace(prefix[start:assignment[0]]) != "" {
+			return "", false
+		}
+		right := prefix[assignment[1]:]
+		if end := strings.IndexAny(right, ";\n"); end >= 0 {
+			right = right[:end]
+		}
+		literal, ok := literalString(right)
+		if !ok {
+			return "", false
+		}
+		value, found = literal, true
+	}
+	return value, found
 }
 
 func literalWriterEnabled(rule literalWriterRule, args []string) bool {
@@ -306,11 +357,11 @@ func literalWriterEnabled(rule literalWriterRule, args []string) bool {
 	return false
 }
 
-func literalInterpreterWrites(language, code string) ([]string, bool) {
+func literalInterpreterWrites(language, code, cwd string) ([]string, bool) {
 	if language == "" {
 		return nil, false
 	}
-	if len(code) > 16<<10 {
+	if len(code) > maxAnalysisBytes {
 		return nil, true
 	}
 	code, aliases := literalWriterBindings(language, code)
@@ -338,15 +389,23 @@ func literalInterpreterWrites(language, code string) ([]string, bool) {
 				}
 				continue
 			}
-			if path, ok := literalString(pathArg); ok {
+			path, knownPath := literalString(pathArg)
+			if !knownPath && language == "python" {
+				path, knownPath = literalPythonBoundPath(code[:loc[0]], pathArg)
+			}
+			if knownPath {
 				if rule.kind != literalWriterDirectory {
 					paths = append(paths, path)
 				}
 				if rule.kind == literalWriterDestinationDirectory {
-					if len(args) > 0 {
-						if source, ok := literalString(args[0]); ok {
+					if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
+						if source, ok := literalString(literalWriterArg(args, 0, "src")); ok {
 							paths = append(paths, filepath.Join(path, filepath.Base(source)))
+						} else {
+							unknown = true
 						}
+					} else if err != nil && !os.IsNotExist(err) {
+						unknown = true
 					}
 				}
 				if rule.kind == literalWriterDirectory || rule.kind == literalWriterFileOrDirectory {

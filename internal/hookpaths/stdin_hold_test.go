@@ -19,7 +19,7 @@ func TestStdinProgramOperands(t *testing.T) {
 		path, dynamic bool
 	}{
 		{"direct operand", `echo disklink | xargs truncate -s 5`, true, false},
-		{"shell operand", `echo disklink | xargs -I{} sh -c 'echo x >> {}'`, false, true},
+		{"shell operand", `echo disklink | xargs -I{} sh -c 'echo x >> {}'`, true, false},
 		{"ordinary operand", `echo notes.txt | xargs truncate -s 5`, false, false},
 		{"reader operand", `echo disklink | xargs cat`, false, false},
 		{"copy source", `echo disklink | xargs -I{} cp {} notes.txt`, false, false},
@@ -52,7 +52,7 @@ func TestStdinUnknownWritePositions(t *testing.T) {
 		{"replacement destination", `cat names.txt | xargs -I{} cp payload {}`, true},
 		{"replacement source", `cat names.txt | xargs -I{} cp {} notes.txt`, false},
 		{"reader operand", `cat names.txt | xargs wc -c`, false},
-		{"shell destination", `echo disklink | xargs -I{} sh -c 'echo x >> {}'`, true},
+		{"shell destination", `echo disklink | xargs -I{} sh -c 'echo x >> {}'`, false},
 		{"known direct destination", `echo disklink | xargs truncate -s 5`, false},
 	}
 	for _, row := range rows {

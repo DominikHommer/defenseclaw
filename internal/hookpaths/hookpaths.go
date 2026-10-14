@@ -194,6 +194,9 @@ func ShellExtraWriteOperands(command, cwd, home string) (operands []ExtraWriteOp
 				}
 				for _, value := range candidates.values[name] {
 					bounded := vars.clone()
+					if bounded == nil {
+						bounded = shellVariables{}
+					}
 					bounded[name] = value
 					add(shellCallExtraWriteOperands(call, context.cwd, home, bounded, shellVariablePoison{}))
 				}
@@ -308,7 +311,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 				}
 				for _, value := range values {
 					count++
-					if count > 256 {
+					if count > maxAnalysisExpansionWidth {
 						unknown = true
 						return
 					}
@@ -1125,7 +1128,13 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 			case shellValueSafePath:
 				candidates.safePath[name] = true
 			default:
-				candidates.unknown[name] = true
+				if values, ok := shellCandidateFiniteValues(node.Value, home, cwd, states.varsFor(node.Value), &candidates); ok {
+					for _, value := range values {
+						candidates.add(name, value)
+					}
+				} else {
+					candidates.unknown[name] = true
+				}
 			}
 		case *syntax.ForClause:
 			iter, ok := node.Loop.(*syntax.WordIter)
@@ -1163,6 +1172,10 @@ func shellVariableCandidates(file *syntax.File, home, cwd string) shellVariableC
 				value, ok := staticShellWordWithVars(item, home, states.varsFor(item), shellVariablePoison{})
 				if ok {
 					candidates.add(iter.Name.Value, value)
+				} else if values, ok := shellBraceWordValues(item); ok {
+					for _, value := range values {
+						candidates.add(iter.Name.Value, value)
+					}
 				} else {
 					candidates.unknown[iter.Name.Value] = true
 				}
@@ -1328,7 +1341,15 @@ func shellCandidateCallMutation(
 		for _, name := range names {
 			candidates.unknown[name] = true
 		}
-	case "eval", "source", ".", "let":
+	case "eval":
+		if values, ok := shellLiteralEvalAssignments(call, home); ok {
+			for name, value := range values {
+				candidates.add(name, value)
+			}
+		} else {
+			candidates.allUnknown = true
+		}
+	case "source", ".", "let":
 		candidates.allUnknown = true
 	case "trap":
 		if !shellTrapNoMutation(call, home) {
@@ -1360,6 +1381,9 @@ func shellCandidateCallMutation(
 			candidates.unknown[words[1]] = true
 		}
 	case "printf":
+		if len(call.Args) < 2 || call.Args[1].Lit() != "-v" {
+			return
+		}
 		words, ok := shellStaticWords(call.Args[1:], home)
 		if !ok {
 			candidates.allUnknown = true
@@ -1576,7 +1600,15 @@ func shellPoisonCallMutation(call *syntax.CallExpr, program, home string, poison
 		for _, name := range names {
 			poison.add(name)
 		}
-	case "eval", "source", ".", "let":
+	case "eval":
+		if values, ok := shellLiteralEvalAssignments(call, home); ok {
+			for name := range values {
+				poison.add(name)
+			}
+		} else {
+			poison.all = true
+		}
+	case "source", ".", "let":
 		poison.all = true
 	case "trap":
 		if !shellTrapNoMutation(call, home) {
@@ -2534,6 +2566,26 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 					links.copyDestinations = append(links.copyDestinations, destination)
 				}
 				option, dynamic := copyLinkOptions(words[1:], static[1:])
+				if dynamic && !option && (program == "cp" || program == "gcp") &&
+					len(call.Args) == len(words) && len(words) >= 3 && !static[len(static)-1] &&
+					allStatic(static[:len(static)-1]) {
+					values, exact := shellCandidateFiniteValues(call.Args[len(call.Args)-1], home,
+						siteCWD, states.varsFor(call.Args[len(call.Args)-1]), &boundedWords)
+					if exact && len(values) > 0 && len(values) <= 64 {
+						bounded := true
+						for _, value := range values {
+							variant := append(slices.Clone(words[1:len(words)-1]), value)
+							_, _, preserves, parsed := cpOperands(variant, makeStatic(len(variant)))
+							if !parsed || preserves || strings.HasPrefix(value, "-") {
+								bounded = false
+								break
+							}
+						}
+						if bounded {
+							dynamic = false
+						}
+					}
+				}
 				if copyPreservesLinks(words[1:], static[1:]) {
 					copyScopes = append(copyScopes, destination)
 					if cpDiskSymlink(words[1:], static[1:], siteCWD, home, facts, record) {
@@ -2613,11 +2665,11 @@ func unresolvedProgramMayLink(words []string, static []bool) bool {
 	return false
 }
 
-// dataPrograms only print, search or count text, so link API text in their
-// arguments or here-documents is data, not code (GAP-1536).
+// dataPrograms only read data, print data, or return a fixed status, so link
+// API text in their arguments or here-documents is data, not code (GAP-1536).
 var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail",
 	"wc", "sort", "uniq", "cut", "tr", "nl", "less", "more", "ls", "sha256sum", "diff", "stat",
-	"file", "man", "which", "type"}
+	"file", "man", "which", "type", "true", "false", ":"}
 
 // opaqueLinkText reports link API text that the command may run. Only a
 // command made of data programs alone, without substitutions, is exempt: an

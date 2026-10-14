@@ -24,7 +24,7 @@ func TestShellVariableWriteCandidates(t *testing.T) {
 		{"loop prefix", `for f in link; do echo ok >> "disk$f"; done`, "disklink", false},
 		{"loop infix", `for f in skli; do echo ok >> "di${f}nk"; done`, "disklink", false},
 		{"loop ordinary", `for f in one two; do echo ok >> "out/$f.log"; done`, "out/one.log", false},
-		{"computed value", `f=other; eval 'f=disklink'; echo ok >> "$f"`, "", true},
+		{"computed value", `f=other; eval 'f=disklink'; echo ok >> "$f"`, "disklink", false},
 		{"input value", `read f <<< disklink; echo ok >> "$f"`, "disklink", false},
 		{"conditional default", `f=other; if true; then unset f; fi; echo ok >> "${f:-disklink}"`, "", true},
 	}

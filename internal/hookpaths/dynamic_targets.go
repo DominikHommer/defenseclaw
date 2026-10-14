@@ -206,6 +206,10 @@ func shellKnownAssignmentValue(word *syntax.Word, home, cwd string, vars shellVa
 		if len(words) == 2 {
 			return filepath.Base(words[1]), shellValueExact
 		}
+	case "dirname":
+		if len(words) == 2 {
+			return filepath.Dir(words[1]), shellValueExact
+		}
 	case "realpath":
 		if path, ok := shellPathReaderValue(words, cwd); ok {
 			return path, shellValueExact
