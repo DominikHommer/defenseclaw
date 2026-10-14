@@ -481,8 +481,8 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 // network profile or policy revision, which no registration vouches for. A
 // registration not bound to a sandbox yet takes no record (the daemon posts
 // only after the bind), and a record naming another sandbox than reg's is
-// dropped, so a caller can't make up sandboxes: each one would be a phase the
-// managed recorder tracks for every account (sandboxPhaseKey).
+// dropped, so a telemetry record cannot name a sandbox other than the one
+// held by the registration (sandboxPhaseKey).
 func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
 	var c sandboxTelemetryClaim
 	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &c) != nil {

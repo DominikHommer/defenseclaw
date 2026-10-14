@@ -72,6 +72,17 @@ func TestSandboxGuestSignalAdmittedPathsKeepResponses(t *testing.T) {
 	if bind.Code != http.StatusOK || !strings.Contains(bind.Body.String(), id) {
 		t.Fatalf("bind: %d %s", bind.Code, bind.Body.String())
 	}
+	bound, ok, err := g.auth.store.Get(sbxAlice.UID, id)
+	if err != nil || !ok {
+		t.Fatalf("bound registration: %+v %v %v", bound, ok, err)
+	}
+	wantBind, err := json.Marshal(sandboxRegistrationView(bound))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bind.Body.String(); got != string(wantBind)+"\n" || bind.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("bind response changed: %d %q %v", bind.Code, got, bind.Header())
+	}
 	g.now = g.now.Add(sandboxGuestGrace - time.Nanosecond)
 	stateBefore := guestSnapshot(g.f.do(sbxAlice, http.MethodPost,
 		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationStateSub,
@@ -110,6 +121,21 @@ func TestSandboxGuestSignalAdmittedPathsKeepResponses(t *testing.T) {
 	}
 	if rows[0].Structured["defenseclaw.sandbox.managed.reason"] == rows[1].Structured["defenseclaw.sandbox.managed.reason"] {
 		t.Fatalf("two paths got the same reason: %+v", rows)
+	}
+	// An unavailable recorder is logged by the signal path; the caller still
+	// receives the same policy and relay bytes on later attempts.
+	g.now = g.now.Add(sandboxGuestSignalEvery)
+	g.f.api.logger.SetRuntimeV8Emitter(nil)
+	if got := guestSnapshot(g.f.do(sbxAlice, http.MethodPost,
+		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationStateSub,
+		sandboxrelay.StateReport{V: 1, Running: true}, nil)); !reflect.DeepEqual(stateAfter, got) {
+		t.Fatalf("state response changed on recorder failure: %+v -> %+v", stateAfter, got)
+	}
+	if got := guestSnapshot(g.f.hook(sbxAlice, id, "claudecode", nil)); !reflect.DeepEqual(hookAfter, got) {
+		t.Fatalf("relay response changed on recorder failure: %+v -> %+v", hookAfter, got)
+	}
+	if got := len(g.rows(t)); got != 2 {
+		t.Fatalf("recorder failure created %d alert rows", got)
 	}
 }
 
