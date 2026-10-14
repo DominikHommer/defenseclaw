@@ -1,9 +1,11 @@
 """Regression checks for rel-1-0-2 docs hand-offs and GAP-0554."""
 
+import json
 import unittest
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[2]
 DOCS = Path(__file__).resolve().parents[1] / "content/docs"
 
 
@@ -178,6 +180,103 @@ class R102DocsFinalDocsTest(unittest.TestCase):
                       "check resolves (the local one when both exist)", text)
         self.assertIn("Write `DOMAIN\\name` to target only the Active Directory group", text)
         self.assertNotIn("the local group is " "the one checked", text)
+
+    def test_gap_0595_matched_group_source_lists_every_value(self):
+        text = page("guardrail/user-and-group-policies.mdx")
+        self.assertIn("`matched_group_source` (`local`, `directory` or `local and directory`)", text)
+        self.assertIn("`local and directory` means that the bare name matched both a local group "
+                      "and a `DOMAIN\\name` group in the user's group list", text)
+        self.assertIn("If the source cannot be determined, `matched_group_source` is left out", text)
+
+    def test_guide_no_sandbox_bullet_names_both_host_run_exceptions(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("the host run is refused by the agent's machine-owned hook unless your account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to your account and "
+                      "the effective `when_unavailable` setting is `alert`", text)
+
+    def test_enterprise_non_exempt_host_refusal_names_unavailable_alert_exception(self):
+        text = page("enterprise/sandboxes.mdx")
+        self.assertIn("For a non-exempt account, a host run is refused even when it claims to be "
+                      "nested in a sandbox, unless sandboxes are unavailable to the account and "
+                      "the effective `when_unavailable` setting is `alert`", text)
+        self.assertIn("an agent that has no machine-owned hook is not stopped by it", text)
+
+    def test_guide_host_refusal_applies_while_sandboxes_are_available(self):
+        text = page("sandboxes/guide.mdx")
+        self.assertIn("the host run is refused while sandboxes are available to the account, "
+                      "whether the effective `when_unavailable` setting is `refuse` or `alert`", text)
+        self.assertIn("An effective `alert` setting when sandboxes are unavailable to the account "
+                      "lifts that refusal", text)
+        self.assertIn("[the registration limit](/docs/enterprise/sandboxes#require-sandboxes)", text)
+        self.assertNotIn("that host refusal applies when the effective `when_unavailable` setting "
+                         "is `refuse`", text)
+
+    def test_no_sandbox_registry_names_both_host_run_exceptions(self):
+        registry = json.loads((ROOT / "internal/envvars/registry.json").read_text())
+        entry = next(item for item in registry["entries"]
+                     if item["name"] == "DEFENSECLAW_NO_SANDBOX")
+        self.assertIn("host run is still refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", entry["purpose"])
+
+    def test_no_sandbox_generated_env_vars_row_names_both_exceptions(self):
+        text = page("reference/env-vars.mdx")
+        row = text.split("`DEFENSECLAW_NO_SANDBOX`", 1)[1].split(" | ", 1)[1]
+        self.assertIn("host run is still refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", row)
+
+    def test_no_sandbox_changelog_bullet_names_both_exceptions(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        release = changelog.split("## [1.0.2]", 1)[1].split("\n## [", 1)[0]
+        bullet = release.split("- `DEFENSECLAW_NO_SANDBOX=1`", 1)[1].split("\n- ", 1)[0]
+        bullet = " ".join(bullet.split())
+        self.assertIn("It is not an exemption", bullet)
+        self.assertIn("host run is refused unless the account is in "
+                      "`enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account "
+                      "and the effective `when_unavailable` setting is `alert`", bullet)
+
+    def test_sandbox_gate_doc_names_exempt_and_alert_outcomes(self):
+        text = " ".join((ROOT / "docs/SANDBOX.md").read_text().split())
+        gate = text.split("The require-sandbox gate", 1)[1].split("### OpenShell under management", 1)[0]
+        self.assertIn("An account in `enterprise.enrollment.exempt_users` is not refused", gate)
+        self.assertIn("When sandboxes are unavailable to the account and the effective "
+                      "`when_unavailable` setting is `alert`, the gate alerts instead of refusing", gate)
+        self.assertIn("rebuilt from a live registration skips the host-run gate", gate)
+
+    def test_enterprise_uninstall_keeps_sandboxes_until_purge(self):
+        text = page("enterprise/sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        self.assertIn("Without `--purge`, uninstall stops running sandboxes through the sandbox daemon, "
+                      "which syncs a MicroVM disk before stopping it", bullet)
+        self.assertIn("It then stops the daemon and the OpenShell gateway. Every sandbox stays with "
+                      "its records, disks and any copy-mode work not pulled yet for the next "
+                      "activation of the deployment", bullet)
+        self.assertIn("Only `--purge` runs each user's teardown as that user and removes the daemon state, "
+                      "MicroVM disks, images, both stores and the rendered `gateway.toml`", bullet)
+        self.assertNotIn("Root runs each user's teardown as that user", bullet)
+
+    def test_enterprise_lifecycle_row_does_not_say_every_uninstall_tears_down(self):
+        text = page("enterprise/sandboxes.mdx")
+        row = text.split("| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root |", 1)[1].split("\n", 1)[0]
+        self.assertIn("`uninstall --purge` tears down per user; `uninstall` alone stops running "
+                      "sandboxes and keeps them", row)
+        self.assertNotIn("checks group membership, tears down per user", row)
+
+    def test_enterprise_uninstall_names_the_kept_sandbox_store(self):
+        # rel-1-0-2:GAP-0598 (lead decision option a): a non-purge uninstall
+        # that keeps sandboxes keeps the registrations, decisions and key.
+        text = page("enterprise/sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        self.assertIn("also keeps the gateway's sandbox registrations and decisions "
+                      "(`sandbox/registrations` and `sandbox/decisions`) and their key "
+                      "(`redaction-correlation.key`); the rest of the machine state goes", bullet)
+        self.assertIn("which adopts them and gives them to the service account, also after a package "
+                      "reinstall (`rpm -e` or `apt remove`, then an install)", bullet)
+        self.assertIn("it also removes the kept registrations, decisions and key", bullet)
+        row = text.split("| Lifecycle (`ensure`, `verify`, `repair`, `uninstall`) | root |", 1)[1].split("\n", 1)[0]
+        self.assertIn("with the gateway's sandbox registrations, decisions and `redaction-correlation.key` "
+                      "(`--purge` removes those too)", row)
 
     def test_gap_0534_macos_users_entry_names_the_upn(self):
         text = page("guardrail/user-and-group-policies.mdx")

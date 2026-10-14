@@ -27,6 +27,9 @@ in the admin `config.yaml`; there is no MDM step. See
 ### Fixed
 
 - **A refused sandbox profile now names the setting and the profile.** `config-v8 validate`, the gateway and Windows Setup `/ensure` reported a profile's semantic sandbox error (`allowed: false` with `required_for`, an empty egress intersection, `none` with other credentials, an unknown connector, a value below a minimum) only as "configuration could not be compiled safely" at `$`, and reported `config_version` 8 for a version 9 file. They now report `guardrail.profiles["<name>"]` with the rule text and the file's own version. New read-only `defenseclaw-gateway config validate <file>` checks a candidate before it is applied (GAP-0337, GAP-0323, GAP-0252).
+- **Hook status reads the registered commands, and token changes no longer break setup audits.** After a Windows per-user upgrade from 1.0.1, status reads Claude Code's guarded hook command as doctor does instead of reporting missing hooks. It also recognizes Antigravity hooks and Devin hooks set up with a workspace. `setup openclaw --no-restart`, `setup gateway --token` and a re-run of `init` send their audit events with the token the running gateway still accepts until it restarts (GAP-0463, GAP-0464, GAP-0489, GAP-0490).
+- **The 0.8.x upgrade handoff checks options before downloading.** `defenseclaw-upgrade.sh` answers `--help`, refuses an unknown option or a missing `--version` value before any download, and does not downgrade a newer install when no `--version` is given. `install.ps1` also accepts `--help`. In action mode, `doctor` warns when another OpenCode plugin beside DefenseClaw's can load later (GAP-0466, GAP-0469).
+- **A managed account outage and a locked sandbox pack now give a clear refusal.** When the computer cannot look up an account, `sandbox run` says a new run cannot start, `sandbox connect` and `sandbox exec` cannot reach a running sandbox, agents already running keep working, the stop is not the organization's sandbox policy, and whom to tell if it lasts. On a standalone managed computer, config load checks a locked `openshell.pack` as a required pack for the sandbox floors that use it; `config validate`, `ensure` and `verify` refuse a pack that cannot run on a copy of the project (GAP-0505, GAP-0510).
 
 ### Added
 
@@ -144,7 +147,9 @@ in the admin `config.yaml`; there is no MDM step. See
 - `DEFENSECLAW_NO_SANDBOX=1` is a one-time bypass of the shell wrapper where
   the organization allows a host run. It is not an exemption: on a managed
   computer whose policy lists the agent in `required_for`, the host run is
-  refused.
+  refused unless the account is in `enterprise.enrollment.exempt_users`, or
+  sandboxes are unavailable to the account and the effective
+  `when_unavailable` setting is `alert`.
 - Managed `sandbox run` has no mount flag and no skip-permissions flag to
   loosen the policy: it works on a copy, `--safe` keeps the agent's prompts,
   and `--context`, `--host-port` and `--pack` are checked against the policy.
@@ -156,6 +161,7 @@ in the admin `config.yaml`; there is no MDM step. See
   local group of the same name; the docs recommend the fully qualified
   spelling. macOS shows other accounts' sandbox daemons in the process list
   (no `hidepid`); the docs state this residual.
+- **Behavior change: Cisco AI Defense uses the connection policy for a blank rule list.** An unset or empty `cisco_ai_defense.enabled_rules` list sends no `config` or `enabled_rules` in an API-key inspection request, so the AI Defense connection's own policy applies. A non-empty list is sent in the order configured. Before, an empty list sent an implicit built-in list of 12 cloud rules. If you relied on that list, name those cloud rules in `cisco_ai_defense.enabled_rules`. The Setup TUI hint now explains the blank-list behavior (GAP-0336).
 
 ### Removed
 
