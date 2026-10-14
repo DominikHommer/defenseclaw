@@ -211,22 +211,17 @@ func reconcileEnterpriseHookStandaloneUnixCleanups(
 	}
 	// A cleanup retired as home gone removed nothing; it already said so.
 	retired := map[string]bool{}
-	// A completed re-home cleanup already names both homes in its audit line.
-	rehomed := map[string]bool{}
 	remaining, result := runEnterpriseHookUserCleanups(ctx, due, func(ctx context.Context, entry enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
-		outcome, err, moved := attemptEnterpriseHookStandaloneUnixCleanupResult(ctx, log, entry, resolver)
+		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(ctx, log, entry, resolver)
 		if errors.Is(err, errEnterpriseHookCleanupHomeGone) {
 			retired[enterpriseHookUserCleanupLabel(entry)] = true
-		}
-		if moved {
-			rehomed[enterpriseHookUserCleanupLabel(entry)] = true
 		}
 		return outcome, err
 	}, now)
 	remaining = append(remaining, held...)
 	sortEnterpriseHookStandaloneUnixCleanups(remaining)
 	for _, label := range result.Removed {
-		if !retired[label] && !rehomed[label] {
+		if !retired[label] {
 			fmt.Fprintf(log, "[hook-guardian] %s: no longer enrolled; per-user cleanup done\n", label)
 		}
 	}
@@ -347,18 +342,6 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 	entry enterpriseHookUserCleanup,
 	resolver unixidentity.Resolver,
 ) (enterpriseHookUserCleanupOutcome, error) {
-	outcome, err, _ := attemptEnterpriseHookStandaloneUnixCleanupResult(ctx, log, entry, resolver)
-	return outcome, err
-}
-
-// The extra result lets reconcile avoid a second completion line after the
-// re-home audit line. The public attempt still returns the usual Done/nil.
-func attemptEnterpriseHookStandaloneUnixCleanupResult(
-	ctx context.Context,
-	log io.Writer,
-	entry enterpriseHookUserCleanup,
-	resolver unixidentity.Resolver,
-) (enterpriseHookUserCleanupOutcome, error, bool) {
 	home := filepath.Clean(strings.TrimSpace(entry.UserHome))
 	uid := entry.UID
 	homeResolver := &enterpriseHookCleanupHomeResolver{Resolver: resolver}
@@ -377,13 +360,13 @@ func attemptEnterpriseHookStandaloneUnixCleanupResult(
 	switch {
 	case errors.Is(err, errEnterpriseHookTargetNotFound), errors.Is(err, errEnterpriseHookTargetUIDChanged):
 		fmt.Fprintf(log, "[hook-guardian] %s: %v; nothing to remove as that user\n", enterpriseHookUserCleanupLabel(entry), err)
-		return enterpriseHookUserCleanupDone, nil, false
+		return enterpriseHookUserCleanupDone, nil
 	case homeChanged != nil && enterpriseHookDirectoryNoHome(homeChanged.directoryHome) && enterpriseHookRecordedHomeGone(homeChanged.home):
 		fmt.Fprintf(log, "[hook-guardian] %s: home gone: the recorded home %s no longer exists and the directory gives no home (%s); the cleanup is retired, as nothing is left to remove\n",
 			enterpriseHookUserCleanupLabel(entry), homeChanged.home, homeChanged.directoryHome)
-		return enterpriseHookUserCleanupDone, errEnterpriseHookCleanupHomeGone, false
+		return enterpriseHookUserCleanupDone, errEnterpriseHookCleanupHomeGone
 	case homeChanged != nil && enterpriseHookDirectoryNoHome(homeChanged.directoryHome):
-		return enterpriseHookUserCleanupFailed, &enterpriseHookCleanupHomeKeptError{name: homeChanged.name, home: homeChanged.home, directoryHome: homeChanged.directoryHome}, false
+		return enterpriseHookUserCleanupFailed, &enterpriseHookCleanupHomeKeptError{name: homeChanged.name, home: homeChanged.home, directoryHome: homeChanged.directoryHome}
 	case homeChanged != nil:
 		// Resolve again against the directory's current home. This repeats
 		// the uid and absolute-home checks after the first lookup; a name
@@ -393,25 +376,25 @@ func attemptEnterpriseHookStandaloneUnixCleanupResult(
 			resolver,
 		)
 		if err != nil {
-			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, err.Error()), false
+			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, err.Error())
 		}
 		if pendingReason != "" {
-			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, pendingReason), false
+			return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, pendingReason)
 		}
 	case err != nil:
-		return enterpriseHookUserCleanupFailed, err, false
+		return enterpriseHookUserCleanupFailed, err
 	case pendingReason != "":
-		return enterpriseHookUserCleanupPending, nil, false
+		return enterpriseHookUserCleanupPending, nil
 	}
 	check := enterpriseHookCheckHome(account.Home, account.UID)
 	if homeChanged != nil && check.State != enterprisehooks.HomeAvailable {
-		return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, check.Reason), false
+		return enterpriseHookUserCleanupFailed, enterpriseHookRehomedCleanupError(homeChanged, check.Reason)
 	}
 	switch check.State {
 	case enterprisehooks.HomePending:
-		return enterpriseHookUserCleanupPending, nil, false
+		return enterpriseHookUserCleanupPending, nil
 	case enterprisehooks.HomeUntrusted:
-		return enterpriseHookUserCleanupFailed, errors.New("enterprise hooks: " + check.Reason), false
+		return enterpriseHookUserCleanupFailed, errors.New("enterprise hooks: " + check.Reason)
 	}
 	dataDir := strings.TrimSpace(entry.DataDir)
 	if dataDir == "" {
@@ -439,7 +422,7 @@ func attemptEnterpriseHookStandaloneUnixCleanupResult(
 		}},
 	})
 	if err != nil {
-		return enterpriseHookUserCleanupFailed, err, false
+		return enterpriseHookUserCleanupFailed, err
 	}
 	for _, result := range response.Targets {
 		if result.Index != 0 {
@@ -447,22 +430,22 @@ func attemptEnterpriseHookStandaloneUnixCleanupResult(
 		}
 		switch {
 		case result.Pending:
-			return enterpriseHookUserCleanupPending, nil, false
+			return enterpriseHookUserCleanupPending, nil
 		case result.OK:
 			if homeChanged != nil {
 				fmt.Fprintf(log, "[hook-guardian] %s: the account was re-homed from %s to %s; per-user cleanup ran in the current home\n",
 					enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
-				return enterpriseHookUserCleanupDone, nil, true
+				return enterpriseHookUserCleanupDone, nil
 			}
-			return enterpriseHookUserCleanupDone, nil, false
+			return enterpriseHookUserCleanupDone, nil
 		default:
-			return enterpriseHookUserCleanupFailed, errors.New(boundedString(result.Error, 256)), false
+			return enterpriseHookUserCleanupFailed, errors.New(boundedString(result.Error, 256))
 		}
 	}
 	if response.Error != "" {
-		return enterpriseHookUserCleanupFailed, errors.New(boundedString(response.Error, 256)), false
+		return enterpriseHookUserCleanupFailed, errors.New(boundedString(response.Error, 256))
 	}
-	return enterpriseHookUserCleanupFailed, errEnterpriseHookWorkerNoResult, false
+	return enterpriseHookUserCleanupFailed, errEnterpriseHookWorkerNoResult
 }
 
 func enterpriseHookRehomedCleanupError(changed *enterpriseHookTargetHomeChangedError, reason string) error {

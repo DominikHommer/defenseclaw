@@ -104,7 +104,7 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			if err != nil || len(remaining) != 0 {
 				t.Fatalf("cleanup ledger after reconcile = %+v, %v", remaining, err)
 			}
-			if strings.Count(guardianLog.String(), wantAudit) != 1 || strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
+			if strings.Count(guardianLog.String(), wantAudit) != 1 || strings.Count(guardianLog.String(), "no longer enrolled; per-user cleanup done") != 1 {
 				t.Fatalf("guardian completion audit = %q", guardianLog.String())
 			}
 			guardianLog.Reset()
