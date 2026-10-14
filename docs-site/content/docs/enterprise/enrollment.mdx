@@ -569,11 +569,17 @@ A home that is not available (not mounted, or not created yet) and a
 removal that fails are recorded in an administrator-owned list and retried.
 `status` and `verify` report each one as the warning
 `guardian_cleanup_pending` and do not fail on it. If a live account is
-re-homed to a trusted directory, the guardian cleans up as that user in the
-current home, logs the old and new homes once, and ends the record. If the
-current home is missing or untrusted, the record stays: fix the account's
-directory home to an existing directory it owns, without symlinks or
-group/other write, or remove the account, then rerun uninstall. A record is
+re-homed to a trusted directory, the guardian cleans the current home as
+that user and, when its recorded home still exists and is trusted, cleans
+that home too. The record ends when the recorded home is definitely gone or
+both cleanups succeed; the guardian logs both homes once. If the recorded
+home may still exist but cannot be trusted, the record stays and the warning
+names it. Uninstall warns and goes on: remove DefenseClaw's entries from
+that agent's config in the recorded home, delete that home if unused, or
+fix its owner or permissions so the guardian can clean it. If the current
+home is missing or untrusted, the record stays: fix the account's directory
+home to an existing directory it owns, without symlinks or group/other
+write, or remove the account, then rerun uninstall. A record is
 dropped without running cleanup when the account no longer exists, its name
 belongs to another uid, or the directory gives it no home and its recorded
 home is definitely gone. A user who is enrolled again keeps the record until
