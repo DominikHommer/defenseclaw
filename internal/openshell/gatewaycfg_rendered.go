@@ -86,12 +86,15 @@ const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from e
 // namespace a managed account's gateway start removed the supervisors of
 // another account's running sandboxes (a per-user gateway the account
 // started before the host was managed) and their workloads ended
-// (GAP-0566). The managed gateways get a namespace of their own:
-// DefaultDockerNamespace stays with the gateways DefenseClaw does not
-// render. Managed gateways share theirs because one runs at a time: the
-// managed port is one, a second account's daemon is refused while another
-// account holds it (accountBusyError), and a gateway's ExecStop stops its
-// sandboxes before it exits.
+// (GAP-0566). The managed gateways get a namespace of their own, and a
+// per-user gateway `defenseclaw sandbox setup` configures gets the
+// account's (AccountDockerNamespace, GAP-0579): DefaultDockerNamespace stays
+// with the gateways DefenseClaw does not configure and those that keep
+// sandboxes in it. Managed gateways share theirs because one runs at a
+// time: a second account's daemon is refused while another account's
+// managed gateway runs, on the managed port or, while that account's
+// gateway_port switch waits, on the old one (accountBusyError), and a
+// gateway's ExecStop stops its sandboxes before it exits.
 const (
 	// DefaultDockerNamespace is OpenShell's own default sandbox_label.
 	DefaultDockerNamespace = "default"
