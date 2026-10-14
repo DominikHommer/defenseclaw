@@ -121,7 +121,7 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o700, owner: service}
 			case rel == guardianStateFile:
 				return stateMode{mode: 0o640, owner: rootService} // the gateway reads it
-			case rel == guardianRepairsFile, rel == guardianRestoresFile:
+			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile:
 				// Root-only guardian records: verify failed on the restore record after
 				// the first restore, and ensure gave it to the service account
 				// (GAP-0499).

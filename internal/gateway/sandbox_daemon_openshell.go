@@ -144,6 +144,9 @@ type accountOpenShell struct {
 	// accountProcs lists the account's processes, a line each: the pid and
 	// the command line.
 	accountProcs func(ctx context.Context) (string, error)
+	// hostProcs lists every account's processes, a line each: the uid, the
+	// pid and the command line.
+	hostProcs func(ctx context.Context) (string, error)
 
 	// installed is the release this process installed or found intact.
 	mu        sync.Mutex
@@ -176,6 +179,9 @@ func newAccountOpenShell(goos string, uid int, home string, logf func(string, ..
 		procArgs:     processArgs,
 		accountProcs: func(ctx context.Context) (string, error) {
 			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-u", strconv.Itoa(uid), "-o", "pid=,args="}, nil)
+		},
+		hostProcs: func(ctx context.Context) (string, error) {
+			return runServiceCommand(ctx, "/bin/ps", []string{"-ww", "-A", "-o", "uid=,pid=,args="}, nil)
 		},
 	}
 }
@@ -437,11 +443,48 @@ func (o *accountOpenShell) Prepare(ctx context.Context, s sandboxrelay.DaemonSet
 			return false, openShellPrerequisiteError("the administrator's OpenShell is not usable: %v", err)
 		}
 	}
-	started, err := o.ensureRunning(ctx, port)
+	started, err := o.ensureRunning(ctx, port, s.Enterprise.GatewayConfigPath)
 	if err != nil {
 		return started, err
 	}
 	return started, o.ensureRegistered(ctx, cli, gatewayRegistrationName(s), port)
+}
+
+// otherAccountManagedGateway reports a managed gateway, the managed unit's
+// command line on the rendered configuration cfg on any port, that another
+// account runs (false when the processes cannot be listed). Every managed
+// docker gateway keeps its sandboxes in one namespace
+// (openshell.ManagedDockerNamespace), and a docker gateway's start
+// force-removes that namespace's supervisors, so one started while another
+// account's runs ends that account's sandboxes. The one managed port keeps
+// them apart while both use it, but an account whose gateway_port switch
+// waits for its sandboxes to stop still runs its gateway on the old port
+// while the new one is free (GAP-0566).
+func (o *accountOpenShell) otherAccountManagedGateway(ctx context.Context, cfg string) bool {
+	if o.hostProcs == nil || cfg == "" {
+		return false
+	}
+	configs := map[string]bool{cfg: true}
+	if o.goos == "linux" {
+		configs[filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile)] = true
+	}
+	out, err := o.hostProcs(ctx)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		words := strings.Fields(line)
+		// uid pid <openshell-gateway> --config <rendered file>: the binary
+		// is the install mode's (the account's own in setup mode), the
+		// configuration the administrator's.
+		if len(words) != 5 || filepath.Base(words[2]) != openshell.GatewayBinary || words[3] != "--config" || !configs[words[4]] {
+			continue
+		}
+		if uid, err := strconv.Atoi(words[0]); err == nil && uid != o.uid {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureInstalled installs the pinned release: once per process unless
@@ -469,12 +512,20 @@ func (o *accountOpenShell) ensureInstalled(ctx context.Context, version string, 
 
 // ensureRunning starts the account's gateway unit unless the gateway port
 // is already this account's, and waits until it is. Another account's
-// listener on the port refuses with the neutral account-busy text.
-func (o *accountOpenShell) ensureRunning(ctx context.Context, port int) (bool, error) {
+// listener on the port, or another account's managed gateway on the
+// rendered configuration cfg on any port, refuses with the neutral
+// account-busy text.
+func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg string) (bool, error) {
 	if holder, held := o.portHolder(port); held {
 		if holder == o.uid {
 			return false, nil
 		}
+		return false, accountBusyError()
+	}
+	if o.otherAccountManagedGateway(ctx, cfg) {
+		// Neutral, like the refusal: whose gateway it is stays out of this
+		// account's log.
+		o.logf("another account's managed OpenShell gateway runs: yours starts once it has stopped")
 		return false, accountBusyError()
 	}
 	if err := o.startUnit(ctx); err != nil {

@@ -592,6 +592,13 @@ type openshellApplied struct {
 	DaemonInputs string `json:"daemon_inputs,omitempty"`
 	// E2fsprogsDir is enterprise.openshell.e2fsprogs_dir.
 	E2fsprogsDir string `json:"e2fsprogs_dir,omitempty"`
+	// DockerNamespace is the OpenShell sandbox namespace (sandbox_label) of
+	// the docker gateways the render starts: the docker driver and the
+	// docker fallback of the MicroVM driver; "" when the render has none. A
+	// record written before the render named one (1.0.1, the 1.0.2 release
+	// candidates) has none either: its docker gateways ran in OpenShell's
+	// default namespace (dockerNamespace).
+	DockerNamespace string `json:"docker_namespace,omitempty"`
 }
 
 func appliedOf(op *openshellPlan) *openshellApplied {
@@ -599,8 +606,34 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 		return nil
 	}
 	s := op.settings
-	return &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
+	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
 		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir}
+	if a.usesDocker() {
+		a.DockerNamespace = openshell.ManagedDockerNamespace
+	}
+	return a
+}
+
+// usesDocker reports whether the applied setup starts docker gateways: the
+// docker driver, or the MicroVM driver with the docker fallback.
+func (a *openshellApplied) usesDocker() bool {
+	return a.Driver == config.EnterpriseOpenShellDriverDocker || a.Fallback == config.EnterpriseOpenShellFallbackDocker
+}
+
+// dockerNamespace is the sandbox namespace the applied setup's docker
+// gateways keep their containers and volumes in, "" when it starts none.
+// OpenShell's docker gateway lists only the sandboxes of its own namespace,
+// so a change strands the sandboxes made under the previous one as a driver
+// switch does (GAP-0587): 1.0.1 rendered no sandbox_label, so the sandboxes
+// its managed gateways kept are in OpenShell's default namespace.
+func (a *openshellApplied) dockerNamespace() string {
+	switch {
+	case a == nil || !a.usesDocker():
+		return ""
+	case a.DockerNamespace != "":
+		return a.DockerNamespace
+	}
+	return openshell.DefaultDockerNamespace
 }
 
 // switchKey changes when the account's OpenShell has to be replaced rather
@@ -621,6 +654,11 @@ func (a *openshellApplied) switchKey() string {
 		// A changed fallback changes which rendered file a user's
 		// gateway starts with.
 		key += "|" + a.Fallback
+	}
+	if ns := a.dockerNamespace(); ns != "" {
+		// A changed docker sandbox namespace hides the sandboxes made under
+		// the previous one from the account's gateway (GAP-0587).
+		key += "|namespace=" + ns
 	}
 	return key
 }
