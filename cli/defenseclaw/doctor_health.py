@@ -566,6 +566,30 @@ def assess_connector_health(
     return tuple(findings)
 
 
+def connector_agent_missing(data_dir: str, connector: str) -> bool:
+    """Whether ``connector``'s agent is not installed, by the rule of doctor's
+    Connector compatibility row: the cached discovery evidence finds no
+    installation and its executable is not on PATH now either (an agent
+    installed after the last scan is not missing, GAP-0052).
+
+    Doctor fails that row; ``status`` uses the same answer, so a connector
+    whose hooks setup staged for an agent that is not installed is not
+    reported RUNNING or counted active (GAP-0513). Missing, partial or
+    unreadable evidence is no proof, so the answer is then False. Nothing is
+    scanned or run.
+    """
+
+    discovery = read_cached_discovery(data_dir)
+    if discovery is None:
+        return False
+    findings = assess_connector_health((connector,), discovery)
+    if not findings or findings[0].reason_code != "connector-agent-unavailable":
+        return False
+    from defenseclaw.inventory import agent_discovery
+
+    return not agent_discovery.binary_on_path(connector)
+
+
 def build_health_report(
     active_connectors: Iterable[str],
     discovery: Any | None,
