@@ -857,6 +857,42 @@ func (c *Config) validateSandboxProfiles() error {
 			}
 		}
 	}
+	return c.validateLockedSandboxPack(names)
+}
+
+// validateLockedSandboxPack judges, on a managed standalone host, a locked
+// openshell.pack the way each run will. With openshell.admin.locked listing
+// pack, SandboxManagedFloor makes openshell.pack the required pack of every
+// floor that names none (openshell.admin's, and a profile's whose sandbox
+// section names none), and each policy, explain and run then judges it like
+// a profile's own pack: tighten-only, and copy-only on a managed computer.
+// A pack that inherits workspace.mode: mount from balanced passed validate,
+// ensure and verify, and then every user's sandbox policy could not load
+// (GAP-0510). profiles are the names of the profiles with a sandbox section.
+func (c *Config) validateLockedSandboxPack(profiles []string) error {
+	pack := strings.TrimSpace(c.OpenShell.Pack)
+	if pack == "" || !c.StandaloneEnterprise() || SandboxProfilePackCheck == nil {
+		return nil
+	}
+	takes := func(f OpenShellAdminConfig) bool {
+		return f.IsLocked("pack") && strings.TrimSpace(f.RequiredPack) == ""
+	}
+	locked := takes(c.OpenShell.Admin)
+	for _, name := range profiles {
+		if locked {
+			break
+		}
+		if floor, err := TightenOpenShellAdmin(c.OpenShell.Admin, c.Guardrail.Profiles[name].Sandbox); err == nil && takes(floor) {
+			locked = true
+		}
+	}
+	if !locked {
+		return nil
+	}
+	if err := SandboxProfilePackCheck(c, "", pack, ""); err != nil {
+		return settingErrorAt("openshell.pack", fmt.Errorf(
+			"openshell.pack %q: openshell.admin.locked lists pack, so it is the required pack of every sandbox on this computer: %w", pack, err))
+	}
 	return nil
 }
 
