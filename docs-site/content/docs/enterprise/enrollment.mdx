@@ -580,7 +580,9 @@ recorded home is gone or its worker completed. An absent report, a path outside 
 or entries left in the current home keep the record. The warning names the
 path: remove DefenseClaw's entries from that agent's config in the current
 home, delete a stale copied receipt in its `.defenseclaw/connector_backups/`
-folder if it keeps naming the other home, and rerun. An operator-edited
+folder if it keeps naming the other home, and rerun. If a backup receipt is
+unreadable or invalid, removal still runs, but a re-homed record stays until
+the named receipt is corrected or removed. An operator-edited
 plugin left in the recorded home is left for the operator and does not alone
 keep the record after the current home is verified clean. The guardian logs
 both homes once when cleanup completes. If the recorded
