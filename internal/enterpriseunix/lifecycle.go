@@ -3354,7 +3354,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 			r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed: %s", connector, user, reason))
 			continue
 		}
-		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is available, rerun %s", connector, user, rerun))
+		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
 	}
 	for _, entry := range report.StateFailed {
 		user, reason, _ := strings.Cut(entry, ": ")
