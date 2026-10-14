@@ -389,6 +389,16 @@ users you expect are enrolled, so check `enrollment` too. For per-user connector
 user shows up after the next enumerator cycle (up to five minutes), then the
 guardian reconciles.
 
+`status` and `verify` warn with `agent_settings_not_restored` if the guardian
+puts back a missing Hermes `config.yaml` or Devin `config.json` from the last
+known good copy or the pristine backup, or recreates it with DefenseClaw's
+hooks only when no copy is available. The hooks are in place, but settings
+changed after the copy may be missing; with no copy, the user may need to
+re-enter their settings. This warning alone does not make
+`security_complete` false or `verify` fail, change the exit code, or fail MDM
+detection. Ask the user to review their settings and restore missing values
+from a backup; see [Warnings](/docs/enterprise/troubleshooting#warnings).
+
 The guardian is always running, so `systemctl start` on it does nothing. To
 reconcile at once, run:
 
