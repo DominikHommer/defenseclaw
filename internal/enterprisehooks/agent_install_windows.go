@@ -105,13 +105,11 @@ func windowsInstallLocalDrivePath(path string) (string, error) {
 	return abs, nil
 }
 
-// windowsRejectInstallReparseChain refuses a reparse point anywhere on path
-// below a local drive letter. Every folder is checked from the volume root
-// down before the one below it is touched, so a link a user made in the
-// middle of the chain (a directory symbolic link that names a UNC share) is
-// refused before anything is opened through it; winpath.RejectReparseChain
-// checks the leaf first, which already resolves the whole chain as
-// LocalSystem. A missing element ends the walk: nothing exists below it.
+// windowsRejectInstallReparseChain accepts only local drive-letter paths,
+// refusing UNC and device paths. It checks each element from the volume root
+// down and refuses a reparse point before reading anything below it. The
+// shared winpath.RejectReparseChain also walks root first, but permits paths
+// outside local drive letters. A missing element ends either walk.
 func windowsRejectInstallReparseChain(path string) error {
 	abs, err := windowsInstallLocalDrivePath(path)
 	if err != nil {
