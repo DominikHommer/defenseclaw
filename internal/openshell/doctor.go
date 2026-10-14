@@ -398,7 +398,7 @@ type Doctor struct {
 	Managed bool
 	// AdminE2fsprogsDir is the managed gateway's e2fsprogs_dir. Known is
 	// false when its settings call did not answer; an empty known value
-	// means the account build or a trusted Homebrew keg is used.
+	// means only the account build is used, never a Homebrew keg (GAP-0004).
 	AdminE2fsprogsDir   string
 	AdminE2fsprogsKnown bool
 	// TrustedE2fsprogsDir is the exec shim's trusted-directory check.
