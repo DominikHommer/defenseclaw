@@ -63,69 +63,45 @@ func RegularFile(path string) bool {
 
 // ManagedE2fsprogsToolDir chooses the tools put first on a managed Mac
 // gateway's PATH. An administrator's configured directory is authoritative:
-// a broken one never falls back to a user's build or a Homebrew keg.
+// a broken one never falls back to a user's build.
 // trustedAdmin checks the chosen directory and both tool files by the same
 // managed rules used by the exec shim. A tool the account owns or a symlink
 // to one must not become a command on an administrator's PATH.
-// Without an administrator value, the account's own build takes precedence
-// over a trusted Homebrew keg. refused records the first keg the account
-// cannot safely use.
-func ManagedE2fsprogsToolDir(adminDir, home string, kegs []string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem, refused string) {
+// Without an administrator value, only the account's own build is used,
+// never a Homebrew keg (GAP-0004).
+func ManagedE2fsprogsToolDir(adminDir, home string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem string) {
 	if adminDir != "" {
 		if problem := AdminE2fsprogsCandidateAccessProblem(adminDir, os.Stat); problem != "" {
-			return "", problem, ""
+			return "", problem
 		}
 		tools := AdminE2fsprogsToolDir(adminDir, RegularFile)
 		if tools == "" {
-			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir), ""
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir)
 		}
 		if trustedAdmin == nil {
-			return "", fmt.Sprintf("the administrator's e2fsprogs %s cannot be trusted without a directory check", tools), ""
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s cannot be trusted without a directory check", tools)
 		}
 		if err := trustedAdmin(tools, false); err != nil {
-			return "", fmt.Sprintf("the administrator's e2fsprogs %s is not trusted: %v", tools, err), ""
+			return "", fmt.Sprintf("the administrator's e2fsprogs %s is not trusted: %v", tools, err)
 		}
 		for _, name := range AdminE2fsprogsTools {
 			path := filepath.Join(tools, name)
 			if err := trustedAdmin(path, true); err != nil {
-				return "", fmt.Sprintf("the administrator's e2fsprogs tool %s is not trusted: %v", path, err), ""
+				return "", fmt.Sprintf("the administrator's e2fsprogs tool %s is not trusted: %v", path, err)
 			}
 		}
 		if problem := E2fsprogsAccessProblem(tools, os.Stat); problem != "" {
-			return "", problem, ""
+			return "", problem
 		}
-		return tools, "", ""
+		return tools, ""
 	}
 	if filepath.IsAbs(home) {
 		own := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
 		if ownedE2fsprogsTools(own, uid) {
-			return own, "", ""
+			return own, ""
 		}
 	}
-	if kegs == nil {
-		kegs = e2fsprogsDirs
-	}
-	for _, keg := range kegs {
-		if !hasE2fsprogs(keg) {
-			continue
-		}
-		mke2fs := filepath.Join(keg, "mke2fs")
-		if !executable(mke2fs) {
-			mke2fs = filepath.Join(keg, "mkfs.ext4")
-		}
-		for _, tool := range []string{mke2fs, filepath.Join(keg, "debugfs")} {
-			if err := ownedByRootOrUser(tool, uid); err != nil {
-				if refused == "" {
-					refused = fmt.Sprintf("%s (%v)", keg, err)
-				}
-				break
-			}
-			if tool == filepath.Join(keg, "debugfs") {
-				return keg, "", refused
-			}
-		}
-	}
-	return "", "MicroVM sandboxes need mke2fs and debugfs in your own ~/.local/opt/e2fsprogs/sbin or a trusted Homebrew keg", refused
+	return "", "MicroVM sandboxes need mke2fs and debugfs in the administrator's enterprise.openshell.e2fsprogs_dir or your own ~/.local/opt/e2fsprogs/sbin; a Homebrew keg is not used on a managed computer"
 }
 
 // AdminE2fsprogsCandidateAccessProblem refuses an inaccessible candidate

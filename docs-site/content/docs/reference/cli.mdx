@@ -1280,6 +1280,16 @@ moved keys and the upgrade steps.
 | `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. First use `defenseclaw sandbox pull NAME --branch` for copy mode or `defenseclaw sandbox review NAME` for mount mode, then `defenseclaw sandbox stop NAME`. `reset` takes this option too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
+When the sandbox teardown would run, `uninstall` and `reset` also stop before
+any change if DefenseClaw cannot read the sandbox list: the gateway or its
+sandbox daemon may be stopped, the list may time out, or its output may not
+be readable. The message says why. Run `defenseclaw sandbox list` to check;
+start the gateway first if it says to. Pull back work or stop the sandboxes
+you want to keep, then retry, or use `--stop-sandboxes` to let teardown stop
+and delete any that still run. The `error`, `stopping`, `creating` and
+`deleting` phases count as running. Only `stopped`, `completed`, `deleted`
+and `missing` do not.
+
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that

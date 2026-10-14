@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -114,7 +115,19 @@ type InstallResult struct {
 	AgentVersionStatus         string `json:"agent_version_status,omitempty"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at,omitempty"`
 	HookContractEntryUpdatedAt string `json:"hook_contract_entry_updated_at,omitempty"`
+	// AgentConfig is what the account should know about its agent config
+	// that is no protection failure (connector.AgentConfigStatus: a Hermes
+	// or Devin config put back from a copy, or recreated with DefenseClaw's
+	// hooks only, GAP-0564). It is not serialized: the guardian state keeps
+	// the schema a prior binary reads strictly. The worker's answer carries
+	// it next to the result, and the guardian records it in its own file.
+	AgentConfig string `json:"-"`
 }
+
+// agentConfigReadOnVerify reports a guardian that verifies the accounts'
+// agent configs without writing in their data folders: the Windows
+// standalone one (agent_config_verify_windows.go).
+var agentConfigReadOnVerify = func() bool { return false }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
 // policy registration. Per-user runtime files are intentionally retained as
@@ -315,6 +328,19 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				HookContractID:  lock.ContractID,
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), lock.RawAgentVersion),
+			}
+			switch {
+			case standalonePerUserRepair(uid):
+				// The agent config that verified (Hermes, Devin) is the
+				// last known good copy; one recreated without the
+				// account's settings stays reported until they are back
+				// (GAP-0564).
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, true)
+			case agentConfigReadOnVerify():
+				// The Windows standalone guardian verifies for the account:
+				// it reads what to report and writes nothing (the copy is
+				// kept by its setup, GAP-0588).
+				result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, time.Time{}, false)
 			}
 			return nil
 		})
@@ -535,6 +561,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// (GAP-0509).
 			beforeSetup = snapshotDataDir(dataDir)
 			beforeHookConfigs = snapshotHookConfigs(append(append([]string{}, paths...), pluginArtifacts...))
+			setupStarted := time.Now()
 			// The folders Setup creates below the home (~/.codex in an
 			// account that never ran Codex, say) are recorded, so the purge
 			// and a per-user uninstall --all remove them once empty.
@@ -622,6 +649,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 				AgentVersionStatus: agentVersionStatus(conn.Name(), setupOpts.AgentVersion),
 			}
+			// An agent config this setup put back or recreated (GAP-0564).
+			result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, setupStarted, false)
 			return nil
 		})
 	})

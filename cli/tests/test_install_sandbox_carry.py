@@ -216,6 +216,44 @@ def test_a_rollback_to_a_release_that_cannot_take_over_says_the_hooks_stay_block
     ), out
 
 
+@pytest.mark.parametrize(
+    ("listing", "opening"),
+    [
+        ('{"sandboxes": [{"name": "one", "phase": "ready"}]}', "WARN Sandbox one is running:"),
+        ('{"sandboxes": [{"name": "one", "phase": "ready"}, {"name": "two", "phase": "ready"}]}',
+         "WARN 2 sandboxes are running (one, two):"),
+    ],
+)
+def test_a_rollback_to_a_0x_release_names_the_installer_command_not_defenseclaw_rollback(
+    tmp_path: Path, listing: str, opening: str
+) -> None:
+    bin_dir, venv = tmp_path / "bin", tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        f"#!/bin/sh\n[ \"$*\" = \"sandbox list --output json\" ] && printf '%s\\n' '{listing}'\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    previous = tmp_path / "previous"
+    script = tmp_path / "warn.sh"
+    script.write_text(
+        f'set -euo pipefail\nBIN_DIR="{bin_dir}"\nVENV="{venv}"\nPREVIOUS="{previous}"\n'
+        'gateway_pid() { printf 42; }\nwarn() { echo "WARN $*"; }\n'
+        + _functions("warn_running_sandboxes") + 'warn_running_sandboxes "0.8.10"\n',
+        encoding="utf-8",
+    )
+
+    proc = _run(script, tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith(opening), proc.stdout
+    assert f"until you run 'bash {previous}/installer/install.sh --rollback' again" in proc.stdout
+    assert "defenseclaw rollback" not in proc.stdout
+
+
 def test_the_rollback_carries_the_setup_after_the_swap_and_before_the_gateway_starts() -> None:
     text = _text()
     rollback = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') : text.index("# ── Stage: nothing live changes")]

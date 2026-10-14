@@ -1342,6 +1342,18 @@ def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -
     required = [harness_command(_text(name)) for name in _list(explain.get("required_for"))]
     if explain.get("allowed") is False:
         pairs.append(("Sandboxes", "your organization doesn't allow sandboxes for you"))
+        if required and explain.get("host_run_gate") == "exempt":
+            pairs.append((
+                "Required",
+                "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
+                f"{_and_list(required)} may run on this computer outside a sandbox, where their calls are still inspected and logged",
+            ))
+    elif required and explain.get("host_run_gate") == "exempt":
+        pairs.append((
+            "Required",
+            "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
+            f"{_and_list(required)} may also run on this computer outside a sandbox, where their calls are still inspected and logged",
+        ))
     elif required:
         required_text = f"{_and_list(required)} run only in a sandbox on this computer"
         if explain.get("when_unavailable") == "alert":

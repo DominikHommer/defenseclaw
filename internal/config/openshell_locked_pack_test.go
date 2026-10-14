@@ -34,11 +34,16 @@ func TestValidateLockedSandboxPack(t *testing.T) {
 		name  string
 		edit  func(*Config)
 		calls string
+		// lock is the lock the refusal names (pass-6 review: a profile's
+		// lock was reported as openshell.admin.locked).
+		lock string
 	}{
-		{name: "openshell.admin locks the pack", edit: func(c *Config) { c.OpenShell.Admin.Locked = []string{"pack"} }, calls: ">wk-locked>"},
+		{name: "openshell.admin locks the pack", edit: func(c *Config) { c.OpenShell.Admin.Locked = []string{"pack"} }, calls: ">wk-locked>",
+			lock: `openshell.pack "wk-locked": openshell.admin.locked lists pack, so it is the required pack of every sandbox`},
 		{name: "a profile locks the pack", edit: func(c *Config) {
 			c.Guardrail.Profiles["engineering"].Sandbox.Locked = []string{"pack"}
-		}, calls: ">wk-locked>"},
+		}, calls: ">wk-locked>",
+			lock: `openshell.pack "wk-locked": guardrail.profiles["engineering"].sandbox.locked lists pack, so it is the required pack of that profile's sandboxes`},
 		{name: "not locked", edit: func(*Config) {}},
 		{name: "the floor names its own pack", edit: func(c *Config) {
 			c.OpenShell.Admin.Locked, c.OpenShell.Admin.RequiredPack = []string{"pack"}, "strict"
@@ -73,7 +78,7 @@ func TestValidateLockedSandboxPack(t *testing.T) {
 				}
 				return
 			}
-			for _, want := range []string{`openshell.pack "wk-locked": openshell.admin.locked lists pack`, "in workspace.mode", "set workspace.mode: copy in the pack"} {
+			for _, want := range []string{tc.lock, "in workspace.mode", "set workspace.mode: copy in the pack"} {
 				if err == nil || !strings.Contains(err.Error(), want) {
 					t.Fatalf("ValidateGuardrailProfiles() = %v, want %q", err, want)
 				}

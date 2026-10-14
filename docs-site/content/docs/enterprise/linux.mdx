@@ -540,6 +540,12 @@ sandboxes. `ensure`, `status` and `verify` count the enrolled accounts in the
 group (`docker_group_members`); see
 [Docker group members](/docs/enterprise/sandboxes#what-users-see).
 
+A member of the `docker` group can also run an agent in a plain container
+outside DefenseClaw, bypassing `sandbox.required_for`. Administrators who
+need `required_for` to hold against deliberate users must not give them
+Docker access. A root-owned image and lifecycle service that closes this
+limit is planned for a later release.
+
 The full guide covers the config keys, the recipes for both install modes, the
 MicroVM checks, requiring sandboxes per group, and what people see:
 [Sandboxes on managed computers](/docs/enterprise/sandboxes).

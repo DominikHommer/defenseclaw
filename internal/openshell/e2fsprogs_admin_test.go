@@ -7,6 +7,7 @@ package openshell
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,33 +45,39 @@ func TestAdminE2fsprogsToolDir(t *testing.T) {
 }
 
 func TestManagedE2fsprogsToolDirUsesTheGatewayOrder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed MicroVM e2fsprogs resolution is macOS and Linux only; os.Getuid is -1 on Windows")
+	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	own := filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin")
-	keg := filepath.Join(root, "keg", "sbin")
-	for _, dir := range []string{own, keg} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(own, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range AdminE2fsprogsTools {
+		if err := os.WriteFile(filepath.Join(own, tool), []byte("tool"), 0o755); err != nil {
 			t.Fatal(err)
-		}
-		for _, tool := range AdminE2fsprogsTools {
-			if err := os.WriteFile(filepath.Join(dir, tool), []byte("tool"), 0o755); err != nil {
-				t.Fatal(err)
-			}
 		}
 	}
 	trust := func(string, bool) error { return nil }
 	uid := os.Getuid()
-	if dir, problem, _ := ManagedE2fsprogsToolDir("", home, []string{keg}, uid, trust); dir != own || problem != "" {
+	if dir, problem := ManagedE2fsprogsToolDir("", home, uid, trust); dir != own || problem != "" {
 		t.Fatalf("account build = %q, %q", dir, problem)
 	}
 	if err := os.Remove(filepath.Join(own, "debugfs")); err != nil {
 		t.Fatal(err)
 	}
-	if dir, problem, _ := ManagedE2fsprogsToolDir("", home, []string{keg}, uid, trust); dir != keg || problem != "" {
-		t.Fatalf("trusted keg = %q, %q", dir, problem)
+	if dir, problem := ManagedE2fsprogsToolDir("", home, uid, trust); dir != "" ||
+		!strings.Contains(problem, "enterprise.openshell.e2fsprogs_dir") ||
+		!strings.Contains(problem, "~/.local/opt/e2fsprogs/sbin") ||
+		!strings.Contains(problem, "Homebrew keg is not used") {
+		t.Fatalf("no account build = %q, %q", dir, problem)
+	}
+	if err := os.WriteFile(filepath.Join(own, "debugfs"), []byte("tool"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	admin := filepath.Join(root, "bad-admin")
-	if dir, problem, _ := ManagedE2fsprogsToolDir(admin, home, []string{keg}, uid, trust); dir != "" || !strings.Contains(problem, admin) {
-		t.Fatalf("broken configured directory fell back to keg: %q, %q", dir, problem)
+	if dir, problem := ManagedE2fsprogsToolDir(admin, home, uid, trust); dir != "" || !strings.Contains(problem, admin) {
+		t.Fatalf("broken configured directory fell back to the account build: %q, %q", dir, problem)
 	}
 }

@@ -401,6 +401,14 @@ review mount-mode changes, then stop the sandbox and retry. To stop and delete
 running sandboxes with the teardown, pass `--stop-sandboxes`; copy-mode work
 that has not been pulled back is lost.
 
+If the sandbox list cannot be read, `uninstall` and `reset` also stop before
+any change because teardown could delete a sandbox that still runs. Check
+with `defenseclaw sandbox list` (start the gateway first if prompted), pull
+back work or stop the sandboxes you want to keep, then retry; or use
+`--stop-sandboxes` to let teardown stop and delete them. The `error`,
+`stopping`, `creating` and `deleting` phases count as running; only
+`stopped`, `completed`, `deleted` and `missing` do not.
+
 Close your agent sessions first. One that stays open goes on without
 DefenseClaw: its hooks fail and nothing checks its tool calls. The plan and
 the end of the uninstall both say so.

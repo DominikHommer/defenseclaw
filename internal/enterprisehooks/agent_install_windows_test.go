@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -140,7 +141,7 @@ func TestStandaloneWindowsCodexDiscoveryRefusesAForeignOrIncompleteSelection(t *
 		"foreign":     {target: foreign, reason: "outside its releases folder"},
 		"misnamed":    {target: misnamed, reason: "not named <version>-<target>"},
 		"no codex":    {target: incomplete, reason: "holds no codex.exe"},
-		"redirected":  {target: redirected, reason: "holds no codex.exe"},
+		"redirected":  {target: redirected, reason: "refused reparse chain"},
 		"parent hops": {target: filepath.Join(releases, "..", "..", "..", "..", "x", testCodexStandaloneRelease), reason: "outside its releases folder"},
 		// A directory symbolic link may name a share; it is refused before
 		// anything opens it.
@@ -270,5 +271,234 @@ func TestEnumerateWindowsStandaloneReportsAnInstalledCodexItCannotRead(t *testin
 		if !strings.Contains(message, want) {
 			t.Fatalf("message %q does not contain %q", message, want)
 		}
+	}
+}
+
+// Pass-6 review: the reparse check of an install path runs from the volume
+// root down and stops at the first reparse point, so nothing below a link a
+// user made is touched through it; a path that is not on a local drive
+// letter is refused before any check touches it.
+func TestWindowsRejectInstallReparseChainChecksFromTheRootDown(t *testing.T) {
+	previous := windowsInstallPathAttributes
+	t.Cleanup(func() { windowsInstallPathAttributes = previous })
+	var touched []string
+	stub := func(reparse, missing string) {
+		touched = nil
+		windowsInstallPathAttributes = func(path string) (uint32, error) {
+			touched = append(touched, path)
+			switch {
+			case strings.EqualFold(path, reparse):
+				return windows.FILE_ATTRIBUTE_DIRECTORY | windows.FILE_ATTRIBUTE_REPARSE_POINT, nil
+			case strings.EqualFold(path, missing):
+				return 0, windows.ERROR_FILE_NOT_FOUND
+			}
+			return windows.FILE_ATTRIBUTE_DIRECTORY, nil
+		}
+	}
+	leaf := `C:\Users\alice\.codex\packages\standalone\releases`
+	stub(`C:\Users\alice\.codex`, "")
+	if err := windowsRejectInstallReparseChain(leaf); err == nil || !strings.Contains(err.Error(), `C:\Users\alice\.codex`) {
+		t.Fatalf("err = %v, want the user's link refused", err)
+	}
+	if want := []string{`C:\`, `C:\Users`, `C:\Users\alice`, `C:\Users\alice\.codex`}; strings.Join(touched, "|") != strings.Join(want, "|") {
+		t.Fatalf("touched %q, want %q: nothing below the link may be checked through it", touched, want)
+	}
+
+	stub("", `C:\Users\alice\.codex`)
+	if err := windowsRejectInstallReparseChain(leaf); err != nil || len(touched) != 4 {
+		t.Fatalf("missing element: err %v, touched %q", err, touched)
+	}
+
+	stub("", "")
+	if err := windowsRejectInstallReparseChain(leaf); err != nil || len(touched) != 7 {
+		t.Fatalf("plain chain: err %v, touched %q", err, touched)
+	}
+	stub("", "")
+	if err := windowsRejectInstallReparseChain(`\\?\` + leaf + `\`); err != nil || len(touched) != 7 || touched[0] != `C:\` {
+		t.Fatalf("extended drive path: err %v, touched %q, want the same root-first chain", err, touched)
+	}
+	windowsInstallPathAttributes = func(path string) (uint32, error) {
+		touched = append(touched, path)
+		if strings.EqualFold(path, `C:\Users`) {
+			return 0, windows.ERROR_ACCESS_DENIED
+		}
+		return windows.FILE_ATTRIBUTE_DIRECTORY, nil
+	}
+	touched = nil
+	if err := windowsRejectInstallReparseChain(leaf); !errors.Is(err, windows.ERROR_ACCESS_DENIED) || len(touched) != 2 {
+		t.Fatalf("access denied: err %v, touched %q, want refusal before descendants", err, touched)
+	}
+
+	for _, path := range []string{`\\127.0.0.1\c$\Users\alice\.codex`, `\\?\UNC\127.0.0.1\c$\x`} {
+		stub("", "")
+		if err := windowsRejectInstallReparseChain(path); err == nil || len(touched) != 0 {
+			t.Fatalf("%s: err %v, touched %q, want a refusal before any check", path, err, touched)
+		}
+	}
+}
+
+// Pass-6 review: the user-writable WinGet Packages folder is listed only up
+// to a bound of entries and time, and an account whose folder was not fully
+// listed is reported as not fully scanned instead of as having no install.
+func TestStandaloneWindowsInstalledAgentBoundsTheWinGetPackagesListing(t *testing.T) {
+	home := t.TempDir()
+	packages := filepath.Join(home, "AppData", "Local", "Microsoft", "WinGet", "Packages")
+	if err := os.MkdirAll(packages, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 600; i++ {
+		if err := os.WriteFile(filepath.Join(packages, fmt.Sprintf("AAA.Filler_%04d", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	match := filepath.Join(packages, "OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe")
+	if err := os.MkdirAll(match, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previousMax, previousBudget := windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget
+	t.Cleanup(func() { windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget = previousMax, previousBudget })
+
+	if installed, fix := windowsStandaloneInstalledAgent(home, "codex"); !strings.EqualFold(installed, match) || !strings.Contains(fix, "WinGet version") {
+		t.Fatalf("within the bound: %q %q, want %q", installed, fix, match)
+	}
+	if installed, fix := windowsStandaloneInstalledAgent(home, "copilot"); installed != "" || fix != "" {
+		t.Fatalf("fully listed, no copilot package: %q %q, want none", installed, fix)
+	}
+
+	for name, bound := range map[string]func(){
+		"entries": func() { windowsWinGetPackagesMaxEntries = 300 },
+		"time":    func() { windowsWinGetPackagesScanBudget = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget = previousMax, previousBudget
+			bound()
+			installed, fix := windowsStandaloneInstalledAgent(home, "codex")
+			if installed != "" || !strings.Contains(fix, "not fully scanned") || !strings.Contains(fix, packages) {
+				t.Fatalf("over the bound: %q %q, want the account reported as not fully scanned", installed, fix)
+			}
+		})
+	}
+
+	// The enumerator reports such an account as unprotected.
+	windowsWinGetPackagesMaxEntries, windowsWinGetPackagesScanBudget = 300, previousBudget
+	stubMachineWinGet(t, nil)
+	stubUserWinGet(t, nil)
+	stubCodexMachinePolicyPublished(t, true)
+	injectWindowsProfileList(t, map[string]string{testEntraUserSID: home})
+	var reported []UnprotectedAgent
+	if _, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	}); err != nil {
+		t.Fatalf("EnumerateWindows: %v", err)
+	}
+	if len(reported) != 1 || reported[0].Connector != "codex" || !strings.Contains(reported[0].Message(), "not fully scanned") {
+		t.Fatalf("unprotected = %+v, want the account reported as not fully scanned", reported)
+	}
+	reported = nil
+	(&windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) {
+		reported = append(reported, agent)
+	}}).pending(&ManifestTarget{SID: testEntraUserSID, UserHome: home, Connector: "codex"}, "directory lookup is pending")
+	if len(reported) != 1 || !strings.Contains(reported[0].Message(), "not fully scanned") {
+		t.Fatalf("pending row = %+v, want the incomplete scan named", reported)
+	}
+}
+
+func TestWindowsWinGetPackageFolderBoundsOneStalledRead(t *testing.T) {
+	packages := t.TempDir()
+	previousRead, previousBudget := windowsWinGetReadPackageNames, windowsWinGetPackagesScanBudget
+	t.Cleanup(func() {
+		windowsWinGetReadPackageNames, windowsWinGetPackagesScanBudget = previousRead, previousBudget
+	})
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	windowsWinGetReadPackageNames = func(*os.File, int) ([]string, error) {
+		close(entered)
+		<-release
+		defer close(finished)
+		return []string{"OpenAI.Codex_Microsoft.Winget.Source"}, nil
+	}
+	windowsWinGetPackagesScanBudget = 40 * time.Millisecond
+	type result struct {
+		match    string
+		complete bool
+	}
+	got := make(chan result, 1)
+	go func() {
+		match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"})
+		got <- result{match, complete}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("directory read did not start")
+	}
+	select {
+	case scan := <-got:
+		if scan.match != "" || scan.complete {
+			t.Fatalf("stalled scan = %+v, want an incomplete scan", scan)
+		}
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		t.Fatal("one stalled Packages directory read delayed the next user")
+	}
+	close(release)
+	<-finished
+}
+
+func TestWindowsWinGetPackageFolderCountsEntriesBeforeMatching(t *testing.T) {
+	packages := t.TempDir()
+	if match, complete := findWindowsWinGetPackageFolder(filepath.Join(packages, "absent"), []string{"OpenAI.Codex"}); match != "" || !complete {
+		t.Fatalf("absent Packages directory = %q, complete %t; want the old Glob result of no matches", match, complete)
+	}
+	previousRead, previousMax := windowsWinGetReadPackageNames, windowsWinGetPackagesMaxEntries
+	t.Cleanup(func() {
+		windowsWinGetReadPackageNames, windowsWinGetPackagesMaxEntries = previousRead, previousMax
+	})
+	windowsWinGetReadPackageNames = func(*os.File, int) ([]string, error) {
+		return []string{"filler-one", "filler-two", "OpenAI.Codex_Microsoft.Winget.Source"}, nil
+	}
+	windowsWinGetPackagesMaxEntries = 2
+	if match, complete := findWindowsWinGetPackageFolder(packages, []string{"OpenAI.Codex"}); match != "" || complete {
+		t.Fatalf("entry beyond the cap = %q, complete %t; want an incomplete scan", match, complete)
+	}
+}
+
+// Pass-6 review: a current junction that names the release by its 8.3 short
+// spelling is read by the release folder's long name.
+func TestStandaloneWindowsCodexDiscoveryReadsAShortReleaseName(t *testing.T) {
+	home := t.TempDir()
+	releases := filepath.Join(windowsCodexStandaloneRoot(home), "releases")
+	short := writeCodexStandaloneRelease(t, home, "0160~1.0-X", false)
+	previousJunction, previousLong := windowsReadInstallJunction, windowsInstallLongPathName
+	t.Cleanup(func() { windowsReadInstallJunction, windowsInstallLongPathName = previousJunction, previousLong })
+	windowsReadInstallJunction = func(string) (string, error) { return short, nil }
+	windowsInstallLongPathName = func(path string) (string, error) {
+		if !strings.EqualFold(path, short) {
+			return "", errors.New("unexpected path " + path)
+		}
+		return filepath.Join(releases, testCodexStandaloneRelease), nil
+	}
+	if version, reason := discoverWindowsCodexStandaloneVersion(home); version != "0.160.0" {
+		t.Fatalf("short release name: version %q (%s), want 0.160.0", version, reason)
+	}
+	windowsInstallLongPathName = func(string) (string, error) { return "", errors.New("no long name") }
+	if version, reason := discoverWindowsCodexStandaloneVersion(home); version != "" || !strings.Contains(reason, "not named <version>-<target>") {
+		t.Fatalf("unresolvable short name: version %q reason %q, want a refusal", version, reason)
+	}
+	previousAttributes := windowsInstallPathAttributes
+	t.Cleanup(func() { windowsInstallPathAttributes = previousAttributes })
+	windowsInstallPathAttributes = func(path string) (uint32, error) {
+		if strings.EqualFold(path, short) {
+			return windows.FILE_ATTRIBUTE_DIRECTORY | windows.FILE_ATTRIBUTE_REPARSE_POINT, nil
+		}
+		return previousAttributes(path)
+	}
+	longNameRead := false
+	windowsInstallLongPathName = func(string) (string, error) {
+		longNameRead = true
+		return filepath.Join(releases, testCodexStandaloneRelease), nil
+	}
+	if version, reason := discoverWindowsCodexStandaloneVersion(home); version != "" || !strings.Contains(reason, "refused reparse chain") || longNameRead {
+		t.Fatalf("short release link: version %q reason %q long-name read %t, want refusal before opening the leaf", version, reason, longNameRead)
 	}
 }

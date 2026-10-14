@@ -28,12 +28,12 @@ func TestUninstallWarnsAndGoesOnForAPerUserHomeThatIsNotAvailable(t *testing.T) 
 			h := newTestHost(t, goos)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
-				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["dcad-r102-eng1/hermes"]}`)}, nil
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":0,"pending":["sample-user/hermes"]}`)}, nil
 			}}
 			done := h.run(Options{Action: ActionUninstall})
 			requireOK(t, done)
 			got := messagesOf(done.Warnings, codePerUserHooks)
-			if !strings.Contains(got, "hermes hooks for user dcad-r102-eng1 were not removed because that account's home is not available") {
+			if !strings.Contains(got, "hermes hooks for user sample-user were not removed because that account's home is not available") {
 				t.Fatalf("the uninstall does not warn for the user whose home is not available: %q", got)
 			}
 			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {

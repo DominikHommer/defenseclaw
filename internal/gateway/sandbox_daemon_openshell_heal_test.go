@@ -79,7 +79,7 @@ func TestAccountOpenShellReloadFailureReachesPerson(t *testing.T) {
 		}
 		return "", nil
 	}
-	_, err := r.o.ensureRunning(context.Background(), 17670)
+	_, err := r.o.ensureRunning(context.Background(), 17670, "")
 	if err == nil || !strings.Contains(err.Error(), openShellGatewayRepairCommand) || strings.Contains(err.Error(), "raw launchctl failure") {
 		t.Fatalf("person-facing reload error: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAccountOpenShellFirstUseHealAfterKickstart(t *testing.T) {
 				}
 				return "", nil
 			}
-			_, err := r.o.ensureRunning(context.Background(), 17670)
+			_, err := r.o.ensureRunning(context.Background(), 17670, "")
 			if tc.listenAfterReload {
 				if err != nil {
 					t.Fatalf("first-use recovery: %v", err)
@@ -168,7 +168,7 @@ func TestAccountOpenShellListeningBeforeGraceDoesNotInspectAgain(t *testing.T) {
 		}
 		return "", nil
 	}
-	if _, err := r.o.ensureRunning(context.Background(), 17670); err != nil || prints != 1 {
+	if _, err := r.o.ensureRunning(context.Background(), 17670, ""); err != nil || prints != 1 {
 		t.Fatalf("happy path: err=%v job prints=%d", err, prints)
 	}
 }

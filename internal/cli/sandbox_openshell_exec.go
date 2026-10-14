@@ -156,7 +156,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	configPath := filepath.Join(layout.ConfigDir, "openshell", "gateway.toml")
 	if err := openShellExecTrustedFile(configPath, "OpenShell gateway configuration"); err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway configuration %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, configPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	home, err := openShellExecHome()
 	if err != nil {
@@ -232,7 +232,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	rendered, err := openShellExecRenderedEnv(envPath)
 	if err != nil {
 		return openShellExecPlan{}, fmt.Errorf("%w: the administrator's OpenShell gateway environment %s: %v "+
-			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, sandboxPlatformName(goos))
+			"(an administrator renders it with `enterprise %s ensure`)", errOpenShellPrerequisiteMissing, envPath, err, openshell.EnterprisePlatformName(goos))
 	}
 	env = append(env, rendered...)
 	if !openShellExecUpstreamTelemetry(ctx) {
@@ -323,10 +323,10 @@ var openShellExecDockerContext = func(ctx context.Context) (string, error) {
 // enterprise.openshell.e2fsprogs_dir that holds mke2fs and debugfs, found
 // by the rule ensure checks (openshell.AdminE2fsprogsToolDir, GAP-0506),
 // when it passes the managed trust check. Without an administrator value,
-// the account's own build or a trusted Homebrew keg is used. The managed
-// doctor calls the same selection rule.
+// only the account's own build is used, never a Homebrew keg (GAP-0004).
+// The managed doctor calls the same selection rule.
 func openShellE2fsprogs(adminDir, home string) (string, error) {
-	dir, problem, refused := openshell.ManagedE2fsprogsToolDir(adminDir, home, nil, os.Getuid(),
+	dir, problem := openshell.ManagedE2fsprogsToolDir(adminDir, home, os.Getuid(),
 		func(path string, file bool) error {
 			if file {
 				return openShellExecTrustedFile(path, "e2fsprogs tool")
@@ -334,9 +334,6 @@ func openShellE2fsprogs(adminDir, home string) (string, error) {
 			return openShellExecTrustedDir(path, "e2fsprogs")
 		})
 	if dir == "" {
-		if refused != "" {
-			problem += "; refused " + refused
-		}
 		return "", fmt.Errorf("%w: %s (an administrator checks it with `enterprise macos verify`)", errOpenShellPrerequisiteMissing, problem)
 	}
 	return dir, nil
@@ -436,12 +433,4 @@ func ownFileOnly(path string) error {
 		return fmt.Errorf("%s is not a file of your own that only you can change", path)
 	}
 	return nil
-}
-
-// sandboxPlatformName is the `enterprise` subcommand of goos.
-func sandboxPlatformName(goos string) string {
-	if goos == "darwin" {
-		return "macos"
-	}
-	return goos
 }

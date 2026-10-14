@@ -2001,6 +2001,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	pending := 0
 	repairs := 0
 	var restored []enterpriseHookGuardianRestore
+	var notices []enterpriseHookGuardianNotice
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
@@ -2114,6 +2115,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
 					row.Result = &result
+					if result.AgentConfig != "" {
+						// A Hermes or Devin config put back or recreated
+						// (GAP-0588).
+						notices = append(notices, enterpriseHookGuardianNotice{User: firstNonEmptyString(row.User, row.SID), Connector: row.Connector, AgentConfig: result.AgentConfig})
+					}
 					reconcileEnterpriseForeignHooks(opts)
 				}
 			}
@@ -2140,6 +2146,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
 	recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
+	if runtime.GOOS == "windows" && enterpriseHookGuardianRestoresEnabled() {
+		// The standalone Windows guardian; Linux and macOS record theirs
+		// in their own reconcile, and Secure Client records none.
+		writeEnterpriseHookGuardianNotices(os.Stderr, cfg.DataDir, notices)
+	}
 
 	var enrollmentErr error
 	if failures == 0 {

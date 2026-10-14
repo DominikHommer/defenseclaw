@@ -1898,6 +1898,7 @@ func finishWindowsEnterpriseStandalone(
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
 	applyWindowsEnterpriseAgentSessions(result, opts)
+	applyWindowsEnterpriseAgentSettings(result)
 	if opts.localEnforcementEntriesIgnored > 0 {
 		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
 			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",

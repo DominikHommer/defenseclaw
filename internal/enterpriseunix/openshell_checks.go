@@ -535,7 +535,7 @@ type E2fsprogsCheckResult struct {
 // CheckE2fsprogsDir is checkE2fsprogs's macOS directory decision.
 func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
 	if dir == "" {
-		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build or a trusted Homebrew keg",
+		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build",
 			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to its install prefix or the folder that holds both mke2fs and debugfs"}
 	}
 	trust := e.Trust

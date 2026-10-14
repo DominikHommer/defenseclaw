@@ -663,7 +663,7 @@ func (a *App) wrapperBypassHint(ctx context.Context, commands []string, managed 
 	var open []string
 	for _, cmd := range commands {
 		spec, err := ResolveHarness(cmd)
-		if err != nil || slices.ContainsFunc(ex.Managed.RequiredFor, func(c string) bool { return config.NormalizeConnectorName(c) == spec.Name }) {
+		if err != nil || ex.Managed.HostRunRefused(spec.Name) {
 			continue
 		}
 		open = append(open, cmd)

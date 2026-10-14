@@ -89,6 +89,9 @@ func managedPolicyLine(m *sandboxapi.ManagedStatus) string {
 	if !strings.HasSuffix(text, ".") {
 		text += "."
 	}
+	if m.HostRunGate == "exempt" {
+		text += " Your account is exempt from enrollment; required_for does not apply and a host run is allowed."
+	}
 	return text + " Details: defenseclaw sandbox policy explain"
 }
 
@@ -128,7 +131,7 @@ func managedStatusOfExplain(m *sandboxapi.ManagedExplain) *sandboxapi.ManagedSta
 	if m == nil {
 		return nil
 	}
-	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, Provisional: m.Provisional,
+	return &sandboxapi.ManagedStatus{Profile: m.Profile, Description: m.Description, HostRunGate: m.HostRunGate, Provisional: m.Provisional,
 		EffectiveDigest: m.PolicyDigest, UpdatedAt: m.UpdatedAt, RequestAccess: m.RequestAccess,
 		Driver: m.Driver, DriverReason: m.DriverReason, DriverFallback: m.DriverFallback}
 }
@@ -312,6 +315,16 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	switch {
 	case !m.Allowed:
 		add("Sandboxes", "your organization doesn't allow sandboxes for you", "allowed")
+		if len(m.RequiredFor) > 0 && m.HostRunGate == "exempt" {
+			add("Required", "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "+
+				andList(commandNames(m.RequiredFor))+" may run on this computer outside a sandbox, where their calls are still inspected and logged", "required_for")
+		}
+	case len(m.RequiredFor) > 0 && m.HostRunGate == "exempt":
+		// The managed gateway's host-run gate allows this account's runs;
+		// required_for alone would give a false protected status (GAP-0555).
+		add("Required", "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "+
+			andList(commandNames(m.RequiredFor))+" may also run on this computer outside a sandbox, where their calls are still inspected and logged",
+			"required_for")
 	case len(m.RequiredFor) > 0:
 		text := andList(commandNames(m.RequiredFor)) + " run only in a sandbox on this computer"
 		keys := []string{"required_for"}
@@ -1055,7 +1068,7 @@ func (a *App) withRenderedVMDriver(c *openshell.Check, m *sandboxapi.ManagedStat
 	}
 	c.Status = openshell.StatusFail
 	c.Detail += "; but " + problem + ", so no MicroVM sandbox can start for you on this computer"
-	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + goos + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
+	c.Fix = &openshell.Fix{Summary: "nothing to do on your account; ask your administrator to run `enterprise " + openshell.EnterprisePlatformName(goos) + " ensure` so the rendered driver_dir names an installed, trusted openshell-driver-vm"}
 	return c
 }
 
