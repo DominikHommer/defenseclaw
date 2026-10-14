@@ -62,7 +62,11 @@ class R102HandoffPages2DocsTest(unittest.TestCase):
 
     def test_fg05_managed_policy_next_hook_call(self):
         text = page("enterprise/sandboxes.mdx")
-        self.assertIn("changed policy on its next relayed hook\ncall", text)
+        # DELTA-21 (GAP-0172) replaced "takes the changed policy on its next
+        # relayed hook call": a running sandbox takes the change before its
+        # next connection (test_r102_delta15_docs checks the full paragraph).
+        self.assertIn("A running managed sandbox takes a changed live field before its next\nconnection", text)
+        self.assertNotIn("changed policy on its next relayed hook\ncall", text)
 
     def test_lfuninst_running_sandbox_refuses_uninstall(self):
         text = page("sandboxes/guide.mdx")

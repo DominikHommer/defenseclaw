@@ -85,6 +85,7 @@ const (
 	CheckIDGlobalPolicy      = "global-policy"
 	CheckIDBindMounts        = "bind-mounts"
 	CheckIDTelemetry         = "telemetry"
+	CheckIDDockerNamespace   = "docker-namespace"
 	CheckIDPortPrefix        = "port-"
 	installOpenShellCommand  = "defenseclaw sandbox setup --install-openshell"
 	setupCommand             = "defenseclaw sandbox setup"
@@ -683,6 +684,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.checkDockerNamespace(ctx)
 	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
 	return r.report
