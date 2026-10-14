@@ -393,3 +393,32 @@ func TestKeptOpenShellSetupCarriesPendingRestart(t *testing.T) {
 		})
 	}
 }
+
+// A record that cannot be kept (its mode was changed by hand) must not stop
+// the uninstall or a package removal: the uninstall warns, removes the
+// record as it did before kept sandboxes carried one, and goes on.
+func TestKeptOpenShellSetupRecordProblemWarnsAndUninstallGoesOn(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := keptDockerHost(t, goos, true)
+			if err := os.Chmod(h.env.openshellStatePath(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			r := h.run(Options{Action: ActionUninstall})
+			requireOK(t, r)
+			if !hasWarning(r, codeOpenShell) {
+				t.Errorf("no warning for the record that could not be kept: %+v", r.Warnings)
+			}
+			if physicalExists(h.env.openshellStatePath()) || physicalExists(h.env.openshellKeptStatePath()) {
+				t.Error("a record that could not be kept stayed behind")
+			}
+			if strings.Contains(strings.Join(r.Changes, "\n"), "record of the sandbox setup the kept sandboxes") {
+				t.Errorf("the summary claims a kept record: %v", r.Changes)
+			}
+			// The kept sandboxes themselves stay, as before.
+			if len(h.ops.teardowns) != 0 {
+				t.Errorf("a non-purge uninstall tore down sandboxes: %v", h.ops.teardowns)
+			}
+		})
+	}
+}

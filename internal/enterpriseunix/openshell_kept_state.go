@@ -37,19 +37,20 @@ func (e *Env) keepOpenShellState() (bool, error) {
 		return false, removeFile(kept)
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("could not keep the record of the sandbox setup the kept sandboxes were made under: %w; the next activation will not report a change of that setup", err)
 	}
 	uid, _, ownerErr := e.OwnerOf(active)
 	if !info.Mode().IsRegular() || ownerErr != nil || uid != 0 || info.Mode().Perm() != 0o600 {
-		return false, fmt.Errorf("sandbox setup record is not a root-owned regular 0600 file")
+		return false, fmt.Errorf("could not keep the record of the sandbox setup the kept sandboxes were made under: %s is not a root-owned regular 0600 file, so the next activation will not report a change of that setup", active)
 	}
 	if err := os.Rename(active, kept); err != nil {
-		return false, err
+		return false, fmt.Errorf("could not keep the record of the sandbox setup the kept sandboxes were made under: %w; the next activation will not report a change of that setup", err)
 	}
 	// Rename preserves ownership on the host. This also records the new path
 	// for the injectable owner reader used by the lifecycle tests.
 	if err := e.Lchown(kept, 0, 0); err != nil {
-		return false, err
+		_ = removeFile(kept)
+		return false, fmt.Errorf("could not keep the record of the sandbox setup the kept sandboxes were made under: %w; the next activation will not report a change of that setup", err)
 	}
 	return true, nil
 }

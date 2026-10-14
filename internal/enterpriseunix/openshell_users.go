@@ -1277,10 +1277,16 @@ func (e *Env) removeOpenShellMachineState(channel string, keepRecord bool) (bool
 	var kept bool
 	var err error
 	if keepRecord {
-		kept, err = e.keepOpenShellState()
+		if kept, err = e.keepOpenShellState(); err != nil {
+			// Nothing stale stays behind: the record goes, as it did before
+			// kept sandboxes carried it.
+			_ = removeFile(e.openshellStatePath())
+		}
 	} else {
 		_ = removeFile(e.openshellStatePath())
-		err = removeFile(e.openshellKeptStatePath())
+		if err = removeFile(e.openshellKeptStatePath()); err != nil {
+			err = fmt.Errorf("could not remove the stale record of the sandbox setup %s: %w", e.openshellKeptStatePath(), err)
+		}
 	}
 	if !e.packageOwnsOpenShellDir(channel) {
 		_ = removeDirIfEmpty(e.P(e.openshellDir()))

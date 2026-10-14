@@ -2888,9 +2888,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
 		}
 	}
-	if err := l.removeOpenShellFiles(record); err != nil {
-		errs = append(errs, err)
-	}
+	l.removeOpenShellFiles(record)
 	if record == nil && env.GOOS == "linux" {
 		for _, unit := range units {
 			// The drop-in folders a rolled-back install left empty.
