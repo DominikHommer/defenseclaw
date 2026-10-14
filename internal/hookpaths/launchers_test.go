@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -14,6 +15,18 @@ func TestLauncherWriteOperands(t *testing.T) {
 	cwd := filepath.Join(t.TempDir(), "proj")
 	home := filepath.Dir(cwd)
 	target := filepath.Join(cwd, "disklink")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), target); err != nil {
+		t.Fatal(err)
+	}
 	rows := []struct {
 		name, command string
 		want          bool
@@ -24,6 +37,8 @@ func TestLauncherWriteOperands(t *testing.T) {
 		{"command prefix", `command -p cp payload disklink`, true},
 		{"nested prefix", `env A=1 nice -n 5 cp payload disklink`, true},
 		{"shell command", `bash -c 'cp payload disklink'`, true},
+		{"shell positional destination", `sh -c 'tee -a "$1" < payload' _ disklink`, true},
+		{"shell positional ordinary", `bash -c 'echo x >> $1' _ out/one`, false},
 		{"multicall", `busybox cp payload disklink`, true},
 		{"find child", `find disklink -exec cp payload {} \;`, true},
 		{"xargs child", `printf disklink | xargs -I{} cp payload {}`, true},

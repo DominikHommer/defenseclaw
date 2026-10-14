@@ -40,6 +40,8 @@ func TestProtectedWriteLauncherDecisions(t *testing.T) {
 		{"command prefix", `command -p cp payload disklink`, true},
 		{"nested process prefix", `nice -n 5 env A=1 cp payload disklink`, true},
 		{"shell command", `bash -c 'cp payload disklink'`, true},
+		{"shell positional destination", `sh -c 'tee -a "$1" < payload' _ disklink`, true},
+		{"shell positional ordinary", `bash -c 'echo x >> $1' _ out/one`, false},
 		{"find child", `find disklink -exec cp payload {} \;`, true},
 		{"xargs child", `printf disklink | xargs -I{} cp payload {}`, true},
 		{"numa prefix", `numactl --localalloc cp payload disklink`, true},

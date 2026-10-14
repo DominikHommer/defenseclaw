@@ -569,6 +569,12 @@ func resolveShellString(result *launcherResult) {
 						}
 						result.script = words[i]
 					}
+					var ok bool
+					result.script, ok = shellPositionalScript(result.script, words[i+1:], static[i+1:])
+					if !ok {
+						result.ok = false
+						return
+					}
 					result.words, result.static = nil, nil
 					return
 				default:
