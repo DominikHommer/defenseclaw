@@ -28,12 +28,42 @@ func (e *Env) openshellKeptStatePath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), openshellKeptStateFile)
 }
 
+// keptOpenShellSetup returns a usable kept setup, not an empty or untrusted file.
+func (e *Env) keptOpenShellSetup() *openshellState {
+	state := e.loadKeptOpenShellState()
+	if state != nil && (state.Applied != nil || len(state.Pending) > 0) {
+		return state
+	}
+	return nil
+}
+
+// uninstallOpenShellState uses the active setup when it has content. A failed
+// uninstall can leave its deployment record after moving that setup to the
+// kept name; only then may a retry use the kept setup to find sandbox accounts.
+// A purge after a completed uninstall has no deployment record and ignores it.
+func (l *lifecycle) uninstallOpenShellState() *openshellState {
+	state := l.env.loadOpenShellState()
+	if state.Applied != nil || len(state.Pending) > 0 {
+		return state
+	}
+	if exists(l.env.deploymentPath()) {
+		if kept := l.env.keptOpenShellSetup(); kept != nil {
+			return kept
+		}
+	}
+	return state
+}
+
 // keepOpenShellState moves the applied setup without copying its contents or
-// changing its mode. A missing active record leaves no kept record behind.
+// changing its mode. If a failed uninstall already moved it, a retry keeps a
+// valid nonempty record; an invalid or empty kept file is removed.
 func (e *Env) keepOpenShellState() (bool, error) {
 	active, kept := e.openshellStatePath(), e.openshellKeptStatePath()
 	info, err := os.Lstat(active)
 	if os.IsNotExist(err) {
+		if e.keptOpenShellSetup() != nil {
+			return true, nil
+		}
 		return false, removeFile(kept)
 	}
 	if err != nil {
