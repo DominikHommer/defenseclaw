@@ -283,6 +283,33 @@ func TestSandboxPurgeCleansImagesOfTheDaemonStore(t *testing.T) {
 	}
 }
 
+func TestSandboxPurgeCleansImagesWithLinkedHomeAncestor(t *testing.T) {
+	h, docker := imageTestHost(t, "linux")
+	tag := "defenseclaw/sandbox:managed-u1000"
+	foreign := "ordinary/base:latest"
+	store := writeImageStore(t, h, h.alice, sampleImageOwner, tag, "", "")
+	parent := filepath.Dir(h.env.P(h.alice.Home))
+	if err := os.Rename(parent, parent+".target"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(parent)+".target", parent); err != nil {
+		t.Fatal(err)
+	}
+	docker.add(tag, sampleImageOwner, h.alice.UID, "a", false)
+	docker.add(foreign, otherImageOwner, h.alice.UID, "b", false)
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	if got := docker.removals(); !reflect.DeepEqual(got, []string{tag}) {
+		t.Errorf("image rm calls = %v, want only %s", got, tag)
+	}
+	if docker.images[tag] != nil || docker.images[foreign] == nil || h.exists(store) {
+		t.Errorf("managed image removal or local purge failed")
+	}
+	if !containsLine(r.Changes, "removed 1 DefenseClaw sandbox images of user alice") || len(r.Warnings) != 0 {
+		t.Errorf("changes = %v, warnings = %+v", r.Changes, r.Warnings)
+	}
+}
+
 func TestSandboxPurgeReadsLegacyAndBothStores(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -490,6 +517,7 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 		name     string
 		prepare  func(*testing.T, *osHost) string
 		wantWarn string
+		imageTag string
 	}{
 		{name: "no image store", prepare: func(t *testing.T, h *osHost) string {
 			return ""
@@ -519,6 +547,17 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			}
 			return path
 		}, wantWarn: "could not safely read"},
+		{name: "symlinked home", prepare: func(t *testing.T, h *osHost) string {
+			path := writeImageStore(t, h, h.alice, sampleImageOwner, "defenseclaw/sandbox:linked-home-u1000", "", "")
+			home := h.env.P(h.alice.Home)
+			if err := os.Rename(home, home+".target"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Base(home)+".target", home); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}, wantWarn: "symlink is not followed", imageTag: "defenseclaw/sandbox:linked-home-u1000"},
 		{name: "own installation", prepare: func(t *testing.T, h *osHost) string {
 			path := writeLegacyImageStore(t, h, h.alice, sampleImageOwner, "", "", "")
 			writeHostFile(t, h.testHost, filepath.Join(h.alice.Home, ".defenseclaw/config.yaml"), "own install\n")
@@ -528,6 +567,9 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, docker := imageTestHost(t, "linux")
 			path := tc.prepare(t, h)
+			if tc.imageTag != "" {
+				docker.add(tc.imageTag, sampleImageOwner, h.alice.UID, "a", false)
+			}
 			before := imageHomeTree(t, h)
 			r := enterprisestatus.New(ActionUninstall, "", "linux", "1.0.2")
 			if path == "" && (h.exists(filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", "images.json")) ||
@@ -540,6 +582,12 @@ func TestSandboxImageCleanupGuardsAndDockerUnavailable(t *testing.T) {
 			}
 			if after := imageHomeTree(t, h); !reflect.DeepEqual(after, before) {
 				t.Errorf("cleanup changed the account's tree: before %v, after %v", before, after)
+			}
+			if path != "" && !h.exists(path) {
+				t.Errorf("cleanup removed the image store %s", path)
+			}
+			if tc.imageTag != "" && docker.images[tc.imageTag] == nil {
+				t.Errorf("cleanup removed image %s", tc.imageTag)
 			}
 			if path == "" && (h.exists(filepath.Join(h.alice.Home, h.env.daemonStateRel(), "sandboxes", "images.json")) ||
 				h.exists(filepath.Join(h.alice.Home, userSandboxDataRel, "images.json"))) {

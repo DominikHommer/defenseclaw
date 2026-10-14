@@ -65,38 +65,19 @@ type sandboxDockerImage struct {
 	rank int // run image, alias, overlay image
 }
 
-// openSandboxImageHome walks the entire path through descriptors. The purge's
-// walkDirs checks the account-owned folders below it; this also refuses a
-// symlink in an ancestor of the home before root reads an account's store.
+// openSandboxImageHome opens the account-owned home like the rest of the purge.
+// The home itself cannot be a symlink; walkDirs checks the folders below it.
 func (e *Env) openSandboxImageHome(a SandboxAccount) (int, error) {
 	path := filepath.Clean(e.P(a.Home))
 	if !filepath.IsAbs(path) || path == "/" || a.UID <= 0 {
 		return -1, errors.New("invalid account home")
 	}
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := e.openHome(a)
 	if err != nil {
-		return -1, err
+		return -1, fmt.Errorf("account home: %w", err)
 	}
-	for i, part := range parts {
-		if part == "" || part == "." || part == ".." {
-			_ = unix.Close(fd)
-			return -1, errors.New("invalid account home")
-		}
-		var next int
-		if i == len(parts)-1 {
-			next, err = openOwnedDir(fd, part, a.UID)
-		} else {
-			next, err = unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		}
-		_ = unix.Close(fd)
-		if err != nil || next < 0 {
-			if err == nil {
-				return -1, os.ErrNotExist
-			}
-			return -1, fmt.Errorf("account home component %s: %w", part, err)
-		}
-		fd = next
+	if fd < 0 {
+		return -1, os.ErrNotExist
 	}
 	return fd, nil
 }
