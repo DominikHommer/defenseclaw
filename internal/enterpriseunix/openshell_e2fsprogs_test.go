@@ -43,6 +43,9 @@ func TestCheckE2fsprogsFollowsTheGatewayRule(t *testing.T) {
 		}
 		return rows[0]
 	}
+	if row := check(""); row.OK || !strings.Contains(row.Detail, "~/.local/opt/e2fsprogs") || strings.Contains(row.Detail, "trusted Homebrew keg") {
+		t.Errorf("unset administrator directory: %+v", row)
+	}
 	prefix := write("sbin/mke2fs", "sbin/debugfs")
 	if row := check(prefix); !row.OK || row.Detail != prefix+"/sbin" {
 		t.Errorf("install prefix: %+v, want ok naming %s/sbin", row, prefix)

@@ -164,3 +164,53 @@ func TestManagedMacE2fsprogsEnsureGatewayDoctorAgree(t *testing.T) {
 		})
 	}
 }
+
+// With no administrator setting or account build, a managed gateway and
+// doctor both refuse a keg, including one reached through a writable opt
+// directory that can retarget its symlink.
+func TestManagedMacE2fsprogsGatewayDoctorRefuseKeg(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		name := "trusted-looking keg"
+		if symlink {
+			name = "symlink in writable opt"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			if err := os.MkdirAll(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cellar := filepath.Join(root, "hb", "Cellar", "e2fsprogs", "1.47", "sbin")
+			if err := os.MkdirAll(cellar, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, tool := range []string{"mke2fs", "debugfs"} {
+				if err := os.WriteFile(filepath.Join(cellar, tool), []byte("#!/bin/sh\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			keg := cellar
+			if symlink {
+				opt := filepath.Join(root, "hb", "opt")
+				if err := os.MkdirAll(opt, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(opt, 0o777); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("..", "Cellar", "e2fsprogs", "1.47"), filepath.Join(opt, "e2fsprogs")); err != nil {
+					t.Fatal(err)
+				}
+				keg = filepath.Join(opt, "e2fsprogs", "sbin")
+			}
+			if dir, err := openShellE2fsprogs("", home); dir != "" || !errors.Is(err, errOpenShellPrerequisiteMissing) || strings.Contains(err.Error(), keg) {
+				t.Fatalf("gateway used keg: dir=%q err=%v", dir, err)
+			}
+			doctor := (&openshell.Doctor{GOOS: "darwin", Managed: true, AdminE2fsprogsKnown: true,
+				HomeDir: func() (string, error) { return home, nil }, E2fsprogsDirs: []string{keg}}).ManagedE2fsprogsCheck()
+			if doctor.Status != openshell.StatusFail || !strings.Contains(doctor.Detail, "Homebrew keg is not used") || strings.Contains(doctor.Detail, keg) {
+				t.Fatalf("doctor used keg: %+v", doctor)
+			}
+		})
+	}
+}
