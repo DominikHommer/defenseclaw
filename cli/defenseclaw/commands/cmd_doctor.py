@@ -60,6 +60,10 @@ import click
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import (
+    HOOK_CONTRACT_MANIFEST,
+    HOOK_CONTRACTS,
+    PROXY_CONNECTORS,
+    normalize_connector,
     resolve_connector_contract,
     stable_agent_version,
 )
@@ -14331,6 +14335,89 @@ def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
     return name, digest.strip() if isinstance(digest, str) else ""
 
 
+_PROMPT_BLOCKS = "blocks"
+_PROMPT_NO_HOOK = "no-hook"
+_PROMPT_SURFACE = "surface"
+_PROMPT_UNKNOWN = "unknown"
+
+# What a connector whose prompt veto depends on the client that runs its hook
+# (_PROMPT_SURFACE) does with a prompt, per client. Kiro: the IDE vetoes a
+# blocked prompt; neither kiro-cli engine does (kiro.mdx, threat-model.mdx).
+_PROMPT_SURFACE_DETAIL = {
+    "kiro": "prompts still block only in Kiro IDE; kiro-cli sends every prompt to the model and blocks tool calls only",
+}
+
+
+def _prompt_block_capability(connector: str) -> str:
+    """Whether *connector* can stop a user prompt, from the hook contract manifest.
+
+    A proxy connector's LLM proxy inspects every model request, so its
+    prompts block. A hook connector blocks prompts only when one of its
+    contract's ``block_events`` is a prompt event (the gateway's own test,
+    internal/openshell/manager/hooks.go isPromptEvent: the name contains
+    "prompt"). A connector whose contracts disagree, or that the manifest
+    does not know, gets no claim either way.
+
+    A connector without versioned contracts (Kiro) lists its events in
+    ``native_hook_inventory``, whose ``block_events`` the gateway resolves per
+    request from the hook surface that invoked it, not from the release
+    (KiroBlockEventsForSurface: an unmarked request gets the set without a
+    prompt event). A prompt event there blocks only on some of its clients:
+    surface-dependent, never "prompts still block" (GAP-0461).
+    """
+    name = normalize_connector(connector)
+    if name in PROXY_CONNECTORS:
+        return _PROMPT_BLOCKS
+    event_sets = [contract.capabilities.get("block_events") for contract in HOOK_CONTRACTS.get(name, ())]
+    per_surface = False
+    if not event_sets:
+        spec = (HOOK_CONTRACT_MANIFEST.get("connectors") or {}).get(name)
+        inventory = spec.get("native_hook_inventory") if isinstance(spec, dict) else None
+        if isinstance(inventory, dict):
+            event_sets = [inventory.get("block_events")]
+            per_surface = True
+    answers = {
+        any(isinstance(event, str) and "prompt" in event.lower() for event in events)
+        for events in event_sets
+        if isinstance(events, list)
+    }
+    if per_surface and answers == {True}:
+        return _PROMPT_SURFACE
+    if answers == {True}:
+        return _PROMPT_BLOCKS
+    if answers == {False}:
+        return _PROMPT_NO_HOOK
+    return _PROMPT_UNKNOWN
+
+
+def _detection_only_prompt_clause(connector: str) -> str:
+    """The prompt half of the detection-only rule-pack warning for *connector*.
+
+    GAP-0461: the row said "prompts still block" for every connector, also
+    for OpenCode, whose user prompts reach the model because it has no hook
+    that can block one.
+    """
+    capability = _prompt_block_capability(connector) if connector else _PROMPT_UNKNOWN
+    if capability == _PROMPT_BLOCKS:
+        return "; prompts still block"
+    if capability == _PROMPT_NO_HOOK:
+        label = _CONNECTOR_LABELS.get(normalize_connector(connector), connector)
+        return (
+            f"; {label} has no hook that can block a prompt, so no rule stops its user prompts: "
+            "they reach the model, and only tool calls are blocked"
+        )
+    if capability == _PROMPT_SURFACE:
+        name = normalize_connector(connector)
+        label = _CONNECTOR_LABELS.get(name, connector)
+        detail = _PROMPT_SURFACE_DETAIL.get(
+            name,
+            f"whether {label} blocks a prompt depends on the client that runs its hook, "
+            "so a prompt-only rule may not stop its user prompts; tool calls are still blocked",
+        )
+        return f"; {detail}"
+    return ""
+
+
 def _emit_rule_pack_row(
     path: str,
     kind: str,
@@ -14338,6 +14425,7 @@ def _emit_rule_pack_row(
     *,
     validation_cache: dict[str, object] | None = None,
     pack: tuple[str, str] = ("", ""),
+    connector: str = "",
 ) -> None:
     """Authoritatively validate a resolved rule pack and emit one doctor row.
 
@@ -14351,6 +14439,7 @@ def _emit_rule_pack_row(
     overlay itself enables rules. *pack* is the selected ``(name, pinned
     digest)``: a custom pack whose files no longer match its pin FAILs, because
     the gateway refuses the edit and keeps the pack it loaded before.
+    *connector* picks the prompt wording of the detection-only warning.
     """
     cache_key = _rule_pack_cache_key(path)
     outcome: object
@@ -14463,7 +14552,7 @@ def _emit_rule_pack_row(
             "Rule pack",
             f"{kind} {shown_path}: {enabled_rule_count}/{rule_count} rules enabled, but "
             f"{' and '.join(problems)} with no expression: they are detection-only for tool calls "
-            "(a match is recorded, never blocked; prompts still block)",
+            f"(a match is recorded, never blocked{_detection_only_prompt_clause(connector)})",
             r=r,
             remediation=remediation,
         )
@@ -14646,6 +14735,7 @@ def _check_connector_inventory(
                 r,
                 validation_cache=rule_pack_validation_cache,
                 pack=pack,
+                connector=connector,
             )
         else:
             # No explicit rule pack → the gateway resolves the built-in
@@ -14663,6 +14753,7 @@ def _check_connector_inventory(
                     "built-in default rule pack",
                     r,
                     validation_cache=rule_pack_validation_cache,
+                    connector=connector,
                 )
             else:
                 _emit(

@@ -73,7 +73,9 @@ const LauncherSystemPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 // where the base image's python3 is, ahead of the venv's bin, so `pip
 // install x` and then `python3 -c 'import x'` used two environments
 // (#1238). Root-owned python3 and python shims in WorkloadPythonShimDir,
-// first on LauncherSystemPATH, run the venv's interpreter instead. The
+// first on LauncherSystemPATH, run the venv's interpreter instead, and pip
+// and pip3 shims there run its pip: the venv's bin is not on the harness's
+// PATH, so a bare pip was not found in the agent's tool shell. The
 // hooks' PATH (connector.SandboxHookPATH) leaves that directory out, so a
 // hook never runs the workload-writable venv.
 const (
@@ -94,8 +96,21 @@ echo "python3: @PY@ is gone" >&2
 exit 127
 `
 
+// pipShimScript is each pip shim: the pip of the interpreter the python3
+// shim runs (pythonShimScript, the same @PY@ and @BASE@), so `pip install x`
+// installs where `python3 -c 'import x'` looks.
+const pipShimScript = `#!/bin/sh
+# DefenseClaw: pip installs into the sandbox's workload environment (@VENV@),
+# the one python3 runs, as in a shell that activated it.
+if [ -x @PY@ ]; then exec @PY@ -m pip "$@"; fi
+if [ -n "@BASE@" ]; then exec @BASE@ -m pip "$@"; fi
+echo "pip: @PY@ is gone" >&2
+exit 127
+`
+
 // WorkloadPythonShimStep is the image step that installs the python3 and
-// python shims (pythonShimScript) when the base image has the workload venv.
+// python shims (pythonShimScript) when the base image has the workload venv,
+// and the pip and pip3 shims (pipShimScript) when that venv has pip.
 // Like WorkloadPythonStep it is a compatibility fix, not a control: the
 // venv is the workload's, as pip already was. A base image without the
 // venv, or with a program of its own at a shim's path, builds on without
@@ -103,7 +118,7 @@ exit 127
 // python3.
 func WorkloadPythonShimStep() InstallStep {
 	return InstallStep{
-		Comment: "python3 and pip use one environment, the workload venv " + WorkloadVenv + " (the hooks keep the system python3)",
+		Comment: "python3, pip and pip3 use one environment, the workload venv " + WorkloadVenv + " (the hooks keep the system python3)",
 		Run:     workloadPythonShimRun(WorkloadVenv, WorkloadPythonShimDir, "/usr/local/bin/python3 /usr/bin/python3"),
 	}
 }
@@ -112,16 +127,24 @@ func WorkloadPythonShimStep() InstallStep {
 // the shim directory and the base interpreters to fall back to (shell
 // words).
 func workloadPythonShimRun(venv, dir, bases string) string {
-	shim := strings.ReplaceAll(pythonShimScript, "@VENV@", venv)
-	b64 := base64.StdEncoding.EncodeToString([]byte(shim))
+	encode := func(script string) string {
+		return base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(script, "@VENV@", venv)))
+	}
+	// install writes the shim b64 for each name in names, keeping a
+	// program the base image has at a shim's path.
+	install := func(names, b64 string) string {
+		return `for name in ` + names + `; do ` +
+			`if [ -e "$dir/$name" ]; then echo "DefenseClaw: the base image has its own $dir/$name" >&2; continue; fi; ` +
+			`printf '%s' ` + b64 + ` | base64 -d | sed -e "s#@PY@#$py#g" -e "s#@BASE@#$base#g" >"$dir/$name"; chmod 0755 "$dir/$name"; done; `
+	}
 	return `set -eu; venv=` + shellQuote(venv) + `; dir=` + shellQuote(dir) + `; ` +
 		`if [ -x "$venv/bin/python3" ]; then ` +
 		`v="$("$venv/bin/python3" -I -S -c 'import sys; print("%d.%d" % sys.version_info[:2])')"; py="$venv/bin/python$v"; ` +
 		`base=""; for b in ` + bases + `; do if [ -x "$b" ]; then base="$b"; break; fi; done; ` +
 		`if [ ! -x "$py" ]; then echo "DefenseClaw: $venv has no python$v, so python3 and pip may use different environments" >&2; ` +
-		`else install -d -m 0755 "$dir"; for name in python3 python; do ` +
-		`if [ -e "$dir/$name" ]; then echo "DefenseClaw: the base image has its own $dir/$name" >&2; continue; fi; ` +
-		`printf '%s' ` + b64 + ` | base64 -d | sed -e "s#@PY@#$py#g" -e "s#@BASE@#$base#g" >"$dir/$name"; chmod 0755 "$dir/$name"; done; fi; fi`
+		`else install -d -m 0755 "$dir"; ` + install("python3 python", encode(pythonShimScript)) +
+		`if "$py" -I -c 'import pip' >/dev/null 2>&1; then ` + install("pip pip3", encode(pipShimScript)) +
+		`else echo "DefenseClaw: $venv has no pip, so pip stays off the agent's PATH" >&2; fi; fi; fi`
 }
 
 // launcherScrubbedEnv are variables no launcher passes to its harness. The
