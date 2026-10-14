@@ -108,6 +108,14 @@ periodic rescan (`watch.rescan_enabled`, on by default).
 Until then a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
 
+On managed Windows, the LocalSystem install watcher skips skill, plugin and
+MCP server roots inside enrolled users' profiles, so assets there do not
+receive its install-admission scan. Gateway health reports
+`watcher.details.profile_roots_skipped: true` when it skips those roots.
+Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
+and keep shared skills outside profiles. A brokered scan as the enrolled
+user is planned for a later release.
+
 ## The admission block
 
 `admission:` has one block per asset type: `skill`, `mcp` and `plugin`. There
@@ -553,9 +561,10 @@ project: its first hook (the session start, or the first skill call) adds the
 project's existing skill folders to the install watcher, which restarts and
 admits what they hold, as at a gateway start. Until a project skill's first
 scan has finished, the hooks refuse it with "is not scanned yet ... try again
-in a minute". Up to 32 project folders are watched; on a managed computer only
-projects inside the user's home count, and explicit
-`gateway.watcher.skill.dirs` add none. The hooks also cover them as they cover every other folder: a denied name is refused at the
+in a minute". Up to 32 project folders are watched. On managed Windows, the
+LocalSystem watcher skips profile roots, so project skills inside enrolled
+users' profiles do not receive this install-admission scan. Explicit
+`gateway.watcher.skill.dirs` add none there. The hooks also cover them as they cover every other folder: a denied name is refused at the
 Skill call, the `$name` selection and the folder read, wherever the skill
 lives. With `runtime_detection.enabled: true`, `mode: action` and a
 `default: deny` or an approved registry, the Skill call and `$name` selection
