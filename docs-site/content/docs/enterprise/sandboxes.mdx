@@ -675,7 +675,12 @@ fails closed. A run whose profile names no pack gets the default pack
 (`openshell.pack`, else `balanced`; never `open`). Managed computers run every
 sandbox on a copy of the project, so a profile's pack that sets
 `workspace.mode: mount` is refused as looser than the default pack, and a
-repository policy that asks for a mount is clamped to copy with a reason.
+repository policy that asks for a mount is clamped to copy with a reason. The
+same holds for an `openshell.pack` that `openshell.admin.locked: [pack]` makes
+the required pack of every sandbox: one that sets or inherits
+`workspace.mode: mount` (a pack that extends `balanced` inherits it) is refused
+by `config validate`, `ensure` and `verify`, naming `openshell.pack`; set
+`workspace.mode: copy` in the pack.
 Under a required pack, `sandbox run --pack` takes a pack that is at least as
 strict in every setting and refuses a looser one, naming your profile and the
 setting it loosens. `extends` helps you write a pack and guarantees nothing. The
@@ -919,8 +924,17 @@ learns of it from the next relayed hook or from a poll every 60 seconds. A
 renamed or recycled account is different: the registration is revoked (see the
 last paragraph of this section), not re-matched.
 
-A running managed sandbox takes the changed policy on its next relayed hook
-call; an idle sandbox picks it up on its next poll.
+A running managed sandbox takes a changed live field before its next
+connection: its egress proxy decides each new connection with the policy the
+managed gateway confirmed for it within the last second, and confirms it again
+first when a relayed hook names another policy. The first `git clone` or `curl`
+after `ensure` reported the new configuration meets the new lists, tighter or
+looser, also one from `sandbox exec`. While the managed gateway does not
+answer, the policy in force stays, except after a relayed hook said it changed:
+then new connections are refused with "your organization changed this
+sandbox's policy and DefenseClaw could not confirm the new one yet; try again
+in a moment" until the new one is confirmed. A sandbox that makes no
+connection picks the change up on its next poll.
 
 | Kind of field | What happens |
 | --- | --- |
@@ -937,7 +951,18 @@ and `sandbox pull` still reads it:
 When a directory lookup is cold, the create waits up to 10 seconds for it
 and then starts under `default_profile`, marked
 **provisional**. A later verified match re-evaluates it and can stop it. A slow
-or failed lookup never refuses a create or a hook. A sandbox still running two
+or failed group lookup never refuses a create or a hook. The computer must
+still know the account itself: OpenShell reaches every sandbox over ssh as the
+person, and ssh refuses an account the computer can't look up (on Linux, SSSD
+stopped, or no cached entry for the account). Then a new `sandbox run` stops
+with "Your account can't be looked up on this computer right now. Try again in
+a moment.", says that this isn't the organization's sandbox policy and names
+the request-access contact for when it lasts, although `sandbox policy
+explain` shows the provisional default; `sandbox connect` and `sandbox exec`
+can't reach a running sandbox either ("your account can't be looked up on this
+computer right now"). Agents already running keep working under the
+provisional default, and the same run starts once the computer looks the
+account up again. A sandbox still running two
 minutes after it should have stopped is revoked, and a recycled or renamed
 account (the same uid with a different name) revokes its registrations.
 
@@ -1108,6 +1133,8 @@ or request-access contact when applicable.
 | Policy can't load | "Your organization's sandbox policy can't be loaded on this computer." |
 | Another account holds the ports | "Sandboxes aren't available for your account on this computer right now: another account is using them" and "Try again when that account has no sandbox running." |
 | Directory lookup is provisional | "Your organization's directory couldn't be reached, so its default policy applies for now. Try again in a moment." |
+| Account can't be looked up on the computer (a new run) | "Your account can't be looked up on this computer right now. Try again in a moment." and "This isn't your organization's sandbox policy." |
+| Changed policy not confirmed yet (a new connection) | "your organization changed this sandbox's policy and DefenseClaw could not confirm the new one yet; try again in a moment" |
 | Access request exceeds the profile | "You can't approve this."; the notice gives the request-access contact and the caller's profile, rule, host and sandbox to quote |
 
 What a second account sees while the first holds the sandbox ports. The text
