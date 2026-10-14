@@ -506,8 +506,7 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 			if err != nil {
 				var rehomed *enterpriseHookTargetHomeChangedError
 				if errors.As(err, &rehomed) {
-					// Keep both homes and the clearing paths in the report.
-					reason = boundedEnterpriseHookUserCleanupText(err.Error())
+					reason = enterpriseHookRehomedReportReason(err, rehomed)
 				} else {
 					reason = boundedString(err.Error(), 256)
 				}
@@ -517,6 +516,78 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		}
 	}
 	return skip
+}
+
+// enterpriseHookRehomedReportReason keeps the full remedy before bounding a
+// long diagnostic. The ledger's generic 512-byte error limit can cut that
+// sentence when both home paths are long; remove-all shortens paths first.
+func enterpriseHookRehomedReportReason(err error, changed *enterpriseHookTargetHomeChangedError) string {
+	const maxReportReason = 768
+	raw := err.Error()
+	if len(raw) <= enterpriseHookUserCleanupErrorMax {
+		return boundedEnterpriseHookUserCleanupText(raw)
+	}
+	homes := []string{changed.home, changed.directoryHome}
+	if len(homes[1]) > len(homes[0]) {
+		homes[0], homes[1] = homes[1], homes[0]
+	}
+	for _, home := range homes {
+		if home != "" && filepath.IsAbs(home) {
+			raw = strings.ReplaceAll(raw, home, shortEnterpriseHookReportPath(home))
+		}
+	}
+	// A worker or home check can add another absolute config path to the
+	// reason. Keep its basename visible without letting it hide the remedy.
+	words := strings.Fields(raw)
+	for i, word := range words {
+		path := strings.Trim(word, `"'(),;:`)
+		if filepath.IsAbs(path) && len(path) > 96 {
+			words[i] = strings.Replace(word, path, shortEnterpriseHookReportPath(path), 1)
+		}
+	}
+	raw = strings.Join(words, " ")
+	if len(raw) <= maxReportReason {
+		return raw
+	}
+	// The clearing instruction precedes "current home check". Only the
+	// trailing reason may be clipped after all paths have been shortened.
+	const reasonSeparator = "; current home check: "
+	if index := strings.Index(raw, reasonSeparator); index >= 0 && index+len(reasonSeparator) < maxReportReason {
+		end := maxReportReason - 3
+		for end > 0 && !utf8.RuneStart(raw[end]) {
+			end--
+		}
+		return raw[:end] + "..."
+	}
+	// Other re-home failures put their remedy at the end. Preserve that
+	// ending as well as the target named at the start.
+	const gap = " ... "
+	head, tail := (maxReportReason-len(gap))/2, len(raw)-(maxReportReason-len(gap))/2
+	for head > 0 && !utf8.RuneStart(raw[head]) {
+		head--
+	}
+	for tail < len(raw) && !utf8.RuneStart(raw[tail]) {
+		tail++
+	}
+	return raw[:head] + gap + raw[tail:]
+}
+
+func shortEnterpriseHookReportPath(path string) string {
+	if len(path) <= 96 {
+		return path
+	}
+	base := filepath.Base(path)
+	if len(base) > 48 {
+		head, tail := 24, len(base)-20
+		for head > 0 && !utf8.RuneStart(base[head]) {
+			head--
+		}
+		for tail < len(base) && !utf8.RuneStart(base[tail]) {
+			tail++
+		}
+		base = base[:head] + "..." + base[tail:]
+	}
+	return filepath.Join(string(filepath.Separator), "...", base)
 }
 
 // enterpriseHookJobRemoves reports whether job already removes connector.
