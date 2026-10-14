@@ -43,6 +43,17 @@ class SandboxTeardownTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        home = patch.dict(
+            os.environ,
+            {
+                "HOME": self._tmp.name,
+                "USERPROFILE": self._tmp.name,
+                "XDG_CONFIG_HOME": os.path.join(self._tmp.name, ".config"),
+                "XDG_STATE_HOME": os.path.join(self._tmp.name, ".local", "state"),
+            },
+        )
+        home.start()
+        self.addCleanup(home.stop)
         self.gateway = os.path.join(self._tmp.name, "defenseclaw-gateway")
         Path(self.gateway).write_text("#!/bin/sh\n")
 
@@ -51,6 +62,8 @@ class SandboxTeardownTests(unittest.TestCase):
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             os.mkdir(os.path.join(data_dir, "sandboxes"))
             Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
+            self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
+            Path(data_dir, "sandboxes", "owned-sandbox", "run.json").write_text("{}")
             self.assertTrue(cmd_uninstall._sandbox_state_present(None, data_dir, "linux"))
             self.assertFalse(cmd_uninstall._sandbox_state_present(None, data_dir, "win32"))
         enabled = type("Cfg", (), {"openshell": type("OS", (), {"enabled": True, "wrappers": []})()})()
@@ -218,6 +231,7 @@ class SandboxTeardownTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir:
             os.mkdir(os.path.join(data_dir, "sandboxes"))
             Path(data_dir, "sandboxes", "owned-sandbox").mkdir()
+            Path(data_dir, "sandboxes", "owned-sandbox", "run.json").write_text("{}")
             with (
                 patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(data_dir)),
                 patch.object(
