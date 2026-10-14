@@ -1586,6 +1586,22 @@ func auditGuardrailProfileChanges(logger *audit.Logger, changes []guardrailProfi
 	}
 }
 
+// profileEnrollmentExemption describes the hook's exemption decision in a
+// profile explanation. The no-profile answer must not refer to a profile.
+func profileEnrollmentExemption(cfg *config.Config, subject *profileSubject, withProfile bool) (map[string]any, string) {
+	if !explainEnrollmentExempt(cfg, subject) {
+		return nil, ""
+	}
+	warning := "this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses " +
+		"its host runs, but its calls are still inspected under "
+	if withProfile {
+		warning += "the profile above, which blocks findings at its block_at, and logged "
+	} else {
+		warning += "the guardrail settings and logged "
+	}
+	return map[string]any{"exempt": true}, warning + "(defenseclaw.user.enrollment: exempt)"
+}
+
 // handleGuardrailProfileResolve serves GET
 // /api/v1/guardrail/profiles/resolve?user=&connector=&agent=: which profile
 // the named subject would get, for `defenseclaw guardrail profile explain`.
@@ -1687,8 +1703,18 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["profile"] = ""
 		out["match"] = ""
 		out["effective"] = profileEffectiveView(base, connectorName)
+		var warnings []string
+		if _, lookupFailed := out["lookup_error"]; !lookupFailed {
+			if enrollment, warning := profileEnrollmentExemption(base, subject, false); enrollment != nil {
+				out["enrollment"] = enrollment
+				warnings = append(warnings, warning)
+			}
+		}
 		if note := inertHILTWarning(base, connectorName); note != "" {
-			out["warnings"] = []string{note}
+			warnings = append(warnings, note)
+		}
+		if len(warnings) > 0 {
+			out["warnings"] = warnings
 		}
 		a.writeJSON(w, http.StatusOK, out)
 		return
@@ -1728,13 +1754,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
 		out["directory"] = view
 	}
-	if explainEnrollmentExempt(base, subject) {
+	if enrollment, warning := profileEnrollmentExemption(base, subject, true); enrollment != nil {
 		// exempt_users skips enrollment and the sandbox requirement only;
 		// the profile still inspects and blocks (GAP-0328).
-		out["enrollment"] = map[string]any{"exempt": true}
-		warnings = append(warnings, "this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses "+
-			"its host runs, but its calls are still inspected under the profile above, which blocks findings at its block_at, and logged "+
-			"(defenseclaw.user.enrollment: exempt)")
+		out["enrollment"] = enrollment
+		warnings = append(warnings, warning)
 	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
