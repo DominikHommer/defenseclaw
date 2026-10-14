@@ -13,11 +13,15 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The four are replaced in tests.
 var (
 	managedArtifactDigestMemoEligible = managedEnterpriseHookBinaryPath
+	managedProtectedHookCopyEligible  = managedEnterpriseHookCopyPath
 	openManagedArtifactExclusive      = openWindowsManagedArtifactExclusive
 	managedArtifactStampOf            = windowsManagedArtifactStamp
 	endManagedArtifactChangeEpoch     = endWindowsManagedArtifactChangeEpoch
@@ -35,6 +39,22 @@ func managedEnterpriseHookBinaryPath(path string) bool {
 	}
 	hook := managedEnterpriseWindowsHookBinary(executable)
 	return hook != "" && strings.EqualFold(filepath.Clean(hook), filepath.Clean(path))
+}
+
+// managedEnterpriseHookCopyPath limits the no-backstop memo to the protected
+// copy under the administrator's registered state root. Its path and every
+// ancestor must be trusted; arbitrary connector data cannot use this policy.
+func managedEnterpriseHookCopyPath(path string) bool {
+	if !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return false
+	}
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return false
+	}
+	want := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
+	return strings.EqualFold(filepath.Clean(want), filepath.Clean(path)) &&
+		managed.ValidateTrustedFilePath(path, "guardian hook copy") == nil
 }
 
 // openWindowsManagedArtifactExclusive opens path for reading with a share

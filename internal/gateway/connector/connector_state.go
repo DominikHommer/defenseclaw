@@ -1771,18 +1771,34 @@ func stableManagedArtifactDigestForOwner(
 	return stableManagedArtifactDigestWith(path, label, maxBytes, expectedOwnerSID, false)
 }
 
-// stableManagedArtifactDigestWith reads path twice and returns its digest
-// when both reads and the file identity agree. With memoize it returns the
-// digest of an earlier full read while the opened file keeps the version
-// stamp of that read (openManagedArtifactForDigest, GAP-0438).
+// stableManagedArtifactDigestWith uses the shared ten-minute target memo.
+// Without a guarded stable stamp it still reads twice and compares both
+// reads with the opened file identity (GAP-0438).
 func stableManagedArtifactDigestWith(
 	path, label string,
 	maxBytes int64,
 	expectedOwnerSID string,
 	memoize bool,
 ) (string, bool, error) {
+	return stableManagedArtifactDigestWithAge(
+		path, label, maxBytes, expectedOwnerSID, memoize, managedArtifactDigestMaxAge,
+	)
+}
+
+func stableManagedArtifactDigestWithAge(
+	path, label string,
+	maxBytes int64,
+	expectedOwnerSID string,
+	memoize bool,
+	maxAge time.Duration,
+) (string, bool, error) {
 	if maxBytes <= 0 {
 		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
+	}
+	if memoize {
+		lock := managedArtifactDigestPathLock(path)
+		lock.Lock()
+		defer lock.Unlock()
 	}
 	expected, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1822,7 +1838,7 @@ func stableManagedArtifactDigestWith(
 		// would itself move the journal number and end every hit.
 		if guarded {
 			if seen, ok := managedArtifactStampOf(file); ok {
-				if digest, ok := rememberedManagedArtifactDigest(path, seen); ok {
+				if digest, ok := rememberedManagedArtifactDigest(path, seen, maxAge); ok {
 					current, err := os.Lstat(path)
 					if err == nil && current.Mode()&os.ModeSymlink == 0 && current.Mode().IsRegular() &&
 						os.SameFile(opened, current) {
@@ -1834,8 +1850,8 @@ func stableManagedArtifactDigestWith(
 		// A full read. It first ends the change epoch of the file on this
 		// deny-write handle, so the next change gets a new journal number
 		// even while another handle stays open, and takes the stamp after
-		// that. The digest is remembered only once both reads and the stamp
-		// after them agree; when the epoch cannot be ended nothing is.
+		// that. With a guarded stamp, one data pass and a matching later
+		// stamp suffice. Otherwise the original two-pass check remains.
 		forgetManagedArtifactDigest(path)
 		if guarded && endManagedArtifactChangeEpoch(file) == nil {
 			stamp, stamped = managedArtifactStampOf(file)
@@ -1846,7 +1862,7 @@ func stableManagedArtifactDigestWith(
 			return [sha256.Size]byte{}, 0, err
 		}
 		hash := sha256.New()
-		count, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+		count, err := managedArtifactDigestRead(hash, file, maxBytes)
 		if err != nil {
 			return [sha256.Size]byte{}, count, err
 		}
@@ -1865,13 +1881,18 @@ func stableManagedArtifactDigestWith(
 	if err != nil {
 		return "", true, err
 	}
-	between, err := file.Stat()
-	if err != nil {
-		return "", true, err
-	}
-	second, secondSize, err := hashOnce()
-	if err != nil {
-		return "", true, err
+	var between os.FileInfo
+	var second [sha256.Size]byte
+	var secondSize int64
+	if !stamped {
+		between, err = file.Stat()
+		if err != nil {
+			return "", true, err
+		}
+		second, secondSize, err = hashOnce()
+		if err != nil {
+			return "", true, err
+		}
 	}
 	after, err := file.Stat()
 	if err != nil {
@@ -1885,19 +1906,20 @@ func stableManagedArtifactDigestWith(
 		!current.Mode().IsRegular() ||
 		!os.SameFile(opened, current) ||
 		firstSize != opened.Size() ||
-		secondSize != firstSize ||
-		between.Size() != opened.Size() ||
+		(!stamped && (secondSize != firstSize || between.Size() != opened.Size() ||
+			!between.ModTime().Equal(opened.ModTime()) || first != second)) ||
 		after.Size() != opened.Size() ||
-		!between.ModTime().Equal(opened.ModTime()) ||
-		!after.ModTime().Equal(opened.ModTime()) ||
-		first != second {
+		!after.ModTime().Equal(opened.ModTime()) {
 		return "", true, fmt.Errorf("%s changed during bounded digest", label)
+	}
+	if stamped {
+		if later, ok := managedArtifactStampOf(file); !ok || later != stamp {
+			return "", true, fmt.Errorf("%s changed during bounded digest", label)
+		}
 	}
 	digest := "sha256:" + hex.EncodeToString(first[:])
 	if stamped {
-		if later, ok := managedArtifactStampOf(file); ok && later == stamp {
-			rememberManagedArtifactDigest(path, stamp, digest)
-		}
+		rememberManagedArtifactDigest(path, stamp, digest)
 	}
 	return digest, true, nil
 }
