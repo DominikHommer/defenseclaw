@@ -119,24 +119,43 @@ func TestProxyRefreshDecidesWithTheCurrentPolicy(t *testing.T) {
 // returned. A connection that waited for another one's confirmation, or
 // found the lease that confirmation renewed, kept the decider it had read
 // before the other connection's change was registered, and reached a
-// destination the new policy blocks.
+// destination the new policy blocks. A forwarded request has no later
+// check (a CONNECT tunnel is checked again once it is tracked), so it is
+// the one that shows it.
 func TestProxyRefreshReadsTheCredentialAgainAfterAnotherRequestsChange(t *testing.T) {
-	var once sync.Once
+	var mu sync.Mutex
 	var h *harness
+	tighten := false
 	h = newHarness(t, func(c *harnessConfig) {
 		c.opts.Refresh = func(context.Context, Principal) *Decision {
 			// Another connection's confirmation registers the tightened
 			// policy while this one waits; this one's own refresh has
 			// nothing to report.
-			once.Do(func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if tighten {
 				pr := h.pr
 				pr.Decider = h.newDecider(DeciderOptions{Unblocks: h.unblocks, Block: []string{"example.com"}})
 				must(t, h.creds.Register(h.cred, pr))
-			})
+				tighten = false
+			}
 			return nil
 		}
 	})
 	h.dialer.route(443, startEcho(t))
+	h.serve(80, answerOK)
+	set := func() {
+		mu.Lock()
+		tighten = true
+		mu.Unlock()
+		must(t, h.creds.Register(h.cred, h.pr))
+	}
+	set()
+	if res, data := fetch(t, h.clientFor(h.cred, nil), "http://example.com/"); res.StatusCode != http.StatusForbidden ||
+		!strings.Contains(string(data), "operator_block") {
+		t.Fatalf("forwarded GET after another request's change = %d %s", res.StatusCode, data)
+	}
+	set()
 	if resp, body := h.refused(h.cred, "example.com:443"); resp.status != http.StatusForbidden || body.Host != "example.com" ||
 		body.Category == CategoryEgressOff {
 		t.Fatalf("CONNECT after another request's change = %d %+v", resp.status, body)
