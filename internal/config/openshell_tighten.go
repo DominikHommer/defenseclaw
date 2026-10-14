@@ -877,21 +877,25 @@ func (c *Config) validateLockedSandboxPack(profiles []string) error {
 	takes := func(f OpenShellAdminConfig) bool {
 		return f.IsLocked("pack") && strings.TrimSpace(f.RequiredPack) == ""
 	}
-	locked := takes(c.OpenShell.Admin)
+	// lockedBy names the lock that makes openshell.pack a required pack, so
+	// the refusal points at the setting to change.
+	lockedBy := ""
+	if takes(c.OpenShell.Admin) {
+		lockedBy = "openshell.admin.locked lists pack, so it is the required pack of every sandbox on this computer"
+	}
 	for _, name := range profiles {
-		if locked {
+		if lockedBy != "" {
 			break
 		}
 		if floor, err := TightenOpenShellAdmin(c.OpenShell.Admin, c.Guardrail.Profiles[name].Sandbox); err == nil && takes(floor) {
-			locked = true
+			lockedBy = fmt.Sprintf("guardrail.profiles[%q].sandbox.locked lists pack, so it is the required pack of that profile's sandboxes", name)
 		}
 	}
-	if !locked {
+	if lockedBy == "" {
 		return nil
 	}
 	if err := SandboxProfilePackCheck(c, "", pack, ""); err != nil {
-		return settingErrorAt("openshell.pack", fmt.Errorf(
-			"openshell.pack %q: openshell.admin.locked lists pack, so it is the required pack of every sandbox on this computer: %w", pack, err))
+		return settingErrorAt("openshell.pack", fmt.Errorf("openshell.pack %q: %s: %w", pack, lockedBy, err))
 	}
 	return nil
 }
