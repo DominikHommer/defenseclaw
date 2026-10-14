@@ -853,7 +853,12 @@ func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) 
 			if found < 0 {
 				break
 			}
-			end := start + found + len(".defenseclaw")
+			begin := start + found
+			end := begin + len(".defenseclaw")
+			if begin > 0 && !strings.ContainsRune("/\\\"'= \t([{,", rune(lower[begin-1])) {
+				start = end
+				continue
+			}
 			if end == len(lower) || strings.ContainsRune("/\\\"'", rune(lower[end])) {
 				return index + 1, "data-dir path"
 			}
