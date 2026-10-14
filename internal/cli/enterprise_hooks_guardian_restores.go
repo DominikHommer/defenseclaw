@@ -76,6 +76,16 @@ func (entry enterpriseHookGuardianRestore) key() string {
 	return ""
 }
 
+// enterpriseHookGuardianRestoreUserKey names a Linux or macOS target by
+// account name and connector, or "" without a name.
+func enterpriseHookGuardianRestoreUserKey(user, connectorName string) string {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return ""
+	}
+	return "user:" + user + "\x00" + strings.ToLower(strings.TrimSpace(connectorName))
+}
+
 // enterpriseHookGuardianRestoreRowKey keys a reconcile row like its entry.
 func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string {
 	entry := enterpriseHookGuardianRestore{SID: row.SID, Connector: row.Connector}
@@ -89,8 +99,14 @@ func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string 
 // recordEnterpriseHookGuardianRestores dates the targets this reconcile put
 // back (restored, from rows that verified before and were repaired) and
 // keeps the earlier entries of the other targets in rows. An entry whose
-// target left the manifest is dropped, so the record stays bounded. It is
-// best effort: a failed write is logged and changes nothing else.
+// target left the manifest is dropped, so the record stays bounded. A row
+// this pass could not resolve to a uid (a pending or failed identity lookup
+// on Linux or macOS, for example during a directory outage) still enrolls
+// its account's target, so its entry stays: dropping it lost the restore of
+// a still-running session for good, as later clean passes repair nothing
+// (GAP-0499). A row whose account identity changed (RevokeProtection) keeps
+// nothing: the old uid may belong to another account now. It is best
+// effort: a failed write is logged and changes nothing else.
 func recordEnterpriseHookGuardianRestores(
 	stderr io.Writer,
 	dataDir string,
@@ -103,9 +119,12 @@ func recordEnterpriseHookGuardianRestores(
 	}
 	path := filepath.Join(dataDir, hookGuardianRestoresFile)
 	enrolled := make(map[string]bool, len(rows))
+	unresolved := map[string]bool{}
 	for _, row := range rows {
 		if key := enterpriseHookGuardianRestoreRowKey(row); key != "" {
 			enrolled[key] = true
+		} else if key := enterpriseHookGuardianRestoreUserKey(row.User, row.Connector); key != "" && !row.RevokeProtection {
+			unresolved[key] = true
 		}
 	}
 	entries := map[string]enterpriseHookGuardianRestore{}
@@ -113,7 +132,7 @@ func recordEnterpriseHookGuardianRestores(
 	if record, err := readEnterpriseHookGuardianRestoreRecord(path); err == nil {
 		for _, entry := range record.Targets {
 			key := entry.key()
-			if key == "" || !enrolled[key] {
+			if key == "" || (!enrolled[key] && !unresolved[enterpriseHookGuardianRestoreUserKey(entry.User, entry.Connector)]) {
 				changed = true
 				continue
 			}
