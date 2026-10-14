@@ -1282,7 +1282,7 @@ func (c *managedSandboxController) confirmingView(v *sandboxapi.Sandbox) {
 		return
 	}
 	if r, ok := c.d.regs.get(v.Name); ok && registrationUnconfirmed(r) {
-		c.Manager.ConfirmingView(v, sandboxConfirmingNote)
+		c.ConfirmingView(v, sandboxConfirmingNote)
 	}
 }
 
