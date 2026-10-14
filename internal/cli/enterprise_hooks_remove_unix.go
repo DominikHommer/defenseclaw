@@ -506,7 +506,7 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 			if err != nil {
 				var rehomed *enterpriseHookTargetHomeChangedError
 				if errors.As(err, &rehomed) {
-					reason = enterpriseHookRehomedReportReason(err, rehomed)
+					reason = enterpriseHookRehomedReportReason(err)
 				} else {
 					reason = boundedString(err.Error(), 256)
 				}
@@ -518,22 +518,66 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 	return skip
 }
 
-// enterpriseHookRehomedReportReason keeps the full remedy before bounding a
-// long diagnostic. The ledger's generic 512-byte error limit can cut that
-// sentence when both home paths are long; remove-all shortens paths first.
-func enterpriseHookRehomedReportReason(err error, changed *enterpriseHookTargetHomeChangedError) string {
-	const maxReportReason = 768
+func init() {
+	enterpriseHookUserCleanupFailureText = func(err error) string {
+		var changed *enterpriseHookTargetHomeChangedError
+		var oldKept *enterpriseHookCleanupOldHomeKeptError
+		var unverified *enterpriseHookCleanupUnverifiedError
+		if errors.As(err, &changed) || errors.As(err, &oldKept) || errors.As(err, &unverified) {
+			return enterpriseHookRehomeFailureText(err, enterpriseHookUserCleanupErrorMax)
+		}
+		return boundedEnterpriseHookUserCleanupText(err.Error())
+	}
+}
+
+// enterpriseHookRehomedReportReason and the ledger formatter share path
+// shortening. Short errors preserve their prior bytes.
+func enterpriseHookRehomedReportReason(err error) string {
+	return enterpriseHookRehomeFailureText(err, 768)
+}
+
+func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	raw := err.Error()
 	if len(raw) <= enterpriseHookUserCleanupErrorMax {
 		return boundedEnterpriseHookUserCleanupText(raw)
 	}
-	homes := []string{changed.home, changed.directoryHome}
-	if len(homes[1]) > len(homes[0]) {
-		homes[0], homes[1] = homes[1], homes[0]
+	var paths []string
+	var changed *enterpriseHookTargetHomeChangedError
+	if errors.As(err, &changed) {
+		paths = append(paths, changed.home, changed.directoryHome)
 	}
-	for _, home := range homes {
-		if home != "" && filepath.IsAbs(home) {
-			raw = strings.ReplaceAll(raw, home, shortEnterpriseHookReportPath(home))
+	var oldKept *enterpriseHookCleanupOldHomeKeptError
+	if errors.As(err, &oldKept) {
+		paths = append(paths, oldKept.home, oldKept.currentHome)
+		if maxBytes == enterpriseHookUserCleanupErrorMax {
+			reason := strings.ReplaceAll(oldKept.reason, oldKept.home, "the recorded home")
+			raw = fmt.Sprintf("enterprise hooks: old home %s for %q untrusted (%s); new home %s cleaned; remove %s entries in old home, delete it if unused, or fix owner/permissions and rerun",
+				oldKept.home, oldKept.name, reason, oldKept.currentHome, oldKept.connector)
+		}
+	}
+	var unverified *enterpriseHookCleanupUnverifiedError
+	keepConfigPath := ""
+	if errors.As(err, &unverified) {
+		paths = append(paths, unverified.path, unverified.dataDir, unverified.home, unverified.configPath)
+		if len(unverified.configPath) <= 180 {
+			keepConfigPath = unverified.configPath
+		}
+		if maxBytes == enterpriseHookUserCleanupErrorMax {
+			receiptDir := filepath.Join(unverified.dataDir, "connector_backups", unverified.connector) + string(filepath.Separator)
+			raw = fmt.Sprintf("enterprise hooks: cleanup report unverified at %s (%s); remove DefenseClaw's entries from that agent's config at %s, delete the stale copied receipt under %s if it keeps naming the other home, and rerun",
+				unverified.path, boundedString(unverified.reason, 96), unverified.configPath, receiptDir)
+		}
+		if keepConfigPath != "" {
+			raw = strings.Replace(raw, "config at "+keepConfigPath, "config at <current-config-path>", 1)
+		}
+	}
+	if oldKept != nil && unverified == nil && len(raw) <= maxBytes {
+		return raw
+	}
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, path := range paths {
+		if path != "" && filepath.IsAbs(path) {
+			raw = strings.ReplaceAll(raw, path, shortEnterpriseHookReportPath(path))
 		}
 	}
 	// A worker or home check can add another absolute config path to the
@@ -546,23 +590,40 @@ func enterpriseHookRehomedReportReason(err error, changed *enterpriseHookTargetH
 		}
 	}
 	raw = strings.Join(words, " ")
-	if len(raw) <= maxReportReason {
+	if keepConfigPath != "" {
+		raw = strings.Replace(raw, "<current-config-path>", keepConfigPath, 1)
+	}
+	if len(raw) <= maxBytes {
 		return raw
 	}
 	// The clearing instruction precedes "current home check". Only the
 	// trailing reason may be clipped after all paths have been shortened.
 	const reasonSeparator = "; current home check: "
-	if index := strings.Index(raw, reasonSeparator); index >= 0 && index+len(reasonSeparator) < maxReportReason {
-		end := maxReportReason - 3
+	if index := strings.Index(raw, reasonSeparator); index >= 0 && index+len(reasonSeparator) < maxBytes {
+		end := maxBytes - 3
 		for end > 0 && !utf8.RuneStart(raw[end]) {
 			end--
 		}
 		return raw[:end] + "..."
 	}
+	for _, marker := range []string{"; remove DefenseClaw's entries", "; remove the entries"} {
+		if index := strings.Index(raw, marker); index >= 0 {
+			remedy := raw[index:]
+			if len(remedy)+3 < maxBytes {
+				end := maxBytes - len(remedy) - 3
+				for end > 0 && !utf8.RuneStart(raw[end]) {
+					end--
+				}
+				if end < index {
+					return raw[:end] + "..." + remedy
+				}
+			}
+		}
+	}
 	// Other re-home failures put their remedy at the end. Preserve that
 	// ending as well as the target named at the start.
 	const gap = " ... "
-	head, tail := (maxReportReason-len(gap))/2, len(raw)-(maxReportReason-len(gap))/2
+	head, tail := (maxBytes-len(gap))/2, len(raw)-(maxBytes-len(gap))/2
 	for head > 0 && !utf8.RuneStart(raw[head]) {
 		head--
 	}

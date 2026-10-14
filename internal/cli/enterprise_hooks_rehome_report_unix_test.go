@@ -6,7 +6,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,12 +16,101 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func longRehomeReportTestPath(name string) string {
 	return filepath.Join("/tmp", strings.Repeat("a", 55), strings.Repeat("b", 55),
 		strings.Repeat("c", 55), strings.Repeat("d", 55), strings.Repeat(name, 8))
+}
+
+func TestGuardianRehomeLedgerAndWarningKeepLongHomeRemedy(t *testing.T) {
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	oldHome, currentHome := longRehomeReportTestPath("old"), longRehomeReportTestPath("new")
+	resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: 31415, GID: 31415, Home: currentHome}
+	entry := enterpriseHookUserCleanup{Connector: "opencode", User: "sample-user", UID: 31415,
+		UserHome: oldHome, DataDir: filepath.Join(oldHome, ".defenseclaw")}
+	now := time.Now()
+	if err := saveEnterpriseHookUserCleanups(f.dataDir, []enterpriseHookUserCleanup{entry}, now); err != nil {
+		t.Fatal(err)
+	}
+	f.writeManifest(t)
+	manifest, err := enterprisehooks.LoadManifest(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	if err := reconcileEnterpriseHookStandaloneUnixCleanups(context.Background(), &log, manifest,
+		enterpriseHookUnixBindings{Bindings: map[string]enterpriseHookUnixBinding{}}, nil, resolver, now); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
+	const remedy = "fix the account's home to an existing account-owned directory without symlinks or group/other write, or remove the account, then rerun"
+	if err != nil || len(remaining) != 1 || len(remaining[0].LastError) > enterpriseHookUserCleanupErrorMax ||
+		!strings.Contains(remaining[0].LastError, remedy) || !strings.Contains(log.String(), remedy) ||
+		!strings.Contains(remaining[0].LastError, "/.../") {
+		t.Fatalf("long-home ledger or warning lost remedy: remaining %+v, %v, log %q", remaining, err, log.String())
+	}
+}
+
+func TestUserCleanupOtherFailureTextIsByteIdentical(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "nil"},
+		{name: "short", err: errors.New("agent config remains")},
+		{name: "whitespace", err: errors.New("agent\n config\t remains")},
+		{name: "long", err: errors.New(strings.Repeat("x", 600))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entry := enterpriseHookUserCleanup{Connector: "hermes", User: "sample-user", UID: 1001}
+			remaining, result := runEnterpriseHookUserCleanups(context.Background(), []enterpriseHookUserCleanup{entry},
+				func(context.Context, enterpriseHookUserCleanup) (enterpriseHookUserCleanupOutcome, error) {
+					return enterpriseHookUserCleanupFailed, test.err
+				}, time.Now())
+			want := "cleanup failed"
+			if test.err != nil {
+				want = test.err.Error()
+			}
+			want = boundedEnterpriseHookUserCleanupText(want)
+			if len(remaining) != 1 || remaining[0].LastError != want ||
+				len(result.Failed) != 1 || result.Failed[0] != "hermes/sample-user: "+want {
+				t.Fatalf("non-rehome failure changed: remaining %+v, result %+v, want %q", remaining, result, want)
+			}
+		})
+	}
+}
+
+func TestTypedRehomeFailuresKeepTheirRemediesWithLongHomes(t *testing.T) {
+	oldHome, currentHome := longRehomeReportTestPath("old"), longRehomeReportTestPath("new")
+	changed := &enterpriseHookTargetHomeChangedError{name: "sample-user", home: oldHome, directoryHome: currentHome}
+	for _, test := range []struct {
+		name, remedy string
+		err          error
+	}{
+		{name: "home changed", err: enterpriseHookRehomedCleanupError(changed, "current home is unavailable"),
+			remedy: "fix the account's home to an existing account-owned directory without symlinks or group/other write, or remove the account, then rerun"},
+		{name: "old home kept", err: &enterpriseHookCleanupOldHomeKeptError{name: "sample-user", connector: "opencode",
+			home: oldHome, currentHome: currentHome, reason: "owner cannot be verified"},
+			remedy: "fix owner/permissions and rerun"},
+		{name: "unverified current home", err: &enterpriseHookCleanupUnverifiedError{changed: changed, connector: "opencode",
+			home: currentHome, dataDir: filepath.Join(currentHome, ".defenseclaw"),
+			path:       filepath.Join(currentHome, ".config", "opencode", "plugins", "defenseclaw.js"),
+			configPath: filepath.Join(currentHome, ".config", "opencode", "plugins", "defenseclaw.js"),
+			reason:     "DefenseClaw entries remain"},
+			remedy: "delete the stale copied receipt under"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := enterpriseHookUserCleanupFailureText(test.err)
+			if len(got) > enterpriseHookUserCleanupErrorMax || !strings.Contains(got, test.remedy) ||
+				!strings.Contains(got, "rerun") {
+				t.Fatalf("typed failure lost bounded remedy: %d bytes, %q", len(got), got)
+			}
+		})
+	}
 }
 
 func TestRemoveAllRehomeReportKeepsTheFullRemedyWithLongHomes(t *testing.T) {
