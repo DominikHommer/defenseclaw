@@ -120,6 +120,10 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 				if uid, _, err := kept.env.OwnerOf(kept.env.openshellKeptStatePath()); err != nil || uid != 0 {
 					t.Errorf("kept record owner = %d, %v", uid, err)
 				}
+				if !containsLine(uninstall.Changes, "removed the machine state: ") ||
+					!strings.Contains(strings.Join(uninstall.Changes, "\n"), "except the record of the sandbox setup the kept sandboxes were made under") {
+					t.Errorf("uninstall summary omitted the kept record: %v", uninstall.Changes)
+				}
 				kept.ops.stops = nil
 				reactivated := ensureKeptHost(t, kept, tc.settings)
 				requireOK(t, reactivated)
@@ -183,7 +187,13 @@ func TestKeptOpenShellSetupUninstallModes(t *testing.T) {
 			noSandbox := keptDockerHost(t, goos, false)
 			r := noSandbox.run(Options{Action: ActionUninstall})
 			requireOK(t, r)
-			if physicalExists(noSandbox.env.openshellStatePath()) || physicalExists(noSandbox.env.openshellKeptStatePath()) {
+			layout := noSandbox.env.Layout
+			wantSummary := "removed the machine state: the managed config and secrets (" + layout.ConfigDir + "), the gateway and guardian state (" + layout.DataDir + ", " + layout.GuardianAuthDir + "), the logs (" + layout.LogDir + "), the lifecycle state (" + layout.LifecycleDir + ") and the service account " + layout.ServiceUser
+			if !containsLine(r.Changes, wantSummary) {
+				t.Errorf("no-sandbox summary changed: %v", r.Changes)
+			}
+			if physicalExists(noSandbox.env.openshellStatePath()) || physicalExists(noSandbox.env.openshellKeptStatePath()) ||
+				strings.Contains(strings.Join(r.Changes, "\n"), "record of the sandbox setup the kept sandboxes") {
 				t.Errorf("no-sandbox uninstall kept a setup record: %v", r.Changes)
 			}
 			reactivated := ensureKeptHost(t, noSandbox, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
@@ -220,8 +230,9 @@ func TestKeptOpenShellSetupUninstallModes(t *testing.T) {
 			keepState := keptDockerHost(t, goos, true)
 			r = keepState.run(Options{Action: ActionUninstall, KeepState: true})
 			requireOK(t, r)
-			if !physicalExists(keepState.env.openshellKeptStatePath()) || physicalExists(keepState.env.openshellStatePath()) {
-				t.Errorf("--keep-state lost the kept setup record")
+			if !physicalExists(keepState.env.openshellKeptStatePath()) || physicalExists(keepState.env.openshellStatePath()) ||
+				!strings.Contains(strings.Join(r.Changes, "\n"), "kept the record of the sandbox setup") {
+				t.Errorf("--keep-state lost or omitted the kept setup record: %v", r.Changes)
 			}
 		})
 	}
