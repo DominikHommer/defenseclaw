@@ -107,7 +107,29 @@ func (a *App) accountOutage(ctx context.Context, err error) error {
 	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
 		return errors.New("your account can't be looked up on this computer right now (ssh found no user for it); try again in a moment")
 	}
-	return errors.New(sandboxapi.AccountUnknownText + " " + sandboxapi.AccessContact(a.managedFacts(ctx).RequestAccess))
+	return errors.New(sandboxapi.AccountUnknownText + " " + accountOutageNote + " " + accountOutageContact(a.managedFacts(ctx).RequestAccess))
+}
+
+// accountOutageNote is why a managed run stops while the computer can't look
+// the account up, although `sandbox policy explain` shows the organization's
+// default policy (provisional) for it: OpenShell reaches every sandbox over
+// ssh as the account, and ssh refuses an account the computer does not know
+// (SSSD stopped, or no cached entry). The refusal is not the policy, so it
+// does not ask for a policy exception (GAP-0505).
+const accountOutageNote = "Until it can, a new sandbox can't start and `sandbox connect` and `sandbox exec` can't reach a running one; " +
+	"agents already running keep working. This isn't your organization's sandbox policy."
+
+// accountOutageContact is the closing sentence of the account outage refusal:
+// whom to tell when it lasts.
+func accountOutageContact(contact string) string {
+	text := sandboxapi.RequestAccessText(contact)
+	if text == sandboxapi.RequestAccessFallback {
+		return "If it lasts, " + text + "."
+	}
+	if !strings.HasSuffix(text, ".") {
+		text += "."
+	}
+	return "If it lasts, tell IT: " + text
 }
 
 // checkAccount stops a managed run at its start when the account cannot be
