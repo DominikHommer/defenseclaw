@@ -1,16 +1,17 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// The hook tables use POSIX homes and paths; the conflict check itself is
-// platform-neutral (TestConflictingToolArgumentKeysScope).
+// The hook and proxy tables use POSIX homes, paths and commands; the
+// conflict check itself is platform-neutral
+// (conflicting_tool_argument_keys_scope_test.go).
 
 //go:build !windows
 
 package gateway
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,7 +19,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -33,6 +33,10 @@ type conflictingKeysCase struct {
 	block bool
 	rules []string
 }
+
+// conflictingKeysControl names a control row: a call with one key for each
+// argument, which must not name the conflict.
+const conflictingKeysControl = "/control/"
 
 func conflictingKeysQuote(value string) string {
 	raw, _ := json.Marshal(value)
@@ -62,16 +66,34 @@ func conflictingKeysHome(t *testing.T) (home, project string) {
 func conflictingKeysHook(t *testing.T, mode, connector, tool, home, project, args string) map[string]any {
 	t.Helper()
 	var payload map[string]any
-	if connector == "opencode" {
+	input := json.RawMessage(args)
+	switch connector {
+	case "opencode":
 		payload = map[string]any{
-			"hook_event_name": "tool.execute.before", "tool_name": tool, "tool_input": json.RawMessage(args),
+			"hook_event_name": "tool.execute.before", "tool_name": tool, "tool_input": input,
 			"session_id": "s-conflicting-keys", "turn_id": "m1", "tool_call_id": "c1", "agent_name": "build",
 			"cwd": project, "arguments_authoritative": true, "mcp_identity_status": "not_mcp",
 		}
-	} else {
+	case "devin":
+		payload = map[string]any{
+			"hook_event_name": "PreToolUse", "session_id": "s-conflicting-keys", "prompt_id": "p1",
+			"cwd": project, "tool_name": tool, "tool_input": input,
+		}
+	case "kiro":
+		payload = map[string]any{
+			"hook_event_name": "preToolUse", "session_id": "s-conflicting-keys",
+			"cwd": project, "tool_name": tool, "tool_input": input,
+		}
+	case "hermes":
+		payload = map[string]any{
+			"hook_event_name": "pre_tool_call", "session_id": "20260929_1", "cwd": project,
+			"tool_name": tool, "tool_input": input,
+			"extra": map[string]any{"tool_call_id": "call_1", "task_id": "t1"},
+		}
+	default:
 		payload = map[string]any{
 			"hook_event_name": "PreToolUse", "session_id": "s-conflicting-keys", "turn_id": "t1",
-			"cwd": project, "tool_name": tool, "tool_input": json.RawMessage(args), "tool_use_id": "u1",
+			"cwd": project, "tool_name": tool, "tool_input": input, "tool_use_id": "u1",
 		}
 	}
 	body, err := json.Marshal(payload)
@@ -138,6 +160,7 @@ func conflictingKeysCases() []conflictingKeysCase {
 				shell("ls -la", `,"`+harness.key+`":"true"`), true, []string{conflictingToolArgumentsRuleID}},
 		)
 	}
+	cases = append(cases, conflictingKeysProjectedAndAliasCases()...)
 	return append(cases,
 		conflictingKeysCase{"opencode/write/keys/alone", "opencode", "write",
 			func(h, _ string) string { return `{"filePath":` + keys(h) + `,"content":"# k"}` }, true, nil},
@@ -171,6 +194,69 @@ func conflictingKeysCases() []conflictingKeysCase {
 	)
 }
 
+// conflictingKeysProjectedAndAliasCases are the shell calls whose second
+// key names an argument the connector projection takes out (workdir,
+// working_dir, timeout, description, summary), or whose second key is one
+// ActionFacts reads as the same field (cmd, script). Each blocks with the
+// command's rule and the conflict; the same calls with one key keep their
+// verdicts.
+func conflictingKeysProjectedAndAliasCases() []conflictingKeysCase {
+	wipe := "rm -rf ~/"
+	shell := func(cmd string, extra ...string) func(string, string) string {
+		return func(_, project string) string {
+			args := `{"command":` + conflictingKeysQuote(cmd)
+			for _, member := range extra {
+				args += "," + strings.ReplaceAll(member, "{PROJ}", project)
+			}
+			return args + "}"
+		}
+	}
+	blocked := []string{"CMD-RM-RF", conflictingToolArgumentsRuleID}
+	var cases []conflictingKeysCase
+	add := func(name, connector, tool string, args func(string, string) string) {
+		cases = append(cases, conflictingKeysCase{connector + "/" + name, connector, tool, args, true, blocked})
+	}
+	control := func(name, connector, tool string, args func(string, string) string, block bool) {
+		var rules []string
+		if block {
+			rules = []string{"CMD-RM-RF"}
+		}
+		cases = append(cases, conflictingKeysCase{connector + conflictingKeysControl + name, connector, tool, args, block, rules})
+	}
+	// A case twin of an argument the projection takes out.
+	add("workdir+Workdir", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"{PROJ}"`))
+	add("workdir+WORKDIR", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"WORKDIR":"{PROJ}"`))
+	add("workdir+Workdir-other", "opencode", "bash", shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
+	add("working_dir+Working_dir", "kiro", "execute_bash", shell(wipe, `"working_dir":"{PROJ}"`, `"Working_dir":"{PROJ}"`))
+	add("description+Description", "kiro", "execute_bash", shell(wipe, `"description":"d"`, `"Description":"d"`))
+	add("timeout+Timeout", "kiro", "execute_bash", shell(wipe, `"timeout":5000`, `"Timeout":5000`))
+	add("summary+Summary", "kiro", "execute_bash", shell(wipe, `"summary":"s"`, `"Summary":"s"`))
+	for _, harness := range []struct{ connector, tool string }{{"hermes", "terminal"}, {"devin", "exec"}} {
+		add("timeout+Timeout", harness.connector, harness.tool, shell(wipe, `"timeout":5000`, `"Timeout":5000`))
+		add("workdir+Workdir-other", harness.connector, harness.tool, shell(wipe, `"workdir":"{PROJ}"`, `"Workdir":"/tmp"`))
+	}
+	// A second key ActionFacts reads as the command.
+	for _, harness := range []struct{ connector, tool, workdir string }{
+		{"devin", "exec", "workdir"}, {"kiro", "execute_bash", "working_dir"}, {"hermes", "terminal", "workdir"},
+		{"opencode", "bash", "workdir"}, {"claudecode", "Bash", ""},
+	} {
+		add("command+cmd", harness.connector, harness.tool, shell(wipe, `"cmd":"true"`))
+		add("command+cmd-value", harness.connector, harness.tool, shell("true", `"cmd":`+conflictingKeysQuote(wipe)))
+		add("command+script", harness.connector, harness.tool, shell(wipe, `"script":"true"`))
+		control("alone", harness.connector, harness.tool, shell(wipe), true)
+		control("benign", harness.connector, harness.tool, shell("ls -la"), false)
+		if harness.workdir != "" {
+			control(harness.workdir, harness.connector, harness.tool, shell(wipe, `"`+harness.workdir+`":"{PROJ}"`), true)
+			control("benign-"+harness.workdir, harness.connector, harness.tool,
+				shell("ls -la", `"`+harness.workdir+`":"{PROJ}"`), false)
+		}
+	}
+	for _, harness := range []struct{ connector, tool string }{{"kiro", "execute_bash"}, {"hermes", "terminal"}, {"devin", "exec"}} {
+		control("timeout", harness.connector, harness.tool, shell(wipe, `"timeout":5000`), true)
+	}
+	return cases
+}
+
 // TestConflictingToolArgumentKeysBlockInActionMode pins GAP-0678: a shell
 // or file-write tool call with a second key for one argument (a letter-case
 // variant, or a second file target key) is blocked and every value is
@@ -189,8 +275,8 @@ func TestConflictingToolArgumentKeysBlockInActionMode(t *testing.T) {
 					t.Errorf("response does not name %s: %.800s", rule, raw)
 				}
 			}
-			if !c.block && strings.Contains(string(raw), conflictingToolArgumentsRuleID) {
-				t.Errorf("benign call names %s: %.800s", conflictingToolArgumentsRuleID, raw)
+			if (!c.block || strings.Contains(c.name, conflictingKeysControl)) && strings.Contains(string(raw), conflictingToolArgumentsRuleID) {
+				t.Errorf("control call names %s: %.800s", conflictingToolArgumentsRuleID, raw)
 			}
 		})
 	}
@@ -208,56 +294,100 @@ func TestConflictingToolArgumentKeysWouldBlockInObserveMode(t *testing.T) {
 	}
 }
 
-// TestConflictingToolArgumentKeysScope pins which calls the conflict check
-// covers: only ambiguous calls whose candidates are complete analyses, and
-// the conservative block only for shell and file-write calls.
-func TestConflictingToolArgumentKeysScope(t *testing.T) {
-	for _, c := range []struct {
-		name         string
-		input        actionfacts.Input
-		applies      bool
-		shellOrWrite bool
-		candidates   int
-	}{
-		{"bash case variant", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"true"}`)}, true, true, 4},
-		{"write target keys", actionfacts.Input{Tool: "Write", Args: json.RawMessage(`{"file_path":"/w/a","content":"x","path":"/w/b"}`)}, true, true, 4},
-		{"read target keys", actionfacts.Input{Tool: "Read", Args: json.RawMessage(`{"file_path":"/w/a","path":"/w/b"}`)}, true, false, 4},
-		// The closed shell contract reads the second key as unknown even
-		// when it repeats the value; the call is judged and blocked as well.
-		{"same value twice", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"ls"}`)}, true, true, 2},
-		{"same value twice, generic tool", actionfacts.Input{Tool: "shell", Args: json.RawMessage(`{"command":"ls","Command":"ls"}`)}, false, false, 0},
-		{"single key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`)}, false, false, 0},
-		{"other unknown key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","shell":"x"}`)}, false, false, 0},
-		{"case variant and unknown key", actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"true","shell":"x"}`)}, false, false, 0},
-		{"unreviewed tool", actionfacts.Input{Tool: "github.create_issue", Args: json.RawMessage(`{"title":"a","Title":"b"}`)}, false, false, 0},
-		{"explicit command", actionfacts.Input{Tool: "Bash", Command: "ls", Args: json.RawMessage(`{"command":"ls","Command":"true"}`)}, false, false, 0},
-	} {
+// TestConflictingToolArgumentKeysProxyRawArguments pins GAP-0678 on the LLM
+// proxy, where a model's tool call arguments reach the gateway as raw JSON:
+// a command or write target named twice, under one key or under two keys
+// ActionFacts reads as one, is judged on every value and blocked. A key
+// repeated with the same value keeps its verdict.
+func TestConflictingToolArgumentKeysProxyRawArguments(t *testing.T) {
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	wipe := conflictingKeysQuote("rm -rf /")
+	type proxyCase struct {
+		name, tool, args string
+		block            bool
+		rules            []string
+		noConflict       bool
+	}
+	var cases []proxyCase
+	for _, tool := range []string{"bash", "exec", "shell", "run_shell_command"} {
+		blocked := []string{"CMD-RM-RF", conflictingToolArgumentsRuleID}
+		cases = append(cases,
+			proxyCase{tool + "/alone", tool, `{"command":` + wipe + `}`, true, []string{"CMD-RM-RF"}, true},
+			proxyCase{tool + "/command-twice-last", tool, `{"command":"true","command":` + wipe + `}`, true, blocked, false},
+			proxyCase{tool + "/command-twice-first", tool, `{"command":` + wipe + `,"command":"true"}`, true, blocked, false},
+			proxyCase{tool + "/Command", tool, `{"command":` + wipe + `,"Command":"true"}`, true, blocked, false},
+			proxyCase{tool + "/cmd", tool, `{"command":` + wipe + `,"cmd":"true"}`, true, blocked, false},
+			proxyCase{tool + "/cmd-value", tool, `{"command":"true","cmd":` + wipe + `}`, true, blocked, false},
+			proxyCase{tool + "/script-value", tool, `{"command":"true","script":` + wipe + `}`, true, blocked, false},
+			proxyCase{tool + "/benign-twice-same", tool, `{"command":"ls","command":"ls"}`, false, nil, true},
+		)
+	}
+	keys := []string{"persistence.ssh_authorized_keys_command", conflictingToolArgumentsRuleID}
+	cases = append(cases,
+		proxyCase{"write_file/alone", "write_file", `{"path":"/root/.ssh/authorized_keys","content":"ssh-ed25519 AAAA x"}`,
+			true, []string{"persistence.ssh_authorized_keys_command"}, true},
+		proxyCase{"write_file/path-twice-last", "write_file",
+			`{"path":"/tmp/a","content":"ssh-ed25519 AAAA x","path":"/root/.ssh/authorized_keys"}`, true, keys, false},
+		proxyCase{"write_file/path-twice-first", "write_file",
+			`{"path":"/root/.ssh/authorized_keys","content":"ssh-ed25519 AAAA x","path":"/tmp/a"}`, true, keys, false},
+		proxyCase{"write_file/path+file_path", "write_file",
+			`{"path":"/tmp/a","content":"ssh-ed25519 AAAA x","file_path":"/root/.ssh/authorized_keys"}`, true, keys, false},
+		proxyCase{"write_file/benign-twice-same", "write_file",
+			`{"path":"/tmp/a","content":"x","path":"/tmp/a"}`, false, nil, true},
+		proxyCase{"write_file/unreviewed-twice", "write_file",
+			`{"path":"/tmp/a","content":"x","note":"a","note":"b"}`, false, nil, true},
+	)
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			conflict, ok := conflictingToolArgumentKeys(c.input, actionfacts.Analyze(c.input))
-			if ok != c.applies || conflict.shellOrWrite != c.shellOrWrite || (ok && len(conflict.candidates) != c.candidates) {
-				t.Fatalf("applies=%t shellOrWrite=%t candidates=%d, want %t %t %d (status %s)",
-					ok, conflict.shellOrWrite, len(conflict.candidates), c.applies, c.shellOrWrite, c.candidates,
-					actionfacts.Analyze(c.input).Parse.Status)
+			calls, err := json.Marshal([]map[string]any{{"id": "c1", "type": "function",
+				"function": map[string]any{"name": c.tool, "arguments": c.args}}})
+			if err != nil {
+				t.Fatal(err)
 			}
-			for _, candidate := range conflict.candidates {
-				if _, again := conflictingToolArgumentKeys(candidate, actionfacts.Analyze(candidate)); again {
-					t.Fatalf("candidate %s still conflicts", candidate.Args)
+			verdict := proxy.inspectToolCalls(context.Background(), calls)
+			blocked := verdict != nil && verdict.Action == "block"
+			var findings string
+			if verdict != nil {
+				findings = strings.Join(verdict.Findings, " | ")
+			}
+			if blocked != c.block {
+				t.Fatalf("blocked = %t, want %t: %+v", blocked, c.block, verdict)
+			}
+			for _, rule := range c.rules {
+				if !strings.Contains(findings, rule) {
+					t.Errorf("findings do not name %s: %s", rule, findings)
 				}
+			}
+			if c.noConflict && strings.Contains(findings, conflictingToolArgumentsRuleID) {
+				t.Errorf("control call names %s: %s", conflictingToolArgumentsRuleID, findings)
 			}
 		})
 	}
 }
 
-func TestConflictingToolArgumentKeysBoundsCandidates(t *testing.T) {
-	var fields []string
-	for i := range 6 {
-		fields = append(fields, fmt.Sprintf(`"k%d":"a","K%d":"b"`, i, i))
-	}
-	input := actionfacts.Input{Tool: "Bash", Args: json.RawMessage(`{"command":"ls","Command":"true",` + strings.Join(fields, ",") + `}`)}
-	facts := actionfacts.Analyze(input)
-	facts.Parse.Status, facts.Parse.Issues = actionfacts.StatusAmbiguous, []actionfacts.IssueCode{actionfacts.IssueConflictingSources}
-	conflict, _ := conflictingToolArgumentKeys(input, facts)
-	if n := len(conflict.candidates); n == 0 || n > maxConflictingToolArgumentCandidates {
-		t.Fatalf("candidates = %d, want 1..%d", n, maxConflictingToolArgumentCandidates)
+// TestConflictingToolArgumentKeysInspectToolProjection pins GAP-0678 on
+// /api/v1/inspect/tool, where OpenClaw's exec controls are projected out: a
+// case twin of a projected control is a conflict, and the same call with
+// one key keeps its verdict.
+func TestConflictingToolArgumentKeysInspectToolProjection(t *testing.T) {
+	api := testAPIServerWithConfig(t, "action")
+	for _, c := range []struct {
+		name, args string
+		conflict   bool
+	}{
+		{"alone", `{"command":"rm -rf /","timeout":5}`, false},
+		{"timeout+Timeout", `{"command":"rm -rf /","timeout":5,"Timeout":5}`, true},
+		{"workdir+Workdir", `{"command":"rm -rf /","workdir":"/srv","Workdir":"/tmp"}`, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			verdict := api.inspectToolPolicy(&ToolInspectRequest{
+				Tool: "exec", Args: json.RawMessage(c.args), Direction: "tool_call", Connector: "openclaw",
+			})
+			findings := strings.Join(verdict.Findings, " | ")
+			if verdict.Action != "block" || !strings.Contains(findings, "CMD-RM-RF") ||
+				strings.Contains(findings, conflictingToolArgumentsRuleID) != c.conflict {
+				t.Fatalf("action %s findings %s, want block with CMD-RM-RF (conflict %t)", verdict.Action, findings, c.conflict)
+			}
+		})
 	}
 }
