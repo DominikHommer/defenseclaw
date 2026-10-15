@@ -1118,7 +1118,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		p.payload.CompilerSource, p.payload.CompilerSHA = compiler, digest
 		if p.payload.CompilerSHA == "" {
-			return nil, &codedError{code: codePayload, err: fmt.Errorf("Fleet is enabled but the managed payload has no %s; provide a release payload or package with the Fleet compiler", compilerFileName)}
+			return nil, &codedError{code: codePayload, err: fmt.Errorf("fleet.enabled is set but the managed payload has no %s; provide a release payload or package with the Fleet compiler", compilerFileName)}
 		}
 		if record != nil && record.Files[compilerPath] != "" && record.Files[compilerPath] != digest &&
 			l.opts.Reason != "package" && p.payload.Version == record.ProductVersion {
