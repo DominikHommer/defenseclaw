@@ -18,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -84,6 +85,17 @@ var (
 // a protected target (want) or a project file.
 func overLimitRow(benign map[string]bool, name string, want bool) bool { return want || benign[name] }
 
+// overLimitNotUnverified fails a row whose verdict is the conservative block
+// of a call whose targets cannot be read: a row whose targets the reduction
+// reads is judged by the rules themselves, and that block would hide a
+// broken reduction.
+func overLimitNotUnverified(t *testing.T, got string) {
+	t.Helper()
+	if strings.Contains(got, overLimitUnverifiedWriteTitle) {
+		t.Fatalf("conservative block of an unread target, not the rule verdict: %.600s", got)
+	}
+}
+
 func overLimitHostHook(t *testing.T, connector, home, body string) string {
 	t.Helper()
 	cfg := &config.Config{}
@@ -125,6 +137,7 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 				if blocked := nativeWriteBlocked(t, got); blocked != want {
 					t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
 				}
+				overLimitNotUnverified(t, got)
 			})
 		}
 	}
@@ -138,6 +151,7 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 				if blocked := hermesPatchVerdict(t, got); blocked != want {
 					t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
 				}
+				overLimitNotUnverified(t, got)
 			})
 		}
 	}
@@ -178,6 +192,7 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T)
 				if got := nativeWriteBlocked(t, string(raw)); got != want {
 					t.Fatalf("blocked = %t, want %t: %.600s", got, want, raw)
 				}
+				overLimitNotUnverified(t, string(raw))
 			})
 		}
 	}
@@ -193,6 +208,7 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T)
 				if got := hermesPatchVerdict(t, string(raw)); got != want {
 					t.Fatalf("blocked = %t, want %t: %.600s", got, want, raw)
 				}
+				overLimitNotUnverified(t, string(raw))
 			})
 		}
 	}
@@ -216,7 +232,7 @@ func TestOverLimitWriteToolCallsWithUnreadableTargets(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := overLimitHostHook(t, "claudecode", home, body("Write", args))
-			if !nativeWriteBlocked(t, got) || !strings.Contains(got, "too large or malformed") {
+			if !nativeWriteBlocked(t, got) || !strings.Contains(got, overLimitUnverifiedWriteTitle) {
 				t.Fatalf("verdict = %.600s", got)
 			}
 		})
@@ -229,6 +245,111 @@ func TestOverLimitWriteToolCallsWithUnreadableTargets(t *testing.T) {
 			got := overLimitHostHook(t, "claudecode", home, body(call[0].(string), call[1].(map[string]any)))
 			if nativeWriteBlocked(t, got) {
 				t.Fatalf("blocked: %.600s", got)
+			}
+		})
+	}
+}
+
+// overLimitPathRuleRows are the protected targets of
+// TestOverLimitNativeWritesKeepTheirPathRules, with the rule and the action
+// of the same call under the limit.
+func overLimitPathRuleRows(home string) []struct{ target, rule, action string } {
+	return []struct{ target, rule, action string }{
+		{"/etc/shadow", "PATH-ETC-SHADOW", "block"},
+		{filepath.Join(home, ".ssh", "id_ed25519"), "PATH-SSH-DIR", "alert"},
+	}
+}
+
+func overLimitHookAction(t *testing.T, got string) string {
+	t.Helper()
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(got), &resp); err != nil {
+		t.Fatalf("verdict %q: %v", got, err)
+	}
+	action, _ := resp["action"].(string)
+	return action
+}
+
+// TestOverLimitNativeWritesKeepTheirPathRules pins that the path rules judge
+// the target of a write tool call over the argument limit as they judge the
+// same call under it: Claude Code Write, OpenCode write and Hermes
+// write_file of /etc/shadow are blocked by PATH-ETC-SHADOW and of an SSH
+// private key alert with PATH-SSH-DIR, and a project file whose large text
+// names those paths stays allowed with neither rule. Over the limit, the
+// recovery lanes and the context checks read facts that name no target, so
+// those calls were allowed with no rule (GAP-0674).
+func TestOverLimitNativeWritesKeepTheirPathRules(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	shapes := map[string]func(target string) string{}
+	for i, call := range overLimitNativeWriteCalls() {
+		if name := call.name(i); name == "claudecode-Write-0" || name == "opencode-write-4" {
+			shapes[name] = func(target string) string {
+				return overLimitHostHook(t, call.connector, home, call.body(t, project, target))
+			}
+		}
+	}
+	writeFile := overLimitHermesCalls()[0]
+	shapes["hermes-"+writeFile.name] = func(target string) string {
+		return hermesPatchHostHook(t, home, project, hermesPatchBody(t, project, writeFile.tool, writeFile.args(target)))
+	}
+	if len(shapes) != 3 {
+		t.Fatalf("shapes = %d, want 3", len(shapes))
+	}
+	for name, hook := range shapes {
+		for _, row := range overLimitPathRuleRows(home) {
+			t.Run(name+"/"+filepath.Base(row.target), func(t *testing.T) {
+				got := hook(row.target)
+				if action := overLimitHookAction(t, got); action != row.action || !strings.Contains(got, row.rule) {
+					t.Fatalf("action = %q, want %q with %s: %.600s", action, row.action, row.rule, got)
+				}
+				overLimitNotUnverified(t, got)
+			})
+		}
+	}
+	t.Run("project doc naming protected paths", func(t *testing.T) {
+		doc := "see /etc/shadow, ~/.ssh/authorized_keys and ~/.ssh/id_ed25519\n" + overLimitWriteText
+		call := nativeWriteCall{"claudecode", "Write", func(p string) map[string]any { return map[string]any{"file_path": p, "content": doc} }}
+		got := overLimitHostHook(t, call.connector, home, call.body(t, project, filepath.Join(project, "docs", "notes.md")))
+		if action := overLimitHookAction(t, got); action != "allow" ||
+			strings.Contains(got, "PATH-ETC-SHADOW") || strings.Contains(got, "PATH-SSH-DIR") {
+			t.Fatalf("action = %q: %.600s", action, got)
+		}
+	})
+}
+
+// TestOverLimitWriteTargetsInTheTrustedFallback pins the same judgement in
+// dispatchTrustedFallback, which judges an over-limit write tool call whose
+// view cannot be projected or whose rule generation has no semantic rules.
+func TestOverLimitWriteTargetsInTheTrustedFallback(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	generation := snapshotRulePackGenerationFor(t.Context(), "claudecode")
+	options := ruleScanOptions{includeToolCallOnly: true, excludeTrustExploit: true}
+	doc := "see /etc/shadow\n" + overLimitWriteText
+	for name, row := range map[string]struct {
+		target, content string
+		want            bool
+	}{
+		"shadow":      {"/etc/shadow", overLimitWriteText, true},
+		"project doc": {filepath.Join(project, "docs", "notes.md"), doc, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := mustJSON(t, map[string]any{"file_path": row.target, "content": row.content})
+			input := actionfacts.Input{Tool: "Write", Args: args, CWD: project, ActiveHome: home}
+			facts := actionfacts.Analyze(input)
+			if facts.Authoritative() || !actionfacts.LimitExceededWriteTool(input, facts) {
+				t.Fatalf("facts are not limit-exceeded: %+v", facts.Parse)
+			}
+			findings, _ := dispatchTrustedFallback(generation, trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: "claudecode", EnforcementCapable: true,
+			}, facts, options)
+			finding := findingWithID(findings, "PATH-ETC-SHADOW")
+			if got := finding != nil && finding.contributesToEnforcement(); got != row.want {
+				t.Fatalf("PATH-ETC-SHADOW enforces = %t, want %t: %v", got, row.want, FindingStrings(findings))
+			}
+			for _, finding := range findings {
+				if finding.Title == overLimitUnverifiedWriteTitle {
+					t.Fatalf("conservative block of an unread target: %v", FindingStrings(findings))
+				}
 			}
 		})
 	}
