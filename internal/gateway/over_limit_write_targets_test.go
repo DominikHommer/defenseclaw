@@ -23,8 +23,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
-// overLimitWriteText is written text over the 256 KiB argument limit.
-var overLimitWriteText = strings.Repeat("# k\n", 70000)
+// overLimitWriteText is written text over the 64 KiB string limit, and
+// overArgsLimitText over the 256 KiB argument limit: either leaves the call
+// limit-exceeded. Most rows use the smaller one; a hook call of this size
+// takes seconds under the race detector.
+var (
+	overLimitWriteText = strings.Repeat("# k\n", 17000)
+	overArgsLimitText  = strings.Repeat("# k\n", 70000)
+)
 
 // overLimitNativeWriteCalls are native file-write tool calls whose
 // arguments are over the argument limit, in each harness's shape.
@@ -32,7 +38,7 @@ func overLimitNativeWriteCalls() []nativeWriteCall {
 	return []nativeWriteCall{
 		{"claudecode", "Write", func(p string) map[string]any { return map[string]any{"file_path": p, "content": overLimitWriteText} }},
 		{"claudecode", "Write", func(p string) map[string]any {
-			return map[string]any{"file_path": p, "content": overLimitWriteText[:100<<10]}
+			return map[string]any{"file_path": p, "content": overArgsLimitText}
 		}},
 		{"claudecode", "Edit", func(p string) map[string]any {
 			return map[string]any{"file_path": p, "old_string": "# base", "new_string": overLimitWriteText}
@@ -46,7 +52,7 @@ func overLimitNativeWriteCalls() []nativeWriteCall {
 		}},
 		{"codex", "apply_patch", func(p string) map[string]any {
 			return map[string]any{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n # base\n" +
-				strings.Repeat("+# k\n", 70000) + "*** End Patch\n"}
+				strings.Repeat("+# k\n", 54000) + "*** End Patch\n"}
 		}},
 		{"copilot", "create", func(p string) map[string]any { return map[string]any{"path": p, "file_text": overLimitWriteText} }},
 	}
@@ -62,6 +68,21 @@ func overLimitHermesCalls() []hermesPatchCall {
 		}},
 	}
 }
+
+// A hook call of this size takes about a second, and twenty under the race
+// detector, so the tables judge every tool on the protected file and only
+// some on a project file (they share one reduction per argument shape), and
+// the sandbox table judges Claude Code Write, OpenCode write, Codex
+// apply_patch and both Hermes tools.
+var (
+	overLimitHostBenign    = map[string]bool{"claudecode-Write-0": true, "opencode-write-4": true, "codex-apply_patch-6": true, "hermes-write-file": true}
+	overLimitSandboxRows   = map[string]bool{"claudecode-Write-0": true, "opencode-write-4": true, "codex-apply_patch-6": true, "hermes-write-file": true, "hermes-replace": true}
+	overLimitSandboxBenign = map[string]bool{"claudecode-Write-0": true, "hermes-write-file": true}
+)
+
+// overLimitRow reports whether the table has the row of call name for
+// a protected target (want) or a project file.
+func overLimitRow(benign map[string]bool, name string, want bool) bool { return want || benign[name] }
 
 func overLimitHostHook(t *testing.T, connector, home, body string) string {
 	t.Helper()
@@ -96,6 +117,9 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 	targets := map[string]bool{keys: true, filepath.Join(project, "big.json"): false}
 	for i, call := range overLimitNativeWriteCalls() {
 		for target, want := range targets {
+			if !overLimitRow(overLimitHostBenign, call.name(i), want) {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
 				got := overLimitHostHook(t, call.connector, home, call.body(t, project, target))
 				if blocked := nativeWriteBlocked(t, got); blocked != want {
@@ -106,6 +130,9 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 	}
 	for _, call := range overLimitHermesCalls() {
 		for target, want := range targets {
+			if !overLimitRow(overLimitHostBenign, "hermes-"+call.name, want) {
+				continue
+			}
 			t.Run(fmt.Sprintf("hermes-%s/block=%t", call.name, want), func(t *testing.T) {
 				got := hermesPatchHostHook(t, home, project, hermesPatchBody(t, project, call.tool, call.args(target)))
 				if blocked := hermesPatchVerdict(t, got); blocked != want {
@@ -129,6 +156,9 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T)
 	keys := sandboxauth.SandboxHome + "/.ssh/authorized_keys"
 	targets := map[string]bool{keys: true, "/work/app/big.json": false}
 	for i, call := range overLimitNativeWriteCalls() {
+		if !overLimitSandboxRows[call.name(i)] {
+			continue
+		}
 		v := versions[call.connector]
 		var headers []string
 		switch call.connector {
@@ -138,6 +168,9 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T)
 			headers = []string{"X-DefenseClaw-Copilot-Event", "preToolUse"}
 		}
 		for target, want := range targets {
+			if !overLimitRow(overLimitSandboxBenign, call.name(i), want) {
+				continue
+			}
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
 				_, token := f.mint(t, fmt.Sprintf("dc-ol-%s-%t", call.name(i), want), call.connector, v[0], v[1], f.project)
 				resp := f.hook(t, v[2], token, call.body(t, "/work/app", target), headers...)
@@ -150,6 +183,9 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T)
 	}
 	for _, call := range overLimitHermesCalls() {
 		for target, want := range targets {
+			if !overLimitSandboxRows["hermes-"+call.name] || !overLimitRow(overLimitSandboxBenign, "hermes-"+call.name, want) {
+				continue
+			}
 			t.Run(fmt.Sprintf("hermes-%s/block=%t", call.name, want), func(t *testing.T) {
 				_, token := f.mint(t, fmt.Sprintf("dc-ol-hermes-%s-%t", call.name, want), "hermes", "0.19.0", "hermes-hooks-v1", f.project)
 				resp := f.hook(t, "/api/v1/hermes/hook", token, hermesPatchBody(t, "/work/app", call.tool, call.args(target)))
