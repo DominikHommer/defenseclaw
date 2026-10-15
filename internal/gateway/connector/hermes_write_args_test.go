@@ -118,7 +118,7 @@ func TestHermesAddViewContentBound(t *testing.T) {
 	for _, test := range []struct {
 		size int
 		want string
-	}{{hermesMaxAddContentBytes - 2, "full"}, {hermesMaxAddContentBytes - 1, hermesWriteStandIn}} {
+	}{{hermesMaxAddContentBytes, "full"}, {hermesMaxAddContentBytes + 1, hermesWriteStandIn}} {
 		text := strings.Repeat("a", test.size)
 		args, _ := json.Marshal(map[string]any{"mode": "patch", "patch": "*** Add File: a.txt\n+" + text})
 		views, ok := HermesTrustedWriteViews("patch", args)

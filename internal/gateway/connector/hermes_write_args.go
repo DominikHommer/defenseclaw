@@ -197,12 +197,16 @@ func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 // not empty, as the text it stands for is not.
 const hermesWriteStandIn = "x"
 
-// hermesMaxAddContentBytes bounds the JSON-encoded text an Add view carries:
-// the trusted-action parser's bound on one written text (64 KiB), under its
-// bound on a whole argument object (256 KiB). Over it, the Add view carries
-// hermesWriteStandIn, as a write_file call whose text is over that bound is
+// hermesMaxAddContentBytes bounds the decoded text an Add view carries: the
+// trusted-action parser's bound on one written text (64 KiB). Over it, or
+// when the view's encoded arguments are over hermesMaxViewArgsBytes, the Add
+// view carries hermesWriteStandIn, as a write_file call over those bounds is
 // judged on its target with a stand-in text.
 const hermesMaxAddContentBytes = 64 << 10
+
+// hermesMaxViewArgsBytes is the trusted-action parser's bound on a whole
+// argument object (256 KiB).
+const hermesMaxViewArgsBytes = 256 << 10
 
 // hermesTargetViews is one view per distinct target, kind of change and
 // written text. An Add view carries the text Hermes writes, so the content
@@ -236,6 +240,9 @@ func hermesTargetViews(targets []hermesV4ATarget) ([]HermesWriteView, bool) {
 		)
 		if target.Write {
 			view, ok = hermesView("write_file", "path", target.Path, map[string]any{"content": content})
+			if ok && content != hermesWriteStandIn && len(view.Args) > hermesMaxViewArgsBytes {
+				view, ok = hermesView("write_file", "path", target.Path, map[string]any{"content": hermesWriteStandIn})
+			}
 		} else {
 			view, ok = hermesView("delete_file", "path", target.Path, map[string]any{})
 		}
@@ -252,7 +259,7 @@ func hermesTargetViews(targets []hermesV4ATarget) ([]HermesWriteView, bool) {
 // text is over hermesMaxAddContentBytes.
 func hermesAddContent(lines []string) string {
 	content := strings.Join(lines, "\n")
-	if encoded, err := json.Marshal(content); err != nil || len(encoded) > hermesMaxAddContentBytes {
+	if len(content) > hermesMaxAddContentBytes {
 		return hermesWriteStandIn
 	}
 	return content

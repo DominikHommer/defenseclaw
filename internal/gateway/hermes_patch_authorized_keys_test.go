@@ -254,6 +254,9 @@ func TestHermesV4AAddIsJudgedOnItsContent(t *testing.T) {
 		{"write-file", "write_file", map[string]any{"path": profile, "content": "# loader\nexport LD_PRELOAD=/usr/local/lib/libconnect_logger.so"}, true},
 		{"v4a-add", "patch", add(profile, "+# loader\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
 		{"v4a-add-second-hunk", "patch", add(profile, "+# loader\n@@ x @@\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"write-file-escaped-padding", "write_file", map[string]any{"path": profile, "content": "# " + strings.Repeat("<", 12000) + "\nexport LD_PRELOAD=/usr/local/lib/libconnect_logger.so"}, true},
+		{"v4a-add-escaped-padding", "patch", add(profile, "+# "+strings.Repeat("<", 12000)+"\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-ctl-padding", "patch", add(profile, "+# "+strings.Repeat("\x01", 12000)+"\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
 		{"v4a-add-benign", "patch", add(filepath.Join(project, "run.sh"), "+#!/bin/sh\n+echo hello\n"), false},
 		{"v4a-add-benign-relative", "patch", add("run.sh", "+#!/bin/sh\n+echo hello\n"), false},
 	} {
