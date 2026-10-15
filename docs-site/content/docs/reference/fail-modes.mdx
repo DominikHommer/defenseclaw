@@ -71,7 +71,7 @@ call through unchecked because the gateway is down.
 | Gateway returns 4xx, malformed JSON, or no action | Allow, warn, and record the response failure. | Block with the connector's response shape and record the failure. |
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
-| Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. | Block with the connector's block response, an audit row with result `panic`, and telemetry. |
+| Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. | Block when the event supports a block response; otherwise allow with `would_block`. Record an audit row with result `panic` and telemetry either way. Secure Client allows and audits recovered errors. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
 Fail mode applies only to a hook the agent can start. A hook script that is
@@ -98,11 +98,12 @@ place as root with mode 0755). `enterprise linux repair` does the same at
 once. On Windows the standalone guardian puts a missing, empty or different
 `defenseclaw-hook.exe` back from its protected copy within seconds.
 
-A recovered internal evaluator error follows the effective fail mode, like any
-other failure to reach a verdict: `closed` blocks the call, `open` allows it and
-says so with `would_block` and an audit row, and a connector in observe mode
-(effective mode `open`) never enforces. The block is a fail-closed answer, not a
-policy finding, and its reason says the hook could not complete its check. Treat
+A recovered hook evaluation error now honours the fail mode. In action mode,
+`closed` blocks an event that supports a block response; `open` allows it and
+records `would_block` and an audit row. An event that cannot block allows and
+records `would_block`. Observe mode never enforces, and Secure Client allows
+and audits recovered errors regardless of its configured fail mode. The block
+is a fail-closed answer without a policy finding. Treat
 the condition as a degraded security incident: alert on the
 `defenseclaw.panics.total` counter and on audit rows with result `panic`, and
 inspect gateway health.
