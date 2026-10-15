@@ -2271,6 +2271,16 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs, toolCWD = "shell", args, dir
 			}
 		}
+		var hermesWriteViews []connector.HermesWriteView
+		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "hermes") && actionTool == fallbackTool {
+			// Hermes' native file writes (patch in both modes, write_file)
+			// are judged as one reviewed single-target write per file they
+			// change: the first here, the others with it
+			// (inspectHermesWriteToolPolicyCtx, GAP-0667).
+			if views, ok := connector.HermesTrustedWriteViews(req.ToolName, req.ToolArgs); ok {
+				actionTool, trustedArgs, hermesWriteViews = views[0].Tool, views[0].Args, views
+			}
+		}
 		// A sandbox shell call is also judged on its command alone when its
 		// other arguments leave the parse partial.
 		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
@@ -2287,7 +2297,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
 			}
 		}
-		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		verdict = a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input:                actionInput,
 			LegacyText:           string(req.ToolArgs),
 			Connector:            req.ConnectorName,
@@ -2295,7 +2305,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
 			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			record:               toolChainRecorder(req.toolChain),
-		}, command, commandTool)
+		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
