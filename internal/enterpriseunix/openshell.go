@@ -652,7 +652,10 @@ func (a *openshellApplied) usesDocker() bool {
 // says what it does to the sandboxes made before). 1.0.1 upgrade bridge,
 // remove when 1.0.1 is out of support.
 func dockerBridgeHolds(goos string, s openshellSettings, prev *openshellApplied) bool {
-	if goos != "linux" || prev == nil || !(prev.DefaultNamespaceBridge || (prev.usesDocker() && prev.DockerNamespace == "")) {
+	if goos != "linux" || prev == nil {
+		return false
+	}
+	if bridged := prev.DefaultNamespaceBridge || (prev.usesDocker() && prev.DockerNamespace == ""); !bridged {
 		return false
 	}
 	return !s.Enabled || s.Driver == config.EnterpriseOpenShellDriverDocker || s.dockerFallback()
