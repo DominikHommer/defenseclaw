@@ -221,6 +221,24 @@ func (p *GuardrailProxy) connectorName() string {
 	return "unknown"
 }
 
+// connectorCanInspectViaHooks returns true when the active connector has
+// native hook-based guardrail inspection (CanBlock=true) AND the proxy
+// mode is not "full". In "full" mode, the gateway always inspects regardless
+// of hook capability (defense-in-depth for high-security deployments).
+func (p *GuardrailProxy) connectorCanInspectViaHooks() bool {
+	if p.cfg != nil && strings.EqualFold(p.cfg.ProxyMode, "full") {
+		return false
+	}
+	if p.connector == nil {
+		return false
+	}
+	hp, ok := p.connector.(connector.HookCapabilityProvider)
+	if !ok {
+		return false
+	}
+	return hp.HookCapabilities(p.setupOpts).CanBlock
+}
+
 // postCallContext returns a detached context for post-stream completion
 // inspection. The HTTP request context may already be cancelled by the time
 // the final POST-CALL inspection runs, which would kill in-flight LLM judge
@@ -888,7 +906,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				} else {
 					body = patchModelInBody(body, decision.Model)
-				bodyModified = true
+					bodyModified = true
 				}
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: semantic-router hydration model=%q base=%s\n",
@@ -1012,7 +1030,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				r.URL.RawPath = ""
 				bedrockTranslateNeeded = true
 				bedrockTranslateToOpenAI = true
-					bodyModified = true
+				bodyModified = true
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→openai translation model=%q\n", decision.Model)
 			} else if shouldTranslateBedrockToAnthropic(r.URL.Path, decision) {
 				body, r.URL.Path = bedrockToAnthropicRequest(body, r.URL.Path, decision.Model)
@@ -1020,7 +1038,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				bedrockTranslateNeeded = true
 				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: bedrock→anthropic translation model=%q\n", decision.Model)
 			} else if decision.Model != "" && !strings.Contains(r.URL.Path, "/invoke") && decision.APIKeyOverride {
-					bodyModified = true
+				bodyModified = true
 				// Only patch the model when credentials are being overridden.
 				// Passthrough auth (APIKeyOverride=false) preserves the
 				// client's original model choice alongside their credentials.
@@ -1033,7 +1051,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if cleaned := stripUnsupportedInputItems(body); cleaned != nil {
 					body = cleaned
 				}
-					bodyModified = true
+				bodyModified = true
 			}
 		}
 	}
@@ -2314,17 +2332,17 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 			for _, backend := range rc.backends {
 				apiKey := ResolveAPIKey(backend.APIKeyEnv, rc.dotenv)
 				decision = &ModelRouterDecision{
-					Provider:         backend.Provider,
-					Model:            backend.Model,
-					TargetURL:        backend.BaseURL,
-					HostHeader:       backend.HostHeader,
+					Provider:          backend.Provider,
+					Model:             backend.Model,
+					TargetURL:         backend.BaseURL,
+					HostHeader:        backend.HostHeader,
 					TargetURLOverride: true,
-					APIKey:           apiKey,
-					APIKeyOverride:   apiKey != "",
-					Reason:           "default (no intent matched)",
-					ExtraHeaders:     backend.ExtraHeaders,
-					ExtraBody:        backend.ExtraBody,
-					PathOverride:     backend.PathOverride,
+					APIKey:            apiKey,
+					APIKeyOverride:    apiKey != "",
+					Reason:            "default (no intent matched)",
+					ExtraHeaders:      backend.ExtraHeaders,
+					ExtraBody:         backend.ExtraBody,
+					PathOverride:      backend.PathOverride,
 				}
 				fmt.Fprintf(os.Stderr, "[responses-api] no routing decision, using default model %q\n", backend.Model)
 				break
@@ -2403,7 +2421,7 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	// guardrail inspection via their hook mechanism (UserPromptSubmit,
 	// PreToolUse, PostToolUse → API server at :18970). For connectors
 	// without hooks, run proxy-level inspection here.
-	connectorHasHooks := p.connector != nil
+	connectorHasHooks := p.connectorCanInspectViaHooks()
 	if !connectorHasHooks {
 		userText := lastUserText(messages)
 		if userText != "" && p.inspector != nil {
@@ -2561,10 +2579,10 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 		if lister, ok := p.modelRouter.(interface{ Models() []string }); ok {
 			for _, m := range lister.Models() {
 				models = append(models, map[string]interface{}{
-					"id":                 m,
-					"object":             "model",
-					"owned_by":           "defenseclaw",
-					"prefer_websockets":  false,
+					"id":                m,
+					"object":            "model",
+					"owned_by":          "defenseclaw",
+					"prefer_websockets": false,
 				})
 			}
 		}
@@ -3366,14 +3384,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 		t0 := time.Now()
 
-		verdict := p.inspector.Inspect(agentCtx, "prompt", inspectionText, req.Messages, req.Model, mode)
-		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
-		// any client can forge, so we additionally inspect the RAW user text
-		// when the strip actually changed the content. Either path can
-		// trigger a block; we keep the stricter verdict.
-		if inspectionText != inspectText {
-			rawVerdict := p.inspector.Inspect(agentCtx, "prompt", inspectText, req.Messages, req.Model, mode)
-			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		var verdict *ScanVerdict
+		if p.connectorCanInspectViaHooks() {
+			verdict = &ScanVerdict{Action: "allow"}
+		} else {
+			verdict = p.inspector.Inspect(agentCtx, "prompt", inspectionText, req.Messages, req.Model, mode)
+			if inspectionText != inspectText {
+				rawVerdict := p.inspector.Inspect(agentCtx, "prompt", inspectText, req.Messages, req.Model, mode)
+				verdict = mergePromptVerdicts(verdict, rawVerdict)
+			}
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
