@@ -299,17 +299,7 @@ func projectPOSIXStatement(
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok {
 		if stmt.Cmd == nil && len(stmt.Redirs) > 0 {
-			command := CommandFact{
-				ID:              out.nextCommandID(),
-				ParentCommandID: parentID,
-				PipelineID:      pipelineID,
-				Dialect:         DialectPOSIX,
-				Effect:          EffectUncertain,
-				ArgvComplete:    false,
-			}
-			projectPOSIXRedirects(stmt.Redirs, &command, out)
-			out.markPartial(IssueUnsupportedConstruct)
-			return command, true
+			return projectPOSIXNoCommandRedirect(stmt, pipelineID, parentID, stack, out)
 		}
 		switch stmt.Cmd.(type) {
 		case *syntax.BinaryCmd:
@@ -379,6 +369,36 @@ func projectPOSIXStatement(
 		out.markPartial(IssueDynamicWord)
 	}
 	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	return command, true
+}
+
+// projectPOSIXNoCommandRedirect records a statement whose only executable
+// effects are its redirects. Unsupported redirect forms retain the parser's
+// partial status; literal input without a path needs no command fact.
+func projectPOSIXNoCommandRedirect(
+	stmt *syntax.Stmt,
+	pipelineID, parentID int64,
+	stack []syntax.Node,
+	out *parseOutput,
+) (CommandFact, bool) {
+	command := CommandFact{
+		ID:                   out.nextCommandID(),
+		ParentCommandID:      parentID,
+		PipelineID:           pipelineID,
+		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+		Background:           stmt.Background,
+		Kind:                 CommandKindShellRedirect,
+		Dialect:              DialectPOSIX,
+		Effect:               EffectExecute,
+		ArgvComplete:         true,
+	}
+	projectPOSIXRedirects(stmt.Redirs, &command, out)
+	if len(command.Redirects) == 0 {
+		return CommandFact{}, false
+	}
+	addOperation(&command, OperationExecute)
+	classifyRedirects(out, &command)
 	return command, true
 }
 
