@@ -2160,6 +2160,12 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 // behavior; action mode falls through to the global value. Pass "" to resolve
 // the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
+	return g.effectiveHookFailModeForMode(connector, g.EffectiveMode(connector))
+}
+
+// effectiveHookFailModeForMode keeps the configured precedence when a request
+// profile selects a different decision mode from the connector default.
+func (g *GuardrailConfig) effectiveHookFailModeForMode(connector, mode string) string {
 	if g == nil {
 		return "closed"
 	}
@@ -2176,7 +2182,7 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			return "closed"
 		}
 	}
-	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
 		return "open"
 	}
 	return g.EffectiveHookFailMode()

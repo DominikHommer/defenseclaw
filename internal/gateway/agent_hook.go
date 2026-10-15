@@ -501,12 +501,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
-				resp := safeHookPanicResponse(connectorName, req.HookEventName, recovered)
+				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
-				// Sandbox hooks fail closed, as on the inline panic path, so
-				// post-evaluation panics (e.g., in enrichAgentHookSpan,
-				// deferred EmitLLMEvent, finalizeAgentHook) also block.
-				resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
@@ -600,9 +596,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// path for every connector, so unrecovered panics would take
 		// the whole agent estate
 		// down at once. The recover emits a RecordPanic counter
-		// with subsystem=gateway and synthesises a safe fail-open
-		// response (action=allow, would_block=true, reason carries
-		// "internal evaluator error"). Operators alert on
+		// with subsystem=gateway and returns the configured fail-mode
+		// response. Operators alert on
 		// defenseclaw.panics.total{subsystem="gateway"} and on the
 		// `result="panic"` label on the standard hook invocation
 		// counter.
@@ -621,13 +616,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		panicked := false
 		if !gated {
 			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
-		}
-		if panicked {
-			// Sandbox hooks fail closed: the host's fail-open posture for
-			// a crashed evaluator keeps workflows running outside the
-			// sandbox, but inside it the hook is the only gate on the
-			// tool call, so an undecided call is blocked, and says so.
-			resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		var chainFinalization toolChainHookFinalization
 		if !panicked && !gated {
@@ -1156,7 +1144,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// codex-notify caller writes "{}" and a 200 regardless of
 	// outcome, but the audit + metrics pipeline below this MUST
 	// run even when the evaluator dies. Same RecordPanic +
-	// fail-open contract as handleAgentHook.
+	// configured fail-mode contract as handleAgentHook.
 	t0 := time.Now()
 	accountingCtx := ctx
 	evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
@@ -1249,8 +1237,7 @@ func enrichAgentHookSpanSynthetic(ctx context.Context) {
 // enrichAgentHookSpanPanic stamps a defenseclaw.hook.panic attribute
 // on the active span AND sets the span status to Error so trace
 // backends surface the failure even though the HTTP response itself
-// was 200 (we fail-open with would_block=true rather than dropping
-// the connection — see safeEvaluateHook for the rationale).
+// was 200 (the recovered verdict follows the effective fail mode).
 //
 // Marking Error is what lets Tempo / Jaeger / Honeycomb filters
 // like "status=error" and the OTel collector's error-rate panel
@@ -1268,7 +1255,7 @@ func enrichAgentHookSpanPanic(ctx context.Context) {
 		attribute.String("defenseclaw.connector.result", "panic"),
 		attribute.String("defenseclaw.hook.reason", "panic"),
 	)
-	span.SetStatus(codes.Error, "hook evaluator panic recovered (fail-open)")
+	span.SetStatus(codes.Error, "hook evaluator panic recovered")
 }
 
 // hookReasonLabelAllowlist constrains the `reason` Prometheus/OTLP
@@ -1445,21 +1432,9 @@ func mergeHookEnvelopeExtra(base map[string]string, extra map[string]string) map
 //   - logs the recovered value + stack to stderr (only place we
 //     have during a panic — the structured logger may itself be
 //     the panic source).
-//   - returns a SAFE fail-open agentHookResponse:
-//     action=allow, raw_action=allow, severity=WARN, would_block=true,
-//     mode is recovered from the effective connector configuration
-//     (the standalone response helper starts at "unknown"), reason carries a stable "defenseclaw internal
-//     evaluator error" string so operator log greps can find the
-//     row, additional_context carries an operator-facing hint.
-//
-// We deliberately fail OPEN (allow) rather than fail-closed (block)
-// because: a panic likely means a transient bug in a single
-// evaluator branch, and silently blocking every agent's every
-// tool call would be a worse production incident than carrying
-// on with telemetry-only mode. would_block=true preserves the
-// guardrail intent ("I would have blocked this in stricter
-// posture") and result="panic" + audit row + RecordPanic counter
-// give SRE every signal they need to investigate.
+//   - returns an agentHookResponse according to the decision mode and
+//     configured fail mode. The rendered hook output carries the same
+//     verdict to the agent harness. The audit row retains result="panic".
 //
 // The bool return tells the caller whether to label downstream
 // metrics + audit envelope with result="panic". Without it, the
@@ -1476,8 +1451,7 @@ func (a *APIServer) safeEvaluateHook(
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
-			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
+			resp = a.hookPanicResponse(ctx, connectorName, req, rawBody, payload)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1492,7 +1466,7 @@ func (a *APIServer) safeEvaluateHook(
 }
 
 // safeEvaluateSyntheticHook is the synthetic-path counterpart of
-// safeEvaluateHook. Same fail-open contract; the generic evaluator
+// safeEvaluateHook. It uses the same fail-mode response; the generic evaluator
 // is the only callee (notify-bridge events have no per-connector
 // scan / asset-policy semantics).
 func (a *APIServer) safeEvaluateSyntheticHook(
@@ -1503,8 +1477,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
-			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
+			resp = a.hookPanicResponse(ctx, connectorName, req, nil, req.Payload)
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1512,20 +1485,66 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	return resp, false
 }
 
-// safeHookPanicResponse builds the agentHookResponse returned when
-// safeEvaluateHook recovers from a panic.
-// The fields here are deliberately conservative — see
-// safeEvaluateHook godoc for the fail-open rationale.
-func safeHookPanicResponse(connectorName, eventName string, _ any) agentHookResponse {
+// safeHookPanicResponse provides the common audit source reason before the
+// effective mode and fail-mode verdict are applied.
+func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 	return agentHookResponse{
-		Action:            "allow",
-		RawAction:         "allow",
 		Severity:          "WARN",
-		Mode:              "unknown",
-		WouldBlock:        true,
 		Reason:            "defenseclaw internal evaluator error",
-		AdditionalContext: fmt.Sprintf("DefenseClaw hook evaluator for %s/%s recovered from an internal error; the action was allowed with would_block=true. Operators: check defenseclaw.panics.total and recent audit rows with extra.panic=true.", connectorName, eventName),
+		AdditionalContext: fmt.Sprintf("DefenseClaw hook check for %s/%s could not complete. Operators: check defenseclaw.panics.total and recent audit rows with extra.panic=true.", connectorName, eventName),
 	}
+}
+
+// hookPanicResponse renders one fail-mode verdict for every recovery path.
+// Sandbox ingress has its own mandatory closed verdict and is rendered once.
+func (a *APIServer) hookPanicResponse(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+) (out agentHookResponse) {
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	if req.Payload == nil {
+		req.Payload = payload
+	}
+	base := safeHookPanicResponse(connectorName, req.HookEventName)
+	profile := a.hookProfileForRequest(ctx, connectorName)
+	mode := a.agentHookMode(ctx, connectorName)
+	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
+		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
+		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
+	}
+	if mode != "action" {
+		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
+	}
+	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
+	if mode != "action" {
+		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
+	} else {
+		cfg := a.decisionConfig(ctx)
+		if cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open") {
+			action, wouldBlock = "allow", true
+			plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+		} else if action != "block" {
+			plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
+		} else {
+			plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
+		}
+	}
+	resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: mode, WouldBlock: wouldBlock, Reason: plain, SourceReason: base.Reason, AdditionalContext: base.AdditionalContext}
+	// A connector-owned response renderer can be the source of the original
+	// evaluation error. Keep the configured verdict if it fails again.
+	defer func() {
+		if recover() != nil {
+			out = resp
+			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
+		}
+	}()
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
 }
 
 // handleHookPanic centralises the side-effects of a recovered hook panic. The
