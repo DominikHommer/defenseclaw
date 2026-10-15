@@ -115,10 +115,10 @@ func nativeWriteBlocked(t *testing.T, got string) bool {
 // TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost pins that every
 // native file-write tool of every connector that names the active user's
 // ~/.ssh/authorized_keys is blocked by the SSH persistence rule, and that
-// the same tool writing a project file stays allowed. OpenCode's edit and
-// multiedit take their arguments in camelCase, and Copilot's edit and create
-// take path with old_str/new_str or file_text: the parse stayed partial and
-// the calls were allowed with no rule (GAP-0655).
+// the same tool writing a project file stays allowed. The native edit and
+// create tools of OpenCode and Copilot parse as complete write calls and are
+// judged like Claude Code's, and a call with one argument outside its
+// tool's reviewed schema is judged by its target too (GAP-0655).
 func TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) {
 	root := t.TempDir()
 	home, project := filepath.Join(root, "home"), filepath.Join(root, "home", "proj")
@@ -136,7 +136,7 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Chdir(project)
-	for i, call := range nativeWriteCalls() {
+	for i, call := range nativeWriteTableCalls() {
 		for target, want := range map[string]bool{keys: true, filepath.Join(project, "notes.txt"): false} {
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
 				if !want && call.benignGap() != "" {

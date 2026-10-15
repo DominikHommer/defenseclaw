@@ -102,6 +102,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
 	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
 }
