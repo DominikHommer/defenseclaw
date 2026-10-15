@@ -486,7 +486,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
         _print_hook_guardian(cfg)
-        _print_fleet_health(client)
+        _print_fleet_health(cfg, client)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -528,7 +528,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        _print_fleet_health(client)
+        _print_fleet_health(cfg, client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -1814,29 +1814,33 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
-    payload["fleet"] = _fleet_health_payload(client)
+    payload["fleet"] = _fleet_health_payload(cfg, client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
 
 
-def _fetch_fleet_health(client) -> dict | None:
-    """GET /api/v1/fleet/health from the gateway; None when unavailable."""
-    if client is None:
+def _fleet_enabled(cfg) -> bool:
+    # Identity check, as _sandboxes_enabled: a stand-in config is not "on".
+    return getattr(getattr(cfg, "fleet", None), "enabled", False) is True
+
+
+def _fetch_fleet_health(cfg, client) -> dict | None:
+    """GET /api/v1/fleet/health from the gateway; None when unavailable.
+
+    Only a Fleet-enabled config asks: with Fleet off the route does not
+    exist, and a Fleet token sent in place of the gateway token made every
+    status call log an api-auth-failure row (DAMAGE-678 A7).
+    """
+    if client is None or not _fleet_enabled(cfg):
         return None
     import os
 
     try:
-        # Use the fleet bearer token (DCLAW_FLEET_API_TOKEN), not the gateway token.
-        # Fall back to reading from ~/.defenseclaw/.env if the env var is not set.
-        fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
-        if not fleet_token:
-            env_file = Path.home() / ".defenseclaw" / ".env"
-            if env_file.exists():
-                for line in env_file.read_text().splitlines():
-                    if line.startswith("DCLAW_FLEET_API_TOKEN="):
-                        fleet_token = line.split("=", 1)[1].strip()
-                        break
+        # The Fleet bearer token, not the gateway token. Loading the config
+        # already merged the data dir's .env into the environment.
+        token_env = getattr(cfg.fleet, "api_token_env", "") or "DCLAW_FLEET_API_TOKEN"
+        fleet_token = os.environ.get(token_env, "").strip()
         headers = {}
         if fleet_token:
             headers["Authorization"] = f"Bearer {fleet_token}"
@@ -1868,9 +1872,11 @@ def _safe_int(val, default=0):
         return default
 
 
-def _print_fleet_health(client) -> None:
-    """Render a Fleet row when the fleet API is reachable."""
-    data = _fetch_fleet_health(client)
+def _print_fleet_health(cfg, client) -> None:
+    """Render a Fleet row when Fleet is enabled; nothing otherwise."""
+    if not _fleet_enabled(cfg):
+        return
+    data = _fetch_fleet_health(cfg, client)
     if data is None:
         _status_row("Fleet", ux.dim("not configured"))
         return
@@ -1885,9 +1891,9 @@ def _print_fleet_health(client) -> None:
     _status_row("Fleet", f"{online_text}, {offline_text}")
 
 
-def _fleet_health_payload(client) -> dict:
+def _fleet_health_payload(cfg, client) -> dict:
     """Fleet health as a JSON-friendly dict for ``status --json``."""
-    data = _fetch_fleet_health(client)
+    data = _fetch_fleet_health(cfg, client)
     if data is None:
         return {"available": False}
     return {
@@ -1896,7 +1902,7 @@ def _fleet_health_payload(client) -> dict:
         "online": _safe_int(data.get("online", 0)),
         "offline": _safe_int(data.get("offline", 0)),
         "degraded": _safe_int(data.get("degraded", 0)),
-        "lockdown": int(data.get("lockdown", 0)),
+        "lockdown": _safe_int(data.get("lockdown", 0)),
     }
 
 

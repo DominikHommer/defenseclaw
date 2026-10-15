@@ -19143,48 +19143,6 @@ function Assert-DefenseClawInstalledConfig {
         -Arguments $arguments)
 }
 
-function Assert-DefenseClawSecureClientFleetSourcePreflight {
-    param(
-        [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][hashtable]$Sources
-    )
-    if (Test-DefenseClawStandaloneProfile) {
-        return
-    }
-    # Use exactly the config this install-like transaction will publish. A
-    # Repair/Upgrade that keeps config.yaml checks the protected installed
-    # copy. The source descriptors authenticate both files before execution.
-    $configSource = if ($Sources.ContainsKey('config')) {
-        [hashtable]$Sources['config']
-    }
-    elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
-        Get-DefenseClawSourceDescriptor `
-            -Path $Layout.ConfigPath `
-            -Label 'installed managed config'
-    }
-    else {
-        return
-    }
-    # This gate uses the gateway from the new release. A Repair with no new
-    # gateway can service an older installed release whose binary does not
-    # have this helper; its own config validation remains transactional.
-    $gatewaySource = [hashtable]$Sources['gateway']
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
-    $probe = Invoke-DefenseClawProcess `
-        -File ([string]$gatewaySource.path) `
-        -Arguments @(
-            'enterprise', 'windows', 'preflight-secure-client-fleet',
-            '--config', ([string]$configSource.path)
-        )
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $configSource)
-    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $gatewaySource)
-    if ([int]$probe.exit_code -ne 0) {
-        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output
-        throw "Secure Client config preflight failed before service changes: $detail"
-    }
-}
-
 function Test-DefenseClawStandaloneFleetSourceEnabled {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -29642,11 +29600,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 }
             }
         }
-        else {
-            Assert-DefenseClawSecureClientFleetSourcePreflight `
-                -Layout $layout `
-                -Sources $sources
-        }
+        # Secure Client keeps its 1.0.1 lifecycle with no Fleet step: the
+        # gateway refuses a Secure Client config with fleet.enabled when it
+        # loads it (resolveEnterpriseConfig).
     }
     Initialize-DefenseClawManagedRoot `
         -Path $layout.LifecycleLockDirectory `

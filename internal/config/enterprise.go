@@ -813,19 +813,20 @@ var (
 
 const secureClientFleetUnsupported = "fleet.enabled is unsupported for the Secure Client enterprise profile: its managed installers do not ship the Fleet policy compiler and Python runtime; disable Fleet or deploy the standalone profile on a separate host"
 
-// CheckSecureClientFleetSource is the read-only, pre-mutation installer gate.
-// It uses the same bounded, duplicate-key rejecting YAML parser as the
-// gateway, but needs no installed rule packs or runtime state. The gateway's
-// normal profile resolution repeats the check against the decoded config.
-func CheckSecureClientFleetSource(source string, raw []byte) error {
+// StandaloneFleetSourceEnabled answers the signed Windows standalone
+// installer's question "does this config opt into Fleet?". requireTrusted
+// (the admin-protected path check) runs only for a Fleet opt-in: a Fleet-off
+// answer installs nothing, and a config that never mentions Fleet must not
+// gain a new refusal on its 1.0.1 to 1.0.2 upgrade.
+func StandaloneFleetSourceEnabled(source string, raw []byte, requireTrusted func() error) (bool, error) {
 	enabled, err := FleetEnabledFromSource(source, raw)
-	if err != nil {
-		return err
+	if err != nil || !enabled {
+		return false, err
 	}
-	if enabled {
-		return fmt.Errorf("config: %s", secureClientFleetUnsupported)
+	if err := requireTrusted(); err != nil {
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 // FleetEnabledFromSource inspects only the Fleet opt-in bit with the bounded,
