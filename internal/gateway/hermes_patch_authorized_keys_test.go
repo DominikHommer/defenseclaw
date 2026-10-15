@@ -3,7 +3,7 @@
 
 // The sandbox ingress fixture is POSIX-only, and the host table uses POSIX
 // homes; the Hermes write projection itself is platform-neutral and is
-// pinned on every OS by connector.TestHermesTrustedWriteArgs.
+// pinned on every OS by connector.TestHermesTrustedWriteViews.
 
 //go:build !windows
 
@@ -160,8 +160,8 @@ func hermesPatchHome(t *testing.T) (home, project string) {
 // native write form naming the active user's ~/.ssh/authorized_keys (by
 // absolute path, by ~ and relative to the working directory) is blocked by
 // the SSH persistence rule, and that the same form on a project file stays
-// allowed. The patch tool was judged as an unknown tool, so its write target
-// reached no file-write rule and the call was allowed (GAP-0667).
+// allowed. Each form is judged as the reviewed write contract it implements,
+// so its target reaches the same file-write rules as write_file (GAP-0667).
 func TestHermesNativeWritesOfAuthorizedKeysAreBlocked(t *testing.T) {
 	home, project := hermesPatchHome(t)
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
@@ -231,5 +231,45 @@ func TestHermesNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestHermesV4AAddIsJudgedOnItsContent pins that a V4A Add is judged on the
+// text Hermes writes (the "+" line contents of its hunks), as a write_file
+// call of that text is: a global LD_PRELOAD export added to a login profile
+// is blocked by the same rule either way, and a benign project file added
+// the same way stays allowed (GAP-0667).
+func TestHermesV4AAddIsJudgedOnItsContent(t *testing.T) {
+	const rule = "persistence.global_ld_preload_install"
+	home, project := hermesPatchHome(t)
+	profile := "/etc/profile.d/connect_logger.sh"
+	add := func(path, lines string) map[string]any {
+		return map[string]any{"mode": "patch", "patch": "*** Begin Patch\n*** Add File: " + path + "\n" + lines + "*** End Patch\n"}
+	}
+	for _, test := range []struct {
+		name, tool string
+		args       map[string]any
+		block      bool
+	}{
+		{"write-file", "write_file", map[string]any{"path": profile, "content": "# loader\nexport LD_PRELOAD=/usr/local/lib/libconnect_logger.so"}, true},
+		{"v4a-add", "patch", add(profile, "+# loader\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-second-hunk", "patch", add(profile, "+# loader\n@@ x @@\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"write-file-escaped-padding", "write_file", map[string]any{"path": profile, "content": "# " + strings.Repeat("<", 12000) + "\nexport LD_PRELOAD=/usr/local/lib/libconnect_logger.so"}, true},
+		{"v4a-add-escaped-padding", "patch", add(profile, "+# "+strings.Repeat("<", 12000)+"\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-ctl-padding", "patch", add(profile, "+# "+strings.Repeat("\x01", 12000)+"\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-benign", "patch", add(filepath.Join(project, "run.sh"), "+#!/bin/sh\n+echo hello\n"), false},
+		{"v4a-add-benign-relative", "patch", add("run.sh", "+#!/bin/sh\n+echo hello\n"), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := hermesPatchHostHook(t, home, project, hermesPatchBody(t, project, test.tool, test.args))
+			var resp map[string]any
+			if err := json.Unmarshal([]byte(got), &resp); err != nil {
+				t.Fatalf("verdict %q: %v", got, err)
+			}
+			if blocked := resp["action"] == "block" && strings.Contains(got, rule); blocked != test.block ||
+				(!test.block && resp["action"] != "allow") {
+				t.Fatalf("action %v, want block by %s = %t: %.800s", resp["action"], rule, test.block, got)
+			}
+		})
 	}
 }
