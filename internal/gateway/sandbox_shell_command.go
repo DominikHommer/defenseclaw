@@ -62,9 +62,9 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // commandTool the tool to judge it as (sandboxShellCommand, or
 // codexPowerShellCommand for a Codex shell call on Windows); with no command
 // it is inspectTrustedToolPolicyCtx, except for a connector's shell tool
-// (connector.IsShellTool) whose parse is partial or ambiguous: with no
-// single command argument to judge, that call cannot be verified and takes
-// a conservative CRITICAL finding (unverifiedShellCommandFinding).
+// (connector.IsShellTool) whose parse is not complete: with no single
+// command argument to judge, that call cannot be verified and takes a
+// conservative CRITICAL finding (unverifiedShellCommandFinding).
 //
 // A shell call's arguments reach the trusted-action parser through the
 // connector's projection, which takes out only the arguments it knows with
@@ -109,9 +109,10 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		return verdict
 	}
 	if unverified {
-		if primary.Parse.Status != actionfacts.StatusPartial && primary.Parse.Status != actionfacts.StatusAmbiguous {
-			return verdict
-		}
+		// Any parse that is not complete: partial or ambiguous with extra
+		// keys, and invalid or not applicable when the command key is
+		// missing or holds no command string (a number, null, blank text,
+		// an object).
 		return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict,
 			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
 	}
@@ -120,6 +121,13 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	}
 	input := action.Input
 	input.Tool, input.Args = commandTool, command
+	if action.windowsShellDialect {
+		// The full call's hint was inferred from arguments whose parse is
+		// not complete, so it may be empty; the command alone is judged in
+		// the dialect inferred from it, as the same call without the extra
+		// keys is (GAP-0686).
+		input.DialectHint = agentHookWindowsShellDialect(input)
+	}
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
 		Input:                         input,
 		LegacyText:                    string(command),

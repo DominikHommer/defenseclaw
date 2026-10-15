@@ -80,6 +80,7 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 		{"claudecode", "Bash", "workdir"},
 		{"devin", "exec", "workdir"},
 		{"kiro", "execute_bash", "working_dir"},
+		{"kiro", "shell", "working_dir"},
 		{"hermes", "terminal", "workdir"},
 		{"codex", "Bash", "workdir"},
 	} {
@@ -95,11 +96,23 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 			// Two keys for the command stay a conflict (GAP-0678).
 			{"command-case-value-extra", `{"command":"true","Command":` + rm + `,"extra":"x"}`, conflictingToolArgumentsRuleID},
 			// No single command argument to judge: conservative block.
-			{"no-command-key", `{"Command":` + rm + `,"extra":"x"}`, ""},
+			{"no-command-key", `{"Command":` + rm + `,"extra":"x"}`, unverifiedShellCommandRuleID},
+			{"extra-only", `{"extra":"x"}`, unverifiedShellCommandRuleID},
+			{"number-command", `{"command":7,"extra":"x"}`, unverifiedShellCommandRuleID},
+			{"null-command", `{"command":null,"extra":"x"}`, unverifiedShellCommandRuleID},
+			{"blank-command", `{"command":"  ","extra":"x"}`, unverifiedShellCommandRuleID},
+			{"object-command", `{"command":{"cmd":` + rm + `},"extra":"x"}`, unverifiedShellCommandRuleID},
+			{"empty-args", `{}`, unverifiedShellCommandRuleID},
 			{"benign", `{"command":"ls","description":"x","timeout":5}`, "allow"},
 			{"benign-extra", `{"command":"ls","extra":"x"}`, "allow"},
 		} {
-			t.Run(shell.connector+"/"+row.name, func(t *testing.T) {
+			if shell.tool == "shell" && row.rule != unverifiedShellCommandRuleID && row.rule != "allow" {
+				// Kiro's shell alias does not reach the command rules even
+				// with the command alone (rel-1-0-2 GAP-0689, open): only the
+				// rows without a command to judge are pinned for it here.
+				continue
+			}
+			t.Run(shell.connector+"/"+shell.tool+"/"+row.name, func(t *testing.T) {
 				got := shellExtraKeyHook(t, shell.connector, shell.tool, json.RawMessage(row.args))
 				if row.rule == "allow" {
 					if !strings.HasPrefix(got, `{"action":"allow"`) {
