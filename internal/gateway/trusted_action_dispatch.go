@@ -194,7 +194,12 @@ func dispatchTrustedAction(
 		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
 			powerShellView = &view
 		}
-		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+		if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+			// A write tool call whose arguments are limit-exceeded, judged on
+			// the same call with its large text left out: it names the same
+			// targets, so a match counts (GAP-0674).
+			semanticFacts, subsetView = view, true
+		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
@@ -496,7 +501,7 @@ func dispatchTrustedAction(
 	}
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
+	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -2196,7 +2201,7 @@ func dispatchTrustedFallback(
 		request.EnforcementCapable,
 	)
 	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
-	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
+	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on
