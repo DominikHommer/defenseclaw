@@ -1144,7 +1144,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// codex-notify caller writes "{}" and a 200 regardless of
 	// outcome, but the audit + metrics pipeline below this MUST
 	// run even when the evaluator dies. Same RecordPanic +
-	// fail-open contract as handleAgentHook.
+	// configured fail-mode contract as handleAgentHook.
 	t0 := time.Now()
 	accountingCtx := ctx
 	evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
@@ -1237,8 +1237,7 @@ func enrichAgentHookSpanSynthetic(ctx context.Context) {
 // enrichAgentHookSpanPanic stamps a defenseclaw.hook.panic attribute
 // on the active span AND sets the span status to Error so trace
 // backends surface the failure even though the HTTP response itself
-// was 200 (we fail-open with would_block=true rather than dropping
-// the connection — see safeEvaluateHook for the rationale).
+// was 200 (the recovered verdict follows the effective fail mode).
 //
 // Marking Error is what lets Tempo / Jaeger / Honeycomb filters
 // like "status=error" and the OTel collector's error-rate panel
@@ -1256,7 +1255,7 @@ func enrichAgentHookSpanPanic(ctx context.Context) {
 		attribute.String("defenseclaw.connector.result", "panic"),
 		attribute.String("defenseclaw.hook.reason", "panic"),
 	)
-	span.SetStatus(codes.Error, "hook evaluator panic recovered (fail-open)")
+	span.SetStatus(codes.Error, "hook evaluator panic recovered")
 }
 
 // hookReasonLabelAllowlist constrains the `reason` Prometheus/OTLP
@@ -1486,15 +1485,11 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	return resp, false
 }
 
-// safeHookPanicResponse provides the common audit fields before the effective
-// mode and fail-mode verdict are applied.
+// safeHookPanicResponse provides the common audit source reason before the
+// effective mode and fail-mode verdict are applied.
 func safeHookPanicResponse(connectorName, eventName string) agentHookResponse {
 	return agentHookResponse{
-		Action:            "allow",
-		RawAction:         "allow",
 		Severity:          "WARN",
-		Mode:              "unknown",
-		WouldBlock:        true,
 		Reason:            "defenseclaw internal evaluator error",
 		AdditionalContext: fmt.Sprintf("DefenseClaw hook check for %s/%s could not complete. Operators: check defenseclaw.panics.total and recent audit rows with extra.panic=true.", connectorName, eventName),
 	}
@@ -1512,32 +1507,41 @@ func (a *APIServer) hookPanicResponse(
 	if req.ConnectorName == "" {
 		req.ConnectorName = connectorName
 	}
-	resp := safeHookPanicResponse(connectorName, req.HookEventName)
+	if req.Payload == nil {
+		req.Payload = payload
+	}
+	base := safeHookPanicResponse(connectorName, req.HookEventName)
 	profile := a.hookProfileForRequest(ctx, connectorName)
-	if sandboxHookForConnector(ctx, connectorName) {
+	mode := a.agentHookMode(ctx, connectorName)
+	action, wouldBlock := mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
+	if sandboxHookForConnector(ctx, connectorName) && action == "block" {
+		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
-	resp.Mode = a.agentHookMode(ctx, connectorName)
+	if mode != "action" {
+		action, wouldBlock = mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
+	}
 	plain := "DefenseClaw could not complete its hook check because of an internal evaluator error. "
-	if resp.Mode != "action" {
+	if mode != "action" {
 		plain += "The call was allowed because the guardrail is in observe mode. Ask your administrator to review the hook and audit log."
 	} else {
 		cfg := a.decisionConfig(ctx)
-		if cfg != nil && cfg.EffectiveHookFailModeForConnector(connectorName) == "open" && explicitHookFailOpen(cfg, connectorName) {
+		if cfg != nil && (cfg.SecureClientIntegration() || cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open") {
+			action, wouldBlock = "allow", true
 			plain += "The call was allowed because the hook fails open. Ask your administrator to review the hook and audit log."
+		} else if action != "block" {
+			plain += "The call could not be blocked on this hook event. Ask your administrator to review the hook and audit log."
 		} else {
-			resp.Action, resp.RawAction = "block", "block"
 			plain += "The call was blocked because the hook fails closed. Retry the call; if this continues, contact your administrator."
 		}
 	}
+	resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: mode, WouldBlock: wouldBlock, Reason: plain, SourceReason: base.Reason, AdditionalContext: base.AdditionalContext}
 	// A connector-owned response renderer can be the source of the original
 	// evaluation error. Keep the configured verdict if it fails again.
 	defer func() {
 		if recover() != nil {
-			resp.SourceReason = hookSourceReason(resp)
-			resp.Reason = plain
-			resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
 			out = resp
+			out.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, plain, resp.AdditionalContext, profile.Capabilities)
 		}
 	}()
 	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)

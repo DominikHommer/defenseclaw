@@ -993,9 +993,9 @@ func TestManagedAIDOnly_NativeHookOwnerDiscardsPostProposalPanicAndArtifactBlock
 			connectorName,
 			`{"hook_event_name":"pre_tool_call","session_id":"managed-panic","tool_name":"read_file","tool_args":{"path":"README.md"}}`,
 		)
-		if response.Action != "block" || response.RawAction != "block" ||
-			!strings.Contains(response.Reason, "hook fails closed") {
-			t.Fatalf("panic response=%+v, want closed-mode block", response)
+		if response.Action != "allow" || response.RawAction != "block" ||
+			!strings.Contains(response.Reason, "hook fails open") {
+			t.Fatalf("panic response=%+v, want Secure Client allow", response)
 		}
 		if inspector.calls != 1 {
 			t.Fatalf("AID calls=%d, want proposal before panic", inspector.calls)

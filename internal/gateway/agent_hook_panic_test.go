@@ -46,12 +46,6 @@ func TestSafeEvaluateHook_ObserveRecovery(t *testing.T) {
 	}
 
 	resp := safeHookPanicResponse("codex", "PreToolUse")
-	if resp.Action != "allow" {
-		t.Errorf("panic action = %q, want allow", resp.Action)
-	}
-	if !resp.WouldBlock {
-		t.Errorf("panic WouldBlock = false, want true (deny posture in stricter mode)")
-	}
 	if resp.Severity != "WARN" {
 		t.Errorf("panic Severity = %q, want WARN", resp.Severity)
 	}
@@ -487,7 +481,7 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 		{"claudecode", "PreToolUse", "observe", "closed", "allow"},
 		{"codex", "PreToolUse", "observe", "closed", "allow"},
 		{"hermes", "pre_tool_call", "observe", "closed", "allow"},
-		{"claudecode", "PostToolUse", "action", "closed", "block"},
+		{"claudecode", "PostToolUse", "action", "closed", "allow"},
 	} {
 		t.Run(strings.Join([]string{tc.connector, tc.event, tc.mode, tc.failMode}, "/"), func(t *testing.T) {
 			previous, had := hookProfileRuntimes[tc.connector]
@@ -512,8 +506,9 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 			cfg.Guardrail.Connector = tc.connector
 			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 			response := postDecisionForTest(t, api, tc.connector, tc.event, "echo done")
-			if response["action"] != tc.wantAction || response["raw_action"] != tc.wantAction || response["mode"] != tc.mode || response["would_block"] != true {
-				t.Fatalf("response=%v, want %s/%s/would_block", response, tc.wantAction, tc.mode)
+			wantWouldBlock := tc.wantAction != "block"
+			if response["action"] != tc.wantAction || response["raw_action"] != "block" || response["mode"] != tc.mode || response["would_block"] != wantWouldBlock {
+				t.Fatalf("response=%v, want %s/%s/would_block=%v", response, tc.wantAction, tc.mode, wantWouldBlock)
 			}
 			if tc.wantAction == "block" && tc.event == "PreToolUse" {
 				field := "hook_output"
@@ -528,13 +523,12 @@ func TestHandleAgentHook_RecoveredEvaluationUsesFailMode(t *testing.T) {
 				}
 			}
 			row := soleHookDecisionForTest(t, store)
-			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != true {
-				t.Fatalf("audit=%v, want panic/%s/would_block", row.Structured, tc.wantAction)
+			if row.Structured["result"] != "panic" || row.Structured["action"] != tc.wantAction || row.Structured["would_block"] != wantWouldBlock {
+				t.Fatalf("audit=%v, want panic/%s/would_block=%v", row.Structured, tc.wantAction, wantWouldBlock)
 			}
 			if tc.event == "PostToolUse" {
-				output, ok := response["claude_code_output"].(map[string]any)
-				if !ok || output["decision"] != "block" || output["permissionDecision"] != nil || output["reason"] == "" {
-					t.Fatalf("post-tool output=%v, want a valid post-tool block shape", output)
+				if decisionIsDenied(response["claude_code_output"]) {
+					t.Fatalf("post-tool output=%v, want a nonblocking advisory", response["claude_code_output"])
 				}
 			}
 			extra, _ := row.Structured["extra"].(map[string]any)
@@ -568,7 +562,7 @@ func TestHookPanicResponse_ActionProfileRequiresExplicitOpen(t *testing.T) {
 			}, nil, nil, hookProfileRuntime{Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
 				panic("injected evaluator error")
 			}})
-			if !panicked || resp.Mode != "action" || resp.Action != tc.want || resp.RawAction != tc.want {
+			if !panicked || resp.Mode != "action" || resp.Action != tc.want || resp.RawAction != "block" {
 				t.Fatalf("response=%+v, want %s/action", resp, tc.want)
 			}
 		})
@@ -590,8 +584,8 @@ func TestHandleAgentHookSynthetic_RecoveredEvaluationUsesFailMode(t *testing.T) 
 		Payload: map[string]interface{}{"hook_event_name": "Stop"},
 	}
 	resp := api.handleAgentHookSynthetic(t.Context(), "codex", req, nil)
-	if resp.Action != "block" || resp.RawAction != "block" || resp.Mode != "action" || !resp.WouldBlock {
-		t.Fatalf("synthetic response=%+v, want block/action/would_block", resp)
+	if resp.Action != "block" || resp.RawAction != "block" || resp.Mode != "action" || resp.WouldBlock {
+		t.Fatalf("synthetic response=%+v, want block/action", resp)
 	}
 	row := soleHookDecisionForTest(t, store)
 	if row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
