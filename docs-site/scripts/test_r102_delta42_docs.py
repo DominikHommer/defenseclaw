@@ -1,4 +1,4 @@
-"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587, GAP-0675)."""
+"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587, GAP-0675, GAP-0026)."""
 
 import unittest
 from pathlib import Path
@@ -45,6 +45,20 @@ class Delta42DocsTest(unittest.TestCase):
         ):
             self.assertIn(phrase, bullet)
         self.assertNotIn("The kept sandboxes then start, review and pull as before. Only", bullet)
+
+    def test_sandboxes_purge_removes_containers_in_both_namespaces(self):
+        # rel-1-0-2:GAP-0026 (DELTA-52): a managed Linux purge removes the
+        # account's sandbox containers and volumes in both Docker namespaces.
+        text = flat("sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        for phrase in (
+            "On Linux, purge first asks host Docker as root to remove the containers and volumes of each account's sandboxes in both managed Docker namespaces",
+            "OpenShell's `default` (the sandboxes kept under 1.0.1) and `defenseclaw-managed`",
+            "matched by OpenShell's sandbox labels and the account's DefenseClaw uid and owner labels",
+            "a container or volume that names another account stays, with a warning",
+            "Purge then asks host Docker as root to remove each account's DefenseClaw-labelled sandbox image tags",
+        ):
+            self.assertIn(phrase, bullet)
 
     def test_lifecycle_upgrade_names_the_bridge(self):
         text = flat("lifecycle.mdx")

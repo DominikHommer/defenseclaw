@@ -1370,6 +1370,12 @@ running sandbox counts again within the next minute.
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
   it also removes the kept registrations, decisions and key. On Linux, purge
+  first asks host Docker as root to remove the containers and volumes of each
+  account's sandboxes in both managed Docker namespaces, OpenShell's `default`
+  (the sandboxes kept under 1.0.1) and `defenseclaw-managed`, matched by
+  OpenShell's sandbox labels and the account's DefenseClaw uid and owner
+  labels; a container or volume that names another account stays, with a
+  warning, and other accounts' sandboxes are untouched. Purge then
   asks host Docker as root to remove each account's DefenseClaw-labelled
   sandbox image tags before deleting that account's image records in the
   daemon's state folder (and an older `~/.defenseclaw/sandboxes/images.json`
