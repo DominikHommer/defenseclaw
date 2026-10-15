@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // HermesUnverifiedPatchArgs is the projection of a Hermes patch call whose
@@ -28,13 +29,62 @@ import (
 // unknown (the protected files may be among them).
 var HermesUnverifiedPatchArgs = json.RawMessage(`{}`)
 
-// HermesTrustedWriteArgs projects a Hermes native file-write call onto the
-// reviewed tool contract the trusted-action parser judges, so its write
-// targets reach the same file-write rules as the other connectors' native
-// write tools. Unprojected, the patch tool was an unknown tool and the
-// write_file tool's cross_profile flag an unknown key, so neither call named
-// a write target and a protected file such as ~/.ssh/authorized_keys was
-// written with no rule (GAP-0667).
+// HermesMaxPatchTargets bounds the distinct targets of one V4A patch that are
+// judged one by one. A patch that names more is judged as unverified.
+const HermesMaxPatchTargets = 256
+
+// HermesWriteView is one write target of a Hermes native file-write call, in
+// the reviewed single-target tool shape the trusted-action parser judges:
+// write_file {path, content}, edit {file_path, old_string, new_string,
+// replace_all} or delete_file {path}. The unverified view is apply_patch
+// with HermesUnverifiedPatchArgs and no Path.
+type HermesWriteView struct {
+	Tool string
+	Args json.RawMessage
+	// Path is the target as the call names it ("" for the unverified view).
+	Path string
+
+	fields  map[string]any
+	pathKey string
+}
+
+// Retarget is the view's arguments with target in place of Path. ok is
+// false for the unverified view.
+func (v HermesWriteView) Retarget(target string) (json.RawMessage, bool) {
+	if v.pathKey == "" {
+		return nil, false
+	}
+	fields := make(map[string]any, len(v.fields))
+	for key, value := range v.fields {
+		fields[key] = value
+	}
+	fields[v.pathKey] = target
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func hermesView(tool, pathKey, path string, fields map[string]any) (HermesWriteView, bool) {
+	view := HermesWriteView{Tool: tool, Path: path, fields: fields, pathKey: pathKey}
+	args, ok := view.Retarget(path)
+	if !ok {
+		return HermesWriteView{}, false
+	}
+	view.Args = args
+	return view, true
+}
+
+func hermesUnverifiedView() HermesWriteView {
+	return HermesWriteView{Tool: "apply_patch", Args: HermesUnverifiedPatchArgs}
+}
+
+// HermesTrustedWriteViews projects a Hermes native file-write call onto the
+// reviewed single-target write contracts the trusted-action parser judges,
+// one view per file the call changes, so each target reaches the same
+// file-write rules as a write_file call naming it (GAP-0667). The caller
+// judges every view and keeps the strongest verdict.
 //
 // The contract is Hermes' own (tools/file_tools.py in hermes-agent: the
 // published PATCH_SCHEMA and WRITE_FILE_SCHEMA and the _handle_patch and
@@ -42,66 +92,67 @@ var HermesUnverifiedPatchArgs = json.RawMessage(`{}`)
 // any other):
 //
 //   - write_file {path, content, cross_profile} writes content to path; it
-//     is judged as write_file {path, content}.
+//     is one write_file {path, content} view.
 //   - patch {mode, path, old_string, new_string, replace_all, patch,
 //     cross_profile}: mode defaults to "replace", which edits path and is
-//     judged as Claude Code's edit {file_path, old_string, new_string,
-//     replace_all}; mode "patch" applies a V4A patch whose Update, Add,
-//     Delete and Move File headers name the files, judged as an apply_patch
-//     envelope that names the same files (path, when given, is one of them:
-//     Hermes checks and locks it as a target).
+//     one Claude Code edit {file_path, old_string, new_string, replace_all}
+//     view; mode "patch" applies a V4A patch whose Update, Add, Delete and
+//     Move File headers name the files: each written file (Update, Add, a
+//     Move destination) is a write_file view and each removed file (Delete,
+//     a Move source) a delete_file view. In that mode path is only checked
+//     and locked, never written, so it is not a target.
 //
 // A patch call that does not fit that contract (another mode, a key of the
-// wrong type, a V4A patch Hermes cannot parse or that names no file) is
-// projected onto HermesUnverifiedPatchArgs. A write_file call that does not
-// fit is left alone: Hermes refuses it before it writes.
-func HermesTrustedWriteArgs(toolName string, args json.RawMessage) (tool string, projected json.RawMessage, ok bool) {
+// wrong type, a V4A patch Hermes cannot parse or that names no file, a path
+// or target with a control character, more than HermesMaxPatchTargets
+// targets) is the one unverified view. A write_file call that does not fit
+// is left alone (ok false): Hermes refuses it before it writes.
+func HermesTrustedWriteViews(toolName string, args json.RawMessage) (views []HermesWriteView, ok bool) {
 	switch strings.TrimSpace(toolName) {
 	case "write_file":
-		out, ok := hermesWriteFileArgs(args)
-		return "write_file", out, ok
-	case "patch":
-		if tool, out, ok := hermesPatchArgs(args); ok {
-			return tool, out, true
+		view, ok := hermesWriteFileView(args)
+		if !ok {
+			return nil, false
 		}
-		return "apply_patch", HermesUnverifiedPatchArgs, true
+		return []HermesWriteView{view}, true
+	case "patch":
+		if views, ok := hermesPatchViews(args); ok {
+			return views, true
+		}
+		return []HermesWriteView{hermesUnverifiedView()}, true
 	default:
-		return "", args, false
+		return nil, false
 	}
 }
 
-func hermesWriteFileArgs(args json.RawMessage) (json.RawMessage, bool) {
+func hermesWriteFileView(args json.RawMessage) (HermesWriteView, bool) {
 	fields, ok := hermesWriteFields(args)
 	if !ok {
-		return args, false
+		return HermesWriteView{}, false
 	}
 	path, pathOK := hermesString(fields, "path")
 	content, contentOK := hermesString(fields, "content")
 	if !pathOK || path == "" || !contentOK {
-		return args, false
+		return HermesWriteView{}, false
 	}
-	out, err := json.Marshal(map[string]string{"path": path, "content": content})
-	if err != nil {
-		return args, false
-	}
-	return out, true
+	return hermesView("write_file", "path", path, map[string]any{"content": content})
 }
 
-func hermesPatchArgs(args json.RawMessage) (string, json.RawMessage, bool) {
+func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 	fields, ok := hermesWriteFields(args)
 	if !ok {
-		return "", nil, false
+		return nil, false
 	}
 	mode := "replace"
 	if _, present := fields["mode"]; present {
 		if mode, ok = hermesString(fields, "mode"); !ok {
-			return "", nil, false
+			return nil, false
 		}
 	}
 	path := ""
 	if raw, present := fields["path"]; present && !hermesJSONNull(raw) {
-		if json.Unmarshal(raw, &path) != nil {
-			return "", nil, false
+		if json.Unmarshal(raw, &path) != nil || !hermesPlainPath(path) {
+			return nil, false
 		}
 	}
 	switch mode {
@@ -109,41 +160,74 @@ func hermesPatchArgs(args json.RawMessage) (string, json.RawMessage, bool) {
 		oldText, oldOK := hermesString(fields, "old_string")
 		newText, newOK := hermesString(fields, "new_string")
 		if path == "" || !oldOK || !newOK {
-			return "", nil, false
+			return nil, false
 		}
-		edit := map[string]any{"file_path": path, "old_string": oldText, "new_string": newText}
+		edit := map[string]any{"old_string": oldText, "new_string": newText}
 		if raw, present := fields["replace_all"]; present && !hermesJSONNull(raw) {
 			var all bool
 			if json.Unmarshal(raw, &all) != nil {
-				return "", nil, false
+				return nil, false
 			}
 			edit["replace_all"] = all
 		}
-		out, err := json.Marshal(edit)
-		if err != nil {
-			return "", nil, false
+		view, ok := hermesView("edit", "file_path", path, edit)
+		if !ok {
+			return nil, false
 		}
-		return "edit", out, true
+		return []HermesWriteView{view}, true
 	case "patch":
 		body, bodyOK := hermesString(fields, "patch")
 		if !bodyOK || body == "" {
-			return "", nil, false
+			return nil, false
 		}
 		targets, parsed := HermesV4ATargets(body)
 		if !parsed {
-			return "", nil, false
+			return nil, false
 		}
-		if path != "" {
-			targets = append([]HermesPatchTarget{{Path: path, Write: true}}, targets...)
-		}
-		out, err := json.Marshal(map[string]string{"patch": hermesApplyPatchEnvelope(targets)})
-		if err != nil {
-			return "", nil, false
-		}
-		return "apply_patch", out, true
+		return hermesTargetViews(targets)
 	default:
-		return "", nil, false
+		return nil, false
 	}
+}
+
+// hermesTargetViews is one view per distinct target and kind of change.
+func hermesTargetViews(targets []HermesPatchTarget) ([]HermesWriteView, bool) {
+	seen := make(map[HermesPatchTarget]bool, len(targets))
+	views := make([]HermesWriteView, 0, len(targets))
+	for _, target := range targets {
+		if !hermesPlainPath(target.Path) {
+			return nil, false
+		}
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		if len(seen) > HermesMaxPatchTargets {
+			return nil, false
+		}
+		var (
+			view HermesWriteView
+			ok   bool
+		)
+		if target.Write {
+			view, ok = hermesView("write_file", "path", target.Path, map[string]any{"content": "x"})
+		} else {
+			view, ok = hermesView("delete_file", "path", target.Path, map[string]any{})
+		}
+		if !ok {
+			return nil, false
+		}
+		views = append(views, view)
+	}
+	return views, len(views) > 0
+}
+
+// hermesPlainPath reports a path with no control character and no line or
+// paragraph separator.
+func hermesPlainPath(path string) bool {
+	return !strings.ContainsFunc(path, func(r rune) bool {
+		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+	})
 }
 
 // hermesWriteFields decodes a tool argument object whose keys do not repeat
@@ -285,28 +369,4 @@ func hermesTraversal(path string) bool {
 		}
 	}
 	return false
-}
-
-// hermesApplyPatchEnvelope is an apply_patch envelope that names targets:
-// each written file as an Update and each removed file as a Delete, once.
-func hermesApplyPatchEnvelope(targets []HermesPatchTarget) string {
-	write := make(map[string]bool, len(targets))
-	order := make([]string, 0, len(targets))
-	for _, target := range targets {
-		if _, seen := write[target.Path]; !seen {
-			order = append(order, target.Path)
-		}
-		write[target.Path] = write[target.Path] || target.Write
-	}
-	var envelope strings.Builder
-	envelope.WriteString("*** Begin Patch\n")
-	for _, path := range order {
-		if write[path] {
-			envelope.WriteString("*** Update File: " + path + "\n@@\n+\n")
-		} else {
-			envelope.WriteString("*** Delete File: " + path + "\n")
-		}
-	}
-	envelope.WriteString("*** End Patch\n")
-	return envelope.String()
 }
