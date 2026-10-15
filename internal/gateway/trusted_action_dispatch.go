@@ -69,6 +69,10 @@ type trustedActionRequest struct {
 	ResolvedWriteTargets map[string]string
 	record               func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry      func(trustedActionTelemetry)
+	// SandboxGuestCWD is a sandbox call's working directory in the guest's
+	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
+	// the authorized-keys proofs read it, and only to add a match.
+	SandboxGuestCWD string
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately

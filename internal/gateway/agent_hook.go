@@ -2301,6 +2301,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:            req.ConnectorName,
 			EnforcementCapable:   enforcementCapable,
 			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
+			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			record:               toolChainRecorder(req.toolChain),
 		}, command, commandTool)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
