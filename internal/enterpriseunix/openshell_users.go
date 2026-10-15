@@ -1117,7 +1117,7 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			// Purge removed those files independently, so describe the
 			// resources that may remain instead of repeating that step.
 			if env.GOOS == "linux" {
-				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; any Docker images that could not be removed are reported separately", a.Name))
+				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; OpenShell gateway resources may remain and need manual cleanup; any Docker containers, volumes and images of its sandboxes that could not be removed are reported separately", a.Name))
 			} else {
 				r.AddWarning(codeSandboxUserState, fmt.Sprintf("sandbox teardown did not finish for user %s; purge continued with local sandbox file removal; Docker images and OpenShell gateway resources may remain and need manual cleanup", a.Name))
 			}
@@ -1173,8 +1173,9 @@ func (l *lifecycle) keepAccountSandboxes(ctx context.Context, a SandboxAccount) 
 // the daemon's state, MicroVM disks, CLI state and build logs, and the OpenShell
 // that DefenseClaw installed and its state. An OpenShell the account or its
 // administrator installed stays. Account teardown handles gateway resources;
-// on Linux the root image cleanup also handles labelled Docker images before
-// these files, including the image records, are removed.
+// on Linux the root cleanup also removes the account's labelled Docker
+// sandbox containers and volumes in both managed namespaces, then its images,
+// before these files, including the image records, are removed.
 func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	env, r := l.env, l.result
 	removedAny := false

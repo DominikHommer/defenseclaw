@@ -241,9 +241,12 @@ func (l *lifecycle) warnSandboxDockerUnavailable(a SandboxAccount, owner string,
 }
 
 // purgeAccountSandboxImages removes only this account's labelled Docker
-// image tags. Linux's managed Docker is host-wide; on macOS Docker Desktop
-// belongs to the account, so the existing account-run teardown handles it.
-// Every failure is a warning: the local file purge must still finish.
+// image tags, after the containers and volumes of its sandboxes in both
+// namespaces of the managed gateways (purgeSandboxOwnerContainers), which
+// would keep an image in use. Linux's managed Docker is host-wide; on macOS
+// Docker Desktop belongs to the account, so the existing account-run
+// teardown handles it. Every failure is a warning: the local file purge must
+// still finish.
 func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAccount) {
 	if l.env.GOOS != "linux" {
 		return
@@ -276,6 +279,7 @@ func (l *lifecycle) purgeAccountSandboxImages(ctx context.Context, a SandboxAcco
 		sandboxImageRanks(store, owners[store.Owner])
 	}
 	for _, owner := range ownerOrder {
+		l.purgeSandboxOwnerContainers(ctx, a, owner)
 		l.purgeSandboxOwnerImages(ctx, a, owner, owners[owner])
 	}
 }
