@@ -2279,6 +2279,14 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs = tool, args
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "kiro") && actionTool == fallbackTool {
+			// Kiro native file writes (fs_write in the kiro-cli and IDE
+			// shapes, fs_append, str_replace) are judged as the reviewed
+			// write_file and edit contracts (GAP-0688).
+			if tool, args, ok := connector.KiroTrustedWriteArgs(req.ToolName, req.ToolArgs); ok {
+				actionTool, trustedArgs = tool, args
+			}
+		}
 		// A sandbox shell call is also judged on its command alone when its
 		// other arguments leave the parse partial.
 		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
