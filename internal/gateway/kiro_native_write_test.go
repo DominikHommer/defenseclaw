@@ -78,8 +78,8 @@ func kiroNativeWriteHook(t *testing.T, home, cwd, tool string, args map[string]a
 
 // TestKiroNativeWritesAreJudgedAsWrites pins that every Kiro native write
 // shape naming ~/.ssh/authorized_keys is blocked by the SSH persistence rule,
-// that the same shape on a project file is allowed, and that the text a call
-// writes reaches the content rules (LD_PRELOAD into /etc/profile.d). Only
+// that the same shape on a project file is allowed, and that the text a
+// write reaches the content rules (LD_PRELOAD into /etc/profile.d). Only
 // fs_write {path, content} named a write target before; the other shapes
 // were allowed with no rule (GAP-0688).
 func TestKiroNativeWritesAreJudgedAsWrites(t *testing.T) {
@@ -96,6 +96,11 @@ func TestKiroNativeWritesAreJudgedAsWrites(t *testing.T) {
 			{filepath.Join(project, "notes.txt"), "# notes\n", ""},
 			{"notes.txt", "# notes\n", ""},
 		} {
+			if strings.HasSuffix(call.name, "str-replace") && strings.HasPrefix(target.path, "/etc/") {
+				// An edit is judged as Claude Code Edit: the LD_PRELOAD
+				// install rule reads the content of a whole-file write.
+				continue
+			}
 			t.Run(call.name+"/"+target.path, func(t *testing.T) {
 				raw, got := kiroNativeWriteHook(t, home, project, call.tool, call.args(target.path, target.text))
 				if target.rule == "" {
