@@ -102,7 +102,7 @@ func (e *Env) sandboxDockerLabels(ctx context.Context, docker, kind, ref string)
 	}
 	var labels map[string]string
 	if err := json.Unmarshal(out.Stdout, &labels); err != nil {
-		return nil, errors.New("Docker did not report its labels")
+		return nil, errors.New("docker inspect did not report its labels")
 	}
 	return labels, nil
 }
