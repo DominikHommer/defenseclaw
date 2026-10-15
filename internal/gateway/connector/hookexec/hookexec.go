@@ -863,7 +863,11 @@ func sendHookRequest(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", sp.hookName+"/1.0")
 	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
-		if resolved := hookpaths.Resolve(payload); resolved != "" {
+		if resolved, ok := resolveHookWriteTargets(payload); !ok {
+			// An empty header is a resolution the gateway cannot prove, so
+			// the call is judged fail-closed instead of the hook crashing.
+			req.Header.Set(hookpaths.Header, "")
+		} else if resolved != "" {
 			req.Header.Set(hookpaths.Header, resolved)
 		}
 	}
@@ -2664,4 +2668,17 @@ func emitCopilotVSCodeLocalResult(opts Options, sp spec, result failResult) int 
 		fmt.Fprintln(opts.Stdout, body)
 	}
 	return 0
+}
+
+// resolveHookWriteTargets resolves the payload's write targets for the
+// managed gateway. It reports false when the resolver fails on the payload,
+// so the hook still reaches the gateway, which then judges the call
+// fail-closed.
+func resolveHookWriteTargets(payload []byte) (resolved string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			resolved, ok = "", false
+		}
+	}()
+	return hookpaths.Resolve(payload), true
 }
