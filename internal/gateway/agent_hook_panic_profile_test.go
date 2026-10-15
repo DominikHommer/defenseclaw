@@ -40,6 +40,11 @@ func panicTestProfiles(t *testing.T, api *APIServer) map[string]connector.HookPr
 	if len(profiles) < 12 {
 		t.Fatalf("registered hook profiles=%d, want the complete hook registry", len(profiles))
 	}
+	for _, name := range []string{"claudecode", "codex", "copilot", "cursor", "devin", "antigravity", "hermes", "openhands", "opencode", "kiro", "amp", "omnigent"} {
+		if _, ok := profiles[name]; !ok {
+			t.Fatalf("registered hook profile %s is missing", name)
+		}
+	}
 	return profiles
 }
 
@@ -260,6 +265,10 @@ func TestRecoveredHookVerdictUsesRegisteredProfiles(t *testing.T) {
 }
 
 func TestRecoveredHookFailModeByDeployment(t *testing.T) {
+	var nilConfig *config.Config
+	if got := nilConfig.EffectiveActionHookFailModeForConnector("hermes"); got != "closed" {
+		t.Fatalf("nil config action fail mode=%q, want closed", got)
+	}
 	api := &APIServer{}
 	profiles := panicTestProfiles(t, api)
 	for name, profile := range profiles {
