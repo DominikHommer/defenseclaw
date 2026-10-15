@@ -333,6 +333,12 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	restoredSessions := map[string]map[string][]string{}
 	unknownSessions := map[string][]string{}
 	unknownOwners := map[string][]string{}
+	// Sessions whose account name did not resolve (a deleted account whose
+	// process kept running, or an unreachable directory): judged by their SID
+	// below, and named as unknown if no verdict and no enrolled target covers
+	// them (GAP-0591).
+	type sidOnlySession struct{ sid, connector, label string }
+	var sidOnly []sidOnlySession
 	sids := map[string]string{}
 	for _, process := range processes {
 		user := strings.TrimSpace(process.User)
@@ -351,6 +357,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 		}
 		if user == "" {
 			user = sid
+			sidOnly = append(sidOnly, sidOnlySession{sid: sid, connector: name, label: label})
 		}
 		if process.StartedAt.IsZero() {
 			continue
@@ -483,6 +490,26 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	if restoresErr != nil && len(unknownSessions) == 0 {
 		result.AddWarning(windowsAgentSessionsRestartCode, "restart status unknown: the hook guardian's restore record could not be read")
 	}
+	if len(sidOnly) > 0 {
+		// A SID no enabled target enrolls has no activation, enrollment or
+		// restore time to judge its session by, so silence would read as "no
+		// session to restart" while it runs without DefenseClaw. An unreadable
+		// manifest or connector set is no proof of coverage either.
+		targets, targetsErr := windowsEnterpriseEnrolledTargets()
+		for _, session := range sidOnly {
+			if (currentErr == nil && !currentSet[session.connector]) ||
+				windowsEnterpriseSessionNamed(session.sid, session.label,
+					[]map[string][]string{byUser, unknownSessions},
+					[]map[string]map[string][]string{connectorSessions, enrollmentSessions, restoredSessions}) {
+				continue
+			}
+			key := windowsEnterpriseManifestRowKey(enterprisehooks.ManifestTarget{SID: session.sid, Connector: session.connector})
+			if targetsErr == nil && targets[key] {
+				continue
+			}
+			unknownOwners[session.connector] = append(unknownOwners[session.connector], session.label+" as "+session.sid)
+		}
+	}
 	warnWindowsEnterpriseUnknownOwnerSessions(result, unknownOwners)
 	if len(restoredSessions) > 0 {
 		result.SecurityComplete = false
@@ -527,6 +554,28 @@ func windowsServiceSID(sid string) bool {
 	return strings.HasPrefix(sid, "S-1-5-80-") ||
 		strings.HasPrefix(sid, "S-1-5-90-") ||
 		strings.HasPrefix(sid, "S-1-5-96-")
+}
+
+// windowsEnterpriseSessionNamed reports whether a restart-status verdict of
+// this run already names label for user.
+func windowsEnterpriseSessionNamed(user, label string, flat []map[string][]string, nested []map[string]map[string][]string) bool {
+	lists := make([][]string, 0, len(flat)+len(nested))
+	for _, byUser := range flat {
+		lists = append(lists, byUser[user])
+	}
+	for _, byUser := range nested {
+		for _, labels := range byUser[user] {
+			lists = append(lists, labels)
+		}
+	}
+	for _, labels := range lists {
+		for _, named := range labels {
+			if named == label {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // warnWindowsEnterpriseUnknownOwnerSessions keeps the restart status
