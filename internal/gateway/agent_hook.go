@@ -2264,6 +2264,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
+		shellProjectedArgs := trustedArgs
 		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "cursor") {
 			// beforeShellExecution names no tool: its payload is the shell
 			// command (see connector.CursorTrustedShellArgs).
@@ -2290,14 +2291,20 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
-			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-				actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
-			}
+		dialectHint := a.agentHookWindowsDialectHint(ctx)
+		if dialectHint {
+			actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
+		}
+		var conflictSource *conflictingToolArgumentSource
+		if bytes.Equal(trustedArgs, shellProjectedArgs) {
+			// The conflicting-keys check reads the arguments as the call
+			// carried them and projects each candidate as above (GAP-0678).
+			conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input:                actionInput,
 			LegacyText:           string(req.ToolArgs),
+			conflictSource:       conflictSource,
 			Connector:            req.ConnectorName,
 			EnforcementCapable:   enforcementCapable,
 			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
@@ -2536,6 +2543,42 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 		return out, dir
 	}
 	return args, ""
+}
+
+// agentHookWindowsDialectHint reports whether a structured tool call's
+// shell dialect is inferred from its command (agentHookWindowsShellDialect):
+// on a Windows host, outside a sandbox and Secure Client.
+func (a *APIServer) agentHookWindowsDialectHint(ctx context.Context) bool {
+	if runtime.GOOS != "windows" || isSandboxHookRequest(ctx) {
+		return false
+	}
+	cfg := a.decisionConfig(ctx)
+	return cfg == nil || !cfg.SecureClientIntegration()
+}
+
+// agentHookConflictSource is a structured tool call's arguments as the call
+// carried them (req.ToolArgs), and how a candidate of them is projected as
+// base was: agentHookTrustedActionArgs, its working directory, and the
+// shell dialect when dialectHint is set.
+func agentHookConflictSource(
+	ctx context.Context,
+	req agentHookRequest,
+	base actionfacts.Input,
+	dialectHint bool,
+) *conflictingToolArgumentSource {
+	return &conflictingToolArgumentSource{
+		raw: req.ToolArgs,
+		project: func(raw json.RawMessage) actionfacts.Input {
+			candidate := base
+			args, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, raw)
+			candidate.Args = args
+			candidate.CWD = agentHookTrustedActionCWD(ctx, req.CWD, toolCWD)
+			if dialectHint {
+				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
+			}
+			return candidate
+		},
+	}
 }
 
 // agentHookTrustedActionCWD is the working directory of a structured tool

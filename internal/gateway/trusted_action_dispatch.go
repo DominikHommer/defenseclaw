@@ -54,6 +54,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// conflictSource is the tool call's argument object before a connector
+	// projection took arguments out of Input.Args, for the conflicting-keys
+	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
+	// the call carried.
+	conflictSource *conflictingToolArgumentSource
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -133,7 +138,7 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
-	if conflict, ok := conflictingToolArgumentKeys(request.Input, facts); ok {
+	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
 	}

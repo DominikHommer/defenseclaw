@@ -17,10 +17,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -36,75 +37,120 @@ const (
 	maxConflictingToolArgumentCandidates = 16
 )
 
-// conflictingToolArguments is a tool call whose analysis is ambiguous
-// because two of its argument keys name the same field (GAP-0678).
+// conflictingToolArgumentSource is the argument object of a tool call as
+// the call carried it, before a connector projection took arguments out of
+// it (agentHookTrustedActionArgs, connector.TrustedShellArgs), and that
+// projection. The conflict check reads this object, so a second key for an
+// argument the projection takes out still names the same field, and every
+// candidate is projected the same way before it is judged (GAP-0678).
+type conflictingToolArgumentSource struct {
+	raw     json.RawMessage
+	project func(json.RawMessage) actionfacts.Input
+}
+
+// conflictingToolArgumentCandidate is the call with each conflicting field
+// named once: raw as the tool call would carry it, input as the trusted
+// action parser reads it.
+type conflictingToolArgumentCandidate struct {
+	input actionfacts.Input
+	raw   json.RawMessage
+}
+
+// conflictingToolArguments is a tool call whose analysis is ambiguous or
+// partial because more than one of its argument keys names the same field
+// (GAP-0678).
 type conflictingToolArguments struct {
 	// candidates are the call with each such field named once, for every
 	// key and value it was given.
-	candidates []actionfacts.Input
+	candidates []conflictingToolArgumentCandidate
 	// shellOrWrite is set when a candidate is a complete shell or
 	// file-write call.
 	shellOrWrite bool
 }
 
+// toolArgument is one member of a tool call's argument object.
+type toolArgument struct {
+	key   string
+	value json.RawMessage
+}
+
+// toolArgumentGroup is the members of an argument object that name one
+// field: its distinct keys, its distinct values, and its distinct members.
+type toolArgumentGroup struct {
+	keys    []string
+	values  []json.RawMessage
+	members []toolArgument
+}
+
 // conflictingToolArgumentKeys reports a tool call whose argument object
-// carries two keys for one field: keys equal but for letter case (command
-// and Command, filePath and filepath, content and Content), or two of the
-// target keys file_path, filePath and path. ActionFacts folds those keys
-// onto one field (ambiguous, conflicting sources) or, in a closed argument
-// contract, reads the second key as an unknown one (partial). Such a call
-// cannot be verified.
+// names one field more than once: keys equal but for letter case (command
+// and Command, workdir and Workdir), two keys ActionFacts reads as the same
+// field (command and cmd or script, file_path and path, cwd and workdir), or
+// a reviewed key repeated with another value ({"command":"a","command":"b"};
+// a JSON decoder keeps one of them, and which one depends on the runtime).
+// ActionFacts folds those keys onto one field (ambiguous: conflicting
+// sources or a duplicate JSON key) or, in a closed argument contract, reads
+// the second key as an unknown one (partial). Such a call cannot be
+// verified. The object is read as the tool call carried it, before a
+// connector projection (request.conflictSource).
+//
+// A repeated key ActionFacts does not read keeps its last value, as the
+// harnesses' decoders do, and a key repeated with the same value counts
+// once: neither is a conflict.
 //
 // It applies only when at least one candidate, the call with each such
-// field named once, is a complete analysis: the extra key alone made the
+// field named once, is a complete analysis: the extra keys alone made the
 // call uncertain, and the rest is a reviewed argument contract. Every other
-// ambiguous or partial call keeps its result.
-func conflictingToolArgumentKeys(input actionfacts.Input, facts actionfacts.Facts) (conflictingToolArguments, bool) {
-	if !conflictingToolArgumentStatus(facts.Parse) ||
-		input.Command != "" || len(input.Argv) != 0 || len(input.Args) == 0 {
+// ambiguous or partial call keeps its result (an unknown extra key is
+// GAP-0686).
+func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts.Facts) (conflictingToolArguments, bool) {
+	input := request.Input
+	if !conflictingToolArgumentStatus(facts.Parse) || input.Command != "" || len(input.Argv) != 0 {
 		return conflictingToolArguments{}, false
 	}
-	object, ok := decodeExactTrustedJSONObject(input.Args)
+	raw := input.Args
+	project := func(args json.RawMessage) actionfacts.Input {
+		candidate := input
+		candidate.Args = args
+		return candidate
+	}
+	if source := request.conflictSource; source != nil && len(source.raw) > 0 && source.project != nil {
+		raw, project = source.raw, source.project
+	}
+	members, ok := topLevelToolArguments(raw)
 	if !ok {
 		return conflictingToolArguments{}, false
 	}
-	groups := make(map[string][]string, len(object))
-	for key := range object {
-		field := conflictingToolArgumentField(key)
-		groups[field] = append(groups[field], key)
-	}
-	shared := make(map[string]json.RawMessage, len(object))
-	var conflicting [][]string
-	for _, keys := range groups {
-		if len(keys) == 1 {
-			shared[keys[0]] = object[keys[0]]
+	shared := make(map[string]json.RawMessage, len(members))
+	var conflicting []*toolArgumentGroup
+	for _, group := range groupToolArguments(members) {
+		if len(group.members) == 1 {
+			shared[group.keys[0]] = group.values[0]
 			continue
 		}
-		sort.Strings(keys)
-		conflicting = append(conflicting, keys)
+		conflicting = append(conflicting, group)
 	}
 	if len(conflicting) == 0 {
 		return conflictingToolArguments{}, false
 	}
-	sort.Slice(conflicting, func(i, j int) bool { return conflicting[i][0] < conflicting[j][0] })
 
 	// Each field is named by each of its keys with each of its values, so a
 	// value is judged under the key the reviewed contract reads.
 	choices := []map[string]json.RawMessage{shared}
 	total := 1
-	for _, keys := range conflicting {
-		total *= len(keys) * len(keys)
+	for _, group := range conflicting {
+		total *= len(group.keys) * len(group.values)
 		if total > maxConflictingToolArgumentCandidates {
 			break
 		}
 	}
 	if total <= maxConflictingToolArgumentCandidates {
-		for _, keys := range conflicting {
-			next := make([]map[string]json.RawMessage, 0, len(choices)*len(keys)*len(keys))
+		for _, group := range conflicting {
+			next := make([]map[string]json.RawMessage, 0, len(choices)*len(group.keys)*len(group.values))
 			for _, choice := range choices {
-				for _, name := range keys {
-					for _, source := range keys {
-						next = append(next, withArgument(choice, name, object[source]))
+				for _, key := range group.keys {
+					for _, value := range group.values {
+						next = append(next, withArgument(choice, key, value))
 					}
 				}
 			}
@@ -113,15 +159,15 @@ func conflictingToolArgumentKeys(input actionfacts.Input, facts actionfacts.Fact
 	} else {
 		// Too many fields to try every pairing: each key keeps its own value.
 		widest := 0
-		for _, keys := range conflicting {
-			widest = max(widest, len(keys))
+		for _, group := range conflicting {
+			widest = max(widest, len(group.members))
 		}
 		next := make([]map[string]json.RawMessage, 0, widest)
 		for index := range widest {
 			choice := shared
-			for _, keys := range conflicting {
-				key := keys[min(index, len(keys)-1)]
-				choice = withArgument(choice, key, object[key])
+			for _, group := range conflicting {
+				member := group.members[min(index, len(group.members)-1)]
+				choice = withArgument(choice, member.key, member.value)
 			}
 			next = append(next, choice)
 		}
@@ -132,25 +178,24 @@ func conflictingToolArgumentKeys(input actionfacts.Input, facts actionfacts.Fact
 	complete := false
 	seen := make(map[string]struct{}, len(choices))
 	for _, choice := range choices {
-		raw, err := json.Marshal(choice)
-		if err != nil {
+		raw, ok := encodeToolArguments(choice)
+		if !ok {
 			continue
 		}
 		if _, duplicate := seen[string(raw)]; duplicate {
 			continue
 		}
 		seen[string(raw)] = struct{}{}
-		candidate := input
-		candidate.Args = raw
+		candidate := conflictingToolArgumentCandidate{input: project(raw), raw: raw}
 		result.candidates = append(result.candidates, candidate)
-		analysis := actionfacts.Analyze(candidate)
+		analysis := actionfacts.Analyze(candidate.input)
 		if !analysis.Authoritative() {
 			continue
 		}
 		complete = true
 		// A complete analysis of a command argument is an execution tool:
 		// ActionFacts reads command text only for one.
-		if (len(analysis.Commands) > 0 && hasCommandArgument(candidate.Args)) ||
+		if (len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
 			slices.ContainsFunc(analysis.Paths, writeClassPathFact) {
 			result.shellOrWrite = true
 		}
@@ -158,28 +203,95 @@ func conflictingToolArgumentKeys(input actionfacts.Input, facts actionfacts.Fact
 	return result, complete
 }
 
-// conflictingToolArgumentStatus is the analysis an extra key for a field
-// leaves: ambiguous with conflicting sources, or partial with only unknown
-// operands.
+// conflictingToolArgumentStatus is the analysis a second key for a field
+// leaves: ambiguous (conflicting sources, a duplicate JSON key) or partial
+// (a closed contract reads the second key as an unknown one). Whether the
+// keys caused it is decided on the candidates.
 func conflictingToolArgumentStatus(parse actionfacts.ParseResult) bool {
-	switch parse.Status {
-	case actionfacts.StatusAmbiguous:
-		return slices.Contains(parse.Issues, actionfacts.IssueConflictingSources)
-	case actionfacts.StatusPartial:
-		return len(parse.Issues) > 0 && !slices.ContainsFunc(parse.Issues, func(issue actionfacts.IssueCode) bool {
-			return issue != actionfacts.IssueUnknownOperandGrammar
-		})
-	}
-	return false
+	return parse.Status == actionfacts.StatusAmbiguous || parse.Status == actionfacts.StatusPartial
 }
 
+// topLevelToolArguments is every member of a JSON object, in order,
+// repeated keys included, with compact values.
+func topLevelToolArguments(raw json.RawMessage) ([]toolArgument, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if opening, err := decoder.Token(); err != nil || opening != json.Delim('{') {
+		return nil, false
+	}
+	var members []toolArgument
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, value); err != nil {
+			return nil, false
+		}
+		members = append(members, toolArgument{key: key, value: compact.Bytes()})
+	}
+	if closing, err := decoder.Token(); err != nil || closing != json.Delim('}') {
+		return nil, false
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
+	return members, true
+}
+
+// groupToolArguments groups an argument object's members by the field they
+// name (conflictingToolArgumentField), in order. A repeated key the field
+// table does not review keeps only its last value; a member repeated with
+// the same value counts once.
+func groupToolArguments(members []toolArgument) []*toolArgumentGroup {
+	last := make(map[string]int, len(members))
+	for index, member := range members {
+		last[member.key] = index
+	}
+	byField := make(map[string]*toolArgumentGroup, len(members))
+	var groups []*toolArgumentGroup
+	for index, member := range members {
+		field, reviewed := conflictingToolArgumentField(member.key)
+		if !reviewed && last[member.key] != index {
+			continue
+		}
+		group := byField[field]
+		if group == nil {
+			group = &toolArgumentGroup{}
+			byField[field] = group
+			groups = append(groups, group)
+		}
+		if slices.ContainsFunc(group.members, func(existing toolArgument) bool {
+			return existing.key == member.key && bytes.Equal(existing.value, member.value)
+		}) {
+			continue
+		}
+		group.members = append(group.members, member)
+		if !slices.Contains(group.keys, member.key) {
+			group.keys = append(group.keys, member.key)
+		}
+		if !slices.ContainsFunc(group.values, func(value json.RawMessage) bool { return bytes.Equal(value, member.value) }) {
+			group.values = append(group.values, member.value)
+		}
+	}
+	return groups
+}
+
+// hasCommandArgument reports an argument object with a key ActionFacts
+// reads as a command (command and its aliases, or argv).
 func hasCommandArgument(args json.RawMessage) bool {
-	object, ok := decodeExactTrustedJSONObject(args)
+	members, ok := topLevelToolArguments(args)
 	if !ok {
 		return false
 	}
-	for key := range object {
-		if strings.EqualFold(key, "command") {
+	for _, member := range members {
+		switch field, _ := conflictingToolArgumentField(member.key); field {
+		case "command", "argv":
 			return true
 		}
 	}
@@ -187,14 +299,54 @@ func hasCommandArgument(args json.RawMessage) bool {
 }
 
 // conflictingToolArgumentField is the field an argument key names for the
-// conflict check: its lower-case form, with the file target keys as one.
-func conflictingToolArgumentField(key string) string {
+// conflict check, and whether ActionFacts reviews it. It mirrors
+// actionfacts canonicalInputFieldName (keys equal but for letter case, and
+// the aliases it folds onto one field), plus the edit tools' text keys. Any
+// other key names its lower-case form.
+func conflictingToolArgumentField(key string) (string, bool) {
 	field := strings.ToLower(key)
 	switch field {
-	case "filepath", "file_path", "file-path", "path":
-		return "path"
+	case "command", "cmd", "script",
+		"rawcommand", "raw_command", "raw-command",
+		"shellcommand", "shell_command", "shell-command",
+		"commandline", "command_line", "command-line":
+		return "command", true
+	case "argv", "commandargv", "command_argv", "command-argv":
+		return "argv", true
+	case "cwd", "workdir", "work_dir", "work-dir",
+		"workingdirectory", "working_directory", "working-directory":
+		return "cwd", true
+	case "path", "filepath", "file_path", "file-path":
+		return "path", true
+	case "url", "uri", "endpoint":
+		return "url", true
+	case "method", "httpmethod", "http_method", "http-method":
+		return "method", true
+	case "input", "parameters", "request":
+		return "nested", true
+	case "old_string", "oldstring", "old-string", "old_str":
+		return "old_string", true
+	case "new_string", "newstring", "new-string", "new_str":
+		return "new_string", true
+	case "replace_all", "replaceall", "replace-all":
+		return "replace_all", true
+	case "args", "source", "destination", "target",
+		"body", "data", "payload", "content", "headers", "edits":
+		return field, true
 	}
-	return field
+	return field, false
+}
+
+// encodeToolArguments encodes a candidate argument object as a tool call
+// carries it (no HTML escaping, so the text fallback reads the same text).
+func encodeToolArguments(object map[string]json.RawMessage) (json.RawMessage, bool) {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(object); err != nil {
+		return nil, false
+	}
+	return bytes.TrimSuffix(out.Bytes(), []byte("\n")), true
 }
 
 func withArgument(base map[string]json.RawMessage, key string, value json.RawMessage) map[string]json.RawMessage {
@@ -228,8 +380,9 @@ func dispatchConflictingToolArguments(
 	var findings []RuleFinding
 	for _, candidate := range conflict.candidates {
 		single := request
-		single.Input = candidate
-		single.LegacyText = string(candidate.Args)
+		single.Input = candidate.input
+		single.LegacyText = string(candidate.raw)
+		single.conflictSource = nil
 		single.record, single.recordTelemetry = nil, nil
 		findings = append(findings, dispatchTrustedAction(parent, single)...)
 	}
