@@ -34,12 +34,10 @@ type trustedPOSIXHomeRewrite struct {
 // The shell expands that tilde to $HOME, which ActiveHome is for the
 // identity running the action, so the result is exact only while nothing in
 // the input can have changed HOME first. The rewrite is therefore limited to
-// commands with no assignments or other HOME mentions. A list may begin with
-// one statically modeled redirect statement; all other list forms remain
-// outside this proof. Pipeline members have no redirects or dynamic words;
-// the lone-command redirect handling is retained. "~user" forms and command
-// names are never rewritten. The caller keeps the rewrite only when its parse
-// is complete.
+// commands with no assignments or other HOME mentions. Pipeline/list members
+// have no redirects or dynamic words; the lone-command redirect handling is
+// retained. "~user" forms and command names are never rewritten. The caller
+// keeps the rewrite only when its parse is complete.
 func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRewrite, bool) {
 	if !trustedPOSIXHomeLiteral.MatchString(activeHome) ||
 		(!strings.Contains(source, "~") && !strings.Contains(source, "HOME")) {
@@ -47,30 +45,10 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
 		Parse(strings.NewReader(source), "")
-	if err != nil || len(file.Stmts) == 0 || len(file.Stmts) > 2 {
+	if err != nil || len(file.Stmts) != 1 {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	stmt := file.Stmts[0]
-	if len(file.Stmts) == 2 {
-		first, second := file.Stmts[0], file.Stmts[1]
-		hasHeredoc, static := staticNoCommandRedirectPrefix(first)
-		if !static {
-			return trustedPOSIXHomeRewrite{}, false
-		}
-		if first.Semicolon.IsValid() {
-			start, end := int(first.Semicolon.Offset()), int(second.Pos().Offset())
-			if start < 0 || end < start || end > len(source) {
-				return trustedPOSIXHomeRewrite{}, false
-			}
-			separator := source[start:end]
-			if strings.TrimSpace(separator) != ";" || strings.ContainsAny(separator, "\r\n") {
-				return trustedPOSIXHomeRewrite{}, false
-			}
-		} else if !hasHeredoc {
-			return trustedPOSIXHomeRewrite{}, false
-		}
-		stmt = second
-	}
 	var words []*syntax.Word
 	var collect func(*syntax.Stmt, bool) bool
 	collect = func(stmt *syntax.Stmt, compound bool) bool {
@@ -155,44 +133,6 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	}
 	rewrite.source = out.String()
 	return rewrite, true
-}
-
-func staticNoCommandRedirectPrefix(stmt *syntax.Stmt) (hasHeredoc, static bool) {
-	if stmt == nil || stmt.Cmd != nil || len(stmt.Redirs) == 0 ||
-		stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
-		return false, false
-	}
-	for _, redirect := range stmt.Redirs {
-		if redirect == nil || redirect.Word == nil {
-			return false, false
-		}
-		switch redirect.Op {
-		case syntax.Hdoc:
-			if hasHeredoc || redirect.Hdoc == nil ||
-				redirect.N != nil && redirect.N.Value != "0" {
-				return false, false
-			}
-			delimiter := projectPOSIXWord(redirect.Word)
-			body := projectPOSIXWord(redirect.Hdoc)
-			if delimiter.Expands || delimiter.Quote != QuoteSingle || delimiter.Value == "" ||
-				body.Expands || len(body.Value) > maxScalarBytes || strings.ContainsRune(body.Value, '\x00') {
-				return false, false
-			}
-			hasHeredoc = true
-			continue
-		case syntax.RdrOut, syntax.RdrClob, syntax.AppOut, syntax.AppClob:
-			if redirect.N != nil && redirect.N.Value != "1" {
-				return false, false
-			}
-		default:
-			return false, false
-		}
-		word := projectPOSIXWord(redirect.Word)
-		if word.Expands || word.Value == "" {
-			return false, false
-		}
-	}
-	return hasHeredoc, true
 }
 
 func staticHomeRewriteWord(word *syntax.Word) bool {

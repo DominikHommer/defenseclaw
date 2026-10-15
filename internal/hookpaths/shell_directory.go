@@ -434,18 +434,16 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			// An unmodeled command, such as a function definition, may change
 			// the directory later. Its redirects are still inspected using the
 			// state at this point.
-			if cmd != nil {
-				syntax.Walk(cmd, func(node syntax.Node) bool {
-					if call, ok := node.(*syntax.CallExpr); ok {
-						if program, _, static := shellCommandWord(call, home); !static ||
-							program == "cd" || program == "pushd" || program == "popd" ||
-							program == "eval" || program == "source" || program == "." {
-							s.known, s.changed, s.stack = false, true, nil
-						}
+			syntax.Walk(cmd, func(node syntax.Node) bool {
+				if call, ok := node.(*syntax.CallExpr); ok {
+					if program, _, static := shellCommandWord(call, home); !static ||
+						program == "cd" || program == "pushd" || program == "popd" ||
+						program == "eval" || program == "source" || program == "." {
+						s.known, s.changed, s.stack = false, true, nil
 					}
-					return true
-				})
-			}
+				}
+				return true
+			})
 			write(stmt, s)
 		}
 	}
