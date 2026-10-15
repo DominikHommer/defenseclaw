@@ -78,6 +78,11 @@ type trustedActionRequest struct {
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
 	SandboxGuestCWD string
+	// windowsShellDialect is set when Input.DialectHint is inferred from
+	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
+	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
+	// has its hint inferred again from that command (GAP-0686).
+	windowsShellDialect bool
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
