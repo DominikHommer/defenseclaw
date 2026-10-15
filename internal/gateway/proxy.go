@@ -285,6 +285,18 @@ func (p *GuardrailProxy) connectorCanInspectViaHooks() bool {
 	return hp.HookCapabilities(p.setupOpts).CanBlock
 }
 
+// inspectionStrategyLabel returns a telemetry-safe label describing how
+// inspection is handled for the active connector.
+func (p *GuardrailProxy) inspectionStrategyLabel() string {
+	if p.cfg != nil && strings.EqualFold(p.cfg.ProxyMode, "full") {
+		return "gateway_full"
+	}
+	if p.connectorCanInspectViaHooks() {
+		return "hooks"
+	}
+	return "gateway"
+}
+
 // postCallContext returns a detached context for post-stream completion
 // inspection. The HTTP request context may already be cancelled by the time
 // the final POST-CALL inspection runs, which would kill in-flight LLM judge
@@ -2717,6 +2729,8 @@ func (p *GuardrailProxy) handleResponsesAPI(w http.ResponseWriter, r *http.Reque
 	// PreToolUse, PostToolUse → API server at :18970). For connectors
 	// without hooks, run proxy-level inspection here.
 	connectorHasHooks := p.connectorCanInspectViaHooks()
+	fmt.Fprintf(os.Stderr, "[responses-api] inspection=%s connector=%s\n",
+		p.inspectionStrategyLabel(), p.connectorName())
 	if !connectorHasHooks {
 		userText := lastUserText(messages)
 		if userText != "" && p.inspector != nil {
