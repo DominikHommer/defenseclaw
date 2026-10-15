@@ -1,4 +1,4 @@
-"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587)."""
+"""Pin the 1.0.1 upgrade bridge for managed docker sandboxes (GAP-0587, GAP-0675)."""
 
 import unittest
 from pathlib import Path
@@ -30,6 +30,21 @@ class Delta42DocsTest(unittest.TestCase):
             self.assertIn(phrase, bullet)
         for stale in ("cannot start, and OpenShell drops them", "before the upgrade", "pending switch"):
             self.assertNotIn(stale, bullet)
+
+    def test_sandboxes_uninstall_names_the_101_bridge_limit(self):
+        # rel-1-0-2:GAP-0675: kept sandboxes come back after a package
+        # reinstall, but not the ones kept under 1.0.1 (GAP-0666 limit).
+        text = flat("sandboxes.mdx")
+        bullet = text.split("- **Uninstall and purge.**", 1)[1].split("## Troubleshooting", 1)[0]
+        for phrase in (
+            "The kept sandboxes then start, review and pull as before, except the sandboxes kept under 1.0.1 (the 1.0.1 upgrade bridge)",
+            "the bridge lives in the setup's applied record, which an uninstall removes",
+            "after the reinstall their gateway starts in `defenseclaw-managed` and no longer lists them",
+            "Before an uninstall, pull the work you want to keep from the sandboxes kept under 1.0.1 (`defenseclaw sandbox pull NAME --apply`)",
+            "they do not survive an uninstall and reinstall (a known limit)",
+        ):
+            self.assertIn(phrase, bullet)
+        self.assertNotIn("The kept sandboxes then start, review and pull as before. Only", bullet)
 
     def test_lifecycle_upgrade_names_the_bridge(self):
         text = flat("lifecycle.mdx")

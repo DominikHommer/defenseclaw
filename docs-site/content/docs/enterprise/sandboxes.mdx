@@ -1360,7 +1360,13 @@ running sandbox counts again within the next minute.
   goes. If the uninstall removed the service account, those files are root's
   until the next `ensure`, which adopts them and gives them to the service
   account, also after a package reinstall (`rpm -e` or `apt remove`, then an
-  install). The kept sandboxes then start, review and pull as before. Only
+  install). The kept sandboxes then start, review and pull as before, except
+  the sandboxes kept under 1.0.1 (the 1.0.1 upgrade bridge): the bridge lives in
+  the setup's applied record, which an uninstall removes, so after the reinstall
+  their gateway starts in `defenseclaw-managed` and no longer lists them. Before
+  an uninstall, pull the work you want to keep from the sandboxes kept under
+  1.0.1 (`defenseclaw sandbox pull NAME --apply`); they do not survive an
+  uninstall and reinstall (a known limit). Only
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
   it also removes the kept registrations, decisions and key. On Linux, purge
