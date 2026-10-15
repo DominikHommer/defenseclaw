@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
@@ -614,15 +615,17 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 	}()
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "hermes"
 	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
 	response := postDecisionForTest(t, api, "hermes", "pre_tool_call", "echo done")
-	if response["action"] != "block" || response["raw_action"] != "block" || !decisionIsDenied(response["hook_output"]) {
-		t.Fatalf("response=%v, want a denying block", response)
+	if response["action"] != "allow" || response["raw_action"] != "block" || response["would_block"] != true || decisionIsDenied(response["hook_output"]) {
+		t.Fatalf("response=%v, want Secure Client allow with would_block", response)
 	}
 	row := soleHookDecisionForTest(t, store)
-	if row.Action != string(audit.ActionConnectorHook) || !row.Enforced {
-		t.Fatalf("audit=%+v, want one enforced connector-hook row", row)
+	if row.Action != string(audit.ActionConnectorHook) || row.Enforced {
+		t.Fatalf("audit=%+v, want one non-enforcing connector-hook row", row)
 	}
 }
