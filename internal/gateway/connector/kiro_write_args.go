@@ -19,37 +19,40 @@ var KiroUnverifiedWriteArgs = json.RawMessage(`{}`)
 // {path, content} and edit {file_path, old_string, new_string}), carrying
 // the text the call writes as content, so its target reaches the same
 // file-write rules as Claude Code's Write and Edit and content rules fire
-// too. Unprojected, only fs_write {path, content} named a write target: the
-// kiro-cli and IDE shapes below reached no write rule and a write of
-// ~/.ssh/authorized_keys was allowed (GAP-0688).
+// too. The native tool names and argument shapes differ across Kiro surfaces.
 //
 // The shapes (keys outside them make the call unreviewed):
 //
-//   - kiro-cli fs_write (the Amazon Q Developer CLI fs_write tool schema that
-//     kiro-cli inherits: command create|str_replace|insert|append, path,
-//     file_text, old_str, new_str, insert_line, summary): create writes
-//     file_text (new_str when file_text is absent, as the CLI does), append
-//     and insert write new_str, str_replace is an edit of old_str to new_str.
-//   - Kiro IDE / v3 agent fs_write {path, text} and fs_append {path, text}
-//     (AWS Labs Kiro hook payload reference): text is the content written.
-//   - str_replace {path, oldStr, newStr} (same reference), and the snake_case
-//     {path, old_str, new_str} spelling: an edit.
+//   - kiro-cli write, fs_write and fsWrite: command create|append|insert|
+//     str_replace|strReplace, path, and the command's text and line fields.
+//     Create accepts content, file_text, fileText or new_str/newStr; append
+//     and insert accept content or new_str/newStr. Insert may specify
+//     insert_line/insertLine; replacement accepts old_str/oldStr and
+//     new_str/newStr, with an optional boolean replaceAll.
+//   - Kiro IDE fs_write/fsWrite and fs_append/fsAppend {path, text}:
+//     text is the content written.
+//   - str_replace/strReplace {path, oldStr, newStr} or the snake_case
+//     spellings: an edit.
 //
 // Every shape may carry Kiro's __tool_use_purpose note and a summary.
-// fs_write {path, content} is already a reviewed write_file shape and is
-// left alone (ok false); with a note it is projected as write_file too. Any other fs_write, fs_append or str_replace call (a repeated key,
-// an unknown command or key, a value of the wrong type, an empty path) is
-// projected onto apply_patch KiroUnverifiedWriteArgs.
+// fs_write {path, content} is already a reviewed write shape and is left
+// alone (ok false); with a note it is projected as write_file too. Every
+// other unreviewed write call is projected onto apply_patch with unknown
+// targets, so the fail-closed hook blocks it.
 func KiroTrustedWriteArgs(toolName string, args json.RawMessage) (tool string, projected json.RawMessage, ok bool) {
 	name := strings.TrimSpace(toolName)
 	switch name {
-	case "fs_write", "fs_append", "str_replace":
+	case "write", "fs_write", "fsWrite", "fs_append", "fsAppend", "str_replace", "strReplace":
 	default:
 		return "", args, false
 	}
 	fields, valid := hermesWriteFields(args)
-	if valid && name == "fs_write" && len(fields) == 2 && fields["path"] != nil && fields["content"] != nil {
-		return "", args, false
+	if valid && name == "fs_write" && len(fields) == 2 {
+		path, pathOK := hermesString(fields, "path")
+		_, contentOK := hermesString(fields, "content")
+		if pathOK && strings.TrimSpace(path) != "" && contentOK {
+			return "", args, false
+		}
 	}
 	if valid {
 		if tool, out, ok := kiroWriteView(name, fields); ok {
@@ -72,69 +75,72 @@ func kiroWriteView(name string, fields map[string]json.RawMessage) (string, json
 			return "", nil, false
 		}
 	}
-	if _, cli := fields["command"]; cli && name == "fs_write" {
+	if _, cli := fields["command"]; cli && (name == "write" || name == "fs_write" || name == "fsWrite") {
 		command, ok := hermesString(fields, "command")
 		if !ok {
 			return "", nil, false
 		}
 		switch command {
 		case "create":
-			if !kiroOnlyKeys(fields, "command", "path", "file_text", "new_str") {
+			if !kiroOnlyKeys(fields, "command", "path", "content", "file_text", "fileText", "new_str", "newStr") {
 				return "", nil, false
 			}
-			text, textOK := kiroOptionalString(fields, "file_text")
-			fallback, fallbackOK := kiroOptionalString(fields, "new_str")
-			if !textOK || !fallbackOK {
-				return "", nil, false
+			if raw, present := fields["file_text"]; present && hermesJSONNull(raw) {
+				// The CLI uses new_str when its optional file_text is null.
+				if !kiroOnlyKeys(fields, "command", "path", "file_text", "new_str", "newStr") {
+					return "", nil, false
+				}
+				return kiroRequiredWriteFileView(fields, path, "new_str", "newStr")
 			}
-			if _, present := fields["file_text"]; !present || hermesJSONNull(fields["file_text"]) {
-				text = fallback
-			}
-			return kiroWriteFileView(path, text)
+			return kiroRequiredWriteFileView(fields, path, "content", "file_text", "fileText", "new_str", "newStr")
 		case "append":
-			if !kiroOnlyKeys(fields, "command", "path", "new_str") {
+			if !kiroOnlyKeys(fields, "command", "path", "content", "new_str", "newStr") {
 				return "", nil, false
 			}
-			return kiroRequiredWriteFileView(fields, path, "new_str")
+			return kiroRequiredWriteFileView(fields, path, "content", "new_str", "newStr")
 		case "insert":
-			if !kiroOnlyKeys(fields, "command", "path", "insert_line", "new_str") {
+			if !kiroOnlyKeys(fields, "command", "path", "insert_line", "insertLine", "content", "new_str", "newStr") ||
+				!kiroAliasedLine(fields, "insert_line", "insertLine") {
 				return "", nil, false
 			}
-			var line uint64
-			if raw, present := fields["insert_line"]; !present || json.Unmarshal(raw, &line) != nil {
+			return kiroRequiredWriteFileView(fields, path, "content", "new_str", "newStr")
+		case "str_replace", "strReplace":
+			if !kiroOnlyKeys(fields, "command", "path", "old_str", "oldStr", "new_str", "newStr", "replaceAll") {
 				return "", nil, false
 			}
-			return kiroRequiredWriteFileView(fields, path, "new_str")
-		case "str_replace":
-			if !kiroOnlyKeys(fields, "command", "path", "old_str", "new_str") {
-				return "", nil, false
+			if raw, present := fields["replaceAll"]; present {
+				var replaceAll bool
+				if hermesJSONNull(raw) || json.Unmarshal(raw, &replaceAll) != nil {
+					return "", nil, false
+				}
 			}
-			return kiroEditView(fields, path, "old_str", "new_str")
+			return kiroAliasedEditView(fields, path)
 		default:
 			return "", nil, false
 		}
 	}
 	switch name {
-	case "fs_write", "fs_append":
+	case "fs_write", "fsWrite", "fs_append", "fsAppend":
 		if kiroOnlyKeys(fields, "path", "text") {
 			return kiroRequiredWriteFileView(fields, path, "text")
 		}
-		if name == "fs_write" && kiroOnlyKeys(fields, "path", "content") {
+		if (name == "fs_write" || name == "fsWrite") && kiroOnlyKeys(fields, "path", "content") {
 			return kiroRequiredWriteFileView(fields, path, "content")
 		}
-	case "str_replace":
-		if kiroOnlyKeys(fields, "path", "oldStr", "newStr") {
-			return kiroEditView(fields, path, "oldStr", "newStr")
+	case "write":
+		if kiroOnlyKeys(fields, "path", "content") {
+			return kiroRequiredWriteFileView(fields, path, "content")
 		}
-		if kiroOnlyKeys(fields, "path", "old_str", "new_str") {
-			return kiroEditView(fields, path, "old_str", "new_str")
+	case "str_replace", "strReplace":
+		if kiroOnlyKeys(fields, "path", "oldStr", "newStr", "old_str", "new_str") {
+			return kiroAliasedEditView(fields, path)
 		}
 	}
 	return "", nil, false
 }
 
-func kiroRequiredWriteFileView(fields map[string]json.RawMessage, path, key string) (string, json.RawMessage, bool) {
-	text, ok := hermesString(fields, key)
+func kiroRequiredWriteFileView(fields map[string]json.RawMessage, path string, keys ...string) (string, json.RawMessage, bool) {
+	text, ok := kiroAliasedString(fields, keys...)
 	if !ok {
 		return "", nil, false
 	}
@@ -149,9 +155,17 @@ func kiroWriteFileView(path, content string) (string, json.RawMessage, bool) {
 	return "write_file", out, true
 }
 
-func kiroEditView(fields map[string]json.RawMessage, path, oldKey, newKey string) (string, json.RawMessage, bool) {
-	oldText, oldOK := hermesString(fields, oldKey)
-	newText, newOK := hermesString(fields, newKey)
+func kiroAliasedEditView(fields map[string]json.RawMessage, path string) (string, json.RawMessage, bool) {
+	_, snakeOld := fields["old_str"]
+	_, snakeNew := fields["new_str"]
+	_, camelOld := fields["oldStr"]
+	_, camelNew := fields["newStr"]
+	if (snakeOld || snakeNew) && (camelOld || camelNew) &&
+		!(snakeOld && snakeNew && camelOld && camelNew) {
+		return "", nil, false
+	}
+	oldText, oldOK := kiroAliasedString(fields, "old_str", "oldStr")
+	newText, newOK := kiroAliasedString(fields, "new_str", "newStr")
 	if !oldOK || !newOK {
 		return "", nil, false
 	}
@@ -160,6 +174,44 @@ func kiroEditView(fields map[string]json.RawMessage, path, oldKey, newKey string
 		return "", nil, false
 	}
 	return "edit", out, true
+}
+
+// kiroAliasedString accepts equivalent spellings only when their values agree.
+func kiroAliasedString(fields map[string]json.RawMessage, keys ...string) (string, bool) {
+	var text string
+	seen := false
+	for _, key := range keys {
+		raw, present := fields[key]
+		if !present {
+			continue
+		}
+		if hermesJSONNull(raw) {
+			return "", false
+		}
+		value, ok := hermesString(fields, key)
+		if !ok || (seen && text != value) {
+			return "", false
+		}
+		text, seen = value, true
+	}
+	return text, seen
+}
+
+func kiroAliasedLine(fields map[string]json.RawMessage, keys ...string) bool {
+	var line uint64
+	seen := false
+	for _, key := range keys {
+		raw, present := fields[key]
+		if !present {
+			continue
+		}
+		var value uint64
+		if hermesJSONNull(raw) || json.Unmarshal(raw, &value) != nil || (seen && line != value) {
+			return false
+		}
+		line, seen = value, true
+	}
+	return true
 }
 
 // kiroOnlyKeys reports whether every key of fields is one of keys or a Kiro

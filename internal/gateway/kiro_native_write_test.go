@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,4 +138,92 @@ func TestKiroUnreviewedWriteShapesAreBlocked(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestKiroLiveWriteHook covers the write call sent by current Kiro CLI hooks
+// and the same call with other write targets.
+func TestKiroLiveWriteHook(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	hardLink := filepath.Join(project, "keys-hard.txt")
+	symlink := filepath.Join(project, "keys-link.txt")
+	if err := os.Link(keys, hardLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, symlink); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, target := range []struct {
+		name, path, content, rule string
+	}{
+		{"authorized keys absolute", keys, "V688-HARDLINK2\n", hermesPatchAuthorizedKeysRule},
+		{"authorized keys tilde", "~/.ssh/authorized_keys", "V688-HARDLINK2\n", hermesPatchAuthorizedKeysRule},
+		{"authorized keys hard link", hardLink, "V688-HARDLINK2\n", hermesPatchAuthorizedKeysRule},
+		{"authorized keys symlink", symlink, "V688-HARDLINK2\n", hermesPatchAuthorizedKeysRule},
+		{"profile content", "/etc/profile.d/logger.sh", "# logger\nexport LD_PRELOAD=/usr/local/lib/liblogger.so\n", "persistence.global_ld_preload_install"},
+		{"project absolute", filepath.Join(project, "lab-hard2.txt"), "V688-HARDLINK2\n", ""},
+		{"project relative", "lab-hard2.txt", "V688-HARDLINK2\n", ""},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			args := map[string]any{
+				"__tool_use_purpose": "Creating the requested file with the specified content",
+				"command":            "create",
+				"path":               target.path,
+				"content":            target.content,
+			}
+			raw, got := kiroNativeWriteHook(t, home, project, "write", args)
+			want := "allow"
+			if target.rule != "" {
+				want = "block"
+			}
+			if raw != want || (target.rule != "" && !strings.Contains(got, target.rule)) {
+				t.Fatalf("raw_action = %q, want %s by %s: %.800s", raw, want, target.rule, got)
+			}
+		})
+	}
+	for _, call := range []struct {
+		name string
+		args map[string]any
+		rule string
+	}{
+		{"insert end hard link", map[string]any{"command": "insert", "path": hardLink, "content": "V688-HARDLINK2\n"}, hermesPatchAuthorizedKeysRule},
+		{"insert end symlink", map[string]any{"command": "insert", "path": symlink, "content": "V688-HARDLINK2\n"}, hermesPatchAuthorizedKeysRule},
+		{"insert real path", map[string]any{"command": "insert", "path": keys, "content": "V688-HARDLINK2\n", "insertLine": 3}, hermesPatchAuthorizedKeysRule},
+		{"replace hard link", map[string]any{"command": "strReplace", "path": hardLink, "oldStr": "# base", "newStr": "# next", "replaceAll": true}, hermesPatchAuthorizedKeysRule},
+		{"insert end profile content", map[string]any{"command": "insert", "path": "/etc/profile.d/logger.sh", "content": "# logger\nexport LD_PRELOAD=/usr/local/lib/liblogger.so\n"}, "persistence.global_ld_preload_install"},
+		{"insert end project", map[string]any{"command": "insert", "path": filepath.Join(project, "notes.txt"), "content": "# notes\n"}, ""},
+		{"insert line project", map[string]any{"command": "insert", "path": filepath.Join(project, "notes.txt"), "content": "# notes\n", "insertLine": 3}, ""},
+		{"replace project", map[string]any{"command": "strReplace", "path": filepath.Join(project, "notes.txt"), "oldStr": "# base", "newStr": "# notes", "replaceAll": true}, ""},
+	} {
+		t.Run(call.name, func(t *testing.T) {
+			call.args["__tool_use_purpose"] = "Update the requested file"
+			raw, got := kiroNativeWriteHook(t, home, project, "write", call.args)
+			want := "allow"
+			if call.rule != "" {
+				want = "block"
+			}
+			if raw != want || (call.rule != "" && !strings.Contains(got, call.rule)) {
+				t.Fatalf("raw_action = %q, want %s by %s: %.800s", raw, want, call.rule, got)
+			}
+		})
+	}
+	t.Run("unreviewed command", func(t *testing.T) {
+		args := map[string]any{
+			"__tool_use_purpose": "Creating the requested file with the specified content",
+			"command":            "undo_edit",
+			"path":               filepath.Join(project, "lab-hard2.txt"),
+			"content":            "V688-HARDLINK2\n",
+		}
+		if raw, got := kiroNativeWriteHook(t, home, project, "write", args); raw != "block" {
+			t.Fatalf("raw_action = %q, want block: %.800s", raw, got)
+		}
+	})
+	t.Run("bare write symlink", func(t *testing.T) {
+		args := map[string]any{"path": symlink, "content": "V688-HARDLINK2\n"}
+		if raw, got := kiroNativeWriteHook(t, home, project, "write", args); raw != "block" ||
+			!strings.Contains(got, hermesPatchAuthorizedKeysRule) {
+			t.Fatalf("raw_action = %q, want authorized keys block: %.800s", raw, got)
+		}
+	})
 }
