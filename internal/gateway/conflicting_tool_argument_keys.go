@@ -93,16 +93,6 @@ type toolArgumentGroup struct {
 // the second key as an unknown one (partial). Such a call cannot be
 // verified. The object is read as the tool call carried it, before a
 // connector projection (request.conflictSource).
-//
-// A repeated key ActionFacts does not read keeps its last value, as the
-// harnesses' decoders do, and a key repeated with the same value counts
-// once: neither is a conflict.
-//
-// It applies only when at least one candidate, the call with each such
-// field named once, is a complete analysis: the extra keys alone made the
-// call uncertain, and the rest is a reviewed argument contract. Every other
-// ambiguous or partial call keeps its result (an unknown extra key is
-// GAP-0686).
 func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts.Facts) (conflictingToolArguments, bool) {
 	input := request.Input
 	if !conflictingToolArgumentStatus(facts.Parse) || input.Command != "" || len(input.Argv) != 0 {
