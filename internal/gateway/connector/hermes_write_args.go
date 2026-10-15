@@ -99,8 +99,9 @@ func hermesUnverifiedView() HermesWriteView {
 //     view; mode "patch" applies a V4A patch whose Update, Add, Delete and
 //     Move File headers name the files: each written file (Update, Add, a
 //     Move destination) is a write_file view and each removed file (Delete,
-//     a Move source) a delete_file view. In that mode path is only checked
-//     and locked, never written, so it is not a target.
+//     a Move source) a delete_file view. An Add view carries the text
+//     _apply_add writes; the others a stand-in text. In that mode path is
+//     only checked and locked, never written, so it is not a target.
 //
 // A patch call that does not fit that contract (another mode, a key of the
 // wrong type, a V4A patch Hermes cannot parse or that names no file, a path
@@ -180,7 +181,7 @@ func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 		if !bodyOK || body == "" {
 			return nil, false
 		}
-		targets, parsed := HermesV4ATargets(body)
+		targets, parsed := hermesV4ATargets(body)
 		if !parsed {
 			return nil, false
 		}
@@ -190,18 +191,42 @@ func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 	}
 }
 
-// hermesTargetViews is one view per distinct target and kind of change.
-func hermesTargetViews(targets []HermesPatchTarget) ([]HermesWriteView, bool) {
-	seen := make(map[HermesPatchTarget]bool, len(targets))
+// hermesWriteStandIn is the content of a write_file view whose written text
+// is not known from the call alone (an Update or a Move destination, whose
+// result depends on the file), or is over hermesMaxAddContentBytes. It is
+// not empty, as the text it stands for is not.
+const hermesWriteStandIn = "x"
+
+// hermesMaxAddContentBytes bounds the JSON-encoded text an Add view carries:
+// the trusted-action parser's bound on one written text (64 KiB), under its
+// bound on a whole argument object (256 KiB). Over it, the Add view carries
+// hermesWriteStandIn, as a write_file call whose text is over that bound is
+// judged on its target with a stand-in text.
+const hermesMaxAddContentBytes = 64 << 10
+
+// hermesTargetViews is one view per distinct target, kind of change and
+// written text. An Add view carries the text Hermes writes, so the content
+// rules judge it as they judge a write_file call of that text.
+func hermesTargetViews(targets []hermesV4ATarget) ([]HermesWriteView, bool) {
+	type viewKey struct {
+		target  HermesPatchTarget
+		content string
+	}
+	seen := make(map[viewKey]bool, len(targets))
 	views := make([]HermesWriteView, 0, len(targets))
 	for _, target := range targets {
 		if !hermesPlainPath(target.Path) {
 			return nil, false
 		}
-		if seen[target] {
+		content := hermesWriteStandIn
+		if target.add {
+			content = hermesAddContent(target.lines)
+		}
+		key := viewKey{target: target.HermesPatchTarget, content: content}
+		if seen[key] {
 			continue
 		}
-		seen[target] = true
+		seen[key] = true
 		if len(seen) > HermesMaxPatchTargets {
 			return nil, false
 		}
@@ -210,7 +235,7 @@ func hermesTargetViews(targets []HermesPatchTarget) ([]HermesWriteView, bool) {
 			ok   bool
 		)
 		if target.Write {
-			view, ok = hermesView("write_file", "path", target.Path, map[string]any{"content": "x"})
+			view, ok = hermesView("write_file", "path", target.Path, map[string]any{"content": content})
 		} else {
 			view, ok = hermesView("delete_file", "path", target.Path, map[string]any{})
 		}
@@ -220,6 +245,17 @@ func hermesTargetViews(targets []HermesPatchTarget) ([]HermesWriteView, bool) {
 		views = append(views, view)
 	}
 	return views, len(views) > 0
+}
+
+// hermesAddContent is the text Hermes' _apply_add writes for an Add: the
+// contents of its "+" lines joined with "\n", or hermesWriteStandIn when that
+// text is over hermesMaxAddContentBytes.
+func hermesAddContent(lines []string) string {
+	content := strings.Join(lines, "\n")
+	if encoded, err := json.Marshal(content); err != nil || len(encoded) > hermesMaxAddContentBytes {
+		return hermesWriteStandIn
+	}
+	return content
 }
 
 // hermesPlainPath reports a path with no control character and no line or
@@ -266,6 +302,15 @@ type HermesPatchTarget struct {
 	Write bool
 }
 
+// hermesV4ATarget is a HermesPatchTarget with, for an Add, the contents of
+// its "+" lines as Hermes' parser keeps them (the line after the "+", up to
+// but not including its "\n").
+type hermesV4ATarget struct {
+	HermesPatchTarget
+	add   bool
+	lines []string
+}
+
 // hermesSpace is Python's str whitespace (re's \s for a str pattern and
 // str.strip), which the Hermes V4A markers and paths use.
 const hermesSpace = `[\t\n\v\f\r\x1c-\x1f \x{85}\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]`
@@ -278,10 +323,11 @@ var (
 	hermesV4AOps   = []struct {
 		re    *regexp.Regexp
 		write bool
+		add   bool
 		move  bool
 	}{
 		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Update` + hermesSpace + `+File:` + hermesSpace + `*(.+)`), write: true},
-		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Add` + hermesSpace + `+File:` + hermesSpace + `*(.+)`), write: true},
+		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Add` + hermesSpace + `+File:` + hermesSpace + `*(.+)`), write: true, add: true},
 		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Delete` + hermesSpace + `+File:` + hermesSpace + `*(.+)`)},
 		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Move` + hermesSpace + `+File:` + hermesSpace + `*(.+?)` +
 			hermesSpace + `*->` + hermesSpace + `*(.+)`), move: true},
@@ -307,10 +353,26 @@ func hermesStrip(text string) string {
 // parsed is false when Hermes would refuse the patch (an empty path, an
 // Update without hunks, a Move without a destination, a ".." component,
 // which _collect_v4a_header_paths rejects) or when it names no file.
-func HermesV4ATargets(body string) (targets []HermesPatchTarget, parsed bool) {
-	lines := strings.Split(body, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimSuffix(lines[i], "\r")
+func HermesV4ATargets(body string) ([]HermesPatchTarget, bool) {
+	parsedTargets, parsed := hermesV4ATargets(body)
+	if !parsed {
+		return nil, false
+	}
+	targets := make([]HermesPatchTarget, len(parsedTargets))
+	for i, target := range parsedTargets {
+		targets[i] = target.HermesPatchTarget
+	}
+	return targets, true
+}
+
+// hermesV4ATargets is HermesV4ATargets with the "+" lines of each Add: the
+// lines up to the next operation header that start with "+", read on the
+// line as Hermes splits it (at "\n" only, so a "\r" before it is kept).
+func hermesV4ATargets(body string) (targets []hermesV4ATarget, parsed bool) {
+	raw := strings.Split(body, "\n")
+	lines := make([]string, len(raw))
+	for i := range raw {
+		lines[i] = strings.TrimSuffix(raw[i], "\r")
 	}
 	start, end := -1, len(lines)
 	for i, line := range lines {
@@ -321,8 +383,8 @@ func HermesV4ATargets(body string) (targets []HermesPatchTarget, parsed bool) {
 			break
 		}
 	}
-	update, hunk := false, false
-	for _, line := range lines[start+1 : end] {
+	update, hunk, add := false, false, -1
+	for i, line := range lines[start+1 : end] {
 		matched := false
 		for _, op := range hermesV4AOps {
 			groups := op.re.FindStringSubmatch(line)
@@ -332,7 +394,7 @@ func HermesV4ATargets(body string) (targets []HermesPatchTarget, parsed bool) {
 			if update && !hunk {
 				return nil, false
 			}
-			matched, update, hunk = true, false, false
+			matched, update, hunk, add = true, false, false, -1
 			source := hermesStrip(groups[1])
 			if source == "" || hermesTraversal(source) {
 				return nil, false
@@ -343,16 +405,23 @@ func HermesV4ATargets(body string) (targets []HermesPatchTarget, parsed bool) {
 				if destination == "" || hermesTraversal(destination) {
 					return nil, false
 				}
-				targets = append(targets, HermesPatchTarget{Path: source}, HermesPatchTarget{Path: destination, Write: true})
+				targets = append(targets, hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: source}},
+					hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: destination, Write: true}})
 			default:
-				targets = append(targets, HermesPatchTarget{Path: source, Write: op.write})
+				targets = append(targets, hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: source, Write: op.write}, add: op.add})
 				update = op.re == hermesV4AOps[0].re
+				if op.add {
+					add = len(targets) - 1
+				}
 			}
 			break
 		}
 		if !matched && update && line != "" && !strings.HasPrefix(line, `\`) {
 			// A hunk header or any other line of an Update's hunk.
 			hunk = hunk || !strings.HasPrefix(line, "@@")
+		}
+		if rawLine := raw[start+1+i]; !matched && add >= 0 && strings.HasPrefix(rawLine, "+") {
+			targets[add].lines = append(targets[add].lines, rawLine[1:])
 		}
 	}
 	if update && !hunk || len(targets) == 0 {

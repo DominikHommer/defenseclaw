@@ -233,3 +233,40 @@ func TestHermesNativeWritesOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 		}
 	}
 }
+
+// TestHermesV4AAddIsJudgedOnItsContent pins that a V4A Add is judged on the
+// text Hermes writes (the "+" line contents of its hunks), as a write_file
+// call of that text is: a global LD_PRELOAD export added to a login profile
+// is blocked by the same rule either way, and a benign project file added
+// the same way stays allowed (GAP-0667).
+func TestHermesV4AAddIsJudgedOnItsContent(t *testing.T) {
+	const rule = "persistence.global_ld_preload_install"
+	home, project := hermesPatchHome(t)
+	profile := "/etc/profile.d/connect_logger.sh"
+	add := func(path, lines string) map[string]any {
+		return map[string]any{"mode": "patch", "patch": "*** Begin Patch\n*** Add File: " + path + "\n" + lines + "*** End Patch\n"}
+	}
+	for _, test := range []struct {
+		name, tool string
+		args       map[string]any
+		block      bool
+	}{
+		{"write-file", "write_file", map[string]any{"path": profile, "content": "# loader\nexport LD_PRELOAD=/usr/local/lib/libconnect_logger.so"}, true},
+		{"v4a-add", "patch", add(profile, "+# loader\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-second-hunk", "patch", add(profile, "+# loader\n@@ x @@\n+export LD_PRELOAD=/usr/local/lib/libconnect_logger.so\n"), true},
+		{"v4a-add-benign", "patch", add(filepath.Join(project, "run.sh"), "+#!/bin/sh\n+echo hello\n"), false},
+		{"v4a-add-benign-relative", "patch", add("run.sh", "+#!/bin/sh\n+echo hello\n"), false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := hermesPatchHostHook(t, home, project, hermesPatchBody(t, project, test.tool, test.args))
+			var resp map[string]any
+			if err := json.Unmarshal([]byte(got), &resp); err != nil {
+				t.Fatalf("verdict %q: %v", got, err)
+			}
+			if blocked := resp["action"] == "block" && strings.Contains(got, rule); blocked != test.block ||
+				(!test.block && resp["action"] != "allow") {
+				t.Fatalf("action %v, want block by %s = %t: %.800s", resp["action"], rule, test.block, got)
+			}
+		})
+	}
+}

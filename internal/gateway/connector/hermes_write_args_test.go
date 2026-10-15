@@ -35,7 +35,18 @@ func TestHermesTrustedWriteViews(t *testing.T) {
 			want: []string{`delete_file {"path":"a.md"}`, `write_file {"content":"x","path":"~/b.md"}`}, wantOK: true},
 		// path is only checked and locked in this mode, never written.
 		{name: "v4a with path", tool: "patch", args: `{"mode":"patch","path":"c.txt","patch":"*** Add File: a.txt\n+y"}`,
-			want: []string{`write_file {"content":"x","path":"a.txt"}`}, wantOK: true},
+			want: []string{`write_file {"content":"y","path":"a.txt"}`}, wantOK: true},
+		// An Add writes the "+" line contents of all its hunks joined with
+		// "\n" (Hermes' _apply_add); other lines and a "\r" end are kept as
+		// Hermes' parser keeps them.
+		{name: "v4a add content", tool: "patch",
+			args:   `{"mode":"patch","patch":"*** Begin Patch\n*** Add File: /etc/profile.d/x.sh\n+# loader\n ctx\n@@ h @@\n+export LD_PRELOAD=/l.so\r\n+\n*** Update File: b.txt\n x\n+y\n*** End Patch"}`,
+			want:   []string{`write_file {"content":"# loader\nexport LD_PRELOAD=/l.so\r\n","path":"/etc/profile.d/x.sh"}`, `write_file {"content":"x","path":"b.txt"}`},
+			wantOK: true},
+		{name: "v4a add with no lines", tool: "patch", args: `{"mode":"patch","patch":"*** Add File: a.txt\n*** Delete File: b.txt\n+y"}`,
+			want: []string{`write_file {"content":"","path":"a.txt"}`, `delete_file {"path":"b.txt"}`}, wantOK: true},
+		{name: "v4a same add path, other content", tool: "patch", args: `{"mode":"patch","patch":"*** Add File: a.txt\n+y\n*** Add File: a.txt\n+z\n*** Add File: a.txt\n+y"}`,
+			want: []string{`write_file {"content":"y","path":"a.txt"}`, `write_file {"content":"z","path":"a.txt"}`}, wantOK: true},
 		{name: "v4a repeated and lexical duplicate targets", tool: "patch",
 			args: `{"mode":"patch","patch":"*** Update File: a.txt\n x\n+y\n*** Update File: a.txt\n x\n+y\n*** Update File: ./a.txt\n x\n+y\n"}`,
 			want: []string{`write_file {"content":"x","path":"a.txt"}`, `write_file {"content":"x","path":"./a.txt"}`}, wantOK: true},
@@ -96,6 +107,31 @@ func TestHermesTrustedWriteViewsTargetBound(t *testing.T) {
 		}
 		if last := views[len(views)-1]; test.wantViews == 1 && (last.Tool != "apply_patch" || string(last.Args) != "{}") {
 			t.Fatalf("%d targets: got %s %s, want the unverified view", test.targets, last.Tool, last.Args)
+		}
+	}
+}
+
+// TestHermesAddViewContentBound pins that an Add whose text is over the
+// bound one written text is judged under carries the stand-in text, so the
+// view is judged on its target.
+func TestHermesAddViewContentBound(t *testing.T) {
+	for _, test := range []struct {
+		size int
+		want string
+	}{{hermesMaxAddContentBytes - 2, "full"}, {hermesMaxAddContentBytes - 1, hermesWriteStandIn}} {
+		text := strings.Repeat("a", test.size)
+		args, _ := json.Marshal(map[string]any{"mode": "patch", "patch": "*** Add File: a.txt\n+" + text})
+		views, ok := HermesTrustedWriteViews("patch", args)
+		if !ok || len(views) != 1 {
+			t.Fatalf("%d bytes: views %v ok=%t", test.size, views, ok)
+		}
+		want := test.want
+		if want == "full" {
+			want = text
+		}
+		var got map[string]string
+		if err := json.Unmarshal(views[0].Args, &got); err != nil || got["content"] != want || got["path"] != "a.txt" {
+			t.Fatalf("%d bytes: got %d content bytes (%v), want %d", test.size, len(got["content"]), err, len(want))
 		}
 	}
 }
