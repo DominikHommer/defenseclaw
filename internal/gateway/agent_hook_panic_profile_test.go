@@ -288,7 +288,7 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 							want, reason = "allow", "observe mode never enforces"
 						} else if deployment.name == "secure_client" {
 							want, reason = "allow", "Secure Client allows recovered errors"
-						} else if failMode == "open" && name != "cursor" && !(deployment.name == "standalone" && (name == "codex" || name == "claudecode" || name == "devin")) {
+						} else if failMode == "open" && name != "cursor" && (deployment.name != "standalone" || (name != "codex" && name != "claudecode" && name != "devin")) {
 							want, reason = "allow", "explicit open is effective for this connector"
 						} else if failMode == "open" {
 							reason = "managed native or cursor accessor keeps this connector closed"
