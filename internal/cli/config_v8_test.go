@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -31,6 +34,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+func TestReadConfigErrorDoesNotNameOldVersion(t *testing.T) {
+	_, err := readConfigV8Source(filepath.Join(t.TempDir(), "missing-config.yaml"))
+	if err == nil || strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "read config") {
+		t.Fatalf("config read error = %v", err)
+	}
+}
+
+func TestV9ValidationFailureNamesCurrentVersion(t *testing.T) {
+	err := &config.V8SchemaError{
+		Version: 9, Path: "$.guardrail.mode", Keyword: "enum",
+		Summary: "configuration violates the enum constraint",
+		Action:  "inspect the config_version 9 settings reference and correct this field",
+	}
+	failure := configV8ValidationFailure(err)
+	if failure.ConfigVersion != 9 || strings.Contains(failure.Reason, "v8") ||
+		!strings.Contains(failure.Reason, "config_version 9") {
+		t.Fatalf("v9 validation failure = %+v", failure)
+	}
+}
 
 func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
 	directory := t.TempDir()
@@ -61,7 +84,7 @@ observability: {}
 // The gateway loads config through this v8 loader. A roster that still names
 // the retired Desktop connector must load as the replacement connector instead
 // of failing the roster check, or every gateway command refuses to start
-// until `defenseclaw upgrade` rewrites the file.
+// until `defenseclaw migrate` rewrites the file.
 func TestLoadConfigV8FileAcceptsRetiredConnectorKey(t *testing.T) {
 	retired := legacyconnector.RetiredDesktopID
 	replacement := legacyconnector.Replacement
@@ -208,6 +231,156 @@ func TestConfigV8ValidateEmitsValueSafeStructuredFailure(t *testing.T) {
 	}
 }
 
+// A value the schema refuses is reported at its field, with what the field
+// takes, before the runtime loader's own check of it (which reached the wire
+// only as "configuration could not be compiled safely" at "$", the #1019
+// retest), and still without the rejected value.
+func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
+	for _, c := range []struct {
+		source, value, path, want string
+	}{
+		{"openshell:\n  workdir: {undo_ignored: {enabled: true, max_mb: 2000000}}\n", "2000000",
+			"$.openshell.workdir.undo_ignored.max_mb", "expected a number between 0 and 1048576"},
+		{"openshell:\n  workdir: {undo_ignored: {max_mb: -5}}\n", "-5",
+			"$.openshell.workdir.undo_ignored.max_mb", "expected a number between 0 and 1048576"},
+		{"openshell:\n  llm: bogus\n", "bogus",
+			"$.openshell.llm", `expected one of ["auto","none","anthropic","claude-oauth","openai","bedrock","gemini"]`},
+	} {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.yaml")
+		if err := os.WriteFile(path, []byte("config_version: 8\ndata_dir: "+directory+"\n"+c.source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+		previousOutput := configV8ValidateCmd.OutOrStdout()
+		configV8ConfigPath, configV8DataDir = path, directory
+		output := &strings.Builder{}
+		configV8ValidateCmd.SetOut(output)
+		err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+		if err == nil {
+			t.Fatalf("%s: config-v8 validate accepted it", c.path)
+		}
+		var failure configV8WireFailure
+		if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+			t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+		}
+		if failure.Path != c.path || !strings.Contains(failure.Reason, "config_schema_invalid") || !strings.Contains(failure.Reason, c.want) {
+			t.Fatalf("structured validation failure = %+v\nwant %s: %s", failure, c.path, c.want)
+		}
+		if strings.Contains(failure.Reason, c.value) {
+			t.Fatalf("the failure names the rejected value %s: %+v", c.value, failure)
+		}
+	}
+}
+
+// GAP-0044: a per-user config that carries a managed snippet
+// (enterprise.tetragon from the Tetragon guide) is refused at
+// $.enterprise with the reason and the way out, not as a config that
+// "could not be compiled safely" at $.
+func TestConfigV8ValidateNamesTheEnterpriseBlockOfAPerUserConfig(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + directory + "\nenterprise:\n  tetragon:\n    mode: observe\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+	configV8ValidateCmd.SetOut(previousOutput)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an enterprise block in a per-user config")
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+	}
+	if failure.Path != "$.enterprise" || !strings.Contains(failure.Reason, "requires deployment_mode managed_enterprise") ||
+		!strings.Contains(failure.Reason, "remove the enterprise block") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
+// GAP-0288: an assignment naming a profile that guardrail.profiles does not
+// define reached the wire only as "configuration could not be compiled
+// safely" at "$". It now names the assignment's field and the profile.
+func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + directory + "\nguardrail:\n  profiles:\n    ihs-a: {mode: observe}\n" +
+		"  profile_assignments:\n    - profile: ihs-nope\n      match: {groups: [dc-s-a]}\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+	configV8ValidateCmd.SetOut(previousOutput)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an assignment of an undefined profile")
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+	}
+	if failure.Path != "$.guardrail.profile_assignments[0].profile" ||
+		!strings.Contains(failure.Reason, `unknown profile "ihs-nope"`) || !strings.Contains(failure.Reason, "defines ihs-a") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
+// GAP-0553: a standalone config whose default OpenShell gateway port collides
+// with gateway.api_port was refused only as "configuration could not be
+// compiled safely" at "$". It names enterprise.openshell.gateway_port and the
+// port it collides with, and the same file with another API port validates.
+func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
+	validate := func(apiPort int) (configV8WireFailure, error) {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.yaml")
+		source := fmt.Sprintf("config_version: 9\ndata_dir: %s\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ngateway:\n  api_port: %d\n", directory, apiPort)
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+		previousOutput := configV8ValidateCmd.OutOrStdout()
+		configV8ConfigPath, configV8DataDir = path, directory
+		output := &strings.Builder{}
+		configV8ValidateCmd.SetOut(output)
+		err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+		var failure configV8WireFailure
+		if err != nil {
+			if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+				t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+			}
+		}
+		return failure, err
+	}
+	failure, err := validate(config.DefaultEnterpriseOpenShellGatewayPort)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted the default OpenShell port on the API port")
+	}
+	if failure.Path != "$.enterprise.openshell.gateway_port" ||
+		!strings.Contains(failure.Reason, "collides with gateway.api_port") ||
+		!strings.Contains(failure.Reason, strconv.Itoa(config.DefaultEnterpriseOpenShellGatewayPort)) {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+	if _, err := validate(config.DefaultEnterpriseOpenShellGatewayPort + 1); err != nil {
+		t.Fatalf("the control with another API port does not validate: %v", err)
+	}
+}
+
 func TestCompileConfigV8FileLoadsInstallationDotEnvForValidationOnly(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
@@ -324,14 +497,8 @@ observability:
 func TestConfigV8ReadOnlyManagedPlanAndStatusUseEffectiveConfig(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
-	t.Setenv(managed.DeploymentModeEnv, "")
-	if err := os.WriteFile(
-		filepath.Join(directory, ".env"),
-		[]byte(managed.DeploymentModeEnv+"="+managed.DeploymentModeManagedEnterprise+"\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	// The service definition pins the mode; a .env cannot (GAP-0082).
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	raw := []byte("config_version: 8\ndata_dir: " + directory + `
 observability:
   buckets:
@@ -358,7 +525,11 @@ observability:
 		base.Plan,
 		config.ObservabilityV8ManagedAIDOptions{
 			DeploymentMode: managed.DeploymentModeManagedEnterprise,
-			Endpoint:       config.DefaultConfig().CiscoAIDefense.Endpoint,
+			// Without an enterprise block the host default applies:
+			// standalone on Linux (no Secure Client sink), Secure Client
+			// elsewhere.
+			Profile:  managed.DefaultEnterpriseProfile(runtime.GOOS),
+			Endpoint: config.DefaultConfig().CiscoAIDefense.Endpoint,
 		},
 	)
 	if err != nil {
@@ -404,6 +575,13 @@ observability:
 	}
 	if !bytes.Equal(effective.Effective, expected.EffectiveJSON()) {
 		t.Fatalf("read-only effective plan does not match generated managed plan")
+	}
+
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		if _, ok := expected.RuntimeDestination(config.ObservabilityV8ManagedAIDDestinationName); ok {
+			t.Fatal("standalone managed plan gained the Secure Client AI Defense destination")
+		}
+		return
 	}
 
 	snapshot := expected.Snapshot()

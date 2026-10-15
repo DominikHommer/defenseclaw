@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -23,12 +24,21 @@ type ObservabilityV8CompileOptions struct {
 	DefaultDataDir      string
 	ConfiguredFilePaths []string
 	Secrets             ObservabilityV8SecretResolver
+	// CredentialsDir is where the default resolver reads protected
+	// credential references. When empty, a standalone enterprise source
+	// uses the secrets directory next to it and any other source resolves
+	// none.
+	CredentialsDir string
 }
 
 type ObservabilityV8CompiledConfig struct {
 	DataDir       string
 	Observability ObservabilityV8Source
 	Plan          *ObservabilityV8Plan
+	// PathWarnings name the jsonl destination paths this account could not
+	// inspect (GAP-1265). They describe the filesystem at compile time, so
+	// they stay out of the effective plan and its digest.
+	PathWarnings []ObservabilityV8Warning
 }
 
 type observabilityV8ConfigEnvelope struct {
@@ -56,6 +66,11 @@ func ParseCompileObservabilityV8(
 	dataDir := strings.TrimSpace(envelope.DataDir)
 	if dataDir == "" {
 		dataDir = strings.TrimSpace(options.DefaultDataDir)
+		// The runtime loader defaults the same way (standaloneLayoutDataDir),
+		// so the compiled local store paths match the runtime data_dir.
+		if layoutDataDir, ok := standaloneLayoutDataDir(sourceName, document.Document); ok {
+			dataDir = layoutDataDir
+		}
 	}
 	if dataDir == "" {
 		return nil, annotateObservabilityV8SemanticError(document, fmt.Errorf("config: v8 compilation requires a data_dir or explicit DefaultDataDir option"))
@@ -68,6 +83,10 @@ func ParseCompileObservabilityV8(
 	if envelope.Observability != nil {
 		source = *envelope.Observability
 	}
+	// The same retired-connector rename the config loader applies
+	// (migrateLegacyConnectorIDs), so a route selector or connector block
+	// written for the retired ID keeps applying to its replacement.
+	migrateObservabilityV8LegacyConnectors(&source)
 	if source.Local.Path == "" {
 		source.Local.Path = filepath.Join(dataDir, DefaultAuditDBName)
 		source.localPathDefaulted = true
@@ -80,18 +99,34 @@ func ParseCompileObservabilityV8(
 	if observabilityV8SourceNameIsPath(sourceName) {
 		configuredFiles = append(configuredFiles, sourceName)
 	}
-	if err := validateObservabilityV8FilePaths(&source, configuredFiles); err != nil {
+	secureClient := secureClientManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document))
+	pathWarnings, err := validateObservabilityV8FilePaths(&source, configuredFiles, !secureClient)
+	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
 	if err := normalizeObservabilityV8EffectiveFilePaths(&source); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
-	if err := validateObservabilityV8Secrets(&source, options.Secrets); err != nil {
+	secrets := options.Secrets
+	if secrets == nil {
+		credentialsDir := options.CredentialsDir
+		if credentialsDir == "" {
+			credentialsDir = standaloneCredentialsDir(sourceName, document.Document)
+		}
+		secrets = observabilityV8RuntimeSecretResolver{credentialsDir: credentialsDir}
+	}
+	if err := validateObservabilityV8Secrets(&source, secrets); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
 	plan, err := CompileObservabilityV8(&source)
 	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
+	}
+	if secureClient {
+		plan, err = withObservabilityV8SecureClientAliasSwitch(plan, source.TracePolicy.CompatibilityAliases)
+		if err != nil {
+			return nil, annotateObservabilityV8SemanticError(document, err)
+		}
 	}
 	plan, err = addObservabilityV8SourceProvenance(plan, document)
 	if err != nil {
@@ -101,7 +136,23 @@ func ParseCompileObservabilityV8(
 		DataDir:       dataDir,
 		Observability: source,
 		Plan:          plan,
+		PathWarnings:  pathWarnings,
 	}, nil
+}
+
+// withObservabilityV8SecureClientAliasSwitch puts the retired
+// trace_policy.compatibility_aliases switch back into the plan of a Secure
+// Client source, with the value and provenance main compiled for it (true
+// unless the source turns it off). The plan digest stamps every local audit
+// record, so Secure Client keeps the digest of main (issue #1092).
+func withObservabilityV8SecureClientAliasSwitch(plan *ObservabilityV8Plan, source *bool) (*ObservabilityV8Plan, error) {
+	effective := cloneObservabilityV8EffectivePlan(plan.effective)
+	value := source == nil || *source
+	effective.TracePolicy.CompatibilityAliases = &value
+	effective.Provenance = append(effective.Provenance, ObservabilityV8Provenance{
+		Path: "observability.trace_policy.compatibility_aliases", Origin: originObservabilityV8Pointer(source),
+	})
+	return newObservabilityV8Plan(effective)
 }
 
 func addObservabilityV8SourceProvenance(

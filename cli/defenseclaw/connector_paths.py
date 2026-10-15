@@ -27,8 +27,8 @@ It mirrors:
 
 Importing this module instead of reaching into private helpers in
 :mod:`defenseclaw.config` lets other CLI commands (``cmd_doctor``,
-``cmd_uninstall``, ``cmd_setup_sandbox``) walk the connector matrix
-without circular imports through ``Config``.
+``cmd_uninstall``) walk the connector matrix without circular imports
+through ``Config``.
 
 Public surface
 --------------
@@ -69,6 +69,8 @@ from dataclasses import dataclass, field, replace
 from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from defenseclaw import codex_toml
 
 try:  # Python 3.11+ ships ``tomllib`` in the stdlib.
     import tomllib
@@ -149,28 +151,6 @@ Consumers that walk *installed* connectors keep using
 (inventory / agent_discovery) use this.
 """
 
-HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
-    {
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    }
-)
-"""Connectors added through lifecycle hook surfaces.
-
-Kept as a compatibility constant for older tests/importers. These connectors
-now expose connector-specific MCP/skill/rule/plugin path discovery instead of
-falling back to OpenClaw or returning hook-only empty paths.
-"""
-
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -203,6 +183,12 @@ class MCPServerEntry:
     source_scope: str = ""
     trust_required: bool = False
     bundled: bool = False
+    # Why the agent itself skips this entry ("" = it loads). Set for Claude
+    # Code entries it rejects, so list/scan/doctor do not call them live.
+    load_problem: str = ""
+    # True when ``mcp set`` rewrites the skipped entry itself (the user-scope
+    # ``mcpServers`` it writes). Other scopes are repaired in their own file.
+    load_problem_set_repairs: bool = False
 
 
 @dataclass(frozen=True)
@@ -344,6 +330,77 @@ def infer_mcp_transport(
     return "stdio"
 
 
+# Transport names a connector may store under ``type`` (Claude Code, Cursor).
+# Other ``type`` values (OpenCode ``local``/``remote``, Copilot ``local``) are
+# not transports, so they are left to ``infer_mcp_transport``.
+_MCP_TYPE_TRANSPORTS = frozenset({"stdio", "http", "sse", "ws", "streamable-http"})
+
+
+def _mcp_entry_transport(cfg: dict[str, Any]) -> str:
+    explicit = str(cfg.get("transport", "") or "").strip()
+    if explicit:
+        return explicit
+    kind = str(cfg.get("type", "") or "").strip().lower()
+    return kind if kind in _MCP_TYPE_TRANSPORTS else ""
+
+
+def _claude_mcp_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a generic MCP entry to Claude Code's ``mcpServers`` schema.
+
+    Claude Code names the transport ``type`` and skips a ``url`` entry that
+    has none ("has a \"url\" but no \"type\"", GAP-1837). A remote server
+    therefore gets ``type`` (``http`` unless ``sse`` or ``ws`` was asked for)
+    and the generic ``transport`` key is not written.
+    """
+    out = {k: v for k, v in entry.items() if k != "transport"}
+    if str(out.get("type", "") or "").strip():
+        return out
+    transport = str(entry.get("transport", "") or "").strip().lower()
+    if str(out.get("url", "") or "").strip():
+        kind = transport if transport in {"sse", "ws"} else "http"
+    elif transport == "stdio":
+        kind = "stdio"
+    else:
+        return out
+    return {"type": kind, **out}
+
+
+def _flag_claude_unloadable(
+    entries: list[MCPServerEntry], servers: Any, path: str, *, user_scope: bool = False,
+    where: str = "",
+) -> list[MCPServerEntry]:
+    """Mark the entries Claude Code skips as not loaded (GAP-2514).
+
+    Claude Code skips a ``url`` entry without ``type`` ("has a \"url\" but
+    no \"type\""), the shape ``mcp set`` wrote before GAP-1837. The entry
+    stays listed (so ``mcp unset`` and the repair still find it) but carries
+    ``load_problem`` instead of passing as a live server. ``mcp set`` only
+    writes the user-scope ``mcpServers`` of :func:`claude_mcp_state_path`,
+    so only those entries say it repairs them (GAP-2528). ``where`` names
+    the key inside *path* (a per-project entry, GAP-2530).
+    """
+    set_repairs = user_scope and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+        os.path.abspath(claude_mcp_state_path())
+    )
+    if not isinstance(servers, dict):
+        return entries
+    out: list[MCPServerEntry] = []
+    for entry in entries:
+        cfg = servers.get(entry.name)
+        if (
+            isinstance(cfg, dict)
+            and str(cfg.get("url", "") or "").strip()
+            and not str(cfg.get("type", "") or "").strip()
+        ):
+            entry = replace(
+                entry,
+                load_problem=f'has a "url" but no "type" in {path}{where}',
+                load_problem_set_repairs=set_repairs,
+            )
+        out.append(entry)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Connector-name normalization
 # ---------------------------------------------------------------------------
@@ -372,35 +429,94 @@ def is_known(connector: str | None) -> bool:
     return normalize(connector) in KNOWN_CONNECTORS
 
 
+# How much of a plugin.yaml is read, in bytes (the gateway's
+# maxPluginManifestBytes).
+_PLUGIN_MANIFEST_MAX_BYTES = 64 * 1024
+
+
+def _read_plugin_manifest(manifest: str) -> dict | None:
+    """Parse one plugin.yaml the way the gateway does, or return ``None``.
+
+    The bytes go straight to the YAML parser, which reads a UTF-8 or UTF-16
+    (BOM) manifest; any read, decode or parse error means "no manifest",
+    as in the gateway's ``readPluginManifestName``.
+    """
+    try:
+        with open(manifest, "rb") as fh:
+            doc = yaml.safe_load(fh.read(_PLUGIN_MANIFEST_MAX_BYTES))
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def scan_plugin_connectors(plugin_dir: str) -> tuple[set[str], bool]:
+    """Return ``(declared names, whether any manifest is loadable)``.
+
+    A manifest is loadable when it sets ``entry`` and ``sha256`` and its
+    ``entry`` is a regular file in the plugin's directory, on an OS where the
+    gateway loads Go plugins (not Windows). Raises :class:`OSError` when
+    *plugin_dir* exists but cannot be listed.
+    """
+    names: set[str] = set()
+    loadable = False
+    if not (plugin_dir or "").strip():
+        return names, loadable
+    try:
+        entries = list(os.scandir(plugin_dir))
+    except FileNotFoundError:
+        return names, loadable
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        names.add(entry.name.strip().lower())
+        doc = _read_plugin_manifest(os.path.join(entry.path, "plugin.yaml"))
+        if doc is None:
+            continue
+        if isinstance(doc.get("name"), str):
+            names.add(doc["name"].strip().lower())
+        if all(isinstance(doc.get(key), str) and doc[key].strip() for key in ("entry", "sha256")):
+            loadable = loadable or _plugin_entry_loadable(entry.path, doc["entry"].strip())
+    return names, loadable
+
+
+def _plugin_entry_loadable(directory: str, entry: str) -> bool:
+    """Report whether the gateway could open plugin *entry* of *directory*:
+    Go plugins never load on Windows, and the loader opens
+    ``<directory>/<entry>`` only when it is a regular file."""
+    if sys.platform == "win32":
+        return False
+    try:
+        info = os.lstat(os.path.join(directory, entry))
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode)
+
+
 def declared_plugin_connectors(plugin_dir: str) -> set[str]:
     """Return the connector names the plugin directories under *plugin_dir* declare.
 
     Each subdirectory declares its own name and, when its ``plugin.yaml`` has
     one, that ``name`` (both lowercased), mirroring the gateway's
-    ``pluginDirDeclares``. A missing *plugin_dir* declares nothing. Any other
-    read error raises :class:`OSError`: callers must then treat every name as
-    one a plugin might provide.
+    ``pluginDirDeclares``. A manifest that cannot be read, decoded (for
+    example one that is not UTF-8) or parsed declares only its directory
+    name, as in the gateway. A missing *plugin_dir* declares nothing. Only a
+    *plugin_dir* that exists but cannot be listed raises :class:`OSError`:
+    callers must then treat every name as one a plugin might provide.
     """
-    names: set[str] = set()
-    if not (plugin_dir or "").strip():
-        return names
-    try:
-        entries = list(os.scandir(plugin_dir))
-    except FileNotFoundError:
-        return names
-    for entry in entries:
-        if not entry.is_dir():
-            continue
-        names.add(entry.name.strip().lower())
-        manifest = os.path.join(entry.path, "plugin.yaml")
-        try:
-            with open(manifest, encoding="utf-8") as fh:
-                doc = yaml.safe_load(fh.read(64 * 1024))
-        except (OSError, yaml.YAMLError):
-            continue
-        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
-            names.add(doc["name"].strip().lower())
-    return names
+    return scan_plugin_connectors(plugin_dir)[0]
+
+
+def plugin_dir_may_provide_any_connector(plugin_dir: str) -> bool:
+    """Report whether a plugin under *plugin_dir* could register any name.
+
+    The gateway registers a plugin connector under the name its code reports
+    (``Name()``), which need not match the plugin's directory or manifest
+    name. So while *plugin_dir* holds a manifest the gateway would try to
+    load (``entry`` and ``sha256`` set and the entry file present, not on
+    Windows), no connector name can be ruled out offline. Raises
+    :class:`OSError` like :func:`declared_plugin_connectors`.
+    """
+    return scan_plugin_connectors(plugin_dir)[1]
 
 
 # ---------------------------------------------------------------------------
@@ -536,17 +652,17 @@ def claude_user_config_paths() -> list[str]:
     raises a finding when a plugin reads its credentials. MCP discovery
     was the one place that did not.
 
-    Two candidates, not one: ``~/.claude.json`` always, plus
-    ``$CLAUDE_CONFIG_DIR/.claude.json`` when that variable is set. I could
-    not confirm from the outside whether Claude Code relocates this file
-    along with the directory, and probing a path that does not exist costs
-    one failed ``open`` — guessing wrong costs another silent zero.
+    Two candidates, not one: :func:`claude_mcp_state_path` (the file
+    ``mcp set`` writes, ``$CLAUDE_CONFIG_DIR/.claude.json`` when that
+    variable is set) first, so it wins a same-named entry, then
+    ``~/.claude.json``. Probing a path that does not exist costs one failed
+    ``open``.
     """
 
-    paths = [os.path.join(os.path.abspath(str(Path.home())), ".claude.json")]
-    if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
-        paths.append(os.path.join(claude_config_dir(), ".claude.json"))
-    return _dedup(paths)
+    return _dedup([
+        claude_mcp_state_path(),
+        os.path.join(os.path.abspath(str(Path.home())), ".claude.json"),
+    ])
 
 
 def claude_mcp_state_path() -> str:
@@ -561,6 +677,18 @@ def claude_mcp_state_path() -> str:
     if configured:
         return os.path.join(claude_config_dir(), ".claude.json")
     return os.path.join(os.path.abspath(str(Path.home())), ".claude.json")
+
+
+def claude_legacy_mcp_settings_path() -> str:
+    """Return the ``settings.json`` whose ``mcpServers`` DefenseClaw 0.8.x wrote.
+
+    Claude Code reads user MCP servers from :func:`claude_mcp_state_path`.
+    DefenseClaw still reads this block, last, so an entry 0.8.x wrote stays
+    visible after an upgrade, and ``mcp set`` / ``mcp unset`` remove a
+    same-named entry from it (GAP-1340).
+    """
+
+    return os.path.join(claude_config_dir(), "settings.json")
 
 
 def claude_settings_paths(workspace_dir: str | None = None) -> list[str]:
@@ -614,8 +742,9 @@ def claude_auto_memory_resolution(
     if not workspace:
         return ClaudeAutoMemoryResolution(
             limitation=(
-                "Claude auto-memory project identity is unresolved because no "
-                "connector workspace/session CWD is available"
+                "Claude auto-memory is not listed: no project folder is set "
+                "(claw.workspace_dir), so DefenseClaw cannot tell which "
+                "project's memory Claude Code uses"
             ),
         )
     project_root, project_limitation = _claude_project_root(workspace)
@@ -799,7 +928,7 @@ def _codex_project_root_markers() -> tuple[str, ...]:
     path = os.path.join(codex_home(), "config.toml")
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        config = tomllib.loads(payload.decode("utf-8"))
+        config = codex_toml.loads(payload)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return (".git",)
     raw = config.get("project_root_markers")
@@ -1329,12 +1458,6 @@ def _read_hermes_config_bounded(path: str | None = None) -> tuple[dict[str, Any]
     return document, ""
 
 
-def _hermes_truthy(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     """Return why a selected Hermes home is outside the single-profile contract."""
 
@@ -1343,7 +1466,8 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     if os.path.basename(os.path.dirname(home)).casefold() == "profiles":
         return (
             "Hermes named profiles are unsupported by the single-HERMES_HOME "
-            "connector; select the default profile and retry"
+            "connector; point HERMES_HOME at the default profile (run "
+            "'hermes profile use default') and retry"
         )
 
     active_profile = os.path.join(home, "active_profile")
@@ -1357,7 +1481,8 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
         if profile and profile.casefold() != "default":
             return (
                 f"Hermes active named profile {profile!r} is unsupported by the "
-                "single-HERMES_HOME connector"
+                "single-HERMES_HOME connector; switch back with "
+                "'hermes profile use default' and retry"
             )
     except FileNotFoundError:
         pass
@@ -1378,29 +1503,16 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
             if entry.is_dir(follow_symlinks=False):
                 return (
                     f"Hermes named profile {entry.name!r} is unsupported by the "
-                    "single-HERMES_HOME connector"
+                    f"single-HERMES_HOME connector; remove it with 'hermes profile "
+                    f"delete {entry.name}' (or move it out of {profiles_dir}) and retry"
                 )
         except OSError as exc:
             return f"Hermes profile entry cannot be safely inspected: {exc}"
 
-    document, error = _read_hermes_config_bounded(target)
-    if error:
-        return f"Hermes profile topology is unverified: {error}"
-    multiplex = document.get("multiplex_profiles")
-    if multiplex is None and isinstance(document.get("gateway"), dict):
-        multiplex = document["gateway"].get("multiplex_profiles")
-    raw_override = os.environ.get("GATEWAY_MULTIPLEX_PROFILES")
-    if raw_override is not None:
-        token = raw_override.strip().lower()
-        if token in {"1", "true", "yes", "on"}:
-            multiplex = True
-        elif token in {"0", "false", "no", "off"}:
-            multiplex = False
-    if _hermes_truthy(multiplex):
-        return (
-            "Hermes multiplex profiles are unsupported by the single-HERMES_HOME "
-            "connector"
-        )
+    # gateway.multiplex_profiles is not checked: Hermes writes its default
+    # (true) into config.yaml on its own, and a multiplexing gateway serves the
+    # default profile plus the named profiles under profiles/, refused above.
+    # With none, it serves only this HERMES_HOME (GAP-1844).
     return ""
 
 
@@ -2003,7 +2115,6 @@ def mcp_servers(
     openclaw_config: str | None = None,
     workspace_dir: str | None = None,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     infer_workspace_from_cwd: bool = False,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
@@ -2029,10 +2140,8 @@ def mcp_servers(
     * OpenClaw:    ``openclaw config get mcp.servers`` (preferred)
                     falling back to direct ``openclaw.json`` parse
 
-    *openclaw_bin_resolver* and *openclaw_cmd_prefix* let callers
-    inject test doubles or sandbox-mode prefixes (``sudo -u sandbox``);
-    when omitted, lookups go through ``shutil.which`` and an empty
-    prefix.
+    *openclaw_bin_resolver* lets callers inject a test double; when
+    omitted, the lookup goes through ``shutil.which``.
     """
     name = normalize(connector)
     infer = infer_workspace_from_cwd
@@ -2105,7 +2214,6 @@ def mcp_servers(
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -2152,9 +2260,9 @@ def mcp_source_locations(
     if name == "claudecode":
         return _dedup(
             [
-                os.path.join(claude_config_dir(), "settings.json"),
-                ws(".mcp.json"),
                 *claude_user_config_paths(),
+                ws(".mcp.json"),
+                claude_legacy_mcp_settings_path(),
                 ws(".claude", "settings.json"),
                 ws(".claude", "settings.local.json"),
             ]
@@ -2975,6 +3083,30 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
+def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that group or other can write.
+
+    The gateway refuses to install its plugin there and does not start.
+    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
+    as 0775. Only the folders inside the home directory are checked.
+    """
+    if os.name == "nt":
+        return ""
+    home = os.path.realpath(os.path.expanduser("~"))
+    for plugin_path in plugin_paths:
+        folder = os.path.dirname(os.path.realpath(plugin_path))
+        while folder.startswith(home + os.sep):
+            try:
+                mode = os.lstat(folder).st_mode
+            except OSError:
+                folder = os.path.dirname(folder)
+                continue
+            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+                return folder
+            folder = os.path.dirname(folder)
+    return ""
+
+
 def _opencode_config_dir() -> str:
     raw = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
     if raw:
@@ -3445,6 +3577,9 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 # --- MCP readers -----------------------------------------------------------
 
 
+CLAUDE_LEGACY_MCP_SCOPE = "legacy-settings"
+
+
 def _claudecode_mcp_servers(
     workspace_dir: str | None = None,
     *,
@@ -3453,27 +3588,15 @@ def _claudecode_mcp_servers(
 ) -> list[MCPServerEntry]:
     """Return Claude Code's MCP registrations across all five read surfaces.
 
-    Order is additive on purpose. ``_dedup_mcp_entries`` is first-wins, so
-    the two pre-existing sources stay in front and any name that resolved
-    before resolves to the same entry now; the sources added below can only
-    contribute names that were previously invisible. Making
-    ``~/.claude.json`` *win* over settings.json would match Claude Code's
-    own precedence more closely, but that is a behaviour change for
-    existing installs and belongs in its own commit.
+    ``_dedup_mcp_entries`` is first-wins, so the order is Claude Code's own
+    precedence: local, then project ``.mcp.json``, then user
+    (``~/.claude.json``). The ``settings.json`` block DefenseClaw 0.8.x
+    wrote comes after them, tagged ``legacy-settings``: a name in both
+    files counts once and resolves to the entry Claude Code reads, as the
+    Go reader does (GAP-1340).
     """
 
     entries: list[MCPServerEntry] = []
-    # settings.json stays first so names that resolved before this change
-    # still resolve to the same entry. Claude's own local → project → user
-    # order then applies to ~/.claude.json and workspace .mcp.json.
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(claude_config_dir(), "settings.json"),
-            keys=("mcpServers",),
-            diagnostic_sink=diagnostic_sink,
-        )
-    )
-
     workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd) or None
     local_entries: list[MCPServerEntry] = []
     user_entries: list[MCPServerEntry] = []
@@ -3492,9 +3615,20 @@ def _claudecode_mcp_servers(
     )
     if project_mcp:
         entries.extend(
-            _read_dotmcp_json(project_mcp, diagnostic_sink=diagnostic_sink)
+            _read_dotmcp_json(
+                project_mcp, diagnostic_sink=diagnostic_sink, claude_schema=True,
+            )
         )
     entries.extend(user_entries)
+    legacy_path = claude_legacy_mcp_settings_path()
+    entries.extend(
+        replace(entry, source=legacy_path, source_scope=CLAUDE_LEGACY_MCP_SCOPE)
+        for entry in _read_mcp_settings_block(
+            legacy_path,
+            keys=("mcpServers",),
+            diagnostic_sink=diagnostic_sink,
+        )
+    )
 
     # Workspace settings, which agent_discovery already probes but MCP
     # discovery never did. `.local.` is the git-ignored personal override.
@@ -3529,7 +3663,7 @@ def _read_claude_mcp_state(
     """
 
     try:
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except FileNotFoundError:
         return [], []
@@ -3557,10 +3691,17 @@ def _read_claude_mcp_state(
             )
             if normalized_key != normalized_workspace:
                 continue
-            local_entries = _parse_mcp_servers_value(project_state.get("mcpServers"))
+            local_servers = project_state.get("mcpServers")
+            local_entries = _flag_claude_unloadable(
+                _parse_mcp_servers_value(local_servers), local_servers, path,
+                where=f' (projects["{project_key}"].mcpServers)',
+            )
             break
 
-    user_entries = _parse_mcp_servers_value(data.get("mcpServers"))
+    user_servers = data.get("mcpServers")
+    user_entries = _flag_claude_unloadable(
+        _parse_mcp_servers_value(user_servers), user_servers, path, user_scope=True,
+    )
     return local_entries, user_entries
 
 
@@ -3689,7 +3830,7 @@ def _read_codex_config_toml(
     """
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        data = tomllib.loads(payload.decode("utf-8"))
+        data = codex_toml.loads(payload)
     except FileNotFoundError:
         return []
     except OSError:
@@ -3782,12 +3923,10 @@ def _openclaw_mcp_servers(
     openclaw_config: str | None,
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     cli_entries = _read_mcp_servers_via_openclaw_cli(
         openclaw_bin_resolver=openclaw_bin_resolver,
-        openclaw_cmd_prefix=openclaw_cmd_prefix,
         diagnostic_sink=diagnostic_sink,
     )
     if cli_entries is not None:
@@ -3798,13 +3937,18 @@ def _openclaw_mcp_servers(
     )
 
 
+_HERMES_MCP_KEY = ("mcp_servers",)
+_HERMES_LEGACY_MCP_KEY = ("mcp", "servers")
+_HERMES_MCP_HINT = "add or remove the server with `hermes mcp add` / `hermes mcp remove` instead"
+
+
 def _hermes_mcp_servers(
     *,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     return _read_yaml_mcp_servers(
         hermes_config_path(),
-        key_paths=(("mcp", "servers"), ("mcpServers",)),
+        key_paths=(_HERMES_MCP_KEY, _HERMES_LEGACY_MCP_KEY, ("mcpServers",)),
         diagnostic_sink=diagnostic_sink,
     )
 
@@ -3817,10 +3961,13 @@ def _cursor_mcp_servers(
 ) -> list[MCPServerEntry]:
     home = str(Path.home())
     entries: list[MCPServerEntry] = []
+    user_mcp = os.path.join(home, ".cursor", "mcp.json")
     project_mcp = _discovery_path(
         workspace_dir, ".cursor", "mcp.json", infer_from_cwd=infer_from_cwd,
     )
-    if project_mcp:
+    # GAP-1505: run from the home directory, the project file IS the user
+    # file; reading it twice listed, scanned and counted each server twice.
+    if project_mcp and os.path.realpath(project_mcp) != os.path.realpath(user_mcp):
         entries.extend(
             _read_dotmcp_json(
                 project_mcp,
@@ -3830,7 +3977,7 @@ def _cursor_mcp_servers(
         )
     entries.extend(
         _read_dotmcp_json(
-            os.path.join(home, ".cursor", "mcp.json"),
+            user_mcp,
             source_scope="user",
             diagnostic_sink=diagnostic_sink,
         )
@@ -3850,9 +3997,11 @@ def _kiro_mcp_read_paths(
     project_mcp = _discovery_path(
         workspace_dir, ".kiro", "settings", "mcp.json", infer_from_cwd=infer_from_cwd,
     )
-    if project_mcp:
+    user_mcp = os.path.join(connector_home("kiro"), "settings", "mcp.json")
+    # GAP-1505: from the home directory the project file is the user file.
+    if project_mcp and os.path.realpath(project_mcp) != os.path.realpath(user_mcp):
         paths.append(project_mcp)
-    paths.append(os.path.join(connector_home("kiro"), "settings", "mcp.json"))
+    paths.append(user_mcp)
     return paths
 
 
@@ -3887,7 +4036,10 @@ def _devin_mcp_servers(
     workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd)
     entries: list[MCPServerEntry] = []
     for path in _devin_mcp_read_paths(workspace or None):
-        entries.extend(_read_dotmcp_json(path, diagnostic_sink=diagnostic_sink))
+        legacy = os.path.basename(path).casefold().startswith("config")
+        entries.extend(
+            _read_dotmcp_json(path, diagnostic_sink=diagnostic_sink, wrapped_only=legacy)
+        )
     return _dedup_mcp_entries(entries)
 
 
@@ -4170,28 +4322,6 @@ def _opencode_mcp_servers(
     ]
 
 
-def _read_opencode_mcp_block(path: str) -> dict[str, dict[str, Any]]:
-    """Parse opencode's top-level ``mcp`` map without losing partial overrides.
-
-    Tolerates JSONC (``//`` and ``/* */`` comments) via the optional
-    ``json5`` backport — mirroring the OpenClaw reader — so a
-    hand-authored ``opencode.jsonc`` still parses. A missing file,
-    unparseable content, or missing ``mcp`` block all yield ``{}``.
-    """
-    data = _load_json_or_jsonc(path)
-    if not isinstance(data, dict):
-        return {}
-    servers = data.get("mcp")
-    if not isinstance(servers, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            continue
-        out[str(name)] = cfg
-    return out
-
-
 def _merge_opencode_mcp_config(
     base: dict[str, Any],
     override: dict[str, Any],
@@ -4309,13 +4439,6 @@ def _load_json_or_jsonc(
     return parsed
 
 
-def _parse_json_or_jsonc(raw: str) -> Any:
-    """Parse already-read JSON/JSONC text without changing read policy."""
-
-    parsed, valid = _parse_json_or_jsonc_result(raw)
-    return parsed if valid else None
-
-
 def _parse_json_or_jsonc_result(raw: str) -> tuple[Any, bool]:
     """Return parsed JSON/JSONC plus whether parsing succeeded."""
 
@@ -4405,9 +4528,39 @@ def _next_jsonc_significant_char(raw: str, index: int) -> str:
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
     try:
-        with open(_expand(config_file)) as f:
+        with open(_expand(config_file), encoding="utf-8") as f:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _load_mcp_json_document(
+    path: str,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None,
+) -> Any:
+    """Load a JSON MCP config, or ``None`` when it declares nothing usable.
+
+    A missing or blank file declares no servers and records no diagnostic:
+    Antigravity creates a 0-byte ``mcp_config.json`` on first run
+    (GAP-2627). Unreadable or invalid files record a diagnostic.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
+        return None
+    except UnicodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return None
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return None
 
 
@@ -4422,20 +4575,10 @@ def _read_mcp_settings_block(
     *keys* is a tuple of the dotted lookup path inside the JSON
     document — e.g. ``("mcpServers",)`` for Claude Code's
     settings.json or ``("mcp", "servers")`` for ZeptoClaw's
-    config.json. Returns an empty list when the file is missing,
+    config.json. Returns an empty list when the file is missing, blank,
     invalid JSON, or the block isn't a mapping.
     """
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return []
-    except OSError:
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
-        return []
-    except (UnicodeError, json.JSONDecodeError):
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-        return []
+    data = _load_mcp_json_document(path, diagnostic_sink)
     if not isinstance(data, dict):
         return []
     cursor: Any = data
@@ -4489,31 +4632,30 @@ def _read_dotmcp_json(
     *,
     source_scope: str = "",
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+    claude_schema: bool = False,
+    wrapped_only: bool = False,
 ) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
     The file may either wrap the servers under ``mcpServers`` (Claude
     Code / Codex SDK convention) or be a top-level mapping of name →
-    server. Both are accepted.
+    server. Both are accepted unless *wrapped_only* is set: a general
+    settings file (Devin's ``config.json``) holds other top-level objects
+    such as ``hooks`` and ``shell``, which are not servers (GAP-2625).
     """
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return []
-    except OSError:
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "unreadable")
-        return []
-    except (UnicodeError, json.JSONDecodeError):
-        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-        return []
+    data = _load_mcp_json_document(path, diagnostic_sink)
     if not isinstance(data, dict):
         return []
     inner = data.get("mcpServers")
     if isinstance(inner, dict):
-        entries = _parse_mcp_servers_dict(inner)
+        servers = inner
+    elif wrapped_only:
+        return []
     else:
-        entries = _parse_mcp_servers_dict(data)
+        servers = data
+    entries = _parse_mcp_servers_dict(servers)
+    if claude_schema:
+        entries = _flag_claude_unloadable(entries, servers, path)
     if source_scope:
         return [
             replace(entry, source=path, source_scope=source_scope)
@@ -4596,14 +4738,12 @@ def _devin_config_paths(workspace_dir: str | None = None) -> list[str]:
 def _read_mcp_servers_via_openclaw_cli(
     *,
     openclaw_bin_resolver: Any = None,
-    openclaw_cmd_prefix: list[str] | None = None,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry] | None:
     """Run ``openclaw config get mcp.servers`` and parse the JSON.
 
     Returns ``None`` (not ``[]``) on any failure so callers can fall
-    back to direct ``openclaw.json`` parsing. Honors *openclaw_cmd_prefix*
-    so sandbox-mode setups can prepend ``sudo -u sandbox``.
+    back to direct ``openclaw.json`` parsing.
     """
     if openclaw_bin_resolver is None:
         import shutil
@@ -4611,10 +4751,9 @@ def _read_mcp_servers_via_openclaw_cli(
         bin_path = shutil.which("openclaw") or "openclaw"
     else:
         bin_path = openclaw_bin_resolver()
-    prefix = list(openclaw_cmd_prefix or [])
     try:
         result = subprocess.run(
-            [*prefix, bin_path, "config", "get", "mcp.servers"],
+            [bin_path, "config", "get", "mcp.servers"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -4644,7 +4783,7 @@ def _read_mcp_servers_from_openclaw_json(
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
 ) -> list[MCPServerEntry]:
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw = f.read()
     except FileNotFoundError:
         return []
@@ -4673,17 +4812,6 @@ def _read_mcp_servers_from_openclaw_json(
     return _parse_mcp_servers_dict(servers)
 
 
-def _parse_mcp_servers_text(text: str) -> list[MCPServerEntry]:
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    return _parse_mcp_servers_value(parsed)
-
-
 def _parse_mcp_servers_value(servers: Any) -> list[MCPServerEntry]:
     if isinstance(servers, dict):
         return _parse_mcp_servers_dict(servers)
@@ -4707,7 +4835,7 @@ def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=infer_mcp_transport(
-                    cfg.get("transport", ""),
+                    _mcp_entry_transport(cfg),
                     url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                     command=cfg.get("command", "") or "",
                 ),
@@ -4739,7 +4867,7 @@ def _parse_mcp_servers_list(servers: list[Any]) -> list[MCPServerEntry]:
                 cwd=cfg.get("cwd", "") or "",
                 url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                 transport=infer_mcp_transport(
-                    cfg.get("transport", ""),
+                    _mcp_entry_transport(cfg),
                     url=cfg.get("serverUrl", "") or cfg.get("url", "") or "",
                     command=cfg.get("command", "") or "",
                 ),
@@ -4767,6 +4895,16 @@ def _dedup_mcp_entries(entries: list[MCPServerEntry]) -> list[MCPServerEntry]:
 # ---------------------------------------------------------------------------
 # MCP server WRITES — connector-specific set / unset adapters (S4.2)
 # ---------------------------------------------------------------------------
+
+
+class MCPServerNotRemovedError(RuntimeError):
+    """Raised by an MCP unset that leaves the server in the connector's config.
+
+    DefenseClaw removes only an entry it still owns. Once the file changed
+    after DefenseClaw wrote the entry (Claude Code rewrites ``~/.claude.json``
+    as it runs), the entry is left in place, and the caller must not report
+    it removed.
+    """
 
 
 class MCPWriteUnsupportedError(RuntimeError):
@@ -4837,9 +4975,21 @@ def set_mcp_server(
     if name_n == "claudecode":
         path = claude_mcp_state_path()
         try:
-            _set_claudecode_mcp_server(path, name, entry)
+            _set_claudecode_mcp_server(path, name, _claude_mcp_entry(entry))
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
+        # The new entry is in the file Claude Code reads; a same-named copy
+        # that 0.8.x left in settings.json would linger in list, doctor and
+        # inventory (GAP-1340). The write above already succeeded, so a
+        # failure here is a warning, not a failed set.
+        try:
+            _remove_claude_legacy_mcp_server(name)
+        except (MCPWriteUnsupportedError, UnsafePathError, ValueError, OSError) as exc:
+            sys.stderr.write(
+                f"[defenseclaw] warning: the old {name!r} entry in "
+                f"{claude_legacy_mcp_settings_path()} was not removed ({exc}); Claude Code "
+                "does not read it, delete it from mcpServers there by hand\n"
+            )
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
@@ -4856,7 +5006,10 @@ def set_mcp_server(
             "server with `amp mcp add`, then re-run `defenseclaw mcp scan`.",
         )
     if name_n == "hermes":
-        _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
+        # GAP-1591: Hermes loads top-level ``mcp_servers`` (what ``hermes mcp
+        # add`` writes).
+        path = hermes_config_path()
+        _atomic_yaml_merge(path, _HERMES_MCP_KEY + (name,), entry, hint=_HERMES_MCP_HINT)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -4913,19 +5066,63 @@ def set_mcp_server(
     )
 
 
+MCP_PRIOR_RESTORED = "prior-restored"
+
+
+def _roll_back_claude_unset(
+    exc: BaseException,
+    path: str,
+    legacy_path: str,
+    publications: dict[str, dict[str, Any]],
+) -> None:
+    """Undo a failed Claude unset without overwriting another writer's edit.
+
+    The state write may have published before its final metadata step
+    failed. Each file is restored only while it still holds exactly what this
+    command wrote; the ownership journal follows only a restored state file,
+    so it never comes back describing settings that are no longer there.
+    """
+    left: list[str] = []
+    with _locked_claude_mcp_mutation(path):
+        state_key = os.path.normcase(os.path.abspath(path))
+        if not _undo_claude_publication(path, publications):
+            left.append(path)
+        elif state_key in publications:
+            metadata_path = _claude_mcp_ownership_path(path)
+            if not _undo_claude_publication(metadata_path, publications):
+                left.append(metadata_path)
+    with _locked_claude_mcp_mutation(legacy_path):
+        if not _undo_claude_publication(legacy_path, publications):
+            left.append(legacy_path)
+    if not left:
+        return
+    note = (
+        f"Another program changed {', '.join(left)} during the unset, so DefenseClaw "
+        "kept that change and did not restore its earlier copy."
+    )
+    if isinstance(exc, Exception) and len(exc.args) == 1 and isinstance(exc.args[0], str):
+        exc.args = (f"{exc.args[0]} {note}",)
+    elif hasattr(exc, "add_note"):
+        exc.add_note(note)
+
+
 def unset_mcp_server(
     connector: str | None,
     name: str,
     *,
     workspace_dir: str | None = None,
     openclaw_config_unsetter: Any = None,
-) -> None:
+) -> str | None:
     """Remove an MCP server from the active connector's registry.
 
     Mirrors :func:`set_mcp_server` and uses the connector's native JSON or TOML
     format; OpenClaw delegates to the injected
     *openclaw_config_unsetter*; ZeptoClaw raises
     :class:`MCPWriteUnsupportedError`.
+
+    Returns ``None``, or :data:`MCP_PRIOR_RESTORED` when the removal put back
+    the entry of the same name that was there before DefenseClaw replaced it,
+    so the name is still configured (GAP-1846).
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -4939,11 +5136,35 @@ def unset_mcp_server(
         return
     if name_n == "claudecode":
         path = claude_mcp_state_path()
+        legacy_path = claude_legacy_mcp_settings_path()
         try:
-            _unset_claudecode_mcp_server(path, name)
+            # Validate both active-profile targets before changing either.
+            # Discovery can also read the default profile, but an override
+            # must never delete another profile's MCP entry (GAP-1364).
+            with _locked_claude_mcp_mutation(path):
+                _parse_claude_settings(path, _read_regular_bytes_if_present(path))
+                _load_claude_mcp_envelope(path)
+            with _locked_claude_mcp_mutation(legacy_path):
+                _parse_claude_settings(legacy_path, _read_regular_bytes_if_present(legacy_path))
+
+            publications: dict[str, dict[str, Any]] = {}
+            legacy_changed = False
+            token = _CLAUDE_PUBLICATIONS.set(publications)
+            try:
+                legacy_changed = _remove_claude_legacy_mcp_server(name)
+                outcome = _unset_claudecode_mcp_server(path, name)
+            except BaseException as exc:
+                _CLAUDE_PUBLICATIONS.reset(token)
+                token = None
+                if legacy_changed:
+                    _roll_back_claude_unset(exc, path, legacy_path, publications)
+                raise
+            finally:
+                if token is not None:
+                    _CLAUDE_PUBLICATIONS.reset(token)
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
-        return
+        return MCP_PRIOR_RESTORED if outcome == MCP_PRIOR_RESTORED else None
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
         path = (
@@ -4959,7 +5180,8 @@ def unset_mcp_server(
             "with Amp's MCP command, then re-run `defenseclaw mcp scan`.",
         )
     if name_n == "hermes":
-        _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
+        path = hermes_config_path()
+        _atomic_yaml_delete(path, _HERMES_MCP_KEY + (name,), hint=_HERMES_MCP_HINT)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5065,6 +5287,9 @@ def _codex_mcp_section_names(name: str) -> set[str]:
 
 
 def _strip_codex_mcp_block(text: str, name: str) -> str:
+    has_bom = text.startswith("\ufeff")
+    if has_bom:
+        text = text[1:]
     section_names = _codex_mcp_section_names(name)
     out: list[str] = []
     skipping = False
@@ -5075,7 +5300,8 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
             skipping = section_name in section_names
         if not skipping:
             out.append(line)
-    return "\n".join(out).rstrip() + ("\n" if out else "")
+    result = "\n".join(out).rstrip() + ("\n" if out else "")
+    return ("\ufeff" if has_bom else "") + result
 
 
 def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -> None:
@@ -5086,7 +5312,7 @@ def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -
         text = ""
     if text.strip():
         try:
-            tomllib.loads(text)
+            codex_toml.loads(text.encode("utf-8"))
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"refusing to modify malformed Codex config.toml: {exc}") from exc
     updated = _strip_codex_mcp_block(text, name)
@@ -5388,7 +5614,7 @@ def _read_opencode_doc_for_write(path: str) -> dict[str, Any]:
     unexpectedly-shaped config is never silently overwritten.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             raw = f.read()
     except FileNotFoundError:
         return {}
@@ -5461,8 +5687,7 @@ def _unset_opencode_mcp_server(
         data["mcp"] = mcp
         updates.append((path, data))
     for path, data in updates:
-        _capture_managed_mcp_backup(path)
-        _atomic_write_json(path, data)
+        _write_json_after_mcp_delete(path, data, "mcp")
     return bool(updates)
 
 
@@ -5482,6 +5707,64 @@ _CLAUDE_MUTATION_GUARD: ContextVar[dict[str, Any] | None] = ContextVar(
     "claude_mcp_mutation_guard",
     default=None,
 )
+# Files one Claude MCP command published, keyed by path: the snapshot before
+# its first write and after its last one. A failed unset rolls back only
+# what this log proves the command itself wrote (GAP-1378).
+_CLAUDE_PUBLICATIONS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "claude_mcp_publications",
+    default=None,
+)
+
+
+def _record_claude_publication(path: str, before: Any, after: Any) -> None:
+    log = _CLAUDE_PUBLICATIONS.get()
+    if log is None:
+        return
+    key = os.path.normcase(os.path.abspath(path))
+    entry = log.get(key)
+    if entry is None:
+        log[key] = {"before": before, "after": after, "foreign": False}
+        return
+    prior = entry["after"]
+    if prior.existed != before.existed or prior.payload != before.payload:
+        # Another writer changed the file between two of this command's
+        # writes, so the first pre-image is no longer the one to restore.
+        entry["foreign"] = True
+    entry["after"] = after
+
+
+def _undo_claude_publication(path: str, log: dict[str, dict[str, Any]]) -> bool:
+    """Restore *path* to its pre-image only while it holds this command's write.
+
+    Returns False, leaving the file alone, when another writer changed its
+    content, mode, owner or inode since this command wrote it.
+    """
+    from defenseclaw.observability import v8_activation
+
+    entry = log.get(os.path.normcase(os.path.abspath(path)))
+    if entry is None:
+        return True
+    if entry["foreign"]:
+        return False
+    after = entry["after"]
+    current = v8_activation._snapshot_regular_file(path, required=False)
+    if current.existed != after.existed or (
+        after.existed
+        and (current.payload != after.payload or not v8_activation._same_snapshot_identity(current, after))
+    ):
+        return False
+    before = entry["before"]
+    if current.existed == before.existed and current.payload == before.payload:
+        return True
+    try:
+        _publish_claude_config_if_unchanged(
+            path,
+            current.payload if current.existed else None,
+            before.payload if before.existed else None,
+        )
+    except MCPWriteUnsupportedError:
+        return False
+    return True
 
 
 def _read_regular_bytes_if_present(path: str) -> bytes | None:
@@ -5597,10 +5880,16 @@ def _claude_windows_private_file_security(path: str, destination: str | None = N
         )
     security = windows_acl.capture_path(lock_path)
     parent = os.path.dirname(os.path.abspath(destination or path)) or os.curdir
-    if windows_acl.capture_path(parent, directory=True).owner != security.owner:
-        raise MCPWriteUnsupportedError(
-            f"refusing Claude MCP mutation: settings parent has an unexpected owner: {parent}",
-        )
+    parent_security = windows_acl.capture_path(parent, directory=True)
+    if parent_security.owner != security.owner:
+        # A Windows profile root (C:\Users\<user>) is owned by SYSTEM, not
+        # the user, so accept the trusted system owners too (GAP-1686).
+        try:
+            windows_acl.assert_trusted_owner(parent_security)
+        except windows_acl.WindowsAclError as exc:
+            raise MCPWriteUnsupportedError(
+                f"refusing Claude MCP mutation: settings parent has an unexpected owner: {parent}",
+            ) from exc
     return security
 
 
@@ -6076,6 +6365,7 @@ def _write_claude_private_metadata(
             raise MCPWriteUnsupportedError(
                 f"refusing Claude MCP mutation: private metadata was replaced after publication: {path}",
             )
+        _record_claude_publication(path, snapshot, observed)
         if is_ownership:
             guard["ownership_snapshot"] = published
     except MCPWriteUnsupportedError:
@@ -6161,6 +6451,8 @@ def _clear_claude_mcp_ownership(path: str) -> None:
         metadata_path,
         required=False,
     )
+    if expected.existed:
+        _record_claude_publication(metadata_path, expected, guard["ownership_snapshot"])
 
 
 def _directory_identity(path: str) -> tuple[int, int]:
@@ -6279,7 +6571,7 @@ def _locked_claude_file_update(path: str, *, label: str):
     make_private_directory(directory)
     lock_path = os.path.abspath(path + ".lock")
     if not os.path.lexists(lock_path):
-        atomic_write_private_bytes(lock_path, b"")
+        _write_private_config(lock_path, b"")
     _validate_claude_private_file(lock_path, label=label)
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags)
@@ -6321,7 +6613,7 @@ def _locked_claude_mcp_mutation(path: str):
     metadata_path = _claude_mcp_ownership_path(path)
     lock_path = metadata_path + ".lock"
     if not os.path.lexists(lock_path):
-        atomic_write_private_bytes(lock_path, b"")
+        _write_private_config(lock_path, b"")
     _validate_claude_private_file(lock_path, label="ownership lock")
     with _locked_claude_file_update(
         metadata_path,
@@ -7336,6 +7628,7 @@ def _publish_claude_config_if_unchanged(
                 path,
                 expected_snapshot=snapshot,
             )
+            _record_claude_publication(path, snapshot, v8_activation._snapshot_regular_file(path, required=False))
         else:
             metadata = None
             if os.name == "nt" and not snapshot.existed:
@@ -7378,6 +7671,7 @@ def _publish_claude_config_if_unchanged(
         # staged file object with the expected bytes and security.  The
         # pre-publication journal remains the crash-safe fallback until this
         # callback durably records the observed public identity.
+        _record_claude_publication(path, snapshot, observed)
         observed_identity = _claude_postimage_identity_from_snapshot(observed)
         if candidate_verified is not None:
             candidate_verified(observed_identity)
@@ -7523,14 +7817,13 @@ def _set_claudecode_mcp_server(
             identity_matches = _claude_postimage_identity_matches(path, state)
             if raw != postimage or not identity_matches:
                 state["exact_restore"] = False
-            if not identity_matches:
-                released.update(state["managed"])
-                state["managed"].clear()
-            else:
-                previously_managed = set(state["managed"])
-                if _reconcile_claude_managed_servers(state, data):
-                    released.update(previously_managed - set(state["managed"]))
-                    state["exact_restore"] = False
+            # Claude Code rewrites ~/.claude.json as it runs (new inode, its own
+            # state added), so ownership follows each entry's value, not the
+            # file identity (GAP-2541).
+            previously_managed = set(state["managed"])
+            if _reconcile_claude_managed_servers(state, data):
+                released.update(previously_managed - set(state["managed"]))
+                state["exact_restore"] = False
             if not state["managed"]:
                 _finish_claude_mcp_episode(path, None, released)
                 state = None
@@ -7632,7 +7925,29 @@ def _unset_claude_without_state(
     return True
 
 
-def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
+_CLAUDE_ENTRY_CHANGED = "the entry changed after DefenseClaw wrote it"
+_CLAUDE_ENTRY_CHANGED_OR_PRIOR = (
+    "the entry changed after DefenseClaw wrote it, or it was there before DefenseClaw wrote it"
+)
+
+
+def _raise_claude_mcp_not_removed(
+    path: str,
+    name: str,
+    data: dict[str, Any],
+    reason: str = _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+) -> None:
+    # A Claude Code rewrite alone no longer releases an entry (GAP-2541), so
+    # the reason names the entry's own change, not the rewrite (GAP-2553).
+    servers = data.get("mcpServers")
+    if isinstance(servers, dict) and name in servers:
+        raise MCPServerNotRemovedError(
+            f"DefenseClaw no longer owns {name!r} in {path} ({reason}), so it left the entry in place; "
+            f"remove it with: claude mcp remove {name} -s user"
+        )
+
+
+def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
     with _locked_claude_mcp_mutation(path):
         state, released = _recover_claude_mcp_transaction(
             path,
@@ -7641,6 +7956,10 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         raw = _read_regular_bytes_if_present(path)
         data = _parse_claude_settings(path, raw)
         if name in released:
+            # DefenseClaw released this entry earlier (the file was rewritten,
+            # or it was the operator's before DefenseClaw wrote it). A repeat
+            # unset must not report it removed while it is still there (GAP-1400).
+            _raise_claude_mcp_not_removed(path, name, data)
             return False
         if state is None:
             return _unset_claude_without_state(path, name, raw, data, released)
@@ -7654,18 +7973,25 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         if not bytes_match:
             state["exact_restore"] = False
         target_was_owned = name in state["managed"]
-        if not identity_matches:
-            released.update(state["managed"])
-            state["managed"].clear()
-        else:
-            previously_managed = set(state["managed"])
-            if _reconcile_claude_managed_servers(state, data):
-                released.update(previously_managed - set(state["managed"]))
-                state["exact_restore"] = False
+        # An entry still exactly as DefenseClaw wrote it stays DefenseClaw's,
+        # even after Claude Code rewrote the file around it (GAP-2541).
+        previously_managed = set(state["managed"])
+        if _reconcile_claude_managed_servers(state, data):
+            released.update(previously_managed - set(state["managed"]))
+            state["exact_restore"] = False
 
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)
             if target_was_owned or name in released:
+                # The file changed since DefenseClaw wrote the entry, so it
+                # is no longer DefenseClaw's to remove (GAP-1400): say so
+                # rather than let the caller report it removed.
+                _raise_claude_mcp_not_removed(
+                    path,
+                    name,
+                    data,
+                    _CLAUDE_ENTRY_CHANGED if target_was_owned else _CLAUDE_ENTRY_CHANGED_OR_PRIOR,
+                )
                 return False
             return _unset_claude_without_state(path, name, raw, data, released)
 
@@ -7695,16 +8021,18 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
                 released=released,
                 next_released=next_released,
             )
-            return True
+            return MCP_PRIOR_RESTORED if record["prior_present"] else True
 
         next_state = copy.deepcopy(state)
         next_released = set(released)
         changed = False
+        prior_restored = False
         record = next_state["managed"].get(name)
         if record is not None:
             changed = _restore_claude_server_prior(data, name, record)
             if changed and record["prior_present"]:
                 next_released.add(name)
+                prior_restored = True
             del next_state["managed"][name]
         elif not target_was_owned:
             servers = data.get("mcpServers")
@@ -7717,6 +8045,11 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
 
         if not changed:
             _commit_claude_state_without_config(path, next_state, raw, released)
+            if target_was_owned:
+                # Other entries are still DefenseClaw's, but this one changed
+                # after DefenseClaw wrote it: say so, as the last-entry case
+                # does, rather than let the caller report it removed (GAP-2570).
+                _raise_claude_mcp_not_removed(path, name, data, _CLAUDE_ENTRY_CHANGED)
             return False
 
         if not next_state["managed"]:
@@ -7737,7 +8070,30 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
             released=released,
             next_released=next_released,
         )
-        return True
+        return MCP_PRIOR_RESTORED if prior_restored else True
+
+
+def _remove_claude_legacy_mcp_server(name: str) -> bool:
+    """Remove *name* from the ``mcpServers`` block 0.8.x wrote in settings.json.
+
+    Only that entry goes; the other keys (hooks, env) stay. An emptied block
+    is dropped. The publish is atomic, keeps the file's mode and refuses a
+    file changed concurrently. Returns True when an entry was removed.
+    """
+    path = claude_legacy_mcp_settings_path()
+    if not os.path.lexists(path):
+        return False
+    with _locked_claude_mcp_mutation(path):
+        raw = _read_regular_bytes_if_present(path)
+        data = _parse_claude_settings(path, raw)
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict) or name not in servers:
+            return False
+        del servers[name]
+        if not servers:
+            del data["mcpServers"]
+        _publish_claude_config_if_unchanged(path, raw, _render_json_bytes(data))
+    return True
 
 
 def _reject_symlink_config(path: str) -> None:
@@ -7783,7 +8139,7 @@ def _atomic_json_merge(
     _capture_managed_mcp_backup(path)
     data: dict[str, Any]
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = json.load(f)
         data = loaded if isinstance(loaded, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
@@ -7809,7 +8165,7 @@ def _atomic_json_delete(
     Missing files / missing keys are no-ops returning False.
     """
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             loaded = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return False
@@ -7823,8 +8179,229 @@ def _atomic_json_delete(
     if not isinstance(cursor, dict) or keys[-1] not in cursor:
         return False
     del cursor[keys[-1]]
+    if len(keys) == 2:
+        _write_json_after_mcp_delete(path, loaded, keys[0])
+    else:
+        _capture_managed_mcp_backup(path)
+        _atomic_write_json(path, loaded)
+    return True
+
+
+def _managed_mcp_backup_doc(path: str) -> tuple[bytes | None, dict[str, Any] | None]:
+    """Return the bytes and parsed object of *path*'s pre-DefenseClaw backup."""
+    backup = _registry_backup_for(os.path.abspath(path)) or _managed_mcp_backup_path(path)
+    try:
+        raw = _read_regular_bytes_if_present(backup)
+    except (OSError, ValueError, MCPWriteUnsupportedError, UnsafePathError):
+        return None, None
+    if raw is None:
+        return None, None
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None, None
+    doc = _load_json_or_jsonc_content(text) if text.strip() else {}
+    return (raw, doc) if isinstance(doc, dict) else (None, None)
+
+
+def _write_json_after_mcp_delete(path: str, data: dict[str, Any], container: str) -> None:
+    """Write a JSON config after removing one MCP server from *container*.
+
+    GAP-1812: removing the only server DefenseClaw added left an empty
+    container (``"mcp": {}``) and re-serialised keys behind. Drop a container
+    the delete emptied unless the pre-DefenseClaw file had it, and when the
+    result equals that file, put its original bytes back.
+    """
+    raw, original = _managed_mcp_backup_doc(path)
+    if data.get(container) == {} and original is not None and container not in original:
+        data.pop(container, None)
+    if raw is not None and original == data:
+        _write_private_config(path, raw)
+        return
     _capture_managed_mcp_backup(path)
-    _atomic_write_json(path, loaded)
+    _atomic_write_json(path, data)
+
+
+def _write_private_config(path: str, payload: bytes) -> None:
+    """Atomically write a connector config; name the file in OS errors.
+
+    ``os.write`` errors carry no file name, so a full disk surfaced as a bare
+    "[Errno 28] No space left on device" traceback (GAP-1838).
+    """
+    try:
+        atomic_write_private_bytes(path, payload)
+    except OSError as exc:
+        if exc.filename is None and exc.errno is not None:
+            raise OSError(exc.errno, exc.strerror or str(exc), os.fspath(path)) from exc
+        raise
+
+
+def _yaml_is_content(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _yaml_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _yaml_find_key(lines: list[str], start: int, end: int, key: str):
+    """Find mapping key *key* among the direct children of ``lines[start:end]``.
+
+    Returns ``(index, indent, block_end, inline_value)`` for a hit, or
+    ``(None, child_indent, insert_at, None)`` when the key is absent.
+    """
+    child_indent = None
+    last_content = start - 1
+    for i in range(start, end):
+        line = lines[i]
+        if not _yaml_is_content(line):
+            continue
+        last_content = i
+        indent = _yaml_indent(line)
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        try:
+            parsed = yaml.safe_load(line.strip())
+        except yaml.YAMLError:
+            continue
+        if not (isinstance(parsed, dict) and len(parsed) == 1 and str(next(iter(parsed))) == key):
+            continue
+        block_end = i + 1
+        for j in range(i + 1, end):
+            other = lines[j]
+            if not _yaml_is_content(other):
+                continue
+            other_indent = _yaml_indent(other)
+            item = other.strip()
+            # A block sequence may sit at its key's own indent ("key:\n- a").
+            if other_indent < indent or (other_indent == indent and not (item == "-" or item.startswith("- "))):
+                break
+            block_end = j + 1
+        return i, indent, block_end, next(iter(parsed.values()))
+    return None, child_indent, last_content + 1, None
+
+
+def _yaml_fragment(key: str, value: Any, indent: int, newline: str) -> list[str]:
+    text = yaml.safe_dump({key: value}, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    return [" " * indent + line + newline for line in text.splitlines()]
+
+
+def _yaml_text_set(lines: list[str], keys: tuple[str, ...], value: Any, newline: str) -> bool:
+    start, end, parent_indent = 0, len(lines), -2
+    for depth, key in enumerate(keys):
+        index, indent, block_end, inline = _yaml_find_key(lines, start, end, key)
+        nested = value
+        for inner in reversed(keys[depth + 1:]):
+            nested = {inner: nested}
+        if index is None:
+            at = len(lines) if depth == 0 else block_end
+            lines[at:at] = _yaml_fragment(key, nested, parent_indent + 2 if indent is None else indent, newline)
+            return True
+        if depth == len(keys) - 1:
+            lines[index:block_end] = _yaml_fragment(key, value, indent, newline)
+            return True
+        if block_end == index + 1:
+            if inline not in (None, {}):
+                return False
+            lines[index:block_end] = _yaml_fragment(key, nested, indent, newline)
+            return True
+        start, end, parent_indent = index + 1, block_end, indent
+    return False
+
+
+def _yaml_text_delete(lines: list[str], keys: tuple[str, ...]) -> bool:
+    spans = []
+    start, end = 0, len(lines)
+    for key in keys:
+        index, _indent, block_end, _inline = _yaml_find_key(lines, start, end, key)
+        if index is None:
+            return False
+        spans.append((index, block_end))
+        start, end = index + 1, block_end
+    index, block_end = spans.pop()
+    del lines[index:block_end]
+    removed = block_end - index
+    # Drop parents the delete left empty, like the parsed-data side does.
+    for parent, parent_end in reversed(spans):
+        parent_end -= removed
+        if any(_yaml_is_content(line) for line in lines[parent + 1:parent_end]):
+            break
+        del lines[parent]
+        removed += 1
+    return True
+
+
+_YAML_DELETE = object()
+
+
+def _yaml_edit_in_place(path: str, keys: tuple[str, ...], value: Any = _YAML_DELETE, *, hint: str = "") -> bool:
+    """Set or delete one nested mapping entry in a YAML file, text-level.
+
+    Only the lines of that entry change, so the user's comments, ordering
+    and formatting survive (GAP-1586: a full ``safe_dump`` rewrite dropped
+    every comment of Hermes' self-documenting config). The edited text must
+    parse to exactly the expected data; otherwise nothing is written.
+    """
+    deleting = value is _YAML_DELETE
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        raw = b""
+    text = raw.decode("utf-8-sig")
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    refuse = f"refusing to rewrite {path}: {{}}" + (f"; {hint}" if hint else "")
+    try:
+        data = yaml.safe_load(text) if text.strip() else None
+    except yaml.YAMLError as exc:
+        raise MCPWriteUnsupportedError(refuse.format("it is not valid YAML")) from exc
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise MCPWriteUnsupportedError(refuse.format("its top level is not a mapping"))
+
+    expected = copy.deepcopy(data)
+    cursor: Any = expected
+    chain = []
+    for key in keys[:-1]:
+        node = cursor.get(key)
+        if node is None or node == {}:
+            if deleting:
+                return False
+            node = {}
+            cursor[key] = node
+        if not isinstance(node, dict):
+            raise MCPWriteUnsupportedError(refuse.format(f"{key!r} is not a mapping"))
+        chain.append((cursor, key))
+        cursor = node
+    if deleting:
+        if keys[-1] not in cursor:
+            return False
+        del cursor[keys[-1]]
+        for parent, key in reversed(chain):
+            if parent[key]:
+                break
+            del parent[key]
+    else:
+        cursor[keys[-1]] = value
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(("\n", "\r")):
+        lines[-1] += newline
+    edited = _yaml_text_delete(lines, keys) if deleting else _yaml_text_set(lines, keys, value, newline)
+    new_text = "".join(lines)
+    try:
+        matches = edited and (yaml.safe_load(new_text) or {}) == expected
+    except yaml.YAMLError:
+        matches = False
+    if not matches:
+        raise MCPWriteUnsupportedError(refuse.format("its layout cannot be edited in place without losing comments"))
+    _capture_managed_mcp_backup(path)
+    _write_private_config(path, (b"\xef\xbb\xbf" if bom else b"") + new_text.encode("utf-8"))
     return True
 
 
@@ -7832,51 +8409,24 @@ def _atomic_yaml_merge(
     path: str,
     keys: tuple[str, ...],
     value: dict[str, Any],
+    *,
+    hint: str = "",
 ) -> None:
     _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
-    _capture_managed_mcp_backup(path)
-    try:
-        with open(path) as f:
-            loaded = yaml.safe_load(f) or {}
-        data = loaded if isinstance(loaded, dict) else {}
-    except (FileNotFoundError, yaml.YAMLError):
-        data = {}
-    cursor = data
-    for k in keys[:-1]:
-        node = cursor.get(k)
-        if not isinstance(node, dict):
-            node = {}
-            cursor[k] = node
-        cursor = node
-    cursor[keys[-1]] = value
-    _atomic_write_yaml(path, data)
+    _yaml_edit_in_place(path, keys, value, hint=hint)
 
 
 def _atomic_yaml_delete(
     path: str,
     keys: tuple[str, ...],
+    *,
+    hint: str = "",
 ) -> bool:
-    try:
-        with open(path) as f:
-            loaded = yaml.safe_load(f) or {}
-    except (FileNotFoundError, yaml.YAMLError):
-        return False
-    if not isinstance(loaded, dict):
-        return False
-    cursor: Any = loaded
-    for k in keys[:-1]:
-        if not isinstance(cursor, dict) or k not in cursor:
-            return False
-        cursor = cursor[k]
-    if not isinstance(cursor, dict) or keys[-1] not in cursor:
-        return False
-    del cursor[keys[-1]]
-    _capture_managed_mcp_backup(path)
-    _atomic_write_yaml(path, loaded)
-    return True
+    _reject_symlink_config(path)
+    return _yaml_edit_in_place(path, keys, hint=hint)
 
 
 def restore_managed_mcp_backup(path: str) -> bool:
@@ -8093,28 +8643,6 @@ def _registry_path() -> str:
     return os.path.join(_registry_dir(), "registry.json")
 
 
-def _registry_load() -> dict[str, dict[str, str]]:
-    path = _registry_path()
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for k, v in data.items():
-        if isinstance(k, str) and isinstance(v, dict):
-            out[k] = {kk: str(vv) for kk, vv in v.items() if isinstance(kk, str)}
-    return out
-
-
-def _registry_save(state: dict[str, dict[str, str]]) -> None:
-    path = _registry_path()
-    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
-
-
 def _registry_key(abs_target: str) -> str:
     """Stable identifier for *abs_target* used as the registry key.
 
@@ -8194,23 +8722,6 @@ def _registry_register(abs_target: str, backup: str) -> None:
             _registry_register_locked(abs_target, backup)
 
 
-def _registry_clear(abs_target: str) -> None:
-    with _locked_claude_mcp_mutation(abs_target):
-        with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
-            state, snapshot = _load_claude_legacy_registry()
-            keys = _registry_matching_keys(state, abs_target)
-            if not keys:
-                return
-            for key in keys:
-                state.pop(key, None)
-            _write_claude_private_metadata(
-                _registry_path(),
-                _render_json_bytes(state),
-                owner_path=abs_target,
-                expected_snapshot=snapshot,
-            )
-
-
 def _registry_backup_for(abs_target: str) -> str | None:
     with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
         state, _snapshot = _load_claude_legacy_registry()
@@ -8235,14 +8746,9 @@ def lookup_managed_mcp_backup(path: str) -> str | None:
     return _registry_backup_for(os.path.abspath(path))
 
 
-def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
-    payload = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
-
-
 def _atomic_write_text(path: str, text: str) -> None:
     """Atomically write UTF-8 text with private permissions."""
-    atomic_write_private_bytes(path, text.encode("utf-8"))
+    _write_private_config(path, text.encode("utf-8"))
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
@@ -8253,4 +8759,4 @@ def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
     atomicWriteFile contract for connector config patches.
     """
     payload = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
+    _write_private_config(path, payload.encode("utf-8"))

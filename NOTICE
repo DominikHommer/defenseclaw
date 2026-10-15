@@ -45,6 +45,30 @@ Material modifications made by Cisco Systems, Inc.:
 
 This NOTICE preserves the attribution required by Apache License 2.0 section 4.
 
+VENDORED SOURCE: TETRAGON API
+
+third_party/tetragon/ carries the gRPC API definitions of Tetragon, which the
+Linux sensor helper uses to read a customer-run Tetragon agent.
+
+    Copyright Authors of Tetragon (Copyright Authors of Hubble in the .proto
+    headers)
+    https://github.com/cilium/tetragon
+    Licensed under the Apache License, Version 2.0
+    Upstream revision: api/v1.7.1 (commit 99ca93d98710b98a42551bf3c12613e32888885d)
+
+The five .proto files are unmodified. The Go stubs next to them were generated
+from those files by DefenseClaw with protoc-gen-go and protoc-gen-go-grpc; the
+only change from upstream's generation is the Go package path. Tetragon ships no
+NOTICE file. third_party/tetragon/README.md records the provenance checks.
+
+internal/sensor/kernelpolicy/testdata/tracingpolicy-v1.7.0.schema.json is the
+openAPIV3Schema of Tetragon's TracingPolicy CRD from cilium/tetragon v1.7.0
+(pkg/k8s/apis/cilium.io/client/crds/v1alpha1/cilium.io_tracingpolicies.yaml,
+Apache-2.0, same copyright), with its descriptions removed. It is test data
+only: a unit test checks that the kernel policies DefenseClaw renders use only
+fields the lowest supported Tetragon accepts. It is not shipped in any binary
+or package.
+
 Declared third-party dependencies are listed in go.mod/go.sum (Go) and
 pyproject.toml/uv.lock (Python). The shipped OpenClaw TypeScript plugin is built
 from extensions/defenseclaw/package.json and
@@ -79,11 +103,13 @@ dependencies include:
   - CEL expression protobufs (cel.dev/expr) — Apache-2.0
   - ANTLR4 Go runtime (github.com/antlr4-go/antlr/v4) — BSD-3-Clause
   - Go experimental packages (golang.org/x/exp) — BSD-3-Clause
+  - NVIDIA OpenShell Go SDK (github.com/NVIDIA/OpenShell/sdk/go) — Apache-2.0
   - OpenTelemetry Go (go.opentelemetry.io/otel) — Apache-2.0
   - Lumberjack (gopkg.in/natefinch/lumberjack.v2) — MIT
   - UUID (github.com/google/uuid) — BSD-3-Clause
   - fsnotify (github.com/fsnotify/fsnotify) — BSD-3-Clause
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
+  - Tetragon API definitions (github.com/cilium/tetragon/api, vendored) — Apache-2.0
   - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
 
 The generated observability redaction repertoire includes data derived from the
@@ -91,3 +117,15 @@ Unicode Character Database 13.0 `DerivedAge.txt` file.
 Copyright © 1991-2020 Unicode, Inc. All rights reserved.
 Distributed under the Unicode Data Files and Software License; see
 https://www.unicode.org/copyright.html.
+
+THIRD-PARTY MQTT LIBRARIES
+
+This product includes:
+
+  - Eclipse Paho MQTT Go Client (github.com/eclipse/paho.golang v0.23.0)
+    Copyright (c) 2023 Contributors to the Eclipse Foundation
+    Licensed under the Eclipse Public License 2.0 and the Eclipse Distribution License 1.0
+
+  - Eclipse Paho Embedded C/C++ MQTT Client (edge-connector/third_party/paho-embedded/)
+    Copyright (c) 2014, 2026 IBM Corp., Ian Craggs
+    Licensed under the Eclipse Public License v2.0

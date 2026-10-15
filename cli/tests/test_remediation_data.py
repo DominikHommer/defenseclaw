@@ -31,7 +31,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback only
 TESTS_DIR = Path(__file__).resolve().parent
 CLI_DIR = TESTS_DIR.parent
 REPO_ROOT = CLI_DIR.parent
-DATA = CLI_DIR / "defenseclaw" / "_data"
+# The tracked sources. `make _bundle-data` mirrors these directories verbatim
+# into the gitignored cli/defenseclaw/_data/ build-staging tree; reading that
+# copy made every test here fail on a fresh checkout that had not run it.
+DATA = REPO_ROOT / "bundles"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 OBS = DATA / "local_observability_stack"
@@ -39,9 +42,6 @@ COMPOSE = OBS / "docker-compose.yml"
 PASSWORD_COMPOSE = OBS / "docker-compose.password.yml"
 OTEL = OBS / "otel-collector" / "config.yaml"
 OBS_README = OBS / "README.md"
-SOURCE_OBS = REPO_ROOT / "bundles" / "local_observability_stack"
-SOURCE_COMPOSE = SOURCE_OBS / "docker-compose.yml"
-SOURCE_PASSWORD_COMPOSE = SOURCE_OBS / "docker-compose.password.yml"
 
 BRIDGE_DIR = DATA / "splunk_local_bridge"
 CI_COMPOSE = BRIDGE_DIR / "compose" / "docker-compose.ci.yml"
@@ -60,8 +60,6 @@ SEARCH_VIEW = VIEWS / "search_and_drilldown.xml"
 O11Y = DATA / "splunk_o11y_dashboards"
 DETECTORS = O11Y / "terraform" / "detectors.tf"
 O11Y_README = O11Y / "README.md"
-
-INSTALLER = DATA / "scripts" / "install-openshell-sandbox.sh"
 
 _SECURE_HOST_BIND_PORT = re.compile(
     r"^\$\{(?P<variable>HOST_BIND):-(?P<default>127\.0\.0\.1)\}:"
@@ -148,11 +146,6 @@ def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | Non
 # --------------------------------------------------------------------------- #
 # Local-observability Compose publishing contract
 # --------------------------------------------------------------------------- #
-def test_local_observability_compose_source_matches_packaged_data() -> None:
-    assert COMPOSE.read_bytes() == SOURCE_COMPOSE.read_bytes()
-    assert PASSWORD_COMPOSE.read_bytes() == SOURCE_PASSWORD_COMPOSE.read_bytes()
-
-
 @pytest.mark.parametrize(
     ("service", "expected_ports"),
     _LOCAL_OBSERVABILITY_PORTS.items(),
@@ -258,6 +251,9 @@ def test_f0561_local_grafana_is_loopback_bound_and_authenticated() -> None:
             expected_ports=((3000, 3000),),
         )
     assert "network_mode" not in overlay["services"]["grafana"]
+    # The collector's debug exporter logs every payload; unrotated logs filled a disk.
+    for service in base["services"].values():
+        assert service["logging"]["options"]["max-size"] == "10m"
 
 
 # --------------------------------------------------------------------------- #
@@ -402,21 +398,6 @@ def test_f0623_readme_uses_env_var_not_cli_token() -> None:
     assert "never put the API token on the command line" in text
     # no example passes a literal token placeholder on the CLI
     assert "--o11y-api-token <api-access-token>" not in text
-
-
-# --------------------------------------------------------------------------- #
-# F-0548 — installer verifies an independent pinned checksum before install
-# --------------------------------------------------------------------------- #
-def test_f0548_installer_verifies_pinned_checksum() -> None:
-    text = _read(INSTALLER)
-    assert "_sha256()" in text
-    assert "EXPECTED_SHA256" in text
-    assert "OPENSHELL_SANDBOX_SHA256" in text
-    assert "Integrity check failed" in text
-    assert "without an independent integrity anchor" in text
-    # fail-closed before any blob download, and verify before install
-    assert text.index("Refusing to install") < text.index("blobs/${LAYER_DIGEST}")
-    assert text.index("ACTUAL_SHA256=") < text.index("install -m 755")
 
 
 # --------------------------------------------------------------------------- #

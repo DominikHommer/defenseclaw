@@ -801,13 +801,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -822,11 +815,11 @@
             },
             "renameByName": {
               "connector": "connector",
-              "TOTAL": "total/1h",
-              "BLOCKS": "blocks/1h",
-              "WOULDBLOCK": "would-block/1h",
-              "ALERTS": "alerts/1h",
-              "CONFIRM": "confirms/1h"
+              "Value #TOTAL": "total/1h",
+              "Value #BLOCKS": "blocks/1h",
+              "Value #WOULDBLOCK": "would-block/1h",
+              "Value #ALERTS": "alerts/1h",
+              "Value #CONFIRM": "confirms/1h"
             }
           }
         }
@@ -906,7 +899,7 @@
           }
         },
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | event_name=~\"guardrail[.]evaluation[.](completed|failed)|hook_decision\"",
           "refId": "B",
           "datasource": {
             "type": "loki",
@@ -1104,6 +1097,60 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Fleet Alerts (Total)",
+      "description": "P2-19: Real alert count wired from fleet manager events",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 100 },
+      "datasource": { "type": "prometheus", "uid": "defenseclaw-prometheus" },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_alerts_total",
+          "legendFormat": "alerts",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "OTA Canary Rollbacks",
+      "description": "P2-19: OTA canary rollback count from fleet devices",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 100 },
+      "datasource": { "type": "prometheus", "uid": "defenseclaw-prometheus" },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_ota_rollbacks_total",
+          "legendFormat": "rollbacks",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
         }
       }
     }

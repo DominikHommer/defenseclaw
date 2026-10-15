@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Cmd-K / Ctrl-K command palette for the Playground. Lets operators
-// jump straight to a knob ("hilt severity", "splunk hec token",
+// jump straight to a knob ("hilt severity", "webhook secret",
 // "block threshold") instead of opening every accordion until they
 // find it.
 //
@@ -41,7 +41,7 @@ export const INDEX: IndexEntry[] = [
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Block threshold', keywords: ['block_threshold', 'sev to block'] },
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Alert threshold', keywords: ['alert_threshold'] },
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Pattern categories', keywords: ['regex', 'patterns'] },
-  { sectionId: 'guardrail', group: 'Guardrail', label: 'HILT (human in the loop)', keywords: ['human in the loop', 'hilt min severity', 'hilt timeout'] },
+  { sectionId: 'guardrail', group: 'Guardrail', label: 'HITL (human in the loop)', keywords: ['human in the loop', 'hitl', 'hilt min severity', 'hilt timeout'] },
 
   // rules
   { sectionId: 'rules', group: 'Rules', label: 'Rule pack files', keywords: ['rule pack', 'pack file'] },
@@ -70,7 +70,6 @@ export const INDEX: IndexEntry[] = [
   // webhooks
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Webhook destination', keywords: ['webhook', 'callback', 'url'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Webhook signing secret', keywords: ['hmac', 'signing', 'secret', 'env var'] },
-  { sectionId: 'webhooks', group: 'Webhooks', label: 'Splunk HEC sink', keywords: ['splunk', 'hec', 'token', 'url'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'PagerDuty sink', keywords: ['pagerduty', 'pd', 'routing key'] },
   { sectionId: 'webhooks', group: 'Webhooks', label: 'Slack webhook', keywords: ['slack', 'channel', 'webhook'] },
 
@@ -236,7 +235,7 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
                 commit(results[active]);
               }
             }}
-            placeholder="Search knobs (e.g. 'hilt severity', 'splunk token', 'block threshold')"
+            placeholder="Search knobs (e.g. 'hilt severity', 'webhook secret', 'block threshold')"
             className="flex-1 bg-transparent text-sm text-fd-foreground placeholder:text-fd-muted-foreground focus:outline-none"
           />
           <kbd className="rounded border border-fd-border bg-fd-background px-1.5 py-0.5 text-[10px] text-fd-muted-foreground">
@@ -298,7 +297,7 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
 /** Hint button operators can click to discover the shortcut. */
 export function CommandPaletteHint() {
   return (
-    <span className="hidden items-center gap-1 text-[11px] text-fd-muted-foreground sm:inline-flex">
+    <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-fd-muted-foreground sm:inline-flex">
       <kbd className="rounded border border-fd-border bg-fd-background px-1 py-px text-[10px]">⌘K</kbd>
       <span>to search knobs</span>
     </span>

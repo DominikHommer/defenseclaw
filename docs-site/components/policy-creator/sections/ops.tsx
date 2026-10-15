@@ -101,7 +101,7 @@ export function WebhooksSection({
                   type="button"
                   onClick={() => remove(idx)}
                   aria-label="Remove"
-                  className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-500"
+                  className="ml-auto rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] text-fd-muted-foreground hover:border-red-500 hover:text-red-700 dark:hover:text-red-400"
                 >
                   ×
                 </button>
@@ -239,6 +239,7 @@ export function AuditSection({
 }) {
   return (
     <div className="space-y-3">
+      <p role="alert" className="text-xs text-amber-700 dark:text-amber-300">Audit choices are planning notes only. Policy activation does not apply them; configure retention and logging separately.</p>
       <Toggle
         label="log_all_actions"
         hint="Persist every gateway action (allow/deny/block/quarantine)."
@@ -268,7 +269,7 @@ export function AuditSection({
             });
           }
         }}
-        hint="Days non-CRITICAL events are retained. CRITICAL events are kept indefinitely (see audit.rego)."
+        hint="Days audit events are retained."
       />
     </div>
   );

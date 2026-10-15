@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -76,6 +77,9 @@ func newRemoteRouterClient(endpoint string, timeoutMs int, backends []ModelRoute
 		}
 	}
 	transport := &http.Transport{
+		// A standalone gateway reaches the router through the
+		// enterprise.network proxy unless no_proxy excludes it.
+		DialContext:         enterpriseEgressDialer{direct: &net.Dialer{}}.DialContext,
 		MaxIdleConns:        10,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,

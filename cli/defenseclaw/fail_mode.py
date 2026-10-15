@@ -28,7 +28,11 @@ from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
-_MAX_DIGEST_FILE = 128 * 1024 * 1024
+# The gateway records the digest of the whole hook launcher with no size cap.
+# An unstripped Windows source build (make all) of defenseclaw-hook.exe is
+# about 148 MiB, so a 128 MiB cap hashed it as '' and reported
+# registration-digest-stale on every check (GAP-1922).
+_MAX_DIGEST_FILE = 1024 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
@@ -110,12 +114,30 @@ class ConnectorFailModeState:
             source = candidate
         return source
 
+    @property
+    def note(self) -> str:
+        """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
+
+        A connector in observe mode without a value of its own stays fail-open
+        whatever the global value says (GuardrailConfig.effective_hook_fail_mode),
+        so ``closed`` in config.yaml next to ``open`` in the hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129).
+        """
+
+        if self.configured == self.desired or self.effective != self.desired:
+            return ""
+        return (
+            f"observe mode keeps hooks fail-{self.desired}; "
+            f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+        )
+
     def to_report(self) -> dict[str, Any]:
         """Return the canonical JSON-friendly reporting projection."""
 
         return {
             "effective": self.effective,
             "provenance": self.provenance,
+            "note": self.note,
             "configured": self.configured,
             "desired": self.desired,
             "runtime": self.runtime,
@@ -166,11 +188,9 @@ def resolve_connector_fail_mode(
             runtime = claude_env
         if not registered:
             drift.append("registration-missing")
-    # Windows managed Codex registration is a structured event matrix whose
-    # native validator below checks the exact command, launcher, contract,
-    # policy, and file identities. The legacy text probe only understands the
-    # user-scoped ``[hooks]`` placeholder and would falsely mark a valid
-    # ``managed_config.toml`` matrix missing before that authoritative check.
+    # Windows Codex registration is a structured event matrix whose native
+    # validator below checks the exact command, launcher, contract, policy,
+    # trust, and file identities, so the text probe is not used there.
     elif name == "codex" and not _is_windows() and not _codex_registration_current(workspace):
         drift.append("registration-missing")
 
@@ -237,6 +257,7 @@ def connector_fail_mode_report(
         return {
             "effective": "open",
             "provenance": f"{name}-upstream-fail-open",
+            "note": "",
             "configured": configured,
             "desired": "open",
             "runtime": "open",
@@ -256,6 +277,7 @@ def connector_fail_mode_report(
     return {
         "effective": configured,
         "provenance": "config",
+        "note": "",
         "configured": configured,
         "desired": configured,
         "runtime": None,
@@ -397,14 +419,23 @@ def _claude_registration_state(workspace: str = "") -> tuple[str | None, bool]:
     return (mode if mode in _VALID_MODES else None), registered
 
 
+def codex_windows_hook_config_path(cfg: Any) -> str:
+    """Return where native Windows Setup registers Codex hooks without a lock.
+
+    Managed enterprise installs use Codex's legacy managed layer. Per-user
+    installs use config.toml because current Codex ignores
+    CODEX_HOME/managed_config.toml on Windows.
+    """
+
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return str(Path(codex_home()) / ("managed_config.toml" if managed else "config.toml"))
+
+
 def _codex_registration_current(workspace: str = "") -> bool:
-    if _is_windows():
-        config_path = Path(codex_home()) / "managed_config.toml"
-    else:
-        paths = connector_config_files("codex", workspace_dir=workspace)
-        if not paths:
-            return False
-        config_path = Path(paths[0])
+    paths = connector_config_files("codex", workspace_dir=workspace)
+    if not paths:
+        return False
+    config_path = Path(paths[0])
     data = _read_small_file(config_path)
     if data is None:
         return False
@@ -553,10 +584,12 @@ def _windows_registration_freshness(
             return "registration-config-binding-stale"
         config_path = locked_paths[0]
     elif connector == "codex":
-        # Native Setup registers Codex hooks in the supported managed layer so
-        # they are source-trusted without a manual /hooks approval. Keep the
-        # fail-mode freshness guard on that effective source as well.
-        config_path = str(Path(codex_home()) / "managed_config.toml")
+        # Keep the fail-mode freshness guard on the source Setup recorded:
+        # config.toml for per-user installs (current Codex ignores
+        # managed_config.toml on Windows), managed_config.toml for managed
+        # enterprise installs.
+        locked_paths = _registration_hook_config_paths(cfg, connector)
+        config_path = locked_paths[0] if locked_paths else codex_windows_hook_config_path(cfg)
     else:
         workspace = _connector_workspace(cfg)
         paths = connector_config_files(connector, workspace_dir=workspace)
@@ -576,6 +609,10 @@ def _windows_registration_freshness(
         search_path=os.environ.get("PATH", ""),
         pathext=os.environ.get("PATHEXT", ""),
         inspect_effective_policy=inspect_effective_policy,
+        codex_per_user=(
+            connector == "codex"
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+        ),
     )
     return None if check.healthy else f"registration-{check.state}"
 
@@ -721,9 +758,14 @@ def fail_mode_transaction_lock(cfg: Any) -> Iterator[None]:
 
 
 def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[FileSnapshot, ...]:
-    paths = {config_module.config_path_for_data_dir(cfg.data_dir)}
+    """Snapshot the registration files a fail-mode change can rewrite.
+
+    config.yaml is not part of it: the caller reverts its modeled change and
+    saves again through the single writer, which keeps concurrent edits and
+    records the rollback as a new generation.
+    """
     hook_dir = Path(cfg.data_dir) / "hooks"
-    paths.update(
+    paths = set(
         {
             hook_dir / ".hookcfg",
             hook_dir / ".hookcfg.legacy",
@@ -815,7 +857,16 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
     errors: list[str] = []
     for snapshot in reversed(snapshots):
         try:
+            # A failed save can leave every file untouched. Avoid replacing an
+            # immutable original (and rewriting user edits) in that case.
             if snapshot.existed:
+                try:
+                    current, mode = _snapshot_regular_file(snapshot.path)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if current == snapshot.data and mode == snapshot.mode:
+                        continue
                 snapshot.path.parent.mkdir(parents=True, exist_ok=True)
                 fd, temporary = tempfile.mkstemp(prefix=f".{snapshot.path.name}.", dir=snapshot.path.parent)
                 try:

@@ -8,7 +8,6 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +17,15 @@ import (
 )
 
 const WindowsManagedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
+
+// WindowsManagedEnrollmentPendingReason is the standalone hook's refusal of
+// an account the machine policy registers that has no managed runtime yet:
+// the guardian creates it while the account is signed in.
+const WindowsManagedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
+
+// ErrWindowsManagedRuntimeGenerationPending reports that no managed runtime
+// generation is selected for a registered account yet.
+var ErrWindowsManagedRuntimeGenerationPending = errors.New("no managed runtime generation is selected for this account yet")
 
 // WindowsManagedHookRuntime is the administrator-authorized runtime selected
 // for the current process token. PolicyActive distinguishes a clean
@@ -64,6 +72,8 @@ func ResolveWindowsManagedHookRuntime(
 		return resolveWindowsCodexManagedHookRuntime(hookExecutable)
 	case "cursor":
 		return resolveWindowsCursorManagedHookRuntime(hookExecutable)
+	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode":
+		return resolveWindowsPerUserManagedHookRuntime(hookExecutable, name)
 	default:
 		return WindowsManagedHookRuntime{}, fmt.Errorf(
 			"enterprise hooks: unsupported Windows managed connector %q",
@@ -123,80 +133,6 @@ func resolveWindowsCursorManagedHookRuntime(
 	result.GenerationID = generation.GenerationID
 	result.Registered = true
 	return result, nil
-}
-
-func validateWindowsCursorManagedRuntime(
-	target windowsCursorManagedPolicyTarget,
-) error {
-	if target.targetSID == nil {
-		return errors.New("enterprise hooks: Cursor managed runtime target SID is required")
-	}
-	if err := windowsEnterpriseHookTrustCheck(target.hookExecutable); err != nil {
-		return fmt.Errorf("enterprise hooks: Cursor managed hook executable trust check failed: %w", err)
-	}
-	hookDir := filepath.Join(target.dataDir, "hooks")
-	tokenPath, err := connector.HookTokenFilePath(hookDir, "cursor")
-	if err != nil {
-		return err
-	}
-	for _, item := range []struct {
-		path string
-		dir  bool
-	}{
-		{target.dataDir, true},
-		{hookDir, true},
-		{filepath.Join(hookDir, ".hookcfg"), false},
-		{filepath.Join(hookDir, ".hookcfg.lock"), false},
-		{filepath.Join(hookDir, ".hookcfg.cursor"), false},
-		{tokenPath, false},
-		{filepath.Join(target.dataDir, "hook_contract_lock.json"), false},
-		{filepath.Join(target.dataDir, "hook_contract_lock.json.lock"), false},
-	} {
-		if err := validateWindowsUserPathElement(
-			item.path,
-			target.targetSID,
-			item.dir,
-			item.dir,
-			true,
-		); err != nil {
-			return fmt.Errorf("enterprise hooks: Cursor managed runtime trust check failed for %s: %w", item.path, err)
-		}
-		if !item.dir {
-			info, err := os.Lstat(item.path)
-			if err != nil {
-				return err
-			}
-			if info.Size() > windowsEnterpriseUserFileMaxBytes {
-				return fmt.Errorf("enterprise hooks: Cursor runtime file exceeds the bounded size: %s", item.path)
-			}
-		}
-	}
-	if err := connector.ValidateManagedNativeHookRuntime(
-		target.dataDir,
-		target.gatewayAddr,
-		"cursor",
-	); err != nil {
-		return fmt.Errorf("enterprise hooks: Cursor managed runtime sidecars are invalid: %w", err)
-	}
-	cursorPaths, err := windowsCursorManagedPaths()
-	if err != nil {
-		return err
-	}
-	hooksPath := cursorPaths.Hooks
-	adapterPath := cursorPaths.Adapter
-	lock, err := connector.LoadHookContractLockEntryForMode(target.dataDir, "cursor", true)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: load Cursor managed hook contract: %w", err)
-	}
-	if lock.Connector != "cursor" ||
-		len(lock.Locations.HookConfigPaths) != 1 ||
-		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], hooksPath) ||
-		len(lock.Locations.HookScriptPaths) != 1 ||
-		!sameWindowsEnterprisePath(lock.Locations.HookScriptPaths[0], adapterPath) ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
-		return errors.New("enterprise hooks: Cursor managed hook contract does not identify the active enterprise adapter")
-	}
-	return nil
 }
 
 func resolveWindowsClaudeManagedHookRuntime(
@@ -326,102 +262,6 @@ func resolveWindowsCodexManagedHookRuntime(
 	result.GenerationID = generation.GenerationID
 	result.Registered = true
 	return result, nil
-}
-
-func validateWindowsCodexManagedRuntime(
-	dataDir string,
-	targetSID *windows.SID,
-	hookExecutable string,
-) error {
-	if targetSID == nil {
-		return errors.New("enterprise hooks: Codex managed runtime target SID is required")
-	}
-	if err := windowsEnterpriseHookTrustCheck(hookExecutable); err != nil {
-		return fmt.Errorf("enterprise hooks: Codex managed hook executable trust check failed: %w", err)
-	}
-	if !strings.EqualFold(filepath.Base(dataDir), ".defenseclaw") {
-		return fmt.Errorf("enterprise hooks: Codex managed data directory is noncanonical: %s", dataDir)
-	}
-	home := filepath.Dir(dataDir)
-	validatedHome, validatedSID, err := validateWindowsEnterpriseHome(home, targetSID.String())
-	if err != nil {
-		return err
-	}
-	if !sameWindowsEnterprisePath(validatedHome, home) ||
-		!validatedSID.Equals(targetSID) {
-		return errors.New("enterprise hooks: Codex managed runtime identity changed during validation")
-	}
-	hookDir := filepath.Join(dataDir, "hooks")
-	tokenPath, err := connector.HookTokenFilePath(hookDir, "codex")
-	if err != nil {
-		return err
-	}
-	requirementsPath, err := windowsCodexMachineRequirementsPath()
-	if err != nil {
-		return err
-	}
-	for _, item := range []struct {
-		path string
-		dir  bool
-	}{
-		{dataDir, true},
-		{hookDir, true},
-		{filepath.Join(hookDir, ".hookcfg"), false},
-		{filepath.Join(hookDir, ".hookcfg.lock"), false},
-		{filepath.Join(hookDir, ".hookcfg.codex"), false},
-		{tokenPath, false},
-		{filepath.Join(dataDir, "hook_contract_lock.json"), false},
-		{filepath.Join(dataDir, "hook_contract_lock.json.lock"), false},
-	} {
-		if err := validateWindowsUserPathElement(
-			item.path,
-			targetSID,
-			item.dir,
-			item.dir,
-			true,
-		); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: Codex managed runtime trust check failed for %s: %w",
-				item.path,
-				err,
-			)
-		}
-		if !item.dir {
-			info, err := os.Lstat(item.path)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: inspect Codex managed runtime %s: %w", item.path, err)
-			}
-			if info.Size() > windowsEnterpriseUserFileMaxBytes {
-				return fmt.Errorf(
-					"enterprise hooks: Codex managed runtime %s exceeds %d-byte limit",
-					item.path,
-					windowsEnterpriseUserFileMaxBytes,
-				)
-			}
-		}
-	}
-	if err := connector.ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err != nil {
-		return fmt.Errorf("enterprise hooks: Codex managed runtime sidecars are invalid: %w", err)
-	}
-	lock, err := connector.LoadHookContractLockEntryForMode(
-		dataDir,
-		"codex",
-		true,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"enterprise hooks: load Codex managed hook contract: %w",
-			err,
-		)
-	}
-	if lock.Connector != "codex" ||
-		len(lock.Locations.HookConfigPaths) != 1 ||
-		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
-		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
-		return errors.New("enterprise hooks: Codex managed hook contract lock does not identify the active machine requirements")
-	}
-	return nil
 }
 
 func windowsCodexMachineRequirementsPath() (string, error) {

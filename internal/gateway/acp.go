@@ -18,9 +18,15 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 )
 
@@ -94,7 +100,13 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		msg, err := acp.ParseMessage(req.Payload)
+		// A guard forwards a null-id error response (GAP-0351); Secure
+		// Client keeps the parser of main.
+		parse := acp.ParseMessageAllowingNullIDErrors
+		if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+			parse = acp.ParseMessage
+		}
+		msg, err := parse(req.Payload)
 		if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
 			return
@@ -110,32 +122,69 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP guard is not enabled"})
 		return
 	}
+	// refuse answers a guard whose editor entry the binding no longer
+	// admits. Outside Secure Client the answer says why and the refusal is
+	// audited: a guard of a profile moved from observe to action used to
+	// keep working unchecked, with nothing in the audit (GAP-0723).
+	refuse := func(message, code string, extra map[string]string) {
+		body := map[string]string{"error": message}
+		if !cfg.SecureClientIntegration() {
+			body["code"] = code
+			for key, value := range extra {
+				body[key] = value
+			}
+			reason := message
+			if extra["profile"] != "" {
+				reason += "; the pair now uses profile " + extra["profile"]
+			}
+			a.recordACPEvaluationV8(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), req,
+				acp.Verdict{Action: "block", RawAction: "block", Severity: "MEDIUM", Reason: reason},
+				nil, nil, agent.ConnectorID, req.Profile, time.Since(started))
+		}
+		a.writeJSON(w, http.StatusForbidden, body)
+	}
 	profileName, profile, ok, matched := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
+	if !matched && !cfg.SecureClientIntegration() {
+		// A pair switched off is reported as off, whatever profile it names
+		// now: the moved answer told the user to enroll and run setup for a
+		// pair that cannot run (GAP-0834).
+		if disabled := cfg.ACP.ACPPairDisabled(req.ClientID, req.AgentID); disabled != "" {
+			refuse("ACP pair is disabled centrally: "+disabled, acp.RefusalBinding, nil)
+			return
+		}
+	}
 	if !matched {
 		// Distinguishable on purpose: a stale guard argv and an undefined
 		// profile need different fixes, and "not configured" sent operators
 		// looking for a missing profiles: entry that was present all along.
-		a.writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "ACP profile does not match the configured binding for this client and agent; re-run acp setup",
-		})
+		current := cfg.ACP.ACPProfileForPair(req.ClientID, req.AgentID)
+		if current == "" {
+			current = "default"
+		}
+		refuse("ACP profile does not match the configured binding for this client and agent; re-run acp setup",
+			acp.RefusalProfileChanged, map[string]string{"profile": current, "mode": effectiveACPMode(cfg.ACP, current)})
 		return
 	}
 	if !ok {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP profile is not configured"})
+		refuse("ACP profile is not configured", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpPairIsBound(cfg.ACP, req.ClientID, req.AgentID, profileName) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent binding is disabled or pinned to another profile"})
+		refuse("ACP client or agent binding is disabled or pinned to another profile", acp.RefusalBinding, nil)
 		return
 	}
 	if !acpBindingAllowed(profile.AllowedClients, req.ClientID) || !acpBindingAllowed(profile.AllowedAgents, req.AgentID) {
-		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent is outside the selected profile"})
+		refuse("ACP client or agent is outside the selected profile", acp.RefusalBinding, nil)
 		return
 	}
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		credential, ok := acpEnterpriseCredentialFromContext(r.Context())
 		if !ok || credential.ClientID != req.ClientID || credential.AgentID != req.AgentID || credential.Profile != profileName {
-			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP enterprise credential is outside its enrolled binding"})
+			extra := map[string]string{}
+			if ok {
+				extra["credential_profile"] = credential.Profile
+			}
+			refuse("ACP enterprise credential is outside its enrolled binding", acp.RefusalCredentialBinding, extra)
 			return
 		}
 	}
@@ -146,12 +195,24 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration())
+	// Resolve the identity-based guardrail profile once, with the ACP
+	// agent's connector, as the hook, proxy and inspect paths do: resolved
+	// lazily, the request had no connector, so a connectors assignment never
+	// selected ACP traffic (GAP-0311).
+	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
 		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
-		a.recordACPEvaluationV8(r.Context(), req, verdict, nil, agent.ConnectorID, profileName, time.Since(started))
+		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{
+			Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
+			Reason: verdict.Reason, Mode: mode, WouldBlock: verdict.WouldBlock,
+		}, started, func(traceCtx context.Context) hookEvaluationContext {
+			a.recordACPEvaluationV8(traceCtx, req, verdict, nil, nil, agent.ConnectorID, profileName, time.Since(started))
+			return hookEvaluationContext{}
+		})
 		a.writeJSON(w, http.StatusOK, verdict)
 		return
 	}
@@ -163,7 +224,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if req.Surface == acp.SurfacePrompt {
 		direction = "prompt"
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
+	scanCtx, cancel := context.WithTimeout(ctx, inspectScanTimeout)
 	defer cancel()
 	// Scan the frame's strings, not the marshalled envelope. Content rules
 	// anchor on prose boundaries, and inside raw JSON every value is preceded
@@ -173,7 +234,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if content == "" {
 		content = string(req.Payload)
 	}
-	verdict := a.inspectMessageContent(ctx, &ToolInspectRequest{
+	verdict := a.inspectMessageContent(scanCtx, &ToolInspectRequest{
 		Tool: "message", Content: content, Direction: direction,
 		Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
 	})
@@ -186,8 +247,289 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
 	}
-	a.recordACPEvaluationV8(r.Context(), req, result, verdict.Findings, agent.ConnectorID, profileName, time.Since(started))
+	record := func(recordCtx context.Context) hookEvaluationContext {
+		var evaluation hookEvaluationContext
+		if len(verdict.DetailedFindings) > 0 {
+			// A rule match is a finding of the agent's connector, as it is
+			// on the hook path: a blocked ACP prompt raised no alert
+			// (GAP-1302).
+			evaluation = a.emitInspectVerdictFindings(recordCtx, "inspect-http",
+				hookEvaluationTarget(agent.ConnectorID, "acp"), acpTraceTargetType(req), verdict,
+				time.Since(started), "emit_acp_findings")
+		}
+		ruleIDs := scanner.TopRuleIDs(ruleFindingsToInspect(verdict.DetailedFindings, ""), 8)
+		a.recordACPEvaluationV8(recordCtx, req, result, verdict.Findings, ruleIDs,
+			agent.ConnectorID, profileName, time.Since(started))
+		return evaluation
+	}
+	if len(verdict.DetailedFindings) > 0 {
+		// The hook path records a decision as a span; ACP wrote only the log
+		// row, so Tempo and a Galileo-only deployment never saw an ACP block
+		// (GAP-1836).
+		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, verdict, started, record)
+	} else {
+		record(ctx)
+	}
+	// The audit row keeps the source reason; the editor gets the wording the
+	// hook connectors show ("DefenseClaw policy blocked this action (rule
+	// SEC-AWS-KEY: AWS access key). Do not retry it in another form."), not
+	// the raw "matched: ID:title" text (GAP-1793), through the same sink
+	// barrier as the inspect response.
+	result.Reason = verdict.sanitizeForResponse(false).Reason
+	if req.Direction == acp.AgentToClient && req.Surface == acp.SurfaceOutput {
+		result.Reason = acpWithheldOutputReason(result.Reason)
+	}
 	a.writeJSON(w, http.StatusOK, result)
+}
+
+// acpWithheldOutputReason words a block of the agent's own output
+// (session/update). The guard can only withhold what the agent sent: a tool
+// the agent runs itself has already run when its tool_call update arrives,
+// so "blocked this action ... Do not retry it" told the user nothing had
+// happened while the file was already written (GAP-1956). Other reasons
+// (evaluation unavailable, a configured message) are kept.
+func acpWithheldOutputReason(reason string) string {
+	for _, prefix := range []string{
+		"DefenseClaw policy blocked this action (",
+		"DefenseClaw blocked this action under your organization's policy (",
+	} {
+		rest, ok := strings.CutPrefix(reason, prefix)
+		if !ok {
+			continue
+		}
+		subject, _, ok := strings.Cut(rest, "). "+agentBlockNoRetry)
+		if !ok || subject == "" {
+			break
+		}
+		policy := "DefenseClaw policy withheld agent output ("
+		if strings.Contains(prefix, "organization") {
+			policy = "DefenseClaw withheld agent output under your organization's policy ("
+		}
+		return policy + subject + "). The agent may already have run the step; check its effects."
+	}
+	return reason
+}
+
+// acpEvaluationContext attributes an ACP evaluation the way the hook path
+// attributes a hook call: to the ACP session the frame belongs to and, on a
+// per-user gateway (which runs as its user and is the only holder of the
+// user's ACP token), to that user. The guard sends no identity headers, so
+// ACP finding, scan and span rows named no user or session and could not be
+// joined to the hook rows of the same session (GAP-1946).
+type acpUnboundAgentContextKey struct{}
+
+func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string, secureClient bool) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if env.Connector != connector {
+		env.Connector, changed = connector, true
+	}
+	if session := acpFrameSessionID(req, secureClient); session != "" {
+		if SessionIDFromContext(ctx) == "" {
+			ctx = ContextWithSessionID(ctx, session)
+		}
+		if env.SessionID == "" {
+			env.SessionID, changed = session, true
+		}
+	}
+	if changed {
+		ctx = audit.ContextWithEnvelope(ctx, env)
+	}
+	identity := AgentIdentityFromContext(ctx)
+	updated := false
+	if identity.UserID == "" && identity.UserName == "" && !gatewayRunsAsServiceAccount() {
+		if user := useridentity.Current(); !user.Empty() {
+			identity.UserID, identity.UserIDKind, identity.UserName = user.ID, user.IDKind, user.Name
+			updated = true
+		}
+	}
+	// The agent an ACP client drives is the connector's install, so its
+	// records carry the agent identity the hook path derives for it.
+	var facts agentIdentityFacts
+	if identity.IdentityID == "" {
+		if facts = resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+			updated = true
+		}
+	}
+	// An unbound managed credential must not adopt a hook agent merely
+	// because its caller supplied the same session ID.
+	if identity.IdentityID == "" && !ManagedEnterpriseActive() {
+		ctx = context.WithValue(ctx, acpUnboundAgentContextKey{}, true)
+	}
+	newSession := false
+	// And the instance (ais-) of the ACP session the frame belongs to,
+	// derived from that identity as the hook path derives one per session; a
+	// frame that names no session has none (GAP-0252). Secure Client ACP
+	// records carry no instance, as on main (issue #1092).
+	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && identity.IdentityID != "" && session != "" && !ManagedEnterpriseActive() {
+		if registry := SharedAgentRegistry(); registry != nil {
+			resolved, minted := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
+			newSession = minted
+			if resolved.AgentInstanceID != "" {
+				identity.AgentInstanceID = resolved.AgentInstanceID
+				updated = true
+			}
+		}
+	}
+	// Recorded for `defenseclaw agent identities` as the hook path and the
+	// LLM proxy record theirs, so an agent used only through ACP is listed
+	// and its ACP sessions are counted (GAP-0315).
+	sharedAgentIdentities.observe(facts, SessionIDFromContext(ctx), newSession)
+	if updated {
+		ctx = ContextWithAgentIdentity(ctx, identity)
+	}
+	return ctx
+}
+
+// acpFrameSessionID is the ACP sessionId a single frame names, or "".
+func acpFrameSessionID(req acp.Evaluation, secureClient bool) string {
+	payload := req.Payload
+	if req.Aggregate {
+		// Main does not extract a session from completed-turn aggregates.
+		// Keep that record and trace shape for Secure Client (issue #1092).
+		if secureClient {
+			return ""
+		}
+		var turn struct {
+			Frames []json.RawMessage `json:"frames"`
+		}
+		if json.Unmarshal(payload, &turn) != nil || len(turn.Frames) == 0 {
+			return ""
+		}
+		payload = turn.Frames[0]
+	}
+	msg, err := acp.ParseMessage(payload)
+	if err != nil || len(msg.Params) == 0 {
+		return ""
+	}
+	var params struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(msg.Params, &params) != nil || !hookModelV8Identifier(params.SessionID) {
+		return ""
+	}
+	return params.SessionID
+}
+
+// acpDecisionTraceRuntime starts the spans of one ACP decision.
+type acpDecisionTraceRuntime interface {
+	StartAgentTrace(context.Context, observability.SpanAgentInvokeInput) (context.Context, *observabilityruntime.AgentTrace, error)
+	inspectTraceV8Runtime
+}
+
+const acpTraceV8Producer = "gateway.acp.trace"
+
+// traceACPDecisionV8 records one ACP decision as an "invoke_agent <agent>"
+// span with its apply_guardrail child, and runs record (the finding and
+// verdict rows) inside the child so those rows carry its trace and span IDs.
+// The agent span is what Galileo ingests: it has no guardrail span shape, so
+// an ACP block that was only an apply_guardrail span reached Tempo but never
+// Galileo (GAP-1836).
+func (a *APIServer) traceACPDecisionV8(
+	ctx context.Context, connector string, req acp.Evaluation, verdict *ToolInspectVerdict,
+	started time.Time, record func(context.Context) hookEvaluationContext,
+) {
+	runtime, ok := a.observabilityV8RuntimeEmitter().(acpDecisionTraceRuntime)
+	if !ok || runtime == nil || verdict == nil {
+		record(ctx)
+		return
+	}
+	targetType := acpTraceTargetType(req)
+	agentInput := acpAgentInvokeInputV8(ctx, connector, verdict, started)
+	agentCtx, agentSpan, err := runtime.StartAgentTrace(ctx, agentInput)
+	if err != nil || agentCtx == nil {
+		agentCtx, agentSpan = ctx, nil
+	}
+	if agentSpan != nil {
+		defer agentSpan.Abort()
+	}
+	guardCtx, guardSpan, err := runtime.StartGuardrailApplyTrace(agentCtx, observability.SpanGuardrailApplyInput{
+		Kind: "INTERNAL", StartTimeUnixNano: uint64(started.UnixNano()),
+		DefenseClawGuardrailName: "inspect", DefenseClawGuardrailTargetType: targetType,
+	})
+	if err != nil || guardCtx == nil {
+		guardCtx, guardSpan = agentCtx, nil
+	}
+	if guardSpan != nil {
+		defer guardSpan.Abort()
+	}
+	evaluation := record(guardCtx)
+	if guardSpan != nil {
+		if input, ok := a.guardrailApplyTraceV8Input(guardCtx, connector, "", targetType, verdict,
+			time.Since(started), evaluation); ok {
+			input.StartTimeUnixNano = uint64(started.UnixNano())
+			_ = guardSpan.End(input)
+		}
+	}
+	if agentSpan != nil {
+		ruleIDs := evaluation.RuleIDs
+		if len(ruleIDs) == 0 {
+			ruleIDs = scanner.TopRuleIDs(ruleFindingsToInspect(verdict.DetailedFindings, ""), 8)
+		}
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, ruleIDs); ok {
+			agentInput.DefenseClawGuardrailAction, agentInput.DefenseClawGuardrailRuleID,
+				agentInput.DefenseClawGuardrailSeverity = guardrailOutcomeAttributes(outcome)
+		}
+		agentInput.EndTimeUnixNano = uint64(time.Now().UTC().UnixNano())
+		_ = agentSpan.End(agentInput)
+	}
+}
+
+// acpAgentInvokeInputV8 is the agent root of one ACP decision: the agent the
+// editor drives, its ACP session and the user.
+func acpAgentInvokeInputV8(
+	ctx context.Context, connector string, verdict *ToolInspectVerdict, started time.Time,
+) observability.SpanAgentInvokeInput {
+	connector = hookDecisionMetricConnector(connector)
+	connectorKnown := connector != "unknown"
+	if !connectorKnown {
+		connector = ""
+	}
+	session := audit.EnvelopeFromContext(ctx).SessionID
+	outcome := observability.OutcomeCompleted
+	if strings.EqualFold(strings.TrimSpace(verdict.Action), "block") {
+		outcome = observability.OutcomeBlocked
+	}
+	input := observability.SpanAgentInvokeInput{
+		Envelope: observability.FamilyEnvelopeInput{
+			Source: observability.SourceGateway, Connector: connector, Action: "invoke_agent", Phase: "finalize",
+			Correlation: gatewayGeneratedCorrelation(ctx, connector),
+			Provenance:  observability.FamilyProvenanceInput{Producer: acpTraceV8Producer},
+		},
+		Outcome: outcome, Kind: "INTERNAL",
+		StartTimeUnixNano:                  uint64(started.UnixNano()),
+		EndTimeUnixNano:                    uint64(time.Now().UTC().UnixNano()),
+		Status:                             observability.NewTraceStatusOK(),
+		DefenseClawAgentType:               firstNonEmpty(connector, "acp"),
+		DefenseClawTelemetryInputReported:  false,
+		DefenseClawContentInputState:       "not_reported",
+		DefenseClawTelemetryOutputReported: false,
+		DefenseClawContentOutputState:      "not_reported",
+		GenAIOperationName:                 observability.Present("invoke_agent"),
+		DefenseClawConnectorSource:         hookV8OptionalIdentifier(connector),
+		GenAIAgentName:                     hookV8OptionalIdentifier(connector),
+		GenAIConversationID:                hookV8OptionalIdentifier(session),
+		DefenseClawSessionRootID:           hookV8OptionalIdentifier(session),
+		ConditionConnectorKnown:            connectorKnown,
+		ConditionOperationTerminal:         true,
+	}
+	caller := auditCallerIdentity(ctx)
+	input.UserID = hookV8OptionalIdentifier(caller.ID)
+	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
+	caller.Identity.applyTo(&input)
+	return input
+}
+
+// acpTraceTargetType is the guardrail target of an ACP frame: what the
+// editor sends is a prompt, what the agent sends is a completion.
+func acpTraceTargetType(req acp.Evaluation) string {
+	if req.Direction == acp.AgentToClient {
+		return "completion"
+	}
+	return "prompt"
 }
 
 // findings is carried separately from verdict because acp.Verdict is the wire
@@ -198,8 +540,13 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 // evaluation as rule_ids absent / finding_count 0 while the reason named the
 // rule that matched -- a SIEM rolling up either attribute saw no ACP findings
 // at all, and the hook lane reported them for identical content.
+//
+// ruleIDs are the matched rules' own IDs, as the hook rows and the
+// apply_guardrail span name them. Without them the IDs were re-derived from
+// the finding strings, which turns a rule-pack rule into
+// "UNKNOWN-<rule id>" (GAP-1946).
 func (a *APIServer) recordACPEvaluationV8(
-	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, findings []string,
+	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, findings, ruleIDs []string,
 	connector, profile string, elapsed time.Duration,
 ) {
 	action := strings.ToLower(strings.TrimSpace(verdict.Action))
@@ -225,6 +572,9 @@ func (a *APIServer) recordACPEvaluationV8(
 	})
 	if err != nil {
 		return
+	}
+	if len(ruleIDs) > 0 {
+		facts.ruleIDs = inspectTraceV8RuleIDs(ruleIDs)
 	}
 	facts.acp = &acpEvaluationV8Context{
 		client: req.ClientID, agent: req.AgentID, method: req.Method,
@@ -262,18 +612,7 @@ func resolveACPProfileForPair(
 // at all, so disabling a client or an agent continues to disable every pair
 // that uses it.
 func acpPairIsBound(cfg config.ACPConfig, client, agent, profileName string) bool {
-	clientBinding, clientOK := cfg.Clients[client]
-	agentBinding, agentOK := cfg.Agents[agent]
-	if !clientOK || !clientBinding.Enabled || !agentOK || !agentBinding.Enabled {
-		return false
-	}
-	if pair, ok := cfg.ACPBindingFor(client, agent); ok {
-		if !pair.Enabled {
-			return false
-		}
-		return strings.TrimSpace(pair.Profile) == "" || strings.TrimSpace(pair.Profile) == profileName
-	}
-	return clientBinding.Profile == profileName && agentBinding.Profile == profileName
+	return len(cfg.ACPPairBindingRefusals(client, agent, profileName)) == 0
 }
 
 func effectiveACPMode(cfg config.ACPConfig, profileName string) string {
@@ -317,6 +656,57 @@ func withACPEnterpriseCredential(ctx context.Context, credential acp.EnterpriseC
 func acpEnterpriseCredentialFromContext(ctx context.Context) (acp.EnterpriseCredential, bool) {
 	credential, ok := ctx.Value(acpEnterpriseCredentialContextKey{}).(acp.EnterpriseCredential)
 	return credential, ok
+}
+
+// attachACPSubject names the account behind an authenticated ACP request.
+// A managed request carries the credential `enterprise acp enroll` issued
+// for one principal (uid:N or sid:S-...): the gateway keeps the record in
+// its protected state and only the bearer copy is in that user's private
+// ACP runtime, so presenting it proves the account as a per-user hook
+// credential does (GAP-0200, GAP-0206). A home: principal names no account
+// and binds none: the user the caller claimed is dropped too, so its records
+// name no one. A per-user gateway's caller is its own account. Under the
+// Secure Client integration identity facts are off and nothing changes.
+func (a *APIServer) attachACPSubject(ctx context.Context) context.Context {
+	ctx = PromoteSessionIfAuthenticated(ctx)
+	credential, enrolled := acpEnterpriseCredentialFromContext(ctx)
+	if !enrolled {
+		return a.attachProcessOwnerSubject(ctx)
+	}
+	if !identityFactsEnabled.Load() {
+		return ctx
+	}
+	identity := acpPrincipalIdentity(credential.Principal)
+	if identity == "" {
+		claimed := AgentIdentityFromContext(ctx)
+		claimed.UserID, claimed.UserIDKind, claimed.UserName = "", "", ""
+		return ContextWithAgentIdentity(ctx, claimed)
+	}
+	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
+	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity,
+		sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
+}
+
+// acpPrincipalIdentity is the canonical account of an enrollment principal
+// in this platform's kind: a uid (uid:1001) on Linux and macOS, a SID
+// (sid:S-1-5-21-...) on Windows. Those are the accounts enrollment proves
+// own the home the bearer is published to. Any other principal, such as the
+// home-directory fallback or the other platform's kind, names no account
+// and gives "".
+func acpPrincipalIdentity(principal string) string {
+	kind, value, _ := strings.Cut(strings.TrimSpace(principal), ":")
+	identity, ok := connector.CanonicalUserScopedIdentity(value)
+	if !ok {
+		return ""
+	}
+	want, wantKind := "uid", useridentity.KindPOSIXUID
+	if runtime.GOOS == "windows" {
+		want, wantKind = "sid", useridentity.KindWindowsSID
+	}
+	if kind != want || useridentity.KindForID(identity) != wantKind {
+		return ""
+	}
+	return identity
 }
 
 // authenticateACPToken applies different custody models without widening the
@@ -492,19 +882,34 @@ func (a *APIServer) acpScopedTokenReady() bool {
 	now := time.Now()
 	a.acpReadinessMu.Lock()
 	defer a.acpReadinessMu.Unlock()
-	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < 500*time.Millisecond {
+	window := a.acpReadinessWindow
+	if window < acpReadinessMinWindow {
+		window = acpReadinessMinWindow
+	}
+	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < window {
 		return a.acpReadinessValue
 	}
 	ready := a.acpScopedTokenReadyUncached()
 	a.acpReadinessKey = key
 	a.acpReadinessCheckedAt = now
 	a.acpReadinessValue = ready
+	// The managed check reads every enrollment record: keep its share of an
+	// unauthenticated /health poll at about 5% however large the inventory
+	// (GAP-0706).
+	a.acpReadinessWindow = min(max(20*time.Since(now), acpReadinessMinWindow), acpReadinessMaxWindow)
 	return ready
 }
 
+// The readiness answer is reused for 500 ms, or longer for a large managed
+// inventory, but never for more than 30 s.
+const (
+	acpReadinessMinWindow = 500 * time.Millisecond
+	acpReadinessMaxWindow = 30 * time.Second
+)
+
 func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir)
+		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir, a.scannerCfg.SecureClientIntegration())
 	}
 	path := filepath.Join(a.scannerCfg.DataDir, "acp", ".token")
 	info, err := os.Lstat(path)

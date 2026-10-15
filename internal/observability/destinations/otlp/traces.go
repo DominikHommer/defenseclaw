@@ -291,8 +291,8 @@ func completeOTLPCanaryTrace(spans []sdktrace.ReadOnlySpan, destination string) 
 		}
 	}
 	if root == nil || child == nil || rootContract.generation != childContract.generation ||
-		root.Name() != "invoke_agent diagnostic" ||
-		child.Name() != "chat gpt-4o-mini" || root.SpanKind() != trace.SpanKindInternal ||
+		root.Name() != observability.RuntimeCanaryAgentSpanName ||
+		child.Name() != observability.RuntimeCanaryModelSpanName || root.SpanKind() != trace.SpanKindInternal ||
 		child.SpanKind() != trace.SpanKindClient || root.Status().Code != codes.Ok ||
 		child.Status().Code != codes.Ok || root.Parent().IsValid() ||
 		root.SpanContext().SpanID() == child.SpanContext().SpanID() {
@@ -404,7 +404,7 @@ func otlpCanonicalResource(span sdktrace.ReadOnlySpan) (map[string]string, strin
 		values[key] = item.Value.AsString()
 		validation[key] = item.Value.AsString()
 	}
-	if observability.ValidateTelemetryResourceAttributes(validation) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(validation) != nil {
 		return nil, "", false
 	}
 	return values, resource.SchemaURL(), true
@@ -471,6 +471,7 @@ func (exporter *SpanExporter) exportBatch(
 	exporter.counters.accepted.Add(uint64(len(spans)))
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
+	redialGRPC(attemptContext, exporter.connection)
 	err := exporter.inner.ExportSpans(attemptContext, spans)
 	recordRetryAttempts(&exporter.counters, observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
 	if err != nil {
@@ -648,6 +649,7 @@ func (exporter *SpanExporter) recordHealthAt(
 		return
 	}
 	exporter.healthMu.Lock()
+	reason = delivery.SettledHealthReason(exporter.health, exporter.healthReason, state, reason)
 	exporter.health = state
 	exporter.healthReason = reason
 	if success {
@@ -697,6 +699,12 @@ func (exporter *SpanExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {
 	lastFailure := exporter.lastFailure
 	exporter.healthMu.Unlock()
 	circuit := exporter.circuit.Snapshot()
+	if state == delivery.HealthFailing && circuit.State == delivery.CircuitOpen &&
+		!exporter.nowUTC().Before(circuit.OpenUntil) {
+		circuit.State = delivery.CircuitHalfOpen
+		state = delivery.HealthDegraded
+		reason = delivery.HealthReasonCircuitHalfOpen
+	}
 	counters := exporter.Counters()
 	return delivery.HealthSnapshot{
 		State: state, Reason: string(reason),

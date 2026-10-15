@@ -23,8 +23,7 @@ Design rules:
   parity test (``internal/tui/cli_parity_test.go``) relies on this so
   the TUI's batch invocations never block on stdin.
 * The model catalog is a packaged JSON; custom-provider instances
-  contribute ``available_models`` discovered at runtime from
-  ``~/.defenseclaw/custom-providers.json``.
+  contribute ``available_models`` from config.yaml ``llm_providers``.
 * No new state is introduced — helpers mutate :class:`LLMConfig`
   instances in place to match the existing wizard contract.
 """
@@ -48,12 +47,9 @@ import click
 from defenseclaw import terminal_checkbox, ux
 from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
-    AzureKeyConfig,
-    BedrockKeyConfig,
     LLMConfig,
-    LLMTLSConfig,
-    VertexKeyConfig,
 )
+from defenseclaw.llm_keys import looks_like_key_shape
 
 _CATALOG_RESOURCE = "_data/llm/model_catalog.json"
 
@@ -106,22 +102,31 @@ def _overlay_path(data_dir: str) -> str:
     return os.path.join(data_dir or os.path.expanduser("~/.defenseclaw"), "custom-providers.json")
 
 
-def list_custom_instances(data_dir: str) -> list[dict[str, Any]]:
-    """Return the custom-providers.json provider entries.
+def list_custom_instances(data_dir: str, cfg: Any = None) -> list[dict[str, Any]]:
+    """Return the custom provider entries, in the overlay shape.
 
-    Returns an empty list when the file is missing or malformed —
-    overlay errors are surfaced by ``defenseclaw doctor``, not the
-    wizard helpers.
+    With the loaded config they come from ``llm_providers``, as
+    ``resolve_llm`` reads them (``derived_providers.configured_providers``):
+    the derived custom-providers.json is never read back, so a migration
+    that folded the overlay into config loses no instance. Without a config
+    the overlay at ``data_dir`` is read. Returns an empty list when nothing
+    is declared or the file is missing or malformed — overlay errors are
+    surfaced by ``defenseclaw doctor``, not the wizard helpers.
     """
     path = _overlay_path(data_dir)
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = _json.load(f)
-    except (FileNotFoundError, ValueError, PermissionError, OSError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    providers = data.get("providers") or []
+    if cfg is not None and hasattr(cfg, "llm_providers"):
+        from defenseclaw import derived_providers  # noqa: PLC0415
+
+        providers: Any = derived_providers.configured_providers(cfg, path)
+    else:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = _json.load(f)
+        except (FileNotFoundError, ValueError, PermissionError, OSError):
+            return []
+        if not isinstance(data, dict):
+            return []
+        providers = data.get("providers") or []
     if not isinstance(providers, list):
         return []
     out: list[dict[str, Any]] = []
@@ -131,11 +136,11 @@ def list_custom_instances(data_dir: str) -> list[dict[str, Any]]:
     return out
 
 
-def custom_instance(data_dir: str, name: str) -> dict[str, Any] | None:
+def custom_instance(data_dir: str, name: str, cfg: Any = None) -> dict[str, Any] | None:
     target = (name or "").strip().lower()
     if not target:
         return None
-    for entry in list_custom_instances(data_dir):
+    for entry in list_custom_instances(data_dir, cfg):
         if str(entry.get("name", "")).strip().lower() == target:
             return entry
     return None
@@ -256,7 +261,7 @@ def pick_provider(
             tail = pid.removeprefix("custom:") if pid.startswith("custom:") else pid
             if lowered in (pid.lower(), tail.lower()):
                 return tail
-        click.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
+        ux.echo("    Invalid choice — pick a number from the list, type a provider name, or 'm' for free-form.")
 
 
 def pick_model(
@@ -303,7 +308,13 @@ def pick_model(
             click.echo(f"    [{idx}] {m}")
         click.echo("    [c] type a custom model id")
         click.echo()
-        default = current if current in models else models[0]
+        # Keep the saved model as the default even when it is not in the
+        # suggested list (an older or custom id), so pressing Enter keeps
+        # it. A live runtime list is authoritative: only installed models.
+        if current and (current in models or live_models is None):
+            default = current
+        else:
+            default = models[0]
         while True:
             raw = click.prompt("  Pick model", default=default, show_default=True).strip()
             if raw.isdigit():
@@ -362,7 +373,7 @@ def pick_local_runtime(
 
     live_models: list[str] | None = None
     if base_url and not non_interactive:
-        click.echo(f"    Querying {provider} for installed models…")
+        ux.echo(f"    Querying {provider} for installed models…")
         discovered, error = list_local_provider_models(provider, base_url)
         if error:
             click.echo(f"    Could not list local models ({error}). Falling back to catalog suggestions.")
@@ -643,50 +654,27 @@ def pick_key_env(
         suggested = suggestions[0] if suggestions else DEFENSECLAW_LLM_KEY_ENV
         if len(suggestions) > 1:
             click.echo(f"    Common env vars: {', '.join(suggestions)}")
-        name = click.prompt(
-            "  API key env var name",
-            default=suggested,
-            show_default=True,
-        ).strip()
+        while True:
+            name = click.prompt(
+                "  API key env var name",
+                default=suggested,
+                show_default=True,
+            ).strip()
+            if not looks_like_key_shape(name):
+                break
+            click.echo(f"    Enter the NAME of the variable that holds the key, e.g. {suggested}.")
+            click.echo(f"    Store the key itself with 'defenseclaw keys set {suggested}'.")
+    if flag_value and looks_like_key_shape(name):
+        raise click.BadParameter(
+            f"takes the NAME of the variable that holds the key, e.g. {DEFENSECLAW_LLM_KEY_ENV}; "
+            f"store the key itself with 'defenseclaw keys set {DEFENSECLAW_LLM_KEY_ENV}'.",
+            param_hint=f"'{flag_name}'",
+        )
     if not _ENV_KEY_RE.match(name):
         raise click.BadParameter(
             f"invalid env var name: {name!r} (must be ASCII [A-Za-z_][A-Za-z0-9_]*)"
         )
     return name
-
-
-def pick_instance_name(
-    *,
-    data_dir: str,
-    current: str,
-    flag_value: str | None,
-    non_interactive: bool,
-    flag_name: str = "--instance-name",
-) -> str:
-    """Pick a custom-provider instance by name. Returns empty when no
-    custom instances are configured / the operator skipped.
-    """
-    if flag_value is not None:
-        return flag_value.strip()
-    if non_interactive:
-        return current or ""
-    instances = list_custom_instances(data_dir)
-    if not instances:
-        return ""
-    names = [str(i.get("name", "")) for i in instances if i.get("name")]
-    click.echo()
-    ux.subhead("Configured custom-provider instances:")
-    for n in names:
-        click.echo(f"    - {n}")
-    click.echo("    (blank skips and uses a stock provider)")
-    choice = click.prompt(
-        "  Use a custom-provider instance? (name or blank)",
-        default=current or "",
-        show_default=bool(current),
-    ).strip()
-    if choice and choice not in names:
-        click.echo(f"    Note: no instance named {choice!r} — will be created if you run setup provider add.")
-    return choice
 
 
 # ---------------------------------------------------------------------------
@@ -825,10 +813,10 @@ def preflight_inherit(
 
     click.echo()
     click.echo("  " + ux.bold("How should we apply the inherited values?"))
-    click.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
-    click.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
-    click.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
-    click.echo("    " + ux.bold("[B]") + " Back               — abort")
+    ux.echo("    " + ux.bold("[I]") + " Inherit fully     — copy provider/model/api_key_env/...")
+    ux.echo("    " + ux.bold("[P]") + " Partial            — copy then re-prompt for model only")
+    ux.echo("    " + ux.bold("[R]") + " Reconfigure        — skip inheritance, prompt for everything")
+    ux.echo("    " + ux.bold("[B]") + " Back               — abort")
 
     action_default = "I"
     action_map = {
@@ -867,30 +855,6 @@ def preflight_inherit(
 # ---------------------------------------------------------------------------
 
 
-def ensure_bedrock(llm: LLMConfig) -> BedrockKeyConfig:
-    if llm.bedrock is None:
-        llm.bedrock = BedrockKeyConfig()
-    return llm.bedrock
-
-
-def ensure_vertex(llm: LLMConfig) -> VertexKeyConfig:
-    if llm.vertex is None:
-        llm.vertex = VertexKeyConfig()
-    return llm.vertex
-
-
-def ensure_azure(llm: LLMConfig) -> AzureKeyConfig:
-    if llm.azure is None:
-        llm.azure = AzureKeyConfig()
-    return llm.azure
-
-
-def ensure_tls(llm: LLMConfig) -> LLMTLSConfig:
-    if llm.tls is None:
-        llm.tls = LLMTLSConfig()
-    return llm.tls
-
-
 # ---------------------------------------------------------------------------
 # Summary panel
 # ---------------------------------------------------------------------------
@@ -901,7 +865,8 @@ def _mask(value: str) -> str:
         return "(unset)"
     if len(value) <= 8:
         return "****"
-    return f"{value[:4]}…{value[-4:]}"
+    # Last four only, like keys set/list (GAP-1366).
+    return f"…{value[-4:]}"
 
 
 def summary_panel(
@@ -926,12 +891,18 @@ def summary_panel(
         rows.append(("base_url", llm.base_url))
     if llm.region:
         rows.append(("region", llm.region))
-    rows.append(("api_key_env", llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV))
-    rows.append(("api_key", _mask(llm.resolved_api_key())))
+    bedrock_auth = ((llm.bedrock.auth_mode if llm.bedrock else "") or "").strip().lower()
+    if bedrock_auth in ("", "api_key"):
+        # Bedrock IAM, profile and instance-role auth use AWS credentials,
+        # not an API key, so a key row would only mislead (GAP-1476).
+        rows.append(("api_key_env", llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV))
+        rows.append(("api_key", _mask(llm.resolved_api_key())))
     if llm.bedrock and any(asdict(llm.bedrock).values()):
         rows.append(("bedrock.auth_mode", llm.bedrock.auth_mode))
         if llm.bedrock.region:
             rows.append(("bedrock.region", llm.bedrock.region))
+        if bedrock_auth == "profile":
+            rows.append(("bedrock.profile_name", llm.bedrock.profile_name or "(default)"))
     if llm.vertex and any(asdict(llm.vertex).values()):
         rows.append(("vertex.project_id", llm.vertex.project_id))
         rows.append(("vertex.region", llm.vertex.region))

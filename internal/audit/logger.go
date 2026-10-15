@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -128,16 +129,6 @@ func (l *Logger) SetRuntimeV8Emitter(emitter RuntimeV8Emitter) {
 	}
 }
 
-func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
-	if l == nil {
-		return nil
-	}
-	l.mu.RLock()
-	emitter := l.runtimeV8
-	l.mu.RUnlock()
-	return emitter
-}
-
 type runtimeV8Binding struct {
 	emitter                     RuntimeV8Emitter
 	logBatch                    RuntimeV8LogBatchEmitter
@@ -206,6 +197,19 @@ type ScanCorrelation struct {
 	// EmitScanResult can record per-connector scan-finding metrics. Empty
 	// for connector-agnostic scans (CLI file scans, background rescans).
 	Connector string
+
+	// UserID, UserIDKind and UserName name the caller whose request the
+	// scan inspected, as the hook_decision rows do. Only the gateway's
+	// verified caller fills them, never an identity a request only claims;
+	// they stay empty for scans no caller started.
+	UserID     string
+	UserIDKind string
+	UserName   string
+
+	// JudgeModel names the LLM judge model on the scan summary row
+	// (scanner.ScanResult.JudgeModel). The install watcher sets it, so an
+	// auditor sees from the row that the judge ran (GAP-0575).
+	JudgeModel string
 }
 
 // LogScan persists the forensic scan rows and emits the canonical v8 finding,
@@ -646,10 +650,6 @@ func redactCredentialFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, sensitiveFindingRedactionPrefix)
 }
 
-func isSensitiveFindingRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, sensitiveFindingRedactionPrefix)
-}
-
 func redactFindingValueWithPrefix(value, prefix string) string {
 	if strings.TrimSpace(value) == "" || isFindingRedactionPlaceholder(value, prefix) {
 		return value
@@ -738,10 +738,6 @@ func redactPIIFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, piiFindingRedactionPrefix)
 }
 
-func isPIIRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, piiFindingRedactionPrefix)
-}
-
 func redactPIIFindingDecisionPath(finding *scanner.Finding) {
 	redactFindingDecisionPathWith(finding, piiFindingRedactionPrefix, piiFindingDecisionPathKey)
 }
@@ -822,6 +818,12 @@ func (l *Logger) LogAction(action, target, details string) error {
 // the zero value, which the auto-fill treats as "no override").
 func (l *Logger) LogActionCtx(ctx context.Context, action, target, details string) error {
 	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, "INFO")
+}
+
+// LogActionCtxSeverity is LogActionCtx with a caller-chosen severity, for an
+// action row that is an alert: the alert views list only rows above INFO.
+func (l *Logger) LogActionCtxSeverity(ctx context.Context, action, target, details, severity string) error {
+	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, severity)
 }
 
 // LogCLIAction is the canonical Python/operator CLI ingress. It retains the
@@ -991,7 +993,9 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 			return nil
 		}
 	}
-	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{})
+	disposition, emitErr = l.emitCompatibilityAuditV8(ctx, event, compatibilityAuditV8Options{
+		classification: cliActionV8Classification(event),
+	})
 	if emitErr != nil {
 		return emitErr
 	}
@@ -999,6 +1003,31 @@ func (l *Logger) logActionWithEnvelopeContextAndAssetActor(
 		return nil
 	}
 	return fmt.Errorf("audit: no generated v8 family handled action %q", event.Action)
+}
+
+// cliActionV8Classification supplies the context that a CLI-reported action
+// needs when its registered classification has no default identity (init,
+// bootstrap). Without it the gateway rejected re-running "defenseclaw init"
+// on a v8 install with a content-free 503 (GAP-2381). Such a CLI action is a
+// setup mutation recorded as a compliance activity.
+func cliActionV8Classification(event Event) observability.ClassificationContext {
+	if event.Actor != "cli" {
+		return observability.ClassificationContext{}
+	}
+	registered, found := observability.AuditActionClassification(observability.ProducerKey(event.Action))
+	if !found || registered.Bucket != "" ||
+		!slices.Contains(registered.AllowedContextBuckets, observability.BucketComplianceActivity) {
+		return observability.ClassificationContext{}
+	}
+	classification := observability.ClassificationContext{
+		Bucket:         observability.BucketComplianceActivity,
+		EventName:      observability.EventName("legacy.audit.action"),
+		MandatoryFacts: observability.MandatoryFacts{ControlPlaneMutation: true},
+	}
+	if _, err := registered.Resolve(classification); err != nil {
+		return observability.ClassificationContext{}
+	}
+	return classification
 }
 
 // LogActionWithEnforcement persists an action event with enforcement metadata.
@@ -1098,8 +1127,13 @@ func (l *Logger) logEventWithV8(ctx context.Context, event Event, emit auditV8Ev
 // The generated v8 runtime owns its projection and persistence; activity_events
 // remains readable only for historical database compatibility.
 type ActivityInput struct {
-	Actor       string
-	Action      Action
+	Actor string
+	// Principal is the signed bundle creator when Actor is the local OS account.
+	Principal string
+	Action    Action
+	// Operation refines the config.change.applied operation without changing
+	// the registered audit action or canonical event name.
+	Operation   string
 	TargetType  string
 	TargetID    string
 	Reason      string
@@ -1112,6 +1146,11 @@ type ActivityInput struct {
 	RunID       string
 	RequestID   string
 	TraceID     string
+	// Bundle names the signed policy bundle of a config.change.applied
+	// record or a bundle receipt; BundleReceipt is set only on a
+	// config.bundle.receipt record (LogPolicyBundleReceipt).
+	Bundle        *PolicyBundle
+	BundleReceipt *PolicyBundleReceipt
 }
 
 // ActivityDiffEntry records one canonical control-plane mutation delta.
@@ -1189,21 +1228,6 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 // sink resources in v8.
 func (l *Logger) Close() {
 	l.SetRuntimeV8Emitter(nil)
-}
-
-func inferTargetType(scannerName string) string {
-	switch scannerName {
-	case "mcp-scanner", "mcp_scanner":
-		return "mcp"
-	case "skill-scanner", "skill_scanner":
-		return "skill"
-	case "codeguard", "aibom", "aibom-claw",
-		"clawshield-vuln", "clawshield-secrets", "clawshield-pii",
-		"clawshield-malware", "clawshield-injection":
-		return "code"
-	default:
-		return "unknown"
-	}
 }
 
 func inferAssetTypeFromAction(action, details string) string {

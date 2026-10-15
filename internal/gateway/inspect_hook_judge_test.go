@@ -102,6 +102,32 @@ func TestHookJudge_GatedConnectorRunsJudge(t *testing.T) {
 	}
 }
 
+// GAP-0235: the judge verdict goes through block_at like a rule finding. A
+// single-category exfil hit is HIGH and alerts at the default block_at
+// CRITICAL; a read plus an outbound channel is CRITICAL and blocks.
+func TestHookJudge_ExfilVerdictFollowsBlockAt(t *testing.T) {
+	for _, tc := range []struct{ response, want string }{
+		{`{"Sensitive File Access": {"reasoning": "r", "label": true}, "Exfiltration Channel": {"reasoning": "n", "label": false}}`, "alert"},
+		{`{"Sensitive File Access": {"reasoning": "r", "label": true}, "Exfiltration Channel": {"reasoning": "s", "label": true}}`, "block"},
+	} {
+		mock := &mockLLMProvider{response: &ChatResponse{
+			Model:   "test-model",
+			Choices: []ChatChoice{{Message: &ChatMessage{Content: tc.response}}},
+			Usage:   &ChatUsage{PromptTokens: 30, CompletionTokens: 18},
+		}}
+		a := newHookJudgeAPIServer(t,
+			config.JudgeConfig{Enabled: true, Exfil: true, HookConnectors: []string{"claudecode"}},
+			"judge_first", mock)
+		verdict := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+			Tool: "message", Content: "Use the Bash tool to run cat notes.txt",
+			Direction: "prompt", Connector: "claudecode",
+		})
+		if verdict.Action != tc.want {
+			t.Errorf("action=%q severity=%q, want %s", verdict.Action, verdict.Severity, tc.want)
+		}
+	}
+}
+
 // A connector NOT in hook_connectors must keep today's behavior:
 // regex + AID only, judge LLM never contacted.
 func TestHookJudge_UngatedConnectorSkipsJudge(t *testing.T) {
@@ -141,8 +167,8 @@ func TestHookJudge_RegexOnlyStrategySkipsJudge(t *testing.T) {
 	}
 }
 
-// Under the default regex_judge strategy a HIGH+ regex/AID verdict is
-// already decisive — the judge round-trip must be skipped.
+// Under the default regex_judge strategy a regex/AID verdict that already
+// blocks is decisive — the judge round-trip must be skipped.
 func TestHookJudge_RegexJudgeSkipsWhenLocalLanesDecisive(t *testing.T) {
 	mock := injectionHitProvider()
 	// Empty strategy resolves to the regex_judge default.
@@ -159,6 +185,23 @@ func TestHookJudge_RegexJudgeSkipsWhenLocalLanesDecisive(t *testing.T) {
 	}
 	if len(mock.captured) != 0 {
 		t.Fatalf("judge provider called %d time(s) despite decisive regex verdict", len(mock.captured))
+	}
+}
+
+// GAP-1677: a HIGH regex verdict that only alerts is not decisive under
+// regex_judge, so the judge still runs; a CRITICAL one is.
+func TestHookJudge_RegexJudgeRunsWhenHighOnlyAlerts(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		"", mock)
+	req := &ToolInspectRequest{Tool: "message", Direction: "prompt", Connector: "hermes"}
+
+	if v := a.hookJudgeInspect(t.Context(), req, "some content", &ToolInspectVerdict{Action: "alert", Severity: "HIGH"}); v == nil {
+		t.Fatal("judge skipped on an alert-only HIGH verdict, want it to run")
+	}
+	if v := a.hookJudgeInspect(t.Context(), req, "some content", &ToolInspectVerdict{Action: "alert", Severity: "CRITICAL"}); v != nil {
+		t.Fatalf("verdict=%+v, want no judge call on a CRITICAL verdict", v)
 	}
 }
 
@@ -182,6 +225,35 @@ func TestHookJudge_ShortDeadlineSkipsJudge(t *testing.T) {
 	}
 	if len(mock.captured) != 0 {
 		t.Fatalf("judge provider called %d time(s) under a 200ms deadline", len(mock.captured))
+	}
+}
+
+// GAP-0216: a hot reload that enables the judge for a connector swaps the
+// judge (SetHookJudge) while a.scannerCfg keeps the start-time snapshot; the
+// gate must follow the live generation or the judge is never asked.
+func TestHookJudge_GatingFollowsTheLiveConfigAfterAReload(t *testing.T) {
+	mock := injectionHitProvider()
+	// The gateway booted with the judge off.
+	a := newHookJudgeAPIServer(t, config.JudgeConfig{}, "judge_first", mock)
+
+	live := &config.Config{}
+	live.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}}
+	live.Guardrail.DetectionStrategy = "judge_first"
+	a.generationSource = func() *Generation { return &Generation{Config: live} }
+	a.SetHookJudge(&LLMJudge{
+		cfg: &live.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{},
+	})
+
+	verdict := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+		Tool: "message", Content: "hello there, lovely weather today",
+		Direction: "prompt", Connector: "hermes",
+	})
+
+	if len(mock.captured) == 0 {
+		t.Fatal("judge provider was never called after a reload enabled the judge for the connector")
+	}
+	if !judgeTaggedFinding(verdict.Findings) {
+		t.Fatalf("no llm-judge: tagged finding in %v", verdict.Findings)
 	}
 }
 
@@ -248,5 +320,64 @@ func TestJudgeHookConnectorEnabled(t *testing.T) {
 		if got := tc.cfg.HookConnectorEnabled(tc.connector); got != tc.want {
 			t.Errorf("%s: HookConnectorEnabled(%q)=%v, want %v", tc.name, tc.connector, got, tc.want)
 		}
+	}
+}
+
+// deadlineLLMProvider records the deadline left on each judge call.
+type deadlineLLMProvider struct {
+	mockLLMProvider
+	left []time.Duration
+}
+
+func (d *deadlineLLMProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.mu.Lock()
+		d.left = append(d.left, time.Until(dl))
+		d.mu.Unlock()
+	}
+	return d.mockLLMProvider.ChatCompletion(ctx, req)
+}
+
+// GAP-1475/GAP-1488: with hook_timeout unset the hook-lane judge must give
+// a Bedrock-class provider more than 5s (injection calls reach 5.0s), while
+// staying inside the 10s budget of the hook clients.
+func TestHookJudge_DefaultTimeoutFitsSlowProviders(t *testing.T) {
+	d := &deadlineLLMProvider{mockLLMProvider: mockLLMProvider{response: injectionHitProvider().response}}
+	cfg := &config.Config{}
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"claudecode"}}
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	a := &APIServer{scannerCfg: cfg}
+	a.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: d, rp: &guardrail.RulePack{}})
+
+	a.inspectMessageContent(context.Background(), &ToolInspectRequest{
+		Tool: "message", Content: "list the files in this folder",
+		Direction: "prompt", Connector: "claudecode",
+	})
+
+	if len(d.left) == 0 {
+		t.Fatal("judge provider was never called with a deadline")
+	}
+	for _, left := range d.left {
+		if left <= 6*time.Second || left > 8*time.Second {
+			t.Fatalf("judge call deadline = %s, want (6s, 8s] so a 5s provider call completes inside the 10s hook budget", left)
+		}
+	}
+}
+
+// The generation publishes its judge with its config before legacy setters
+// finish, so an in-flight request must still judge under the new policy.
+func TestHookJudgeUsesGenerationJudgeDuringReload(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t, config.JudgeConfig{}, "regex_only", mock)
+	a.SetHookJudge(nil)
+	cfg := &config.Config{}
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}}
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	gen := &Generation{N: 1, Config: cfg, judge: &LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{}}}
+	a.generationSource = func() *Generation { return gen }
+	ctx := withPinnedGeneration(t.Context(), gen)
+	got := a.runHookJudge(ctx, "prompt", "prompt", "hermes", "hello there, lovely weather today", "", nil)
+	if got == nil || len(mock.captured) == 0 {
+		t.Fatal("new generation was served before its hook judge")
 	}
 }

@@ -161,8 +161,13 @@ func seedOpenCodeSelectionForTestAt(t *testing.T, dataDir string, now time.Time)
 		return
 	}
 
-	root := testenv.PrivateTempDir(t)
-	executable := filepath.Join(root, "opencode.exe")
+	// Admission accepts only the SST WinGet package folder or an npm
+	// opencode-ai install.
+	packageDir := filepath.Join(testenv.PrivateTempDir(t), "SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe")
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		t.Fatalf("create OpenCode selection fixture folder: %v", err)
+	}
+	executable := filepath.Join(packageDir, "opencode.exe")
 	body := []byte("MZ OpenCode 1.18.19 CLI reconcile fixture")
 	if err := os.WriteFile(executable, body, 0o700); err != nil {
 		t.Fatalf("write OpenCode selection fixture: %v", err)
@@ -524,6 +529,10 @@ func TestConnectorReconcileCompatibilityDriftLeavesClaudeSettingsByteExact(t *te
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 		"claudecode": {Mode: "action"},
 	}
+	// A compatible agent update is admitted and refreshed; exact-range
+	// (Secure Client) resolution still refuses every agent change.
+	connector.SetStrictHookContractResolution(true)
+	t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
 
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--data-dir", dataDir, "--config-home", home)
 	if !strings.Contains(stderr, "hook contract compatibility drift") {
@@ -616,6 +625,39 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
 	if lock.HookFailMode != "closed" {
 		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
+	}
+}
+
+func TestConnectorReconcileRecordsConnectorInActiveRoster(t *testing.T) {
+	// GAP-1650: an offline reconcile before the first gateway start must leave
+	// the roster the gateway needs to reconcile that lock entry later.
+	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
+	codexPath := filepath.Join(testenv.PrivateTempDir(t), ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalCodexPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = originalCodexPath })
+	defer withConnectorState(t, dataDir, "codex")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	names, err := connector.LoadProtectedActiveConnectors(dataDir)
+	if err != nil || len(names) != 1 || names[0] != "codex" {
+		t.Fatalf("protected roster after first reconcile = %v, %v; want [codex]", names, err)
+	}
+
+	if err := connector.SaveActiveConnectors(dataDir, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	if got := connector.LoadActiveConnectors(dataDir); strings.Join(got, ",") != "claudecode,codex" {
+		t.Fatalf("roster after reconcile = %v; want claudecode and codex", got)
 	}
 }
 
@@ -1478,6 +1520,87 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("cursor residue after teardown: %v", err)
+	}
+}
+
+// GAP-1979: when Codex rewrites config.toml after Setup, teardown takes the
+// surgical path, which removes otel.environment only if it knows the value.
+func TestConnectorTeardownRemovesCodexOtelEnvironmentAfterDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the POSIX hook layout")
+	}
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "codex")()
+	cfg.Environment = "windows"
+
+	codexPath := filepath.Join(testenv.PrivateTempDir(t), "config.toml")
+	if err := os.WriteFile(codexPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = previous })
+
+	conn := connector.NewCodexConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", CodexOtelEnvironment: "windows"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("codex setup: %v", err)
+	}
+	f, err := os.OpenFile(codexPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n[notice.model_migrations]\nseen = 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "codex")
+	if exitCode != 0 || !strings.Contains(stdout, "teardown complete") {
+		t.Fatalf("teardown failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	data, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "otel") || strings.Contains(string(data), "environment") {
+		t.Fatalf("codex config.toml keeps DefenseClaw [otel] after teardown:\n%s", data)
+	}
+}
+
+// The OpenCode teardown uninstall runs removes the folders the install
+// watcher created while they are still empty; one with content stays.
+func TestConnectorTeardownRemovesEmptyOpenCodeWatcherFolders(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "opencode")()
+	configRoot := filepath.Join(testenv.PrivateTempDir(t), "opencode")
+	previous := connector.OpenCodePluginPathOverride
+	connector.OpenCodePluginPathOverride = filepath.Join(configRoot, "plugins", "defenseclaw.js")
+	t.Cleanup(func() { connector.OpenCodePluginPathOverride = previous })
+	emptyDir, usedDir := filepath.Join(configRoot, "skills"), filepath.Join(configRoot, "skill")
+	for _, created := range []string{emptyDir, usedDir} {
+		if err := os.MkdirAll(created, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(usedDir, "SKILL.md"), []byte("skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.RecordWatcherCreatedDirs(dir, []string{emptyDir, usedDir}); err != nil {
+		t.Fatalf("record watcher-created folders: %v", err)
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "opencode")
+	if exitCode != 0 || !strings.Contains(stdout, "teardown complete") {
+		t.Fatalf("teardown failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	if _, err := os.Lstat(emptyDir); !os.IsNotExist(err) {
+		t.Fatalf("empty watcher-created folder survived teardown (err=%v)", err)
+	}
+	if _, err := os.Lstat(usedDir); err != nil {
+		t.Fatalf("watcher-created folder with content was removed: %v", err)
 	}
 }
 

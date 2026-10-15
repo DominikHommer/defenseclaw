@@ -70,6 +70,17 @@ def _render(cfg) -> str:
 
 
 class TestPrintAgentsRoster(unittest.TestCase):
+    def test_guardrail_off_lists_no_connector_as_active(self):
+        # GAP-1312: the default uninstall turns the guardrail off; the gateway
+        # then tears every connector down, so none of them is active.
+        cfg = _cfg(["claudecode", "codex"], modes={"claudecode": "action", "codex": "action"})
+        cfg.guardrail.enabled = False
+        out = _render(cfg)
+        self.assertIn("2 configured, guardrail off", out)
+        self.assertNotIn("active", out)
+        self.assertEqual(out.count("DISABLED"), 2)
+        self.assertIn("defenseclaw setup guardrail", out)
+
     def test_single_connector_uses_same_roster(self):
         # Uniform UX: a single-connector install renders the SAME "Agents"
         # section as a fan-out install (one row), not a special "Agent:" block.
@@ -83,11 +94,12 @@ class TestPrintAgentsRoster(unittest.TestCase):
         report = {
             "effective": "open",
             "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
-        self.assertIn("fail-mode=open", out)
+        self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
         self.assertIn("provenance=process-env", out)
 
     def test_zero_connectors_shows_no_active(self):
@@ -200,7 +212,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
     own live counters — there is no privileged "primary" tally."""
 
     def test_cursor_disclosure_has_enabled_disabled_and_config_live_parity(self):
-        disclosure = "priority-conflict-detection=unavailable (none inferred)"
+        disclosure = "(overrides by Enterprise, Team or Project hooks can't be detected)"
         live_health = {
             "connectors": [
                 {"name": "codex", "state": "running"},
@@ -218,7 +230,7 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
                     codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
 
                     self.assertIn(disclosure, cursor_row)
-                    self.assertNotIn("priority-conflict-detection", codex_row)
+                    self.assertNotIn("Project hooks", codex_row)
                     if enabled:
                         self.assertNotIn("DISABLED", cursor_row)
                         if health is not None:
@@ -412,9 +424,14 @@ class TestOpenCodeRuntimeTruth(unittest.TestCase):
                 self.assertEqual(state, "degraded")
                 self.assertIn("manual or automatic OpenCode registration", detail)
 
-    def test_missing_malformed_and_stale_are_unverified(self):
+    def test_missing_heartbeat_is_idle_not_degraded(self):
+        state, detail = self._state("")
+        self.assertEqual(state, "idle")
+        self.assertIn("no authenticated load heartbeat", detail)
+        self.assertIn("normal while OpenCode is closed", detail)
+
+    def test_malformed_and_stale_are_unverified(self):
         for heartbeat, reason in (
-            ("", "no authenticated load heartbeat"),
             ("not-a-timestamp", "malformed"),
             ((self.now - timedelta(minutes=16)).isoformat(), "stale"),
         ):
@@ -741,12 +758,78 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("unavailable", result.output)
         self.assertIn("disk I/O error", result.output)
 
+    def test_alerts_too_slow_to_count_say_so(self):
+        # GAP-1149: a 2 GB audit database kept status silent for minutes.
+        from defenseclaw.models import Counts
+
+        self.app.store.get_counts = MagicMock(return_value=Counts(alerts=None))
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("not counted", result.output)
+        self.assertIn("defenseclaw alerts", result.output)
+        self.assertEqual(
+            self.app.store.get_counts.call_args.kwargs,
+            {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS, "cfg": self.app.cfg},
+        )
+
     def test_healthy_db_shows_counts(self):
         result = self._invoke()
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Enforcement", result.output)
         self.assertIn("Blocked skills", result.output)
         self.assertNotIn("disk I/O error", result.output)
+
+
+class TestStatusHeaderAndConfigProblems(unittest.TestCase):
+    """GAP-1789 (version, sidecar PID/uptime/API, footer) and GAP-1788."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self, args=()):
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None):
+            return CliRunner().invoke(status_cmd, list(args), obj=self.app, catch_exceptions=False)
+
+    def test_sidecar_running_detail(self):
+        detail = cmd_status._sidecar_running_detail({"pid": 4242, "uptime_ms": 3_725_000}, "127.0.0.1", 19030)
+        self.assertEqual(detail, " (PID 4242, up 1h 2m, API http://127.0.0.1:19030)")
+        self.assertEqual(cmd_status._sidecar_running_detail({}, "", 0), "")
+
+    def test_header_names_version_and_footer_skips_status_itself(self):
+        from defenseclaw import __version__
+
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn(f"Version:      {__version__}", result.output)
+        self.assertNotIn("Operator overview: defenseclaw status", result.output)
+
+    def test_config_problem_still_renders_and_exits_one(self):
+        self.app.config_problems = ["galileo needs GALILEO_API_KEY"]
+        result = self._invoke()
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("1 problem(s)", result.output)
+        self.assertIn("Sidecar", result.output)
+        self.assertIn("not checked while config.yaml is invalid", result.output)
+        self.assertNotIn("not running; start it", result.output)
+        self.assertIn("Enforcement", result.output)
+        as_json = self._invoke(["--json"])
+        self.assertEqual(as_json.exit_code, 1, msg=as_json.output)
+        self.assertEqual(json.loads(as_json.output)["config_errors"], ["galileo needs GALILEO_API_KEY"])
+
+    def test_config_problem_is_not_repeated_by_the_observability_section(self):
+        # GAP-1995: the loader's raw diagnostic repeated the config check's
+        # remedy under Observability.
+        self.app.config_problems = ["line 25: galileo needs GALILEO_API_KEY"]
+        raw = RuntimeError("config.yaml:25:11: [config_semantic_invalid] $.observability.destinations[0]")
+        with patch("defenseclaw.observability.v8_status.inspect_v8_operator_status", side_effect=raw):
+            result = self._invoke()
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("destination plan unavailable: the config has a problem, listed above", result.output)
+        self.assertNotIn("config_semantic_invalid", result.output)
+        self.assertNotIn("canonical v8", result.output)
 
 
 class TestStatusJson(unittest.TestCase):
@@ -760,6 +843,7 @@ class TestStatusJson(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
+        gc.enabled = True
         gc.connector = "codex"
         gc.connectors = {
             "codex": PerConnectorGuardrailConfig(mode="action"),
@@ -848,6 +932,18 @@ class TestStatusJson(unittest.TestCase):
         by_name = {c["name"]: c for c in doc["connectors"]}
         self.assertEqual(by_name["codex"]["fail_mode"], report)
 
+    def test_json_invalid_config_does_not_query_runtime(self):
+        self.app.config_problems = ["invalid config.yaml"]
+        health = {"policy": {"effective_digest": "runtime-only-digest"}}
+        with patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=health) as fetch:
+            result = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        fetch.assert_not_called()
+        doc = json.loads(result.output)
+        self.assertIsNone(doc["sidecar"]["running"])
+        self.assertNotIn("policy", doc)
+
     def test_json_db_error_is_explicit_null_not_dropped(self):
         self.app.store.get_counts = MagicMock(side_effect=RuntimeError("locked"))
         result = self._invoke_json()
@@ -901,7 +997,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(human.exit_code, 0, msg=human.output)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status", "/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status", "/status"],
+                )
                 self.assertIn("not running", human.output)
                 self.assertNotIn(foreign_marker, human.output)
                 self.assertNotIn(str(ambient_home), human.output)
@@ -931,7 +1030,10 @@ class TestStatusProfileIdentity(unittest.TestCase):
                     with patch.dict(os.environ, env, clear=False):
                         result = runner.invoke(status_cmd, ["--json"], obj=app, catch_exceptions=False)
                 self.assertEqual(result.exit_code, 0, msg=result.output)
-                self.assertEqual(seen, ["/status"])
+                self.assertEqual(
+                    [p for p in seen if not p.startswith("/api/v1/fleet/")],
+                    ["/status"],
+                )
                 doc = json.loads(result.output)
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
@@ -942,3 +1044,46 @@ class TestStatusProfileIdentity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_status_shows_failing_llm_judge(capsys):
+    # GAP-1120: a judge whose calls all fail is named on the status page.
+    from defenseclaw.commands.cmd_status import _print_llm_judge
+
+    _print_llm_judge({"guardrail": {"details": {"mode": "action"}}})
+    assert "LLM judge" not in capsys.readouterr().out
+    _print_llm_judge({"guardrail": {"details": {
+        "judge_state": "failing", "judge_recent_calls": 10, "judge_failed_calls": 10,
+        "judge_last_error": "400 The provided model identifier is invalid.",
+    }}})
+    out = capsys.readouterr().out
+    assert "LLM judge" in out and "all of its last 10 call(s) failed" in out
+    assert "model identifier is invalid" in out and "defenseclaw doctor" in out
+
+
+def test_status_names_a_connector_whose_setup_failed_at_gateway_start():
+    # GAP-1714: Hermes failed setup at start; status said mode=action with no
+    # runtime state, as if it were enforced.
+    cfg = _cfg(["codex", "hermes"], modes={"hermes": "action"})
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {"connectors_not_started": ["hermes"]}},
+    }
+    out = _render_live(cfg, health)
+    hermes_row = next(line for line in out.splitlines() if "Hermes (hermes)" in line)
+    codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
+    assert "NOT RUNNING" in hermes_row and "not enforced" in hermes_row
+    assert "defenseclaw setup hermes" in hermes_row
+    assert "NOT RUNNING" not in codex_row
+    # GAP-1937: the Agents count matches `defenseclaw-gateway status`.
+    agents_row = next(line for line in out.splitlines() if "Agents" in line)
+    assert "1 active, 1 not running" in agents_row
+
+
+def test_status_marks_missing_claude_binary_as_not_detected(monkeypatch):
+    monkeypatch.setattr(cmd_status.shutil, "which", lambda name: None if name == "claude" else "/bin/true")
+    cfg = _cfg(["claudecode"])
+    out = _render_live(cfg, {"connectors": [{"name": "claudecode", "state": "running"}]})
+    claude_row = next(line for line in out.splitlines() if "Claude Code (claudecode)" in line)
+    assert "not detected" in claude_row.lower()
+    assert "RUNNING" not in claude_row

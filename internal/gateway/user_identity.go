@@ -14,6 +14,7 @@ import (
 	osuser "os/user"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -25,6 +26,9 @@ type llmEventUser struct {
 	IDKind string
 	Name   string
 	Email  string
+	// Identity is the directory and session attribution of the same
+	// account (identity_subject.go); empty under Secure Client.
+	Identity *llmEventIdentity
 }
 
 // userEmailCollectionEnabled mirrors ai_discovery.include_user_email at the
@@ -47,17 +51,45 @@ func SetUserEmailCollectionEnabled(v bool) { userEmailCollectionEnabled.Store(v)
 // emits the uid or SID and the account name alone.
 func UserEmailCollectionEnabled() bool { return userEmailCollectionEnabled.Load() }
 
+// managedServiceHosted records that the running deployment is
+// managed_enterprise, in any profile. A managed gateway runs as a service
+// account (LocalSystem or NT SERVICE\DefenseClawGateway on Windows, a daemon
+// account on macOS, the defenseclaw account on Linux), so its own OS identity
+// and home never describe the person using an agent. ManagedEnterpriseActive
+// is narrower: it is the Secure Client AI Defense-only posture, which a
+// standalone deployment does not run, so it cannot answer this question.
+//
+// Wired from deployment_mode by NewSidecar and applyConfigReloadSnapshot.
+var managedServiceHosted atomic.Bool
+
+// setManagedServiceHosted records whether the gateway runs as a managed
+// service account. Tests may toggle it under t.Cleanup.
+func setManagedServiceHosted(v bool) { managedServiceHosted.Store(v) }
+
+// gatewayRunsAsServiceAccount reports whether the gateway's own OS identity
+// belongs to a service principal rather than to the end user.
+func gatewayRunsAsServiceAccount() bool {
+	return managedServiceHosted.Load() || ManagedEnterpriseActive()
+}
+
 // resolveHookUserIdentity determines which end user a hook event belongs to.
 //
-// Precedence is deliberate. The identity headers come from the hook process,
-// which is the only participant that runs inside the user's session, so they
-// are preferred. The hook payload is agent-controlled and is consulted only as
-// a fallback for connectors that report a user natively. Both are attribution
-// evidence, not authentication: the gateway's loopback listener is reachable by
-// any local process.
+// Precedence is deliberate. An authenticated request's verified subject is
+// bound onto its agent identity (attachVerifiedSubject) and always wins.
+// Otherwise the identity headers come from the hook process, which is the
+// only participant that runs inside the user's session, so they are
+// preferred. The hook payload is agent-controlled and is consulted only as a
+// fallback for connectors that report a user natively. Both are attribution
+// evidence, not authentication: the gateway's loopback listener is reachable
+// by any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
-	user.Email = hookUserEmail(connector, payload)
+	if !isSandboxHookRequest(ctx) {
+		// A sandbox payload is agent-controlled end to end: the binding's
+		// host user is the only attribution, and no address is inferred.
+		user.Email = hookUserEmail(connector, payload)
+	}
+	user.Identity = requestIdentityFor(ctx, user.ID)
 	return user
 }
 
@@ -66,6 +98,10 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 // address lookup in resolveHookUserIdentity reads a credential file, which is
 // wasted work on a path that has nowhere to put the result.
 func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEventUser {
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		userID, _, userName := sandboxBindingUser(binding)
+		return newLLMEventUser(userID, userName, userID != "")
+	}
 	fromHeaders := AgentIdentityFromContext(ctx)
 	// The two sources are ranked as pairs rather than field by field. The hook
 	// helper omits the name header on its own whenever the account name fails
@@ -84,6 +120,22 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // OTLP ingest traffic, where the caller is a library rather than a connector
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
+	var user llmEventUser
+	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
+		userID, _, userName := sandboxBindingUser(binding)
+		user = newLLMEventUser(userID, userName, userID != "")
+	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
+		// An authenticated caller's headers and body are claims; the
+		// verified subject is who it is.
+		user = newTrustedLLMEventUser(subject.UserID, subject.UserName)
+	} else {
+		user = resolveHTTPUser(r, rawBody)
+	}
+	user.Identity = requestIdentityFor(r.Context(), user.ID)
+	return user
+}
+
+func resolveHTTPUser(r *http.Request, rawBody []byte) llmEventUser {
 	trustedID := r.Header.Get(llmEventUserIDHeader)
 	trustedName := r.Header.Get(llmEventUserNameHeader)
 	if trustedID != "" || trustedName != "" {
@@ -134,6 +186,11 @@ func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
 func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
+	if trustedID && identityFactsEnabled.Load() {
+		// New identity records use a bare account name. Secure Client keeps
+		// the qualified passwd name that main reports.
+		userName = verifiedAccountName(userID, userName)
+	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
 		trustedID = userID != ""
@@ -149,17 +206,36 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	}
 }
 
+func localAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	return name
+}
+
+func processAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	// main strips only a Windows-style domain prefix here.
+	name = strings.TrimSpace(name)
+	if idx := strings.LastIndexByte(name, '\\'); idx >= 0 && idx+1 < len(name) {
+		return name[idx+1:]
+	}
+	return name
+}
+
 // localProcessUser reports the gateway's own OS user, and only when that is
 // meaningful.
 //
-// Under a managed install the gateway runs as a service account — LocalSystem
-// on Windows, a daemon account on macOS — so its own identity is not the end
+// Under a managed install, in either profile, the gateway runs as a service
+// account (see managedServiceHosted), so its own identity is not the end
 // user's, and reporting it would attribute every event on a multi-user
 // endpoint to one service principal. Under an unmanaged install the gateway
 // runs as the person using it, and its identity is the right answer for
 // traffic that carries none of its own.
 func localProcessUser() (string, string) {
-	if ManagedEnterpriseActive() {
+	if gatewayRunsAsServiceAccount() {
 		return "", ""
 	}
 	current, err := osuser.Current()
@@ -167,7 +243,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(current.Username, current.Name, current.Uid))
+		sanitizeLLMEventUser(firstNonEmpty(processAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in
@@ -254,6 +330,14 @@ func v8UserEmail(email string) observability.Optional[string] {
 		return observability.Absent[string]()
 	}
 	return observability.Present(email)
+}
+
+// v8UserName renders the account name for defenseclaw.user.name through the
+// shared normaliser (observability.UserName): a name in any script is kept
+// when the gateway collects identity facts, and an ASCII name, and every name
+// under Secure Client, keeps the rule of the producer.
+func v8UserName(name string, ascii func(string) observability.Optional[string]) observability.Optional[string] {
+	return observability.UserName(name, ascii)
 }
 
 // v8UserIDKind renders the id namespace for a v8 builder input. The attribute

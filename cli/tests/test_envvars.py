@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,8 +40,14 @@ def _doc_rows_by_name(path: Path) -> dict[str, list[str]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| `DEFENSECLAW_"):
             continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        rows[cells[0].strip("`")] = cells
+        # Row shape: | `NAME`<br/>Impact: X<br/>Default: Y<br/>Values: Z | ... |
+        # Impact is omitted for variables without one. Split on unescaped
+        # pipes only, because values such as `a\|b` contain escaped ones.
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        parts = cells[0].split("<br/>")
+        fields = dict(part.split(": ", 1) for part in parts[1:] if ": " in part)
+        name = parts[0].strip("`")
+        rows[name] = [name, fields.get("Impact", "—"), fields.get("Default", ""), fields.get("Values", "")]
     return rows
 
 
@@ -113,7 +120,10 @@ class RegistryStructureTests(unittest.TestCase):
                 mock.patch.object(envvars_module, "__file__", str(module)),
                 mock.patch.dict(os.environ, {"DEFENSECLAW_REPO_ROOT": ""}),
             ):
-                self.assertEqual(envvars_module._registry_path(), bundled)
+                self.assertEqual(
+                    envvars_module._registry_path().resolve(),
+                    bundled.resolve(),
+                )
 
     def test_new_windows_envvar_contract_is_pinned(self) -> None:
         expected_registry = {
@@ -210,6 +220,12 @@ class RegistryStructureTests(unittest.TestCase):
                 "`unset`",
                 "`absolute file path`, `unset`",
             ),
+            # GAP-1393: defenseclaw-gateway validates Rego, so OPA is optional.
+            "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA": (
+                "**medium**",
+                "`unset` (validation needs opa or defenseclaw-gateway)",
+                "`1`, `unset`",
+            ),
             "DEFENSECLAW_WINDOWS_PROCESS_HELPER": (
                 "—",
                 "`unset`",
@@ -253,8 +269,8 @@ class RegistryStructureTests(unittest.TestCase):
             if e.name == "MIGRATION_DEFENSECLAW_HOME":
                 continue
             self.assertTrue(
-                e.name.startswith("DEFENSECLAW_"),
-                f"{e.name} must start with DEFENSECLAW_",
+                e.name.startswith("DEFENSECLAW_") or e.name.startswith("DCLAW_"),
+                f"{e.name} must start with DEFENSECLAW_ or DCLAW_",
             )
 
     def test_high_impact_security_optouts_surface_in_doctor(self) -> None:
@@ -376,6 +392,18 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         restricted = [e.name for e in active_security_overrides(env, include_low_impact=False)]
         self.assertNotIn("DEFENSECLAW_DEV", restricted)
 
+    def test_sandbox_binding_id_surfaces_as_a_sandbox_bypass(self) -> None:
+        # Any value turns `sandbox run` and the shell wrappers native, so
+        # the opaque id is active whenever it is set (Go: activeWhenNonEmpty).
+        entry = load_registry().get("DEFENSECLAW_SANDBOX_ID")
+        assert entry is not None
+        self.assertEqual((entry.security_impact, entry.surface_in_doctor), ("medium", True))
+        self.assertFalse(entry.is_active({"DEFENSECLAW_SANDBOX_ID": " "}))
+        env = {"DEFENSECLAW_SANDBOX_ID": "dcmarker-binding"}
+        self.assertTrue(entry.is_active(env))
+        names = [e.name for e in active_security_overrides(env, include_low_impact=False)]
+        self.assertEqual(names, ["DEFENSECLAW_SANDBOX_ID"])
+
     def test_strict_availability_does_not_surface(self) -> None:
         # DEFENSECLAW_STRICT_AVAILABILITY is opt-IN to stricter
         # behavior, not a bypass. It must NOT appear in active
@@ -396,6 +424,42 @@ class IsActiveReadsOsEnvironTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEFENSECLAW_DISABLE_REDACTION", None)
             self.assertFalse(sv.is_active())
+
+
+class ManagedRegistryOverrideTests(unittest.TestCase):
+    """GAP-1292: on a managed standalone host DEFENSECLAW_REPO_ROOT cannot
+    pick the registry, and a registry that fails to load fails closed."""
+
+    def test_managed_host_ignores_repo_root_override_and_fails_closed(self) -> None:
+        from defenseclaw.registries import ssrf
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "internal" / "envvars" / "registry.json"
+            bad.parent.mkdir(parents=True)
+            bad.write_text("not json", encoding="utf-8")
+            config = Path(tmp) / "config.yaml"
+            env = {
+                "DEFENSECLAW_CONFIG": str(config),
+                "DEFENSECLAW_REPO_ROOT": tmp,
+                "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.0.0.5",
+                "DEFENSECLAW_DEPLOYMENT_MODE": "",
+                "DEFENSECLAW_ENTERPRISE_PROFILE": "",
+            }
+            with (
+                mock.patch.dict(os.environ, env),
+                mock.patch.object(envvars_module, "_cached", None),
+                mock.patch("defenseclaw.config_writer.machine_managed_standalone", return_value=False),
+            ):
+                config.write_text("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+                self.assertNotEqual(envvars_module._registry_path(), bad)
+                self.assertIsNone(envvars_module.lookup("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"))
+                self.assertEqual(ssrf._allowed_private_ips(), frozenset())
+                with mock.patch.object(envvars_module, "load_registry", side_effect=ValueError("bad")):
+                    self.assertEqual(envvars_module.managed_policy("X"), envvars_module.MANAGED_IGNORE)
+                # A per-user host keeps the override and reads the variable raw.
+                config.write_text("")
+                self.assertEqual(envvars_module._registry_path(), bad)
+                self.assertEqual(envvars_module.lookup("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"), "10.0.0.5")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,15 @@ from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
 
+
+def test_aibom_ide_scope_off_is_uncollected():
+    from defenseclaw.inventory.claw_inventory import attach_ide_plugins
+
+    inv = {"summary": {}}
+    attach_ide_plugins(inv, {"enabled": True, "scope": "off", "plugins": []})
+    assert inv["summary"]["ide_plugins"]["collected"] is False
+
+
 # ---------------------------------------------------------------------------
 # Status command
 # ---------------------------------------------------------------------------
@@ -46,8 +55,7 @@ class TestStatusCommand(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which", return_value=None)
-    def test_status_output(self, _mock_which, mock_client_cls):
+    def test_status_output(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
         mock_client = MagicMock()
@@ -68,8 +76,7 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("not running", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which", return_value=None)
-    def test_status_shows_counts(self, _mock_which, mock_client_cls):
+    def test_status_shows_counts(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
         from defenseclaw.enforce.policy import PolicyEngine
 
@@ -77,7 +84,7 @@ class TestStatusCommand(unittest.TestCase):
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "bad", "test")
         pe.allow("skill", "good", "test")
 
@@ -87,11 +94,9 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("Allowed skills:", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_sidecar_running(self, mock_which, mock_client_cls):
+    def test_status_sidecar_running(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        mock_which.return_value = None
         mock_client = MagicMock()
         mock_client.is_running.return_value = True
         mock_client_cls.return_value = mock_client
@@ -101,56 +106,42 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("running", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_accepts_openshell_sandbox_binary(self, mock_which, mock_client_cls):
+    def test_status_sandbox_not_configured_on_host_mode(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
-        def fake_which(binary, *, path=None):
-            del path
-            if binary == "openshell-sandbox":
-                return "/usr/local/bin/openshell-sandbox"
-            return None
-
-        mock_which.side_effect = fake_which
         mock_client = MagicMock()
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
 
-        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Sandbox:", result.output)
-        self.assertIn("available", result.output)
-
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertTrue(payload["sandbox"]["available"])
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False})
+        # Windows shows "not supported on Windows" instead.
+        with patch("defenseclaw.commands.cmd_status._host_is_windows", return_value=False):
+            result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("off (set up with: defenseclaw sandbox setup)", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    @patch("defenseclaw.commands.cmd_status.shutil.which")
-    def test_status_does_not_replace_explicit_missing_sandbox_binary(
-        self, mock_which, mock_client_cls
-    ):
-        from defenseclaw.commands.cmd_status import status
+    def test_status_sandbox_row_reflects_enabled_sandboxes(self, mock_client_cls):
+        # GAP-1619: the row was hard-coded to "not configured".
+        from defenseclaw.commands import cmd_status
 
-        self.app.cfg.openshell.binary = "/opt/operator/openshell"
-
-        def fake_which(binary, *, path=None):
-            del path
-            if binary == "openshell-sandbox":
-                return "/usr/local/bin/openshell-sandbox"
-            return None
-
-        mock_which.side_effect = fake_which
         mock_client = MagicMock()
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
+        self.app.cfg.openshell.enabled = True
 
-        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertFalse(payload["sandbox"]["available"])
-        self.assertNotIn("openshell-sandbox", [call.args[0] for call in mock_which.call_args_list])
+        with patch.object(cmd_status, "_host_is_windows", return_value=False):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+            self.assertIn("details: defenseclaw sandbox status", result.output)
+            result = self.runner.invoke(cmd_status.status, ["--json"], obj=self.app, catch_exceptions=False)
+        self.assertTrue(json.loads(result.output)["sandbox"]["enabled"])
+        # GAP-0246: on Windows the platform wins over the config flag.
+        with patch.object(cmd_status, "_host_is_windows", return_value=True):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("not supported on Windows (openshell.enabled has no effect here)", result.output)
+        self.assertNotIn("details: defenseclaw sandbox status", result.output)
 
 
 # ---------------------------------------------------------------------------
@@ -171,13 +162,9 @@ class TestAlertsCommand(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._orig_columns
 
-    # ------------------------------------------------------------------
-    # Helpers: existing tests updated to pass --no-tui (TUI is default)
-    # ------------------------------------------------------------------
-
     def test_alerts_empty(self):
         from defenseclaw.commands.cmd_alerts import alerts
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts", result.output)
 
@@ -189,7 +176,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/worse",
                                        severity="CRITICAL", details="major vulnerability"))
 
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
         self.assertIn("HIGH", result.output)
@@ -202,7 +189,7 @@ class TestAlertsCommand(unittest.TestCase):
             self.app.store.log_event(Event(action="scan-finding", target=f"/skills/s{i}",
                                            severity="MEDIUM", details=f"issue {i}"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
+        result = self.runner.invoke(alerts, ["-n", "2"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
@@ -210,7 +197,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_no_store(self):
         from defenseclaw.commands.cmd_alerts import alerts
         self.app.store = None
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No audit store", result.output)
 
@@ -225,12 +212,53 @@ class TestAlertsCommand(unittest.TestCase):
                                        severity="HIGH",
                                        details="scanner=skill-scanner findings=2 max_severity=HIGH"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
         self.assertIn("HIGH", result.output)
         self.assertIn("/skills/bad", result.output)
+
+    def test_alerts_show_telemetry_destination_names_next_step(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        event = Event(id="a1", action="telemetry-destination", severity="HIGH",
+                      details="galileo/traces failed: request_timeout")
+        with patch.object(self.app.store, "list_alerts", return_value=[event]):
+            result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
+                                        catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("galileo/traces failed: request_timeout", result.output)
+        self.assertIn("defenseclaw setup galileo status", result.output)
+        self.assertIn("defenseclaw alerts dismiss --id a1", result.output)
+
+    def test_alerts_show_delivery_and_circuit_alerts_explain_the_cause(self):
+        from unittest.mock import patch
+
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        events = [
+            Event(id="a2", action="circuit_breaker_open", severity="HIGH",
+                  details="galileo degraded: otlp export paused after 1 failure "
+                          "(authentication: check the API key or token)"),
+            Event(id="a3", action="telemetry-destination", severity="HIGH",
+                  details="galileo/traces failed: http_authentication"),
+        ]
+        with patch.object(self.app.store, "list_alerts", return_value=events):
+            circuit = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
+                                         catch_exceptions=False)
+            delivery = self.runner.invoke(alerts, ["--show", "2"], obj=self.app,
+                                          catch_exceptions=False)
+        self.assertEqual(circuit.exit_code, 0, circuit.output)
+        self.assertIn("galileo degraded: otlp export paused after 1 failure (authentication", circuit.output)
+        self.assertNotIn("degraded:\n", circuit.output)
+        self.assertIn("defenseclaw setup galileo status", circuit.output)
+        self.assertIn("defenseclaw alerts dismiss --id a2", circuit.output)
+        self.assertEqual(delivery.exit_code, 0, delivery.output)
+        self.assertIn("rejected the credentials (HTTP 401/403)", delivery.output)
+        self.assertIn("defenseclaw alerts dismiss --id a3", delivery.output)
 
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
@@ -238,7 +266,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/x",
                                        severity="LOW", details="scanner=skill-scanner findings=0"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "99"], obj=self.app,
                                     catch_exceptions=True)
         self.assertNotEqual(result.exit_code, 0)
 
@@ -258,7 +286,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex"],
+        result = self.runner.invoke(alerts, ["--connector", "codex"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         # The scope is reflected in the title and only codex rows survive.
@@ -271,7 +299,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "CODEX"],
+        result = self.runner.invoke(alerts, ["--connector", "CODEX"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
@@ -281,17 +309,19 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "nope"],
+        # A known connector without alerts; an unknown name exits 1 (GAP-2130,
+        # covered in test_alerts_connector_ux_b2.py).
+        result = self.runner.invoke(alerts, ["--connector", "cursor"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("No alerts from connector 'nope'", result.output)
+        self.assertIn("No alerts from connector 'cursor'", result.output)
 
     def test_alerts_connector_filter_show_indexes_filtered_set(self):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
         # --show 1 should resolve against the filtered list, i.e. the codex row.
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex", "--show", "1"],
+        result = self.runner.invoke(alerts, ["--connector", "codex", "--show", "1"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
@@ -302,7 +332,7 @@ class TestAlertsCommand(unittest.TestCase):
         self._seed_two_connectors()
 
         # Without --connector, both connectors' rows render (no-op parity).
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
         self.assertIn("claudec", result.output)
@@ -362,6 +392,20 @@ class TestAlertsCommand(unittest.TestCase):
     def test_humanize_details_mode(self):
         from defenseclaw.commands.cmd_alerts import _humanize_details
         self.assertIn("observe", _humanize_details("mode=observe port=4000"))
+
+    def test_humanize_details_keeps_a_block_reason_whole(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        raw = (
+            "result=ok action=block severity=CRITICAL mode=action "
+            "reason=matched: MR1-MARKER-BLOCK:<redacted len=17 sha=b29d56f1> would_block=false elapsed_ms=11 "
+            "agent_version_raw=2.1.286 (Claude Code)"
+        )
+        self.assertEqual(
+            _humanize_details(raw),
+            "action result=ok action=block severity=CRITICAL "
+            "reason=matched: MR1-MARKER-BLOCK:<redacted len=17 sha=b29d56f1> elapsed_ms=11 "
+            "agent_version_raw=2.1.286 (Claude Code)",
+        )
 
     def test_humanize_details_plain_text_unchanged(self):
         from defenseclaw.commands.cmd_alerts import _humanize_details
@@ -542,6 +586,52 @@ class TestAIBOMCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fanned = {c.kwargs.get("connector") for c in mock_build.call_args_list}
         self.assertEqual(fanned, {"claudecode", "codex"})
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_adds_gateway_ide_plugins_once_and_stamps_users(self, mock_build, mock_to_scan, mock_enrich):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.inventory.claw_inventory import _stamp_local_user, local_user_identity
+        from defenseclaw.models import ScanResult
+
+        mock_build.side_effect = lambda *a, **k: self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x", timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        payload = {"enabled": True, "scope": "all", "plugins": [
+            {"user": "alice", "user_id": "1001", "ide_product": "vscode", "plugin_id": "github.copilot",
+             "enabled": "enabled", "is_ai": True},
+            {"user": "bob", "user_id": "1002", "ide_product": "pycharm", "plugin_id": "org.rust.lang",
+             "enabled": "disabled", "is_ai": False},
+        ]}
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage_ide_plugins_all(self):
+                return payload
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   return_value=("127.0.0.1", 18970, "token")), \
+                patch("defenseclaw.gateway.OrchestratorClient", FakeClient):
+            result = self.runner.invoke(aibom, ["scan", "--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        first, second = json.loads(result.output[result.output.index("["):])
+        self.assertEqual([p["plugin_id"] for p in first["ide_plugins"]], ["github.copilot", "org.rust.lang"])
+        self.assertEqual(first["summary"]["ide_plugins"],
+                         {"count": 2, "ai": 1, "disabled": 1, "users": 2, "scope": "all", "partial": False})
+        self.assertNotIn("ide_plugins", second)
+
+        # Locally scanned connector plugins and MCP servers name their account.
+        name, user_id = local_user_identity()
+        inv = {"plugins": [{"id": "p"}], "mcp": [{"id": "m", "user": "kept"}]}
+        _stamp_local_user(inv)
+        self.assertEqual(inv["plugins"][0].get("user"), name)
+        self.assertEqual(inv["plugins"][0].get("user_id"), user_id)
+        self.assertEqual(inv["mcp"][0]["user"], "kept")
 
     @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
     @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
@@ -848,6 +938,18 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Configure skill-scanner", result.output)
 
+    def test_setup_skill_scanner_without_a_judge_recommends_one(self):
+        """No llm: block -> static rules with the quiet policy, and the wizard
+        recommends a judge (never a rules-only setup)."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup, ["skill-scanner", "--non-interactive", "--no-verify"], obj=self.app, catch_exceptions=False
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.skill_scanner.policy, "quiet")
+        self.assertIn("defenseclaw setup llm", result.output)
+
     def test_setup_non_interactive_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -906,7 +1008,6 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
                     "guardrail",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                     "--mode", "observe",
                     "--scanner-mode", "local",
                     "--judge-model", "bedrock/claude-3-5-haiku-20241022",
@@ -926,7 +1027,8 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "CUSTOM_TEAM_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "CUSTOM_TEAM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "")  # GAP-2176: no v4 write
         self.assertEqual(self.app.cfg.llm.api_key_env, "CUSTOM_TEAM_KEY")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
 
@@ -941,7 +1043,7 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "DEFENSECLAW_LLM_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "DEFENSECLAW_LLM_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "DEFENSECLAW_LLM_KEY")
         self.assertEqual(self.app.cfg.llm.api_key_env, "")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
 
@@ -954,9 +1056,87 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
         result = self._invoke_guardrail("--judge-api-key-env", "JUDGE_ONLY_KEY")
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(self.app.cfg.guardrail.judge.api_key_env, "JUDGE_ONLY_KEY")
+        self.assertEqual(self.app.cfg.guardrail.judge.llm.api_key_env, "JUDGE_ONLY_KEY")
         self.assertEqual(self.app.cfg.llm.api_key_env, "EXISTING_SHARED_KEY")
         self.assertEqual(self.app.cfg.default_llm_api_key_env, "")
+
+
+
+class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
+    """GAP-2175 / GAP-2176: ``setup guardrail`` judge flags, non-interactive."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _invoke(self, mode, *extra):
+        from defenseclaw.commands.cmd_setup import setup
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ) as execute, patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ), patch(
+            # Windows verifies the agent executable first; the runner has none.
+            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+            return_value=None,
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--no-restart",
+                    "--connector", "claudecode",
+                    "--mode", mode,
+                    "--judge-model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    *extra,
+                ],
+                obj=self.app,
+            )
+        return result, execute
+
+    def test_explicit_observe_hook_connector_is_refused_before_save(self):
+        result, execute = self._invoke("observe", "--judge-hook-connectors", "claudecode")
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("--judge-hook-connectors was not applied", result.output)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
+        execute.assert_not_called()
+
+    def test_all_gate_on_observe_connector_warns_once_without_judge_add_hint(self):
+        # GAP-2297: an 'all' gate pruned to nothing gave two warnings, one with
+        # a 'guardrail judge add' hint that refuses observe-mode connectors.
+        self.app.cfg.guardrail.judge.hook_connectors = ["*"]
+        result, _ = self._invoke("observe")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.output.count("The LLM judge"), 1, result.output)
+        self.assertIn("The LLM judge is off", result.output)
+        self.assertIn("defenseclaw setup claude-code --mode action --enable-judge --yes", result.output)
+        self.assertNotIn("judge add", result.output)
+        self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+
+    def test_action_connector_keeps_judge_and_writes_only_v5_fields(self):
+        judge = self.app.cfg.guardrail.judge
+        judge.model, judge.api_base, judge.api_key_env = "old-model", "https://old.example", "OLD_KEY"
+        result, _ = self._invoke(
+            "action",
+            "--judge-hook-connectors", "claudecode",
+            "--judge-api-base", "https://judge.example",
+            "--judge-api-key-env", "DEFENSECLAW_LLM_KEY",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("not enabled", result.output)
+        self.assertTrue(judge.enabled)
+        self.assertEqual(judge.hook_connectors, ["claudecode"])
+        self.assertEqual(judge.llm.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        self.assertEqual(judge.llm.base_url, "https://judge.example")
+        self.assertEqual(judge.llm.api_key_env, "DEFENSECLAW_LLM_KEY")
+        self.assertEqual((judge.model, judge.api_base, judge.api_key_env), ("", "", ""))
 
 
 class TestSetupHelpers(unittest.TestCase):
@@ -966,10 +1146,8 @@ class TestSetupHelpers(unittest.TestCase):
 
     def test_mask_long_key(self):
         from defenseclaw.commands.cmd_setup import _mask
-        result = _mask("abcdefghijklmnop")
-        self.assertTrue(result.startswith("abcd"))
-        self.assertTrue(result.endswith("mnop"))
-        self.assertIn("...", result)
+        # GAP-1366: the last four only, as keys set/list show.
+        self.assertEqual(_mask("abcdefghijklmnop"), "...mnop")
 
 
 class TestSetupSkillScannerCommonConfig(unittest.TestCase):
@@ -1032,7 +1210,7 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.scanners.skill_scanner.use_aidefense)
+        self.assertTrue(self.app.cfg.scanners.skill_scanner.analyzers.aidefense.enabled)
 
 
 class TestSetupMCPScannerCommonConfig(unittest.TestCase):
@@ -1080,8 +1258,36 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         self.assertIn("llm.model", result.output)
         self.assertNotIn("inspect_llm.provider", result.output)
 
+    def test_auto_inside_analyzers_keeps_yara(self):
+        """M29: "auto,llm" (what the old wizard saved) runs YARA and the LLM."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify", "--analyzers", "auto,llm"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.mcp_scanner.analyzers, "yara,llm")
+
+    def test_openai_compatible_accepts_base_url(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify",
+             "--llm-provider", "openai-compatible", "--llm-model", "test-model",
+             "--llm-base-url", "https://llm.example/v1"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.llm.provider, "openai")
+        self.assertEqual(self.app.cfg.llm.base_url, "https://llm.example/v1")
+
     def test_mcp_scanner_no_old_llm_flags(self):
-        """The old --endpoint-url, --llm-base-url, --llm-timeout, --llm-max-retries flags are gone."""
+        """The retired endpoint and timeout options remain absent."""
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -1090,7 +1296,6 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("--endpoint-url", result.output)
-        self.assertNotIn("--llm-base-url", result.output)
         self.assertNotIn("--llm-timeout", result.output)
         self.assertNotIn("--llm-max-retries", result.output)
 
@@ -1184,22 +1389,23 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 )
             )
         if local:
-            destinations.append(
-                _build_v8_preset_destination(
-                    PRESETS["splunk-hec"],
-                    {
-                        "host": "127.0.0.1",
-                        "port": "8088",
-                        "index": "defenseclaw_local",
-                        "source": "defenseclaw",
-                        "sourcetype": "defenseclaw:json",
-                    },
-                    name="splunk-hec-local",
-                    enabled=True,
-                    signals=None,
-                    target=None,
-                )
+            local_destination = _build_v8_preset_destination(
+                PRESETS["splunk-hec"],
+                {
+                    "host": "127.0.0.1",
+                    "port": "8088",
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                },
+                name="splunk-hec-local",
+                enabled=True,
+                signals=None,
+                target=None,
             )
+            # As the local Splunk setup writes it (GAP-0208).
+            local_destination["network_safety"] = {"allow_private_networks": True}
+            destinations.append(local_destination)
         self._write_v8_destinations(destinations)
 
     def tearDown(self):
@@ -1689,7 +1895,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
 
     @patch(
@@ -1846,7 +2051,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
@@ -1865,7 +2069,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             input=user_input, catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured", result.output)
         mock_preflight.assert_called_once()
 
@@ -1909,7 +2112,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
         self.assertIn("O11y (OTLP): disabled", result.output)
 
     def test_setup_splunk_disable_logs(self):
@@ -1923,7 +2125,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertIn("HEC): disabled", result.output)
 
     def test_setup_splunk_disable_both(self):
@@ -1937,8 +2138,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
-        self.assertFalse(self.app.cfg.splunk.enabled)
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
     def test_setup_splunk_interactive_o11y(self, mock_apply_dashboards):

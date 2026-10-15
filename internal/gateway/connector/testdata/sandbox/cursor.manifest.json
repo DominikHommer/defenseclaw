@@ -1,0 +1,75 @@
+{
+  "connector": "cursor",
+  "hook_contract": "cursor-hooks-v1",
+  "tamper_tier": "managed",
+  "env": {},
+  "binaries": [
+    "bash (runtime)",
+    "chmod (runtime)",
+    "curl (runtime)",
+    "cursor-agent (harness)",
+    "date (runtime)",
+    "find (runtime)",
+    "head (runtime)",
+    "id (runtime)",
+    "jq (runtime)",
+    "mkdir (runtime)",
+    "mktemp (runtime)",
+    "od (runtime)",
+    "readlink (runtime)",
+    "rm (runtime)",
+    "sed (runtime)",
+    "tail (runtime)",
+    "tr (runtime)"
+  ],
+  "files": {
+    "/etc/cursor/hooks.json": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 4158,
+      "sha256": "9fa6e95aafc2d33451cfe4f548e10b0ebbdbecf65dab13cf6aec948f9f74e1e5"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 69581,
+      "sha256": "e5f816e9668b0295ddfbb09f110423af1c219f7af56703416adf01ab54dba62d"
+    },
+    "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
+      "mode": "-rw-r--r--",
+      "owner": "root",
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
+    },
+    "/usr/local/lib/defenseclaw/hooks/cursor-hook.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 8996,
+      "sha256": "7c41de67b49d68cc6974e22673e67faa0f36c3486977ba01835a2dffc9967304"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 6103,
+      "sha256": "254be2dda54179a0bfd84a0df594a8fa61140d7f4bdbcbb2d078b2277328cf38"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 5371,
+      "sha256": "3582b79bc920548f6b3d6cc07879d88c80d75d688423838e3c93045c7f5e437a"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 5889,
+      "sha256": "7bd9add71aaa2b1be56210379638ecde17ae8aa0b680df370197b44522ade242"
+    },
+    "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
+      "mode": "-rwxr-xr-x",
+      "owner": "root",
+      "size": 6273,
+      "sha256": "28064dc36e5ba2d69ead93bc5b3c5e979e0bd85489ec33cf3deab8e9b2acbba2"
+    }
+  }
+}

@@ -15,7 +15,7 @@ keywords:
   - agent kill chain
 ---
 
-Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
+Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the inventory pipeline that answers it.
 
 <DefenseClawDemo scenario="ai-discovery-evidence" />
 
@@ -23,9 +23,9 @@ Most security teams find that the first useful question DefenseClaw answers isn'
 
 Connector configuration, process, MCP, package, provider-domain, and environment-variable-name signals were classified and deduplicated into one sanitized inventory record. Discovery reports evidence and confidence; it does not prove that every detected component is active or safe.
 
-![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
+![DefenseClaw TUI AI Discovery panel: a local GGUF model in the Local models table, and Codex, Claude Code and npm and PyPI AI SDK dependencies in the AI products and tools table](/images/tui/ai-discovery.png)
 
-The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents. Local models appear in their own compact provenance table above the agent/tool inventory, so high-cardinality model IDs and lineage columns do not make the main discovery table unreadably wide.
+The TUI's **AI Discovery** panel (press `V`, above) shows the same inventory this page documents. Local models get their own table above the agents and tools, so long model IDs do not crowd the main table.
 
 <Cards>
   <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
@@ -33,9 +33,10 @@ The TUI's `AI Discovery` view (above) is the operator-facing rendering of the sa
   <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
   <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
   <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
+  <Card title="IDE plugin inventory" href="#ide-plugin-inventory" description="defenseclaw agent ide-plugins. Every extension and plugin in VS Code and its forks, JetBrains, Visual Studio, Zed, Eclipse and Neovim, per user, with enabled state and an AI flag." />
 </Cards>
 
-The five are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then enable the runtime planes to find out which of the inventory was ever actually used.
+The six are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then read the IDE plugin inventory per user, then enable the runtime planes to find out which of the inventory was ever actually used.
 
 ## Run it now: 30-second tour
 
@@ -60,43 +61,40 @@ defenseclaw agent discover --json --no-emit-otel
 defenseclaw agent discover --require-otel
 ```
 
-## How the four surfaces relate
+## Where discovery data goes
 
 <Flow
-  direction="TB"
+  direction="LR"
   compact
-  caption="Continuous (gateway) and on-demand (CLI) discovery feed the same audit pipeline. AIBOM and the Registry sit alongside them, each contributing a different slice of the inventory."
+  caption="The two CLI commands run when you call them. The continuous scan (every 5 minutes by default) and the runtime planes run inside the gateway. The gateway records everything in the local audit log and exports it to your telemetry. The Registry is not a discovery source: it decides what is allowed."
 >
-  <Node id="op" kind="operator">{`Operator\ndefenseclaw CLI`}</Node>
-  <Node id="gateway" kind="gateway">DefenseClaw Gateway</Node>
-  <Node id="cont" kind="connector">{`Continuous scanner\nai_discovery.go`}</Node>
-  <Node id="disc" kind="connector">{`agent discover\nagent_discovery.py`}</Node>
-  <Node id="bom" kind="connector">{`aibom scan\nclaw_inventory.py`}</Node>
-  <Node id="reg" kind="connector">{`registry sync\nasset_policy`}</Node>
-  <Node id="audit" kind="datastore">{`Audit pipeline\nJSONL · OTLP · HEC`}</Node>
-  <Edge from="op" to="disc" />
-  <Edge from="op" to="bom" />
-  <Edge from="op" to="reg" />
-  <Edge from="gateway" to="cont" />
-  <Edge from="cont" to="audit" label="EventAIDiscovery" />
-  <Edge from="disc" to="gateway" label="POST /api/v1/agents/discovery" />
-  <Edge from="gateway" to="audit" label="agent_discovery" />
-  <Edge from="bom" to="audit" label="ScanResult" />
-  <Edge from="reg" to="gateway" label="asset_policy promotion" />
+  <Node id="rt" kind="generic" tag="in the gateway">{`What actually ran\nruntime planes`}</Node>
+  <Node id="cont" kind="generic" tag="in the gateway">{`AI on the host\ncontinuous scan`}</Node>
+  <Node id="bom" kind="operator" tag="CLI, on demand">{`Agent assets\naibom scan`}</Node>
+  <Node id="disc" kind="operator" tag="CLI, on demand">{`Installed agents\nagent discover`}</Node>
+  <Node id="gateway" kind="gateway">{`Gateway\nchecks and records`}</Node>
+  <Node id="sinks" kind="datastore">{`Your telemetry\nOTLP, Splunk`}</Node>
+  <Node id="audit" kind="datastore">{`Audit log\nlocal SQLite`}</Node>
+  <Edge from="rt" to="gateway" label="reports" />
+  <Edge from="cont" to="gateway" label="reports" />
+  <Edge from="bom" to="gateway" label="sends" />
+  <Edge from="disc" to="gateway" label="sends" />
+  <Edge from="gateway" to="sinks" label="exports" />
+  <Edge from="gateway" to="audit" label="records" />
 </Flow>
 
 ## What gets discovered
 
-The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
+The continuous scanner in the gateway classifies every signal into one of the wire categories below. `agent discover` is a separate, connector-focused local inventory; the gateway-backed `agent usage` command renders these continuous-discovery signals.
 
 | Category | What it surfaces |
 | --- | --- |
 | `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
-| `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
-| `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
+| `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
+| `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
-| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
+| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk, in the home folder and in the project (`~/.claude/skills`, `.claude/skills`) |
 | `rule` | Rule packs and ruleset files referenced by config |
 | `plugin` | Connector plugins (TypeScript, Python, native) |
 | `package_dependency` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |
@@ -148,7 +146,7 @@ This is not an unrestricted content crawl. The scanner:
 - preserves recognized model stores as specialized evidence and accepts high-signal GGUF/GGML, safetensors, Core ML, and Q4NX artifacts on format evidence;
 - outside those stores, admits ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary formats only when they have explicit model context (for example, a model/weights/checkpoint/format directory, a semantic model name in a non-cache application support/container/resource scope, or a nearby bounded metadata sidecar) **and** a meaningful, non-opaque identity from the artifact or model directory;
 - rejects generic identities such as `model`, `weights`, and `runtime`, opaque hex/UUID-like cache keys, and version-only identities. Known Chrome Optimization Guide/OptGuide payload paths are rejected for these ambiguous formats; this targeted suppression does not exclude high-signal formats or recognized model stores;
-- skips common source, dependency, build, browser-noise, and runtime-noise trees while allowing application-scoped caches to participate;
+- skips common source, dependency, build, browser-noise, and runtime-noise trees, plus DefenseClaw's own data directory (`~/.defenseclaw` and the configured `data_dir`, which hold its bundled dependencies and models), while allowing application-scoped caches to participate;
 - applies global and per-root traversal limits, rotates roots, and resumes incomplete roots on later scans; and
 - reads only bounded metadata such as a GGUF header prefix or a small adjacent manifest/configuration file, never tensor payloads.
 
@@ -217,7 +215,7 @@ Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plu
 
 The country is the ISO 3166-1 alpha-2 country associated with the organization that released the resolved root/base weights—not the quantizer, Hub uploader, local runtime, or download location. The TUI and macOS app derive the flag locally (`CN 🇨🇳`); emoji is never stored on the wire. `base_models`, `quantized`, `distilled`, and `derivation` preserve the detected lineage, while `source` and `confidence` distinguish embedded/runtime evidence from catalog or Hub enrichment. Missing evidence stays absent/unknown rather than becoming a guess.
 
-Canonical v8 `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
+The `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
 
 **Optional Hugging Face enrichment.** Set `ai_discovery.lookup_model_provenance_online=true` (or pass `--lookup-model-provenance-online` to `agent discovery enable`) to look up public model-card ancestry. This is off by default because a lookup transmits a model repository ID. The resolver calls only the fixed public Hugging Face model-info endpoint, refuses redirects, bounds responses and recursion, caches positive and negative results, and starts only from an exact ID recovered from a Hugging Face cache path, an explicit `huggingface.co` URL in embedded metadata, or a reviewed exact lineage rule. It does not send local paths or slash-shaped relative aliases, fuzzy-search arbitrary filenames, or use a private Hub token. Transient failures retain a previously resolved result for at most seven days; a definitive not-found response clears it. A fully renamed GGUF can still resolve when its embedded `general.source.*` or `general.base_model.*` repository URL survives conversion; if identifiers and metadata were stripped, discovery reports the provenance as unknown.
 
@@ -228,7 +226,7 @@ ai_discovery:
   lookup_model_provenance_online: false
 ```
 
-Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
+Enable it with `defenseclaw config set ai_discovery.lookup_model_provenance_online true` (the gateway applies an `ai_discovery` change without a restart), interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -238,10 +236,10 @@ Limits do not turn a partial observation into a false deletion. API inventories 
 
 The continuous scanner runs inside the gateway. Unmanaged deployments emit
 `ai_discovery` events when a signal transitions state; managed-enterprise full
-scans emit the complete snapshot described above. Fresh CLI-generated configs
-enable discovery; an older or minimal config that omits the `ai_discovery`
-block leaves the gateway runtime default disabled. Use these commands to make
-the intended state explicit:
+scans emit the complete snapshot described above. A fresh `defenseclaw init`
+leaves AI discovery disabled. Run `defenseclaw agent discovery enable` after
+initialization to collect the IDE inventory. This also enables runtime
+monitoring planes A and B. Use these commands to make the intended state explicit:
 
 <Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
   <Tab value="Enable">
@@ -249,7 +247,7 @@ the intended state explicit:
 defenseclaw agent discovery enable --restart --scan
 ```
 
-Toggles `ai_discovery.*` in `~/.defenseclaw/config.yaml`, restarts the gateway, and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning.
+Sets `ai_discovery.enabled` and the other `ai_discovery.*` settings you pass in `~/.defenseclaw/config.yaml`, restarts the gateway (the default; `--no-restart` skips it), and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning. The gateway also applies any `ai_discovery` change made with `defenseclaw config set` by itself, so a single setting needs no restart.
   </Tab>
   <Tab value="Status">
 ```bash
@@ -274,9 +272,147 @@ the companion managed endpoint inventory. No restart needed.
 defenseclaw agent discovery disable
 ```
 
-Stops the scanner and clears the `ai_discovery.*` block. Existing audit events are preserved.
+Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
 </Tabs>
+
+### Per-user scans in standalone enterprise
+
+In the standalone enterprise profile the gateway runs as a service account
+that cannot read user homes or see other accounts' processes. The hook
+guardian therefore runs the static scan for each user in the target
+manifest, as that user, every `scan_interval_min`, while `ai_discovery` is
+enabled:
+
+- The scan reads only that user's home and sees only that user's processes.
+  Home-relative `scan_roots` apply; other roots, loopback probes and
+  environment names stay with the gateway's own scan, which still covers
+  machine-wide binaries and applications.
+- The guardian checks each result and writes it to the `ai-discovery`
+  directory of the authorization ledger (`root`, readable by the gateway's
+  group). The gateway adds it to its inventory on every full scan.
+- Each signal carries `user` and `user_id` from the account the guardian
+  started the scan for, never from the scan's own output. The
+  `ai_component.discovered`, `changed` and `removed` records carry the same
+  user (`user.id`, `defenseclaw.user.name`) to your observability
+  destinations, without the entry's name. The inventory retains the
+  per-entry skill, plugin and MCP names locally; discovery does not emit
+  per-entry `ai_component.observed` records. Names can still reach configured
+  observability destinations in hook decision and asset-policy audit rows
+  when those assets are used, scanned, admitted or rejected. Read the full
+  inventory with the `discovery` view below. With `ai_discovery.include_user_email` on, each
+  account's Claude Code and Codex address goes to your destinations on one
+  `ai_component.observed` record per account and connector each discovery
+  cycle, without entry names
+  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
+- The gateway's own process detector does not run; the scan summary reports
+  `detector_notes.process: provided by per-user scans`.
+- A user's results turn `gone` when the user leaves the manifest, or after the longer of three
+  scan intervals and 15 minutes since the user's last successful scan.
+- `mode`, `include_shell_history`, `include_package_manifests` and
+  `store_raw_local_paths` apply as usual.
+- Administrators read the per-user records on the host with
+  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
+  or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos
+  discovery` (root, read-only; `--user`, `--json`).
+  On Windows, `defenseclaw.exe enterprise windows discovery` (elevated,
+  read-only) shows the gateway's scan the same way.
+- Skills and MCP servers found this way are inventoried only: the managed
+  gateway does not run the skill or MCP scanners on them.
+
+These per-user scans run on Linux and macOS. On Windows the gateway service
+scans every enrolled user's profile itself: the hook enumerator grants the
+service read access to each user's agent folders (`.claude`, `.codex`,
+`.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others) and to
+the IDE folders the [IDE plugin inventory](#ide-plugin-inventory) reads
+([Whose plugins](#whose-plugins) lists them), and nothing else in the
+profile. A folder on an enrolled connector's hook path
+stays at the guardian's protected permissions, so the service is not granted
+it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
+`.gemini` for Antigravity, `.copilot` for Copilot and
+`%APPDATA%\devin` for Devin. Devin's user MCP servers are still listed:
+the service is granted read on `%APPDATA%\devin\mcp_config.json` alone, not
+on the folder or the hook file `config.json` beside it. The Kiro IDE plugins in `.kiro\extensions` are
+still listed: the service is granted that folder alone and reads it without
+any access to `.kiro`. Kiro CLI is then found by its install folder
+`%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
+`%LOCALAPPDATA%\copilot\pkg`, Devin CLI by `%LOCALAPPDATA%\devin\cli` and
+Amp by its npm install `%APPDATA%\npm\node_modules\@ampcode\cli`,
+folders the service may list but not read, and Antigravity CLI by
+`.gemini\antigravity-cli`; OpenCode is found by its folders outside
+`.config`, such as `~\.opencode`. Cursor's hooks are machine-level on a managed
+computer, so a user without `~\.cursor\mcp.json` is found by cursor-agent's
+install folder `%LOCALAPPDATA%\cursor-agent`, which the service may also
+list but not read. Each signal found in a profile, and each agent
+process started from one, carries that profile's account (`user.id` is the
+account SID, `defenseclaw.user.id_kind` is `windows_sid`,
+`defenseclaw.user.name` the account name). Folders outside the granted ones,
+such as the profile root that `scan_roots: ["~"]` names, are skipped
+without failing the scan. Only enrolled profiles are read: the profile of an
+account that `enterprise.enrollment.exclude_users` names is not, the
+processes in its sessions are left out, and the components it reported
+before are reported `removed` once, at the first scan after the change is
+applied, without a gateway restart; the enumerator also takes away the read
+access an earlier install granted it. `ai_discovery.home_dirs` adds folders
+to the enrolled profiles and never replaces them, and a folder inside an
+excluded profile is not read.
+
+### Inside OpenShell sandboxes
+
+While sandboxes are on (`openshell.enabled`), the gateway also inventories
+what the agent in each running [sandbox](/docs/sandboxes) installed and
+configured there, which its own scan of this machine never sees:
+
+- Once a sandbox is ready, every `scan_interval_min` while it runs, and on
+  demand with `defenseclaw sandbox discover NAME`, the daemon reads the
+  sandbox with one read-only command it builds itself: the agent config,
+  MCP configuration, skill, rule and plugin paths of the signature catalog
+  under the sandbox's home and project, the agent CLIs in its bin folders,
+  its running agents, the names (never the values) of its environment
+  variables, its shell history and, for a copy (`--copy`, every sandbox on
+  macOS), its package manifests. A mounted project is this machine's folder,
+  which the gateway's own scan reads.
+- Everything the sandbox sends back is checked as the agent's: only
+  absolute, printable paths under the sandbox's home, projects or harness
+  install, within what was asked for and within the bounds (`max_file_bytes`
+  a file, `max_files_per_scan` files read, 8,192 entries listed and a 4 MiB
+  stream), are kept. They are written as
+  private regular files (never links or FIFOs) under
+  `<data_dir>/sandboxes/NAME/discovery` and scanned on this machine with the
+  same detectors, without the machine-wide ones (applications, IDEs,
+  loopback endpoints, model files). The copies go once scanned: only the
+  scan record (`scan.json`) stays.
+- Each signal carries the sandbox's name and id (`sandbox_name`,
+  `sandbox_id`, and `defenseclaw.sandbox.name` and `.id` on the
+  `ai_component.*` records), and its hashes are its sandbox's own, so the
+  same file in two sandboxes, or in a sandbox and on this machine, are
+  separate entries. `defenseclaw agent usage --sandbox NAME` shows one
+  sandbox's; every view tags them "(sandbox NAME)". A name with no
+  sandbox is an error, a sandbox not read yet gets a note that
+  `defenseclaw sandbox discover NAME` reads it now, and on Windows, which
+  has no sandboxes, `--sandbox` exits 3 as `defenseclaw sandbox` does.
+- A sandbox signal's **Last active** is the last time the sandbox was read
+  while it ran, a running process's too, not the date of the file: the
+  files an image ships carry the image's dates. A sandbox process's
+  **Runtime** `up=` counts from its start.
+- A stopped sandbox keeps what was found, without its processes; a deleted
+  one's entries turn `gone` at once (the delete starts a scan, as
+  `agent usage --refresh` does). `ai_discovery.enabled: false` turns this
+  off too.
+
+A real sandbox, read with `defenseclaw sandbox discover` (the MCP servers, the
+skills, the agent CLI and the running agent found inside it):
+
+![defenseclaw sandbox discover myapp-claude: one row per component with its category, product, what found it, the MCP server and skill names, and the file or folder that holds it](/images/sandboxes/screens/terminal-sandbox-discover.png)
+
+The same components in the AI inventory, tagged with the sandbox:
+
+![defenseclaw agent usage --sandbox myapp-claude: the AI visibility table with Claude Code and GitHub Copilot rows marked (sandbox myapp-claude), their categories, detectors, signal counts and sample evidence](/images/sandboxes/screens/terminal-agent-usage-sandbox.png)
+
+The TUI's AI Discovery panel (`V`) lists the same components as their own rows,
+tagged `(sandbox NAME)`:
+
+![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
 ### Tunable knobs
 
@@ -310,9 +446,246 @@ defenseclaw agent signatures enable codex
 
 `disable` and `enable` take an individual signature ID, not a pack name; use
 `signatures list` to find the ID. The bundled pack covers every connector listed
-in [Capability matrix](/docs/capability-matrix). Custom packs are useful when
+in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
+
+A pack whose sha256 is not the one pinned in `ai_discovery.signature_pack_digests` (or, on a
+managed standalone device, a pack with no pin) is not loaded. `signatures list` prints a
+`Not loaded:` line with both digests and leaves its signatures out, `agent discovery status`
+counts it, and `defenseclaw doctor` warns. A configured pack whose file is gone is reported the same
+way (`file not found`); `signatures list` still prints the rest of the catalog, and the gateway keeps
+enforcing the last catalog it built until the file is restored or removed from
+`ai_discovery.signature_packs`. A pack edited on disk while the gateway runs is checked again within
+a few seconds.
+
+## IDE plugin inventory
+
+Beyond the AI agents on a host, DefenseClaw lists **every extension and plugin
+in every IDE**, AI or not, with its enabled state, for each user. AI plugins
+are flagged from the signature catalog, so "who has Copilot, Claude Code or
+Continue installed, and is it switched on?" is one command. The inventory is
+part of the continuous scan and refreshes with every full scan (every five
+minutes by default). Nothing is executed: the scan reads small, bounded
+metadata files only.
+Bundled extensions inside an IDE application, including VS Code built-in GitHub
+Copilot Chat, are not listed. The inventory reads per-user extension data folders.
+
+
+```text
+$ defenseclaw agent ide-plugins --user alice
+User   IDE              Plugin                                            Version   Enabled      AI
+alice  cursor           anthropic.claude-code (Claude Code for VS Code)   2.1.0     yes          yes
+alice  intellij-idea    com.github.copilot (GitHub Copilot)               1.5.40    yes          yes
+alice  vscode           eamodio.gitlens (GitLens)                         17.0.0    no
+alice  vscode           github.copilot (GitHub Copilot)                   1.250.0   yes          yes
+alice  vscode           ms-python.python (Python)                         2026.1.0  yes
+alice  vscode (ssh)     github.copilot (GitHub Copilot)                   1.250.0   client side  yes
+alice  zed              html                                              0.2.1     yes
+7 plugin(s) shown; 7 in total, 3 AI, 1 disabled, 1 user(s)
+```
+
+| Where to read it | What you get |
+| --- | --- |
+| [`defenseclaw agent ide-plugins`](#read-the-inventory) | The table above, or `--json` |
+| `GET /api/v1/ai-usage/ide-plugins` | The full rows, filtered and paged |
+| `defenseclaw aibom scan --only ide_plugins` | The `ide_plugins` category of the bill of materials |
+| TUI: Inventory (`6`) → **IDE plugins** | The same rows, with a detail card |
+| Grafana **AI Agent Usage & Detection** → IDE plugins | Counts by IDE, AI against other, disabled, per user |
+| `ide.plugin.*` records and the `defenseclaw.inventory.ide_plugins` gauge | The change stream and the current counts, in your telemetry |
+
+### Which IDEs
+
+| IDE family | Products | Plugin list | Enabled state from |
+| --- | --- | --- | --- |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop (including legacy Windsurf folders), Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code Remote-SSH servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers, on the host you connect to | The server's `extensions` folder, shown as `vscode (ssh)`, `cursor (ssh)` and so on | `client_side_unknown`, shown as `client side`: the IDE on your laptop keeps that state |
+| JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside and Android Studio, plus JetBrains remote development (shown as `(remote dev)`) | Each plugin's `META-INF/plugin.xml` in the plugin folders and bundled JARs | `disabled_plugins.txt`: enabled when not listed |
+| Visual Studio (Windows) | Visual Studio per instance, including the experimental hive: the user's extensions under `%LOCALAPPDATA%\Microsoft\VisualStudio`, and the machine-wide ones under Program Files | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`); `unknown` while Visual Studio is running and holds the hive locked |
+| Zed | Zed | `extensions/installed/*/extension.toml` | Always enabled |
+| Eclipse | Per-user Eclipse installs (Oomph under `~/eclipse`, p2 user configurations under `~/.eclipse`), best effort | `bundles.info`, without the platform bundles every Eclipse ships | Enabled |
+| Vim and Neovim | Vim, Neovim | `lazy-lock.json`, native packages in `pack/*/{start,opt}` and vim-plug's `plugged` folder | `start` is enabled and `opt` is disabled; lazy.nvim and vim-plug plugins are `unknown` because they do not record it |
+
+Connector plugins (Claude Code, Codex, OpenCode, Amp, Copilot CLI, Hermes and
+the others) are not IDE plugins. They stay in the AIBOM `plugins` category,
+stamped with their user.
+
+The enabled state of a row is one of `enabled`, `disabled`,
+`client_side_unknown` or `unknown`, and the row records where it came from
+(`state_vscdb`, `disabled_plugins_txt`, `privateregistry`, `remote_server`,
+`default` and so on), which the TUI detail card shows as **Enabled from**.
+
+### Whose plugins
+
+Each per-user row carries the user it belongs to: the home's owner, or on a
+managed host the account the guardian or the gateway scanned. One user can
+never appear in another user's rows: a planted extension folder changes only
+its own owner's inventory.
+
+| Install | Who scans | Whose homes |
+| --- | --- | --- |
+| Per-user (OSS) | The user's own gateway | That user's home only |
+| Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
+| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide. It reads nothing through a link, junction or mount point below a profile, and skips an `ai_discovery.home_dirs` folder that is one; each refused path gets one `ai_discovery_link_refused` warning in the gateway log |
+
+A machine-wide row belongs to no account. A Visual Studio extension
+installed for all users under `Program Files` is listed once, however many
+users are enrolled, with `scope` `machine`, no `user` or `user_id`, and an
+enabled state of `unknown`. `--user` never returns it, `counts.users` does not
+count it, and its `ide.plugin.*` records are exported without `user.id` or any
+`defenseclaw.user.*` attribute.
+
+A managed Windows gateway reads the same IDE sources as a per-user scan, and
+the enabled state comes from the same places. The hook enumerator grants its
+service account read access to these folders in each enrolled profile (one
+with at least one enrolled agent) at every cycle, every 5 minutes, so a new
+IDE or plugin folder shows up after the next cycle and the next scan:
+
+| IDE | Read, with what it holds | Only the folder or file itself |
+| --- | --- | --- |
+| VS Code and forks | `.vscode\extensions` and the forks' `extensions`, `%APPDATA%\Code\User\globalStorage` and `profiles` (and the forks') | |
+| Remote-SSH servers | `.vscode-server\extensions` and the forks' | `.vscode-server` and `.vscode-server\cli\servers` (to list the server builds), each build's `server\package.json` (its version). The server's own data and binaries are not granted |
+| JetBrains | `%APPDATA%\JetBrains`, and `plugins` in each product folder under `%LOCALAPPDATA%\JetBrains` | `%LOCALAPPDATA%\JetBrains` (to list the products), `RemoteDev\dist` and each backend's `product-info.json`. The caches, indexes and logs beside them are not granted |
+| Android Studio | Each `%APPDATA%\Google\AndroidStudio<version>` folder, and `plugins` in each `%LOCALAPPDATA%\Google\AndroidStudio<version>` | `%APPDATA%\Google` and `%LOCALAPPDATA%\Google` (to list the versions). Other Google folders are not granted |
+| Visual Studio, Zed, Neovim, Vim | `%LOCALAPPDATA%\Microsoft\VisualStudio`, `%LOCALAPPDATA%\Zed\extensions\installed`, `%LOCALAPPDATA%\nvim` and `nvim-data`, `vimfiles` | |
+| Eclipse | `.eclipse` | `eclipse` (Oomph's installs) and each install's `bundles.info` |
+
+Nothing is granted through a link or junction inside a profile. The
+enumerator reads the default `%APPDATA%` and `%LOCALAPPDATA%` under each
+profile, so a profile whose AppData is redirected elsewhere is not read. The
+Secure Client profile keeps its historical editor-extension detector and
+has no IDE inventory, so it gets none of these grants. JetBrains Toolbox's
+own folder is not read on any platform: the IDEs it installs keep their
+plugins in the product folders above.
+
+### What is collected, and what is not
+
+Collected for each plugin: the plugin ID, display name and publisher, the
+version, the enabled state and where it came from, the scope (`user`,
+`remote` or `machine`), the AI flag and the signature that matched, the
+install and last-seen times, the owning user, and a hash of the plugin's path.
+For each IDE installation: the product, channel, version, whether it is a
+remote server, and a hash of its path.
+
+Not collected: the contents or source of any extension, settings, tokens or
+credentials, workspace and project files, chat or editor history, or the
+extension's own data. Each text field (a display name, a publisher) is kept
+to one printable line of at most 256 bytes: format characters such as
+right-to-left overrides are dropped and control characters become a space, so
+a planted name cannot render differently in a table or a dashboard. The only
+database read is the one key
+`extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
+and immutable with a 2-second limit. Paths leave the host only as hashes.
+
+Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
+files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
+exceeds a bound is reported as a partial installation rather than read further.
+
+The scan reads regular files only: it skips a FIFO, a device, a socket or a
+folder it cannot open without waiting on it, and a manifest it walks to is read
+as the file itself, never through a link. On a managed Linux host, each
+user's scan runs in a worker with a 1 GiB memory ceiling, so a home that
+defeats these bounds ends that user's worker, not the host. On managed Linux
+and macOS, when a user's scan fails three passes in a row, the guardian
+pauses that home for an hour (then two, up to a day) and keeps the user's
+last inventory meanwhile.
+
+Most IDE rows describe plugin data found in each user profile; Windows Visual
+Studio also has machine-wide rows. Removing an IDE
+application can leave those folders behind, so an `enabled` plugin row means
+its metadata is present and enabled in that saved profile; it does not prove
+that the IDE application is still installed.
+
+### Folder coverage
+
+For VS Code, the scanner reads `~/.vscode/extensions` on macOS and Linux
+and `%USERPROFILE%\.vscode\extensions` on Windows, plus the default
+per-user data folders for the listed forks and their remote SSH servers.
+It does not read portable VS Code `data/extensions` beside the app, folders
+selected with `--extensions-dir` or `VSCODE_EXTENSIONS`, Linux XDG
+relocations, or Snap and Flatpak extension roots. Those installations and
+their editor-extension AI signals can be absent from the inventory.
+
+### Privacy and scope
+
+Plugin lists can reveal personal tooling. `ai_discovery.ide_inventory` sets the
+scope, and the default is the full list:
+
+| Value | Effect |
+| --- | --- |
+| `all` (default) | Every plugin, AI or not |
+| `ai_only` | Only plugins flagged as AI |
+| `off` | No IDE inventory; AI editor-extension signals still appear in `agent usage` |
+
+```yaml title="~/.defenseclaw/config.yaml"
+ai_discovery:
+  ide_inventory: ai_only    # all | ai_only | off
+```
+
+Set the scope with `defenseclaw agent discovery enable --ide-inventory ai_only --yes`
+(or choose `all` or `off`). This also enables discovery and runtime planes A
+and B. A running gateway applies the change on its next reload, and the inventory
+follows at the next full scan. On a managed host, edit the
+[machine configuration](/docs/enterprise/configuration#where-the-config-lives).
+When the scope is `off`, `defenseclaw agent ide-plugins` says so and exports
+nothing. The AI flag follows the [signature packs](#signature-packs), so a new
+AI extension is flagged after a signature update. See also
+[Identity and authentication](/docs/enterprise/identity-and-authentication#turn-off-the-principal-or-the-ide-inventory).
+
+### Read the inventory
+
+```bash
+defenseclaw agent ide-plugins
+defenseclaw agent ide-plugins --user alice --ai-only
+defenseclaw agent ide-plugins --ide cursor --json
+defenseclaw aibom scan --only ide_plugins
+```
+
+`--ide` takes a product (`vscode`, `cursor`, `pycharm`) or a family
+(`jetbrains`). `--ide windsurf` is an alias for `devin-desktop` so
+older Windsurf profiles can be found by that name. The footer line reports the counts of the rows that the filters
+select. Without AI discovery enabled, the command tells you to run
+`defenseclaw agent discovery enable`.
+
+A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
+or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
+ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
+enterprise macos ide-plugins`) prints the managed gateway's inventory as
+JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
+managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
+does the same from an elevated prompt. These commands print the counts of the
+whole machine next to the filtered rows. An answer without an inventory
+carries a `reason`: on a managed computer whose config leaves AI discovery
+off, it says to set `ai_discovery.enabled: true` in the managed config (the
+file Setup, the package or the MDM delivers); `agent discovery enable` is a
+per-user command.
+
+- **API.** `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's
+  plugins, filtered by `user` (account name or ID), `ide` (product or family)
+  and `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
+  previous page's `next_cursor`). `total` and `counts` (plugins, AI, disabled,
+  users, installations and per-IDE) describe the rows the filters select
+  across all pages, and with `ai_only` the `installations` list keeps only the
+  installations that hold an AI plugin. `GET /api/v1/ai-usage` carries the
+  same counts for the whole machine. See the
+  [gateway API](/docs/reference/gateway-api#identity-profiles-and-ide-inventory).
+  Secure Client does not register the IDE plugin route, so it returns `404`.
+- **AIBOM.** The `ide_plugins` category lists the same rows. `--only` can
+  leave it out or select it alone.
+- **TUI.** Inventory (`6`) → **IDE plugins** lists IDE, Plugin, Version,
+  Enabled and AI, with a User column when more than one user is present.
+  `Enter` opens a detail card with the version, publisher, where the enabled
+  state came from, the scope, the matched AI signature and the times;
+  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/tui#ide-plugins).
+- **Grafana.** The **AI Agent Usage & Detection** board has an IDE plugins
+  section: plugins installed, AI plugins and disabled plugins as counters,
+  plugins by IDE, AI against other plugins by IDE, plugins by enabled state,
+  and a per-user table. The `$user` box narrows the Loki panels to one user.
+  See [Grafana dashboards](/docs/observability/grafana-dashboards).
+- **Telemetry.** Each change is exported as an `ide.plugin.discovered`,
+  `ide.plugin.changed` or `ide.plugin.removed` record, and the
+  `defenseclaw.inventory.ide_plugins` gauge counts plugins per IDE, AI flag
+  and enabled state.
 
 ## Operator CLI
 
@@ -324,9 +697,9 @@ The CLI has two distinct discovery paths. `agent discover` runs a connector inve
 defenseclaw agent discover --json --emit-otel
 ```
 
-Walks the connector specs (`KNOWN_CONNECTORS` in
-`cli/defenseclaw/inventory/agent_discovery.py`). The local `--json` output is
-the full `AgentDiscovery` object:
+Checks every connector DefenseClaw knows. The local `--json` output has an
+`agents` object with one entry per connector (`{"agents": {"codex": {...}, ...}}`),
+plus `scanned_at` and the telemetry result. Each entry has:
 
 | Field | What it means |
 | --- | --- |
@@ -364,14 +737,14 @@ defenseclaw agent usage --json | jq '.signals[] | select(.category == "local_mod
 
 Without `--refresh`, the command reads the most recent snapshot. `--refresh` first triggers a full scan and then renders its result. The default table groups repeated observations; `--detail` renders one row per signal. Local-model rows add model ID, installed/loaded status, and format columns when available.
 
-Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
+Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--sandbox` (what AI discovery found inside that sandbox; repeatable), `--show-gone`, `--by-detector`, `--limit`, `--wide`. The default table keeps the columns that fit the terminal; `--wide` adds model format, version and the identity/presence confidence columns. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
   </Tab>
   <Tab value="Processes">
 ```bash
 defenseclaw agent processes --limit 20
 ```
 
-Live AI process table — model serving, sandbox runners, scanner subprocesses. Useful when something is running but you can't tell which agent spawned it.
+Live AI process table — running agent CLIs, local model servers, and AI desktop apps whose process name matches the signature catalog. Useful when something is running but you can't tell which agent spawned it. On macOS and Linux a per-user install lists only your own account's processes; managed installs see every enrolled user.
   </Tab>
   <Tab value="Components">
 ```bash
@@ -380,7 +753,7 @@ defenseclaw agent components show ai-sdk
 defenseclaw agent components history ai-sdk
 ```
 
-Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspaces. `show` and `history` drill into a single component's identity score and detection trail.
+Package-dependency view: every AI-related npm, PyPI, Go, Cargo, or other package dependency across your workspaces. `--ecosystem` takes the ecosystem name (`npm`, `pypi`, `go`, …). `show` and `history` drill into a single component's identity score and detection trail.
   </Tab>
 </Tabs>
 
@@ -419,9 +792,19 @@ For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each
 On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
 </Callout>
 
-The output is a custom JSON document. `stamp_aibom_inventory` attaches the
-same v7 provenance quartet to the top-level document and to each list item.
-The `content_hash` is the SHA-256 of the active DefenseClaw configuration and
+In the human output, a count of `0` means the category was read and is empty.
+`-` / `not collected` means DefenseClaw cannot read that category for this
+connector (or `--only` left it out). The **Inventory coverage notes** at the end
+say what each connector's inventory covers: `not supported` notes mark a
+category that is not read, `partly checked` notes mark one that is read but
+where some runtime details (for example folder trust or organization policy)
+are not checked. `--summary` folds them into one line such as
+`1 inventory coverage note (plugins); run without --summary to read it.`
+JSON keeps them in `limitations` with `status` `unsupported` or `unverified`.
+
+The output is a custom JSON document. The document and each item carry the
+same `provenance` block: schema version, content hash, configuration
+generation, and DefenseClaw version. The `content_hash` is the SHA-256 of the active DefenseClaw configuration and
 policy inputs; it is **not** a hash of an individual inventory item or of the
 complete BOM:
 
@@ -431,7 +814,7 @@ complete BOM:
     "schema_version": 7,
     "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
     "generation": 0,
-    "binary_version": "0.8.10"
+    "binary_version": "1.0.0"
   },
   "skills": [
     {
@@ -442,7 +825,7 @@ complete BOM:
         "schema_version": 7,
         "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
         "generation": 0,
-        "binary_version": "0.8.10"
+        "binary_version": "1.0.0"
       }
     }
   ],
@@ -460,7 +843,8 @@ Useful flags:
 | --- | --- |
 | `--json` | Machine-readable output (default is a human table) |
 | `--summary` | Counts only — useful for CI gates |
-| `--only` | CSV of categories: `skills,plugins,mcp,agents,models,memory` |
+| `--only` | Comma-separated categories to collect: `skills,plugins,mcp,agents,rules,tools,models,memory,ide_plugins`. The others are left out, and the JSON marks them `"collected": false` |
+| `--connector` | Inventory one connector instead of every active one |
 
 <Callout type="info">
 There's no `--sign` or `--format=cyclonedx` today. The stamped provenance
@@ -472,6 +856,8 @@ custom JSON downstream if your SBOM tooling requires CycloneDX.
 ## Where the data lands
 
 Both continuous and on-demand discovery feed the same audit pipeline. Once you've got [Observability](/docs/observability) wired up, the bundled dashboards light up automatically.
+
+Galileo is not one of these places. Its `galileo-rich-v2` trace profile carries agent, workflow, model, tool, retrieval and judge spans only, so discovery results never reach Galileo; use Grafana, Splunk or another OTLP destination for them (see [Galileo](/docs/observability/galileo)).
 
 ### Managed enterprise export
 
@@ -496,7 +882,7 @@ actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI
 Defense destination is the only optional exporter allowed to receive those
 actions. That exclusivity applies to the release-owned managed inventory
-actions; canonical `ai_discovery` records continue to follow the compiled v8
+actions; `ai_discovery` records continue to follow the
 destination policy and also reach the generated destination in managed mode.
 
 ### Splunk: AI Discovery Inventory
@@ -507,11 +893,34 @@ The dashboard reads from the `defenseclaw_demo_ai_discovery_events` macro and br
 
 ### Grafana
 
-The local observability stack ships `defenseclaw-ai-discovery.json` with parallel panels:
+The local observability stack ships the **AI Agent Usage & Detection** board
+(`defenseclaw-ai-discovery`), built on:
 
-- Prometheus counters: `defenseclaw_ai_discovery_signals_total{state, category}`
-- Loki queries: `{event_type="ai_discovery"}`
-- OTel logs: `defenseclaw.ai.discovery.*`
+- Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
+  `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
+  gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
+  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai`, and
+  `defenseclaw_ide_plugin_enabled`; the sample without labels is the current
+  total). The board queries the exported label names directly, including for
+  a plain `otlp` destination.
+- Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
+  records.
+- Tempo: the discovery scan traces.
+
+Its **IDE plugins** section shows the plugin count by IDE, AI against other
+plugins, disabled plugins and a per-user table. The `$user` box narrows the
+Loki panels to one user by `user.id`, account name or principal.
+
+Its **Sandbox signals** section lists what AI discovery found
+[inside OpenShell sandboxes](#inside-openshell-sandboxes), one row per
+sandbox and component, from the `ai_component.*` records that carry
+`defenseclaw.sandbox.name`. The `$sandbox` box narrows that table and the
+per-signal log to one sandbox; All keeps the host's own records in the log.
+The metric panels count the host's and the sandboxes' signals together:
+sandbox names are never metric labels. They, and every other panel the box
+does not narrow, say **(all names)** in their title or their section's.
+
+![Grafana AI Agent Usage & Detection board, Sandbox signals section: a row for each AI component found inside the sandbox, with its vendor, product, component category and whether the record says it was discovered or removed](/images/grafana/ai-discovery-sandbox.png)
 
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 
@@ -540,6 +949,9 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     defaults cannot be removed.
   </Step>
   <Step>
+    **IDE inventory is bounded and scoped.** The IDE scan reads small metadata files only (never extension contents, settings or credentials), hashes every path, and runs per user so rows stay with the account that owns them. `ai_discovery.ide_inventory` narrows it to AI plugins or turns it off. See [IDE plugin inventory](#privacy-and-scope).
+  </Step>
+  <Step>
     **HMAC-stamped events.** Continuous-discovery events are signed with a per-installation HMAC (`PayloadHMAC` on the gateway envelope). Tampering downstream of the gateway is detectable.
   </Step>
   <Step>
@@ -550,9 +962,9 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
   </Step>
 </Steps>
 
-On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
+On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. Without Full Disk Access the scan does not open the folders that make macOS prompt the user (Desktop, Documents, Downloads, Movies, Music, Pictures, iCloud Drive, `~/Library/Containers`, `~/Library/Group Containers` and Contacts data); it skips them without counting an error. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
-The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
+The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 
 ## Runtime planes: what actually ran
 
@@ -567,7 +979,7 @@ a sequence of host actions add up to a chain?
 | Question | Answered by |
 | --- | --- |
 | What AI is **present**? | Discovery / AIBOM |
-| What AI is **allowed**? | [Registry](/docs/setup/registries) |
+| What AI is **allowed**? | [Registry](/docs/scanning/registries) |
 | What AI **actually ran, and where did it send data**? | Runtime planes |
 
 Neither half produces the interesting pair alone. *Present but never running*
@@ -576,7 +988,7 @@ present* is an agent that arrived by a path the inventory does not cover, and
 only the runtime planes see that.
 
 ```bash
-# Selects all three planes by default. Use --no-enable-host-plane for A/B only.
+# A new configuration gets planes A and B. Add --enable-host-plane for Plane C.
 defenseclaw agent discovery runtime enable --restart
 defenseclaw agent discovery runtime selftest
 defenseclaw agent discovery runtime findings
@@ -588,7 +1000,7 @@ defenseclaw agent discovery runtime findings
 | --- | --- | --- |
 | **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
 | **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
-| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`), `cn_proc` + `fanotify`, the Windows Security event log |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`); `cn_proc` + `fanotify`, or Tetragon on a managed Linux computer that runs it; the Windows Security event log |
 
 Plane A only raises a heartbeat inside a scriptable runtime or a known model
 server. A compiled application burning CPU is a compiled application burning
@@ -601,12 +1013,12 @@ framework running inside a bare `python3` is invisible to it.
 
 <Callout type="warning" title="The runtime planes read more than the inventory does">
 argv is collected, and it is classified as **content** on the wire — each
-destination's [redaction profile](/docs/reference/redaction) governs whether it
+destination's [redaction profile](/docs/observability/redaction) governs whether it
 leaves the host. Provider hostnames are content for the same reason.
 Environment variable *values* are never read on any runtime path, matching the
-inventory scanner's names-only rule. Enabling runtime or continuous discovery
-selects all three planes and prints a Plane C warning; use
-`--no-enable-host-plane` for an A/B-only runtime. DNS capture remains a separate
+inventory scanner's names-only rule. Enabling runtime or continuous discovery on a
+new configuration selects planes A and B; pass `--enable-host-plane` to add
+Plane C, which prints a warning. DNS capture remains a separate
 explicit opt-in.
 </Callout>
 
@@ -618,19 +1030,33 @@ which parts it has rather than implying it has all of them.
 | Platform | Source | Needs | Delivers | Does not |
 | --- | --- | --- | --- | --- |
 | macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | all six kinds: exec with argv, exit, file read/write on watched paths, and account/privilege events recognised from the exec argument vector | — |
-| Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
+| Linux | `cn_proc` netlink | `CAP_NET_ADMIN` | exec, exit, uid/gid changes. The name and arguments are read from `/proc` after the event, so a short-lived process can lose them | The executable's path from the start of the process, container identity |
 | Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
+| Linux, managed enterprise | Tetragon, read by the root sensor helper | Nothing at the gateway. Tetragon's API is root-only, so a per-user install never connects to it | Exec and exit with the binary, arguments, user and parent recorded in the kernel at the exec; the container a process belongs to. In `observe` and `enforce` modes also file opens of credential, persistence and agent-config paths, and connects per binary | Windows and macOS: Tetragon has no agent for either |
 | Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
 
-The Linux halves start independently. An unprivileged host gets `cn_proc` with
-the file half honestly reported absent, which beats losing the plane to one
-missing capability — and the snapshot reports it as *partially covered* rather
-than complete.
+The Linux halves start independently. A host that has `CAP_NET_ADMIN` but not
+`CAP_SYS_ADMIN` gets `cn_proc` with the file half honestly reported absent,
+which beats losing the plane to one missing capability — and the snapshot
+reports it as *partially covered* rather than complete. A host with neither
+capability gets neither half, and the snapshot names the capability that is
+missing. On a managed Linux computer the root sensor helper holds the
+capabilities, and uses Tetragon when the computer runs it; see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon).
 
 Windows has two prerequisites that fail differently and are therefore reported
 differently: Advanced Audit Policy for the events at all, and the separate
 command-line policy for argv. Without the second, lineage still works and
 argument-vector tactics do not.
+
+On Windows the plane reads the Security log from the last record it read, and
+it reads file and account events before process events. A burst of process
+starts, such as a scheduled task looping a short command, delays a file write
+that comes after it by about 30 seconds at most: the write waits for the
+process events ahead of it, so it can still be traced to the agent whose
+process made it. A reader that falls behind is listed in `degraded_reasons` as
+`agent actions partially covered: Security event log reader is behind ...`
+until it catches up. Process events are delayed then, not skipped.
 
 ```powershell
 # Windows, elevated: the events themselves
@@ -669,7 +1095,8 @@ defenseclaw agent discovery runtime permissions --grant
 
 Every command is printed before anything runs, and the confirmation is not
 skippable without `--yes`. `--revert` undoes exactly what `--grant` applied.
-On Linux that is one `setcap` on the gateway binary; on Windows it is the
+On Linux that is one `setcap` on the gateway binary (it includes
+`cap_net_admin` for `cn_proc`); on Windows it is the
 three audit subcategories plus the command-line policy, which needs an
 already-elevated prompt. Nothing grants more than the requirement it names —
 notably there is no blanket SACL on Windows, because auditing every object on
@@ -691,12 +1118,12 @@ wrong answer about a machine you are not on.
 
 **Unmanaged install — the operator grants these directly**
 
-| | macOS | Linux | Windows |
+| Signal | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
 | **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
 | **B** DNS naming | root, for `/dev/bpf` | `CAP_NET_RAW` | elevated token |
-| **C** process + identity events | root **and** Full Disk Access | nothing | elevated **and** Advanced Audit Policy |
+| **C** process + identity events | root **and** Full Disk Access | `CAP_NET_ADMIN` (`cn_proc`) | elevated **and** Advanced Audit Policy |
 | **C** file events | included above | `CAP_SYS_ADMIN` (fanotify) | a SACL per audited object |
 | **C** command lines | included above | included above | the separate command-line audit policy |
 
@@ -705,19 +1132,24 @@ missed:
 
 <Callout type="warn">
 **macOS Full Disk Access applies to the responsible process** — the terminal
-or daemon that launched the gateway, not the gateway binary. Without it,
-Endpoint Security refuses the client outright even when running as root, and
-Plane C reports itself stopped with Apple's own message.
+or daemon that launched the gateway, not the gateway binary. On a managed Mac
+that is the root sensor helper, `defenseclaw-sensor-helper`; the
+[macOS enterprise guide](/docs/enterprise/macos#ai-discovery-plane-c-endpoint-security)
+has the PPPC payload. Without it, Endpoint Security refuses the client
+outright even when running as root, and Plane C reports itself stopped with
+Apple's own message.
 
 **Windows argv is a second policy.** The audit subcategories turn the events
 on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors
 inside them. With only the first, lineage works and nearly every tactic
 silently does not.
 
-**Linux Plane C has two independent halves.** `cn_proc` needs nothing, so
-process events work unprivileged; `fanotify` needs `CAP_SYS_ADMIN`. The plane
-starts on whichever half it can and reports the other absent, rather than
-failing whole.
+**Linux Plane C has two independent halves.** `cn_proc` needs
+`CAP_NET_ADMIN`: subscribing to the kernel's process connector is a
+privileged netlink operation, so an unprivileged account gets no process
+events from it. `fanotify` needs `CAP_SYS_ADMIN`. The plane starts on
+whichever half it can and reports the other absent, rather than failing
+whole. `defenseclaw agent discovery runtime permissions --grant` applies both.
 </Callout>
 
 **Managed enterprise install — the installer arranges these**
@@ -725,18 +1157,19 @@ failing whole.
 The gateway is deliberately de-privileged here, so with one exception these
 grants do not go to it:
 
-| | macOS | Linux | Windows |
+| Setting | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | virtual service account |
+| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
 | Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
 | Who holds the privilege | the gateway | the helper (root) | the helper |
 | Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
 
 macOS is the exception: its managed gateway already runs as root for an
 unrelated reason, so there is nothing to broker and the only outstanding grant
-is the TCC profile. Linux and Windows de-privilege the gateway, so the helper
-holds the capabilities instead and the operator grants nothing at the gateway
-at all.
+is the TCC profile. Linux and Windows use the helper for sensor acquisition.
+On Windows the gateway's LocalSystem token is write-restricted, but reads
+outside user profiles are checked as LocalSystem; it refuses profile paths
+and its scanner children inherit that token.
 
 ### Where the privilege lives
 
@@ -767,17 +1200,17 @@ root process into a general-purpose file reader.
 
 | Setting | Value |
 | --- | --- |
-| `ai_discovery.runtime.acquisition` | `auto` (default), `direct`, or `helper` |
 | Transport | `AF_UNIX` socket, mode `0660`, owned by the gateway's group |
 | Peer check (Linux, macOS) | kernel-supplied uid via `SO_PEERCRED` / `LOCAL_PEERCRED`, which the peer cannot forge |
 | Peer check (Windows) | the socket DACL, refused in-kernel at open |
 | Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
 
-`auto` brokers only where the gateway was de-privileged *and* a helper is
-therefore installed. It reads directly on a managed macOS host, because that
-gateway is already root and a broker would add a failure mode for nothing, and
-on an unmanaged workstation, where there is no helper to ask and the honest
-answer is to read what it can and report the shortfall.
+The gateway brokers through the helper only where it was de-privileged *and* a
+helper is therefore installed. It reads directly on a managed macOS host,
+because that gateway is already root and a broker would add a failure mode for
+nothing, and on an unmanaged workstation, where there is no helper to ask and
+the honest answer is to read what it can and report the shortfall. The choice
+is automatic; there is no setting for it.
 
 With the helper running, that same sandboxed Linux gateway reports
 `degraded: false` and detects a full credential-access → identity-creation →
@@ -797,7 +1230,7 @@ the socket DACL manually:
 
 ```powershell
 Get-Service DefenseClawSensorHelper, DefenseClawGateway
-defenseclaw enterprise windows status --json
+defenseclaw.exe enterprise windows status --json
 defenseclaw agent discovery runtime permissions
 defenseclaw agent discovery runtime selftest
 ```
@@ -805,7 +1238,8 @@ defenseclaw agent discovery runtime selftest
 If the helper is absent, stopped, or its protected socket cannot be opened,
 runtime coverage reports degraded rather than silently falling back to a
 privileged gateway. Stage the approved helper binary and run enterprise
-`repair`; see [Managed enterprise deployment](/docs/setup/enterprise-deployment).
+`repair`; see [Secure Client managed deployment](/docs/enterprise/secure-client#troubleshooting)
+or [Troubleshooting](/docs/enterprise/troubleshooting) for the standalone profile.
 
 <Callout type="warn">
 The helper needs `CAP_CHOWN` alongside the capabilities acquisition uses. It
@@ -814,6 +1248,73 @@ root-owned, the gateway cannot open it, and the helper would otherwise come up
 reporting success while brokering nothing. The listener verifies the ownership
 took and refuses to start rather than allow that.
 </Callout>
+
+### Plane C on managed Linux: Tetragon
+
+If a managed Linux computer already runs [Tetragon](https://tetragon.io), the
+sensor helper reads its events over Tetragon's root-owned Unix socket and uses
+them as Plane C's process source. That is the default mode (`consume`), but
+it works only when Plane C is on: set `ai_discovery.runtime.enabled` and
+`ai_discovery.runtime.enable_host_plane` to `true`, because Plane C is opt-in
+(with it off, the Tetragon mode is `off`). The benefit is accuracy: Tetragon records a
+process's binary, arguments, user and parent in the kernel at the exec, where
+`cn_proc` reads `/proc` afterwards and loses fast processes, and it marks
+processes that belong to a container so they are never scored as a host
+agent. If Tetragon is absent, stopped, listening on TCP or an unsupported
+version, the same stream falls back to `cn_proc` and `fanotify` and says why.
+
+Two further modes, `observe` and `enforce`, add DefenseClaw's own policies
+to that Tetragon. `observe` records file opens of credential, persistence and
+agent-configuration paths and connects per binary. `enforce` lets two fixed
+controls deny, only after an administrator approves them. Hooks and
+OpenShell keep their roles; see
+[Agent segmentation, visibility and enforcement](/docs/segmentation). The
+setup, the readiness check and the pause runbook are on
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon),
+and the settings are under
+[`enterprise.tetragon`](/docs/enterprise/configuration#tetragon-linux).
+
+If you run Tetragon policies of your own on kprobe or LSM hooks, the helper
+also reports their events when they hit an AI agent (`customer_events`, on by
+default in `consume`, `observe` and `enforce`). Each record names the policy,
+the action, the outcome (`observed`, `would_block` or `blocked`) and the
+target, and carries the agent, the user and the hook decision it belongs to.
+Events from outside an agent's process tree are counted per policy and not
+exported. DefenseClaw never changes, loads or deletes your policies, and these
+events are not scored as findings.
+
+A per-user (open-source) install never connects to Tetragon: its socket is
+root-only and grants control of kernel policy. `defenseclaw doctor` and
+`runtime permissions` say so when Tetragon is present, and `doctor` warns when
+Tetragon serves its API on a TCP port.
+
+Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
+packages ship no `defenseclaw` command line or TUI in this release (the
+per-user installer refuses to run on a managed computer). So the TUI Runtime
+panel, `agent discovery runtime status` and `defenseclaw doctor` have no
+managed Tetragon lines. The administrator's surfaces are the Go commands
+(`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`,
+`enterprise linux tetragon verify`, `tetragon status` and
+`defenseclaw-gateway status`), the telemetry and the agent's own answers.
+
+When the Plane C entry carries a backend, `enterprise linux discovery` adds
+lines for it under agent actions:
+
+```text
+kernel sensor: Tetragon v1.7.1, enforce, 0 events lost
+kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days
+your Tetragon policies: 4 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)
+```
+
+The second line appears only when DefenseClaw's kernel controls are loaded
+(`observe` or `enforce`), and the third only when Tetragon has policies of
+yours. "next ready" is calendar time at the user's rate of agent use so far,
+shown once the burn-in window is a day old. During a pause the second line
+ends with `; paused until <time>`. The third line counts the events of your
+policies that the gateway recorded below an AI agent since it started, and
+"over the budget" only the ones the helper did not forward because they went
+over the volume limit. `--json` includes the backend. When the number of lost events
+is not known, the line says so instead of showing zero.
 
 ### Naming a peer: DNS capture
 
@@ -833,6 +1334,13 @@ No `tcpdump` subprocess on any platform, and no third-party capture driver on
 Windows. A capture that cannot start is degraded coverage rather than fatal:
 the reverse resolver still names peers, less confidently, and the snapshot says
 so.
+
+`dns_capture` is off by default. While it is off (or cannot start), `runtime
+status` and `selftest` show the shadow egress mechanism as, for example,
+`lsof(8); peers named by reverse DNS (dns_capture off)`, and `runtime
+permissions` lists the DNS naming grant as `[off]` rather than `[MISSING]`.
+Turn it on with `defenseclaw agent discovery runtime enable --dns-capture`. It
+needs root on macOS (for `/dev/bpf`) and `CAP_NET_RAW` on Linux.
 
 ### Every host-plane signal is gated on agent lineage
 
@@ -930,7 +1438,7 @@ leave no trace, and absence is the hardest thing to alert on.
 | --- | --- |
 | `--poll-interval-s` | Seconds between polls (5–3600). Also the window that distinguishes sustained inference from a momentary CPU spike. |
 | `--min-risk-to-report` | Reporting floor (1–100). Defaults to 30, the medium band. |
-| `--enable-host-plane` | Select Plane C. Runtime enablement defaults this on; pass `--no-enable-host-plane` for A/B only. Listing `c` in `planes` without this is ignored. |
+| `--enable-host-plane` | Select Plane C. New configurations default this off, and omitting the flag keeps the current setting; pass `--no-enable-host-plane` to turn it off. Listing `c` in `planes` without this is ignored. |
 | `--dns-capture` | Name peers from the answer the process received rather than inferring from an address. Needs elevated privilege. |
 
 Two knobs are config-only, because neither belongs in a one-shot command:
@@ -958,15 +1466,24 @@ inventory disagreed.
 
 ### Where the data lands
 
-Three canonical v8 log families under the existing `ai.discovery` bucket, so
+Five log families under the existing `ai.discovery` bucket, so
 presence and behaviour share one bucket, one destination policy, and one set of
 dashboards:
 
 | Event | Carries |
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
-| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage. Records now name the user and agent identity, the event source (`tetragon`, `cn_proc`, `fanotify`, ...) and, on managed Linux, whether a hook decision matched (`hook_seen`) |
+| `ai.runtime.plane_health` | One running plane per poll cycle. Plane C also reports its backend (`tetragon` or `native`), the mechanism, lost events and container events. On managed Linux with Tetragon it adds the fleet fields: the Tetragon version, the helper mode, whether `enforce_ack` approves this build, the users enrolled, enforced and in burn-in, whether enforcement is paused, and the would-block, blocked and customer-event counts for the cycle |
+| `ai.runtime.kernel_policy` | One record per change of the Linux kernel controls (a policy loaded, a mode changed, a pause, a user ready or back in burn-in), and one every 6 hours per user in burn-in with the covered and needed hours (`uid_progress`). Never one per event. Managed Linux with Tetragon only |
+| `ai.runtime.kernel_event` | One record per attributed event of your own Tetragon policies (kprobe and LSM) below an AI agent, after repeats are folded: the policy, hook type, function, action, mode, outcome, target and tags, with the agent, the user and the hook join. Managed Linux with Tetragon only; `customer_events: off` stops them |
+
+A running plane emits about one health record per poll cycle (roughly once a
+minute with the default runtime poll), per enabled destination that routes
+ai.discovery logs. Unselected or stopped planes emit no recurring health
+record. Exclude the ai.discovery bucket from a destination route to remove
+this stream there; this also removes runtime findings and discovery events on
+that route. Local sensor status still reports every plane.
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
 
@@ -983,12 +1500,17 @@ visible — press `p` to expand each plane's reason — and coverage sits in the
 header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
-inventory verdict including `unobserved`.
+inventory verdict including `unobserved`. Neither shows Tetragon: only a
+managed Linux gateway reports it, the managed Linux packages ship no TUI in
+this release (see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
+app manages only the Mac's own gateway.
 
 ## Use it alongside Registry
 
-Discovery tells you *what's there*. The [Registry](/docs/setup/registries)
-tells you *what's allowed*. The runtime planes tell you *what actually ran*.
+Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
+tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
+say what is never or always allowed. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -1000,10 +1522,13 @@ A common production pattern:
     Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
   </Step>
   <Step>
-    Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
+    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
   </Step>
   <Step>
     Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
+  </Step>
+  <Step>
+    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
   </Step>
 </Steps>
 
@@ -1011,7 +1536,7 @@ A common production pattern:
 
 <Accordions>
   <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
+    `defenseclaw agent discover --json | jq '[.agents[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
   </Accordion>
   <Accordion title="Trigger a fresh scan after onboarding a tool">
     `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
@@ -1034,7 +1559,7 @@ A common production pattern:
 
 - [Observability](/docs/observability) — where the discovery events actually surface
 - [Splunk](/docs/observability/splunk) — the AI Discovery Inventory dashboard
-- [Capability Matrix](/docs/capability-matrix) — what hooks each discovered connector exposes
-- [Setup → Skill Scanner](/docs/setup/skill-scanner) and [MCP Scanner](/docs/setup/mcp-scanner) — what to do *with* discovered skills and MCP servers
+- [Capability Matrix](/docs/connectors/capability-matrix) — what hooks each discovered connector exposes
+- [Setup → Skill Scanner](/docs/scanning/skill-scanner) and [MCP Scanner](/docs/scanning/mcp-scanner) — what to do *with* discovered skills and MCP servers
 - [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
-- [Reference → Redaction](/docs/reference/redaction) — which field classes govern argv and provider hostnames
+- [Reference → Redaction](/docs/observability/redaction) — which field classes govern argv and provider hostnames

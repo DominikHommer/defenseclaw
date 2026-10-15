@@ -52,9 +52,21 @@ const (
 	// that do not produce a filesystem event (notably Windows registry policy)
 	// and retries watches for policy directories created after startup.
 	defaultHookGuardPolicyAuditInterval = 30 * time.Second
+	// hookGuardSupersededGrace is how long a newer setup selection may
+	// supersede this gateway before it is reported as degraded. A setup
+	// command that restarts the gateway hands off well inside it (GAP-1412).
+	hookGuardSupersededGrace = 90 * time.Second
+
+	// hookGuardBusyRearmMaxDelay caps the backoff between repairs re-armed
+	// after another process held a connector file open.
+	hookGuardBusyRearmMaxDelay = 30 * time.Second
 )
 
 var newHookConfigFSWatcher = fsnotify.NewWatcher
+
+// errHookRepairSuppressed is the repairCurrent answer inside the suppression
+// window, while the writes of a recent Setup or a connector switch settle.
+var errHookRepairSuppressed = errors.New("hook registration repair is suppressed during connector transition")
 
 type hookRuntimePolicy struct {
 	hookFailMode  string
@@ -63,6 +75,15 @@ type hookRuntimePolicy struct {
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
+
+// hookGuardRepairOutcome is the terminal result of one Setup-backed repair.
+// rearmed reports that the repair failed only because another process held a
+// connector file open and the guard queued another attempt on its own.
+type hookGuardRepairOutcome struct {
+	connector string
+	err       error
+	rearmed   bool
+}
 
 // HookConfigGuard watches the active connector's agent config file(s) and
 // auto-heals (re-installs) the DefenseClaw hook block when a user deletes or
@@ -111,7 +132,24 @@ type HookConfigGuard struct {
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
-	done              chan struct{}
+	// A failed fail-mode re-render is retried by the policy audit even for
+	// hook-only connectors that have no periodic registration audit.
+	pendingPolicyRefresh bool
+	// supersededSince is when a newer setup selection was first seen.
+	supersededSince time.Time
+	// busyRepairs counts consecutive repairs that failed on a busy connector
+	// file; it sets the re-arm backoff and resets after any other outcome.
+	busyRepairs int
+	// lastHealFailure is the self-heal failure last reported. The same
+	// failure again (the next audit tick, a SessionStart) writes no log line,
+	// alert or audit row until the contract is current or the failure changes:
+	// a Codex update raised a HIGH alert every 30 s (GAP-0132).
+	lastHealFailure string
+	// repairObserver receives every repair outcome after audit, telemetry and
+	// the heal notifier have run. Tests use it as the repair-completed /
+	// repair-failed event instead of polling the files Setup is replacing.
+	repairObserver func(hookGuardRepairOutcome)
+	done           chan struct{}
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
@@ -609,6 +647,10 @@ func (g *HookConfigGuard) repairCurrent(
 	if dataDir != "" && !sameHookGuardDataDir(opts.DataDir, dataDir) {
 		return errors.New("hook registration guard owns a different data home")
 	}
+	// installedFailMode is the hook fail mode the connector's hooks were last
+	// rendered with; the resolver below replaces it with the current one.
+	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
+	renderedOpts := opts
 	var releasePolicy func()
 	if policyResolver != nil {
 		policy, release, ok := policyResolver(conn.Name())
@@ -639,7 +681,15 @@ func (g *HookConfigGuard) repairCurrent(
 		baseCtx = ctx
 	}
 
-	present, err := connector.OwnedHooksPresent(conn, opts)
+	// Check the files against the policy that rendered them. A legitimate
+	// fail-mode change makes Windows Codex evidence differ from the new
+	// options even while every stored registration is intact.
+	failModeDrift := policyResolver != nil && installedFailMode != "" && installedFailMode != opts.HookFailMode
+	checkOpts := opts
+	if failModeDrift {
+		checkOpts = renderedOpts
+	}
+	present, err := connector.OwnedHooksPresent(conn, checkOpts)
 	if err != nil {
 		if releasePolicy != nil {
 			releasePolicy()
@@ -677,7 +727,7 @@ func (g *HookConfigGuard) repairCurrent(
 			}
 			return baseCtx.Err()
 		}
-		present, err = connector.OwnedHooksPresent(conn, opts)
+		present, err = connector.OwnedHooksPresent(conn, checkOpts)
 		if err != nil {
 			if releasePolicy != nil {
 				releasePolicy()
@@ -687,7 +737,7 @@ func (g *HookConfigGuard) repairCurrent(
 		}
 	}
 	evidenceCurrent, err := connector.HookRuntimeRegistrationCurrent(
-		opts,
+		checkOpts,
 		conn,
 		version.Current().BinaryVersion,
 	)
@@ -699,19 +749,216 @@ func (g *HookConfigGuard) repairCurrent(
 		return err
 	}
 	g.clearPolicyFailure()
-	if present && evidenceCurrent {
+	// The registration can be intact while the rendered hooks bake a stale
+	// hook fail mode: a guardrail mode change (action implies the global fail
+	// mode, observe implies open) never touches the hook entries themselves.
+	if present && evidenceCurrent && !failModeDrift {
+		g.setHealFailure("")
 		return nil
 	}
+	requested := append([]string(nil), changed...)
 	if present && !evidenceCurrent {
 		changed = append(changed, "stale runtime registration evidence")
 	}
 	if suppressed {
-		return errors.New("hook registration repair is suppressed during connector transition")
+		return errHookRepairSuppressed
 	}
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	return g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	if present && evidenceCurrent {
+		err = g.refreshFailModeLocked(baseCtx, conn, opts, releasePolicy)
+	} else {
+		err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	}
+	if policyResolver != nil {
+		if err == nil {
+			g.adoptRenderedPolicy(opts)
+		} else {
+			// Setup can resync watcher targets before reporting failure. Keep
+			// the recorded fail mode at the last successfully rendered value
+			// so the next audit still sees the drift.
+			g.adoptRenderedPolicy(renderedOpts)
+		}
+	}
+	outcome := hookGuardRepairOutcome{
+		connector: conn.Name(),
+		err:       err,
+		rearmed:   g.rearmAfterBusyRepair(requested, err),
+	}
+	g.mu.Lock()
+	observe := g.repairObserver
+	g.mu.Unlock()
+	if observe != nil {
+		observe(outcome)
+	}
+	return err
+}
+
+// RefreshPolicy re-renders the connector's hooks when the effective hook fail
+// mode now differs from the one they were rendered with. The sidecar calls it
+// after a reload publishes a policy that changes the fail mode (for example
+// guardrail.mode action), so the generated hook scripts follow config instead
+// of waiting for a gateway restart. A guard whose hooks are intact and
+// current does nothing.
+//
+// Inside the suppression window of a recent re-render or connector switch it
+// waits the window out and checks again: no later reload asks for this fail
+// mode again, so a second mode change within seconds of the first would
+// otherwise leave the hooks on the previous fail mode (GAP-0317).
+func (g *HookConfigGuard) RefreshPolicy(ctx context.Context) error {
+	for {
+		err := g.repairCurrent(ctx, "", "", []string{"effective hook policy changed"})
+		if !errors.Is(err, errHookRepairSuppressed) {
+			g.mu.Lock()
+			g.pendingPolicyRefresh = err != nil && g.started && !g.retiring
+			g.mu.Unlock()
+			return err
+		}
+		if err := g.waitSuppressionWindow(ctx); err != nil {
+			g.mu.Lock()
+			g.pendingPolicyRefresh = g.started && !g.retiring
+			g.mu.Unlock()
+			return err
+		}
+	}
+}
+
+// waitSuppressionWindow returns when the current suppression window ends, or
+// with an error when ctx ends or the guard stops first.
+func (g *HookConfigGuard) waitSuppressionWindow(ctx context.Context) error {
+	g.mu.Lock()
+	wait := time.Until(g.suppressUntil)
+	guardCtx := g.ctx
+	g.mu.Unlock()
+	if wait <= 0 {
+		return nil
+	}
+	if guardCtx == nil {
+		return errors.New("hook registration guard is not active")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-guardCtx.Done():
+		return errors.New("hook registration guard is retiring")
+	}
+}
+
+// activeConnector is the connector this guard currently owns, or nil.
+func (g *HookConfigGuard) activeConnector() connector.Connector {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.conn
+}
+
+// adoptRenderedPolicy records the policy the hooks were just rendered with,
+// so the next check compares against it. Caller holds repairMu.
+func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
+	g.mu.Lock()
+	g.opts.HookFailMode = opts.HookFailMode
+	g.opts.GuardrailMode = opts.GuardrailMode
+	g.opts.HILTEnabled = opts.HILTEnabled
+	g.mu.Unlock()
+}
+
+// refreshFailModeLocked re-runs Setup for a connector whose registration is
+// intact but was rendered with another hook fail mode. It is a policy
+// refresh, not a repair: no tamper audit row and no heal notification.
+// Caller holds repairMu.
+func (g *HookConfigGuard) refreshFailModeLocked(
+	baseCtx context.Context,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	releasePolicy func(),
+) error {
+	connName := conn.Name()
+	g.mu.Lock()
+	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
+	g.mu.Unlock()
+
+	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
+	defer cancel()
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
+	if releasePolicy != nil {
+		releasePolicy()
+	}
+	err := setupErr
+	if err == nil {
+		present, presentErr := connector.OwnedHooksPresent(conn, opts)
+		if presentErr != nil {
+			err = presentErr
+		} else if !present {
+			err = errors.New("effective hook contract is inactive after the re-render")
+		}
+	}
+	if err == nil {
+		// The re-render changed the script digests and the baked fail mode, so
+		// the hook contract lock follows for every connector, as at gateway boot.
+		err = publishFreshHookRegistrationEvidence(opts, conn)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-render %s hooks for hook fail mode %s failed: %v\n", connName, opts.HookFailMode, err)
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+			fmt.Sprintf("failed to re-render %s hooks for hook fail mode %s", connName, opts.HookFailMode), err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[hook-guard] re-rendered %s hooks for hook fail mode %s\n", connName, opts.HookFailMode)
+	emitLifecycle(baseCtx, "hook_guard", "refreshed", map[string]string{"connector": connName})
+	return nil
+}
+
+// rearmAfterBusyRepair queues another repair when Setup failed only because
+// another process held a connector file open. Without it the hook block stays
+// missing until some unrelated edit produces a new file event, because the
+// failed attempt's own writes fall inside the self-write suppression window.
+// Consecutive busy failures back off from the debounce interval up to
+// hookGuardBusyRearmMaxDelay. Caller holds repairMu.
+func (g *HookConfigGuard) rearmAfterBusyRepair(requested []string, err error) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err == nil || !connector.FileBusyError(err) || !g.started || g.retiring || len(requested) == 0 {
+		g.busyRepairs = 0
+		return false
+	}
+	delay := g.debounce << min(g.busyRepairs, 6)
+	if delay <= 0 || delay > hookGuardBusyRearmMaxDelay {
+		delay = hookGuardBusyRearmMaxDelay
+	}
+	g.busyRepairs++
+	// Nothing was published, so there is no self-write to suppress. Events
+	// queued during the failed attempt join the re-armed request with the
+	// later due time: they keep the backoff, and an unrelated edit that
+	// arrived meanwhile keeps its path name.
+	g.suppressUntil = time.Time{}
+	due := time.Now().Add(delay - g.debounce)
+	if g.pending == nil {
+		g.pending = make(map[string]time.Time, len(requested))
+	}
+	for item, queued := range g.pending {
+		if queued.Before(due) {
+			g.pending[item] = due
+		}
+	}
+	for _, item := range requested {
+		if queued, ok := g.pending[item]; !ok || queued.Before(due) {
+			g.pending[item] = due
+		}
+	}
+	return true
 }
 
 // processPending evaluates debounced events: if any guarded config file no
@@ -761,6 +1008,8 @@ func (g *HookConfigGuard) processPolicyAudit() {
 	g.mu.Lock()
 	conn := g.conn
 	opts := g.opts
+	ctx := g.ctx
+	pendingRefresh := g.pendingPolicyRefresh
 	suppressed := time.Now().Before(g.suppressUntil)
 	if !suppressed && conn != nil && conn.Name() == "claudecode" {
 		// Recompute targets so newly created managed/project directories and
@@ -768,7 +1017,14 @@ func (g *HookConfigGuard) processPolicyAudit() {
 		g.applyTargetsLocked(conn, opts)
 	}
 	g.mu.Unlock()
-	if suppressed || conn == nil || (conn.Name() != "claudecode" && conn.Name() != "codex") {
+	if suppressed || conn == nil {
+		return
+	}
+	if pendingRefresh {
+		_ = g.RefreshPolicy(ctx)
+		return
+	}
+	if conn.Name() != "claudecode" && conn.Name() != "codex" {
 		return
 	}
 	reason := "periodic effective-policy audit"
@@ -781,6 +1037,21 @@ func (g *HookConfigGuard) processPolicyAudit() {
 func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {
 	message := err.Error()
 	g.mu.Lock()
+	if errors.Is(err, connector.ErrSetupSelectionSuperseded) {
+		// A setup command recorded a newer selection and is restarting the
+		// gateway: a planned handoff, not a degraded guardrail, unless it
+		// lasts past the grace window (GAP-1412).
+		now := time.Now()
+		if g.supersededSince.IsZero() {
+			g.supersededSince = now
+		}
+		if now.Sub(g.supersededSince) < hookGuardSupersededGrace {
+			g.mu.Unlock()
+			return
+		}
+	} else {
+		g.supersededSince = time.Time{}
+	}
 	if g.lastPolicyFailure == message {
 		g.mu.Unlock()
 		return
@@ -806,7 +1077,30 @@ func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err erro
 func (g *HookConfigGuard) clearPolicyFailure() {
 	g.mu.Lock()
 	g.lastPolicyFailure = ""
+	g.supersededSince = time.Time{}
 	g.mu.Unlock()
+}
+
+// setHealFailure records failure ("" once the contract is current) as the
+// self-heal failure last reported and returns whether it was already the
+// one reported, so the caller reports it only once.
+func (g *HookConfigGuard) setHealFailure(failure string) (repeat bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	repeat = failure != "" && g.lastHealFailure == failure
+	g.lastHealFailure = failure
+	return repeat
+}
+
+// healFailureHint ends a self-heal failure report on a per-user install,
+// where doctor's hook rows name the repair (after a Codex update: setup
+// codex re-selects the executable). A managed deployment's administrator
+// repairs it, so it gets no per-user command.
+func healFailureHint() string {
+	if gatewayRunsAsServiceAccount() {
+		return ""
+	}
+	return "; defenseclaw doctor names the fix"
 }
 
 // healLocked re-runs the connector Setup to re-install the hook block, emits
@@ -845,7 +1139,7 @@ func (g *HookConfigGuard) healLocked(
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	setupErr := conn.Setup(hctx, opts)
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
 
 	// Setup may have recreated a deleted parent directory even when a later
 	// verification step fails. Rebind before handling its result so the guard
@@ -858,15 +1152,18 @@ func (g *HookConfigGuard) healLocked(
 		if releasePolicy != nil {
 			releasePolicy()
 		}
-		recordTampered()
 		err := setupErr
-		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
+		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
+		if g.setHealFailure("setup: " + err.Error()) {
+			return err
+		}
+		recordTampered()
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v%s\n", connName, err, healFailureHint())
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
-		recordGatewayErrorV8(baseCtx, g.observabilityV8Runtime(), "hook_guard", "self-heal-failed")
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-				fmt.Sprintf("hook self-heal Setup failed: %v", err), "", connName)
+				fmt.Sprintf("hook self-heal Setup failed: %v%s", err, healFailureHint()), "", connName)
 		}
 		return err
 	}
@@ -876,16 +1173,19 @@ func (g *HookConfigGuard) healLocked(
 		if releasePolicy != nil {
 			releasePolicy()
 		}
-		recordTampered()
 		if err == nil {
 			err = fmt.Errorf("effective hook contract is still inactive")
 		}
-		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v\n", connName, err)
+		if g.setHealFailure("verify: " + err.Error()) {
+			return err
+		}
+		recordTampered()
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not restore enforcement: %v%s\n", connName, err, healFailureHint())
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("re-installed %s hook config but enforcement is still inactive", connName), err)
 		if g.logger != nil {
 			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-				fmt.Sprintf("hook self-heal verification failed: %v", err), "", connName)
+				fmt.Sprintf("hook self-heal verification failed: %v%s", err, healFailureHint()), "", connName)
 		}
 		return err
 	}
@@ -894,13 +1194,16 @@ func (g *HookConfigGuard) healLocked(
 			if releasePolicy != nil {
 				releasePolicy()
 			}
+			if g.setHealFailure("evidence: " + err.Error()) {
+				return err
+			}
 			recordTampered()
-			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v\n", connName, err)
+			fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks did not publish current registration evidence: %v%s\n", connName, err, healFailureHint())
 			emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 				fmt.Sprintf("re-installed %s hook config but registration evidence is unavailable", connName), err)
 			if g.logger != nil {
 				_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
-					fmt.Sprintf("hook self-heal registration evidence failed: %v", err), "", connName)
+					fmt.Sprintf("hook self-heal registration evidence failed: %v%s", err, healFailureHint()), "", connName)
 			}
 			return err
 		}
@@ -908,6 +1211,7 @@ func (g *HookConfigGuard) healLocked(
 	if releasePolicy != nil {
 		releasePolicy()
 	}
+	g.setHealFailure("")
 	recordTampered()
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)

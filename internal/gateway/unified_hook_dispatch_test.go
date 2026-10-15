@@ -18,7 +18,6 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -93,12 +92,14 @@ func TestHookProfileForConnector(t *testing.T) {
 	}{
 		{"codex", "codex", "codex", true, true, true},
 		{"claudecode", "claudecode", "claudecode", true, true, true},
-		// hermes has no Decode: its `extra` content is recovered by the
-		// generic decoder's ContentEnvelopeKey fallback.
+		// hermes has no Decode: the generic decoder reads its `extra`
+		// content from the ContentEnvelope its hook contract declares.
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", true, true, true},
 		{"devin", "devin", "devin", true, true, true},
-		{"openhands", "openhands", "openhands", false, true, true},
+		// openhands' Decode maps the CLI's PascalCase SDK event_type onto
+		// the contract's snake_case event names.
+		{"openhands", "openhands", "openhands", true, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {
@@ -260,12 +261,13 @@ func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
 // adapter contract so the regression cannot resurface.
 func TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	src := codexHookResponse{
-		Action:       "allow",
-		RawAction:    "block",
-		Severity:     "CRITICAL",
-		Mode:         "observe",
-		EvaluationID: "eval-codex-fixture",
-		RuleIDs:      []string{"SEC-ANTHROPIC"},
+		Action:               "allow",
+		RawAction:            "block",
+		Severity:             "CRITICAL",
+		Mode:                 "observe",
+		EvaluationID:         "eval-codex-fixture",
+		RuleIDs:              []string{"SEC-ANTHROPIC"},
+		SuppressNotification: true,
 	}
 	out := codexResponseToAgentHookResponse(src)
 	if out.EvaluationID != "eval-codex-fixture" {
@@ -274,16 +276,20 @@ func TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	if len(out.RuleIDs) != 1 || out.RuleIDs[0] != "SEC-ANTHROPIC" {
 		t.Errorf("RuleIDs = %v, want [SEC-ANTHROPIC]", out.RuleIDs)
 	}
+	if !out.SuppressNotification {
+		t.Error("asset-policy notification ownership was lost in Codex adapter")
+	}
 }
 
 func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
 	src := claudeCodeHookResponse{
-		Action:       "allow",
-		RawAction:    "block",
-		Severity:     "CRITICAL",
-		Mode:         "observe",
-		EvaluationID: "eval-claude-fixture",
-		RuleIDs:      []string{"SEC-AWS-KEY", "SEC-GITHUB-TOKEN"},
+		Action:               "allow",
+		RawAction:            "block",
+		Severity:             "CRITICAL",
+		Mode:                 "observe",
+		EvaluationID:         "eval-claude-fixture",
+		RuleIDs:              []string{"SEC-AWS-KEY", "SEC-GITHUB-TOKEN"},
+		SuppressNotification: true,
 	}
 	out := claudeCodeResponseToAgentHookResponse(src)
 	if out.EvaluationID != "eval-claude-fixture" {
@@ -292,38 +298,9 @@ func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.
 	if len(out.RuleIDs) != 2 {
 		t.Errorf("RuleIDs len = %d, want 2", len(out.RuleIDs))
 	}
-}
-
-// runHookHandler invokes a hook handler with the supplied JSON body
-// and returns the response body. We cannot use httptest.NewServer
-// because that would require a fully wired APIServer with audit +
-// otel + scanner dependencies — the parity contract is about wire
-// shape, so a minimal handler invocation is enough.
-func runHookHandler(t *testing.T, h http.HandlerFunc, body []byte) []byte {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/x/hook", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	h(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	if !out.SuppressNotification {
+		t.Error("asset-policy notification ownership was lost in Claude Code adapter")
 	}
-	return w.Body.Bytes()
-}
-
-// jsonEq is a lightweight JSONEq used by the parity tests. We do not
-// import testify in this package to keep the gateway test surface
-// dependency-light; reflect.DeepEqual on json.Unmarshal output is
-// sufficient because Go's json package normalizes map iteration.
-func jsonEq(a, b map[string]interface{}) bool {
-	ab, err := json.Marshal(a)
-	if err != nil {
-		return false
-	}
-	bb, err := json.Marshal(b)
-	if err != nil {
-		return false
-	}
-	return string(ab) == string(bb)
 }
 
 func contains(s, substr string) bool {

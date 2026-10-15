@@ -41,10 +41,21 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+{{if not .Sandbox}}
+# A personal hook left on a managed computer must not fall back to its
+# personal gateway port. The managed hook is published separately by machine
+# policy; this path is never allowed to approve a tool on that host.
+if [ -e /etc/defenseclaw/managed-runtime.json ] || [ -L /etc/defenseclaw/managed-runtime.json ] ||
+   [ -e /opt/cisco/defenseclaw/etc/managed-runtime.json ] || [ -L /opt/cisco/defenseclaw/etc/managed-runtime.json ]; then
+  echo "defenseclaw: this computer is managed; the personal Claude Code hook cannot approve this call" >&2
+  exit 2
+fi
+{{end}}
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   exit 0
 fi
@@ -58,13 +69,23 @@ fi
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status (a garbage DEFENSECLAW_SANDBOX_TOKEN earns a 401, a request flood a
+# 429, an unversioned placeholder a relay 500), so no failed, refused or
+# unparseable reply may ever turn into an allow.
+FAIL_MODE="closed"
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -113,13 +134,16 @@ if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; t
 fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
-fi
+{{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}"
+fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
 
-# Source the token file written by defenseclaw setup (0o600, never baked
+{{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}# Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). Connector-scoped sidecars override an inherited generic
 # gateway token; legacy .token files retain the explicit env override.
 if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
@@ -127,24 +151,78 @@ if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process (curl, jq, the
+# cold-started gateway) inherits the bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 # FAIL_MODE was already set above (before the missing-token branch).
 # Response-layer and transport-layer failures both respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 
-fail_unreachable() {
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"
-  if defenseclaw_should_fail_closed_on_unreachable; then
-    exit 2
+{{if and (not .Sandbox) (not .Managed)}}# claude_fail_closed_decision prints the JSON block decision for a prompt,
+# tool call or permission request that is blocked because the gateway did not
+# answer, with a plain sentence that names no internal file or shell syntax.
+# Per-user hooks only.
+claude_fail_closed_decision() {
+  local reason="" next="" event=""
+  # Managed hooks keep their own exit-2 contract and service wording.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+  elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+    reason="DefenseClaw blocked this: ${next//\`/}."
+  else
+    reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
-  exit 0
+  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+  case "$event" in
+    PreToolUse)
+      _dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' ;;
+    PermissionRequest)
+      _dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}' ;;
+    UserPromptSubmit|UserPromptExpansion)
+      _dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}' ;;
+    *) return 1 ;;
+  esac
+}
+
+{{end}}fail_unreachable() {
+  defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
+{{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
+  # prompt, every other hook a tool call.
+  case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+    UserPromptSubmit|UserPromptExpansion) defenseclaw_emit_unreachable_stderr "claude-code prompt" "$1" ;;
+    *) defenseclaw_emit_unreachable_stderr "claude-code tool" "$1" ;;
+  esac{{else}}  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"{{end}}
+  if defenseclaw_should_fail_closed_on_unreachable; then
+{{if and (not .Sandbox) (not .Managed)}}    # For an exit-2 block Claude Code prints the whole hook command line in
+    # front of the reason. A blocked prompt or tool call goes out as Claude's
+    # own JSON decision instead, which shows one plain sentence (GAP-1074);
+    # exit 2 stays the fallback when the JSON cannot be built.
+    local blocked=""
+    blocked="$(claude_fail_closed_decision "$1")" && [ -n "$blocked" ] && {
+      printf '%s\n' "$blocked"
+      exit 0
+    }
+{{end}}    exit 2
+  fi
+{{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+  # that this account's gateway is down and how to start it again.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{end}}  exit 0
 }
 
 fail_response() {
@@ -158,9 +236,28 @@ fail_response() {
   exit 2
 }
 
-AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Resolve write operands in the user's hook process; the managed gateway
+# cannot inspect this home under ProtectHome. Keep the payload off argv.
+_DC_RESOLVED_WRITES=
+if [ -z "${DEFENSECLAW_SESSION_FACTS_BIN:-}" ] ||
+   ! _DC_RESOLVED_WRITES="$("${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" ||
+   [ -z "${_DC_RESOLVED_WRITES}" ]; then
+  # A truncated fact map makes the gateway evaluate writes with incomplete
+  # evidence; an absent header would incorrectly permit local resolution.
+  _DC_RESOLVED_WRITES=eyJcdTAwMDB0cnVuY2F0ZWQiOiIxIn0
+fi
+RESOLVED_HEADER_ARGS=()
+if [ -n "${_DC_RESOLVED_WRITES}" ]; then
+  RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
+fi
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
@@ -181,17 +278,39 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
+# a reboot, for example): start it once and retry. See
+# defenseclaw_gateway_cold_start in _hardening.sh.
+# defenseclaw_gateway_post (_hardening.sh) hands curl the bearer and the
+# payload on descriptors, never on its command line.
+defenseclaw_hook_post() {
+  defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
+{{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
+RESPONSE=$(defenseclaw_hook_post) || {
+  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
+  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+}
+defenseclaw_retry_busy _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -214,8 +333,10 @@ fi
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+# alert is advisory (would_block=false): the notice printed above is all
+# Claude Code gets, and the tool runs, as with allow.
 case "$ACTION" in
-  allow|block|confirm) ;;
+  allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 

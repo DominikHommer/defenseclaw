@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -36,7 +37,10 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
+from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
+from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 
 if TYPE_CHECKING:
     from defenseclaw.scanner.rulepack import RulePackOverlayCache
@@ -276,8 +280,6 @@ def _external_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
     return detail
 
 
-
-
 @click.group()
 def skill() -> None:
     """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
@@ -383,9 +385,9 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
     installed under a connector (use ``skill list`` for that).
 
     \b
-    F-1481: by default this refuses to let ``npx`` fetch+execute the clawhub
-    package from the network at search time; pass --allow-remote-fetch to opt
-    into the original fetch-on-search behavior (supply-chain risk).
+    By default search does not let npx download and run the clawhub
+    package from the network. Pass --allow-remote-fetch to allow that
+    download (it runs third-party code from the npm registry).
 
     \b
     Examples:
@@ -397,7 +399,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
         argv = _resolve_clawhub_search_argv(query, allow_remote_fetch)
         result = _run_clawhub_process(argv, timeout=30)
     except (OSError, ValueError) as exc:
-        click.echo(
+        ux.echo(
             "error: clawhub not found — install the clawhub binary, or install "
             f"Node.js (npx) and pass --allow-remote-fetch to fetch it ({exc})",
             err=True,
@@ -410,7 +412,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
     if result.returncode != 0:
         stderr = result.stderr.strip()
         if _clawhub_unavailable(stderr):
-            click.echo(
+            ux.echo(
                 "error: skill registry unavailable — the 'clawhub' CLI failed to "
                 "load (it may be broken or not installed).\n"
                 "  Try: npx clawhub --version",
@@ -458,7 +460,7 @@ def search(app: AppContext, query: str, as_json: bool, allow_remote_fetch: bool)
         click.echo(json.dumps(rows, indent=2))
         return
 
-    click.echo(ux.dim("ClawHub registry results (remote — not your installed skills):"))
+    ux.echo(ux.dim("ClawHub registry results (remote — not your installed skills):"))
     click.echo(output)
 
 
@@ -474,10 +476,9 @@ def _run_openclaw(*args: str) -> str | None:
     to substring extraction when the whole stream isn't valid JSON.
     """
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         result = subprocess.run(
-            [*prefix, openclaw_bin(), *args],
+            [openclaw_bin(), *args],
             capture_output=True, text=True, timeout=30,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -511,15 +512,10 @@ def _run_openclaw(*args: str) -> str | None:
 
 
 def _api_bind_host(app: AppContext) -> str:
-    """Resolve the API bind address, mirroring sidecar.runAPI in Go.
+    """Resolve the host to dial for the sidecar API (config.APIBindHost in Go)."""
+    from defenseclaw.gateway import gateway_api_client_host
 
-    In standalone sandbox mode with a non-localhost guardrail host,
-    the Go gateway binds to guardrail.host (the bridge IP) instead
-    of 127.0.0.1.
-    """
-    if app.cfg.openshell.is_standalone() and app.cfg.guardrail.host not in ("", "localhost"):
-        return app.cfg.guardrail.host
-    return "127.0.0.1"
+    return gateway_api_client_host(app.cfg)
 
 
 def _sidecar_client(app: AppContext):
@@ -754,7 +750,31 @@ def _build_scan_map_for_connector(
     return scan_map
 
 
-def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
+def _skill_global_decisions(store, cfg=None) -> set[str]:
+    """Skills with an unscoped block, quarantine or disable decision.
+
+    Only a bare ``skill unblock`` clears these (see
+    ``_report_inherited_skill_state``).
+    """
+    if store is None:
+        return set()
+    try:
+        entries = asset_lists.merge_operator_entries(store.list_actions_by_type("skill"), cfg, "skill")
+    except Exception:
+        return set()
+    return {
+        e.target_name
+        for e in entries
+        if not e.connector
+        and (
+            e.actions.install == "block"
+            or e.actions.file == "quarantine"
+            or e.actions.runtime == "disable"
+        )
+    }
+
+
+def _build_actions_map(store, connector: str = "", cfg=None) -> dict[str, Any]:
     """Build a map of skill-name -> effective ActionEntry from the DB.
 
     Resolves most-specific-wins per action field (SK-4): a non-empty field in
@@ -767,7 +787,7 @@ def _build_actions_map(store, connector: str = "") -> dict[str, Any]:
     if store is None:
         return actions_map
     try:
-        entries = store.list_actions_by_type("skill")
+        entries = asset_lists.merge_operator_entries(store.list_actions_by_type("skill"), cfg, "skill")
     except Exception:
         return actions_map
     for e in entries:
@@ -884,7 +904,7 @@ def _skill_info_card(
         scan_entry = _latest_skill_scan_for_connector(app, skill_name, connector)
     elif skill_name in scan_map:
         scan_entry = scan_map[skill_name]
-    actions_map = _build_actions_map(app.store, connector)
+    actions_map = _build_actions_map(app.store, connector, app.cfg)
     scoped_action = None
     if suppress_global_action_only and connector and app.store is not None:
         try:
@@ -911,6 +931,10 @@ def _skill_info_card(
 
     if connector:
         info_map["connector"] = connector
+    if info_map.get("bundled"):
+        # Discovery-only: no scan or enforcement verdict applies (GAP-0393).
+        scan_entry = None
+        actions_map.pop(skill_name, None)
     if scan_entry is not None:
         info_map["scan"] = scan_entry
     action_entry = actions_map.get(skill_name)
@@ -919,6 +943,18 @@ def _skill_info_card(
         if not ae.actions.is_empty():
             info_map["actions"] = ae.actions.to_dict()
     info_map["disabled"] = _skill_effectively_disabled(info_map, action_entry)
+    if action_entry is not None and getattr(action_entry, "reason", ""):
+        # Why the watcher held the skill (a failed scan, a refused file, a
+        # failed quarantine), not only in gateway.log (GAP-0376).
+        info_map["reason"] = action_entry.reason
+    if scan_entry is not None or action_entry is not None:
+        label, _, reason = _skill_policy_verdict(
+            app, skill_name, skill=info_map, scan_entry=scan_entry,
+            action_entry=action_entry, connector=connector or "",
+        )
+        info_map["verdict"] = label
+        if reason:
+            info_map["verdict_detail"] = reason
     return info_map
 
 
@@ -936,7 +972,13 @@ def _print_skill_info_card(
         click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
     if info_map.get("filePath"):
         click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
-    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    eligible = info_map.get("eligible", False)
+    held = _skill_held_off(info_map) or info_map.get("verdict") in ("quarantined", "disabled")
+    # GAP-1320: "Eligible: True" is the connector's own check; say that
+    # DefenseClaw keeps a disabled or quarantined skill off. A block-list
+    # entry alone does not stop the copy on disk, so it gets no note.
+    note = " (the connector would load it; DefenseClaw keeps it off)" if eligible is True and held else ""
+    click.echo(f"{ux.bold('Eligible:')}    {eligible}{note}")
     click.echo(f"{ux.bold('Disabled:')}    {info_map.get('disabled', False)}")
     click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
     if info_map.get("homepage"):
@@ -957,11 +999,26 @@ def _print_skill_info_card(
             sev_color = {
                 "CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan",
             }.get(sev, "white")
+            noun = "finding" if n == 1 else "findings"
             click.echo(
-                f"  {ux.bold('Verdict:')}  {n} findings "
+                f"  {ux.bold('Findings:')} {n} {noun} "
                 f"(max severity: {ux._style(sev, fg=sev_color, bold=True)})"
             )
         click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
+
+    verdict = info_map.get("verdict")
+    if verdict and verdict != "-":
+        style = _POLICY_VERDICT_STYLES.get(verdict, "white")
+        click.echo()
+        click.echo(f"{ux.bold('Policy:')}      {ux._style(verdict, fg=style, bold=True)}")
+        if info_map.get("reason") and verdict in ("blocked", "rejected", "quarantined", "disabled"):
+            click.echo(f"  {ux.bold('Reason:')} {info_map['reason']}")
+        note = _skill_policy_note(
+            info_map.get("name", skill_name), verdict, held=held,
+            connector=str(info_map.get("connector") or ""),
+        )
+        for line in note.splitlines():
+            click.echo(f"  {line}")
 
     actions_data = info_map.get("actions")
     if actions_data or info_map.get("connector"):
@@ -975,11 +1032,144 @@ def _print_skill_info_card(
 # skill list
 # ---------------------------------------------------------------------------
 
+_POLICY_VERDICT_STYLES = {
+    "blocked": "red",
+    "rejected": "red",
+    "quarantined": "red",
+    "disabled": "red",
+    "warning": "yellow",
+    "allowed": "green",
+    "clean": "green",
+}
+
+
+def _skill_policy_verdict(
+    app: AppContext,
+    name: str,
+    *,
+    skill: dict[str, Any] | None = None,
+    scan_entry: Any = None,
+    action_entry: Any = None,
+    connector: str = "",
+    pe: Any = None,
+) -> tuple[str, str, str]:
+    """Return ``(label, style, reason)`` from the admission policy.
+
+    ``skill list``, ``skill info``, ``skill scan`` and the AIBOM inventory all
+    report this one verdict, so a skill never reads "rejected" in one view and
+    "allowed" or "warning" in another.
+    """
+    if action_entry is not None and not action_entry.actions.is_empty():
+        label, style = _compute_verdict(action_entry, scan_entry)
+        if label != "-":
+            return label, style, ""
+    store = getattr(app, "store", None)
+    cfg = getattr(app, "cfg", None)
+    if store is None or cfg is None:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        return label, style, ""
+    skill = skill or {}
+    source_path = str(
+        skill.get("baseDir")
+        or skill.get("filePath")
+        or (scan_entry.get("target") if isinstance(scan_entry, dict) else "")
+        or ""
+    )
+    try:
+        from defenseclaw.enforce import PolicyEngine
+        from defenseclaw.enforce.admission import evaluate_admission
+        from defenseclaw.inventory.claw_inventory import _source_allows_first_party
+
+        decision = evaluate_admission(
+            pe if pe is not None else PolicyEngine(store, cfg),
+            config=cfg,
+            target_type="skill",
+            name=name,
+            source_path=source_path,
+            connector=connector,
+            scan_result=scan_entry,
+            action_entry=action_entry,
+            include_quarantine=True,
+            allow_first_party=_source_allows_first_party(skill.get("source")),
+        )
+    except Exception:
+        label, style = _compute_verdict(action_entry, scan_entry)
+        return label, style, ""
+    label = "-" if decision.verdict == "scan" else decision.verdict
+    return label, _POLICY_VERDICT_STYLES.get(label, ""), decision.reason or ""
+
+
+def _skill_held_off(info_map: dict[str, Any] | None, action_entry: Any = None) -> bool:
+    """True only when DefenseClaw actually keeps the skill from loading.
+
+    The install block list alone does not stop a copy already on disk; only a
+    disable (runtime) or a quarantine (file) does (GAP-1320).
+    """
+    if info_map and info_map.get("disabled"):
+        return True
+    actions = getattr(action_entry, "actions", None)
+    if actions is None and info_map and isinstance(info_map.get("actions"), dict):
+        actions = info_map["actions"]
+    if isinstance(actions, dict):
+        return actions.get("runtime") == "disable" or actions.get("file") == "quarantine"
+    if actions is not None:
+        return getattr(actions, "runtime", "") == "disable" or getattr(actions, "file", "") == "quarantine"
+    return False
+
+
+def _skill_policy_note(
+    name: str, label: str, *, held: bool = True, connector: str = "", installed: bool = True,
+) -> str:
+    """What a policy verdict means for an installed copy, plus next steps.
+
+    The first line explains the verdict; each next step follows on its own
+    line (GAP-1559), with ``--connector`` when one is known so the command
+    can be pasted as-is on a multi-connector install.
+    """
+    flag = f" --connector {connector}" if connector else ""
+
+    def steps(text: str, *commands: tuple[str, str]) -> str:
+        lines = [text] + [f"{what}: defenseclaw skill {cmd} {name}{flag}" for what, cmd in commands]
+        return "\n".join(lines)
+
+    if label == "rejected":
+        if not installed:
+            # GAP-1599: a folder outside every connector's skill dirs is not
+            # loaded by any agent, so do not say it "stays loaded".
+            return steps(
+                "the policy would refuse this skill at install.",
+                ("Block it", "block"),
+                ("Accept it", "allow"),
+            )
+        return steps(
+            "the policy refuses this skill at install; the copy already on disk "
+            "stays loaded until you act.",
+            ("Block it", "block"),
+            ("Accept it", "allow"),
+        )
+    if label == "warning":
+        return steps("allowed with findings.", ("Block it", "block"))
+    if label == "blocked":
+        if held:
+            return steps(
+                "on the block list, so DefenseClaw keeps it disabled.",
+                ("Unblock it", "unblock"),
+            )
+        return steps(
+            "on the install block list; the copy already on disk still loads.",
+            ("Turn it off", "disable"),
+            ("Unblock it", "unblock"),
+        )
+    return ""
+
+
 def _skill_status(s: dict[str, Any]) -> str:
     if s.get("disabled"):
         return "disabled"
     if s.get("blockedByAllowlist"):
         return "blocked"
+    if s.get("admission"):
+        return str(s["admission"])
     if s.get("eligible"):
         return "active"
     return "inactive"
@@ -1003,6 +1193,8 @@ def _skill_status_display(
         return "✗ disabled"
     if s.get("blockedByAllowlist"):
         return "✗ blocked"
+    if s.get("admission"):
+        return f"… {s['admission']}"
     if action_entry and not action_entry.actions.is_empty():
         a = action_entry.actions
         if a.file == "quarantine":
@@ -1013,14 +1205,12 @@ def _skill_status_display(
             return "✗ disabled"
         if a.install == "allow":
             return "✓ allowed"
-    if scan_entry:
-        sev = scan_entry.get("max_severity", "CLEAN")
-        if sev in ("CRITICAL", "HIGH"):
-            return "✗ rejected"
-        if sev in ("MEDIUM", "LOW"):
-            return "⚠ warning"
+    # Scan findings are a policy verdict (the Verdict column), not a state:
+    # a skill with findings is still loaded, and a deleted one is removed.
     if s.get("eligible"):
         return "✓ ready"
+    if s.get("files_quarantined"):
+        return "✗ quarantined"
     if s.get("source") in ("enforcement", "scan-history"):
         return "✗ removed"
     return "✗ missing"
@@ -1055,7 +1245,7 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     """List skills with their latest scan severity.
 
-    By default this lists **every configured connector's** skills — on a
+    By default this lists every configured connector's skills — on a
     multi-connector install each connector gets its own connector-tagged
     section/table, so you no longer have to re-run with ``--connector``
     per peer. ``--connector <name>`` narrows the listing to one configured
@@ -1073,18 +1263,22 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     # overrides global) so each connector's table/card shows its own actions.
 
     if as_json:
+        global_decisions = _skill_global_decisions(app.store, app.cfg)
         if len(connectors) > 1:
             groups = []
             for c in connectors:
                 scan_map = _build_scan_map_for_connector(app, c)
-                actions_map = _build_actions_map(app.store, c)
+                actions_map = _build_actions_map(app.store, c, app.cfg)
+                c_skills = _collect_skills_for_connector(app, c, scan_map, actions_map)
                 groups.append({
                     "connector": c,
                     "skills": _skill_list_json_items(
-                        _collect_skills_for_connector(app, c, scan_map, actions_map),
+                        c_skills,
                         scan_map,
                         actions_map,
                         connector=c,
+                        verdicts=_skill_policy_verdicts(app, c_skills, scan_map, actions_map, c),
+                        global_decisions=global_decisions,
                     ),
                 })
             click.echo(json.dumps(groups, indent=2, default=str))
@@ -1094,13 +1288,15 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 if legacy_single_scope
                 else _build_scan_map_for_connector(app, connectors[0])
             )
-            actions_map = _build_actions_map(app.store, connectors[0])
+            actions_map = _build_actions_map(app.store, connectors[0], app.cfg)
             skills = _collect_skills_for_connector(app, connectors[0], scan_map, actions_map)
             items = _skill_list_json_items(
                 skills,
                 scan_map,
                 actions_map,
                 connector=connectors[0] if connector_flag and connector_flag.strip() else "",
+                verdicts=_skill_policy_verdicts(app, skills, scan_map, actions_map, connectors[0]),
+                global_decisions=global_decisions,
             )
             payload = (
                 {"connector": connectors[0], "skills": items}
@@ -1117,7 +1313,7 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
             if legacy_single_scope
             else _build_scan_map_for_connector(app, connector)
         )
-        actions_map = _build_actions_map(app.store, connector)
+        actions_map = _build_actions_map(app.store, connector, app.cfg)
         skills = _collect_skills_for_connector(app, connector, scan_map, actions_map)
         if not skills:
             if connector == "openclaw":
@@ -1128,12 +1324,105 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     f"{ux.dim('(checked the connector-specific skill directories).')}",
                 )
             continue
-        _print_skill_list_table(skills, scan_map, actions_map, connector)
+        _print_skill_list_table(
+            skills, scan_map, actions_map, connector,
+            verdicts=_skill_policy_verdicts(app, skills, scan_map, actions_map, connector),
+        )
         shown_any = True
 
     if shown_any:
         from defenseclaw.commands import hint
         hint("Scan all skills:  defenseclaw skill scan all")
+
+
+def _skill_policy_verdicts(
+    app: AppContext,
+    skills: list[dict[str, Any]],
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+    connector: str,
+) -> dict[str, tuple[str, str, str]]:
+    pe = None
+    if getattr(app, "store", None) is not None:
+        try:
+            from defenseclaw.enforce import PolicyEngine
+
+            pe = PolicyEngine(app.store, app.cfg)
+        except Exception:
+            pe = None
+    out: dict[str, tuple[str, str, str]] = {}
+    for s in skills:
+        name = s.get("name", "")
+        if s.get("bundled") and name not in scan_map and name not in actions_map:
+            # Vendor-bundled skills are discovery-only: no policy verdict.
+            out[name] = ("-", "", "")
+            continue
+        out[name] = _skill_policy_verdict(
+            app, name, skill=s, scan_entry=scan_map.get(name),
+            action_entry=actions_map.get(name), connector=connector, pe=pe,
+        )
+    return out
+
+
+# The install watcher's list of assets it has not decided on yet
+# (internal/watcher AdmissionStateFile); older than this, the watcher is gone.
+_ADMISSION_STATE_FILE = "watcher-admission.json"
+_ADMISSION_STATE_MAX_AGE_S = 30 * 60
+
+
+def _pending_admissions(app: AppContext) -> dict[str, str]:
+    """Normalized path -> pending|scanning for skills the watcher has not admitted yet."""
+    data_dir = str(getattr(getattr(app, "cfg", None), "data_dir", "") or "")
+    path = os.path.join(data_dir, _ADMISSION_STATE_FILE) if data_dir else ""
+    try:
+        if not path or time.time() - os.path.getmtime(path) > _ADMISSION_STATE_MAX_AGE_S:
+            return {}
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for asset in doc.get("assets") or []:
+        if isinstance(asset, dict) and asset.get("type") == "skill" and asset.get("path"):
+            out[os.path.normcase(os.path.abspath(str(asset["path"])))] = str(asset.get("state") or "pending")
+    return out
+
+
+def _mark_pending_admissions(app: AppContext, skills: list[dict[str, Any]]) -> None:
+    """Show a skill the watcher has not scanned yet as pending or scanning (GAP-0341).
+
+    It used to read ready with no verdict, as if it were clean, until its turn.
+    """
+    pending = _pending_admissions(app)
+    if not pending:
+        return
+    for s in skills:
+        base = str(s.get("baseDir") or "")
+        state = pending.get(os.path.normcase(os.path.abspath(base))) if base else None
+        if state:
+            s["admission"] = state
+
+
+def _mark_quarantined_phantoms(app: AppContext, skills: list[dict[str, Any]]) -> None:
+    """Flag off-disk skills whose files are held in quarantine.
+
+    After a bare ``skill unblock`` the files stay quarantined until an
+    explicit restore; ``skill list`` must say so, not "removed" (GAP-2008).
+    """
+    phantoms = [s for s in skills if s.get("source") in ("enforcement", "scan-history")]
+    if not phantoms or app.store is None:
+        return
+    try:
+        held = {
+            record.target_name
+            for record in app.store.list_quarantine_records("skill")
+            if record.state in ("pending", "active")
+        }
+    except Exception:
+        return
+    for s in phantoms:
+        if s.get("name", "") in held:
+            s["files_quarantined"] = True
 
 
 def _collect_skills_for_connector(
@@ -1159,7 +1448,7 @@ def _collect_skills_for_connector(
         # never leak a global/peer enforcement row into this connector.
         if connector != "openclaw" and not (
             _normalize_runtime_connector(ae.connector) == _normalize_runtime_connector(connector)
-            and ae.actions.file == "quarantine"
+            and (ae.actions.file == "quarantine" or str(ae.reason or "").startswith("link removed"))
         ):
             continue
         if name not in known_names:
@@ -1191,6 +1480,19 @@ def _collect_skills_for_connector(
             })
             known_names.add(name)
 
+    _mark_quarantined_phantoms(app, skills)
+    _mark_pending_admissions(app, skills)
+
+    # Vendor-bundled skills are discovery-only: DefenseClaw never scans or
+    # blocks them, so a verdict on another connector's skill with the same
+    # name (or an older unscoped row) must not mark them quarantined or
+    # disabled (GAP-0393). The callers' maps drop those names.
+    bundled = {s.get("name", "") for s in skills if s.get("bundled")}
+    bundled -= {s.get("name", "") for s in skills if not s.get("bundled")}
+    for name in bundled:
+        actions_map.pop(name, None)
+        scan_map.pop(name, None)
+
     for discovered in skills:
         name = discovered.get("name", "")
         discovered["disabled"] = _skill_effectively_disabled(
@@ -1206,6 +1508,8 @@ def _skill_list_json_items(
     actions_map: dict[str, Any],
     *,
     connector: str = "",
+    verdicts: dict[str, tuple[str, str, str]] | None = None,
+    global_decisions: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     items = []
     for s in skills:
@@ -1230,24 +1534,20 @@ def _skill_list_json_items(
             ae = actions_map[name]
             if not ae.actions.is_empty():
                 item["actions"] = ae.actions.to_dict()
-        verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
+        if global_decisions and name in global_decisions:
+            # A global (unscoped) block, e.g. from the watcher: a --connector
+            # unblock cannot clear it, so the TUI runs the bare unblock for
+            # this row (GAP-1820).
+            item["global_decision"] = True
+        if verdicts is not None and name in verdicts:
+            verdict_label, _, verdict_reason = verdicts[name]
+            if verdict_reason:
+                item["verdict_detail"] = verdict_reason
+        else:
+            verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
         item["verdict"] = verdict_label
         items.append(item)
     return items
-
-
-def _print_skill_list_json(
-    skills: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    *,
-    connector: str = "",
-) -> None:
-    click.echo(json.dumps(
-        _skill_list_json_items(skills, scan_map, actions_map, connector=connector),
-        indent=2,
-        default=str,
-    ))
 
 
 def _print_skill_list_table(
@@ -1255,17 +1555,28 @@ def _print_skill_list_table(
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
     connector: str = "",
+    verdicts: dict[str, tuple[str, str, str]] | None = None,
 ) -> None:
     from rich.console import Console
     from rich.table import Table
+    from rich.text import Text
 
     from defenseclaw.commands import list_scope_title
 
     ready_count = sum(
         1 for s in skills if s.get("eligible") and not s.get("disabled")
     )
+    # Skills gone from disk (listed from scan history) are not part of the
+    # installed count (GAP-1598).
+    removed_count = sum(
+        1
+        for s in skills
+        if _skill_status_display(s, actions_map.get(s.get("name", "")), scan_map.get(s.get("name", "")))
+        == "✗ removed"
+    )
 
-    detail = f"({ready_count}/{len(skills)} ready)"
+    detail = f"({ready_count}/{len(skills) - removed_count} ready"
+    detail += f", {removed_count} removed)" if removed_count else ")"
     title = (
         list_scope_title("Skills", connector, detail)
         if connector
@@ -1304,9 +1615,16 @@ def _print_skill_list_table(
         if name in actions_map:
             actions_str = actions_map[name].actions.summary()
 
-        verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(name), scan_map.get(name),
-        )
+        if verdicts is not None and name in verdicts:
+            verdict_label, verdict_style, _ = verdicts[name]
+        else:
+            verdict_label, verdict_style = _compute_verdict(
+                actions_map.get(name), scan_map.get(name),
+            )
+        if s.get("bundled") and name not in scan_map and name not in actions_map:
+            # Vendor-bundled skills are discovery-only: never scanned or blocked.
+            severity, sev_style = "bundled", "dim"
+            verdict_label, verdict_style = "discovery-only", "dim"
 
         status_style = ""
         if "✗" in status_display:
@@ -1314,17 +1632,29 @@ def _print_skill_list_table(
         elif "✓" in status_display:
             status_style = "green"
 
+        status_display = ux.table_cell_text(status_display)
         table.add_row(
             f"[{status_style}]{status_display}[/{status_style}]" if status_style else status_display,
-            display_name,
-            desc,
-            source,
+            Text(str(display_name)),
+            Text(str(desc)),
+            Text(str(source)),
             f"[{sev_style}]{severity}[/{sev_style}]" if sev_style else severity,
             f"[{verdict_style}]{verdict_label}[/{verdict_style}]" if verdict_style else verdict_label,
-            actions_str,
+            Text(str(actions_str)),
         )
 
     console.print(table)
+    if removed_count:
+        console.print(
+            f"[dim]{removed_count} removed skill(s) are no longer on disk; they are listed "
+            "from scan history so their last verdict stays visible.[/dim]"
+        )
+    bundled_count = sum(1 for s in skills if s.get("bundled"))
+    if bundled_count:
+        console.print(
+            f"[dim]{bundled_count} vendor-bundled skill(s) are discovery-only: "
+            "listed here, not scanned or blocked.[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1344,7 +1674,8 @@ def _build_skill_scanner(
     ``use_llm`` tri-states the ``--use-llm/--no-use-llm`` option:
 
     * ``None``  → auto: enable the LLM analyzer iff a unified model resolves
-      for ``scanners.skill``. The scanner itself still fails safe — if the
+      for ``scanners.skill`` and ``scanners.skill_scanner.use_llm`` is not
+      false. The scanner itself still fails safe — if the
       model later can't be built it logs-and-skips the LLM analyzer.
     * ``True``  → force the LLM lane on.
     * ``False`` → force it off (local analyzers only).
@@ -1360,9 +1691,12 @@ def _build_skill_scanner(
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     llm = app.cfg.resolve_llm("scanners.skill")
-    effective = bool(litellm_model(llm)) if use_llm is None else use_llm
-
     cfg = app.cfg.scanners.skill_scanner
+    # Auto turns the judge on when a model resolves, unless config.yaml turned it off
+    # (scanners.skill_scanner.use_llm: false); --use-llm still forces it on (GAP-0055).
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    effective = (cfg.use_llm and (secure_client or bool(litellm_model(llm)))) if use_llm is None else use_llm
+
     if cfg.use_llm != effective:
         cfg = dataclasses.replace(cfg, use_llm=effective)
 
@@ -1371,15 +1705,62 @@ def _build_skill_scanner(
         app.cfg.effective_inspect_llm(),
         app.cfg.cisco_ai_defense,
         llm=llm,
+        secure_client=secure_client,
     )
-    # R4: overlay the configured guardrail rule pack so `skill scan` flags what
-    # the gateway's rule lanes would catch. No-op when no rule_pack_dir is set.
+    # R4: overlay the guardrail rule pack (and guardrail.rules) so `skill scan`
+    # flags what the gateway's rule lanes would catch, and what the install
+    # watcher flags: the default pack when the scope selects none (GAP-0164).
     return maybe_wrap(
         scanner,
         app.cfg,
         connector,
         pack_cache=pack_cache,
+        default_pack=not asset_lists.is_secure_client(app.cfg),
     )
+
+
+def _print_skill_scan_policy(
+    app: AppContext,
+    name: str,
+    path: str,
+    result: Any,
+    *,
+    connector: str = "",
+    pe: Any = None,
+    installed: bool = True,
+) -> None:
+    """Under a non-clean scan line, say what the policy makes of it.
+
+    Without this the scan read "[WARN] ... blocked=0" while ``skill list``
+    said "rejected" for the same skill.
+    """
+    label, _, reason = _skill_policy_verdict(
+        app,
+        name,
+        skill={"baseDir": path},
+        scan_entry={
+            "target": path,
+            "finding_count": len(result.findings),
+            "max_severity": str(result.max_severity()),
+        },
+        connector=connector,
+        pe=pe,
+    )
+    if label in ("-", "clean"):
+        return
+    held = True
+    if label == "blocked" and pe is not None:
+        try:
+            held = _skill_held_off(None, pe.get_action("skill", name, connector or ""))
+        except Exception:
+            held = True
+    note = _skill_policy_note(
+        name, label, held=held, connector=connector if installed else "", installed=installed,
+    ) or reason
+    first, *steps = (note or "").splitlines() or [""]
+    ux.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
+    for step in steps:
+        click.echo(f"          {step}")
 
 
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:
@@ -1410,14 +1791,12 @@ def _skill_scan_would_install_block(
     )
     decision = evaluate_admission(
         pe,
-        policy_dir=app.cfg.policy_dir,
+        config=app.cfg,
         target_type="skill",
         name=skill_name,
         source_path=skill_path,
         scan_result=result,
-        fallback_actions=app.cfg.skill_actions,
         connector=eval_connector,
-        asset_policy=app.cfg.asset_policy,
     )
     if decision.verdict == "allowed":
         return False
@@ -1427,7 +1806,10 @@ def _skill_scan_would_install_block(
 @skill.command()
 @click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
-@click.option("--path", "scan_path", default="", help="Override skill directory path")
+@click.option(
+    "--path", "scan_path", default="", metavar="DIR",
+    help="Scan this skill folder (TARGET is optional with --path)",
+)
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
 @click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills (also the default with no TARGET)")
 @click.option(
@@ -1469,21 +1851,29 @@ def scan(
     single connector. ``--all`` remains an explicit/backward-compatible alias
     for the no-TARGET bulk scan.
 
+    A TARGET that is a folder path (./my-skill, ~/stage/my-skill) scans that
+    folder; --path DIR does the same without a TARGET.
+
     Uses the native cisco-ai-skill-scanner SDK for local scans.
 
+    \b
     Remote scanning (--remote):
       When the sidecar runs on a remote host (e.g. via SSM port-forward),
-      pass --remote to send the scan request to the sidecar API instead of
-      running the scanner locally.
+      pass --remote to send the scan request to the sidecar API instead
+      of running the scanner locally.
 
-    URL targets (fetch-to-temp):
+    \b
+    URL targets:
       Pass an https:// URL or clawhub:// URI to download a skill package
       to a temp directory, scan it locally, then clean up. This lets you
       pre-screen skills before installing them.
 
-      Examples:
-        defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
-        defenseclaw skill scan clawhub://my-skill@1.2.3
+    \b
+    Examples:
+      defenseclaw skill scan
+      defenseclaw skill scan ./my-skill
+      defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
+      defenseclaw skill scan clawhub://my-skill@1.2.3
     """
     if action and remote:
         click.echo(
@@ -1508,6 +1898,32 @@ def scan(
             raise SystemExit(1)
         _scan_from_url(app, target, as_json)
         return
+
+    # GAP-1599: a TARGET that names an existing folder ("./my-skill",
+    # "~/stage/my-skill", "C:\stage\my-skill") is scanned as that folder,
+    # like --path; a bare name keeps resolving across connectors.
+    folder_target = bool(
+        target and not scan_path and target != "all" and _looks_like_skill_path(target)
+    )
+    if folder_target:
+        scan_path = os.path.expanduser(target)
+
+    # A folder that is not there is named as such, rather than "could not
+    # resolve skill ... use --path" (GAP-1771). --remote paths live on the
+    # sidecar's host, so they are not checked here.
+    if not remote:
+        wanted = scan_path or (
+            target if target and target != "all" and _is_explicit_path(target) else ""
+        )
+        local = os.path.expanduser(wanted) if wanted else ""
+        if local and not os.path.isdir(local):
+            problem = "is not a folder" if os.path.exists(local) else "does not exist"
+            click.echo(
+                f"error: {wanted} {problem}; pass the path of a skill folder "
+                "(or a skill name, or an https:// or clawhub:// URL)",
+                err=True,
+            )
+            raise SystemExit(1)
 
     # Connector-scoped parity with MCP/list: a missing TARGET means "scan
     # configured skills" (all configured connectors by default, or the selected
@@ -1545,7 +1961,7 @@ def scan(
         pack_cache: RulePackOverlayCache = {}
         for c in connectors:
             if len(connectors) > 1 and not as_json:
-                click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+                ux.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
             if remote:
                 rows = _scan_all_remote(app, as_json, connector=c)
                 if as_json and any(
@@ -1606,12 +2022,18 @@ def scan(
             raise SystemExit(1)
         return
 
-    if not target:
+    if not target and not scan_path:
         raise click.UsageError("Missing argument 'TARGET'.")
 
     # Resolve scan directory
     scan_dir = scan_path
     scan_connector = ""
+    adhoc = False
+    if folder_target and not connector_flag:
+        # Name the connector whose skill dir holds the folder; a folder no
+        # connector holds is an ad-hoc path scan, not "on <first connector>".
+        scan_connector = _connector_for_skill_path(app, scan_dir)
+        adhoc = not scan_connector
     if not scan_dir:
         if not connector_flag:
             # Bare named scans must fan out over every configured connector copy
@@ -1623,7 +2045,7 @@ def scan(
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
-                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                            ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                         _scan_via_sidecar(
                             app,
                             target=match_dir,
@@ -1637,7 +2059,7 @@ def scan(
                     return
                 for match_connector, match_dir in matches:
                     if not as_json:
-                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
                         _build_skill_scanner(
@@ -1672,7 +2094,7 @@ def scan(
                 if as_json:
                     _emit_skill_json_payload(payload)
                 else:
-                    click.echo(
+                    ux.echo(
                         f"SKIPPED: {target} — vendor-bundled skills are "
                         "discovery-only and are not scanned or blocked"
                     )
@@ -1692,7 +2114,7 @@ def scan(
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
-                            click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                            ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                         _scan_via_sidecar(
                             app,
                             target=match_dir,
@@ -1706,7 +2128,7 @@ def scan(
                     return
                 for match_connector, match_dir in matches:
                     if not as_json:
-                        click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
+                        ux.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
                         _build_skill_scanner(
@@ -1752,7 +2174,11 @@ def scan(
                     raise SystemExit(1)
 
     if not scan_dir and not remote:
-        click.echo(f"error: could not resolve skill {target!r} — use --path to specify manually", err=True)
+        click.echo(
+            f"error: no skill named {target!r} was found in the configured skill folders. "
+            "Run 'defenseclaw skill list' to see them, or pass the skill's folder path.",
+            err=True,
+        )
         raise SystemExit(1)
 
     # --remote: delegate scan to sidecar API — skip local policy checks
@@ -1783,7 +2209,43 @@ def scan(
         as_json=as_json,
         action=action,
         connector=connector,
+        adhoc=adhoc,
     )
+
+
+def _is_explicit_path(target: str) -> bool:
+    """True when TARGET can only be a path (absolute, ./, ../ or ~), never a skill name."""
+    return (
+        target in (".", "..")
+        or target.startswith(("./", "../", ".\\", "..\\", "~"))
+        or os.path.isabs(target)
+    )
+
+
+def _looks_like_skill_path(target: str) -> bool:
+    """True when TARGET is written as a path to an existing folder."""
+    pathish = (
+        "/" in target
+        or "\\" in target
+        or target in (".", "..")
+        or target.startswith(("./", "../", "~"))
+        or os.path.isabs(target)
+    )
+    return pathish and os.path.isdir(os.path.expanduser(target))
+
+
+def _connector_for_skill_path(app: AppContext, path: str) -> str:
+    """The active connector whose skill dir holds *path*, else ``""``."""
+    try:
+        real = os.path.normcase(os.path.realpath(path))
+        for connector in _active_skill_connectors(app):
+            for root in app.cfg.skill_dirs(connector):
+                real_root = os.path.normcase(os.path.realpath(root))
+                if real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep):
+                    return connector
+    except Exception:  # noqa: BLE001 - attribution is cosmetic; scan anyway.
+        return ""
+    return ""
 
 
 def _scan_one_local_skill(
@@ -1795,42 +2257,54 @@ def _scan_one_local_skill(
     action: bool,
     connector: str,
     json_sink: list[dict[str, Any]] | None = None,
+    adhoc: bool = False,
 ) -> dict[str, Any] | None:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
 
     name = os.path.basename(scan_dir)
+    # An ad-hoc path scan is not from a connector config, so its JSON names
+    # no connector, like the text banner (GAP-1766). Policy checks still use
+    # the resolved connector.
+    json_connector = "" if adhoc else connector
 
     if _is_bundled_skill_scan_path(scan_dir):
         payload = _skill_scan_skipped_json_payload(
             name,
             scan_dir,
             reason="vendor-bundled",
-            connector=connector,
+            connector=json_connector,
         )
         if as_json:
             _emit_skill_json_payload(payload, json_sink=json_sink)
         else:
-            click.echo(
+            ux.echo(
                 f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
                 "and are not scanned or blocked"
             )
         return payload
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if pe.is_blocked_for_connector("skill", name, connector):
         if as_json:
             payload = _skill_scan_error_json_payload(
                 scan_dir,
                 RuntimeError(f"{name} is blocked by policy"),
-                connector=connector,
+                connector=json_connector,
             )
             _emit_skill_json_payload(payload, json_sink=json_sink)
             if json_sink is None:
                 raise SystemExit(2)
             return payload
-        click.echo(f"BLOCKED: {name} — remove from block list first", err=True)
+        scope = f" for connector={connector}" if connector else ""
+        flag = f" --connector {connector}" if connector else ""
+        click.echo(
+            f"BLOCKED: {name} is on the block list{scope}, so it was not scanned.\n"
+            f"  'defenseclaw skill scan --all{flag}' still reports its findings. "
+            f"To scan it alone, unblock it first: defenseclaw skill unblock {name}{flag}",
+            err=True,
+        )
         raise SystemExit(2)
 
     # F-0282: a bare ``pe.is_allowed("skill", name)`` check skips the scan
@@ -1845,7 +2319,7 @@ def _scan_one_local_skill(
     from defenseclaw.enforce.admission import evaluate_admission as _evaluate_admission
     allow_decision = _evaluate_admission(
         pe,
-        policy_dir=app.cfg.policy_dir,
+        config=app.cfg,
         target_type="skill",
         name=name,
         source_path=scan_dir or "",
@@ -1857,7 +2331,7 @@ def _scan_one_local_skill(
                 name,
                 scan_dir,
                 reason="manual-allow",
-                connector=connector,
+                connector=json_connector,
             )
             _emit_skill_json_payload(payload, json_sink=json_sink)
             return payload
@@ -1868,6 +2342,7 @@ def _scan_one_local_skill(
         connector=connector,
         paths=[scan_dir],
         as_json=as_json,
+        where=_scan_ui.WHERE_ADHOC_PATH if adhoc else "",
     )
     _scan_ui.render_preamble(ctx, target_count=1)
 
@@ -1884,7 +2359,7 @@ def _scan_one_local_skill(
         if as_json:
             if captured_stdout is not None:
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
-            payload = _skill_scan_error_json_payload(scan_dir, exc, connector=connector)
+            payload = _skill_scan_error_json_payload(scan_dir, exc, connector=json_connector)
             _emit_skill_json_payload(payload, json_sink=json_sink)
             if json_sink is None:
                 raise SystemExit(1)
@@ -1892,12 +2367,13 @@ def _scan_one_local_skill(
         click.echo(f"error: scan failed: {exc}", err=True)
         raise SystemExit(1)
 
-    if app.logger:
-        app.logger.log_scan(result)
+    # A path scan belongs to no connector, so its audit record, alert and
+    # finding.observed carry none either (GAP-1919).
+    _record_scan(app.logger, result, connector=json_connector or None)
 
     payload: dict[str, Any] | None = None
     if as_json:
-        payload = _skill_scan_result_json_payload(result, connector=connector)
+        payload = _skill_scan_result_json_payload(result, connector=json_connector)
         _emit_skill_json_payload(payload, json_sink=json_sink)
     else:
         # Per-target glyph line (S6.3 — shared scan UX) sits above the
@@ -1922,6 +2398,11 @@ def _scan_one_local_skill(
                 detail=f"max severity: {result.max_severity()}",
                 findings=len(result.findings),
             )
+            if not enforcement_blocks:
+                _print_skill_scan_policy(
+                    app, name, scan_dir, result, connector=connector or "", pe=pe,
+                    installed=not adhoc,
+                )
         click.echo()
         _print_result(name, result)
         _scan_ui.render_summary(
@@ -2081,7 +2562,7 @@ def _apply_scan_enforcement(
     result,
     connector: str | None = None,
 ) -> None:
-    """Apply configured skill_actions policy based on scan severity.
+    """Apply the configured admission policy (admission.skill) to a scan result.
 
     Allow-listed skills are exempt from auto-enforcement — only a manual
     ``skill block`` can override an allow entry.
@@ -2099,18 +2580,19 @@ def _apply_scan_enforcement(
     scoped_connector = canonical_connector if connector else ""
     decision = evaluate_admission(
         pe,
-        policy_dir=app.cfg.policy_dir,
+        config=app.cfg,
         target_type="skill",
         name=skill_name,
         source_path=skill_path,
         scan_result=result,
-        fallback_actions=app.cfg.skill_actions,
         connector=canonical_connector,
-        asset_policy=app.cfg.asset_policy,
     )
 
     if decision.verdict == "allowed":
-        click.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
+        if decision.source == "scan-allowed":
+            ux.echo(f"[scan] {skill_name!r}: the admission policy allows its findings ({decision.reason})")
+        else:
+            ux.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
         return
 
     sev = result.max_severity()
@@ -2175,16 +2657,11 @@ def _apply_scan_enforcement(
 
     if action_cfg.install == "block":
         try:
-            if scoped_connector:
-                pe.block_for_connector(
-                    "skill", skill_name, scoped_connector, enforcement_reason,
-                )
-            else:
-                pe.block("skill", skill_name, enforcement_reason)
+            pe.record_scan_block("skill", skill_name, scoped_connector or "", enforcement_reason)
             _verify_scan_action_persisted(
                 app, skill_name, "install", "block", scoped_connector,
             )
-            applied_actions.append("added to block list")
+            applied_actions.append("install blocked by this scan")
         except Exception as exc:  # noqa: BLE001 - preserve other defense-in-depth actions.
             click.echo(
                 f"[scan] install-block persistence failed for {skill_name!r}: {exc}",
@@ -2200,7 +2677,7 @@ def _apply_scan_enforcement(
                 f"severity={sev} findings={len(result.findings)} "
                 f"connector={canonical_connector}"
             )
-            app.logger.log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
+            saved_change_audit(app.logger).log_action("scan-enforced", skill_name, f"{detail}; {actions_str}")
 
     if failed_actions:
         failed = ", ".join(failed_actions)
@@ -2280,7 +2757,7 @@ def _scan_all(
     else:
         skill_entries = []
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     verdicts = []
     errors = 0
     telemetry_errors = 0
@@ -2293,6 +2770,7 @@ def _scan_all(
     sources: list[str] = []
     scan_dirs = list(app.cfg.skill_dirs(resolved_connector))
     unresolved_names: set[str] = set()
+    bundled_skipped: set[str] = set()
 
     if skill_entries:
         from defenseclaw.safety import is_symlink, is_within_roots
@@ -2301,6 +2779,7 @@ def _scan_all(
             name = str(info["name"])
             base_dir = _skill_info_path(info)
             if bool(info.get("bundled")) or _is_bundled_skill_scan_path(base_dir):
+                bundled_skipped.add(name)
                 continue
             if not base_dir:
                 resolved_info = _get_openclaw_skill_info(
@@ -2351,6 +2830,7 @@ def _scan_all(
                 entry = discovered.name
                 path = discovered.path
                 if discovered.bundled or _is_bundled_skill_scan_path(path):
+                    bundled_skipped.add(entry)
                     continue
                 if entry in seen_names:
                     continue
@@ -2383,21 +2863,35 @@ def _scan_all(
         for name in sorted(unresolved_names):
             click.echo(f"[scan] warning: no baseDir for {name}", err=True)
 
+    bundled_note = (
+        f"{len(bundled_skipped)} vendor-bundled skill(s) skipped for "
+        f"connector={connector!r} (discovery-only: listed, not scanned or blocked)"
+    )
     if not targets:
         if not as_json:
-            _render_skill_scan_empty_state(connector, scan_dirs)
+            if bundled_skipped:
+                click.echo(f"No scannable skills: {bundled_note}.")
+            else:
+                _render_skill_scan_empty_state(connector, scan_dirs)
         return []
 
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector, paths=sources, as_json=as_json,
     )
     _scan_ui.render_preamble(ctx, target_count=len(targets))
+    if bundled_skipped and not as_json:
+        click.echo(f"  Note: {bundled_note}.")
 
     import time
     started = time.monotonic()
     json_rows: list[dict[str, Any]] = []
 
-    for name, base_dir in targets:
+    # GAP-2643: overlap the LLM-bound scans; JSON mode captures stdout per
+    # skill, so it stays one at a time.
+    workers = 1 if as_json else _scan_ui.scan_batch_workers(scanner)
+    for (name, base_dir), scan_result in _scan_ui.ordered_scans(
+        lambda target: scanner.scan(target[1]), targets, workers=workers,
+    ):
         captured_stdout = None
         try:
             if as_json:
@@ -2406,7 +2900,7 @@ def _scan_all(
                     result = scanner.scan(base_dir)
                 _emit_captured_scan_stdout(captured_stdout.getvalue())
             else:
-                result = scanner.scan(base_dir)
+                result = scan_result()
         except SystemExit as exc:
             # The scanner wrapper uses SystemExit for dependency/bootstrap
             # failures. In the normal JSON batch path that is still a
@@ -2457,7 +2951,7 @@ def _scan_all(
         telemetry_error: Exception | None = None
         if app.logger:
             try:
-                app.logger.log_scan(result)
+                app.logger.log_scan(result, connector=resolved_connector)
             except Exception as exc:
                 telemetry_error = exc
                 telemetry_errors += 1
@@ -2470,12 +2964,15 @@ def _scan_all(
             json_rows.append(payload)
         else:
             enforcement_blocks = False
-            if result.is_clean():
+            # GAP-1320: a block-listed skill reads BLOCKED and counts in the
+            # Summary's blocked=, like 'skill list' shows it.
+            listed_block = pe.is_blocked_for_connector("skill", name, connector or "")
+            if result.is_clean() and not listed_block:
                 _scan_ui.render_per_target_status(
                     ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
                 )
             else:
-                enforcement_blocks = (
+                enforcement_blocks = listed_block or (
                     enforce
                     and _skill_scan_would_install_block(
                         app, pe, name, base_dir, result, connector=connector,
@@ -2487,9 +2984,16 @@ def _scan_all(
                     verdict=_skill_scan_findings_verdict(
                         result, blocked=enforcement_blocks,
                     ),
-                    detail=f"max severity: {result.max_severity()}",
+                    detail=(
+                        f"max severity: {result.max_severity()}"
+                        if result.findings else "on the block list"
+                    ),
                     findings=len(result.findings),
                 )
+                if listed_block or not enforcement_blocks:
+                    _print_skill_scan_policy(
+                        app, name, base_dir, result, connector=connector or "", pe=pe,
+                    )
             v = verdicts[-1]
             v["blocked"] = bool(enforcement_blocks)
             v["findings"] = len(result.findings)
@@ -2503,7 +3007,7 @@ def _scan_all(
             _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
 
     if not as_json and verdicts:
-        clean = sum(1 for v in verdicts if v["result"].is_clean())
+        clean = sum(1 for v in verdicts if v["result"].is_clean() and not v.get("blocked"))
         blocked = sum(1 for v in verdicts if v.get("blocked"))
         findings = sum(int(v.get("findings") or 0) for v in verdicts)
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -2545,7 +3049,7 @@ def _skill_search_dirs(app: AppContext, connector: str = "") -> list[str]:
     """Skill directories to resolve a bare name against (ND-1).
 
     With ``connector`` set, scope to that one peer's dirs. Otherwise search
-    the union of **every configured connector's** skill dirs — active-connector
+    the union of every configured connector's skill dirs — active-connector
     dirs FIRST so a name present on the active peer keeps resolving exactly
     as before, while a skill that only lives on a NON-active peer becomes
     reachable by bare name too. Order-preserving and de-duplicated.
@@ -2637,7 +3141,7 @@ def _skill_match_dir_scopes(app: AppContext, target: str, connector: str = "") -
 def _resolve_path(app: AppContext, target: str, connector: str = "") -> str | None:
     """Resolve a skill name or path to an actual directory.
 
-    A bare name resolves across **every configured connector** (ND-1), not just
+    A bare name resolves across every configured connector (ND-1), not just
     the active one, so a skill living on a non-active peer is findable
     without ``--connector``. When the same name exists under more than one
     connector the active-connector copy wins here; verbs that must reject the
@@ -2780,7 +3284,7 @@ def _scan_via_sidecar(
         if as_json:
             _emit_skill_json_payload(payload, json_sink=json_sink)
         else:
-            click.echo(
+            ux.echo(
                 f"SKIPPED: {name} — vendor-bundled skills are discovery-only "
                 "and are not scanned or blocked"
             )
@@ -2791,8 +3295,10 @@ def _scan_via_sidecar(
     if not as_json:
         click.echo(ux.dim(f"[scan] remote skill-scanner via sidecar -> {target}"))
 
+    # The gateway stops the scan at timeouts.scan_s (GAP-0301); wait a little longer.
+    scan_s = getattr(getattr(app.cfg.scanners.skill_scanner, "timeouts", None), "scan_s", 0) or 300
     try:
-        data = client.scan_skill(target=target, name=name)
+        data = client.scan_skill(target=target, name=name, timeout=max(120, scan_s + 30))
     except Exception as exc:
         if as_json:
             payload = _skill_scan_error_json_payload(target, exc, connector=connector)
@@ -2991,7 +3497,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         os.makedirs(skill_dir, exist_ok=True)
 
         if not as_json:
-            click.echo(
+            ux.echo(
                 f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
         # ("Untrusted skill archives can decompress
@@ -3020,8 +3526,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
 
         result = _build_skill_scanner(app).scan(skill_dir)
 
-        if app.logger:
-            app.logger.log_scan(result)
+        _record_scan(app.logger, result)
 
         if as_json:
             click.echo(result.to_json())
@@ -3146,8 +3651,7 @@ def _scan_from_http(
 
         result = _build_skill_scanner(app).scan(skill_dir)
 
-        if app.logger:
-            app.logger.log_scan(result)
+        _record_scan(app.logger, result)
 
         if as_json:
             click.echo(result.to_json())
@@ -3396,6 +3900,12 @@ def _print_result(name: str, result) -> None:
     click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
     click.echo(f"  {ux._style('Duration:', fg='bright_black', bold=True)} {result.duration.total_seconds():.2f}s")
     click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(result.findings)}")
+    ran_with = getattr(result, "settings", None)
+    if ran_with:
+        click.echo(
+            f"  {ux._style('Scanner:', fg='bright_black', bold=True)}  "
+            f"policy {ran_with.get('policy', '')}, judge {ran_with.get('judge', 'off')}"
+        )
 
     if result.is_clean():
         ux.ok("Verdict:  CLEAN", indent="  ")
@@ -3494,8 +4004,8 @@ def _skill_has_connector_enforcement(
     if app.store is None:
         return False
     return (
-        app.store.has_action("skill", skill_name, "install", "block", connector)
-        or app.store.has_action("skill", skill_name, "install", "allow", connector)
+        asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "block")
+        or asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "allow")
         or app.store.has_action("skill", skill_name, "file", "quarantine", connector)
         or app.store.has_action("skill", skill_name, "runtime", "disable", connector)
     )
@@ -3507,16 +4017,9 @@ def _format_connector_scope_list(connectors: list[str]) -> str:
 
 def _strict_path_within(path: str, root: str) -> bool:
     """Case-safe containment for POSIX and Windows restore/quarantine paths."""
-    try:
-        path_abs = os.path.abspath(path)
-        root_abs = os.path.abspath(root)
-        common = os.path.commonpath((path_abs, root_abs))
-    except (OSError, ValueError):
-        return False
-    return (
-        os.path.normcase(common) == os.path.normcase(root_abs)
-        and os.path.normcase(path_abs) != os.path.normcase(root_abs)
-    )
+    from defenseclaw.enforce.skill_enforcer import SkillEnforcer
+
+    return SkillEnforcer._contained(path, root)
 
 
 def _materialize_legacy_skill_quarantine(
@@ -3569,6 +4072,30 @@ def _materialize_legacy_skill_quarantine(
         return
 
 
+def _shared_dir_quarantine_records(
+    app: AppContext, skill_name: str, connector: str,
+) -> list[Any]:
+    """Quarantine records filed under a peer that shares *connector*'s skill dir.
+
+    GAP-1259: Claude Code and Amp both read ``~/.claude/skills``. The watcher
+    files a quarantine there under its own connector (for example amp), so
+    ``--connector claudecode`` restore found nothing while list/info for
+    claudecode showed the skill quarantined. A record whose original path lies
+    in one of *connector*'s skill directories belongs to that connector too.
+    """
+    if app.store is None or not callable(getattr(app.cfg, "skill_dirs", None)):
+        return []
+    roots = [os.path.realpath(root) for root in app.cfg.skill_dirs(connector) if root]
+    if not roots:
+        return []
+    return [
+        record
+        for record in app.store.list_quarantine_records("skill", skill_name)
+        if record.original_path
+        and any(_strict_path_within(os.path.realpath(record.original_path), root) for root in roots)
+    ]
+
+
 def _skill_quarantine_records(
     app: AppContext,
     pe: Any,
@@ -3581,8 +4108,11 @@ def _skill_quarantine_records(
     if connector_flag:
         connector = _resolve_connector_scope(app, connector_flag)
         _materialize_legacy_skill_quarantine(app, pe, skill_name, connector)
-        return connector, app.store.list_quarantine_records(
+        records = app.store.list_quarantine_records(
             "skill", skill_name, connector,
+        )
+        return connector, records or _shared_dir_quarantine_records(
+            app, skill_name, connector,
         )
 
     entries = [entry for entry in pe.list_by_type("skill") if entry.target_name == skill_name]
@@ -3701,6 +4231,7 @@ def _refuse_bundled_skill_policy_action(
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install block list.
 
@@ -3713,8 +4244,8 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
-    pe = PolicyEngine(app.store)
+    skill_name = asset_lists.policy_rule_name("skill", name)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if not reason:
         reason = "manual block via CLI"
@@ -3728,9 +4259,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     )
     if connector:
         if pe.is_blocked_for_connector("skill", skill_name, connector):
-            if app.store and app.store.has_action(
-                "skill", skill_name, "install", "block", connector,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "block"):
                 click.echo(f"Already blocked for {connector}: {skill_name}")
             else:
                 click.echo(f"Already blocked globally (covers {connector}): {skill_name}")
@@ -3739,38 +4268,82 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         skill_path = _resolve_path(app, skill_name, connector)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path, connector)
-        click.secho(
-            f"[skill] {skill_name!r} added to block list (connector={connector})",
-            fg="red",
-        )
+        click.secho(f"[skill] Blocked {skill_name!r} ({connector}).", fg="red")
     else:
         pe.block("skill", skill_name, reason)
         skill_path = _resolve_path(app, skill_name)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path)
-        affected_connectors = [
+        # GAP-0416: one connector can hold several copies; name it once.
+        affected_connectors = list(dict.fromkeys(
             target_connector
             for target_connector, _path in _skill_match_dir_scopes(app, skill_name)
-        ]
-        suffix = (
-            f" for {_format_connector_scope_list(affected_connectors)}"
-            if affected_connectors
-            else ""
-        )
-        click.secho(f"[skill] {skill_name!r} added to block list{suffix}", fg="red")
+        ))
+        # GAP-2085: a bare block is global; name it the way bare unblock does.
+        click.secho(f"[skill] Blocked {skill_name!r} (every connector).", fg="red")
+        if affected_connectors:
+            click.echo(f"  Copies found for {_format_connector_scope_list(affected_connectors)}.")
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-block", skill_name, f"reason={reason} connector={connector}",
         )
 
     from defenseclaw.commands import hint
-    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}")
+    scope_flag = f" --connector {connector}" if connector else ""
+    hint(f"Unblock later:  defenseclaw skill unblock {skill_name}{scope_flag}")
 
 
 # ---------------------------------------------------------------------------
 # skill unblock
 # ---------------------------------------------------------------------------
+
+def _report_inherited_skill_state(
+    app: AppContext,
+    pe: Any,
+    skill_name: str,
+    connector: str,
+    physical_records: list[Any],
+) -> bool:
+    """Explain a connector-scoped unblock that has nothing of its own to clear.
+
+    GAP-1259: list/info for a connector show the global decision (and a peer's
+    decision on a shared skill dir) it inherits, so "no enforcement state" or
+    "already unblocked" read as wrong. Name the scope that holds the state and
+    the command that clears it. Returns True when something was reported.
+    """
+    holders = sorted({c for record in physical_records for c in record.connectors if c} - {connector})
+    peers = set(holders)
+    peers.update(_skill_policy_fanout_connectors(app, pe, skill_name))
+    peers.discard(connector)
+    owners = sorted(c for c in peers if _skill_has_connector_enforcement(app, skill_name, c))
+    global_state = bool(app.store) and (
+        pe.is_blocked("skill", skill_name)
+        or pe.is_quarantined("skill", skill_name)
+        or app.store.has_action("skill", skill_name, "runtime", "disable")
+    )
+    if not global_state and not owners:
+        return False
+    scope = "a global decision that covers every connector" if global_state else (
+        f"connector={', '.join(owners)}, which shares this skill directory"
+    )
+    if global_state and holders:
+        # GAP-1259: the watcher files a shared-dir quarantine under the
+        # connector it runs as (amp for ~/.claude/skills); name it.
+        scope += (
+            f" (quarantined under connector={', '.join(holders)}, "
+            "which shares this skill directory)"
+        )
+    click.echo(
+        f"[skill] {skill_name!r} has no enforcement state of its own on {connector}; "
+        f"it is blocked by {scope}"
+    )
+    if global_state:
+        click.echo(f"  Clear it for every connector: defenseclaw skill unblock {skill_name}")
+    for owner in owners:
+        click.echo(f"  Clear it for {owner}: defenseclaw skill unblock {skill_name} --connector {owner}")
+    return True
+
 
 @skill.command()
 @click.argument("name")
@@ -3783,6 +4356,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove a skill's logical enforcement state.
 
@@ -3798,7 +4372,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     from defenseclaw.enforce import PolicyEngine
 
     skill_name = os.path.basename(name)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     connector = _resolve_connector_scope(app, connector_flag)
     _, physical_records = _skill_quarantine_records(
@@ -3809,12 +4383,14 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     # connector unblock never falsely reports (or clears) the global block.
     if connector:
         has_state = bool(app.store) and (
-            app.store.has_action("skill", skill_name, "install", "block", connector)
-            or app.store.has_action("skill", skill_name, "install", "allow", connector)
+            asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "block")
+            or asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "allow")
             or app.store.has_action("skill", skill_name, "file", "quarantine", connector)
             or app.store.has_action("skill", skill_name, "runtime", "disable", connector)
         )
         if not has_state:
+            if _report_inherited_skill_state(app, pe, skill_name, connector, physical_records):
+                return
             if physical_records:
                 click.echo(
                     f"[skill] {skill_name!r} is already unblocked for {connector}; "
@@ -3827,18 +4403,15 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
                 )
             return
         pe.remove_action_for_connector("skill", skill_name, connector)
-        click.secho(
-            f"[skill] {skill_name!r} all enforcement state cleared "
-            f"(connector={connector}) (allow/block/quarantine/disable)",
-            fg="green",
-        )
+        click.secho(f"[skill] Unblocked {skill_name!r} ({connector}).", fg="green")
+        click.echo("  It will be scanned on the next check.")
         if physical_records:
             click.echo(
                 "  The skill is unblocked, but its files remain quarantined; "
                 f"restore explicitly with 'defenseclaw skill restore {skill_name} --connector {connector}'."
             )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-unblock", skill_name, f"manual unblock via CLI connector={connector}",
             )
         return
@@ -3859,17 +4432,22 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         for target_connector in targets
     )
     if targets and (has_unscoped_state or has_scoped_state):
+        # GAP-1259: report only the scopes that held state; a global decision
+        # on a shared-dir quarantine was reported as "connector=amp".
+        owners = [
+            target_connector
+            for target_connector in targets
+            if _skill_has_connector_enforcement(app, skill_name, target_connector)
+        ]
         for target_connector in targets:
             pe.remove_action_for_connector("skill", skill_name, target_connector)
-            click.secho(
-                f"[skill] {skill_name!r} all enforcement state cleared "
-                f"(connector={target_connector}) (allow/block/quarantine/disable)",
-                fg="green",
-            )
+        for target_connector in owners:
+            click.secho(f"[skill] Unblocked {skill_name!r} ({target_connector}).", fg="green")
         if has_unscoped_state:
             pe.remove_action("skill", skill_name)
+            click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
         click.echo(
-            "  The skill will go through normal scanning on next install."
+            "  It will be scanned on the next check."
         )
         if physical_records:
             click.echo(
@@ -3877,7 +4455,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
                 f"restore explicitly with 'defenseclaw skill restore {skill_name}'."
             )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-unblock", skill_name, "manual unblock via CLI connector=all",
             )
         return
@@ -3907,11 +4485,9 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     if runtime_cleared:
         pe.remove_action("skill", skill_name)
-        click.secho(
-            f"[skill] {skill_name!r} all enforcement state cleared "
-            "(allow/block/quarantine/disable)",
-            fg="green",
-        )
+        # GAP-2085: name the scope the bare block named.
+        click.secho(f"[skill] Unblocked {skill_name!r} (every connector).", fg="green")
+        click.echo("  It will be scanned on the next check.")
     else:
         pe.unblock("skill", skill_name)
         pe.clear_quarantine("skill", skill_name)
@@ -3927,23 +4503,94 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         )
 
     if app.logger:
-        app.logger.log_action("skill-unblock", skill_name, "manual unblock via CLI")
+        saved_change_audit(app.logger).log_action("skill-unblock", skill_name, "manual unblock via CLI")
 
 
 # ---------------------------------------------------------------------------
 # skill allow
 # ---------------------------------------------------------------------------
 
+def _skill_connectors_for_path(app: AppContext, path: str) -> list[str]:
+    """Configured connectors whose skill folders hold *path*."""
+    if not callable(getattr(app.cfg, "skill_dirs", None)):
+        return []
+    real = os.path.realpath(path)
+    return [
+        connector
+        for connector in _active_skill_connectors(app)
+        if any(_strict_path_within(real, os.path.realpath(root)) for root in app.cfg.skill_dirs(connector) if root)
+    ]
+
+
+def _skill_quarantined_copies(app: AppContext, skill_name: str) -> list[tuple[str, str]]:
+    """``(connector, recorded destination)`` for each quarantined copy: the
+    path ``skill restore`` puts it back to. A record filed without a
+    connector takes the configured connectors whose skill folders hold that
+    path, or "" when none does."""
+    if app.store is None:
+        return []
+    copies: list[tuple[str, str]] = []
+    for record in app.store.list_quarantine_records("skill", skill_name):
+        if not record.original_path:
+            continue
+        connectors = [c for c in record.connectors if c] or _skill_connectors_for_path(app, record.original_path)
+        for connector in connectors or [""]:
+            if (connector, record.original_path) not in copies:
+                copies.append((connector, record.original_path))
+    return copies
+
+
+def _skill_allow_pin(app: AppContext, skill_name: str, connector: str) -> str:
+    """The path an allow for *connector* is pinned to: the installed copy,
+    else the recorded destination of its quarantined copy (GAP-0359)."""
+    path = _resolve_path(app, skill_name, connector) if connector else _resolve_path(app, skill_name)
+    if path:
+        return path
+    for copy_connector, destination in _skill_quarantined_copies(app, skill_name):
+        if copy_connector == connector:
+            return destination
+    return ""
+
+
+def _echo_skill_allow_scope(skill_name: str, connector: str, pin: str) -> None:
+    """Say what a skill allow covers (GAP-0359)."""
+    if pin:
+        click.echo(f"  The rule covers the copy at {pin} only; a skill with this name elsewhere is scanned.")
+        return
+    where = f"on {connector}" if connector else "on any connector"
+    click.secho(
+        f"  Note: this rule matches the name only: any skill named {skill_name!r} {where} skips the scan.",
+        fg="yellow",
+    )
+
+
+def _echo_skill_restore_needed(app: AppContext, skill_name: str, connector: str = "") -> None:
+    """Tell the operator the allowed skill's files are still in quarantine (GAP-0358)."""
+    copies = [c for c in _skill_quarantined_copies(app, skill_name) if not connector or c[0] == connector]
+    if not copies:
+        return
+    flag = f" --connector {connector}" if connector else ""
+    click.echo(
+        "  Its files are still in quarantine (allow does not move them). "
+        f"Restore them with: defenseclaw skill restore {skill_name}{flag}"
+    )
+
+
 @skill.command()
 @click.argument("name")
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install allow list.
 
     Allow-listed skills skip the scan gate during install.
     Adding a skill also removes it from the block list.
+
+    The rule is scoped to the connector that has the copy and pinned to the
+    copy's path; for a quarantined copy, the path it is restored to. Allow
+    does not restore files: run 'defenseclaw skill restore <name>' for that.
 
     Bare ``skill allow <name>`` allows matching configured connector copies;
     ``--connector <name>`` narrows the allow to one peer. If no connector copy
@@ -3951,8 +4598,8 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    skill_name = os.path.basename(name)
-    pe = PolicyEngine(app.store)
+    skill_name = asset_lists.policy_rule_name("skill", name)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if not reason:
         reason = "manual allow via CLI"
@@ -3963,32 +4610,35 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     connector = _resolve_connector_scope(app, connector_flag)
     if connector:
         if pe.is_allowed_for_connector("skill", skill_name, connector):
-            if app.store and app.store.has_action(
-                "skill", skill_name, "install", "allow", connector,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "skill", skill_name, connector, "allow"):
                 click.echo(f"Already allowed for {connector}: {skill_name}")
             else:
                 click.echo(f"Already allowed globally (covers {connector}): {skill_name}")
             return
-        pe.allow_for_connector("skill", skill_name, connector, reason)
-        skill_path = _resolve_path(app, skill_name, connector)
+        skill_path = _skill_allow_pin(app, skill_name, connector)
+        pe.allow_for_connector("skill", skill_name, connector, reason, skill_path)
         if skill_path:
             pe.set_source_path("skill", skill_name, skill_path, connector)
         click.secho(
             f"[skill] {skill_name!r} added to allow list (connector={connector})",
             fg="green",
         )
+        _echo_skill_allow_scope(skill_name, connector, skill_path)
+        _echo_skill_restore_needed(app, skill_name, connector)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-allow", skill_name, f"reason={reason} connector={connector}",
             )
         return
 
     targets = _skill_policy_fanout_connectors(app, pe, skill_name)
+    for copy_connector, _destination in _skill_quarantined_copies(app, skill_name):
+        if copy_connector and copy_connector not in targets:
+            targets.append(copy_connector)
     if targets:
         for target_connector in targets:
-            pe.allow_for_connector("skill", skill_name, target_connector, reason)
-            skill_path = _resolve_path(app, skill_name, target_connector)
+            skill_path = _skill_allow_pin(app, skill_name, target_connector)
+            pe.allow_for_connector("skill", skill_name, target_connector, reason, skill_path)
             if skill_path:
                 pe.set_source_path("skill", skill_name, skill_path, target_connector)
             click.secho(
@@ -3996,10 +4646,12 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
                 f"(connector={target_connector})",
                 fg="green",
             )
+            _echo_skill_allow_scope(skill_name, target_connector, skill_path)
         if app.store and pe.get_action("skill", skill_name) is not None:
             pe.remove_action("skill", skill_name)
+        _echo_skill_restore_needed(app, skill_name)
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-allow", skill_name, f"reason={reason} connector=all",
             )
         return
@@ -4007,27 +4659,29 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     entry = pe.get_action("skill", skill_name)
     runtime_disabled = bool(entry and entry.actions.runtime == "disable")
     runtime_cleared = True
-    if runtime_disabled:
+    # GAP-0358: only OpenClaw keeps a runtime disable in the agent, behind the
+    # gateway's /skill/enable route. For every other connector the disable is
+    # the journal row this allow clears, and the route does not exist.
+    if runtime_disabled and _active_connector_name(app) == "openclaw":
         runtime_cleared = _enable_skill_via_gateway(app, skill_name)
 
-    if runtime_cleared:
-        pe.allow("skill", skill_name, reason)
-    else:
-        app.store.set_action_field("skill", skill_name, "install", "allow", reason)
-
-    skill_path = _resolve_path(app, skill_name)
+    skill_path = _skill_allow_pin(app, skill_name, "")
+    pe.allow("skill", skill_name, reason, skill_path, clear_journal=runtime_cleared)
     if skill_path:
         pe.set_source_path("skill", skill_name, skill_path)
-    if runtime_cleared:
-        click.secho(f"[skill] {skill_name!r} added to allow list", fg="green")
-    else:
+    if app.logger:
+        saved_change_audit(app.logger).log_action("skill-allow", skill_name, f"reason={reason}")
+    if not runtime_cleared:
         click.secho(
-            f"[skill] {skill_name!r} added to allow list; runtime disable remains until the gateway is reachable",
+            f"[skill] {skill_name!r} added to allow list, but OpenClaw still has it disabled: "
+            f"the gateway did not confirm the enable. Run 'defenseclaw skill enable {skill_name}' "
+            "once the gateway is running.",
             fg="yellow",
         )
-
-    if app.logger:
-        app.logger.log_action("skill-allow", skill_name, f"reason={reason}")
+        raise SystemExit(1)
+    click.secho(f"[skill] {skill_name!r} added to allow list", fg="green")
+    _echo_skill_allow_scope(skill_name, "", skill_path)
+    _echo_skill_restore_needed(app, skill_name)
 
 
 # ---------------------------------------------------------------------------
@@ -4140,7 +4794,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         reason = "manual disable via CLI"
 
     connector = _resolve_connector_scope(app, connector_flag)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     target_connector = _normalize_runtime_connector(connector or active)
     _refuse_bundled_skill_policy_action(
         app,
@@ -4180,7 +4834,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
                 pe.disable_for_connector("skill", skill_name, target, reason)
 
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "skill-disable", skill_name, f"reason={reason} connector=all",
                 )
             return
@@ -4218,7 +4872,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
         pe.disable("skill", skill_name, reason)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-disable", skill_name, f"reason={reason} connector={connector}",
         )
 
@@ -4244,7 +4898,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     active = _active_connector_name(app)
     connector = _resolve_connector_scope(app, connector_flag)
     target_connector = _normalize_runtime_connector(connector or active)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if not connector_flag:
         fanout_connectors = _skill_runtime_fanout_connectors(
@@ -4273,7 +4927,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
 
             pe.enable("skill", skill_name)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "skill-enable",
                     skill_name,
                     "re-enabled via CLI connector=all",
@@ -4302,7 +4956,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
         pe.enable("skill", skill_name)
 
     if app.logger:
-        app.logger.log_action(
+        saved_change_audit(app.logger).log_action(
             "skill-enable", skill_name, f"re-enabled via CLI connector={connector}",
         )
 
@@ -4369,7 +5023,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         targets = _skill_match_dir_scopes(app, skill_name, connector_flag)
 
     if not targets:
-        click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
+        ux.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
         raise SystemExit(1)
 
     bundled_targets = [
@@ -4387,7 +5041,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
 
     if not reason:
         reason = "manual quarantine via CLI"
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     for target_connector, skill_path in targets:
         dest = _quarantine_skill_with_provenance(
@@ -4405,7 +5059,7 @@ def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> 
         click.echo(f"[skill] {skill_name!r} quarantined{suffix}")
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-quarantine",
                 skill_name,
                 f"reason={reason}, connector={target_connector}, dest={dest}",
@@ -4441,7 +5095,7 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
 
     skill_name = os.path.basename(name)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     resolved_connector, records = _skill_quarantine_records(
         app, pe, skill_name, connector_flag,
     )
@@ -4590,7 +5244,7 @@ def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) 
         click.echo(f"[skill] {skill_name!r} restored to its recorded destination{suffix}")
 
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "skill-restore",
                 skill_name,
                 f"connector={display_connector}, restored to {target_restore_path}",
@@ -4653,7 +5307,11 @@ def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None
                 cards.append(fallback)
 
     if not cards:
-        click.echo(f"error: skill {skill_name!r} not found", err=True)
+        list_cmd = f"defenseclaw skill list --connector {connector}" if connector_flag else "defenseclaw skill list"
+        click.echo(
+            f"Error: skill {skill_name!r} not found. Run `{list_cmd}` to see installed skills.",
+            err=True,
+        )
         raise SystemExit(1)
 
     if as_json:
@@ -4889,30 +5547,53 @@ def _scan_installed_skill_for_connector(
         )
         raise SystemExit(1)
 
-    if app.logger:
-        app.logger.log_scan(result)
+    _record_scan(app.logger, result, connector=connector)
 
     _print_result(skill_name, result)
 
     post_decision = evaluate_admission(
         pe,
-        policy_dir=app.cfg.policy_dir,
+        config=app.cfg,
         target_type="skill",
         name=skill_name,
         source_path=skill_path,
         scan_result=result,
-        fallback_actions=app.cfg.skill_actions,
         connector=connector,
-        asset_policy=app.cfg.asset_policy,
     )
 
-    if post_decision.verdict == "allowed":
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        _rollback_skill_install_paths(rollback_paths or [skill_path])
+        ux.echo(f"error: skill {skill_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", skill_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
+    if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
+        # The admission action for the findings' severity is allow; nothing
+        # is on an allow list.
         click.echo(
+            f"[install] {skill_name!r} installed: the admission policy allows its findings "
+            f"({post_decision.reason}, connector={connector})"
+        )
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-allowed",
+                skill_name,
+                f"reason=admission-action-allow connector={connector}",
+            )
+        return
+
+    if post_decision.verdict == "allowed":
+        ux.echo(
             f"[install] {skill_name!r} became allow-listed for connector={connector} "
             "— skipping post-scan enforcement"
         )
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-allowed",
                 skill_name,
                 f"reason=allow-listed-post-scan connector={connector}",
@@ -4922,7 +5603,7 @@ def _scan_installed_skill_for_connector(
     if post_decision.verdict == "clean":
         click.echo(f"[install] {skill_name!r} installed and clean (connector={connector})")
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-clean", skill_name, f"verdict=clean connector={connector}",
             )
         return
@@ -4931,12 +5612,12 @@ def _scan_installed_skill_for_connector(
     detail = f"severity={sev} findings={len(result.findings)} connector={connector}"
 
     if not take_action:
-        click.echo(
+        ux.echo(
             f"[install] {len(result.findings)} {sev} findings in {skill_name!r} "
             f"(connector={connector}; no action taken — pass --action to enforce)"
         )
         if app.logger:
-            app.logger.log_action("install-warning", skill_name, detail)
+            saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
         return
 
     action_cfg = post_decision.action
@@ -4974,12 +5655,8 @@ def _scan_installed_skill_for_connector(
             pe.disable_for_connector("skill", skill_name, connector, enforcement_reason)
 
     if action_cfg.install == "block":
-        pe.block_for_connector("skill", skill_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
-
-    if action_cfg.install == "allow":
-        pe.allow_for_connector("skill", skill_name, connector, enforcement_reason)
-        applied_actions.append("added to allow list")
+        pe.record_scan_block("skill", skill_name, connector, enforcement_reason)
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("skill", skill_name, skill_path, connector)
 
@@ -4987,10 +5664,10 @@ def _scan_installed_skill_for_connector(
         actions_str = ", ".join(applied_actions)
         click.echo(f"[install] {skill_name!r}: {actions_str} ({detail})")
         if app.logger:
-            app.logger.log_action(
+            saved_change_audit(app.logger).log_action(
                 "install-enforced", skill_name, f"{detail}; {actions_str}",
             )
-        click.echo(
+        ux.echo(
             f"error: skill {skill_name!r} had {sev} findings for connector={connector} "
             f"— actions applied: {actions_str}",
             err=True,
@@ -5002,13 +5679,13 @@ def _scan_installed_skill_for_connector(
         f"(connector={connector})"
     )
     if app.logger:
-        app.logger.log_action("install-warning", skill_name, detail)
+        saved_change_audit(app.logger).log_action("install-warning", skill_name, detail)
 
 
 @skill.command()
 @click.argument("name")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
-@click.option("--action", "take_action", is_flag=True, help="Apply skill_actions policy based on scan severity")
+@click.option("--action", "take_action", is_flag=True, help="Apply the admission policy (admission.skill)")
 @click.option(
     "--connector", "connector_flag", default="",
     help=(
@@ -5025,7 +5702,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     copy. Pass --connector <name> to install and scan only that connector.
 
     By default, install only runs the scan and reports findings — no enforcement
-    actions are taken. Pass --action to apply the configured skill_actions policy
+    actions are taken. Pass --action to apply the configured admission policy
     (quarantine, disable, block) based on scan severity.
 
     Use --force to overwrite an existing skill.
@@ -5045,19 +5722,17 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
     targets = _skill_install_targets(
         app, connectors, explicit_connector=bool(connector_flag),
     )
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     pre_decisions: dict[str, Any] = {}
     for connector, _install_root in targets:
         decision = evaluate_admission(
             pe,
-            policy_dir=app.cfg.policy_dir,
+            config=app.cfg,
             target_type="skill",
             name=skill_name,
             source_path=name,
-            fallback_actions=app.cfg.skill_actions,
             connector=connector,
-            asset_policy=app.cfg.asset_policy,
             # F-0283: a quarantined skill must NOT be (re)installed. Without
             # this flag the admission evaluator never consulted quarantine
             # state, so an asset that a prior scan quarantined could be
@@ -5068,27 +5743,31 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
 
         if decision.verdict == "blocked":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=blocked connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: skill {skill_name!r} is on the block list for connector={connector}"
-                f" — run 'defenseclaw skill allow {skill_name} --connector {connector}' to unblock",
+                f" — run 'defenseclaw skill unblock {skill_name} --connector {connector}' to clear the block",
                 err=True,
             )
             raise SystemExit(1)
 
         if decision.verdict == "rejected" and decision.source == "quarantine":
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-rejected", skill_name, f"reason=quarantined connector={connector}",
                 )
-            click.echo(
+            ux.echo(
                 f"error: skill {skill_name!r} is quarantined for connector={connector}"
                 f" — release the quarantine before reinstalling",
                 err=True,
             )
             raise SystemExit(1)
+
+        note_asset_policy_observed(
+            app.logger, decision, target_type="skill", name=skill_name, connector=connector,
+        )
 
     # Install via clawhub
     click.echo(
@@ -5108,9 +5787,9 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 err=True,
             )
             if app.logger:
-                app.logger.log_action(
-                    "install-rolled-back", skill_name,
-                    "reason=staged-skill-unresolved scan=skipped",
+                saved_change_audit(app.logger).log_action(
+                    "install-rejected", skill_name,
+                    "result=rolled-back reason=staged-skill-unresolved scan=skipped",
                 )
             raise SystemExit(1)
 
@@ -5136,13 +5815,13 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                     f"(connector={connector})"
                 )
             else:
-                click.echo(
+                ux.echo(
                     f"[install] {skill_name!r} is on the allow list for "
                     f"connector={connector} — skipping scan"
                 )
             pe.set_source_path("skill", skill_name, skill_path, connector)
             if app.logger:
-                app.logger.log_action(
+                saved_change_audit(app.logger).log_action(
                     "install-allowed",
                     skill_name,
                     f"reason=allow-listed connector={connector}",
@@ -5184,32 +5863,3 @@ def _run_clawhub_install(skill_name: str, force: bool, cwd: str | None = None) -
         )
         raise SystemExit(1)
 
-
-def _run_clawhub_uninstall(skill_name: str, cwd: str | None = None) -> None:
-    """Best-effort rollback for a partial install.
-
-    Runs `clawhub uninstall <skill>` with a short timeout. We
-    intentionally do not raise on rollback failures — the caller is
-    already exiting non-zero — but we surface the error to the
-    operator so they can manually remediate.
-    """
-    try:
-        args = _clawhub_args("uninstall", skill_name)
-        result = _run_clawhub_process(args, timeout=120, cwd=cwd, input_text="y\n")
-    except subprocess.TimeoutExpired:
-        click.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — manual cleanup may be required",
-            err=True,
-        )
-    except (OSError, ValueError) as exc:
-        click.echo(
-            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — manual cleanup may be required",
-            err=True,
-        )
-    else:
-        if result.returncode != 0:
-            click.echo(
-                f"[install] warning: clawhub uninstall of {skill_name!r} failed: "
-                f"{_external_failure_detail(result)} — manual cleanup may be required",
-                err=True,
-            )

@@ -32,10 +32,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
+from defenseclaw.gateway import resolve_trusted_gateway_binary
+from defenseclaw.pinned_exec import run_pinned_executable
 
 CONFIG_V8_WIRE_VERSION: Final = 2
-CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
+# A loaded Windows host took more than 15 s (GAP-1621).
+CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 60
 _OPERATIONS: Final = frozenset({"validate", "effective"})
 _REFERENCE_FORMATS: Final = frozenset({"yaml", "markdown"})
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -66,6 +69,10 @@ class ConfigInspectError(RuntimeError):
         super().__init__(message)
 
 
+class ConfigInspectTimeoutError(ConfigInspectError):
+    """The helper did not finish in time; the configuration was not judged."""
+
+
 @dataclass(frozen=True)
 class ConfigV8WireResult:
     wire_version: int
@@ -78,6 +85,7 @@ class ConfigV8WireResult:
     gateway_api_port: int = 18970
     valid: bool | None = None
     effective: dict[str, Any] | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def inspect_v8_config(
@@ -118,6 +126,47 @@ def inspect_v8_config(
     return _decode_wire(payload, operation)
 
 
+def migrate_config_v9(
+    *,
+    config_path: str,
+    dry_run: bool = False,
+    ack: bool = False,
+    gateway_binary: str | None = None,
+) -> dict[str, Any]:
+    """Run the one v8 -> v9 migration (``defenseclaw-gateway config migrate``).
+
+    Returns the JSON result (``migrated``, ``dry_run``, ``written`` and the
+    migration-v9.json ``record``). ``ack`` marks the record as read and
+    returns ``{}``.
+    """
+
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
+    if not binary:
+        raise ConfigInspectError("defenseclaw-gateway is required to migrate config.yaml; run defenseclaw upgrade")
+    argv = [binary, "config", "migrate", "--to", "9", "--config", config_path]
+    if ack:
+        argv.append("--ack")
+    else:
+        argv.append("--json")
+        if dry_run:
+            argv.append("--dry-run")
+    completed = _run(argv)
+    if completed.returncode != 0:
+        raise ConfigInspectError(_helper_failure(completed.stderr, "migrate"))
+    if ack:
+        return {}
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ConfigInspectError("the config migration returned malformed JSON; run defenseclaw upgrade") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("record"), dict):
+        raise ConfigInspectError("the config migration returned an invalid response; run defenseclaw upgrade")
+    return payload
+
+
 def config_v8_schema() -> str:
     """Return the exact embedded canonical JSON Schema from the Go binary."""
 
@@ -145,7 +194,7 @@ def config_v8_reference(fmt: str, *, section: str = "observability") -> str:
     completed = _run(argv)
     if completed.returncode != 0:
         raise ConfigInspectError(_helper_failure(completed.stderr, "reference"))
-    if not completed.stdout.strip():
+    if not (completed.stdout or "").strip():
         raise ConfigInspectError("configuration helper returned an empty reference; run defenseclaw upgrade")
     return completed.stdout
 
@@ -158,10 +207,13 @@ def _helper_argv(
     gateway_binary: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> list[str]:
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     if not binary:
         raise ConfigInspectError(
-            "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
+            "defenseclaw-gateway is required for configuration inspection; run defenseclaw upgrade"
         )
     argv = [binary, "config-v8", operation]
     if config_path:
@@ -180,25 +232,39 @@ def _run(
     environment = None
     if environment_overrides is not None:
         environment = _validation_environment(environment_overrides)
+    # Run the checked gateway file itself, as the lifecycle does: running it
+    # by path let a swap after the custody check run another file. The helper
+    # always writes UTF-8 (the YAML reference has box-drawing characters); the
+    # locale code page on Windows can't decode them and left stdout as None
+    # (GAP-1414).
     try:
         if environment is None:
-            return subprocess.run(
+            return run_pinned_executable(
                 argv,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
                 check=False,
             )
-        return subprocess.run(
+        return run_pinned_executable(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
             check=False,
             env=environment,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ConfigInspectError("configuration helper timed out without producing a result") from exc
+        raise ConfigInspectTimeoutError(
+            f"the configuration check did not finish within {CONFIG_V8_HELPER_TIMEOUT_SECONDS} s "
+            "(the host may be busy), so config.yaml was not judged valid or invalid"
+        ) from exc
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     except OSError as exc:
         raise ConfigInspectError("configuration helper could not be started; run defenseclaw upgrade") from exc
 
@@ -245,7 +311,7 @@ def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:
     expected_kind = "validation" if operation == "validate" else "effective"
     if payload.get("wire_version") != CONFIG_V8_WIRE_VERSION:
         raise ConfigInspectError("configuration helper protocol is incompatible; run defenseclaw upgrade")
-    if payload.get("kind") != expected_kind or payload.get("config_version") != 8:
+    if payload.get("kind") != expected_kind or payload.get("config_version") not in (8, 9):
         raise ConfigInspectError("configuration helper returned an incompatible response; run defenseclaw upgrade")
     effective = payload.get("effective")
     if operation == "effective" and not isinstance(effective, dict):
@@ -268,7 +334,7 @@ def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:
     return ConfigV8WireResult(
         wire_version=CONFIG_V8_WIRE_VERSION,
         kind=expected_kind,
-        config_version=8,
+        config_version=payload["config_version"],
         source=payload["source"],
         data_dir=payload["data_dir"],
         plan_digest=payload["plan_digest"],
@@ -276,6 +342,10 @@ def _decode_wire(payload: dict[str, Any], operation: str) -> ConfigV8WireResult:
         gateway_api_port=gateway_api_port,
         valid=valid if isinstance(valid, bool) else None,
         effective=effective,
+        warnings=tuple(
+            item for item in payload.get("warnings", [])
+            if isinstance(item, str) and len(item) <= 1024 and _DIAGNOSTIC_CONTROL_CHARACTERS.search(item) is None
+        ) if isinstance(payload.get("warnings", []), list) else (),
     )
 
 
@@ -292,7 +362,7 @@ def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, 
         not isinstance(payload, dict)
         or payload.get("wire_version") != CONFIG_V8_WIRE_VERSION
         or payload.get("kind") != "validation_error"
-        or payload.get("config_version") != 8
+        or payload.get("config_version") not in (8, 9)
     ):
         return None
     field_path = payload.get("path")
@@ -314,7 +384,8 @@ def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, 
 def _helper_failure(stderr: str | None, operation: str) -> str:
     detail = _safe_detail(stderr)
     if detail:
-        return detail
+        # The helper prints "Error: ..." and click adds its own prefix.
+        return detail.removeprefix("Error: ")
     return f"canonical configuration {operation} failed; correct config.yaml and retry"
 
 

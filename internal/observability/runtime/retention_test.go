@@ -206,7 +206,27 @@ func TestRetentionControllerWaitsForReadinessRunsOnCadenceAndStopsCleanly(t *tes
 	if interval := receiveRetentionTest(t, scheduler.waits); interval != audit.RetentionScheduleInterval {
 		t.Fatalf("periodic cadence=%s", interval)
 	}
-	if err := controller.Stop(t.Context()); err != nil {
+	// GAP-0287: a run that stopped at a time budget with work left (free
+	// pages still to return) is followed a minute later, then the cadence
+	// resumes once a run finishes.
+	scheduler.commands <- retentionSchedulerCommand{wake: audit.RetentionScheduleTick}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{
+		CompletedAt: firstCompleted.Add(2 * time.Hour), Backlog: true,
+		RowsDeleted: map[audit.RetentionTableClass]int64{},
+	}}
+	if interval := receiveRetentionTest(t, scheduler.waits); interval != audit.RetentionFollowUpInterval {
+		t.Fatalf("cadence after a run with work left=%s, want %s", interval, audit.RetentionFollowUpInterval)
+	}
+	scheduler.commands <- retentionSchedulerCommand{wake: audit.RetentionScheduleTick}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{
+		CompletedAt: firstCompleted.Add(3 * time.Hour), RowsDeleted: map[audit.RetentionTableClass]int64{},
+	}}
+	if interval := receiveRetentionTest(t, scheduler.waits); interval != audit.RetentionScheduleInterval {
+		t.Fatalf("cadence after the backlog drained=%s", interval)
+	}
+	if err := controller.Stop(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 	if status := controller.Status(); status.State != RetentionStateStopped {
@@ -267,7 +287,7 @@ func TestRetentionControllerAppliesPolicyWithoutReplacingOrOverlappingReaper(t *
 	if _, _, maxActive, days := reaper.snapshot(); maxActive != 1 || days != 60 {
 		t.Fatalf("invalid policy changed process reaper max=%d days=%d", maxActive, days)
 	}
-	if err := controller.Stop(t.Context()); err != nil {
+	if err := controller.Stop(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -308,7 +328,7 @@ func TestRetentionControllerPublishesOnlyBoundedFailureOutcomesAndRecovers(t *te
 		schedulerFailure.Failure != RetentionFailureScheduler || schedulerFailure.FailureCount != 2 {
 		t.Fatalf("scheduler failure status=%#v", schedulerFailure)
 	}
-	if err := controller.Stop(t.Context()); err != nil {
+	if err := controller.Stop(lifecycleTestContext(t)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -324,7 +344,7 @@ func TestRetentionControllerStopDrainsAndWaitsForActiveRun(t *testing.T) {
 	}
 	receiveRetentionTest(t, reaper.started)
 	stopDone := make(chan error, 1)
-	go func() { stopDone <- controller.Stop(t.Context()) }()
+	go func() { stopDone <- controller.Stop(lifecycleTestContext(t)) }()
 	select {
 	case err := <-stopDone:
 		t.Fatalf("stop returned before the active retention run drained: %v", err)

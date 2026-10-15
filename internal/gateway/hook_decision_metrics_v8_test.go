@@ -6,13 +6,42 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+type hookDecisionRecordCapture struct {
+	admission func(router.Metadata) router.Admission
+	records   []observability.Record
+}
+
+func (capture *hookDecisionRecordCapture) Emit(
+	_ context.Context,
+	metadata router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	admission := router.AdmissionOrdinary
+	if capture.admission != nil {
+		admission = capture.admission(metadata)
+	}
+	if admission == router.AdmissionDrop {
+		return pipeline.LocalLogOutcome{}, nil
+	}
+	record, err := build(observabilityruntime.EmitContext{}, admission)
+	if err != nil {
+		return pipeline.LocalLogOutcome{}, err
+	}
+	capture.records = append(capture.records, record)
+	return pipeline.LocalLogOutcome{}, nil
+}
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
@@ -166,6 +195,98 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	assertHookV8MetricPoint(t, dispatch, map[string]string{
 		"defenseclaw.connector.source": "codex",
 	}, 1)
+}
+
+func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	dispatcher, notifications := newWiringDispatcher()
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
+	api.SetNotifier(dispatcher)
+	fixture.sidecar.setAPIServer(api)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("observability bootstrap bound=%t error=%v", bound, err)
+	}
+
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-finalized-block",
+		SessionID: "session-finalized-block",
+		PolicyID:  "policy-finalized-block",
+	})
+	req := agentHookRequest{
+		ConnectorName: "cursor",
+		HookEventName: "beforeShellExecution",
+		SessionID:     "session-finalized-block",
+		ToolName:      "shell",
+	}
+	resp := agentHookResponse{
+		Action:            "block",
+		RawAction:         "block",
+		aiDefenseEnforced: true,
+		// NONE proves severity cannot suppress an enforced block's Active Alert.
+		Severity:     "NONE",
+		Reason:       "AI Defense blocked the request",
+		SourceReason: "AI Defense blocked the request",
+		Mode:         "action",
+		EvaluationID: "evaluation-finalized-block",
+		RuleIDs:      []string{"aid-policy-block"},
+	}
+
+	finalization := api.finalizeAgentHook(
+		ctx, "cursor", req, resp, nil, []byte(`{"hook_event_name":"beforeShellExecution"}`),
+		time.Millisecond, false, nil,
+	)
+	if !finalization.Enforced || !finalization.EnforcementPersisted || !finalization.AuditPersisted {
+		t.Fatalf("finalization=%+v, want enforced block with both records persisted", finalization)
+	}
+	counts, err := fixture.store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 1 {
+		t.Fatalf("Active Alerts before notification = %d, want 1", counts.Alerts)
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorAuditRows := 0
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) {
+			connectorAuditRows++
+		}
+	}
+	if connectorAuditRows != 1 {
+		t.Fatalf("connector-hook audit rows before notification = %d, want 1", connectorAuditRows)
+	}
+
+	api.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+	if got := notifications.WaitFor(t, 1); len(got) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(got))
+	}
+}
+
+func TestHookFinalizationNotificationGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		result hookFinalizationResult
+		want   bool
+	}{
+		{name: "ordinary audit persisted", result: hookFinalizationResult{AuditPersisted: true}, want: true},
+		{name: "ordinary audit missing", result: hookFinalizationResult{}, want: false},
+		{name: "block both persisted", result: hookFinalizationResult{AuditPersisted: true, EnforcementPersisted: true, Enforced: true}, want: true},
+		{name: "block connector audit missing", result: hookFinalizationResult{EnforcementPersisted: true, Enforced: true}, want: false},
+		{name: "block active alert missing", result: hookFinalizationResult{AuditPersisted: true, Enforced: true}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.result.notificationReady(); got != test.want {
+				t.Fatalf("notificationReady() = %t, want %t", got, test.want)
+			}
+		})
+	}
 }
 
 func TestHookDecisionSharesSessionStartExecutionIdentityRealShape(t *testing.T) {
@@ -410,4 +531,143 @@ func assertHookV8MetricPoint(
 		}
 	}
 	t.Errorf("metric point attributes=%v value=%v not found in %+v", wantAttributes, wantValue, points)
+}
+
+func TestHookDecisionV8CarriesSandboxBindingCorrelation(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		SessionID: "session-sandbox-1", SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33",
+		SandboxName: "dc-claudecode-myapp-7f3a",
+	})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-sandbox-1", ToolName: "Bash"}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+	eventuallyTrue(t, func() bool {
+		_, requests := capture.snapshot()
+		return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
+	})
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	var logWire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	if len(logs) != 1 || json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &logWire) != nil {
+		t.Fatalf("generated hook decision logs=%d, want one with a JSON body", len(logs))
+	}
+	if logWire.Body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" ||
+		logWire.Body["defenseclaw.sandbox.name"] != "dc-claudecode-myapp-7f3a" {
+		t.Errorf("generated hook decision body = %v, want the sandbox id and name", logWire.Body)
+	}
+	// Sandbox identities are high-cardinality log attributes only; no hook
+	// decision metric may carry them as a label.
+	_, requests := capture.snapshot()
+	for _, instrument := range []string{
+		observability.TelemetryInstrumentDefenseClawConnectorHookInvocations,
+		observability.TelemetryInstrumentDefenseClawConnectorHookOutcome,
+		observability.TelemetryInstrumentDefenseClawInspectEvaluations,
+	} {
+		for _, point := range hookModelV8MetricPoints(requests, instrument) {
+			for key := range point.attributes {
+				if strings.HasPrefix(key, "defenseclaw.sandbox.") {
+					t.Errorf("metric %s carries sandbox label %s", instrument, key)
+				}
+			}
+		}
+	}
+}
+
+// GAP-0317: the decision of a hook admitted under a registration (relayed by
+// the user's daemon or sent to the hook socket with the registration header)
+// names the registration, the effective sandbox policy, the person's keyed
+// pseudonym and the OpenShell provision, as the managed sandbox records do.
+func TestHookDecisionV8CarriesRegistrationManagedStamps(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	reg := managedTelemetryTestRegistration()
+	ctx := withSandboxRelayRegistration(context.Background(), reg)
+	ctx = audit.ContextWithEnvelope(ctx, audit.CorrelationEnvelope{SessionID: "session-reg-1", SandboxID: reg.SandboxID, SandboxName: reg.SandboxName})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-reg-1", ToolName: "Bash"}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "CRITICAL", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 })
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	if len(logs) != 1 || json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &wire) != nil {
+		t.Fatalf("generated hook decision logs=%d, want one with a JSON body", len(logs))
+	}
+	for key, want := range map[string]interface{}{
+		"defenseclaw.sandbox.registration.id":    reg.ID,
+		"defenseclaw.subject.key":                reg.SubjectKey,
+		"defenseclaw.sandbox.policy.digest":      reg.EffectiveDigest,
+		"defenseclaw.sandbox.policy.generation":  float64(reg.Generation),
+		"defenseclaw.sandbox.policy.provisional": false,
+		"defenseclaw.openshell.version":          reg.OpenShell,
+		"defenseclaw.openshell.install_mode":     reg.InstallMode,
+		"defenseclaw.sandbox.driver":             reg.Driver,
+		"defenseclaw.sandbox.name":               reg.SandboxName,
+	} {
+		if got := wire.Body[key]; got != want {
+			t.Errorf("hook decision %s = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		envelope         audit.CorrelationEnvelope
+		wantID, wantName string // "" when the attribute is left out
+	}{
+		{name: "unbound"},
+		{"bound", audit.CorrelationEnvelope{SandboxID: " sbx-1 ", SandboxName: "dc-codex-app-0a1b"}, "sbx-1", "dc-codex-app-0a1b"},
+		{"name without id before the gateway accepted the sandbox", audit.CorrelationEnvelope{SandboxName: "dc-codex-app-0a1b"}, "", "dc-codex-app-0a1b"},
+		{"free text is dropped", audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"}, "", ""},
+		{"name over the registered bound is dropped", audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)}, "sbx-2", ""},
+	} {
+		id, name := hookV8Sandbox(tc.envelope)
+		if got, ok := id.Get(); ok != (tc.wantID != "") || got != tc.wantID {
+			t.Errorf("%s: sandbox id=(%q,%v) want %q", tc.name, got, ok, tc.wantID)
+		}
+		if got, ok := name.Get(); ok != (tc.wantName != "") || got != tc.wantName {
+			t.Errorf("%s: sandbox name=(%q,%v) want %q", tc.name, got, ok, tc.wantName)
+		}
+	}
+}
+
+// GAP-1536: when the correlation ledger cannot be written (disk full), the
+// verdict is still exported (log and metrics), so blocks stay visible
+// remotely while the local audit store is down.
+func TestHookDecisionV8IsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-full-disk", ToolName: "Bash",
+		SuppressCorrelationEmit: true, CorrelationUnavailable: true,
+	}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.finalizeAgentHook(t.Context(), "claudecode", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	eventuallyTrue(t, func() bool {
+		_, requests := capture.snapshot()
+		return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
+	})
+}
+
+// GAP-1536: the prompt/tool/response event (Galileo's invoke_agent and
+// execute_tool spans) of a hook whose correlation ledger write failed is
+// still exported; only an exact replay stays unexported.
+func TestHookLLMEventIsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{"correlated", agentHookRequest{}, true},
+		{"correlation unavailable", agentHookRequest{SuppressCorrelationEmit: true, CorrelationUnavailable: true}, true},
+		{"exact replay", agentHookRequest{SuppressCorrelationEmit: true}, false},
+	} {
+		if got := hookLLMEventExportable(tc.req); got != tc.want {
+			t.Errorf("%s: hookLLMEventExportable = %t, want %t", tc.name, got, tc.want)
+		}
+	}
 }

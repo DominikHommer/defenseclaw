@@ -150,10 +150,14 @@ func ReconcileWindowsCodexMachineRequirements(
 			if markerErr != nil {
 				return fmt.Errorf("inspect unowned Codex requirements: %w", markerErr)
 			}
+			preimage, preimageExisted := requirements.data, requirements.existed
 			if contains {
-				return errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
-			}
-			if managedState.existed {
+				adopted, existed, err := adoptWindowsCodexOrphanedRequirements(requirements.data, opts)
+				if err != nil {
+					return err
+				}
+				preimage, preimageExisted = adopted, existed
+			} else if managedState.existed {
 				return errors.New("Codex managed runtime state exists without protected requirements ownership")
 			}
 			state = windowsCodexMachineOwnership{
@@ -161,9 +165,9 @@ func ReconcileWindowsCodexMachineRequirements(
 				RequirementsPath: opts.RequirementsPath,
 				ManagedDir:       opts.ManagedDir,
 				HookBinary:       opts.HookBinary,
-				PreimageExisted:  requirements.existed,
-				Preimage:         append([]byte(nil), requirements.data...),
-				PreimageSHA256:   windowsCodexMachineHash(requirements.data),
+				PreimageExisted:  preimageExisted,
+				Preimage:         append([]byte(nil), preimage...),
+				PreimageSHA256:   windowsCodexMachineHash(preimage),
 			}
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
@@ -528,8 +532,8 @@ func RemoveWindowsCodexMachineRequirements(
 		report.PostimageSHA256 = windowsCodexMachineHash(requirements.data)
 
 		exactPostimage := requirements.existed && report.PostimageSHA256 == state.PostimageSHA256
-		candidate := append([]byte(nil), requirements.data...)
-		candidateExists := requirements.existed
+		var candidate []byte
+		var candidateExists bool
 		switch {
 		case exactPostimage && state.PreimageExisted:
 			candidate = append([]byte(nil), state.Preimage...)
@@ -838,6 +842,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		HookBinary:         hookExecutable,
 		ManagedStatePath:   statePath,
 		CodexTargetEnabled: true,
+		HookContractID:     WindowsCodexStandaloneHookContract(hookExecutable),
 	}
 	if !stateExists {
 		contains, markerErr := windowsCodexRequirementsContainExactManagedHook(
@@ -1344,6 +1349,9 @@ func acquireWindowsCodexMachineFileLock(
 }
 
 func requireWindowsCodexMachineAdministrator() error {
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return errors.New("Codex machine requirements cannot be written by the managed gateway service")
+	}
 	token := windows.GetCurrentProcessToken()
 	if token.IsElevated() {
 		return nil
@@ -1755,4 +1763,20 @@ func validateWindowsCodexMachineVolume(path string) error {
 		return fmt.Errorf("Codex machine path is not on a trusted mount-manager NTFS drive: %w", err)
 	}
 	return nil
+}
+
+// WindowsCodexStandaloneHookContract is the hook contract the standalone
+// profile binds into every Codex machine-requirements command when
+// hookBinary is the standalone install's hook launcher, and "" for any
+// other launcher: the Secure Client profile keeps its certified unbound
+// command. The standalone launcher path derives from the protected HKLM
+// Program Files registration, never the caller's environment, so the hook
+// process (which runs with the agent's environment) and the SYSTEM
+// lifecycle render and verify the same commands.
+func WindowsCodexStandaloneHookContract(hookBinary string) string {
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil {
+		return ""
+	}
+	return windowsCodexStandaloneHookContractFor(layout, hookBinary)
 }

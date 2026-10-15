@@ -2,7 +2,7 @@
   "schema_version": 2,
   "defenseclaw_version": "0.5.0",
   "runtime_lock_file": "hook_contract_lock.json",
-  "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
+  "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to. A version newer than every tested range uses the newest contract (untested newer version) unless known_broken_versions lists it; each entry has exact or min_inclusive/max_exclusive, reason and issue.",
   "connectors": {
     "kiro": {
       "kind": "acp-with-native-hook-defense-in-depth",
@@ -28,7 +28,7 @@
         "block_events is resolved per request from the hook config that invoked the hook, not from the release. Setup marks the .kiro/hooks command with `--hook-surface v3`; that surface blocks on PreToolUse and UserPromptSubmit (kiro.dev/docs/hooks/actions). The CLI 2.x agent-hook config stays unmarked and blocks on PreToolUse only -- 2.x shows a non-zero exit on any other trigger as a warning (kiro.dev/docs/cli/2x-reference). Version probing cannot decide this: v3 is the `--v3` flag on the 2.x binary, so `kiro-cli --version` reports 2.x for both surfaces. An unmarked request resolves to the 2.x set.",
         "The ACP guard is an optional second enforcement path and is versioned independently from Kiro native hooks.",
         "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
-        "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
+        "Kiro IDE 1.0.182 and later and kiro-cli --v3 merge the global ~/.kiro/hooks/*.json with the project .kiro/hooks/*.json (kiro.dev/docs/hooks, all scopes merged), so the global ~/.kiro/hooks/defenseclaw.json enforces; doctor passes it and notes that Kiro IDE builds before 1.0.182 read only the project copy under claw.workspace_dir. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
         "Hook stdout must remain empty because Kiro adds stdout to agent context."
       ]
     },
@@ -53,6 +53,7 @@
     "codex": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "codex --version",
       "contracts": [
         {
@@ -621,6 +622,7 @@
     "claudecode": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "claude --version",
       "contracts": [
         {
@@ -924,6 +926,7 @@
     "hermes": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "hermes --version",
       "contracts": [
         {
@@ -1032,6 +1035,15 @@
               "A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state."
             ]
           },
+          "content_envelope": {
+            "key": "extra",
+            "fields": {
+              "pre_llm_call": "user_message",
+              "post_llm_call": "assistant_response",
+              "post_tool_call": "result",
+              "subagent_stop": "child_summary"
+            }
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -1043,7 +1055,7 @@
             "scope": "user"
           },
           "notes": [
-            "Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Official hook_event_name, tool_name, and tool_input payload fields remain top-level; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
+            "Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. hook_event_name, tool_name, tool_input, session_id, cwd and profile are top-level and every other hook argument (the prompt, tool result and model response included) is under extra; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
             "pre_tool_call is the only blockable event; pre_llm_call injects context; pre_verify can continue the bounded verification loop. Transform hooks require Python string returns, pre_gateway_dispatch requires plugin skip/rewrite/allow results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output; Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
             "Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
             "The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified."
@@ -1155,6 +1167,15 @@
               "A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state."
             ]
           },
+          "content_envelope": {
+            "key": "extra",
+            "fields": {
+              "pre_llm_call": "user_message",
+              "post_llm_call": "assistant_response",
+              "post_tool_call": "result",
+              "subagent_stop": "child_summary"
+            }
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -1166,7 +1187,7 @@
             "scope": "user"
           },
           "notes": [
-            "Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. Official hook payload fields remain top-level.",
+            "Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
             "pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
             "Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
             "The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified."
@@ -1177,6 +1198,7 @@
     "cursor": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "agent --version",
       "contracts": [
         {
@@ -1320,13 +1342,15 @@
     "devin": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "devin --version",
       "contracts": [
         {
           "contract_id": "devin-hooks-v1",
           "agent_version": {
             "exact": [
-              "3000.4.25"
+              "3000.4.25",
+              "3000.11.3"
             ]
           },
           "default_for_unversioned": true,
@@ -1424,17 +1448,34 @@
             "scope": "user,workspace"
           },
           "notes": [
-            "The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
-            "Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config; its legacy Cascade agent uses a separate contract that is not registered.",
+            "The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
+            "Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config. Devin Desktop 3.9.19 removed the legacy Cascade agent; builds before it run Cascade under a separate contract that is not registered.",
             "Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
-            "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded."
-          ]
+            "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, and native OTLP are excluded. DefenseClaw registers no plugin hooks; under the standalone enterprise profile the foreign-hook guard checks the hooks of installed Devin plugins."
+          ],
+          "platform_overrides": {
+            "darwin": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
+            },
+            "windows": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
+            }
+          }
         }
       ]
     },
     "copilot": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "copilot --version",
       "contracts": [
         {
@@ -1675,6 +1716,7 @@
     "antigravity": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "agy --version",
       "contracts": [
         {
@@ -1776,6 +1818,7 @@
     "openhands": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "openhands --version",
       "docs_url": "https://docs.openhands.dev/openhands/usage/customization/hooks",
       "contracts": [
@@ -1902,6 +1945,7 @@
     "opencode": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "opencode --version",
       "contracts": [
         {
@@ -1999,8 +2043,8 @@
           },
           "notes": [
             "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
-            "DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-            "Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args."
+            "DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+            "Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args."
           ]
         }
       ]
@@ -2008,6 +2052,7 @@
     "amp": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "amp --version",
       "docs_url": "https://ampcode.com/manual/plugin-api",
       "contracts": [
@@ -2120,6 +2165,7 @@
     "omnigent": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "omnigent --version",
       "docs_url": "https://github.com/omnigent-ai/omnigent/blob/v0.13.0/docs/POLICIES.md",
       "contracts": [

@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1538,8 +1539,11 @@ func TestCodexSetupCASPreservesConcurrentEdit(t *testing.T) {
 	if err := verifyInstalledCodexHooksForTest(hooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
 		t.Fatalf("Codex hooks not installed/source-trusted after retry: %v", err)
 	}
-	if _, err := os.Stat(managedFileBackupPath(dir, connector.Name(), "config.toml")); !os.IsNotExist(err) {
-		t.Fatalf("exact managed backup survived concurrent setup edit: %v", err)
+	// The retry re-records the concurrently edited bytes (GAP-2300), so the
+	// exact record matches the file and teardown keeps the edit.
+	record, err := loadManagedFileBackupPath(managedFileBackupPath(dir, connector.Name(), "config.toml"))
+	if err != nil || !bytes.Contains(record.PristineBytes, []byte("concurrent_setup")) {
+		t.Fatalf("exact record after concurrent setup edit: err=%v pristine=%q", err, record.PristineBytes)
 	}
 	if err := connector.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown after concurrent setup edit: %v", err)
@@ -1668,8 +1672,11 @@ func TestClaudeCodeSetupCASPreservesConcurrentEdit(t *testing.T) {
 	if _, ok := settings["env"].(map[string]interface{}); !ok {
 		t.Fatalf("Claude OTel env missing after CAS retry: %#v", settings)
 	}
-	if _, err := os.Stat(managedFileBackupPath(dir, connector.Name(), "settings.json")); !os.IsNotExist(err) {
-		t.Fatalf("exact managed backup survived concurrent setup edit: %v", err)
+	// The retry re-records the concurrently edited bytes, as for Codex
+	// (GAP-0043), so the record matches the file and teardown keeps the edit.
+	record, err := loadManagedFileBackupPath(managedFileBackupPath(dir, connector.Name(), "settings.json"))
+	if err != nil || !bytes.Contains(record.PristineBytes, []byte("concurrentSetup")) {
+		t.Fatalf("exact record after concurrent setup edit: err=%v pristine=%q", err, record.PristineBytes)
 	}
 	if err := connector.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown after concurrent setup edit: %v", err)
@@ -1741,7 +1748,10 @@ func TestClaudeCodeTeardownCASPreservesConcurrentEdit(t *testing.T) {
 	}
 }
 
-func TestCodexRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.T) {
+// GAP-2300: Codex saves folder trust to config.toml, and the gateway runs
+// Setup on every start. Setup re-records the drifted file (so doctor keeps
+// drift detection) and teardown still keeps the outside edit.
+func TestCodexRepeatedSetupRerecordsOperatorDriftAndTeardownKeepsIt(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
@@ -1771,8 +1781,15 @@ func TestCodexRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.T
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("second Setup: %v", err)
 	}
-	if _, err := os.Stat(managedFileBackupPath(dir, conn.Name(), "config.toml")); !os.IsNotExist(err) {
-		t.Fatalf("repeated setup retained unsafe exact backup: %v", err)
+	record, err := loadManagedFileBackupPath(managedFileBackupPath(dir, conn.Name(), "config.toml"))
+	if err != nil {
+		t.Fatalf("repeated setup dropped the exporter record: %v", err)
+	}
+	if !bytes.Contains(record.PristineBytes, []byte("operator_after_setup")) {
+		t.Fatalf("record does not hold the drifted file: %q", record.PristineBytes)
+	}
+	if drifted, err := managedFileBackupDrifted(dir, conn.Name(), "config.toml", configPath); err != nil || drifted {
+		t.Fatalf("record after repeated setup: drifted=%v err=%v", drifted, err)
 	}
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -1782,9 +1799,15 @@ func TestCodexRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.T
 	if operator["kept"] != true {
 		t.Fatalf("teardown erased operator drift: %#v", config)
 	}
+	if hooks, ok := config["hooks"].(map[string]interface{}); ok && len(hooks) != 0 {
+		t.Fatalf("DefenseClaw Codex hooks survived teardown: %#v", hooks)
+	}
 }
 
-func TestClaudeRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.T) {
+// GAP-0043: Claude Code writes its own keys to settings.json. One setup after
+// that re-records the file, so doctor checks drift again at once, and teardown
+// still keeps the outside edit and drops DefenseClaw's entries.
+func TestClaudeRepeatedSetupRerecordsDriftAndTeardownKeepsIt(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
@@ -1814,8 +1837,8 @@ func TestClaudeRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("second Setup: %v", err)
 	}
-	if _, err := os.Stat(managedFileBackupPath(dir, conn.Name(), "settings.json")); !os.IsNotExist(err) {
-		t.Fatalf("repeated setup retained unsafe exact backup: %v", err)
+	if _, err := os.Stat(managedFileBackupPath(dir, conn.Name(), "settings.json")); err != nil {
+		t.Fatalf("repeated setup left no exporter record: %v", err)
 	}
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -1824,6 +1847,15 @@ func TestClaudeRepeatedSetupDoesNotBlessOperatorDriftForExactRestore(t *testing.
 	operator, _ := settings["operatorAfterSetup"].(map[string]interface{})
 	if operator["kept"] != true {
 		t.Fatalf("teardown erased operator drift: %#v", settings)
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, managed := range []string{"claude-code-hook", "OTEL_EXPORTER_OTLP"} {
+		if bytes.Contains(raw, []byte(managed)) {
+			t.Fatalf("teardown kept DefenseClaw entry %q: %s", managed, raw)
+		}
 	}
 }
 

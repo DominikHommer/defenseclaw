@@ -79,6 +79,10 @@ class ScanResult:
     timestamp: datetime
     findings: list[Finding] = field(default_factory=list)
     duration: timedelta = field(default_factory=timedelta)
+    # Short notes about analyzers that did not run (a partial scan).
+    notes: list[str] = field(default_factory=list)
+    # What the scan ran with, for output ("policy": "quiet", "judge": a model or "off").
+    settings: dict[str, str] = field(default_factory=dict)
 
     def has_severity(self, severity: str) -> bool:
         return any(f.severity == severity for f in self.findings)
@@ -95,13 +99,16 @@ class ScanResult:
         return len(self.findings) == 0
 
     def to_json(self) -> str:
-        return json.dumps({
+        payload: dict = {
             "scanner": self.scanner,
             "target": self.target,
             "timestamp": self.timestamp.isoformat(),
             "findings": [f.to_dict() for f in self.findings],
             "duration_ms": int(self.duration.total_seconds() * 1000),
-        }, indent=2)
+        }
+        if self.settings:
+            payload["settings"] = dict(self.settings)
+        return json.dumps(payload, indent=2)
 
 
 def compare_severity(a: str, b: str) -> int:
@@ -160,7 +167,7 @@ class ActionEntry:
     source_path: str = ""
     actions: ActionState = field(default_factory=ActionState)
     reason: str = ""
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime | None = field(default_factory=lambda: datetime.now(timezone.utc))
     # Connector scoping (SK-4): "" means the entry is global — it applies to
     # every connector. A non-empty value scopes the action to one connector
     # (e.g. "hermes"). Mirrors ActionEntry.Connector in internal/audit/store.go.
@@ -203,6 +210,9 @@ class Event:
     severity: str = ""
     run_id: str = ""
     connector: str = ""
+    # audit_events.enforced: True when the gateway really blocked the call
+    # (None on rows that predate the column).
+    enforced: bool | None = None
 
 
 @dataclass
@@ -224,6 +234,7 @@ class Counts:
     allowed_skills: int = 0
     blocked_mcps: int = 0
     allowed_mcps: int = 0
-    alerts: int = 0
+    # None: not counted in time (see Store.get_counts).
+    alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0

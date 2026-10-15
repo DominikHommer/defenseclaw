@@ -1,0 +1,281 @@
+#!/bin/bash
+# defenseclaw-managed-hook v1
+# DefenseClaw OpenShell sandbox transport helpers.
+#
+# Rendered only into DefenseClaw's OpenShell overlay images, where it is
+# root-owned and read-only to the workload, and sourced by the sandbox
+# variants of the hooks right after _hardening.sh and before
+# defenseclaw_harden_env. Host hook directories never contain this file.
+#
+# Everything a hook needs to reach DefenseClaw is baked here at image build:
+# the ingress address (host.openshell.internal, relayed by the OpenShell
+# supervisor to the host-loopback hook ingress) and the request budgets. The
+# only runtime input is the per-sandbox binding token in
+# DEFENSECLAW_SANDBOX_TOKEN: by default a provider placeholder OpenShell
+# swaps for the real credential only on the ingress endpoint, with
+# openshell.token_delivery: env the token itself.
+
+# The workload shapes the environment every hook inherits: Claude Code
+# applies the env block of user and project settings to hook processes, and
+# whatever the agent exports reaches them as well. bash -p has already
+# ignored BASH_ENV, ENV, SHELLOPTS, BASHOPTS, CDPATH, GLOBIGNORE and exported
+# functions at startup, and _hardening.sh, sourced just before this file,
+# only defines helpers. So before the first child process or helper call:
+#
+#   - every inherited variable the sandbox hooks do not read is dropped:
+#     search paths (PATH, PYTHONPATH, PERL5LIB, ...), interpreter, loader,
+#     curl, mktemp and locale inputs, bash knobs such as FUNCNEST, TMOUT,
+#     POSIXLY_CORRECT or EXECIGNORE, and every DEFENSECLAW_* host override
+#     (fail mode, token, payload cap, hook HOME). Values the hook assigned
+#     before this point (HOOK_DIR, the baked PATH) only lose the export bit
+#     an inherited variable of the same name gave them;
+#   - PATH is pinned to the value baked into the sandbox _hardening.sh.
+#
+# Environment entries whose names are not shell identifiers cannot be named
+# here, and none of the tools the hooks run read such names. The ingress
+# requests below still pass -q and --noproxy '*'.
+unset -v _dc_sandbox_var _dc_sandbox_vars
+case "${DEFENSECLAW_BAKED_HOOK_PATH:-}" in
+  /*) ;;
+  *)
+    echo "defenseclaw: sandbox hook helpers carry no baked PATH, blocking (sandbox hooks fail closed)" >&2
+    exit 2
+    ;;
+esac
+if ! _dc_sandbox_vars="$(compgen -e)"; then
+  echo "defenseclaw: cannot enumerate the hook environment, blocking (sandbox hooks fail closed)" >&2
+  exit 2
+fi
+for _dc_sandbox_var in $_dc_sandbox_vars; do
+  case "$_dc_sandbox_var" in
+    DEFENSECLAW_SANDBOX_TOKEN|CLAUDE_TOOL_NAME|TOOL_NAME) ;;
+    DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
+    HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
+    HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    *) unset -v "$_dc_sandbox_var" 2>/dev/null || export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
+  esac
+done
+unset -v _dc_sandbox_var _dc_sandbox_vars
+set +o posix
+PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
+export PATH
+
+# The python3 tiers of defenseclaw_read_stdin_capped and _dc_jq exist for
+# hosts without a byte-exact head(1) or without jq. The overlay image ships
+# both, so sandbox hooks never start an interpreter whose startup reads
+# workload-controlled files (site-packages .pth files, sitecustomize).
+_dc_python3_usable() {
+  return 1
+}
+
+readonly DC_SANDBOX_INGRESS="{{.APIAddr}}"
+readonly DC_SANDBOX_CONNECT_TIMEOUT={{.SandboxConnectTimeout}}
+readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
+readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
+readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
+
+# DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
+# answer, worded for the agent and for the user who reads its screen: what is
+# down, and how the user brings it back. "sandbox ingress unreachable" alone
+# left both guessing when the daemon stopped mid-session (GAP-0272). A
+# daemon that was just started can take a minute to answer: the agent told
+# the user to start the daemon they had just started (GAP-0332). The same
+# image runs on a per-user install and on a managed computer, where the user
+# cannot start DefenseClaw's services: the next step is the doctor, which
+# names the fix for the user's own install (GAP-0506).
+readonly DC_SANDBOX_UNREACHABLE="DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs \`defenseclaw sandbox doctor\` there, which says what is wrong and how to bring it back, and retries in a minute"
+
+# DC_SANDBOX_MANAGED_UNREACHABLE is why a sandbox hook blocked when the user's
+# sandbox daemon answered that the organization's DefenseClaw gateway service
+# does not: only the administrator can start that service.
+readonly DC_SANDBOX_MANAGED_UNREACHABLE="the DefenseClaw gateway service on the user's machine does not answer, so every tool call is blocked until it is back: the user tries again in a moment, and if this continues asks their administrator (\`defenseclaw sandbox doctor\` says what is wrong)"
+
+# defenseclaw_sandbox_unreachable_reason RESPONSE prints why a sandbox hook
+# blocked when defenseclaw_sandbox_post failed. RESPONSE is what it printed:
+# nothing for a transport failure, else the last 502, 503 or 504 answer
+# ("<body>\n<code>"). The daemon's 502 for an unreachable managed gateway and
+# a managed gateway's own 503 refusal (its message says why, for example an
+# account the directory can't look up right now) are named as such; anything
+# else is DC_SANDBOX_UNREACHABLE. The message is cut to one printable line of
+# at most 300 characters (bash only: cut is not among the image's tools).
+defenseclaw_sandbox_unreachable_reason() {
+  local code body message
+  case "$1" in
+    *$'\n'50[234]) ;;
+    *) printf '%s' "$DC_SANDBOX_UNREACHABLE"; return 0 ;;
+  esac
+  code="${1##*$'\n'}"
+  body="${1%$'\n'*}"
+  message="$(printf '%s' "$body" | _dc_jq -r 'if type == "object" then (.message // .error // "") else "" end' 2>/dev/null)" || message=""
+  message="$(printf '%s' "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  message="${message:0:300}"
+  case "$code:$message" in
+    "502:the managed DefenseClaw gateway is not reachable")
+      printf '%s' "$DC_SANDBOX_MANAGED_UNREACHABLE" ;;
+    503:?*)
+      case "$body" in
+        *'"message"'*) printf 'DefenseClaw on the user'"'"'s machine can'"'"'t check this call right now, so it is blocked: %s' "$message" ;;
+        *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
+      esac ;;
+    *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
+  esac
+}
+
+# defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
+#
+# The binding token is the only credential a sandbox hook may present. A
+# missing or malformed token always fails closed: a sandbox hook never falls
+# back to a host token file or to an unauthenticated request.
+defenseclaw_sandbox_require_token() {
+  local connector="${1:-unknown}"
+  local hook_name="${2:-unknown}"
+  local subject="${3:-tool}"
+  local reason=""
+  case "${DEFENSECLAW_SANDBOX_TOKEN:-}" in
+    '') reason="missing sandbox binding token (DEFENSECLAW_SANDBOX_TOKEN unset)" ;;
+    *$'\n'*|*$'\r'*) reason="malformed sandbox binding token" ;;
+  esac
+  if [ -z "$reason" ]; then
+    return 0
+  fi
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport closed
+  echo "defenseclaw: ${reason}, blocking ${subject} (sandbox hooks fail closed)" >&2
+  exit 2
+}
+
+# defenseclaw_sandbox_idempotency_key prints a fresh 128-bit random key, or
+# nothing when the kernel offers no randomness source. The key names one hook
+# invocation so the ingress can answer a retry from its dedupe window instead
+# of evaluating the same event twice; it must not be guessable by the workload.
+defenseclaw_sandbox_idempotency_key() {
+  local key=""
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    IFS= read -r key < /proc/sys/kernel/random/uuid 2>/dev/null || key=""
+  fi
+  case "$key" in
+    ????????-????-????-????-????????????) ;;
+    *) key="" ;;
+  esac
+  case "$key" in
+    *[!0-9a-f-]*) key="" ;;
+  esac
+  if [ -z "$key" ] && [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then
+    key="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')" || key=""
+    case "$key" in
+      ????????????????????????????????) ;;
+      *) key="" ;;
+    esac
+    case "$key" in
+      *[!0-9a-f]*) key="" ;;
+    esac
+  fi
+  printf '%s' "$key"
+}
+
+# defenseclaw_response_failure_reason REASON replaces _hardening.sh's for the
+# sandbox hooks, whose answer body the hook holds in RESULT. A 403 whose body
+# is OpenShell's own refusal of a post that carries a credential placeholder
+# from the conversation (an env output shows them) is named as that: the
+# token, the ingress and DefenseClaw are fine, and a new conversation works
+# (GAP-0355). Another 401 or 403 is the ingress refusing the request, which
+# the host's advice (token drift, doctor --fix, gateway restart) does not
+# reach from inside a sandbox.
+defenseclaw_response_failure_reason() {
+  case "$1" in
+    *"HTTP 401"*|*"HTTP 403"*)
+      case "${RESULT:-}" in
+        *"credential placeholder"*)
+          printf '%s (OpenShell refused it: this conversation holds a sandbox credential placeholder, which an env output shows, and OpenShell forwards no request that carries one; the user starts a new conversation)' "$1"
+          ;;
+        *)
+          printf '%s (DefenseClaw on the user'"'"'s machine refused the sandbox'"'"'s request: the user runs `defenseclaw sandbox doctor` there)' "$1"
+          ;;
+      esac
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
+# defenseclaw_sandbox_post PATH BODY MAX_TIME RETRY_MAX_TIME [CURL_ARGS...]
+#
+# POSTs BODY to the baked ingress and prints "<response body>\n<http code>",
+# the same shape the host hooks read from curl -w; output without a
+# three-digit status fails without a retry. A transport failure (no
+# connection, empty reply, timeout) or a relay 502/503/504 is retried exactly
+# once with the same X-DefenseClaw-Hook-Idempotency-Key: the OpenShell relay
+# occasionally drops a request, possibly after the ingress acted on it, and the
+# ingress dedupes retries by key. Without a random key the request is sent
+# once. A 502, 503 or 504 that is still the answer after the retry is printed
+# before the failure status, for defenseclaw_sandbox_unreachable_reason. The
+# body travels on stdin so large payloads never hit the argv limit.
+# An Authorization header among CURL_ARGS (-H "Authorization: ...") reaches
+# curl as configuration on a descriptor instead of its command line, which
+# every process in the sandbox can read: with token_delivery: env the bearer
+# is the binding token itself.
+defenseclaw_sandbox_post() {
+  local path="$1"
+  local body="$2"
+  local max_time="$3"
+  local retry_max_time="$4"
+  shift 4
+  local key attempts=1 attempt=1 status out code auth=""
+  local key_args=() curl_args=() auth_args=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-H" ] && [ "$#" -ge 2 ]; then
+      case "$2" in
+        [Aa]uthorization:*) auth="$2"; shift 2; continue ;;
+      esac
+    fi
+    curl_args+=("$1")
+    shift
+  done
+  case "$auth" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  if [ -n "$auth" ]; then
+    # The two characters a quoted curl configuration value escapes.
+    auth="${auth//\\/\\\\}"
+    auth="${auth//\"/\\\"}"
+    auth_args=(--config /dev/fd/7)
+  fi
+  key="$(defenseclaw_sandbox_idempotency_key)"
+  if [ -n "$key" ]; then
+    key_args=(-H "X-DefenseClaw-Hook-Idempotency-Key: ${key}")
+    attempts=2
+  fi
+  while :; do
+    status=0
+    out="$(printf '%s' "$body" | curl -q -s --noproxy '*' -w '\n%{http_code}' -X POST \
+      "http://${DC_SANDBOX_INGRESS}${path}" \
+      "${key_args[@]+"${key_args[@]}"}" \
+      "${curl_args[@]+"${curl_args[@]}"}" \
+      "${auth_args[@]+"${auth_args[@]}"}" \
+      --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
+      --max-time "$max_time" \
+      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth"))" || status=$?
+    if [ "$status" -eq 0 ]; then
+      code="${out##*$'\n'}"
+      case "$code" in
+        [0-9][0-9][0-9]) ;;
+        *) return 1 ;;
+      esac
+      case "$code" in
+        502|503|504) status=1 ;;
+      esac
+    fi
+    if [ "$status" -eq 0 ] || [ "$attempt" -ge "$attempts" ]; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    max_time="$retry_max_time"
+  done
+  if [ "$status" -ne 0 ]; then
+    case "${out##*$'\n'}" in
+      502|503|504) printf '%s' "$out" ;;
+    esac
+    return "$status"
+  fi
+  printf '%s' "$out"
+}

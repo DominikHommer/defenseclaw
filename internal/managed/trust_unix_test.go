@@ -8,6 +8,7 @@ package managed
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,6 +51,126 @@ func TestValidateTrustedRuntimeDirRejectsWritableDirectory(t *testing.T) {
 	err := ValidateTrustedRuntimeDir(dir, "managed data_dir")
 	if err == nil || !strings.Contains(err.Error(), "group/other writable") {
 		t.Fatalf("ValidateTrustedRuntimeDir error = %v, want writable-dir refusal", err)
+	}
+}
+
+// AIFW-34262: the directories above the managed roots are maintained by the
+// platform installer, so their owner/mode verdicts warn instead of failing.
+func TestValidateTrustedElementsRelaxAncestorVerdicts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod temp dir: %v", err)
+	}
+
+	t.Run("runtime dir ancestor", func(t *testing.T) {
+		captured := captureTrustAdvisories(t)
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", true); err != nil {
+			t.Fatalf("ancestor runtime dir was fatal: %v", err)
+		}
+		if len(*captured) == 0 {
+			t.Fatal("relaxed ancestor runtime dir did not warn")
+		}
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", false); err == nil {
+			t.Fatal("named runtime dir accepted a world-writable directory")
+		}
+	})
+
+	t.Run("config path ancestor", func(t *testing.T) {
+		captured := captureTrustAdvisories(t)
+		if err := validateTrustedPathElement(dir, true, "managed config", true); err != nil {
+			t.Fatalf("ancestor config directory was fatal: %v", err)
+		}
+		if len(*captured) == 0 {
+			t.Fatal("relaxed ancestor config directory did not warn")
+		}
+		if err := validateTrustedPathElement(dir, true, "managed config", false); err == nil {
+			t.Fatal("named config directory accepted a world-writable directory")
+		}
+	})
+
+	t.Run("strict pin restores refusal", func(t *testing.T) {
+		t.Setenv(TrustStrictAncestorsEnv, "1")
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", true); err == nil {
+			t.Fatal("strict pin accepted a world-writable ancestor")
+		}
+		if err := validateTrustedPathElement(dir, true, "managed config", true); err == nil {
+			t.Fatal("strict pin accepted a world-writable ancestor")
+		}
+	})
+}
+
+// The advisory downgrade is scoped to PlatformInstallerOwnedRoots, so a
+// world-writable ancestor that nobody else has a claim on stays fatal even
+// though it sits above the artifact rather than being the artifact. A temp
+// directory is the canonical example: if it is world-writable, the leaf below it
+// can be swapped, and no platform installer maintains those permissions.
+func TestValidateTrustedFilePathRejectsForeignWritableAncestor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("a root-owned leaf under an untrusted ancestor requires root")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	path := filepath.Join(parent, "authorization.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+	if PlatformInstallerOwnedPath(parent) {
+		t.Skipf("temp parent %s is inside a platform installer root", parent)
+	}
+
+	captured := captureTrustAdvisories(t)
+	err := ValidateTrustedFilePath(path, "managed authorization")
+	if err == nil || !strings.Contains(err.Error(), "group/other writable") {
+		t.Fatalf("ValidateTrustedFilePath error = %v, want the ancestor verdict to stay fatal", err)
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("advisories = %v, want none for an ancestor outside the installer roots", *captured)
+	}
+}
+
+// The same walk keeps the AIFW-34262 relaxation for an ancestor that IS inside a
+// platform installer root, which is where AVC re-ACLs on its own schedule.
+func TestValidateTrustedFilePathAllowsInstallerOwnedWritableAncestor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("writing under a platform installer root requires root")
+	}
+	roots := PlatformInstallerOwnedRoots()
+	if len(roots) == 0 {
+		t.Skip("no platform installer roots on this GOOS")
+	}
+	parent := filepath.Join(roots[0], "trust-advisory-test-"+t.Name())
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Skipf("cannot stage %s: %v", parent, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	path := filepath.Join(parent, "authorization.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+
+	captured := captureTrustAdvisories(t)
+	if err := ValidateTrustedFilePath(path, "managed authorization"); err != nil {
+		t.Fatalf("ValidateTrustedFilePath error = %v, want the ancestor verdict to be advisory", err)
+	}
+	found := false
+	for _, advisory := range *captured {
+		if strings.Contains(advisory, parent) && strings.Contains(advisory, "group/other writable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("advisories = %v, want a warning for %s", *captured, parent)
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	if err := ValidateTrustedFilePath(path, "managed authorization"); err == nil {
+		t.Fatal("strict pin accepted a world-writable ancestor")
 	}
 }
 
@@ -104,5 +225,118 @@ func TestValidateTrustedFilePathRejectsStandardUserOwnedLeaf(t *testing.T) {
 	err := ValidateTrustedFilePath(path, "managed authorization")
 	if err == nil || !strings.Contains(err.Error(), "owner uid") {
 		t.Fatalf("ValidateTrustedFilePath error = %v, want untrusted owner refusal", err)
+	}
+}
+
+// The standalone macOS deployment runs its gateway as _defenseclaw and owns
+// data_dir with it. An administrator's root shell has no
+// DEFENSECLAW_UNIX_SERVICE_ACCOUNT, so `enterprise policy show` failed with
+// "owner uid 499 is not trusted for managed data_dir" until darwin trusted
+// that account by default.
+func TestTrustedRuntimeOwnerForTrustsDarwinServiceAccount(t *testing.T) {
+	accounts := map[string]string{StandaloneDarwinServiceUser: "499", "svc-custom": "777"}
+	restore := trustLookupUser
+	trustLookupUser = func(name string) (*user.User, error) {
+		if uid, ok := accounts[name]; ok {
+			return &user.User{Username: name, Uid: uid}, nil
+		}
+		return nil, user.UnknownUserError(name)
+	}
+	t.Cleanup(func() { trustLookupUser = restore })
+
+	cases := []struct {
+		name   string
+		uid    uint32
+		goos   string
+		custom string
+		want   bool
+	}{
+		{"root is always trusted", 0, "darwin", "", true},
+		{"darwin trusts _defenseclaw without the env", 499, "darwin", "", true},
+		{"linux does not trust _defenseclaw", 499, "linux", "", false},
+		{"darwin rejects a standard user", 501, "darwin", "", false},
+		{"the env override replaces the defaults", 499, "darwin", "svc-custom", false},
+		{"the env override account is trusted", 777, "darwin", " svc-custom ", true},
+	}
+	for _, tc := range cases {
+		if got := trustedRuntimeOwnerFor(tc.uid, tc.goos, tc.custom); got != tc.want {
+			t.Errorf("%s: trustedRuntimeOwnerFor(%d, %q, %q) = %v, want %v", tc.name, tc.uid, tc.goos, tc.custom, got, tc.want)
+		}
+	}
+}
+
+func TestTrustedRuntimeOwnerForTrustsLinuxServiceAccountOnBothPlatforms(t *testing.T) {
+	restore := trustLookupUser
+	trustLookupUser = func(name string) (*user.User, error) {
+		if name == StandaloneLinuxServiceUser {
+			return &user.User{Username: name, Uid: "995"}, nil
+		}
+		return nil, user.UnknownUserError(name)
+	}
+	t.Cleanup(func() { trustLookupUser = restore })
+
+	for _, goos := range []string{"linux", "darwin"} {
+		if !trustedRuntimeOwnerFor(995, goos, "") {
+			t.Errorf("trustedRuntimeOwnerFor(995, %q) = false, want the defenseclaw account trusted", goos)
+		}
+	}
+}
+
+// A trusted policy_dir whose rego folder or a module in it a standard user
+// could write, or a module that is a symlink, passed the folder check, and
+// the gateway loaded the edited Rego as enforcement policy (GAP-1499).
+func TestValidateServiceRuntimeTreeEntriesRejectsWritableRego(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	t.Setenv(UnixServiceAccountEnv, current.Username)
+	cases := map[string]struct {
+		mutate func(t *testing.T, rego string)
+		want   string
+	}{
+		"clean tree": {func(*testing.T, string) {}, ""},
+		"writable rego dir": {func(t *testing.T, rego string) {
+			mustChmod(t, rego, 0o777)
+		}, "group/other writable"},
+		"writable module": {func(t *testing.T, rego string) {
+			mustChmod(t, filepath.Join(rego, "guardrail.rego"), 0o666)
+		}, "group/other writable"},
+		"symlinked module": {func(t *testing.T, rego string) {
+			target := filepath.Join(t.TempDir(), "other.rego")
+			if err := os.WriteFile(target, []byte("package other\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(rego, "other.rego")); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlinks are not allowed"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			rego := filepath.Join(root, "rego")
+			if err := os.Mkdir(rego, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(rego, "guardrail.rego"), []byte("package guardrail\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			tc.mutate(t, rego)
+			err := validateServiceRuntimeTreeEntries(root, "policy_dir")
+			if tc.want == "" && err != nil {
+				t.Fatalf("a clean tree is refused: %v", err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func mustChmod(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
 	}
 }

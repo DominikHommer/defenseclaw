@@ -131,6 +131,10 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 		data, _ := os.ReadFile(cfgPath)
 		t.Fatalf("OwnedHooksPresent=false after Setup; config:\n%s", data)
 	}
+	if remaining, err := OwnedHookConfigReferences(conn, opts); err != nil || len(remaining) != 1 ||
+		filepath.Clean(remaining[0]) != filepath.Clean(cfgPath) {
+		t.Fatalf("OwnedHookConfigReferences after Setup = %v, %v; want %s", remaining, err, cfgPath)
+	}
 
 	// Strip the hook block: an empty JSON object no longer references our
 	// hook command.
@@ -143,6 +147,9 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 	}
 	if present {
 		t.Fatal("OwnedHooksPresent=true after stripping the hook block; want false")
+	}
+	if remaining, err := OwnedHookConfigReferences(conn, opts); err != nil || len(remaining) != 0 {
+		t.Fatalf("OwnedHookConfigReferences after strip = %v, %v; want none", remaining, err)
 	}
 }
 
@@ -343,6 +350,13 @@ func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
 		"whitespace-padded-wildcard": func(settings map[string]interface{}) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
 			entries[0].(map[string]interface{})["matcher"] = " * "
+		},
+		"block-bypassing-command-suffix": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			command := handler["command"].(string)
+			handler["command"] = claudeCodeUnguardedHookCommand(command) + claudeCodeMissingHookGuardSeparator +
+				"exit 0; exit 2; }"
 		},
 		"asynchronous-block-handler": func(settings map[string]interface{}) {
 			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
@@ -603,6 +617,13 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 			}
 			mutateCodexConfig(t, configPath, mutate)
 			present, err := OwnedHooksPresent(conn, opts)
+			if strings.HasSuffix(name, "hooks-feature-disabled") {
+				// The user's switch is reported at once, not repaired (GAP-1094).
+				if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+					t.Fatalf("OwnedHooksPresent = %v, %v; want the turned-off error", present, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("OwnedHooksPresent: %v", err)
 			}

@@ -1,0 +1,19 @@
+{
+  "connector": "amp",
+  "hook_contract": "amp-plugin-v1",
+  "tamper_tier": "user",
+  "env": {
+    "AMP_SKIP_UPDATE_CHECK": "1"
+  },
+  "binaries": [
+    "amp (harness)"
+  ],
+  "files": {
+    "/sandbox/.config/amp/plugins/defenseclaw.ts": {
+      "mode": "-rw-------",
+      "owner": "user",
+      "size": 25809,
+      "sha256": "f3fd66e54dd611e237f23df1cc6890aab2c770c17b80e7c10cd6d6cb19f77f44"
+    }
+  }
+}

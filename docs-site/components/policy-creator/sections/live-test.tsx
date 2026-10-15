@@ -38,9 +38,6 @@ type Source = 'scenario' | 'custom' | 'corpus';
 const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'admission', label: 'admission' },
   { value: 'guardrail', label: 'guardrail' },
-  { value: 'firewall', label: 'firewall' },
-  { value: 'audit', label: 'audit' },
-  { value: 'skill_actions', label: 'skill_actions' },
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [
@@ -383,7 +380,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
                 type="button"
                 onClick={clearCustom}
                 disabled={!customRaw}
-                className="text-[10px] text-fd-muted-foreground hover:text-red-500 disabled:opacity-40"
+                className="text-[10px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400 disabled:opacity-40"
               >
                 Clear
               </button>
@@ -450,15 +447,21 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
             placeholder={'Paste or type JSON, e.g.\n{\n  "scan_result": {\n    "max_severity": "CRITICAL"\n  }\n}'}
             hint={
               parsedCustom.ok ? (
-                <span className="text-emerald-600 dark:text-emerald-400">
+                <span className="text-emerald-700 dark:text-emerald-400">
                   Valid JSON · re-evaluates 250 ms after you stop typing.
                 </span>
               ) : (
-                <span className="text-red-500">JSON parse error: {parsedCustom.error}</span>
+                <span className="text-red-700 dark:text-red-400">JSON parse error: {parsedCustom.error}</span>
               )
             }
           />
         </div>
+      )}
+
+      {domain === 'admission' && (
+        <p className="text-[11px] text-fd-muted-foreground">
+          Live Test cannot verify shipped CodeGuard or DefenseClaw plugin content. It evaluates those names without the built-in first-party scan bypass; the gateway checks the installed content.
+        </p>
       )}
 
       {source !== 'corpus' && (
@@ -478,8 +481,8 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           <p
             className={`mt-2 text-[11px] ${
               matchesExpected
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : 'text-amber-600 dark:text-amber-400'
+                ? 'text-emerald-700 dark:text-emerald-400'
+                : 'text-amber-700 dark:text-amber-400'
             }`}
           >
             {matchesExpected
@@ -493,7 +496,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           </p>
         )}
         {error && (
-          <p className="mt-2 break-words text-[11px] text-red-500">{error}</p>
+          <p className="mt-2 break-words text-[11px] text-red-700 dark:text-red-400">{error}</p>
         )}
       </div>
       )}
@@ -559,7 +562,7 @@ function CorpusReplay({
               <span
                 className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
                   r.errored
-                    ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                    ? 'bg-red-500/15 text-red-700 dark:text-red-400'
                     : r.expected == null
                       ? 'bg-fd-muted/40 text-fd-muted-foreground'
                       : r.matches
@@ -587,7 +590,7 @@ function CorpusReplay({
               </div>
             )}
             {r.errored && r.reason && (
-              <div className="mt-1 break-words text-[10px] text-red-500">{r.reason}</div>
+              <div className="mt-1 break-words text-[10px] text-red-700 dark:text-red-400">{r.reason}</div>
             )}
           </li>
         ))}

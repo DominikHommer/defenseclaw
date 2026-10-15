@@ -14,24 +14,32 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rule-pack overlay scanner — honors ``guardrail.rule_pack_dir`` at scan time.
+"""Rule-pack overlay scanner — honors the configured ``guardrail.rule_pack`` at scan time.
 
-**Finding R4.** The Go gateway loads a rule pack from ``guardrail.rule_pack_dir``
-(``internal/guardrail/rulepack.go::LoadRulePack``) and applies its regex rules
-to LLM traffic at runtime. The install-time Python scanners (skill / mcp /
-plugin) historically ignored that directory, so a custom or ``strict`` rule pack
-never influenced what ``defenseclaw skill|mcp|plugin scan`` flagged. This module
-closes that gap: when an operator has configured a rule pack, the SAME pack's
-detection rules are applied to the artifact text the scanners inspect, so
-scan-time triage lines up with what the gateway would catch on traffic.
+**Finding R4.** The Go gateway loads a rule pack (``guardrail.rule_pack``, or a
+``custom_packs`` entry; ``internal/guardrail/rulepack.go::LoadRulePack``) and
+applies its regex rules to LLM traffic at runtime. The install-time Python
+scanners (skill / mcp / plugin) historically ignored that pack, so a custom or
+``strict`` rule pack never influenced what ``defenseclaw skill|mcp|plugin scan``
+flagged. This module closes that gap: when an operator has configured a rule
+pack, the SAME pack's detection rules are applied to the artifact text the
+scanners inspect, so scan-time triage lines up with what the gateway would
+catch on traffic. The gateway's install watcher applies the same pack to a
+skill with ``internal/guardrail/artifact_scan.go``; keep the two selections in
+step (GAP-0065).
 
 Faithful-but-bounded scope choices (documented for the integrator who sequences
 this against the scanner-flip — see session notes):
 
-* We honor the **configured** ``effective_rule_pack_dir(connector)``. When it is
-  unset (the built-in default, ``""``) we add NO overlay, so default-install
-  scans are unchanged and gain no false positives. The gateway's compiled-in
-  baseline is unaffected; "honor rule_pack_dir" means honor it *when set*.
+* We honor the **configured** ``effective_rule_pack_dir(connector)`` and the
+  ``guardrail.rules`` layers of its scope (``protections``, ``enable``,
+  ``disable`` and ``severity_overrides``, applied as the gateway composes them;
+  ``suppressions`` and ``sensitive_tools`` describe traffic). When there is
+  neither (the built-in default, ``""``) the MCP and plugin scans add NO
+  overlay, so their default-install results are unchanged. A skill scan acts
+  on the default pack instead (``default_pack=True``), because the gateway's
+  install watcher scans every skill with the pack its scope resolves to, the
+  default one included: both give one verdict (GAP-0164).
 * We apply ``rules/*.yaml`` (precise, severity-carrying regex rules) plus the
   regex pattern families in ``rules/local-patterns.yaml``
   (``injection_regexes``, ``pii_data_regexes``). The raw substring phrase lists
@@ -41,6 +49,10 @@ this against the scanner-flip — see session notes):
   Flipping this on is a one-line change if a 1:1 traffic match is later wanted.
 * ``suppressions.yaml`` / ``sensitive-tools.yaml`` / ``judge/*.yaml`` are
   traffic- and LLM-oriented and are not applied to static artifacts here.
+* The data-loss/PII record rules (the ``enterprise-data`` category and the
+  ``pii_data_regexes`` family) are skipped too: they find personal data in
+  traffic, and on source code they match field names and example numbers in
+  help text (GAP-2168).
 
 The overlay is wired into the scan commands via :func:`maybe_wrap`, which wraps
 the underlying scanner so every ``scan()`` call site picks up the overlay with
@@ -53,13 +65,22 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TypeAlias
+from datetime import timedelta
+from typing import Any, TypeAlias
 
 import yaml
 
 from defenseclaw.models import Finding
+from defenseclaw.scanner.plugin_scanner.helpers import PySource, python_source
 from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
+
+try:  # Python 3.11+
+    from re import _parser as _sre_parse
+except ImportError:  # pragma: no cover - Python 3.10
+    import sre_parse as _sre_parse
 
 _log = logging.getLogger(__name__)
 
@@ -83,11 +104,47 @@ _BINARY_EXTS = {
 # module docstring).
 _REGEX_FAMILIES = {
     "injection_regexes": ("HIGH", "RP-INJECTION", "Prompt-injection pattern", "prompt-injection"),
-    "pii_data_regexes": ("MEDIUM", "RP-PII-DATA", "PII data pattern", "pii"),
 }
+# Rule categories that describe data in traffic, not artifact code (GAP-2168).
+_TRAFFIC_DATA_CATEGORIES = frozenset({"enterprise-data"})
 _GO_UNICODE_SCALAR_ESCAPE = re.compile(
     r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
 )
+_GO_POSIX_CLASS = re.compile(r"\[:(?P<negated>\^?)(?P<name>[a-z]+):\]")
+# Go regexp/syntax's POSIX classes are ASCII, including [:word:] and [:space:].
+_POSIX_ASCII_CLASSES = {
+    "alnum": "A-Za-z0-9", "alpha": "A-Za-z", "ascii": r"\x00-\x7f",
+    "blank": r"\t ", "cntrl": r"\x00-\x1f\x7f", "digit": "0-9",
+    "graph": r"\x21-\x7e", "lower": "a-z", "print": r"\x20-\x7e",
+    "punct": r"\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e",
+    "space": r"\x09-\x0d ", "upper": "A-Z", "word": "A-Za-z0-9_",
+    "xdigit": "A-Fa-f0-9",
+}
+
+# A literal prefilter (GAP-2070): every match of a rule must contain certain
+# ASCII literals, e.g. ``ignore`` and one of ``previous|prior``. A node is a
+# lower-case literal or an ("and"|"or", [nodes]) tuple. Checking it with
+# ``in`` on the folded text is far cheaper than a full ``re.search``, and a
+# rule whose literals are absent cannot match, so results are unchanged.
+_Required: TypeAlias = "str | tuple[str, list]"
+_REPEATS = {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}
+# The only non-ASCII characters that ``re.IGNORECASE`` matches to an ASCII
+# letter. Folding them first keeps the prefilter exact for (?i) rules.
+_ASCII_CASE_FOLD = {0x130: "i", 0x131: "i", 0x17F: "s", 0x212A: "k"}
+
+# Windowed search (GAP-2070): in a file over _WINDOW_MIN_TEXT characters a
+# rule is searched only in the lines around its anchor literals (every match
+# contains one), _WINDOW_SLACK characters and one line on each side, and only in windows
+# that hold all of the rule's required literals. Python's re otherwise walks
+# every position of a 400 KB adapter for each prose rule. Small files and
+# rules without a usable anchor get a plain search.
+_WINDOW_MIN_TEXT = 4096
+_WINDOW_SLACK = 512
+_ANCHOR_MIN_LEN = 3
+
+# The C loader parses the default pack several times faster than the pure
+# Python one (GAP-2070); same safe semantics.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
 @dataclass
@@ -99,6 +156,15 @@ class _CompiledRule:
     confidence: float
     tags: list[str]
     category: str
+    # Literals every match contains (None: no prefilter).
+    required: _Required | None = None
+    # Literals one of which every match contains (None: plain search).
+    anchors: list[str] | None = None
+    # Rules whose expression is a write/append/delete of a path. On Python
+    # source a hit counts only when the matched value reaches a write call:
+    # a file name in a data list or a message is not an access (GAP-2069,
+    # GAP-2124).
+    path_write: bool = False
 
 
 @dataclass
@@ -111,16 +177,57 @@ class RulePack:
     def is_empty(self) -> bool:
         return not self.rules
 
-    def scan_text(self, text: str, *, location: str = "") -> list[Finding]:
-        """Return one finding per matching rule (first hit), with line number."""
+    def scan_text(self, text: str, *, location: str = "", python: bool = False) -> list[Finding]:
+        """Return one finding per matching rule (first hit), with line number.
+
+        Python source is matched raw, comments and docstrings included, as
+        the gateway's install watcher matches it, so ``skill scan`` and
+        install admission report the same hits (GAP-0488). With *python*
+        set, only a ``path_write`` rule reads the source with comments and
+        docstrings blanked: its matched value must reach a write call
+        (GAP-2069, GAP-2124), which the watcher checks too. The view is
+        built only when such a rule hits.
+        """
         if not text:
             return []
+        doc = _is_doc(location)
+        folded = _fold(text)
+        py: PySource | None | bool = False  # False: not built yet
+        code = text
         findings: list[Finding] = []
         for rule in self.rules:
-            m = rule.pattern.search(text)
-            if m is None:
+            if rule.required is not None and not _holds(rule.required, folded):
                 continue
-            line_no = text.count("\n", 0, m.start()) + 1
+            # A path-write rule in documentation is a mention of the file, not
+            # an access (internal/guardrail scanArtifactText, GAP-0364).
+            if doc and rule.path_write:
+                continue
+            source = text
+            if rule.category == _COMMAND_CATEGORY:
+                # Search each line directly: ^ and $ must apply to each
+                # command line, as in the Go install watcher (GAP-0641).
+                match_start = _first_line_match(rule.pattern, text)
+            else:
+                m = _search(rule, text, folded)
+                match_start = m.start() if m is not None else None
+            if match_start is not None and python and rule.path_write:
+                if py is False:
+                    py = python_source(text)
+                    code = text if py is None else "\n".join(py.code)
+                if py is not None:
+                    source = code
+                    m = next(
+                        (
+                            hit
+                            for hit in rule.pattern.finditer(source)
+                            if py.path_written(source.count("\n", 0, hit.start()))
+                        ),
+                        None,
+                    )
+                    match_start = m.start() if m is not None else None
+            if match_start is None:
+                continue
+            line_no = source.count("\n", 0, match_start) + 1
             loc = f"{location}:{line_no}" if location else ""
             findings.append(
                 Finding(
@@ -144,10 +251,19 @@ class RulePack:
     def scan_path(self, path: str) -> list[Finding]:
         """Walk *path* (file or dir) and apply :meth:`scan_text` to text files."""
         findings: list[Finding] = []
+        if os.path.islink(path):
+            # A linked file is skipped; a skill folder given as a link is
+            # scanned as the folder it names (GAP-0891). Links inside it
+            # stay skipped below.
+            if not os.path.isdir(path):
+                return findings
+            path = os.path.realpath(path)
         if os.path.isfile(path):
             text = _read_text(path)
             if text is not None:
-                findings.extend(self.scan_text(text, location=os.path.basename(path)))
+                findings.extend(
+                    self.scan_text(text, location=os.path.basename(path), python=_is_python(path))
+                )
             return findings
 
         if not os.path.isdir(path):
@@ -161,16 +277,184 @@ class RulePack:
                     _log.debug("rule-pack overlay hit file cap (%d) under %s", _MAX_FILES, path)
                     return findings
                 full = os.path.join(root, fname)
+                if os.path.islink(full):
+                    continue
                 text = _read_text(full)
                 if text is None:
                     continue
                 seen += 1
                 rel = os.path.relpath(full, path)
-                findings.extend(self.scan_text(text, location=rel))
+                findings.extend(self.scan_text(text, location=rel, python=_is_python(fname)))
         return findings
 
 
 RulePackOverlayCache: TypeAlias = dict[str, RulePack]
+
+
+# The command-line rules' category (rules/commands.yaml).
+_COMMAND_CATEGORY = "command"
+_DOC_EXTS = frozenset({".md", ".mdx", ".markdown", ".txt", ".rst"})
+
+
+def _is_doc(location: str) -> bool:
+    """A documentation file other than the skill's own SKILL.md."""
+    path = location.rsplit(":", 1)[0] if location.count(":") and location.rsplit(":", 1)[1].isdigit() else location
+    if os.path.splitext(path)[1].lower() not in _DOC_EXTS:
+        return False
+    return path.replace("\\", "/").lower() != "skill.md"
+
+
+def _first_line_match(pattern: re.Pattern[str], text: str) -> int | None:
+    """Return the offset of the first match within one line of *text*."""
+    start = 0
+    while start <= len(text):
+        end = text.find("\n", start)
+        stop = len(text) if end < 0 else end
+        m = pattern.search(text[start:stop])
+        if m is not None:
+            return start + m.start()
+        if end < 0:
+            return None
+        start = end + 1
+    return None
+
+
+def _is_python(path: str) -> bool:
+    return path.casefold().endswith(".py")
+
+
+def _fold(text: str) -> str:
+    """Lower-case *text* so ASCII literals match it as ``re.IGNORECASE`` does."""
+    if text.isascii() or not any(chr(c) in text for c in _ASCII_CASE_FOLD):
+        return text.lower()
+    return text.translate(_ASCII_CASE_FOLD).lower()
+
+
+def _holds(node: _Required, folded: str) -> bool:
+    if isinstance(node, str):
+        return node in folded
+    op, kids = node
+    # Plain loops: this runs per rule and file, and generator overhead
+    # showed up in the GAP-2070 profile.
+    want = op != "and"
+    for k in kids:
+        if (k in folded if isinstance(k, str) else _holds(k, folded)) is want:
+            return want
+    return not want
+
+
+def _search(rule: _CompiledRule, text: str, folded: str) -> re.Match[str] | None:
+    """``rule.pattern.search(text)``, limited to anchor windows in big files."""
+    if rule.anchors is None or len(text) < _WINDOW_MIN_TEXT or len(folded) != len(text):
+        return rule.pattern.search(text)
+    spans: list[tuple[int, int]] = []
+    for lit in rule.anchors:
+        i = folded.find(lit)
+        while i >= 0:
+            spans.append((i, i + len(lit)))
+            i = folded.find(lit, i + 1)
+    if not spans:
+        return None
+    spans.sort()
+    windows: list[list[int]] = []
+    for lo, hi in spans:
+        # Whole lines, plus one more line on each side, so a match that
+        # spans a long line and the next one (a CSV header and a row) fits.
+        lo = text.rfind("\n", 0, max(lo - _WINDOW_SLACK, 0))
+        lo = text.rfind("\n", 0, lo) + 1 if lo > 0 else 0
+        hi = text.find("\n", min(hi + _WINDOW_SLACK, len(text)))
+        hi = text.find("\n", hi + 1) if hi >= 0 else -1
+        hi = len(text) if hi < 0 else hi
+        if windows and lo <= windows[-1][1]:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi])
+    for lo, hi in windows:
+        if rule.required is not None and not _holds(rule.required, folded[lo:hi]):
+            continue
+        m = rule.pattern.search(text, lo, hi)
+        if m is not None:
+            return m
+    return None
+
+
+def _anchors(node: _Required | None, pattern: re.Pattern[str]) -> list[str] | None:
+    """A literal set one of which every match contains, for :func:`_search`.
+
+    None when there is no such set of usable literals, or when the pattern
+    has an end anchor (``$`` / ``\\Z`` without MULTILINE) that a window's
+    end would satisfy falsely.
+    """
+    if node is None:
+        return None
+    if "\\Z" in pattern.pattern or "\\z" in pattern.pattern:
+        return None
+    if "$" in pattern.pattern and not pattern.flags & re.MULTILINE:
+        return None
+    if isinstance(node, str):
+        return [node] if len(node) >= _ANCHOR_MIN_LEN or not node.isascii() else None
+    op, kids = node
+    sets = [_anchors(k, pattern) for k in kids]
+    if op == "or":
+        if any(a is None for a in sets):
+            return None
+        return [lit for a in sets for lit in a]
+    usable = [a for a in sets if a is not None]
+    if not usable:
+        return None
+    # Prefer the child with the longest shortest literal: rarer in text.
+    return max(usable, key=lambda a: (min(len(x) for x in a), -len(a)))
+
+
+def _required_literals(pattern: str) -> _Required | None:
+    """Literals every match of *pattern* contains, or None when unknown."""
+    try:
+        return _required_seq(_sre_parse.parse(pattern))
+    except Exception:  # noqa: BLE001 - no prefilter is always safe
+        return None
+
+
+def _uncased(cp: int) -> bool:
+    c = chr(cp)
+    return cp >= 0x80 and c.lower() == c == c.upper()
+
+
+def _required_seq(items) -> _Required | None:
+    parts: list = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if run:
+            parts.append("".join(run).lower())
+            run.clear()
+
+    for op, av in items:
+        name = getattr(op, "name", str(op))
+        if name == "LITERAL" and (av < 0x80 or _uncased(av)):
+            run.append(chr(av))
+            continue
+        flush()
+        sub = None
+        if name == "IN" and av and all(getattr(o, "name", "") == "LITERAL" and _uncased(v) for o, v in av):
+            # A set of uncased non-ASCII characters, such as zero-width
+            # spaces: rare in text, so a good prefilter.
+            sub = ("or", [chr(v) for _, v in av])
+        elif name == "SUBPATTERN":
+            sub = _required_seq(av[-1])
+        elif name == "ATOMIC_GROUP":
+            sub = _required_seq(av)
+        elif name in _REPEATS and av[0] >= 1:
+            sub = _required_seq(av[2])
+        elif name == "BRANCH":
+            alts = [_required_seq(b) for b in av[1]]
+            if all(a is not None for a in alts):
+                sub = ("or", alts)
+        if sub is not None:
+            parts.append(sub)
+    flush()
+    if not parts:
+        return None
+    return parts[0] if len(parts) == 1 else ("and", parts)
 
 
 def _read_text(path: str) -> str | None:
@@ -180,19 +464,40 @@ def _read_text(path: str) -> str | None:
     try:
         if os.path.getsize(path) > _MAX_FILE_BYTES:
             return None
-        with open(path, encoding="utf-8", errors="strict") as fh:
-            return fh.read()
+        with open(path, "rb") as fh:
+            data = fh.read(_MAX_FILE_BYTES + 1)
+        if len(data) > _MAX_FILE_BYTES:
+            return None
+        if os.path.basename(path).casefold() == "skill.md" and data.startswith((b"\xff\xfe", b"\xfe\xff")):
+            from defenseclaw.skill_discovery import decode_skill_text
+
+            return decode_skill_text(data)
+        return data.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return None
 
 
-def load_rule_pack(dir_path: str) -> RulePack:
-    """Load and compile a rule pack from *dir_path*.
+@dataclass(frozen=True)
+class RulesLayer:
+    """One ``guardrail.rules`` block, reduced to what changes file rules."""
+
+    protections: tuple[str, ...] = ()
+    enable: tuple[str, ...] = ()
+    disable: tuple[str, ...] = ()
+    severity_overrides: tuple[tuple[str, str], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.protections or self.enable or self.disable or self.severity_overrides)
+
+
+def load_rule_pack(dir_path: str, layers: Sequence[RulesLayer] = ()) -> RulePack:
+    """Load and compile a rule pack from *dir_path*, with *layers* applied.
 
     Mirrors the Go loader's graceful degradation: a missing directory, missing
     files, or an unparseable / wrong-version YAML yields an empty (or partial)
     pack rather than raising. An invalid regex is logged and skipped, matching
-    ``rulepack.go::checkPattern``.
+    ``rulepack.go::checkPattern``. *layers* are the ``guardrail.rules`` blocks
+    of the scope, applied in order as ``guardrail.Compose`` does.
     """
     pack = RulePack(source_dir=dir_path)
     if not dir_path or not os.path.isdir(dir_path):
@@ -202,30 +507,75 @@ def load_rule_pack(dir_path: str) -> RulePack:
     if not os.path.isdir(rules_dir):
         return pack
 
+    files: list[tuple[str, dict]] = []
     for entry in sorted(os.listdir(rules_dir)):
         if not entry.endswith(".yaml"):
             continue
         full = os.path.join(rules_dir, entry)
         try:
             with open(full, encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh) or {}
+                raw = yaml.load(fh, Loader=_YAML_LOADER) or {}
         except (OSError, yaml.YAMLError) as exc:
             _log.debug("rule-pack: skip %s (parse error: %s)", full, exc)
             continue
         if not isinstance(raw, dict) or raw.get("version") != 1:
             _log.debug("rule-pack: skip %s (missing/unsupported version)", full)
             continue
-        if entry == "local-patterns.yaml":
+        files.append((entry, raw))
+
+    rule_files = [(name, raw) for name, raw in files if name != "local-patterns.yaml"]
+    for layer in layers:
+        rule_files = _apply_rules_layer(rule_files, layer)
+    for name, raw in rule_files:
+        _compile_rules_file(raw, pack)
+    for name, raw in files:
+        if name == "local-patterns.yaml":
             _compile_local_patterns(raw, pack)
-        else:
-            _compile_rules_file(raw, pack)
 
     return pack
+
+
+def _apply_rules_layer(files: list[tuple[str, dict]], layer: RulesLayer) -> list[tuple[str, dict]]:
+    """``guardrail.Compose`` for one layer: protections, enable, disable, severity overrides."""
+    from defenseclaw import policy_catalog
+
+    # Work on copies: the parsed files are only this call's.
+    files = [(name, {**raw, "rules": [dict(rule) for rule in raw.get("rules") or [] if isinstance(rule, dict)]})
+             for name, raw in files]
+    for protection in layer.protections:
+        incoming = policy_catalog.load_rule_files(policy_catalog.protection_pack_dir(protection))
+        ids = {
+            str(rule.get("id", "")).strip()
+            for _, raw in incoming
+            for rule in raw.get("rules") or []
+            if isinstance(rule, dict)
+        }
+        for _, raw in files:
+            raw["rules"] = [rule for rule in raw["rules"] if str(rule.get("id", "")).strip() not in ids]
+        for name, raw in incoming:
+            added = [dict(rule) for rule in raw.get("rules") or [] if isinstance(rule, dict)]
+            target = next((existing for existing_name, existing in files if existing_name == name), None)
+            if target is None:
+                files.append((name, {**raw, "rules": added}))
+            else:
+                target["rules"].extend(added)
+    switches = {**{rid: True for rid in layer.enable}, **{rid: False for rid in layer.disable}}
+    overrides = dict(layer.severity_overrides)
+    for _, raw in files:
+        for rule in raw["rules"]:
+            rule_id = str(rule.get("id", "")).strip()
+            if rule_id in switches:
+                rule["enabled"] = switches[rule_id]
+            if rule_id in overrides:
+                rule["severity"] = overrides[rule_id]
+    return files
 
 
 def _compile_rules_file(raw: dict, pack: RulePack) -> None:
     """Compile a ``rules/<category>.yaml`` file into the pack."""
     category = str(raw.get("category", "") or "rule")
+    if category in _TRAFFIC_DATA_CATEGORIES:
+        return
     for rule in raw.get("rules", []) or []:
         if not isinstance(rule, dict):
             continue
@@ -243,6 +593,8 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
         compiled = _compile(pattern, rule_id)
         if compiled is None:
             continue
+        expression = str(rule.get("expression", "") or "")
+        required = _required_literals(compiled.pattern)
         pack.rules.append(
             _CompiledRule(
                 rule_id=rule_id,
@@ -252,6 +604,11 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
                 confidence=float(rule.get("confidence", 0.0) or 0.0),
                 tags=[str(t) for t in (rule.get("tags") or [])],
                 category=category,
+                required=required,
+                anchors=_anchors(required, compiled),
+                path_write="f.paths" in expression
+                and "f.commands" not in expression
+                and any(f"PATH_ACCESS_{a}" in expression for a in ("WRITE", "APPEND", "DELETE")),
             )
         )
 
@@ -269,6 +626,7 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
             compiled = _compile(str(pattern), rule_id)
             if compiled is None:
                 continue
+            required = _required_literals(compiled.pattern)
             pack.rules.append(
                 _CompiledRule(
                     rule_id=rule_id,
@@ -278,24 +636,70 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
                     confidence=0.0,
                     tags=[tag],
                     category="local-pattern",
+                    required=required,
+                    anchors=_anchors(required, compiled),
                 )
             )
 
 
 def _compile(pattern: str, rule_id: str) -> re.Pattern[str] | None:
-    # Go/RE2 accepts ``\x{10FFFF}`` Unicode scalar escapes while Python's
-    # ``re`` does not. Translate only that representational difference so the
-    # static-artifact overlay does not silently drop shipped rules containing
-    # zero-width or other non-ASCII scalars. This is not validation: the
-    # gateway's strict Go loader remains authoritative for the source pattern,
-    # and every other unsupported construct still fails closed to "no Python
-    # overlay rule" here.
-    translated = _translate_go_unicode_scalar_escapes(pattern)
+    # Translate RE2 scalar escapes and POSIX classes that Python re interprets
+    # differently. The gateway's strict Go loader validates the source pattern.
+    translated = _translate_go_posix_classes(_translate_go_unicode_scalar_escapes(pattern))
     try:
         return re.compile(translated)
     except re.error as exc:
         _log.debug("rule-pack: invalid regex in %s (%s): %s", rule_id, exc, pattern)
         return None
+
+
+def _translate_go_posix_classes(pattern: str) -> str:
+    """Translate RE2 POSIX classes to Python character-class fragments."""
+
+    def _fragment(match: re.Match[str]) -> str:
+        name = match.group("name")
+        fragment = _POSIX_ASCII_CLASSES[name]
+        if match.group("negated"):
+            included = re.compile(f"[{fragment}]")
+            remaining = [code for code in range(128) if not included.fullmatch(chr(code))]
+            ranges = []
+            start = end = remaining[0] if remaining else -1
+            for code in remaining[1:]:
+                if code == end + 1:
+                    end = code
+                else:
+                    ranges.append((start, end))
+                    start = end = code
+            if start >= 0:
+                ranges.append((start, end))
+            fragment = "".join(
+                rf"\x{lo:02x}" + (rf"-\x{hi:02x}" if hi != lo else "")
+                for lo, hi in ranges
+            ) + r"\x80-\U0010ffff"
+        return fragment
+
+    parts = []
+    in_class = False
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            parts.append(pattern[index:index + 2])
+            index += 2
+            continue
+        if char == "[" and in_class:
+            match = _GO_POSIX_CLASS.match(pattern, index)
+            if match and match.group("name") in _POSIX_ASCII_CLASSES:
+                parts.append(_fragment(match))
+                index = match.end()
+                continue
+        if char == "[" and not in_class:
+            in_class = True
+        elif char == "]" and in_class:
+            in_class = False
+        parts.append(char)
+        index += 1
+    return "".join(parts)
 
 
 def _translate_go_unicode_scalar_escapes(pattern: str) -> str:
@@ -325,6 +729,64 @@ def _resolve_dir(cfg, connector: str | None) -> str:
     return gc.effective_rule_pack_dir(connector or "") or ""
 
 
+def _layer_of(block: Any) -> RulesLayer:
+    """The file-relevant part of a ``guardrail.rules`` block (tolerates duck-typed configs)."""
+
+    def names(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        return tuple(text for item in value if (text := str(item).strip()))
+
+    overrides = getattr(block, "severity_overrides", None)
+    return RulesLayer(
+        protections=names(getattr(block, "protections", None)),
+        enable=names(getattr(block, "enable", None)),
+        disable=names(getattr(block, "disable", None)),
+        severity_overrides=(
+            tuple(sorted((str(rid).strip(), str(sev).strip().upper()) for rid, sev in overrides.items()))
+            if isinstance(overrides, dict)
+            else ()
+        ),
+    )
+
+
+def _rule_layers(cfg, connector: str | None) -> tuple[RulesLayer, ...]:
+    """The ``guardrail.rules`` layers of *connector*'s scope that change file rules.
+
+    The global block comes first, then the connector's own (profile scopes
+    apply to users, which a scan has none of).
+    """
+    gc = getattr(cfg, "guardrail", None)
+    if gc is None:
+        return ()
+    blocks = [getattr(gc, "rules", None)]
+    override = getattr(gc, "_connector_override", None)
+    if connector and callable(override):
+        try:
+            blocks.append(getattr(override(connector), "rules", None))
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return tuple(layer for layer in map(_layer_of, blocks) if layer)
+
+
+def _resolve_pack(
+    cfg, connector: str | None, *, default_pack: bool = False
+) -> tuple[str, tuple[RulesLayer, ...]]:
+    """The pack directory and ``guardrail.rules`` layers a scan applies; ``("", ())`` for none.
+
+    ``default_pack`` makes a scope that selects nothing act on the default
+    pack, as the gateway's install watcher does for a skill.
+    """
+    layers = _rule_layers(cfg, connector)
+    dir_path = _resolve_dir(cfg, connector)
+    if not dir_path and (layers or (default_pack and getattr(cfg, "guardrail", None) is not None)):
+        # guardrail.rules alone act on the default pack, as in the gateway.
+        from defenseclaw import policy_catalog
+
+        dir_path = policy_catalog.preset_pack_dir(cfg, "default")
+    return dir_path, layers
+
+
 def _active_connector(cfg, connector: str | None) -> str | None:
     if connector:
         return connector
@@ -345,14 +807,14 @@ def overlay_findings(
 ) -> list[Finding]:
     """Load the effective rule pack and return findings for *path* and/or *text*.
 
-    Returns ``[]`` when no rule pack is configured (the field is unset) or the
+    Returns ``[]`` when no rule pack or ``guardrail.rules`` is configured or the
     pack is empty — callers can extend their result findings unconditionally.
     """
     resolved = _active_connector(cfg, connector)
-    dir_path = _resolve_dir(cfg, resolved)
+    dir_path, layers = _resolve_pack(cfg, resolved)
     if not dir_path:
         return []
-    pack = load_rule_pack(dir_path)
+    pack = load_rule_pack(dir_path, layers)
     if pack.is_empty():
         return []
     findings: list[Finding] = []
@@ -406,10 +868,14 @@ class RulePackOverlayScanner:
 
     def scan(self, target, *args, **kwargs):
         result = self.inner.scan(target, *args, **kwargs)
+        started = time.monotonic()
         try:
             self._apply_overlay(result, target, kwargs)
         except Exception as exc:  # pragma: no cover - defensive
             _log.debug("rule-pack overlay failed for %r: %s", target, exc)
+        # The reported scan duration covers the overlay too (GAP-2070).
+        if isinstance(getattr(result, "duration", None), timedelta):
+            result.duration += timedelta(seconds=time.monotonic() - started)
         return result
 
     def _apply_overlay(self, result, target, kwargs) -> None:
@@ -455,26 +921,31 @@ def maybe_wrap(
     connector: str | None = None,
     *,
     pack_cache: RulePackOverlayCache | None = None,
+    default_pack: bool = False,
 ):
-    """Wrap *inner* with the rule-pack overlay iff a rule pack is configured.
+    """Wrap *inner* with the rule-pack overlay iff a rule pack or ``guardrail.rules`` is configured.
 
-    Returns *inner* unchanged when no pack is set (or it is empty), so the common
-    no-rule-pack path has zero behavior change and pays no extra disk reads.
+    Returns *inner* unchanged when neither is set (or the pack is empty), so the
+    common no-rule-pack path has zero behavior change and pays no extra disk reads.
+    ``default_pack=True`` (the skill scan) wraps with the default pack when
+    nothing is selected, as the gateway's install watcher does (GAP-0164).
     Fan-out callers can provide a per-operation *pack_cache*: it de-duplicates
     identical effective directories while preserving an explicit connector
     lookup, so one peer's pack can never bleed into another peer's scan.
     """
     resolved = _active_connector(cfg, connector)
-    dir_path = _resolve_dir(cfg, resolved)
+    dir_path, layers = _resolve_pack(cfg, resolved, default_pack=default_pack)
     if not dir_path:
         return inner
     cache_key = os.path.normcase(
         os.path.realpath(os.path.abspath(os.path.expanduser(dir_path)))
     )
+    if layers:
+        cache_key += f"#{layers!r}"
     if pack_cache is not None and cache_key in pack_cache:
         pack = pack_cache[cache_key]
     else:
-        pack = load_rule_pack(dir_path)
+        pack = load_rule_pack(dir_path, layers)
         if pack_cache is not None:
             pack_cache[cache_key] = pack
     if pack.is_empty():

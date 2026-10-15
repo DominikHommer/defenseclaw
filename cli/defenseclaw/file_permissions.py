@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -59,6 +61,13 @@ class UnsafePathError(OSError):
     def __init__(self, message: str, *, code: str = UNSAFE_PATH_UNKNOWN) -> None:
         super().__init__(message)
         self.code = code
+
+
+def unsafe_gateway_remedy(exc: UnsafePathError) -> str:
+    """The refusal plus a fix, without repeating one it already names."""
+    if "chmod go-w" in str(exc):
+        return str(exc)
+    return f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
@@ -209,17 +218,23 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
         "DEFENSE" + "CLAW_DISABLE_REDACTION",
         "DEFENSECLAW_DUMP_RAW_SECRETS",
+        # The managed deployment mode and profile pins come only from the
+        # service definition.
+        "DEFENSECLAW_DEPLOYMENT_MODE",
+        "DEFENSECLAW_ENTERPRISE_PROFILE",
         "DEFENSECLAW_FAIL_MODE",
         "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
         "DEFENSECLAW_GATEWAY_BIN",
         "DEFENSECLAW_HOME",
         "DEFENSECLAW_JSONL_DISABLE",
-        "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
         "DEFENSECLAW_OTEL_TLS_INSECURE",
         "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
-        "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
         "DEFENSECLAW_REVEAL_PII",
-        "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
+        # Set only by DefenseClaw inside a sandbox; a planted value would make
+        # the shell wrapper believe it already runs sandboxed.
+        "DEFENSECLAW_SANDBOX_ID",
+        "DEFENSECLAW_SANDBOX_NAME",
+        "DEFENSECLAW_SANDBOX_TOKEN",
         "DEFENSECLAW_STRICT_AVAILABILITY",
         "DEFENSECLAW_TEST",
         "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
@@ -333,12 +348,41 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     move_file_ex = kernel32.MoveFileExW
     move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
     move_file_ex.restype = wintypes.BOOL
-    if not move_file_ex(
-        _windows_extended_path(source_path),
-        _windows_extended_path(target_path),
-        movefile_replace_existing | movefile_write_through,
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
+    code = _move_retrying_sharing_errors(
+        lambda: bool(
+            move_file_ex(
+                _windows_extended_path(source_path),
+                _windows_extended_path(target_path),
+                movefile_replace_existing | movefile_write_through,
+            )
+        ),
+        ctypes.get_last_error,
+    )
+    if code:
+        raise ctypes.WinError(code)
+
+
+# ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: a reader that opened the
+# target without FILE_SHARE_DELETE (another DefenseClaw process, an indexer,
+# antivirus) makes MoveFileExW fail for a moment.
+_TRANSIENT_MOVE_ERRORS = frozenset({5, 32})
+
+
+def _move_retrying_sharing_errors(
+    move: Callable[[], bool], last_error: Callable[[], int], sleep: Callable[[float], None] = time.sleep
+) -> int:
+    """Run *move* until it succeeds (0) or fails with a non-transient error
+    or eight times (that error code), backing off as the Go writer does."""
+    delay = 0.01
+    for attempt in range(1, 9):
+        if move():
+            return 0
+        code = last_error()
+        if code not in _TRANSIENT_MOVE_ERRORS or attempt == 8:
+            return code
+        sleep(delay)
+        delay = min(delay * 2, 0.08)
+    return 0
 
 
 def delete_file_durable(path: str | os.PathLike[str]) -> None:
@@ -398,12 +442,17 @@ def open_regular_file_no_follow(
     *,
     expected_stat: os.stat_result | None = None,
     _deny_write_sharing: bool = False,
+    _deny_delete_sharing: bool = False,
 ) -> int:
     """Open one regular file without following a swapped symlink/reparse point.
 
     ``expected_stat`` lets a caller bind this open to an identity it inspected
     before entering the shared reader. This closes an A→B→A pathname swap in
     callers that perform custody checks before reading the file.
+
+    On Windows ``_deny_delete_sharing`` also withholds delete sharing, so while
+    the descriptor is open NTFS refuses to rename or replace the file or any
+    directory above it.
     """
     target = os.path.abspath(os.fspath(path))
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
@@ -423,8 +472,8 @@ def open_regular_file_no_follow(
     # the exact bytes on disk. Callers that bind security evidence to the
     # opened file size must therefore always receive a binary descriptor.
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    if os.name == "nt" and _deny_write_sharing:
-        fd = _open_windows_stable_read_fd(target)
+    if os.name == "nt" and (_deny_write_sharing or _deny_delete_sharing):
+        fd = _open_windows_stable_read_fd(target, share_delete=not _deny_delete_sharing)
     else:
         fd = os.open(target, flags)
     try:
@@ -445,7 +494,7 @@ def open_regular_file_no_follow(
     return fd
 
 
-def _open_windows_stable_read_fd(path: str) -> int:
+def _open_windows_stable_read_fd(path: str, *, share_delete: bool = True) -> int:
     """Open a binary CRT reader backed by an NT handle that denies writers."""
     import ctypes
     import msvcrt
@@ -477,7 +526,7 @@ def _open_windows_stable_read_fd(path: str) -> int:
     handle = create_file(
         _windows_extended_path(path),
         generic_read,
-        file_share_read | file_share_delete,
+        file_share_read | (file_share_delete if share_delete else 0),
         None,
         open_existing,
         file_flag_open_reparse_point,
@@ -644,7 +693,8 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
     current_uid = geteuid() if callable(geteuid) else info.st_uid
     if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
-            "gateway executable is writable by an untrusted principal",
+            f"gateway executable {resolved} can be changed by another account; "
+            f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
             code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
         )
     if sys.platform == "darwin" and darwin_acl_write_error(resolved):
@@ -661,9 +711,21 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
                 "gateway executable ancestor is not a directory",
                 code=UNSAFE_PATH_NOT_REGULAR_FILE,
             )
-        if parent_info.st_uid not in {0, current_uid} or stat.S_IMODE(parent_info.st_mode) & 0o022:
+        # A root-owned sticky directory such as /tmp is writable by everyone,
+        # but only an entry's owner can rename or remove it, so nobody else
+        # can replace this account's folder inside it (the gateway's own
+        # directory check allows it too). Without this, every config check
+        # failed for a home under /tmp.
+        root_sticky = parent_info.st_uid == 0 and parent_info.st_mode & stat.S_ISVTX
+        if parent_info.st_uid not in {0, current_uid} or (
+            stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky
+        ):
+            # Name the folder: a chmod on the (possibly symlinked) command
+            # path changes the file, not the folder other accounts can write.
             raise UnsafePathError(
-                "gateway executable ancestor is writable by an untrusted principal",
+                f"folder {current} holding the gateway executable {resolved} can be changed by "
+                f"another account; make this account or root its owner and run: "
+                f"chmod go-w {shlex.quote(str(current))}",
                 code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
             )
         if sys.platform == "darwin" and darwin_acl_write_error(current):
@@ -1418,8 +1480,22 @@ def atomic_write_private_bytes(
     )
 
 
-def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
-    """Return why an untrusted SID can write *path*, or ``None`` when safe."""
+_WINDOWS_BUILTIN_ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def windows_acl_write_error(
+    path: str | os.PathLike[str],
+    *,
+    trust_administrators: bool = False,
+) -> str | None:
+    """Return why an untrusted SID can write *path*, or ``None`` when safe.
+
+    Only the current user (who must own *path*), OWNER RIGHTS and LocalSystem
+    may hold write rights. ``trust_administrators`` also admits the built-in
+    Administrators group, matched by its well-known SID only: a profile folder
+    such as ``~\\.local\\bin`` inherits its full-control entry, and a local
+    administrator can already take over the account's files.
+    """
     if os.name != "nt":
         return None
     try:
@@ -1439,6 +1515,8 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
     trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
+    if trust_administrators:
+        trusted.add(_WINDOWS_BUILTIN_ADMINISTRATORS_SID)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
     for permissions, access_mode, inheritance, sid in entries:
         if access_mode not in (1, 2) or not permissions & write_mask:
@@ -1572,7 +1650,9 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     return None
 
 
-def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+def windows_acl_custody_confidentiality_error(
+    path: str | os.PathLike[str], *, allow_inheritable: bool = False
+) -> str | None:
     """Validate a current-user secret managed by Windows system controllers.
 
     The gateway's connector-token trust model admits the current user,
@@ -1581,7 +1661,8 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     Generic user-secret validation remains stricter; this predicate is for
     that managed-token boundary only. Every other effective read or write ACE,
     a foreign owner, an inheritable or null DACL, or missing owner/SYSTEM access
-    still fails.
+    still fails. ``allow_inheritable`` skips only the inheritance check, to
+    tell a file that just needs its DACL sealed from one that is exposed.
     """
 
     if os.name != "nt":
@@ -1602,7 +1683,7 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
     try:
-        dacl_protected = _windows_dacl_is_protected(path)
+        dacl_protected = allow_inheritable or _windows_dacl_is_protected(path)
     except OSError as exc:
         return f"cannot inspect Windows DACL protection ({exc})"
     if not dacl_protected:
@@ -1639,7 +1720,22 @@ def _protect_private_directory(path: str) -> None:
         raise OSError(f"refusing to protect foreign-owned directory: {path}")
     problem = windows_acl_write_error(path)
     if problem is not None or not _windows_acl_has_required_access(path):
-        _set_windows_owner_only_acl(path)
+        try:
+            _set_windows_owner_only_acl(path)
+        except PermissionError as exc:
+            # A managed install's DACL (read-only OWNER RIGHTS) denies the
+            # owner WRITE_DAC. When that DACL still admits only this account
+            # and Windows itself, the folder is already private: use it as it
+            # is instead of locking DefenseClaw out of a folder it set up
+            # (GAP-1243). Anything else names the folder and the way out.
+            if windows_acl_custody_confidentiality_error(path) is None:
+                return
+            raise PermissionError(
+                exc.errno,
+                f"cannot protect private directory {path}: its access control list does not let this "
+                "account change it (a managed DefenseClaw install can leave it that way); have an "
+                f'administrator reset its access (icacls "{path}" /reset /t), then run the command again',
+            ) from exc
         problem = windows_acl_write_error(path)
         if problem is not None:
             raise OSError(f"cannot protect private directory {path}: {problem}")
@@ -2108,7 +2204,19 @@ def _set_windows_owner_only_acl(path: str, *, set_owner: bool = False) -> None:
 
 
 def _set_windows_current_user_owner(path: str) -> None:
-    """Assign a DefenseClaw-managed path to the current token user."""
+    """Assign a DefenseClaw-managed path to the current token user.
+
+    A path the user already owns is left alone: setting the owner needs
+    WRITE_OWNER even when it does not change, and a folder that grants the
+    user Modify, such as a per-session TEMP folder on a Windows server, does
+    not grant it.
+    """
+    try:
+        already_owned = _windows_acl_snapshot(path)[0] == _windows_current_user_sid()
+    except OSError:
+        already_owned = False
+    if already_owned:
+        return
     import ctypes
     from ctypes import wintypes
 

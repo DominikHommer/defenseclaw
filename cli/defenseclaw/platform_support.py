@@ -73,48 +73,41 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "kiro": ConnectorPlatformSupport(
         SUPPORTED,
         "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on "
-        "native Windows x64 when kiro-cli is present. Release certification "
-        "requires official-client live evidence.",
+        "native Windows x64 when kiro-cli is present.",
     ),
     "codex": ConnectorPlatformSupport(
         SUPPORTED,
         "Codex CLI and the DefenseClaw hook entrypoint are supported on native "
-        "Windows x64; authentic packaged plus official-client validation metadata "
-        "is not recorded and live evidence remains false.",
+        "Windows x64.",
     ),
     "claudecode": ConnectorPlatformSupport(
         SUPPORTED,
         "Claude Code and the DefenseClaw native executable hook entrypoint are "
-        "supported on native Windows x64; immutable packaged plus official-client "
-        "validation metadata is not recorded and live evidence remains false.",
+        "supported on native Windows x64.",
     ),
     "cursor": ConnectorPlatformSupport(
         SUPPORTED,
-        "Cursor Agent and the DefenseClaw PowerShell hook adapter are available "
-        "on native Windows x64; official-client validation metadata is not recorded "
-        "and live evidence remains false.",
+        "Cursor Agent and the DefenseClaw PowerShell hook adapter are supported on "
+        "native Windows x64.",
     ),
     "devin": ConnectorPlatformSupport(
         SUPPORTED,
         "Native Devin CLI lifecycle hooks are supported on Windows x64 using the "
-        "pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client "
-        "live certification, cloud Devin, proxy, native OTLP, and managed higher-layer "
-        "enforcement are not covered.",
+        "pinned 3000.4.25 CLI; cloud Devin, proxy, native OTLP, and managed "
+        "higher-layer enforcement are not covered.",
     ),
     "copilot": ConnectorPlatformSupport(
         SUPPORTED,
-        "The DefenseClaw GitHub Copilot CLI integration is supported on native Windows x64; "
-        "authentication, HITL, and official-client live evidence remain unverified and unclaimed.",
+        "The DefenseClaw GitHub Copilot CLI integration is supported on native "
+        "Windows x64.",
     ),
     "antigravity": ConnectorPlatformSupport(
         SUPPORTED,
-        "The Antigravity integration is supported on native Windows x64; authentication, HITL, "
-        "and official-client live evidence remain unverified and unclaimed.",
+        "The Antigravity integration is supported on native Windows x64.",
     ),
     "opencode": ConnectorPlatformSupport(
         SUPPORTED,
-        "OpenCode native Windows setup is supported; official-client validation "
-        "metadata is not recorded and live evidence remains false. OpenCode recommends WSL but does "
+        "OpenCode native Windows setup is supported; OpenCode recommends WSL but does "
         "not require it.",
     ),
     "amp": ConnectorPlatformSupport(
@@ -123,9 +116,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         SUPPORTED,
-        "Hermes native shell hooks use a direct DefenseClaw executable; "
-        "packaged and official-client Windows x64 validation metadata is not recorded, "
-        "running-client state remains pending reload, and live evidence remains false.",
+        "Hermes native shell hooks use a direct DefenseClaw executable on native "
+        "Windows x64; restart any open Hermes session after setup so it loads them.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -133,7 +125,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "omnigent": ConnectorPlatformSupport(
         SUPPORTED,
-        "OmniGent 0.7.0 is supported on native Windows in degraded mode; "
+        "OmniGent is supported on native Windows in degraded mode; "
         "DefenseClaw uses its awaited in-process policy API "
         "without terminal wrapping or filesystem/network sandbox parity.",
     ),
@@ -242,6 +234,17 @@ def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
     return connector_support_status(name, os_name) == PREVIEW
 
 
+def openshell_sandboxes_supported(os_name: str | None = None) -> bool:
+    """Whether OpenShell sandboxes (``defenseclaw sandbox``) run on this host.
+
+    Mirrors ``openshell.CheckPlatform``: Linux and macOS only. WSL2 reports
+    ``linux`` here; the gateway refuses it with a clear message.
+    """
+
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return resolved_os in {"darwin", "linux"}
+
+
 def local_observability_stack_supported(os_name: str | None = None) -> bool:
     """Whether the shared Python-backed observability controller is available."""
 
@@ -290,24 +293,6 @@ def is_local_splunk_stack_destination(
         return False
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
     return (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
-
-
-def is_local_shell_stack_destination(
-    *,
-    name: str = "",
-    preset_id: str = "",
-    kind: str = "",
-    endpoint: str = "",
-) -> bool:
-    """Backward-compatible union classifier for older callers."""
-
-    return is_local_observability_stack_destination(
-        name=name, preset_id=preset_id, kind=kind, endpoint=endpoint
-    ) or is_local_splunk_stack_destination(
-        preset_id=preset_id,
-        kind=kind,
-        endpoint=endpoint,
-    )
 
 
 def destination_platform_unsupported(

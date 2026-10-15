@@ -388,6 +388,11 @@ type CorrelationRelationship struct {
 	Status         CorrelationRelationshipStatus `json:"status"`
 	CreatedAt      time.Time                     `json:"created_at"`
 	LastSeenAt     time.Time                     `json:"last_seen_at"`
+	// Unchanged is set by PutRelationship when the relationship already
+	// existed with the same status: the occurrence only added evidence.
+	// Confidence follows from the method, which is part of the ID, so it
+	// cannot change without a new relationship (GAP-0423).
+	Unchanged bool `json:"-"`
 }
 
 type CorrelationRelationshipInput struct {
@@ -487,6 +492,40 @@ func (repo *CorrelationRepository) ResolveConnectorInstance(
 	profileVersion string,
 	custody ConnectorExportCustody,
 ) (ConnectorInstance, error) {
+	return repo.resolveConnectorInstance(ctx, "", connector, profileVersion, custody)
+}
+
+// ResolveScopedConnectorInstance is ResolveConnectorInstance for a
+// non-default instance with a caller-chosen, stable id, such as one per
+// OpenShell sandbox binding. Every cursor, pending operation, receipt,
+// identifier and tool-chain row is keyed by its instance, so traffic
+// resolved to a scoped instance never shares correlation state with the
+// connector's default instance or with another scope. The instance is
+// created on first use and follows the same custody rules. An existing
+// instance with this id that is a default or belongs to another connector
+// is a conflict.
+func (repo *CorrelationRepository) ResolveScopedConnectorInstance(
+	ctx context.Context,
+	id ConnectorInstanceID,
+	connector string,
+	profileVersion string,
+	custody ConnectorExportCustody,
+) (ConnectorInstance, error) {
+	if err := validateUUIDv7("connector instance id", string(id)); err != nil {
+		return ConnectorInstance{}, err
+	}
+	return repo.resolveConnectorInstance(ctx, id, connector, profileVersion, custody)
+}
+
+// resolveConnectorInstance resolves the connector's default instance when
+// scoped is empty and the scoped instance otherwise.
+func (repo *CorrelationRepository) resolveConnectorInstance(
+	ctx context.Context,
+	scoped ConnectorInstanceID,
+	connector string,
+	profileVersion string,
+	custody ConnectorExportCustody,
+) (ConnectorInstance, error) {
 	if repo == nil || repo.store == nil {
 		return ConnectorInstance{}, errors.New("audit: correlation repository is not initialized")
 	}
@@ -516,34 +555,50 @@ func (repo *CorrelationRepository) ResolveConnectorInstance(
 	var digest sql.NullString
 	var isDefault int
 	var created, updated int64
-	err = tx.QueryRowContext(ctx, `SELECT connector_instance_id, connector, export_custody,
+	const selectInstance = `SELECT connector_instance_id, connector, export_custody,
 		profile_version, managed_config_digest, is_default, created_time_unix_nano,
-		updated_time_unix_nano FROM correlation_connector_instances
-		WHERE connector=? AND is_default=1`, connector).Scan(
+		updated_time_unix_nano FROM correlation_connector_instances`
+	label := "default connector instance"
+	if scoped != "" {
+		label = "scoped connector instance"
+	}
+	var row *sql.Row
+	if scoped == "" {
+		row = tx.QueryRowContext(ctx, selectInstance+` WHERE connector=? AND is_default=1`, connector)
+	} else {
+		row = tx.QueryRowContext(ctx, selectInstance+` WHERE connector_instance_id=?`, string(scoped))
+	}
+	err = row.Scan(
 		&instance.ConnectorInstanceID, &instance.Connector, &instance.ExportCustody,
 		&instance.ProfileVersion, &digest, &isDefault, &created, &updated)
 	now := time.Now().UTC()
 	if errors.Is(err, sql.ErrNoRows) {
-		id, idErr := NewConnectorInstanceID()
-		if idErr != nil {
-			return ConnectorInstance{}, idErr
+		id := scoped
+		if id == "" {
+			var idErr error
+			if id, idErr = NewConnectorInstanceID(); idErr != nil {
+				return ConnectorInstance{}, idErr
+			}
 		}
 		_, err = txExecContextObserved(ctx, tx, "correlation_connector_resolve_insert",
 			repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_connector_instances (
 				connector_instance_id, connector, export_custody, profile_version,
 				managed_config_digest, is_default, created_time_unix_nano, updated_time_unix_nano
-			) VALUES (?, ?, ?, ?, NULL, 1, ?, ?)`, string(id), connector, string(custody),
-			profileVersion, unixNano(now), unixNano(now))
+			) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`, string(id), connector, string(custody),
+			profileVersion, boolInt(scoped == ""), unixNano(now), unixNano(now))
 		if err != nil {
-			return ConnectorInstance{}, fmt.Errorf("audit: create default connector instance: %w", err)
+			return ConnectorInstance{}, fmt.Errorf("audit: create %s: %w", label, err)
 		}
 		instance = ConnectorInstance{
 			ConnectorInstanceID: id, Connector: connector, ExportCustody: custody,
-			ProfileVersion: profileVersion, Default: true, CreatedAt: now, UpdatedAt: now,
+			ProfileVersion: profileVersion, Default: scoped == "", CreatedAt: now, UpdatedAt: now,
 		}
 	} else if err != nil {
-		return ConnectorInstance{}, fmt.Errorf("audit: resolve default connector instance: %w", err)
+		return ConnectorInstance{}, fmt.Errorf("audit: resolve %s: %w", label, err)
 	} else {
+		if scoped != "" && (instance.Connector != connector || isDefault != 0) {
+			return ConnectorInstance{}, ErrCorrelationConflict
+		}
 		effectiveCustody := instance.ExportCustody
 		// Hot-path observation may promote a connector only after the caller
 		// has authenticated a DefenseClaw-managed native stream. Hook traffic
@@ -559,7 +614,7 @@ func (repo *CorrelationRepository) ResolveConnectorInstance(
 				WHERE connector_instance_id=?`, string(effectiveCustody), profileVersion, unixNano(now),
 			string(instance.ConnectorInstanceID))
 		if err != nil {
-			return ConnectorInstance{}, fmt.Errorf("audit: refresh default connector instance: %w", err)
+			return ConnectorInstance{}, fmt.Errorf("audit: refresh %s: %w", label, err)
 		}
 		instance.ExportCustody = effectiveCustody
 		instance.ProfileVersion = profileVersion
@@ -1420,6 +1475,14 @@ func (tx *CorrelationTx) PutRelationship(
 	id := deterministicCorrelationID("rel_", string(input.FromKind), input.FromID,
 		string(input.ToKind), input.ToID, string(input.Type), string(input.Method), input.RuleID,
 		input.RuleVersion)
+	var previous string
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_relationships
+		WHERE relationship_id = ?`, id).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		previous = ""
+	case err != nil:
+		return CorrelationRelationship{}, fmt.Errorf("audit: read correlation relationship: %w", err)
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_relationship_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationships (
 			relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
@@ -1440,6 +1503,7 @@ func (tx *CorrelationTx) PutRelationship(
 		ToKind: input.ToKind, ToID: input.ToID, Type: input.Type, Method: input.Method,
 		Confidence: confidence, RuleID: input.RuleID, RuleVersion: input.RuleVersion,
 		Status: input.Status, CreatedAt: input.ObservedAt, LastSeenAt: input.ObservedAt,
+		Unchanged: previous == string(input.Status),
 	}, nil
 }
 

@@ -43,6 +43,12 @@ func applyTrustedActionContextDisposition(
 	enforcementFacts := facts.EnforcementProjection()
 	for index := range adjusted {
 		finding := adjusted[index]
+		if finding.RuleID == "CMD-WIN-REG-PERSIST" && finding.Severity == "HIGH" &&
+			finding.contributesToEnforcement() {
+			finding.enforcement = findingEnforcementAlertOnly
+			adjusted[index] = finding
+			continue
+		}
 
 		if canonicalTrustedRuleID(finding.RuleID) ==
 			"PRIVILEGE.CONTAINER_RUNTIME_SOCKET_ACCESS" {
@@ -81,7 +87,23 @@ func applyTrustedActionContextDisposition(
 					trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
 				)
 			case trustedActionSensitivePathRead:
+				if (finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY") &&
+					trustedActionActiveSSHPrivateKeyContentRead(enforcementFacts) {
+					finding = finding.withTrustedActionProof(
+						trustedActionContextFindingProof(finding.RuleID, enforcementFacts),
+					)
+					adjusted[index] = finding
+					continue
+				}
+				// A local read of a credential path is MEDIUM: alert, do not
+				// block. Detection-only would also hide it from alerts
+				// (GAP-1516); never promote a finding that an earlier
+				// boundary already made detection-only.
+				detectionOnly := finding.enforcement == findingEnforcementDetectionOnly
 				finding = trustedActionAdvisoryFinding(finding)
+				if !detectionOnly {
+					finding.enforcement = findingEnforcementAlertOnly
+				}
 			default:
 				// A path-shaped string without a matching, command-owned path
 				// fact is a harmless reference, not a filesystem action.
@@ -122,6 +144,51 @@ func applyTrustedActionContextDisposition(
 		)
 	}
 	return adjusted
+}
+
+func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessRead ||
+			!matchesActiveSSHPrivateKey(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute {
+			continue
+		}
+		expandingOperand := false
+		for _, argument := range command.Arguments {
+			if argument.Expands && matchesSSHPrivateKey(argument.Value) {
+				expandingOperand = true
+				break
+			}
+		}
+		if expandingOperand {
+			continue
+		}
+		switch strings.ToLower(command.Program) {
+		case "head", "tail":
+			emptyRead := false
+			for index, arg := range command.Argv {
+				if arg == "-c" && index+1 < len(command.Argv) && command.Argv[index+1] == "0" ||
+					arg == "--bytes=0" {
+					emptyRead = true
+					break
+				}
+			}
+			if emptyRead {
+				continue
+			}
+			return true
+		case "cat", "base64", "cp", "copy", "copy-item", "cpi",
+			"get-content", "gc", "type", "read", "readfile", "read_file", "read-file",
+			"fsread", "fs_read", "fs-read", "fs.read", "fs.read_file",
+			"fileread", "file_read", "file-read", "catfile", "cat_file", "cat-file",
+			"openfile", "open_file", "open-file", "viewfile", "view_file", "view-file":
+			return true
+		}
+	}
+	return false
 }
 
 func trustedActionProvesContainerRuntimeSocketUse(
@@ -743,7 +810,8 @@ func trustedActionStaticCatEmitsPath(
 	default:
 		return false
 	}
-	if command.Argv[pathIndex] != candidate.Value {
+	if command.Argv[pathIndex] != candidate.Value &&
+		(!trustedActionHomeRewrittenPath(candidate) || command.Argv[pathIndex] != candidate.Resolved) {
 		return false
 	}
 	if len(command.Arguments) != len(command.Argv) {
@@ -761,6 +829,12 @@ func trustedActionStaticCatEmitsPath(
 	default:
 		return false
 	}
+}
+
+func trustedActionHomeRewrittenPath(candidate actionfacts.PathFact) bool {
+	return strings.HasPrefix(candidate.Value, "~/") ||
+		strings.HasPrefix(candidate.Value, "$HOME/") ||
+		strings.HasPrefix(candidate.Value, "${HOME}/")
 }
 
 func trustedActionCommandFeedsExternalUpload(

@@ -211,10 +211,9 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
     _remove_from_plugins_allow(oc_config, "defenseclaw")
 
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
         result = subprocess.run(
-            [*prefix, openclaw_bin(), "plugins", "uninstall", "defenseclaw"],
+            [openclaw_bin(), "plugins", "uninstall", "defenseclaw"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -377,10 +376,9 @@ def _expand(p: str) -> str:
 def _preserve_ownership(path: str):
     """Capture a file's uid/gid before a write and restore it afterwards.
 
-    Only relevant in standalone sandbox mode where setup commands run
-    as root and would otherwise re-create files owned by root,
-    breaking sandbox user access. Skipped entirely for non-root
-    callers since ``os.chown`` requires elevated privileges.
+    A setup command run as root would otherwise leave the file owned by
+    root, so its owner could no longer edit it. Skipped entirely for
+    non-root callers since ``os.chown`` requires elevated privileges.
     """
     getuid = getattr(os, "getuid", None)
     if getuid is None or getuid() != 0:
@@ -577,6 +575,3 @@ def _backup(path: str) -> None:
             chown(bak, st.st_uid, st.st_gid)
 
 
-def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = openclaw_config_file

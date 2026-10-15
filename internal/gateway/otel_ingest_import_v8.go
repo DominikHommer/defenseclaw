@@ -91,29 +91,50 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 	}
 	defer batch.Close()
 
+	addPrimary := func(leaf otlpDecodedLeaf, disposition otlpInboundPrimaryDisposition) error {
+		if disposition == otlpInboundInvalidRecord {
+			logInvalidInboundLeafV8(leaf, authenticatedSource)
+		}
+		return accounting.addPrimary(disposition)
+	}
 	_, walkErr := walkDecodedOTLPLeaves(message, signal, func(leaf otlpDecodedLeaf) error {
 		classification, classifyErr := classifier.classify(leaf, authenticatedSource)
 		if classifyErr != nil {
-			return accounting.addPrimary(otlpInboundInvalidRecord)
+			return addPrimary(leaf, otlpInboundInvalidRecord)
 		}
 		if disposition, terminal := inboundTerminalDisposition(classifier, leaf, classification); terminal {
-			return accounting.addPrimary(disposition)
+			return addPrimary(leaf, disposition)
+		}
+		// A connector token authenticates the source, not the reported user,
+		// agent identity, or policy profile. Reject these claims before any
+		// canonical record or correlation state can treat them as local facts.
+		// Secure Client retains the pre-1.0 import behavior (issue #1092).
+		// Native projection markers are sender-controlled too. Check their
+		// projected body as well as the OTLP leaf attributes.
+		if !a.managedAIDOnly() {
+			leaf = withoutSenderUserIDV8(leaf)
+		}
+		if !a.managedAIDOnly() &&
+			(unverifiedOTLPIdentityClaimV8(leaf.attributes()) ||
+				(classification.match.Shape() == observability.InboundShapeNativeExact &&
+					unverifiedNativeOTLPIdentityClaimV8(leaf))) {
+			return addPrimary(leaf, otlpInboundInvalidMappedField)
 		}
 		correlated, correlationErr := a.correlateNativeOTLPLeafV8(
 			ctx, leaf, classification.match, authenticatedSource, receipt,
 		)
 		if correlationErr != nil {
 			if errors.Is(correlationErr, errNativeOTLPCorrelationInputV8) {
-				return accounting.addPrimary(otlpInboundInvalidMappedField)
+				return addPrimary(leaf, otlpInboundInvalidMappedField)
 			}
 			// Correlation state is part of local acceptance in v8. Never hand a
 			// leaf to the runtime/provider after the occurrence transaction has
 			// failed; account the leaf through the existing bounded local failure
 			// disposition so batch acknowledgement remains mathematically exact.
-			return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+			return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 		}
 		if correlated.suppressEmission {
-			return accounting.addPrimary(otlpInboundExactReplaySuppressed)
+			return addPrimary(leaf, otlpInboundExactReplaySuppressed)
 		}
 		leafResult := a.importClassifiedOTLPLeafV8(
 			correlated.ctx, batch, leaf, classification.match, classifier.catalog.WireContract(),
@@ -121,7 +142,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		)
 		if nativeOTLPLeafCanarySucceeded(leafResult) {
 			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
-				return accounting.addPrimary(otlpInboundLocalPersistenceFailed)
+				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
 		}
 		for _, derivative := range leafResult.derivatives {
@@ -169,7 +190,7 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		if err := accounting.addUnknownFieldsDropped(unknownDropped); err != nil {
 			return err
 		}
-		return accounting.addPrimary(primaryDispositionForInboundLeaf(leafResult))
+		return addPrimary(leaf, primaryDispositionForInboundLeaf(leafResult))
 	})
 	if walkErr != nil || !accounting.valid() {
 		return accounting, errOTLPInboundMappingV8
@@ -261,6 +282,114 @@ func primaryDispositionForInboundLeaf(result otlpInboundLeafResult) otlpInboundP
 	return otlpInboundInvalidRecord
 }
 
+// A connector token authenticates the OTLP source, not these identity and
+// profile claims. Only a local resolver may add them after verification.
+var unverifiedOTLPIdentityKeysV8 = [...]string{
+	"user.id",
+	"defenseclaw.user.id_kind",
+	"defenseclaw.user.name",
+	"defenseclaw.user.email",
+	"defenseclaw.user.principal",
+	"defenseclaw.user.domain",
+	"defenseclaw.user.directory",
+	"defenseclaw.user.tenant_id",
+	"defenseclaw.user.identity.source",
+	"defenseclaw.user.principal.assurance",
+	"defenseclaw.session.kind",
+	"defenseclaw.session.kerberos_principal",
+	"defenseclaw.agent.identity.id",
+	"defenseclaw.agent.instance_id",
+	"defenseclaw.guardrail.profile.name",
+	"defenseclaw.guardrail.profile.digest",
+	"defenseclaw.guardrail.profile.match",
+	"defenseclaw.guardrail.profile.matched_group",
+}
+
+func unverifiedOTLPIdentityClaimV8(index otlpTypedAttributeIndex) bool {
+	for _, key := range unverifiedOTLPIdentityKeysV8 {
+		if _, state := index.lookup(key); state != otlpTypedAttributeAbsent {
+			return true
+		}
+	}
+	return false
+}
+
+// Semantic-convention user.id on an OTLP leaf is an identifier of the
+// sender itself: Claude Code puts its anonymous installation id on every log
+// and metric point. That is no DefenseClaw identity claim, so it must not
+// drop the record (every Claude Code batch was dropped, GAP-1229), and it
+// must not reach a canonical record either. Remove it from the leaf so the
+// import never sees it; the local resolver adds the verified user.
+func withoutSenderUserIDV8(leaf otlpDecodedLeaf) otlpDecodedLeaf {
+	const key = "user.id"
+	if _, state := leaf.attributes().lookup(key); state == otlpTypedAttributeAbsent {
+		return leaf
+	}
+	switch {
+	case leaf.signal == otelSignalLogs && leaf.logRecord != nil:
+		leaf.logRecord.Attributes = withoutOTLPAttributeV8(leaf.logRecord.Attributes, key)
+		leaf.leafAttributes = newOTLPTypedAttributeIndex(leaf.logRecord.Attributes)
+	case leaf.signal == otelSignalTraces && leaf.span != nil:
+		leaf.span.Attributes = withoutOTLPAttributeV8(leaf.span.Attributes, key)
+		leaf.leafAttributes = newOTLPTypedAttributeIndex(leaf.span.Attributes)
+	case leaf.numberPoint != nil:
+		leaf.numberPoint.Attributes = withoutOTLPAttributeV8(leaf.numberPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.numberPoint.Attributes)
+	case leaf.histogramPoint != nil:
+		leaf.histogramPoint.Attributes = withoutOTLPAttributeV8(leaf.histogramPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.histogramPoint.Attributes)
+	case leaf.exponentialHistogram != nil:
+		leaf.exponentialHistogram.Attributes = withoutOTLPAttributeV8(leaf.exponentialHistogram.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.exponentialHistogram.Attributes)
+	case leaf.summaryPoint != nil:
+		leaf.summaryPoint.Attributes = withoutOTLPAttributeV8(leaf.summaryPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.summaryPoint.Attributes)
+	}
+	return leaf
+}
+
+func withoutOTLPAttributeV8(attributes []*commonpb.KeyValue, key string) []*commonpb.KeyValue {
+	kept := make([]*commonpb.KeyValue, 0, len(attributes))
+	for _, attribute := range attributes {
+		if attribute == nil || attribute.GetKey() != key {
+			kept = append(kept, attribute)
+		}
+	}
+	return kept
+}
+
+func unverifiedNativeOTLPIdentityClaimV8(leaf otlpDecodedLeaf) bool {
+	if leaf.signal != otelSignalLogs || leaf.logRecord == nil {
+		return false
+	}
+	text, ok := inboundLogBodyString(leaf.logRecord.GetBody())
+	if !ok {
+		return false
+	}
+	var wire projectedLogRecordV8
+	if json.Unmarshal([]byte(text), &wire) != nil {
+		return false
+	}
+	correlation, err := decodeInboundJSONObject(wire.Correlation)
+	if err == nil {
+		for _, member := range correlation {
+			if strings.EqualFold(member.name, "agent_instance_id") {
+				return true
+			}
+		}
+	}
+	members, err := decodeInboundJSONObject(wire.Body)
+	if err != nil {
+		return false
+	}
+	for _, key := range unverifiedOTLPIdentityKeysV8 {
+		if _, present := inboundJSONMember(members, key); present {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *APIServer) importClassifiedOTLPLeafV8(
 	ctx context.Context,
 	batch *observabilityruntime.InboundImportBatch,
@@ -338,6 +467,7 @@ func inboundCorrelationWithSnapshotV8(
 // record without that identity remains un-attributed rather than receiving a
 // guessed root agent.
 func (a *APIServer) enrichInboundWithHookLifecycleV8(
+	ctx context.Context,
 	leaf otlpDecodedLeaf,
 	target observability.InboundTarget,
 	authenticatedSource string,
@@ -353,22 +483,53 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		return fields, false, nil
 	}
 	meta, found := a.hookLifecycleSnapshot(authenticatedSource, conversationID, "")
-	if !found {
-		return fields, false, nil
+	if found && !a.managedAIDOnly() {
+		// Conversation IDs are supplied by the OTLP sender. A shared
+		// gateway token does not prove ownership of another user's hook
+		// session, so retain topology only for a verified matching caller,
+		// with agent identity matching when the request carries one.
+		// Secure Client keeps its existing correlation output.
+		caller := auditCallerIdentity(ctx)
+		identityID := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), conversationID)
+		// A user-scoped OTLP credential proves the caller even when it
+		// carries no agent identity. In that case, the hook's verified
+		// user is enough to join this exact conversation. An explicit
+		// conflicting agent identity still rules the snapshot out.
+		verifiedCaller, verified := verifiedAuditCaller(ctx)
+		sameVerifiedUser := verified && verifiedCaller.ID != "" && meta.UserID == verifiedCaller.ID
+		if (meta.UserID != "" && meta.UserID != caller.ID) ||
+			(meta.AgentIdentityID != "" && meta.AgentIdentityID != identityID &&
+				!(identityID == "" && sameVerifiedUser)) {
+			found = false
+		}
 	}
-	mergeCorrelation := func(current *string, source string) bool {
+	if !found {
+		// Secure Client keeps its agentless native rows (issue #1092).
+		if a.managedAIDOnly() {
+			return fields, false, nil
+		}
+		return inboundConversationRootAgentV8(ctx, target, authenticatedSource, correlation, fields, selected), false, nil
+	}
+	// An agent or turn the native rail only inferred from the durable prompt
+	// cursor is not a sender report, and it can differ from the live hook
+	// snapshot every hook record of this conversation uses (a cursor minted
+	// before the ledger took the telemetry root agent, GAP-0031). The exact
+	// conversation join makes the snapshot the authority: take it instead of
+	// dropping the record as invalid_mapped_field (GAP-1331).
+	derived := nativeOTLPCursorDerivedTargetsV8(ctx, authenticatedSource)
+	mergeCorrelation := func(current *string, source string, target connector.CorrelationTarget) bool {
 		if source == "" {
 			return true
 		}
-		if *current != "" && *current != source {
+		if *current != "" && *current != source && !derived[target] {
 			return false
 		}
 		*current = source
 		return true
 	}
-	if !mergeCorrelation(&correlation.SessionID, conversationID) ||
-		!mergeCorrelation(&correlation.AgentID, meta.AgentID) ||
-		!mergeCorrelation(&correlation.TurnID, meta.TurnID) {
+	if !mergeCorrelation(&correlation.SessionID, conversationID, connector.CorrelationTargetSession) ||
+		!mergeCorrelation(&correlation.AgentID, meta.AgentID, connector.CorrelationTargetAgent) ||
+		!mergeCorrelation(&correlation.TurnID, meta.TurnID, connector.CorrelationTargetTurn) {
 		return nil, false, errOTLPInboundMappingV8
 	}
 	if selected == nil {
@@ -458,6 +619,47 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		}
 	}
 	return fields, true, nil
+}
+
+// inboundConversationRootAgentV8 names the conversation's root agent on a
+// native record that no hook of the conversation has reached yet: Codex
+// exports its user_prompt log as the prompt is submitted, while the hooks
+// still run. The hook records derive the root agent from the conversation
+// the same way (hookLLMEventMeta), so the record joins them (GAP-0082).
+func inboundConversationRootAgentV8(
+	ctx context.Context,
+	target observability.InboundTarget,
+	source string,
+	correlation *observability.Correlation,
+	fields []observability.InboundMappedField,
+	selected map[string]bool,
+) []observability.InboundMappedField {
+	if correlation.AgentID != "" || selected["gen_ai.agent.id"] {
+		return fields
+	}
+	correlation.AgentID = agentNodeID(nativeSessionAgentScopeV8(ctx, source, correlation.SessionID),
+		source, correlation.SessionID, "root")
+	if field, ok := inboundTargetFieldsByName(target)["gen_ai.agent.id"]; ok {
+		fields = append(fields, observability.NewInboundMappedString(field, correlation.AgentID))
+		if selected != nil {
+			selected["gen_ai.agent.id"] = true
+		}
+	}
+	return fields
+}
+
+// nativeSessionAgentScopeV8 is the agent identity (agt-) that scopes the
+// agent ids of a native record's session, as hookLLMEventMeta scopes those of
+// its hook rows (GAP-0232): the one on ctx or the one the session's hooks
+// registered, else the one the hook path derives for the record's connector
+// and the authenticated caller. A record that arrives before the session's
+// first hook has neither of the first two, and an unscoped id names an agent
+// no hook row carries (GAP-0082).
+func nativeSessionAgentScopeV8(ctx context.Context, connectorName, sessionID string) string {
+	if scope := agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID); scope != "" {
+		return scope
+	}
+	return resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}).ID
 }
 
 func selectedInboundLogTime(record *logspb.LogRecord, receipt time.Time) (time.Time, error) {
@@ -1009,7 +1211,7 @@ func (a *APIServer) mapInboundLogV8(
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, target, authenticatedSource, &input.Correlation, fields, selected,
+		ctx, leaf, target, authenticatedSource, &input.Correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedLogInput{}, err

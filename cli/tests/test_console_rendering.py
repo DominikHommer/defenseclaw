@@ -75,7 +75,6 @@ def _invoke_status(*args: str, unicode_output: bool):
     client.is_running.return_value = False
     with (
         _render_mode(unicode_output),
-        mock.patch.object(cmd_status.shutil, "which", return_value=None),
         mock.patch.object(cmd_status, "resolve_scanner_binary", return_value=None),
         mock.patch.object(
             cmd_status,
@@ -203,6 +202,73 @@ def test_doctor_human_rows_retain_unicode_on_modern_console() -> None:
     assert "↪ retry → now" in rendered
 
 
+def test_windows_output_piped_through_a_legacy_console_uses_ascii_glyphs() -> None:
+    # `defenseclaw ... | Out-Host` in PowerShell decodes UTF-8 with the OEM code
+    # page, so a direct click.echo glyph must be downgraded at the stream.
+    piped = _Stream(tty=False)
+    with (
+        mock.patch.object(ux.sys, "platform", "win32"),
+        mock.patch.object(ux, "_console_output_code_page", return_value=437),
+    ):
+        stream = ux.ascii_safe_redirected_stream(piped)
+        console = _Stream(tty=True)
+        assert ux.ascii_safe_redirected_stream(console) is console
+    stream.write("restarting... ✓ — Málaga")
+    assert piped.getvalue() == "restarting... OK - Málaga"
+    # The uninstall plan bullets and setup galileo's batch delay (WIN2-U3-13).
+    stream.write(" • wipe (≤1s, ≥2)")
+    assert piped.getvalue().endswith(" * wipe (<=1s, >=2)")
+
+
+def test_alerts_table_stays_aligned_when_piped_through_ascii_stream() -> None:
+    # WIN2-U3-13 item 1: the stream turned a 1-cell "…" into "..." after Rich
+    # sized the columns, so cut cells overran the border.
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="guardrail-degraded-subsystem",
+        target="C:/Users/dcw-std1/.codex/hooks/very/long/target/path.json",
+        details="subsystem.degraded=" + "x" * 120,
+    )
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out):
+        cmd_alerts._render_table([event], store=None)
+    text = out.getvalue().translate(ux._ASCII_PRESENTATION_TRANSLATION)
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert rows and len({len(line) for line in rows}) == 1
+    assert "..." in text and not any(glyph in out.getvalue() for glyph in "…└┏┃")
+
+
+def test_secure_client_alert_table_keeps_main_target_width() -> None:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_alerts
+
+    event = SimpleNamespace(
+        id="scan-1",
+        severity="HIGH",
+        timestamp=datetime(2026, 10, 2, 4, 5),
+        action="scan",
+        target="/var/tmp/secure-client/suspect-tool-package.bin",
+        details="",
+        connector="",
+    )
+    from rich.console import Console
+
+    out = io.StringIO()
+    with _render_mode(False), redirect_stdout(out), mock.patch(
+        "rich.console.Console", return_value=Console(width=120)
+    ):
+        cmd_alerts._render_table([event], store=None, secure_client=True)
+    assert "...ool-package.bin" in out.getvalue()
+
+
 def test_main_snapshots_capability_before_utf8_reconfigure() -> None:
     events: list[str] = []
     with (
@@ -237,8 +303,12 @@ def test_implicit_tui_refuses_legacy_terminal_with_actionable_message() -> None:
         assert main_mod._try_launch_tui() is True
 
     run_tui.assert_not_called()
-    assert "Windows Terminal or PowerShell 7" in stderr.getvalue()
-    assert "defenseclaw status" in stderr.getvalue()
+    if sys.platform == "win32":
+        assert "needs a UTF-8 capable terminal" in stderr.getvalue()
+        assert "Windows Terminal" in stderr.getvalue()
+    else:
+        assert "needs UTF-8 output" in stderr.getvalue()
+        assert "terminal or tmux" in stderr.getvalue() or "Terminal.app" in stderr.getvalue()
 
 
 def test_implicit_tui_launches_on_capable_terminal() -> None:
@@ -256,12 +326,55 @@ def test_implicit_tui_launches_on_capable_terminal() -> None:
     run_tui.assert_called_once_with()
 
 
+def test_unknown_top_level_option_goes_to_click_not_the_dashboard() -> None:
+    # GAP-1769: "defenseclaw --no-such-flag" opened the dashboard and exited 0.
+    with (
+        _render_mode(True),
+        mock.patch.object(sys, "stdin", _Stream(tty=True)),
+        mock.patch.object(sys, "stdout", _Stream(tty=True)),
+        mock.patch.object(sys, "argv", ["defenseclaw", "--no-such-flag-xyz"]),
+        mock.patch("defenseclaw.tui.run_textual_tui") as run_tui,
+    ):
+        assert main_mod._try_launch_tui() is False
+    run_tui.assert_not_called()
+    result = CliRunner().invoke(main_mod.cli, ["--no-such-flag-xyz"])
+    assert result.exit_code == 2
+    assert "No such option" in result.output
+
+
+def test_piped_rich_table_keeps_its_columns_after_the_ascii_swap() -> None:
+    # GAP-1757: glyphs were swapped after Rich sized the cells, and Rich's
+    # Windows renderer writes a row piece by piece.
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table(title="Skills")
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Description", no_wrap=True, overflow="ellipsis", max_width=14)
+    table.add_row("✓ ready", "A harmless demo skill used for a test")
+    rendered = io.StringIO()
+    Console(file=rendered, width=60, color_system=None, legacy_windows=False).print(table)
+    piped = _Stream(tty=False)
+    with (
+        mock.patch.object(ux.sys, "platform", "win32"),
+        mock.patch.object(ux, "_console_output_code_page", return_value=437),
+    ):
+        stream = ux.ascii_safe_redirected_stream(piped)
+    for char in rendered.getvalue():
+        stream.write(char)
+    text = piped.getvalue()
+    rows = [line for line in text.splitlines() if line[:1] in "|+"]
+    assert len(rows) == 5 and len({len(line) for line in rows}) == 1, text
+    assert "OK ready" in text and "..." in text
+    assert "\\" not in text and not any(ord(c) > 127 for c in text)
+
+
 def test_explicit_tui_uses_the_same_capability_guard() -> None:
     runner = CliRunner()
     with mock.patch.object(ux, "terminal_supports_tui", return_value=False):
         rejected = runner.invoke(tui, catch_exceptions=False)
     assert rejected.exit_code != 0
-    assert "Windows Terminal or PowerShell 7" in rejected.output
+    assert "terminal on stdin and stdout" in rejected.output
 
     with (
         mock.patch.object(ux, "terminal_supports_tui", return_value=True),
@@ -270,3 +383,101 @@ def test_explicit_tui_uses_the_same_capability_guard() -> None:
         accepted = runner.invoke(tui, catch_exceptions=False)
     assert accepted.exit_code == 0
     run_tui.assert_called_once_with()
+
+
+def test_stderr_glyph_policy_is_its_own_snapshot() -> None:
+    # GAP-2564: '2> err.txt' with stdout on a terminal kept "⚠" in the file.
+    with (
+        mock.patch.object(ux, "_configured_unicode_output", None),
+        mock.patch.object(ux, "_configured_unicode_error_output", None),
+        mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=False),
+        mock.patch("click.echo") as echo,
+    ):
+        ux.configure_console_output(_Stream(tty=True), err_stream=_Stream(tty=False))
+        ux.echo("  ⚠ not recorded — start it", err=True)
+        ux.echo("  ⚠ not recorded — start it")
+    assert [c.args[0] for c in echo.call_args_list] == ["  ! not recorded - start it", "  ⚠ not recorded — start it"]
+
+
+def test_cli_echo_calls_with_presentation_glyphs_go_through_ux() -> None:
+    # GAP-2527, GAP-2563: click.echo/secho skip the redirected-output ASCII fallback.
+    import ast
+
+    glyphs = {chr(k) for k in ux._ASCII_PRESENTATION_TRANSLATION}
+    root = Path(ux.__file__).parent
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "ux.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            func = getattr(node, "func", None)
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "click"
+                and func.attr in ("echo", "secho")
+            ):
+                continue
+            if any(
+                isinstance(sub, ast.Constant) and isinstance(sub.value, str) and glyphs & set(sub.value)
+                for arg in node.args
+                for sub in ast.walk(arg)
+            ):
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == [], "use ux.echo/ux.secho for glyph text: " + ", ".join(offenders)
+
+
+def test_redirected_click_help_is_ascii() -> None:
+    # GAP-2598: Click formats --help itself, so em dashes and U+2026 skipped ux.console_text.
+    from defenseclaw.main import cli
+
+    runner = CliRunner()
+    with mock.patch.object(ux, "_configured_unicode_output", False):
+        root = runner.invoke(cli, ["--help"], prog_name="defenseclaw", catch_exceptions=False)
+        aibom = runner.invoke(cli.commands["aibom"], ["--help"], prog_name="defenseclaw aibom", catch_exceptions=False)
+    assert root.exit_code == 0 and aibom.exit_code == 0
+    assert root.output.isascii(), [line for line in root.output.splitlines() if not line.isascii()]
+    assert aibom.output.isascii(), [line for line in aibom.output.splitlines() if not line.isascii()]
+    assert "Manage MCP servers - " in root.output
+
+
+def test_prompt_ends_its_line_when_stdout_is_relayed_line_by_line(monkeypatch) -> None:
+    """GAP-1575: behind a line relay (PowerShell with a transcript) a prompt
+    without a newline stayed hidden until Enter. It must end its line before
+    the answer is read, and a terminal stdout keeps the inline prompt."""
+
+    import click
+    from click import termui
+    from defenseclaw import terminal_checkbox
+
+    class _Keyboard(io.StringIO):
+        def __init__(self, out: io.StringIO) -> None:
+            super().__init__("both\n")
+            self.out = out
+            self.seen = ""
+
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self, *args: object) -> str:
+            self.seen = self.out.getvalue()
+            return super().readline(*args)
+
+    out = io.StringIO()
+    keyboard = _Keyboard(out)
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(sys, "stdin", keyboard)
+    monkeypatch.setattr(sys, "stdout", out)
+    terminal_checkbox.keep_prompts_visible()
+    terminal_checkbox.keep_prompts_visible()  # idempotent
+
+    answer = click.prompt("  Scanner mode", type=click.Choice(["local", "remote", "both"]), default="local")
+
+    assert answer == "both"
+    assert keyboard.seen == "  Scanner mode (local, remote, both) [local]:\n"
+
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(out, "isatty", lambda: True, raising=False)
+    terminal_checkbox.keep_prompts_visible()
+    assert termui.visible_prompt_func is input

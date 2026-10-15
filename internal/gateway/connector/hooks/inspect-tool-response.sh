@@ -34,7 +34,8 @@ unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
 {{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
-DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
+{{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
+{{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
@@ -45,20 +46,33 @@ fi
 
 # Plan B4 / S0.4: shell-side hook hardening.
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
 DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-tool-response"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
-RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+{{if .Sandbox}}# OpenShell sandbox images run exactly one harness: the connector identity
+# is baked at image build, never read from the environment. Sandbox hooks
+# always fail closed: the workload can make the ingress, or the relay in
+# front of it, answer any status (401, 429, a relay 500), so no failed,
+# refused or unparseable reply may ever turn into an allow.
+RUNTIME_CONNECTOR="{{.ConnectorName}}"
+FAIL_MODE="closed"
+readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}
 
 # Avarice F-2025 / chain F-3397: authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
-TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
+{{if .Sandbox}}defenseclaw_sandbox_require_token inspect inspect-tool-response "tool-response"
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}TOKEN_FILE="$(defenseclaw_shared_hook_token_file "$HOOK_DIR" "$RUNTIME_CONNECTOR")"
 if [ ! -f "$TOKEN_FILE" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token inspect inspect-tool-response "tool-response"
+  defenseclaw_handle_missing_token inspect inspect-tool-response "tool-response" "$TOKEN_FILE"
 fi
 if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
   if [ -n "$RUNTIME_CONNECTOR" ]; then
@@ -67,9 +81,11 @@ if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "$TOKEN_FILE" ]; then
     # shellcheck source=/dev/null
     . "$TOKEN_FILE"
   fi
-  export DEFENSECLAW_GATEWAY_TOKEN
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# Only the private copy is used from here on: no child process inherits the
+# bearer in its environment.
+unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
 TOOL_OUTPUT="$(defenseclaw_read_stdin_capped)" || {
@@ -108,25 +124,44 @@ fail_unauthorized() {
 
 AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+{{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
+  # would end the curl config line defenseclaw_gateway_post writes it to. Like
+  # a 401, a malformed bearer fails closed whatever the fail mode: otherwise a
+  # CR in an inherited DEFENSECLAW_GATEWAY_TOKEN would turn it into an allow.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_unauthorized "invalid gateway token" ;;
+  esac
+{{end}}  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 CONNECTOR_HEADER_ARGS=()
 if [ -n "$RUNTIME_CONNECTOR" ]; then
   CONNECTOR_HEADER_ARGS=(-H "X-DefenseClaw-Connector: ${RUNTIME_CONNECTOR}")
 fi
 
-RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg output "$TOOL_OUTPUT" \
-  '{tool: $tool, output: $output}' | \
-  curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool-response" \
+# The tool output reaches jq on stdin and the gateway on a curl descriptor:
+# on a command line it would be readable by every local account, and an
+# output over the argument size limit would make jq fail to start.
+INSPECT_BODY="$(printf '%s' "$TOOL_OUTPUT" | jq -Rs --arg tool "$TOOL_NAME" \
+  '{tool: $tool, output: .}')" || {
+  fail_unreachable "failed to build inspect body"
+}
+{{if .Sandbox}}RESPONSE="$(defenseclaw_sandbox_post "/api/v1/inspect/tool-response" "$INSPECT_BODY" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
   "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
-  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 5 \
-  --data-binary @- 2>/dev/null) || {
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool-response" 5 "$INSPECT_BODY" \
+  -H "Content-Type: application/json" \
+  -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${CONNECTOR_HEADER_ARGS[@]+"${CONNECTOR_HEADER_ARGS[@]}"}" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}") || {
   fail_unreachable "gateway unreachable"
-}
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -141,10 +176,16 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
+# action-less reply from the sandbox ingress is not a verdict.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
-if [ "$ACTION" = "block" ]; then
+[ -n "$ACTION" ] || fail_response "missing action in ingress response"
+{{else}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+{{end}}if [ "$ACTION" = "block" ]; then
   REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
   echo "DefenseClaw: $REASON" >&2
   exit 2

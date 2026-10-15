@@ -79,13 +79,15 @@ def test_doctor_renders_raw_validation_when_runtime_config_load_fails() -> None:
 
     assert result.exit_code == 1, result.output
     payload = json.loads(result.output)
-    assert payload["failed"] >= 2
+    # One problem, one failure: the Config load row only says why doctor
+    # stopped (GAP-1692).
+    assert payload["failed"] == 1
     checks = payload["checks"]
     assert any(item["label"] == "Config validation" and "guardrail.port" in item["detail"] for item in checks)
     load_failure = next(item for item in checks if item["label"] == "Config load")
-    assert load_failure["status"] == "fail"
-    assert "no startup mutation or automatic repair was attempted" in load_failure["detail"]
-    assert "defenseclaw config validate" in load_failure["detail"]
+    assert load_failure["status"] == "skip"
+    assert "nothing was changed or repaired" in load_failure["detail"]
+    assert "TypeError" not in load_failure["detail"]
     validate.assert_called_once_with()
     store.assert_not_called()
 
@@ -141,7 +143,61 @@ def test_doctor_config_load_failure_replaces_stale_green_cache(
     assert saved["schema_version"] == 2
     assert saved["outcome"] == "failed"
     assert saved["exit_code"] == 1
-    assert saved["failed"] >= 2
+    assert saved["failed"] == 1
+
+
+def test_doctor_on_an_uninitialized_install_points_to_init_only(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # BENIGN-MAC-05: with no config.yaml Doctor ran every check against the
+    # built-in defaults and reported an OpenClaw connector, a stopped gateway
+    # and --fix hints instead of saying that init never ran.
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "DefenseClaw is not initialized" in result.output
+    assert "defenseclaw init" in result.output
+    for leftover in ("openclaw", "OpenClaw", "doctor --fix", "Connectors", "Services"):
+        assert leftover not in result.output
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert [(c["label"], c["status"]) for c in payload["checks"]] == [("Config file", "fail")]
+    assert payload["checks"][0]["remediation"] == "defenseclaw init"
+    assert json.loads((data_dir / "doctor_cache.json").read_text())["failed"] == 1
+
+
+def test_doctor_json_on_a_managed_device_agrees_with_the_exit_code(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0239: the process exited 3 while the JSON said healthy with exit_code 0, under a v8 check id.
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setattr("defenseclaw.config_writer.machine_managed_standalone", lambda: True)
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 3, result.output
+    payload = json.loads(result.output)
+    assert (payload["outcome"], payload["exit_code"]) == ("managed", 3)
+    check = payload["checks"][0]
+    assert (check["status"], check["reason_code"]) == ("skip", "managed-device")
+    assert check["check_id"] == "doctor.config.validation"
 
 
 def test_non_doctor_command_keeps_store_initialization() -> None:
@@ -189,7 +245,8 @@ def test_invalid_config_guidance_does_not_claim_doctor_can_repair_it() -> None:
         ),
         patch("defenseclaw.db.Store") as store,
     ):
-        result = CliRunner().invoke(cli, ["status"])
+        # status now reports past a bad config (GAP-1788); alerts still stops.
+        result = CliRunner().invoke(cli, ["alerts"])
 
     assert result.exit_code == 1, result.output
     assert "defenseclaw config validate" in result.output

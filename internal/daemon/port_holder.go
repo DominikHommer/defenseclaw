@@ -1,0 +1,103 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package daemon
+
+import (
+	"fmt"
+	"net"
+	"os/user"
+	"strconv"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// PortHolder is a best-effort description of the process listening on a
+// local TCP port. PID is 0 and UID is -1 when the platform does not reveal
+// them (for example a process of another account).
+type PortHolder struct {
+	PID     int
+	UID     int
+	Command string
+}
+
+// FindPortHolder describes the process that listens on the local TCP port
+// and serves connections to host: a listener bound to that address, or to
+// the wildcard address. An empty or non-IP host other than localhost
+// matches every address. It returns ErrNoListener when no listener was
+// found and ErrListenerInspectionUnavailable when the platform cannot tell.
+func FindPortHolder(host string, port int) (PortHolder, error) {
+	if port < 1 || port > 65535 {
+		return PortHolder{PID: 0, UID: -1}, fmt.Errorf("%w: invalid port %d", ErrListenerInspectionUnavailable, port)
+	}
+	return findPortHolder(host, port)
+}
+
+// listenerServesHost reports whether a listener bound to bound (nil when
+// unknown) serves connections to host.
+func listenerServesHost(host string, bound net.IP) bool {
+	if bound == nil || bound.IsUnspecified() {
+		return true
+	}
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return bound.IsLoopback()
+	}
+	wanted := net.ParseIP(host)
+	return wanted == nil || wanted.IsUnspecified() || wanted.Equal(bound)
+}
+
+// managedHost reports whether this computer is a standalone managed
+// deployment (its public runtime descriptor exists). Replaceable in tests.
+var managedHost = managed.IsStandaloneManagedHost
+
+// String names the holder for an operator: "PID 123 (defenseclaw-gateway)",
+// "PID 123 of another account (uid 1001, alice)" or "a process of another
+// account (uid 1001, alice)".
+//
+// A non-root user on a managed computer is told only that the holder is
+// "a process of another account": the other account's name, uid and PID
+// are the organization's to see, not a colleague's (privacy rule, plan
+// section 7.3). Root (an administrator) always gets the full description.
+func (holder PortHolder) String(ownUID int) string {
+	if ownUID != 0 && managedHost() {
+		return holder.anotherAccountOnly(ownUID)
+	}
+	account := ""
+	if holder.UID >= 0 && holder.UID != ownUID {
+		account = "uid " + strconv.Itoa(holder.UID)
+		if found, err := user.LookupId(strconv.Itoa(holder.UID)); err == nil && found.Username != "" {
+			account += ", " + found.Username
+		}
+	}
+	switch {
+	case holder.PID > 0 && account != "":
+		return fmt.Sprintf("PID %d of another account (%s)", holder.PID, account)
+	case holder.PID > 0 && holder.Command != "":
+		return fmt.Sprintf("PID %d (%s)", holder.PID, holder.Command)
+	case holder.PID > 0:
+		return fmt.Sprintf("PID %d", holder.PID)
+	case account != "":
+		return fmt.Sprintf("a process of another account (%s)", account)
+	default:
+		return "another process"
+	}
+}
+
+// anotherAccountOnly is String for a user on a managed computer: the
+// caller's own process is named as usual, any other account's is "a
+// process of another account", and one whose owner is unknown is "another
+// process". No name, uid or PID of another account appears.
+func (holder PortHolder) anotherAccountOnly(ownUID int) string {
+	switch {
+	case holder.UID >= 0 && holder.UID != ownUID:
+		return "a process of another account"
+	case holder.UID == ownUID && holder.PID > 0 && holder.Command != "":
+		return fmt.Sprintf("PID %d (%s)", holder.PID, holder.Command)
+	case holder.UID == ownUID && holder.PID > 0:
+		return fmt.Sprintf("PID %d", holder.PID)
+	default:
+		return "another process"
+	}
+}

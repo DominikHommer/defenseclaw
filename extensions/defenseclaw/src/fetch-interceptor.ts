@@ -27,6 +27,7 @@
  * the proxy can route to the correct upstream after inspection.
  */
 
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
@@ -43,6 +44,7 @@ import {
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
 import providersConfig from "./providers.json" with { type: "json" };
+import { logInfo } from "./log.js";
 const _require = createRequire(import.meta.url);
 // Use CommonJS require() for https/http — ESM module objects are frozen and
 // cannot have properties reassigned, but the CJS exports object is mutable.
@@ -310,6 +312,51 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * the Ollama port rules so a relative URL to a local Ollama still
  * gets intercepted.
  */
+/**
+ * GAP-2428: what a model call shows when the DefenseClaw gateway is down.
+ * The proxy hop is refused, so the call fails closed; without this the
+ * agent only reported "connection refused by the provider endpoint". The
+ * wording avoids "refused", "timeout" and "unavailable" so OpenClaw shows
+ * it as is instead of mapping it to its generic transport copy.
+ */
+export const GATEWAY_DOWN_MESSAGE =
+  "[DefenseClaw] The DefenseClaw gateway is not running, so this request was blocked (fail-closed). " +
+  "Run: defenseclaw-gateway start";
+
+function isConnectionRefused(err: unknown): boolean {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  return e?.code === "ECONNREFUSED" || e?.cause?.code === "ECONNREFUSED";
+}
+
+/** A provider-shaped 503 for a refused fetch hop; OpenAI and Anthropic SDKs both surface its message. */
+export function gatewayDownResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "defenseclaw_gateway_down", message: GATEWAY_DOWN_MESSAGE },
+    }),
+    { status: 503, headers: { "Content-Type": "application/json", "x-should-retry": "false" } },
+  );
+}
+
+/**
+ * Name the DefenseClaw gateway in a refused node:http proxy hop's error,
+ * keeping its code so SDK retry logic is unchanged.
+ */
+export function explainRefusedProxyHop<T extends { emit: (event: string | symbol, ...args: unknown[]) => boolean }>(
+  req: T,
+): T {
+  const emit = req.emit;
+  if (typeof emit !== "function") return req;
+  req.emit = function (this: T, event: string | symbol, ...args: unknown[]): boolean {
+    if (event === "error" && isConnectionRefused(args[0]) && args[0] instanceof Error) {
+      args[0].message = GATEWAY_DOWN_MESSAGE;
+    }
+    return emit.call(this, event, ...args);
+  } as T["emit"];
+  return req;
+}
+
 function extractHost(urlStr: string): string {
   try {
     return new URL(urlStr).hostname.toLowerCase();
@@ -1053,6 +1100,8 @@ export interface InterceptorLayers {
   httpsRequest: boolean;
   httpGet: boolean;
   undiciDispatcher: boolean;
+  /** The host application's own undici copy, which its model requests go through. */
+  hostUndiciDispatcher: boolean;
 }
 
 export interface InterceptionSelfTest {
@@ -1091,6 +1140,15 @@ function readUndiciHeader(headers: unknown, name: string): string {
 
 function completeUndiciProbe(handler: unknown): boolean {
   const sink = handler as {
+    onRequestStart?: (controller: unknown, context?: unknown) => void;
+    onResponseStart?: (
+      controller: unknown,
+      status: number,
+      headers: Record<string, string>,
+      statusText?: string,
+    ) => void;
+    onResponseData?: (controller: unknown, chunk: Buffer) => void;
+    onResponseEnd?: (controller: unknown, trailers: Record<string, string>) => void;
     onConnect?: (abort: () => void) => void;
     onHeaders?: (
       status: number,
@@ -1103,6 +1161,28 @@ function completeUndiciProbe(handler: unknown): boolean {
     onError?: (err: Error) => void;
   };
   try {
+    // undici 7+ drives a handler through the request lifecycle callbacks.
+    if (typeof sink.onResponseStart === "function") {
+      const controller = {
+        abort: () => undefined,
+        pause: () => undefined,
+        resume: () => undefined,
+        paused: false,
+        aborted: false,
+        reason: null,
+        rawHeaders: [],
+      };
+      sink.onRequestStart?.(controller, {});
+      sink.onResponseStart(
+        controller,
+        200,
+        { [INTERCEPTION_PROBE_HEADER.toLowerCase()]: "1", "content-type": "application/json" },
+        "OK",
+      );
+      sink.onResponseData?.(controller, Buffer.from('{"id":"dc-intercept-probe"}'));
+      sink.onResponseEnd?.(controller, {});
+      return true;
+    }
     sink.onConnect?.(() => undefined);
     sink.onHeaders?.(
       200,
@@ -1122,6 +1202,54 @@ function completeUndiciProbe(handler: unknown): boolean {
     sink.onError?.(err instanceof Error ? err : new Error(String(err)));
     return false;
   }
+}
+
+/** The undici copy the host application ships, as far as the interceptor needs it. */
+type HostUndici = {
+  Agent: (new () => { close?: () => Promise<void> }) & { prototype: object };
+  request?: (
+    url: string,
+    opts?: Record<string, unknown>,
+  ) => Promise<{ body?: { text?: () => Promise<string> } }>;
+};
+
+/**
+ * Locate the undici copy of the application this plugin runs in. OpenClaw
+ * bundles its own undici and sends every model request through an SSRF-guarded
+ * fetch that hands it an explicit per-request dispatcher, so neither
+ * globalThis.fetch nor the global dispatcher ever sees the request (GAP-0190).
+ * Every dispatcher of one undici copy inherits dispatch() from the same base
+ * class, which is the one place that sees those requests. The copy is found
+ * from the application's entry point, the way the application finds it.
+ */
+function resolveHostUndici(): { module: HostUndici; base: { dispatch: UndiciDispatchFn } } | null {
+  const entry = process.argv[1];
+  if (!entry) return null;
+  try {
+    const module = createRequire(realpathSync(entry))("undici") as HostUndici;
+    const base = Object.getPrototypeOf(module.Agent.prototype) as { dispatch?: unknown } | null;
+    if (!base || !Object.prototype.hasOwnProperty.call(base, "dispatch") || typeof base.dispatch !== "function") {
+      return null;
+    }
+    return { module, base: base as { dispatch: UndiciDispatchFn } };
+  } catch {
+    return null;
+  }
+}
+
+/** Dispatch headers arrive as an object from fetch() and as a flat array from other callers. */
+function undiciHeadersToRecord(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (Array.isArray(headers)) {
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      out[String(headers[i])] = String(headers[i + 1]);
+    }
+  } else if (headers && typeof headers === "object") {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (value != null) out[key] = Array.isArray(value) ? value.join(", ") : String(value);
+    }
+  }
+  return out;
 }
 
 export interface CreateFetchInterceptorOptions {
@@ -1163,8 +1291,12 @@ export function createFetchInterceptor(
   let egressReporter: EgressReporter | null = null;
   let chatgptCodexPassthroughWarned = false;
   let selfTestTimer: ReturnType<typeof setInterval> | null = null;
+  let lastSelfTestLine = "";
   const loggedInterceptHosts = new Set<string>();
   let lastUndiciProbeDestination = "";
+  let hostUndici: ReturnType<typeof resolveHostUndici> = null;
+  let originalHostDispatch: UndiciDispatchFn | null = null;
+  let lastHostProbeDestination = "";
 
   function describeLayers(): InterceptorLayers {
     return {
@@ -1177,13 +1309,17 @@ export function createFetchInterceptor(
           originalUndiciDispatcher &&
           undici.getGlobalDispatcher() !== originalUndiciDispatcher,
       ),
+      hostUndiciDispatcher: Boolean(
+        hostUndici && originalHostDispatch && hostUndici.base.dispatch !== originalHostDispatch,
+      ),
     };
   }
 
   function logStartupBanner(layers: InterceptorLayers): void {
-    console.log(
+    logInfo(
       `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
         `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
+        `undici_host=${layers.hostUndiciDispatcher} ` +
         `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
     );
   }
@@ -1198,7 +1334,7 @@ export function createFetchInterceptor(
     const key = `${layer}:${host}`;
     if (loggedInterceptHosts.has(key)) return;
     loggedInterceptHosts.add(key);
-    console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+    logInfo(`[defenseclaw] intercept via=${layer} host=${host}`);
   }
 
   // Extract { host, path } from a URL string without throwing. Missing
@@ -1237,6 +1373,57 @@ export function createFetchInterceptor(
     });
   }
 
+  // One dispatch decision for every undici layer: rewrite a recognised LLM
+  // request onto the guardrail proxy, answer the self-test probe locally, and
+  // hand everything else to the dispatcher it came through.
+  function interceptUndiciDispatch(
+    opts: UndiciDispatchOptions,
+    handler: unknown,
+    layer: "global" | "host",
+    next: (opts: UndiciDispatchOptions, handler: unknown) => boolean,
+  ): boolean {
+    const origin = opts.origin?.toString() ?? "";
+    const pathStr = opts.path ?? "";
+    const urlStr = origin + pathStr;
+
+    if (
+      urlStr &&
+      !isAlreadyProxied(urlStr, guardrailPort) &&
+      !isKnownSafeDomain(urlStr) &&
+      (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
+    ) {
+      opts.origin = proxyBase;
+      const existingHeaders = undiciHeadersToRecord(opts.headers);
+      const providerKey = extractProviderKeyFromRecord(existingHeaders);
+      // The proxy rejoins the request path to X-DC-Target-URL, so the header
+      // carries the origin only, as on the fetch and https layers (GAP-0242).
+      const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
+      opts.headers = { ...existingHeaders, ...proxyHdrs };
+
+      noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
+      egressReporter?.report({
+        targetHost: new URL(origin).hostname,
+        targetPath: pathStr,
+        bodyShape: "none",
+        looksLikeLLM: true,
+        branch: "undici",
+        decision: "intercept",
+        reason: layer === "host" ? "undici-host-dispatcher" : "undici-dispatcher",
+      });
+      if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+        // Either layer proves a probe was rewritten: OpenClaw swaps the global
+        // dispatcher for its own after the first agent run, and the host layer
+        // keeps intercepting.
+        const destination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+        lastUndiciProbeDestination = destination;
+        if (layer === "host") lastHostProbeDestination = destination;
+        return completeUndiciProbe(handler);
+      }
+    }
+
+    return next(opts, handler);
+  }
+
   function start(): void {
     if (originalFetch) return; // this instance already started
 
@@ -1245,8 +1432,12 @@ export function createFetchInterceptor(
     // (so our operator-added domains merge into the shared list) and
     // return without re-wrapping fetch/https/http/undici.
     if (_shared.installed) {
+      // Pass the sidecar token like the first instance does: the
+      // endpoint is authenticated, and an unauthenticated call is
+      // logged as an api-auth-failure security event.
       void bootstrapProviderOverlay(guardrailPort, {
         fetchImpl: globalThis.fetch,
+        token: loadSidecarConfig().token,
       });
       return;
     }
@@ -1397,16 +1588,22 @@ export function createFetchInterceptor(
       };
 
       if (shapeBranch === "shape") {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`,
         );
       }
 
-      const response = await originalFetch!(proxied, newInit);
+      let response: Response;
+      try {
+        response = await originalFetch!(proxied, newInit);
+      } catch (err) {
+        if (!isConnectionRefused(err)) throw err;
+        return gatewayDownResponse();
+      }
 
       const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
       if (blocked) {
@@ -1680,9 +1877,9 @@ export function createFetchInterceptor(
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1702,7 +1899,9 @@ export function createFetchInterceptor(
         // F-1586: now that http.request is also patched, the proxy
         // hop must use the captured original to avoid recursing
         // back into this branch.
-        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        return explainRefusedProxyHop(
+          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+        );
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1810,45 +2009,10 @@ export function createFetchInterceptor(
       originalUndiciDispatcher = undici.getGlobalDispatcher() as UndiciDispatcher;
       const parentDispatcher = originalUndiciDispatcher;
 
-      const interceptingDispatch: UndiciDispatchFn = (opts, handler) => {
-        const origin = opts.origin?.toString() ?? "";
-        const pathStr = opts.path ?? "";
-        const urlStr = origin + pathStr;
-
-        if (
-          urlStr &&
-          !isAlreadyProxied(urlStr, guardrailPort) &&
-          !isKnownSafeDomain(urlStr) &&
-          (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
-        ) {
-          opts.origin = proxyBase;
-          const existingHeaders = (opts.headers ?? {}) as Record<string, string>;
-          const providerKey = extractProviderKeyFromRecord(existingHeaders);
-          const proxyHdrs = buildProxyHeaders(
-            origin + pathStr,
-            providerKey,
-            getCorrelationHeaders,
-          );
-          opts.headers = { ...existingHeaders, ...proxyHdrs };
-
-          noteInterceptLayer("undici", urlStr);
-          egressReporter?.report({
-            targetHost: new URL(origin).hostname,
-            targetPath: pathStr,
-            bodyShape: "none",
-            looksLikeLLM: true,
-            branch: "undici",
-            decision: "intercept",
-            reason: "undici-dispatcher",
-          });
-          if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
-            lastUndiciProbeDestination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
-            return completeUndiciProbe(handler);
-          }
-        }
-
-        return (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(opts, handler);
-      };
+      const interceptingDispatch: UndiciDispatchFn = (opts, handler) =>
+        interceptUndiciDispatch(opts, handler, "global", (nextOpts, nextHandler) =>
+          (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler),
+        );
 
       // Proxy object that delegates dispatch to our interceptor and
       // all other Dispatcher methods to the original.
@@ -1858,7 +2022,25 @@ export function createFetchInterceptor(
       undici.setGlobalDispatcher(proxyDispatcher);
     }
 
-    console.log(
+    // The host application's own undici copy: its requests carry an explicit
+    // dispatcher, so they never reach the global dispatcher above.
+    hostUndici = resolveHostUndici();
+    if (hostUndici) {
+      const base = hostUndici.base;
+      const original = base.dispatch;
+      originalHostDispatch = original;
+      base.dispatch = function dispatchThroughGuardrail(
+        this: unknown,
+        opts: UndiciDispatchOptions,
+        handler: unknown,
+      ): boolean {
+        return interceptUndiciDispatch(opts, handler, "host", (nextOpts, nextHandler) =>
+          original.call(this, nextOpts, nextHandler),
+        );
+      };
+    }
+
+    logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
     const layers = describeLayers();
@@ -1926,18 +2108,40 @@ export function createFetchInterceptor(
       }
     }
 
+    // The host application's model requests carry their own dispatcher, so the
+    // probe does too: a pass here proves the path those requests take.
+    lastHostProbeDestination = "";
+    if (hostUndici?.module.request && layers.hostUndiciDispatcher) {
+      const agent = new hostUndici.module.Agent();
+      try {
+        const response = await hostUndici.module.request(INTERCEPTION_SELF_TEST_URL, {
+          ...probeInit,
+          dispatcher: agent,
+        });
+        await response.body?.text?.();
+      } catch {
+        // Rewrite is recorded on the dispatcher even if the sink is stubbed.
+      } finally {
+        await agent.close?.().catch(() => undefined);
+      }
+    }
+
     const requiredLayers =
       layers.fetch && layers.httpsRequest && layers.httpRequest && layers.httpGet;
     const undiciRequired = Boolean(undici);
     const undiciOk =
       !undiciRequired ||
       (layers.undiciDispatcher && lastUndiciProbeDestination === expectedDest);
-    const ok = destination === expectedDest && requiredLayers && undiciOk;
+    const hostOk =
+      !hostUndici || (layers.hostUndiciDispatcher && lastHostProbeDestination === expectedDest);
+    const ok = destination === expectedDest && requiredLayers && undiciOk && hostOk;
     let reason = "interception-self-test-miss";
     if (ok) {
       reason = "interception-self-test";
     } else if (destination === expectedDest && requiredLayers && !undiciOk) {
       reason = "interception-self-test-undici-miss";
+    } else if (destination === expectedDest && requiredLayers && !hostOk) {
+      reason = "interception-self-test-host-undici-miss";
     }
     return {
       ok,
@@ -1977,10 +2181,15 @@ export function createFetchInterceptor(
 
   async function runSelfTest(): Promise<InterceptionSelfTest> {
     const result = await verifyInterception();
-    console.log(
+    const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
-        `reason=${result.reason}`,
-    );
+      `reason=${result.reason}`;
+    // GAP-1454: the self-test repeats every interval; print only a change.
+    if (line !== lastSelfTestLine) {
+      lastSelfTestLine = line;
+      if (result.ok) logInfo(line);
+      else console.warn(line);
+    }
     await publishSelfTest(result);
     return result;
   }
@@ -2020,6 +2229,11 @@ export function createFetchInterceptor(
       undici.setGlobalDispatcher(originalUndiciDispatcher);
       originalUndiciDispatcher = null;
     }
+    if (hostUndici && originalHostDispatch) {
+      hostUndici.base.dispatch = originalHostDispatch;
+    }
+    hostUndici = null;
+    originalHostDispatch = null;
     if (egressReporter) {
       egressReporter.stop();
       egressReporter = null;
@@ -2032,7 +2246,7 @@ export function createFetchInterceptor(
     }
     _shared.installed = false;
     _shared.guardrailPort = null;
-    console.log("[defenseclaw] LLM fetch interceptor stopped");
+    logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
   return { start, stop, describeLayers, verifyInterception, runSelfTest };

@@ -145,7 +145,7 @@ def test_f0321_remote_scan_blocks_private_and_loopback_targets():
 
     # Private (RFC1918) target rejected by default — fail closed before
     # the SDK ever dials the host.
-    with pytest.raises(ValueError, match="refusing to scan remote MCP target"):
+    with pytest.raises(ValueError, match="refusing to scan MCP URL"):
         wrapper.scan("http://10.20.30.40:9/mcp")
 
     # --allow-private also opts in to loopback scans. Patch the SDK leg so the
@@ -467,7 +467,7 @@ def test_f0347_stream_download_blocks_loopback_and_redirect(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_f0323_named_scan_blocked_by_resolved_url(app_ctx):
-    pe = PolicyEngine(app_ctx.store)
+    pe = PolicyEngine(app_ctx.store, app_ctx.cfg)
     pe.block("mcp", "http://internal.example/mcp", "blocked by url")
     app_ctx.cfg.mcp_servers = lambda connector=None, **_: [
         MCPServerEntry(
@@ -487,7 +487,7 @@ def test_f0323_named_scan_blocked_by_resolved_url(app_ctx):
 # ---------------------------------------------------------------------------
 
 def test_f0324_scan_all_skips_blocked_server(app_ctx):
-    pe = PolicyEngine(app_ctx.store)
+    pe = PolicyEngine(app_ctx.store, app_ctx.cfg)
     pe.block("mcp", "blocked-srv", "operator block")
     app_ctx.cfg.mcp_servers = lambda connector=None, **_: [
         MCPServerEntry(name="blocked-srv", url="http://x.example/mcp", transport="sse"),

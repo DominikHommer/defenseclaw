@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
@@ -84,11 +85,18 @@ func hookAPIValidateDirectoryElement(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("expected directory: %s", path)
 	}
-	return hookAPIValidateDirectoryMetadata(path, info, false)
+	return hookAPIValidateDirectoryMetadata(path, info, false, false)
 }
 
+// hookAPIValidateDirectoryChain walks every ancestor of clean. Ancestors inside
+// the Cisco Secure Client tree get advisory permission verdicts (AIFW-34262):
+// AVC owns and re-ACLs `/opt/cisco/secureclient`, and the managed data and hooks
+// directories live below it, so drift there must not stop the gateway from
+// binding its hook API. The named directory, every ancestor outside that tree,
+// and every structural failure anywhere stay fatal.
 func hookAPIValidateDirectoryChain(clean string) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
+		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
 		info, err := os.Lstat(cur)
 		if err != nil {
 			return err
@@ -112,7 +120,7 @@ func hookAPIValidateDirectoryChain(clean string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("expected directory: %s", cur)
 		}
-		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean); err != nil {
+		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean, advisory); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -147,25 +155,33 @@ func hookAPITrustedSystemSymlink(path string, info os.FileInfo) bool {
 	return ok && parentStat.Uid == 0
 }
 
-func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor bool) error {
+// hookAPIValidateDirectoryMetadata judges one element. With advisory set, the
+// mode, owner, and ACL verdicts become TrustAdvisoryMarker warnings; failures to
+// inspect the element at all stay fatal, as does an ACL helper that could not
+// read or parse the ACL (only its judgements are tagged as downgradable).
+func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor, advisory bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("cannot inspect directory owner: %s", path)
 	}
+	const label = "hook API token path"
 	if mode := info.Mode().Perm(); mode&0o022 != 0 &&
 		!(allowStickyAncestor && info.Mode()&os.ModeSticky != 0 && stat.Uid == 0) {
-		return fmt.Errorf("%s has group/other writable mode %04o", path, mode)
+		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
+			"%s has group/other writable mode %04o", path, mode,
+		)); err != nil {
+			return err
+		}
 	}
 	if !hookAPITrustedOwner(stat.Uid) {
-		return fmt.Errorf(
+		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid",
 			path, stat.Uid, os.Geteuid(), os.Getuid(),
-		)
+		)); err != nil {
+			return err
+		}
 	}
-	if err := hookAPIValidateDirectoryACL(path); err != nil {
-		return err
-	}
-	return nil
+	return managed.RelaxAncestorTrustJudgement(advisory, path, label, hookAPIValidateDirectoryACL(path))
 }
 
 func hookAPITrustedOwner(uid uint32) bool {
@@ -177,10 +193,39 @@ func hookAPITrustedOwner(uid uint32) bool {
 	if runtimeowner.Trusted(uid) {
 		return true
 	}
-	serviceUser, err := user.Lookup("defenseclaw")
-	if err != nil {
-		return false
+	for _, name := range hookAPIServiceAccounts(runtime.GOOS) {
+		serviceUser, err := hookAPILookupUser(name)
+		if err != nil || serviceUser == nil {
+			continue
+		}
+		serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
+		if err == nil && uid == uint32(serviceUID) {
+			return true
+		}
 	}
-	serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
-	return err == nil && uid == uint32(serviceUID)
+	return false
+}
+
+var hookAPILookupUser = user.Lookup
+
+// hookAPIServiceAccounts names the gateway service accounts whose data
+// directories hold hook tokens: "defenseclaw" everywhere, plus the hidden
+// "_defenseclaw" account the standalone macOS deployment runs the gateway as.
+func hookAPIServiceAccounts(goos string) []string {
+	if goos == "darwin" {
+		return []string{managed.StandaloneLinuxServiceUser, managed.StandaloneDarwinServiceUser}
+	}
+	return []string{managed.StandaloneLinuxServiceUser}
+}
+
+// hookAPIValidateOwnerFor matches the Windows signature; Unix guardians act
+// with the target user's own credentials, so no extra owner is trusted.
+func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
+	return hookAPIValidateOwner(path, info)
+}
+
+// hookAPIValidateDirectoryFor matches the Windows signature (see
+// hookAPIValidateOwnerFor).
+func hookAPIValidateDirectoryFor(path, _ string) error {
+	return hookAPIValidateDirectory(path)
 }

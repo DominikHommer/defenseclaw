@@ -52,6 +52,15 @@ type secretResolver struct {
 	mu     sync.Mutex
 	values map[string]string
 	calls  map[string]int
+	// credentials are standalone enterprise protected credentials.
+	credentials map[string]string
+}
+
+func (resolver *secretResolver) ResolveObservabilityCredential(name string) (string, bool) {
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	value, ok := resolver.credentials[name]
+	return value, ok
 }
 
 func (resolver *secretResolver) ResolveObservabilitySecret(name string) (string, bool) {
@@ -234,20 +243,13 @@ func compileDestination(
 }
 
 func testResourceContext(t *testing.T) telemetry.V8ResourceContext {
-	return testResourceContextWith(t, nil, true)
+	return testResourceContextWith(t, nil)
 }
 
-func testResourceContextWith(
-	t *testing.T,
-	attributes map[string]string,
-	compatibilityAliases bool,
-) telemetry.V8ResourceContext {
+func testResourceContextWith(t *testing.T, attributes map[string]string) telemetry.V8ResourceContext {
 	t.Helper()
 	plan, err := config.CompileObservabilityV8(&config.ObservabilityV8Source{
 		Resource: config.ObservabilityV8ResourceSource{Attributes: attributes},
-		TracePolicy: config.ObservabilityV8TracePolicySource{
-			CompatibilityAliases: &compatibilityAliases,
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -633,6 +635,51 @@ func TestFactoryObservesSecretRotationOnlyAtPrepareBoundary(t *testing.T) {
 	}
 }
 
+// Header and bearer credential references resolve only from protected
+// credentials, never as environment names.
+func TestFactoryResolvesProtectedCredentialReferences(t *testing.T) {
+	var mu sync.Mutex
+	var authorization, apiKey string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.Copy(io.Discard, request.Body)
+		mu.Lock()
+		authorization, apiKey = request.Header.Get("Authorization"), request.Header.Get("X-Api-Key")
+		mu.Unlock()
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
+		Name: "archive", Kind: config.ObservabilityV8DestinationHTTPJSONL,
+		Endpoint: server.URL, BearerCredential: "archive-token",
+		Headers: map[string]config.ObservabilityV8HeaderValue{
+			"X-Api-Key": config.ObservabilityV8CredentialHeader("archive-key"),
+		},
+		NetworkSafety: config.ObservabilityV8NetworkSafetySource{AllowPrivateNetworks: true},
+	})
+	secrets := &secretResolver{
+		values: map[string]string{"archive-token": "env-token", "archive-key": "env-key"}, calls: map[string]int{},
+	}
+	factory := newTestFactory(t, io.Discard, secrets, nil, net.Dialer{}, nil)
+	if adapter, _, err := factory.PrepareDestination(context.Background(), destination, telemetry.V8ResourceContext{}); adapter != nil || !IsError(err, ErrorSecretUnavailable) {
+		t.Fatalf("credential references resolved without a stored credential: adapter=%T error=%v", adapter, err)
+	}
+
+	secrets.credentials = map[string]string{"archive-token": "stored-token", "archive-key": "stored-key"}
+	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, telemetry.V8ResourceContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup(context.Background()) }()
+	if counters := deliverOne(t, "archive", adapter, `{"record_id":"record"}`); counters.Delivered != 1 {
+		t.Fatalf("counters=%+v", counters)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if authorization != "Bearer stored-token" || apiKey != "stored-key" {
+		t.Fatalf("authorization=%q X-Api-Key=%q", authorization, apiKey)
+	}
+}
+
 func TestFactoryLoadsCABundleOnceAndDoesNotRequestDuringPrepare(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -717,7 +764,7 @@ func TestFactoryPreparesHTTPOTLPLogsWithDetachedSecretsCAOverridesAndExactRetry(
 	before := cloneDestination(t, destination)
 	resourceContext := testResourceContextWith(t, map[string]string{
 		"team.name": "security-platform",
-	}, true)
+	})
 	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, resourceContext)
 	if err != nil {
 		t.Fatal(err)
@@ -757,8 +804,8 @@ func TestFactoryPreparesHTTPOTLPLogsWithDetachedSecretsCAOverridesAndExactRetry(
 		t.Fatalf("OTLP HTTP resource mismatch: got=%+v want=%+v", resourceLogs, resourceContext.Values())
 	}
 	if got := protoResourceValues(resourceLogs.Resource.Attributes); got["team.name"] != "security-platform" ||
-		got["deployment.environment"] != got["deployment.environment.name"] {
-		t.Fatalf("OTLP HTTP custom/alias resource mismatch: %+v", got)
+		got["deployment.environment.name"] != "test" || got["deployment.environment"] != "" {
+		t.Fatalf("OTLP HTTP custom/canonical resource mismatch: %+v", got)
 	}
 	if record.Body.GetStringValue() != projection || decoded.ResourceLogs[0].ScopeLogs[0].Scope.Name != "defenseclaw.factory" ||
 		protoAttribute(record.Attributes, "defenseclaw.record.id") != "record" ||
@@ -817,7 +864,7 @@ func TestFactoryHTTPOTLPLogOverrideAndUnsafeWarnings(t *testing.T) {
 	})
 	resourceContext := testResourceContextWith(t, map[string]string{
 		"team.name": "runtime-security",
-	}, false)
+	})
 	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, resourceContext)
 	if err != nil {
 		t.Fatal(err)
@@ -867,7 +914,7 @@ func TestFactoryOTLPDefaultAllSignalsBuildsOnlyItsLogAdapter(t *testing.T) {
 	}
 	resourceContext := testResourceContextWith(t, map[string]string{
 		"team.name": "runtime-security",
-	}, false)
+	})
 	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, resourceContext)
 	if err != nil {
 		t.Fatal(err)
@@ -937,7 +984,7 @@ func TestFactoryPreparesGRPCOTLPLogsAndCleanupClosesGenerationConnection(t *test
 	})
 	resourceContext := testResourceContextWith(t, map[string]string{
 		"team.name": "runtime-security",
-	}, false)
+	})
 	adapter, cleanup, err := factory.PrepareDestination(context.Background(), destination, resourceContext)
 	if err != nil {
 		t.Fatal(err)
@@ -956,7 +1003,7 @@ func TestFactoryPreparesGRPCOTLPLogsAndCleanupClosesGenerationConnection(t *test
 		}
 		if got := protoResourceValues(resourceLogs.Resource.Attributes); got["team.name"] != "runtime-security" ||
 			got["deployment.environment"] != "" || got["deployment.mode"] != "" || got["defenseclaw.device.id"] != "" {
-			t.Fatalf("OTLP gRPC alias-disabled resource mismatch: %+v", got)
+			t.Fatalf("OTLP gRPC canonical-only resource mismatch: %+v", got)
 		}
 		record := request.ResourceLogs[0].ScopeLogs[0].LogRecords[0]
 		if request.ResourceLogs[0].ScopeLogs[0].Scope.Name != "defenseclaw.grpc.factory" ||
@@ -1257,5 +1304,25 @@ func TestFactoryConsoleStreamChoiceAndPanickingCALoader(t *testing.T) {
 	adapter, cleanup, err = resolverFactory.PrepareDestination(context.Background(), resolverDestination, telemetry.V8ResourceContext{})
 	if adapter != nil || cleanup == nil || !IsError(err, ErrorAdapterPrepare) || strings.Contains(err.Error(), "sensitive") {
 		t.Fatalf("resolver panic adapter=%T cleanup=%v error=%v", adapter, cleanup != nil, err)
+	}
+}
+
+func TestFactorySecureClientJSONLOpenFailureKeepsStartupError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a read-only file for writing")
+	}
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	factory := newTestFactory(t, &output, nil, nil, net.Dialer{}, nil)
+	factory.secureClient = true
+	destination := compileDestination(t, config.ObservabilityV8DestinationSource{
+		Name: "file", Kind: config.ObservabilityV8DestinationJSONL, Path: path,
+	})
+	adapter, _, err := factory.PrepareDestination(t.Context(), destination, telemetry.V8ResourceContext{})
+	if adapter != nil || !IsError(err, ErrorAdapterPrepare) || output.Len() != 0 {
+		t.Fatalf("secure client JSONL startup adapter=%T error=%v output=%q", adapter, err, output.String())
 	}
 }

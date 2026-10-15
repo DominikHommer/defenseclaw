@@ -145,7 +145,7 @@ func completeCanary(spans []localCanarySpan) bool {
 		}
 	}
 	return root != nil && child != nil && root.span != nil && child.span != nil &&
-		root.span.Name == "invoke_agent diagnostic" && child.span.Name == "chat gpt-4o-mini" &&
+		root.span.Name == observability.RuntimeCanaryAgentSpanName && child.span.Name == observability.RuntimeCanaryModelSpanName &&
 		root.span.Kind == tracepb.Span_SPAN_KIND_INTERNAL && child.span.Kind == tracepb.Span_SPAN_KIND_CLIENT &&
 		root.span.Status != nil && child.span.Status != nil &&
 		root.span.Status.Code == tracepb.Status_STATUS_CODE_OK && child.span.Status.Code == tracepb.Status_STATUS_CODE_OK &&
@@ -245,16 +245,18 @@ func (wire projectedWire) otlp(destination string) (
 	if !ok {
 		return nil, nil, nil, "", "", false
 	}
-	return &resourcepb.Resource{
-			Attributes: resourceAttributes, DroppedAttributesCount: uint32(resourceDropped),
-		}, &tracepb.Span{
-			TraceId: traceID, SpanId: spanID, ParentSpanId: parent, Name: wire.SpanName,
-			Kind: kind, StartTimeUnixNano: start, EndTimeUnixNano: end,
-			TraceState: wire.Body.TraceState, Flags: uint32(flags), Attributes: spanAttributes,
-			DroppedAttributesCount: uint32(droppedAttributes), Events: spanEvents,
-			DroppedEventsCount: uint32(droppedEvents), Links: spanLinks,
-			DroppedLinksCount: uint32(droppedLinks), Status: spanStatus,
-		}, scope, wire.Body.Resource.SchemaURL, wire.Body.Scope.SchemaURL, true
+	resource := &resourcepb.Resource{
+		Attributes: resourceAttributes, DroppedAttributesCount: uint32(resourceDropped),
+	}
+	span := &tracepb.Span{
+		TraceId: traceID, SpanId: spanID, ParentSpanId: parent, Name: wire.SpanName,
+		Kind: kind, StartTimeUnixNano: start, EndTimeUnixNano: end,
+		TraceState: wire.Body.TraceState, Flags: uint32(flags), Attributes: spanAttributes,
+		DroppedAttributesCount: uint32(droppedAttributes), Events: spanEvents,
+		DroppedEventsCount: uint32(droppedEvents), Links: spanLinks,
+		DroppedLinksCount: uint32(droppedLinks), Status: spanStatus,
+	}
+	return resource, span, scope, wire.Body.Resource.SchemaURL, wire.Body.Scope.SchemaURL, true
 }
 
 func canonicalEndedIdentity(wire projectedWire) bool {
@@ -309,7 +311,7 @@ func requiredResourceAttributes(
 	family observability.EventName,
 	input map[string]any,
 ) ([]*commonpb.KeyValue, bool) {
-	if observability.ValidateTelemetryResourceAttributes(input) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(input) != nil {
 		return nil, false
 	}
 	return keyValues(input, func(key string) (observability.OTLPValueKind, bool) {

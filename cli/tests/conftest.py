@@ -106,3 +106,97 @@ def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
             expand_connector_choices(child)
 
     expand_connector_choices(cmd_setup.setup)
+
+
+@pytest.fixture(autouse=True)
+def _config_writer_python_validation(monkeypatch: pytest.MonkeyPatch):
+    """Validate config writes with the Python checks, not a host gateway binary.
+
+    A developer or CI host may have an older ``defenseclaw-gateway`` on PATH,
+    which would judge this tree's config schema.
+    """
+    from defenseclaw import config_writer
+
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def _config_v9_migration_stand_in(monkeypatch: pytest.MonkeyPatch):
+    """Stand in for ``defenseclaw-gateway config migrate --to 9``.
+
+    The migration itself is Go (internal/config/migrate_v9.go, tested
+    there); a Python test that runs ``migrate`` on a config_version 8 file
+    gets only the version bump instead of whatever gateway binary the host
+    has.
+    """
+    import re
+
+    from defenseclaw import config_inspect
+
+    def migrate(*, config_path: str, dry_run: bool = False, ack: bool = False, gateway_binary=None):
+        if ack:
+            return {}
+        path = Path(config_path)
+        text = path.read_text(encoding="utf-8")
+        migrated = re.sub(r"(?m)^config_version:[ \t]*8\b", "config_version: 9", text, count=1)
+        changed = migrated != text
+        if changed and not dry_run:
+            path.write_text(migrated, encoding="utf-8")
+        record = {"from_version": 8 if changed else 9, "to_version": 9, "moved": [], "conflicts": []}
+        return {"migrated": changed and not dry_run, "dry_run": dry_run, "written": [], "record": record}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", migrate)
+
+
+@pytest.fixture(autouse=True)
+def _private_api_port_claims(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep first-run port claims (GAP-1462) out of the shared /var/tmp."""
+    from defenseclaw import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_API_PORT_CLAIM_DIR", str(tmp_path_factory.mktemp("port-claims")))
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_hook_temp_dirs(monkeypatch: pytest.MonkeyPatch):
+    """Keep uninstall from sweeping the host's real temp folders (GAP-1411)."""
+    from defenseclaw.commands import cmd_uninstall
+
+    monkeypatch.setattr(cmd_uninstall, "_hook_temp_roots", lambda: ())
+
+
+@pytest.fixture(autouse=True)
+def _no_host_gateway_listener(monkeypatch: pytest.MonkeyPatch):
+    """Keep doctor's API-port ownership checks off the host's real sockets.
+
+    A host running its own gateway on the default API port (a shared dev box)
+    made doctor report "held by PID ..., not by this account's gateway", and
+    every sidecar, legacy-sandbox and gateway-repair test failed there. Tests
+    that exercise ownership patch these themselves or call the readers that
+    take an explicit proc root.
+    """
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_gateway import ListenerEvidence
+
+    monkeypatch.setattr(cmd_doctor, "_linux_foreign_listener_accounts", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_listener_evidence",
+        lambda *_args, **_kwargs: ListenerEvidence("missing"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
+    """Keep ``policy activate`` (reload on by default) off any real gateway.
+
+    Tests share a Mac with developer gateways on the default API port; a
+    stray POST /policy/reload must never reach one. Tests that exercise the
+    reload path monkeypatch ``OrchestratorClient.reload_policy`` themselves.
+    """
+    import requests
+    from defenseclaw import gateway
+
+    def _unreachable(self):
+        raise requests.ConnectionError("test isolation: no gateway")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _unreachable)

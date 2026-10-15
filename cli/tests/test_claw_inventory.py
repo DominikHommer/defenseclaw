@@ -38,10 +38,6 @@ from defenseclaw import connector_paths
 from defenseclaw.config import (
     ClawConfig,
     Config,
-    MCPActionsConfig,
-    PluginActionsConfig,
-    SeverityAction,
-    SkillActionsConfig,
 )
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
@@ -77,6 +73,22 @@ from defenseclaw.inventory.claw_inventory import (
 from defenseclaw.models import ActionEntry
 
 from tests.helpers import seed_cached_plugin
+
+
+class TestLocalUserStamp(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX account name lookup")
+    def test_environment_login_name_cannot_override_uid_owner(self) -> None:
+        import pwd
+
+        from defenseclaw.inventory.claw_inventory import _stamp_local_user
+
+        owner = pwd.getpwuid(os.getuid()).pw_name
+        rows = {"plugins": [{}], "mcp": [{}]}
+        with patch.dict(os.environ, {"LOGNAME": "other-user", "USER": "other-user"}):
+            _stamp_local_user(rows)
+        for key in ("plugins", "mcp"):
+            self.assertEqual(rows[key][0]["user"], owner)
+            self.assertEqual(rows[key][0]["user_id"], str(os.getuid()))
 
 
 class TestAmpStaticAgentModeParser(unittest.TestCase):
@@ -349,46 +361,21 @@ class TestLiveClawInventory(unittest.TestCase):
         self.assertTrue(any("Skills" in t for t in titles))
         self.assertTrue(any("Memory" in t for t in titles))
 
-    def test_scan_result_preserves_small_category_payload(self):
-        payload = [{"id": "weather", "description": "Weather lookup"}]
-        inv = {
-            "skills": payload,
-            "plugins": [],
-            "mcp": [],
-            "agents": [],
-            "tools": [],
-            "model_providers": [],
-            "memory": [],
-        }
-
-        result = claw_aibom_to_scan_result(inv, self.cfg)
-
-        skills = next(
-            finding for finding in result.findings
-            if finding.title.startswith("Skills (")
-        )
-        self.assertEqual(json.loads(skills.description), payload)
-
-    def test_scan_result_preserves_empty_category_payload_json_type(self):
-        for payload in ({}, "", False, 0, None, []):
+    def test_scan_result_summarizes_each_category_under_a_stable_rule(self):
+        # GAP-1822: an inventory category is exported as a bounded summary
+        # under one rule ID per category, whatever its item count.
+        empty = {key: [] for key in ("plugins", "mcp", "agents", "tools", "model_providers", "memory")}
+        rule_ids = set()
+        for payload in ([{"id": "weather", "description": "Weather lookup"}], [{"id": "a"}, {"id": "b"}], {}, None):
             with self.subTest(payload=payload):
-                inv = {
-                    "skills": payload,
-                    "plugins": [],
-                    "mcp": [],
-                    "agents": [],
-                    "tools": [],
-                    "model_providers": [],
-                    "memory": [],
-                }
-
-                result = claw_aibom_to_scan_result(inv, self.cfg)
-                skills = next(
-                    finding for finding in result.findings
-                    if finding.title.startswith("Skills (")
-                )
-
-                self.assertEqual(json.loads(skills.description), payload)
+                result = claw_aibom_to_scan_result({"skills": payload, **empty}, self.cfg)
+                skills = next(f for f in result.findings if f.title.startswith("Skills ("))
+                summary = json.loads(skills.description)
+                self.assertEqual(summary["schema"], "defenseclaw.aibom.telemetry-summary.v1")
+                self.assertEqual(summary["item_count"], len(payload) if isinstance(payload, list) else 0)
+                self.assertNotIn("weather", skills.description)
+                rule_ids.add(skills.rule_id)
+        self.assertEqual(rule_ids, {"aibom-claw.inventory.skills"})
 
     def test_scan_result_summarizes_oversized_category_for_canonical_ingress(self):
         payload = [
@@ -469,6 +456,137 @@ class TestLiveClawInventory(unittest.TestCase):
     def test_human_summary_only(self, _):
         inv = build_claw_aibom(self.cfg, live=True)
         format_claw_aibom_human(inv, summary_only=True)
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_human_only_shows_requested_categories(self, _):
+        # GAP-1358: --only skills,mcp must not print the other sections as "none".
+        import contextlib
+        import io
+
+        inv = build_claw_aibom(self.cfg, live=True, categories={"skills", "mcp"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, categories={"skills", "mcp"})
+        text = out.getvalue()
+        self.assertIn("MCP servers", text)
+        for absent in ("Plugins", "Agents", "Rules", "Tools", "Model providers", "Memory"):
+            self.assertNotIn(absent, text)
+
+    def test_human_opencode_config_is_opencode_json(self):
+        # GAP-1358: the Config line names opencode.json, not DefenseClaw's bridge plugin.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "opencode",
+            "connector_config_files": ["/h/.config/opencode/plugins/defenseclaw.js"],
+            "connector_mcp_files": ["/h/.config/opencode/opencode.json"],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Config:    /h/.config/opencode/opencode.json", out.getvalue())
+        self.assertNotIn("defenseclaw.js", out.getvalue())
+
+    def test_human_kiro_config_is_kiro_settings_not_defenseclaw_hook(self):
+        # GAP-2038: DefenseClaw-written hook/agent files are not Kiro's config.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "kiro",
+            "connector_config_files": [
+                "/h/.kiro/hooks/defenseclaw.json",
+                "/h/.kiro/agents/defenseclaw.json",
+                "/h/.kiro/settings/cli.json",
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        self.assertIn("Config:    /h/.kiro/settings/cli.json", out.getvalue())
+        self.assertNotIn("defenseclaw.json", out.getvalue())
+
+    def test_human_summary_folds_limitations_into_one_line(self):
+        # GAP-2037: --summary is the tables only; caveats become one pointer line.
+        import contextlib
+        import io
+
+        inv = {
+            "connector": "codex",
+            "limitations": [
+                {"category": "rules", "reason": "long internal caveat text"},
+                {"category": "memory", "reason": "another caveat"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True)
+        text = out.getvalue()
+        self.assertIn(
+            "2 inventory coverage notes (memory, rules); run without --summary to read them.",
+            " ".join(text.split()),
+        )
+        self.assertNotIn("long internal caveat text", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv)
+        self.assertIn("long internal caveat text", out.getvalue())
+
+    def test_human_summary_footer_singular_and_copilot_empty_is_zero(self):
+        # GAP-2227: one note reads singular and names its category.
+        # GAP-2226: Copilot MCP/rules are inventoried, so empty reads 0, not "not collected".
+        import contextlib
+        import io
+
+        from defenseclaw.inventory.claw_inventory import (
+            _UNVERIFIED_CONNECTOR_NOTES,
+            InventoryCapabilityStatus,
+            _not_collected_categories,
+        )
+
+        inv = {
+            "connector": "hermes",
+            "limitations": [
+                {"category": "plugins", "status": "unverified", "reason": "x"},
+                {"category": "rules", "status": "unverified", "reason": "y"},
+            ],
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(inv, summary_only=True, categories={"plugins"})
+        self.assertIn(
+            "1 inventory coverage note (plugins); run without --summary to read it.",
+            " ".join(out.getvalue().split()),
+        )
+
+        copilot = {
+            "connector": "copilot",
+            "limitations": [
+                # Real enum members, as the collector emits them (GAP-2227).
+                {"category": cat, "status": InventoryCapabilityStatus.UNVERIFIED, "reason": note}
+                for (conn, cat), note in _UNVERIFIED_CONNECTOR_NOTES.items()
+                if conn == "copilot"
+            ],
+        }
+        self.assertTrue({"mcp", "rules"} <= {lim["category"] for lim in copilot["limitations"]})
+        self.assertFalse({"mcp", "rules"} & _not_collected_categories(copilot))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            format_claw_aibom_human(copilot)
+        text = out.getvalue()
+        self.assertNotIn("MCP servers: not collected", text)
+        self.assertNotIn("Rules: not collected", text)
+        self.assertIn("Inventory coverage notes", text)
+        self.assertIn("partly checked", text)
+
+    def test_scan_hints_follow_only_categories(self):
+        # GAP-2037: --only mcp points at the MCP scanner, not the skill scanner.
+        from defenseclaw.commands.cmd_aibom import _scan_hints
+
+        self.assertEqual(_scan_hints({"mcp"}), ["Scan MCP servers:  defenseclaw mcp scan --all"])
+        self.assertEqual(_scan_hints(None), ["Scan skills:  defenseclaw skill scan all"])
+        self.assertEqual(_scan_hints({"models"}), [])
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_fallback_when_openclaw_missing(self, _):
@@ -602,6 +720,21 @@ class TestCategoryFilter(unittest.TestCase):
         self.assertEqual(len(inv["mcp"]), 1)
         self.assertEqual(inv["plugins"], [])
         self.assertEqual(inv["memory"], [])
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_only_marks_uncollected_categories(self, _):
+        # GAP-1483: a partial BOM must not read (or store) as empty.
+        from defenseclaw.inventory.claw_inventory import claw_aibom_to_scan_result
+
+        inv = build_claw_aibom(self.cfg, live=True, categories={"skills", "mcp"})
+        self.assertEqual(inv["categories_collected"], ["mcp", "skills"])
+        self.assertIs(inv["summary"]["plugins"]["collected"], False)
+        self.assertIs(inv["summary"]["model_providers"]["collected"], False)
+        self.assertNotIn("collected", inv["summary"]["skills"])
+        ids = {f.id for f in claw_aibom_to_scan_result(inv, self.cfg).findings}
+        self.assertEqual(ids, {"claw-aibom-skills", "claw-aibom-mcp"})
+        full = build_claw_aibom(self.cfg, live=True)
+        self.assertNotIn("categories_collected", full)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_only_tools_fetches_plugins_list(self, mock_sub):
@@ -998,6 +1131,13 @@ class TestBuildSummaryUnit(unittest.TestCase):
         self.assertEqual(s["plugins"]["disabled"], 1)
         self.assertEqual(s["errors"], 1)
 
+    def test_plugins_without_runtime_status_report_enabled_count(self):
+        # Hermes rows carry the configured state, not a runtime "loaded" status.
+        s = _build_summary({"plugins": [{"enabled": True}, {"enabled": True}, {"enabled": False}]})
+        self.assertFalse(s["plugins"]["reports_loaded"])
+        self.assertEqual(s["plugins"]["enabled"], 2)
+        self.assertEqual(s["plugins"]["disabled"], 1)
+
 
 class TestFetchAll(unittest.TestCase):
     """Tests for the parallel _fetch_all dispatcher."""
@@ -1091,6 +1231,10 @@ class TestCLIIntegration(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(aibom, ["scan", "--summary"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
+        # GAP-2312: the progress line must not claim "live" (Hermes is read
+        # from disk); the report header names the source.
+        self.assertIn("inventory", result.stderr)
+        self.assertNotIn("Scanning live", result.stderr)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
     def test_scan_only_filter(self, _):
@@ -1103,6 +1247,41 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(len(data["mcp"]), 1)
         self.assertEqual(data["plugins"], [])
         self.assertEqual(data["memory"], [])
+
+    def test_scan_only_rejects_unknown_category(self):
+        # GAP-2399: an unknown --only category is a usage error (rc 2).
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        for arg in ("bogus", "mcp,bogus"):
+            with self.subTest(arg=arg):
+                result = runner.invoke(aibom, ["scan", "--only", arg], obj=self.app)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn("unknown category 'bogus'", result.output)
+                self.assertIn("valid: skills, plugins, mcp", result.output)
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_scan_only_accepts_singular(self, _):
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json", "--only", "skill"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(len(data["skills"]), 2)
+        self.assertEqual(data["mcp"], [])
+
+    def test_coverage_notes_avoid_internal_jargon(self):
+        # GAP-2400: notes say what was listed and what was not, in plain words.
+        from defenseclaw.inventory.claw_inventory import _UNVERIFIED_CONNECTOR_NOTES
+
+        jargon = (
+            "same-name winner", "official-client evidence", "project-through-worktree",
+            "activation provenance", "singular/plural", "custom-tool registry",
+            "no-follow", "inventoried",
+        )
+        for key, note in _UNVERIFIED_CONNECTOR_NOTES.items():
+            for word in jargon:
+                with self.subTest(key=key, word=word):
+                    self.assertNotIn(word, note)
 
     @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=FileNotFoundError)
     def test_scan_with_errors_shows_warning(self, _):
@@ -1136,11 +1315,11 @@ class TestCLIIntegration(unittest.TestCase):
                     self.assertEqual(data["errors"], [])
                     self.assertEqual(
                         len(data["limitations"]),
-                        3 if connector == "codex" else 4,
+                        2 if connector == "codex" else 4,
                     )
                     self.assertNotIn("failed", result.stderr.lower())
 
-    def test_combined_codex_claude_has_four_limitations_without_warning(self):
+    def test_combined_codex_claude_has_three_limitations_without_warning(self):
         from defenseclaw.commands.cmd_aibom import aibom
 
         runner = CliRunner()
@@ -1160,7 +1339,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.stdout)
         self.assertEqual(len(data), 2)
-        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 4)
+        self.assertEqual(sum(len(inv["limitations"]) for inv in data), 3)
         self.assertTrue(all(inv["errors"] == [] for inv in data))
         self.assertNotIn("failed", result.stderr.lower())
 
@@ -1179,7 +1358,7 @@ class TestCLIIntegration(unittest.TestCase):
             result = runner.invoke(aibom, ["scan", "--connector", "codex"], obj=self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Unsupported inventory capabilities", result.stdout)
+        self.assertIn("Inventory coverage notes", result.stdout)
         self.assertIn("informational", result.stdout)
         self.assertNotIn("command(s) failed", result.output)
 
@@ -1205,7 +1384,7 @@ class TestCLIIntegration(unittest.TestCase):
         self.assertGreaterEqual(json_start, 0)
         data = json.loads(result.stdout[json_start:])
         self.assertEqual(len(data["errors"]), 1)
-        self.assertEqual(len(data["limitations"]), 3)
+        self.assertEqual(len(data["limitations"]), 2)
         self.assertIn("1 connector inventory command(s) failed", result.output)
 
 
@@ -1237,9 +1416,9 @@ class _StoreWithPolicyMixin:
     """Provides a temp Store with init() for policy tests."""
 
     def setUp(self) -> None:
-        from tests.helpers import make_temp_store
+        from tests.helpers import make_temp_config, make_temp_store
         self.store, self.db_path = make_temp_store()
-        self.skill_actions = SkillActionsConfig()
+        self.cfg = make_temp_config()
 
     def tearDown(self) -> None:
         self.store.close()
@@ -1247,10 +1426,11 @@ class _StoreWithPolicyMixin:
             os.unlink(self.db_path)
         except OSError:
             pass
+        shutil.rmtree(self.cfg.data_dir, ignore_errors=True)
 
     def _pe(self):
         from defenseclaw.enforce import PolicyEngine
-        return PolicyEngine(self.store)
+        return PolicyEngine(self.store, self.cfg)
 
 
 class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
@@ -1264,7 +1444,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
             reason="known malware",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "bad-skill", None, entry, self.skill_actions,
+            pe, "skill", "bad-skill", None, entry,
         )
         self.assertEqual(verdict, "blocked")
         self.assertEqual(detail, "known malware")
@@ -1273,7 +1453,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         pe.block("plugin", "evil-plugin", "blocked")
         verdict, detail = _admission_verdict(
-            pe, "plugin", "evil-plugin", None, None, self.skill_actions,
+            pe, "plugin", "evil-plugin", None, None,
         )
         self.assertEqual(verdict, "blocked")
         self.assertEqual(detail, "block list")
@@ -1287,7 +1467,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
             reason="policy override",
         )
         verdict, _ = _admission_verdict(
-            pe, "skill", "dual-status", scan, entry, self.skill_actions,
+            pe, "skill", "dual-status", scan, entry,
         )
         self.assertEqual(verdict, "blocked")
 
@@ -1303,7 +1483,7 @@ class TestAdmissionVerdictAllowed(_StoreWithPolicyMixin, unittest.TestCase):
             reason="security team approved",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "trusted", None, entry, self.skill_actions,
+            pe, "skill", "trusted", None, entry,
         )
         self.assertEqual(verdict, "allowed")
         self.assertEqual(detail, "security team approved")
@@ -1312,7 +1492,7 @@ class TestAdmissionVerdictAllowed(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         pe.allow("mcp", "local-server", "ok")
         verdict, detail = _admission_verdict(
-            pe, "mcp", "local-server", None, None, self.skill_actions,
+            pe, "mcp", "local-server", None, None,
         )
         self.assertEqual(verdict, "allowed")
         self.assertEqual(detail, "allow list")
@@ -1329,7 +1509,7 @@ class TestAdmissionVerdictQuarantined(_StoreWithPolicyMixin, unittest.TestCase):
             reason="under review",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "suspect", None, entry, self.skill_actions,
+            pe, "skill", "suspect", None, entry,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("quarantined", detail)
@@ -1339,7 +1519,7 @@ class TestAdmissionVerdictQuarantined(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         self.store.set_action_field("plugin", "risky", "file", "quarantine", "auto")
         verdict, detail = _admission_verdict(
-            pe, "plugin", "risky", None, None, self.skill_actions,
+            pe, "plugin", "risky", None, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("quarantined", detail)
@@ -1351,7 +1531,7 @@ class TestAdmissionVerdictUnscanned(_StoreWithPolicyMixin, unittest.TestCase):
     def test_unscanned(self):
         pe = self._pe()
         verdict, detail = _admission_verdict(
-            pe, "skill", "new-skill", None, None, self.skill_actions,
+            pe, "skill", "new-skill", None, None,
         )
         self.assertEqual(verdict, "unscanned")
         self.assertEqual(detail, "no scan result")
@@ -1364,7 +1544,7 @@ class TestAdmissionVerdictClean(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 0, "max_severity": "INFO", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "safe-skill", scan, None, self.skill_actions,
+            pe, "skill", "safe-skill", scan, None,
         )
         self.assertEqual(verdict, "clean")
         self.assertEqual(detail, "scan clean")
@@ -1377,44 +1557,20 @@ class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "dangerous", scan, None, self.skill_actions,
+            pe, "skill", "dangerous", scan, None,
         )
         self.assertEqual(verdict, "rejected")
-        self.assertIn("1 findings", detail)
+        self.assertIn("1 finding, max", detail)
         self.assertIn("CRITICAL", detail)
 
     def test_high_rejected_by_policy_defaults(self):
         pe = self._pe()
         scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "plugin", "risky-plugin", scan, None, self.skill_actions,
+            pe, "plugin", "risky-plugin", scan, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("5 findings", detail)
-        self.assertIn("HIGH", detail)
-
-    def test_strict_actions_reject_critical(self):
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            critical=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
-        verdict, detail = _admission_verdict(
-            pe, "skill", "dangerous", scan, None, strict,
-        )
-        self.assertEqual(verdict, "rejected")
-        self.assertIn("CRITICAL", detail)
-
-    def test_strict_actions_reject_high(self):
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
-        verdict, detail = _admission_verdict(
-            pe, "plugin", "risky-plugin", scan, None, strict,
-        )
-        self.assertEqual(verdict, "rejected")
         self.assertIn("HIGH", detail)
 
 
@@ -1425,7 +1581,7 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 2, "max_severity": "MEDIUM", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "so-so", scan, None, self.skill_actions,
+            pe, "skill", "so-so", scan, None,
         )
         self.assertEqual(verdict, "warning")
         self.assertIn("2 findings", detail)
@@ -1435,22 +1591,10 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "mcp", "minor-issues", scan, None, self.skill_actions,
+            pe, "mcp", "minor-issues", scan, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("LOW", detail)
-
-    def test_custom_actions_do_not_override_loaded_policy_defaults(self):
-        """When centralized policy data is in effect, config fallback actions do not take precedence."""
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            medium=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 3, "max_severity": "MEDIUM", "target": "/x"}
-        verdict, _ = _admission_verdict(
-            pe, "skill", "strict-check", scan, None, strict,
-        )
-        self.assertEqual(verdict, "warning")
 
 
 # ---------------------------------------------------------------------------
@@ -1465,18 +1609,16 @@ class TestBuildActionsMap(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_with_entries(self):
-        pe = self._pe()
-        pe.block("skill", "a", "reason-a")
-        pe.allow("skill", "b", "reason-b")
+        self.store.set_action_field("skill", "a", "install", "block", "reason-a")
+        self.store.set_action_field("skill", "b", "file", "quarantine", "reason-b")
         result = _build_actions_map_for_type(self.store, "skill")
         self.assertIn("a", result)
         self.assertIn("b", result)
         self.assertEqual(result["a"].reason, "reason-a")
 
     def test_different_target_types(self):
-        pe = self._pe()
-        pe.block("skill", "s1", "x")
-        pe.block("plugin", "p1", "y")
+        self.store.set_action_field("skill", "s1", "install", "block", "x")
+        self.store.set_action_field("plugin", "p1", "install", "block", "y")
         skill_map = _build_actions_map_for_type(self.store, "skill")
         plugin_map = _build_actions_map_for_type(self.store, "plugin")
         self.assertIn("s1", skill_map)
@@ -1693,6 +1835,14 @@ class TestPolicyDetailSuffix(unittest.TestCase):
         result = _policy_detail_suffix(counts)
         self.assertLess(result.index("blocked"), result.index("clean"))
 
+    def test_allowed_items_are_counted(self):
+        # GAP-1748: an allow-listed skill or plugin read "1 scanned" only.
+        result = _policy_detail_suffix({"allowed": 1, "clean": 0})
+        self.assertEqual(result, " · [cyan]1 allowed[/cyan]")
+        result = _policy_detail_suffix({"rejected": 1, "allowed": 2, "clean": 3})
+        self.assertLess(result.index("rejected"), result.index("allowed"))
+        self.assertLess(result.index("allowed"), result.index("clean"))
+
 
 # ---------------------------------------------------------------------------
 # Policy enrichment — enrich_with_policy end-to-end
@@ -1757,7 +1907,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_skills_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertEqual(by_id["github"]["policy_verdict"], "allowed")
@@ -1766,10 +1916,56 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(by_id["new-skill"]["policy_verdict"], "unscanned")
         self.assertEqual(by_id["peekaboo"]["policy_verdict"], "rejected")
 
+    def test_same_named_copies_use_their_own_scan_and_bundled_is_discovery_only(self):
+        # GAP-1593: codeguard lives in every connector; the codex copy read
+        # "unscanned" because the basename key held another copy's scan.
+        import uuid
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        codex_copy = os.path.abspath("/home/u/.codex/skills/codeguard")
+        claude_copy = os.path.abspath("/home/u/.claude/skills/codeguard")
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", codex_copy, now - timedelta(minutes=5), 100, 0, "INFO", "{}",
+        )
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", claude_copy, now, 100, 0, "INFO", "{}",
+        )
+        inv = {
+            "connector": "codex",
+            "skills": [
+                {"id": "codeguard", "eligible": True, "path": codex_copy},
+                {"id": "imagegen", "eligible": True, "bundled": True,
+                 "path": os.path.abspath("/home/u/.codex/skills/.system/imagegen")},
+            ],
+            "summary": {"skills": {"count": 2}},
+        }
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertEqual(by_id["codeguard"]["policy_verdict"], "clean")
+        self.assertEqual(by_id["codeguard"]["scan_target"], codex_copy)
+        self.assertEqual(by_id["imagegen"]["policy_verdict"], "discovery-only")
+        self.assertEqual(inv["summary"]["scan_skills"]["unscanned"], 0)
+        self.assertIn("1 discovery-only", _policy_detail_suffix(inv["summary"]["policy_skills"]))
+
+    def test_disabled_skill_is_not_enabled(self):
+        # GAP-1383: Inventory said "Enabled yes" for a skill DefenseClaw
+        # had blocked and disabled.
+        self._seed_store()
+        self.store.set_action_field("skill", "discord", "runtime", "disable", "auto")
+        inv = self._make_inventory()
+        for s in inv["skills"]:
+            s["enabled"] = True
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertIs(by_id["discord"]["enabled"], False)
+        self.assertIs(by_id["github"]["enabled"], True)
+
     def test_scan_data_attached_to_items(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertEqual(by_id["weather"]["scan_findings"], 0)
@@ -1782,7 +1978,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_scan_data_on_plugins(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {p["id"]: p for p in inv["plugins"]}
         self.assertEqual(by_id["web-search"]["scan_findings"], 1)
@@ -1792,7 +1988,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_plugins_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {p["id"]: p for p in inv["plugins"]}
         self.assertEqual(by_id["defenseclaw"]["policy_verdict"], "blocked")
@@ -1802,7 +1998,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_mcp_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "allowed")
 
@@ -1866,10 +2062,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 0}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             # F-0742: the codeguard row is ``source: user`` (operator-supplied
             # provenance). It must NOT be blessed by the first-party allow
@@ -1879,25 +2072,20 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             # unscanned (its only scan target, /tmp/downloads/codeguard,
             # does not match the resolved on-disk path — F-0423).
             self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
-            # The defenseclaw plugin has no untrusted source marker, so the
-            # first-party allow still applies on its resolved provenance.
-            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+            # GAP-0419: a plugin folder named defenseclaw is not trusted by
+            # its name and location alone (the gateway recognizes DefenseClaw's
+            # own plugin by its bytes), so this empty one stays unscanned.
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "unscanned")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_inventory_uses_per_target_fallback_actions_when_policy_missing(self):
+    def test_inventory_uses_the_admission_defaults_when_policy_missing(self):
         import uuid
         from datetime import datetime, timezone
 
         tmp = tempfile.mkdtemp(prefix="dc-inventory-fallback-")
         cfg = Config(
             policy_dir=os.path.join(tmp, "missing-policy"),
-            plugin_actions=PluginActionsConfig(
-                high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            ),
-            mcp_actions=MCPActionsConfig(
-                high=SeverityAction(file="none", runtime="enable", install="block"),
-            ),
         )
 
         now = datetime.now(timezone.utc)
@@ -1917,10 +2105,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 1}},
         }
 
-        enrich_with_policy(
-            inv, self.store, self.skill_actions,
-            policy_dir=cfg.policy_dir, cfg=cfg,
-        )
+        enrich_with_policy(inv, self.store, cfg=cfg)
 
         self.assertEqual(inv["plugins"][0]["policy_verdict"], "rejected")
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
@@ -1946,8 +2131,8 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             )
             os.makedirs(os.path.join(cfg.claw.home_dir, "extensions", "xai-plugin"), exist_ok=True)
 
-            pe = self._pe()
-            pe.allow("plugin", "xai-plugin", "reviewed")
+            from defenseclaw.config import AssetPolicyRule
+            cfg.asset_policy.plugin.allowed.append(AssetPolicyRule(name="xai-plugin", reason="reviewed"))
 
             now = datetime.now(timezone.utc)
             self.store.insert_scan_result(
@@ -1963,16 +2148,36 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 0}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
             self.assertEqual(inv["plugins"][0]["scan_findings"], 1)
             self.assertEqual(inv["plugins"][0]["scan_severity"], "MEDIUM")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_mcp_policy_enrichment_credits_connector_scoped_scans(self):
+        import uuid
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "mcp://claudecode/deepwiki",
+            now, 100, 0, "", "{}",
+        )
+        inv = {
+            "connector": "claudecode",
+            "skills": [],
+            "plugins": [],
+            "mcp": [{"id": "deepwiki", "url": "https://mcp.deepwiki.com/mcp", "transport": "http"}],
+            "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
+        }
+
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
+
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "clean")
+        self.assertEqual(inv["mcp"][0]["scan_findings"], 0)
+        self.assertEqual(inv["summary"]["scan_mcp"]["unscanned"], 0)
 
     def test_mcp_policy_enrichment_matches_url_scan_targets(self):
         import uuid
@@ -1982,9 +2187,6 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         try:
             cfg = Config(
                 policy_dir=os.path.join(tmp, "missing-policy"),
-                mcp_actions=MCPActionsConfig(
-                    high=SeverityAction(file="none", runtime="enable", install="block"),
-                ),
             )
 
             now = datetime.now(timezone.utc)
@@ -2000,10 +2202,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
             self.assertEqual(inv["mcp"][0]["scan_findings"], 2)
@@ -2014,7 +2213,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_summary_policy_counts(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         ps = inv["summary"]["policy_skills"]
         self.assertEqual(ps["blocked"], 1)
@@ -2035,7 +2234,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_summary_scan_counts(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         ss = inv["summary"]["scan_skills"]
         self.assertEqual(ss["scanned"], 2)
@@ -2053,12 +2252,12 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
     def test_no_store_is_noop(self):
         inv = self._make_inventory()
-        enrich_with_policy(inv, None, self.skill_actions)
+        enrich_with_policy(inv, None, cfg=self.cfg)
         self.assertNotIn("policy_verdict", inv["skills"][0])
 
     def test_empty_skills_list(self):
         inv = {"skills": [], "plugins": [], "mcp": [], "summary": {}}
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
         self.assertNotIn("policy_skills", inv["summary"])
 
     def test_items_without_id_are_skipped(self):
@@ -2068,7 +2267,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             "mcp": [],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
         self.assertNotIn("policy_verdict", inv["skills"][0])
 
 
@@ -2098,7 +2297,7 @@ class TestCLIIntegrationWithPolicy(unittest.TestCase):
         from datetime import datetime, timezone
 
         from defenseclaw.enforce import PolicyEngine
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         now = datetime.now(timezone.utc)
 
         pe.block("skill", "weather", "missing weather-cli binary")
@@ -2742,8 +2941,8 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             {category: limitations[category]["status"] for category in ("mcp", "rules", "skills")},
             {"mcp": "unverified", "rules": "unverified", "skills": "unverified"},
         )
-        self.assertIn("legacy config*.json", limitations["mcp"]["reason"])
-        self.assertIn("runtime precedence", limitations["rules"]["reason"])
+        self.assertIn("older config*.json", limitations["mcp"]["reason"])
+        self.assertIn("which rule wins at runtime", limitations["rules"]["reason"])
 
     def test_codex_agents_and_rules_reject_reparse_ancestry(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -3822,13 +4021,19 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["memory"], [])
         self.assertEqual(inv["errors"], [])
         self.assertEqual(inv["summary"]["errors"], 0)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
         self.assertEqual(
             {item["category"] for item in inv["limitations"]},
-            {"tools", "models", "memory"},
+            {"tools", "memory"},
         )
         self.assertTrue(all(item["connector"] == "codex" for item in inv["limitations"]))
         self.assertTrue(all(item["status"] == "unsupported" for item in inv["limitations"]))
+        # GAP-2312: the default notes must not describe another product's
+        # model ("plugin's manifest", "the framework").
+        for item in inv["limitations"]:
+            self.assertNotIn("framework", item["reason"])
+            self.assertNotIn("manifest", item["reason"])
+            self.assertIn("this connector", item["reason"])
 
     def test_claudecode_expected_limitations_are_not_errors(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
@@ -3860,9 +4065,9 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["errors"]), 1)
         self.assertEqual(inv["errors"][0]["command"], "codex:skills")
         self.assertIn("denied", inv["errors"][0]["error"])
-        self.assertEqual(len(inv["limitations"]), 3)
+        self.assertEqual(len(inv["limitations"]), 2)
         self.assertEqual(inv["summary"]["errors"], 1)
-        self.assertEqual(inv["summary"]["limitations"], 3)
+        self.assertEqual(inv["summary"]["limitations"], 2)
 
     def test_skill_eligibility_requires_marker(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -4063,18 +4268,39 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(second["transport"], "sse")
 
     def test_summary_total_matches_arrays_for_codex(self):
+        # Codex inventories rules/*.rules beside its home and /etc/codex, so
+        # every discovery root points into the fixture: rules the Codex CLI
+        # wrote on the machine running the tests (~/.codex/rules/default.rules)
+        # must not reach the count.
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         skill_root = os.path.join(self.tmp, "skills")
         os.makedirs(skill_root, exist_ok=True)
         _seed_skill(skill_root, "a")
         _seed_skill(skill_root, "b")
-        with self._patch_skill_dirs([skill_root]), \
+        codex_home = Path(self.tmp) / ".codex"
+        user_rules = codex_home / "rules"
+        user_rules.mkdir(parents=True)
+        (user_rules / "user.rules").write_text(
+            'prefix_rule(pattern=["rm"], decision="forbidden")\n',
+            encoding="utf-8",
+        )
+        with patch.dict(
+            os.environ,
+            {"CODEX_HOME": str(codex_home), "HOME": self.tmp, "USERPROFILE": self.tmp},
+            clear=False,
+        ), patch("defenseclaw.connector_paths.Path.home", return_value=Path(self.tmp)), \
+             patch.object(connector_paths, "rule_dirs", return_value=[str(user_rules)]), \
+             self._patch_skill_dirs([skill_root]), \
              self._patch_plugin_dirs([]), \
              self._patch_mcp([]):
             inv = build_claw_aibom(cfg, live=True)
-        self.assertEqual(inv["summary"]["total_items"], 2)
-        self.assertEqual(inv["summary"]["skills"]["count"], 2)
-        self.assertEqual(inv["summary"]["plugins"]["count"], 0)
+        summary = inv["summary"]
+        self.assertEqual(summary["skills"]["count"], 2)
+        self.assertEqual(summary["plugins"]["count"], 0)
+        self.assertEqual(summary["rules"]["count"], 1)
+        categories = ("skills", "plugins", "mcp", "agents", "rules", "tools", "model_providers", "memory")
+        self.assertEqual(summary["total_items"], sum(len(inv.get(key, [])) for key in categories))
+        self.assertEqual(summary["total_items"], 3)
 
     def test_categories_filter_skills_only_skips_others(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
@@ -4138,3 +4364,31 @@ class TestBuildAibomConnectorPathSkippedForOpenClaw(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEnrichConnectorScopedBlock(_StoreWithPolicyMixin, unittest.TestCase):
+    def test_connector_scoped_block_reads_blocked(self):
+        # GAP-1558: 'skill block X --connector claudecode' is "blocked" in the
+        # inventory too, not "warning" from the scan severity.
+        import uuid
+        from datetime import datetime, timezone
+
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/skills/fsa4-review",
+            datetime.now(timezone.utc), 100, 1, "INFO", "{}",
+        )
+        self._pe().block_for_connector("skill", "fsa4-review", "claudecode", "test block")
+        inv = {
+            "connector": "claudecode",
+            "skills": [{"id": "fsa4-review", "eligible": True, "path": "/skills/fsa4-review"}],
+            "summary": {"skills": {"count": 1}},
+        }
+
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
+
+        self.assertEqual(inv["skills"][0]["policy_verdict"], "blocked")
+        self.assertEqual(inv["summary"]["policy_skills"]["blocked"], 1)
+
+        other = {"connector": "codex", "skills": [{"id": "fsa4-review"}], "summary": {"skills": {"count": 1}}}
+        enrich_with_policy(other, self.store, cfg=self.cfg)
+        self.assertNotEqual(other["skills"][0]["policy_verdict"], "blocked")

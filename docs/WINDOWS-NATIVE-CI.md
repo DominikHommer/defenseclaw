@@ -37,11 +37,7 @@ The merge gate covers:
   digest-pinned official `3000.4.25` Windows archive solely to retain the
   product's exact fixed-path, Authenticode-signer, and version admission; it
   does not log in, run an interactive client session, or claim live-client
-  evidence;
-- a separate required packaged OmniGent 0.7.0 native-degraded cell that
-  exercises its official server and SDK policy path as a disposable standard
-  user without upgrading that evidence to authenticated-client or full-sandbox
-  coverage; and
+  evidence; and
 - the Amp cell covers setup, observe/action
   allow/block behavior, audit correlation, gateway-generated connector
   telemetry, bounded timeout handling, teardown, and cleanup. It additionally
@@ -52,9 +48,7 @@ These deterministic packaged cells do not certify authenticated official-client
 behavior. Secret-bearing real-client evidence remains a separate manual layer.
 
 The packaged test artifact is built once and reused by the disposable lifecycle
-jobs. The public-bootstrap shard uses the authenticated `0.8.7` release—the
-first published native Setup—as its compatibility fixture. Its child launch
-uses sandbox-relative arguments to stay
+jobs. The public-bootstrap shard's child launch uses sandbox-relative arguments to stay
 deterministically below `CreateProcessWithLogonW`'s 1,024-character command-line
 limit even when the parent state root is deeply nested. Failure diagnostics are
 bounded, secret-redacted, retained for five days, and followed by unconditional
@@ -72,21 +66,23 @@ uses `AMP_API_KEY`, runs the official CLI through its native TypeScript plugin,
 and requires lifecycle, tool allow/block, audit, and gateway-generated
 connector telemetry evidence. It does not claim that Amp exports native OTLP.
 
-One manual Release dispatch builds the publishable Windows amd64 and arm64
-gateway binaries plus the x64 `DefenseClawSetup-x64.exe` from the reviewed
-`main` commit selected by that dispatch. The same run:
+One manual Release dispatch (`.github/workflows/release.yaml`) builds the
+publishable Windows assets from the reviewed `main` commit selected by that
+dispatch:
 
-1. requires either the expected Authenticode signature and timestamp or an
-   explicit unverified provenance record with exact `NotSigned` state;
-2. exercises `install.ps1` and the exact Setup candidate as a standard user;
-3. verifies installed versions and payload ownership; and
-4. seals the tested Windows assets with the Linux and macOS candidate before
-   publication.
+1. the Windows gateway, hook and ACP guard binaries from GoReleaser, which
+   `install.ps1` installs for a user;
+2. the standalone managed-enterprise Setup,
+   `enterprise-windows/DefenseClawSetup-Enterprise-Standalone-x64.exe`, with its
+   payload manifest. It is Authenticode-signed when a code-signing certificate
+   is configured; otherwise it ships hash-pinned (flavor
+   `standalone-unsigned`).
 
-Version `0.8.7`, the first release with native Windows Setup, was validated as
-a fresh x64 install and made no Windows upgrade claim. Published releases
-`0.8.7` through `0.8.10` carry explicit unverified provenance with the outer
-Setup and DefenseClaw executables recorded as `NotSigned`; their bytes are
-authenticated by the release checksum/provenance chain, not Authenticode. The
-release gate also verifies and seals both Windows gateway architectures before
-publication.
+The release's `Install and upgrade (windows-latest)` gate then runs
+`scripts/test-install-lifecycle.ps1` against the candidate assets (fresh
+install, Setup import, files in use, a failure drill, policy, and an upgrade
+from the previous release when one exists) before publication.
+
+The release never publishes `DefenseClawSetup-x64.exe`; see
+[RELEASE_RUNBOOK.md](RELEASE_RUNBOOK.md) for the names 0.8.x clients rely on
+not existing.

@@ -10,12 +10,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
 
 func mustLoadRulePack(t *testing.T, dir string) *RulePack {
@@ -114,6 +119,46 @@ func TestLoadRulePackShippedProfiles(t *testing.T) {
 				t.Fatal("missing exfil component did not inherit the embedded baseline")
 			}
 		})
+	}
+}
+
+// The embedded pack is the whole rule pack wherever no profile directory is
+// installed (Windows standalone Setup) and the fallback for any component a
+// custom pack omits. A stale embedded tool-injection prompt defined only five
+// of the eight categories the response schema forces, and the judge blocked a
+// benign Codex file-create on Windows as CRITICAL (GAP-0909). Every embedded
+// file that the default profile also ships must stay identical to it.
+func TestEmbeddedDefaultsMatchShippedDefaultProfile(t *testing.T) {
+	profileDir := filepath.Join("..", "..", "policies", "guardrail", "default")
+	compared := 0
+	err := fs.WalkDir(defaultsFS, "defaults", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return walkErr
+		}
+		rel := strings.TrimPrefix(name, "defaults/")
+		shipped, err := os.ReadFile(filepath.Join(profileDir, filepath.FromSlash(rel)))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		embedded, err := fs.ReadFile(defaultsFS, name)
+		if err != nil {
+			return err
+		}
+		normalize := func(b []byte) string { return strings.ReplaceAll(string(b), "\r\n", "\n") }
+		if normalize(embedded) != normalize(shipped) {
+			t.Errorf("internal/guardrail/defaults/%s differs from policies/guardrail/default/%s; copy the shipped file", rel, rel)
+		}
+		compared++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compared < 4 {
+		t.Fatalf("compared %d embedded files with the default profile, want at least 4", compared)
 	}
 }
 
@@ -332,6 +377,20 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 			_, err := LoadRulePack(dir)
 			requireRulePackError(t, err, test.code)
 		})
+	}
+}
+
+func TestLoadRulePackInvalidRegexNamesRuleAndReason(t *testing.T) {
+	// GAP-1225: name the rule by id and give the RE2 reason, but never echo the pattern.
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '(unclosed['", 1))
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "regex")
+	if !strings.Contains(packErr.Reason, "rule R-1 (entry 1) pattern") || !strings.Contains(packErr.Reason, "missing closing ]") {
+		t.Fatalf("reason = %q, want the rule id and the RE2 reason", packErr.Reason)
+	}
+	if strings.Contains(packErr.Reason, "unclosed") {
+		t.Fatalf("reason echoes the pattern: %q", packErr.Reason)
 	}
 }
 
@@ -831,4 +890,145 @@ rules:
 
 func leftPad(value int) string {
 	return fmt.Sprintf("%04d", value)
+}
+
+// An over-cost expression is refused with the limit it exceeds (the semantic
+// compiler's), per rule and for the whole catalog; an author used to see only
+// "rule 0 expression is invalid".
+func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve the test source path")
+	}
+	limits, err := os.ReadFile(filepath.Join(filepath.Dir(source), "semantic", "limits.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`maxRuleStaticCost\s+uint64\s*=\s*([0-9_]+)`).FindSubmatch(limits)
+	if match == nil {
+		t.Fatal("maxRuleStaticCost is not declared in internal/guardrail/semantic/limits.go")
+	}
+	if want, err := strconv.ParseUint(strings.ReplaceAll(string(match[1]), "_", ""), 10, 64); err != nil || semanticRuleStaticCostLimit != want {
+		t.Fatalf("semanticRuleStaticCostLimit = %d, the compiler enforces %s (%v)", semanticRuleStaticCostLimit, match[1], err)
+	}
+
+	dir := t.TempDir()
+	body := strings.Replace(validRulesYAML("custom", "R-1"), "    title:",
+		"    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a.contains(\"x\")))'\n    title:", 1)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	_, err = LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "semantic_static_cost")
+	if !strings.Contains(packErr.Reason, strconv.FormatUint(semanticRuleStaticCostLimit, 10)) {
+		t.Errorf("reason = %q, want the per-rule limit", packErr.Reason)
+	}
+
+	var rules strings.Builder
+	rules.WriteString("version: 1\ncategory: custom\nrules:\n")
+	for index := 0; index < 200; index++ {
+		fmt.Fprintf(&rules, "  - id: R-%d\n    tool_call_only: true\n    expression: 'f.commands.exists(c, c.argv.exists(a, a == \"x\"))'\n"+
+			"    pattern: 'a+'\n    title: valid\n    severity: HIGH\n    confidence: 0.5\n    tags: [test]\n", index)
+	}
+	catalog := t.TempDir()
+	writeRulePackFile(t, catalog, "rules/custom.yaml", rules.String())
+	_, err = LoadRulePack(catalog)
+	packErr = requireRulePackError(t, err, "semantic_catalog_cost_limit")
+	if !strings.Contains(packErr.Reason, fmt.Sprintf("%d", semantic.MaxEnabledCatalogStaticCost)) {
+		t.Errorf("catalog reason = %q, want the limit", packErr.Reason)
+	}
+}
+
+func TestRulePackDirectoryUnreadableNamesTheReason(t *testing.T) {
+	denied := rulePackDirectoryUnreadable(&fs.PathError{Op: "lstat", Path: `C:\packs`, Err: fs.ErrPermission})
+	if denied.Code != "directory_unreadable" || !strings.Contains(denied.Reason, "access denied") ||
+		!strings.Contains(denied.Reason, "parent folders") || strings.Contains(denied.Reason, `C:\packs`) {
+		t.Fatalf("permission error = %+v", denied)
+	}
+	if other := rulePackDirectoryUnreadable(errors.New("boom")); other.Reason != "rule-pack directory cannot be inspected" {
+		t.Fatalf("unknown error = %+v", other)
+	}
+}
+
+// GAP-1898: a refused expression names the rule by id and entry and says
+// what is wrong, without echoing the expression.
+func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(validRulesYAML("custom", "R4-MARKER-BLOCK"), "    title:",
+		"    tool_call_only: true\n    expression: 'f.commands.exists(c, dccert-block-marker in c.argv)'\n    title:", 1)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "semantic_type")
+	if !strings.HasPrefix(packErr.Reason, "rule R4-MARKER-BLOCK (entry 1) expression is invalid: it does not type-check") ||
+		!strings.Contains(packErr.Reason, "quote string literals") || strings.Contains(packErr.Reason, "dccert") {
+		t.Fatalf("reason = %q", packErr.Reason)
+	}
+}
+
+func TestLoadRulePackRejectsInvalidManifestPosture(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("invalid manifest accepted and strict posture lost")
+	}
+	if _, err := LoadRulePackForSecureClient(dir); err != nil {
+		t.Fatalf("Secure Client legacy manifest handling changed: %v", err)
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"unknown"}`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("unknown manifest posture accepted")
+	}
+}
+
+// GAP-0431: the manifest's posture sets the levels the gateway enforces, so
+// adding or editing defenseclaw-pack.json changes the pin and the summary
+// digest; a pack without a manifest keeps both.
+func TestPackManifestChangesThePinAndTheSummaryDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	before := mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	strict := mustLoadRulePack(t, dir)
+	if strict.FilesDigest() == before.FilesDigest() || strict.Summary().Digest == before.Summary().Digest {
+		t.Fatal("adding the manifest left the pin or the summary digest unchanged")
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"permissive"}`)
+	if again := mustLoadRulePack(t, dir); again.FilesDigest() == strict.FilesDigest() {
+		t.Fatal("editing the manifest posture left the pin unchanged")
+	}
+}
+
+// GAP-1313: on a case-insensitive volume (Windows, macOS) ReadPackPosture
+// opens a differently cased manifest, so the inventory pins it too; Linux
+// keeps the exact name.
+func TestPackManifestNameCaseFollowsTheVolume(t *testing.T) {
+	for _, tc := range []struct {
+		rel             string
+		caseInsensitive bool
+		want            bool
+	}{
+		{PackManifestFile, false, true},
+		{"DefenseClaw-Pack.json", false, false},
+		{"DefenseClaw-Pack.json", true, true},
+		{"rules/defenseclaw-pack.json", true, false},
+	} {
+		if got := packManifestNameMatches(tc.rel, tc.caseInsensitive); got != tc.want {
+			t.Errorf("packManifestNameMatches(%q, %v) = %v, want %v", tc.rel, tc.caseInsensitive, got, tc.want)
+		}
+	}
+	if !isPackManifestName("DefenseClaw-Pack.json") {
+		return
+	}
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	writeRulePackFile(t, dir, "DefenseClaw-Pack.json", `{"posture":"strict"}`)
+	if ReadPackPosture(dir) != "strict" {
+		return // a case-sensitive volume: the cased file is not the manifest
+	}
+	strict := mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, "DefenseClaw-Pack.json", `{"posture":"permissive"}`)
+	if mustLoadRulePack(t, dir).FilesDigest() == strict.FilesDigest() {
+		t.Fatal("editing a differently cased manifest left the pin unchanged")
+	}
 }

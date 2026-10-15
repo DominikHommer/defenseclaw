@@ -144,6 +144,27 @@ def test_defaults_set_omitted_collection_flags_are_not_deleted(tmp_path: Path, m
     ]
 
 
+def test_redaction_writers_refuse_on_a_managed_device_before_any_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0052: apply printed its whole preview and then exited 1; a managed device exits 3 first.
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.setattr(asset_lists, "is_managed_standalone", lambda _cfg: True)
+    app = _app(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    for args in (
+        ["apply", "--scope", "defaults", "--profile", "strict", "--yes"],
+        ["remove-all", "--yes"],
+        ["defaults", "set", "--no-logs", "--yes"],
+    ):
+        result = CliRunner().invoke(redaction, args, obj=app, catch_exceptions=False)
+        assert result.exit_code == 3, (args, result.output)
+        assert "This device is managed" in result.output and "Effective legs" not in result.output
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+
 def test_bucket_set_accepts_false_as_an_explicit_only_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     captured = []
     monkeypatch.setattr(
@@ -272,6 +293,50 @@ def test_profile_show_reads_compiler_owned_redaction_profile_catalog(
     payload = json.loads(result.output)
     assert payload["name"] == "sensitive"
     assert payload["field_classes"]["content"] == "detect"
+
+
+def test_profile_show_says_strict_removes_the_personal_identifiers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0257: "identifier: preserve" alone read as strict keeping the principals.
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "_effective",
+        lambda _app: {
+            "redaction_profiles": [
+                {"name": "sensitive", "built_in": True, "field_classes": {"identifier": "preserve"}},
+                {"name": "strict", "built_in": True, "field_classes": {"identifier": "preserve"}},
+                {"name": "strictx", "built_in": False, "extends": "strict", "field_classes": {"identifier": "preserve"}},
+            ]
+        },
+    )
+
+    shown = {
+        name: CliRunner().invoke(redaction, ["profile", "show", name], obj=_app(tmp_path), catch_exceptions=False).output
+        for name in ("sensitive", "strict", "strictx")
+    }
+
+    assert "Personal identifiers: kept as recorded (user principal, Kerberos principal," in shown["sensitive"]
+    for name in ("strict", "strictx"):
+        assert "Personal identifiers: removed (user principal, Kerberos principal," in shown[name]
+
+
+def test_profile_show_unknown_name_lists_the_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1928: "no compiled profile named X" named no valid profile.
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "_effective",
+        lambda _app: {"redaction_profiles": [{"name": n} for n in ("none", "sensitive", "content", "strict")]},
+    )
+
+    result = CliRunner().invoke(redaction, ["profile", "show", "nope"], obj=_app(tmp_path))
+
+    assert result.exit_code == 1, result.output
+    assert "compiled" not in result.output
+    assert (
+        "Error: redaction profile 'nope' not found. Available: content, none, sensitive, strict. "
+        "Run `defenseclaw setup redaction profile list` for details."
+    ) in result.output
 
 
 def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
@@ -604,3 +669,23 @@ def test_json_mutation_requires_noninteractive_confirmation(tmp_path: Path) -> N
 
     assert result.exit_code == 2
     assert "--json mutations require --yes or --dry-run" in result.output
+
+
+def test_status_discloses_unredacted_judge_body_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1693: judge_bodies.db sits outside every redaction profile, so
+    # status must say it keeps raw judge text and how to turn it off.
+    monkeypatch.setattr(cmd_setup_redaction, "_operator_status", lambda _app: _status(tmp_path))
+
+    text = CliRunner().invoke(redaction, ["status"], obj=_app(tmp_path), catch_exceptions=False)
+    assert text.exit_code == 0, text.output
+    assert "Local judge-body store (not covered by redaction profiles)" in text.output
+    assert "unredacted (it can quote secrets from prompts), for 90 days." in text.output
+    assert "set guardrail.retain_judge_bodies: false" in text.output
+
+    raw = CliRunner().invoke(redaction, ["status", "--json"], obj=_app(tmp_path), catch_exceptions=False)
+    assert json.loads(raw.output)["judge_bodies"] == {
+        "capture": True,
+        "path": str(tmp_path / "judge_bodies.db"),
+        "redacted": False,
+        "retention_days": 90,
+    }

@@ -4,6 +4,8 @@
 .env
 .env.*
 !.env.example
+# Sandbox artifact goldens (a harness's root-owned managed .env, no secrets).
+!internal/gateway/connector/testdata/sandbox/**/.env.golden
 
 # Generated config copies (canonical source: internal/configs/providers.json)
 extensions/defenseclaw/src/providers.json
@@ -19,6 +21,8 @@ cmd/defenseclaw-setup/payload/*.zip
 # Generated only while building DefenseClawSetup-Enterprise-x64.exe.
 cmd/defenseclaw-enterprise-setup/payload/*
 !cmd/defenseclaw-enterprise-setup/payload/.gitkeep
+cmd/defenseclaw-scanners/payload/*
+!cmd/defenseclaw-scanners/payload/.gitkeep
 
 # Editor and IDE metadata
 .idea/
@@ -33,6 +37,9 @@ skills/defenseclaw-dev-host/
 .agents/skills/defenseclaw-dev-host
 .claude/skills/defenseclaw-dev-host
 .codex/skills/defenseclaw-dev-host
+
+# Textual's XTermParser(debug=True) key dump.
+keys.log
 
 # Go build and test artifacts
 bin/
@@ -64,6 +71,7 @@ cli/defenseclaw/_data/config/*
 # Local binaries
 /defenseclaw
 /defenseclaw-*
+!/defenseclaw-lite/
 /custom-scanner
 
 # Collector builder output
@@ -150,6 +158,8 @@ output/playwright/
 # these from disk; keeping them out of git prevents cross-contamination
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
+# The root AGENTS.md is the tracked contributor entry point for coding agents.
+!/AGENTS.md
 CLAUDE.md
 agent-out/
 
@@ -190,9 +200,22 @@ outputs/
 
 # Local native-Windows manual acceptance walkthrough.
 /WINDOWS_NATIVE_MANUAL_TEST.md
-# Local AI planning artifacts
+
+# Compiled object files and static libraries
+*.o
+*.a
+
+# Local AI planning artifacts and internal dev docs
 /.superpowers/
 /docs/superpowers/
+/docs/papers/
+/docs/architecture/defenseclaw-lite-*
+
+# GRPO training engine (separate feature branch)
+/internal/training/
+/internal/config/training.go
+/benchmarks/grpo/
+/cli/defenseclaw/commands/cmd_training.py
 
 # DefenseClaw-managed Kiro hook config. Written by `defenseclaw setup kiro`
 # with machine-absolute hook-script paths, so it is per-machine state.

@@ -58,6 +58,10 @@ const (
 	setupValidationTimeout     = 30 * time.Second
 	setupConfigurationTimeout  = 5 * time.Minute
 	setupMigrationTimeout      = 15 * time.Minute
+	// Compiling the CLI startup closure is a one-time, install-time cost that
+	// can take tens of seconds on a loaded host with real-time scanning. It
+	// gets its own bound so the 30-second identity probes measure startup only.
+	setupBytecodeWarmupTimeout = 5 * time.Minute
 	nativeConnectorStateLimit  = int64(64 << 10)
 	nativeConfigRosterLimit    = int64(4 << 20)
 	maxRunCommandUTF16Units    = 260
@@ -332,10 +336,25 @@ func run(opts options) (int, error) {
 		if err != nil {
 			return 1, err
 		}
-		if err := verifySetupExecutablePolicyAt(self, false); err != nil {
-			return 1, fmt.Errorf("verify setup Authenticode policy: %w", err)
+		archive, err := embeddedPayload.Open("payload/installer-payload.zip")
+		if err != nil {
+			return 1, fmt.Errorf("verify setup payload: %w", err)
 		}
-		fmt.Println("DefenseClaw Setup Authenticode verification succeeded")
+		defer archive.Close()
+		reader, err := zipReaderAtFile(archive)
+		if err != nil {
+			return 1, fmt.Errorf("verify setup payload: %w", err)
+		}
+		report, err := verifySetupImage(self, reader)
+		if err != nil {
+			return 1, err
+		}
+		fmt.Println(report)
+		if report != setupVerifySignedReport {
+			// A caller that reads only stderr still learns that this
+			// Setup is unsigned and how to authenticate it.
+			fmt.Fprintln(os.Stderr, report)
+		}
 		return 0, nil
 	}
 	// INS-32: this read-only token/session/desktop gate must remain the first
@@ -393,6 +412,10 @@ func runInstall(opts options, installRoot, dataRoot string) (int, error) {
 	return runInstallContext(context.Background(), opts, installRoot, dataRoot)
 }
 
+// setupProgress receives the name of each install step as it starts; the
+// wizard shows it, so a slow install does not look hung. It must not block.
+var setupProgress = func(string) {}
+
 func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot string) (int, error) {
 	if err := checkSetupContext(ctx); err != nil {
 		return userExitCode, err
@@ -404,7 +427,6 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	if err := validateManagedRoot(filepath.Dir(maintenancePath)); err != nil {
 		return 1, err
 	}
-	hadInstall := pathExists(installRoot)
 	if err := recoverPendingSetupTransaction(installRoot, dataRoot); err != nil &&
 		!errors.Is(err, errUninstallCleanupRequiresRestart) {
 		return retryRequiredCode, err
@@ -430,17 +452,12 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return 1, err
 	}
 	// Recovery may publish, restore, or remove a transaction-owned tree.
-	hadInstall = pathExists(installRoot)
+	hadInstall := pathExists(installRoot)
 	if hadInstall && oldState == nil {
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
 	if oldState != nil {
-		if replacement, retired := retiredConnectorReplacementAt(installRoot); retired && !opts.ConnectorSet {
-			// Older pre-release state selected a connector this release no
-			// longer ships; move the selection to its replacement.
-			opts.Connector = replacement
-			opts.PreserveConnectorConfiguration = false
-		} else if !opts.ConnectorSet && validConnector(oldState.Connector) {
+		if !opts.ConnectorSet && validConnector(oldState.Connector) {
 			opts.Connector = oldState.Connector
 			opts.PreserveConnectorConfiguration = !opts.ModeSet
 		}
@@ -459,6 +476,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	pathSeparatorReused := oldState != nil && oldState.PathSeparatorReused
 	pathValueCreated := oldState != nil && oldState.PathValueCreated
 
+	setupProgress("Unpacking the installer payload...")
 	payload, err := loadPayload(payloadTempRoot)
 	if err != nil {
 		return 1, err
@@ -526,6 +544,13 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	opts.OpenCodeConfigDir = transaction.OpenCodeConfigDir
 	opts.OmnigentConfigHome = transaction.OmnigentConfigHome
 	opts.HermesHome = transaction.HermesHome
+	stagingNeed, err := stagingSpaceNeeded(payload)
+	if err != nil {
+		return 1, fmt.Errorf("measure the installer payload: %w", err)
+	}
+	if err := requireFreeSpace(filepath.Dir(transaction.StagingPath), stagingNeed, "stage the install"); err != nil {
+		return 1, err
+	}
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
@@ -536,7 +561,9 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return tryAbort(err)
 	}
 
+	setupProgress("Extracting the Python runtime, packages and gateway...")
 	if err := stageInstallTree(
+		ctx,
 		payload,
 		transaction.StagingPath,
 		installRoot,
@@ -554,6 +581,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return tryAbort(err)
 	}
 	if shouldRunPackagedMigrations(transaction.FromVersion, transaction.TargetVersion) {
+		setupProgress("Checking the data migrations...")
 		if err := runPackagedMigrationPreflightWithEnv(
 			transaction.StagingPath,
 			transaction.DataRoot,
@@ -580,6 +608,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return rollbackQuiescingSetup(transaction, cause)
 	}
 	gatewayPath := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	setupProgress("Stopping DefenseClaw for the update...")
 	err = quiesceSetupRuntimeForMutation(
 		transaction,
 		gatewayPath,
@@ -623,6 +652,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return tryRestore(err)
 	}
+	setupProgress("Publishing the new install...")
 	if err := renameInstallTree(transaction.StagingPath, installRoot); err != nil {
 		return tryRestore(fmt.Errorf("publish staged install: %w", err))
 	}
@@ -654,6 +684,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	tryRestorePublished := func(cause error) (int, error) {
 		return rollbackPublishedSetup(transaction, cause)
 	}
+	setupProgress("Migrating data and updating user registration...")
 	if err := activatePublishedSetupTransaction(transaction); err != nil {
 		if errors.Is(err, errPublishedActivationStateChanged) {
 			return retryRequiredCode, fmt.Errorf("activate published setup transaction; target runtime retained for recovery: %w", err)
@@ -1279,10 +1310,6 @@ func readBoundedNativeStateFile(path string, limit int64) ([]byte, bool, error) 
 	return data, true, nil
 }
 
-func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
-	return runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action, managedChildEnv(dataRoot))
-}
-
 func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action string, env []string) error {
 	if !pathExists(gatewayPath) {
 		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
@@ -1564,10 +1591,9 @@ func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenan
 		return nil, err
 	}
 	var state installState
-	if err := readInstallStateJSON(path, &state); err != nil {
+	if err := readJSON(path, &state); err != nil {
 		return nil, fmt.Errorf("read existing installer state: %w", err)
 	}
-	retireInstallStateConnector(&state)
 	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err != nil {
 		return nil, fmt.Errorf("existing installer state: %w", err)
 	}
@@ -1577,7 +1603,7 @@ func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenan
 func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, valueCreated bool) error {
 	path := filepath.Join(installRoot, "installer", "install-state.json")
 	var state installState
-	if err := readInstallStateJSON(path, &state); err != nil {
+	if err := readJSON(path, &state); err != nil {
 		return err
 	}
 	state.PathEntryOwned = owned
@@ -1702,7 +1728,7 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 	return nil
 }
 
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, transaction setupTransaction, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
+func stageInstallTree(ctx context.Context, payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, transaction setupTransaction, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
 	if err := createExclusiveStagingRoot(staging); err != nil {
 		return err
 	}
@@ -1731,6 +1757,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	}
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.SitePackages), sitePackages); err != nil {
 		return fmt.Errorf("extract managed Python packages: %w", err)
+	}
+	if err := warmManagedPythonBytecode(ctx, filepath.Join(staging, "runtime", "python")); err != nil {
+		return err
 	}
 	if err := extractGateway(payload, filepath.Join(staging, "bin")); err != nil {
 		return err
@@ -1904,6 +1933,34 @@ func validateInstall(root, version string) error {
 	return validateInstallContext(context.Background(), root, version)
 }
 
+// managedBytecodeWarmupScript imports the CLI entry module without running
+// it. The payload ships site-packages without bytecode (the build strips it
+// for reproducibility), so without this step the first defenseclaw.exe launch,
+// which is the bounded --version-json identity probe, compiles and writes every
+// module of the eager CLI import closure. Importing here writes that bytecode
+// into the staged tree under the same interpreter flags the launcher uses.
+const managedBytecodeWarmupScript = `import defenseclaw.main`
+
+func managedBytecodeWarmupArgs() []string {
+	return []string{"-I", "-c", managedBytecodeWarmupScript}
+}
+
+func warmManagedPythonBytecode(ctx context.Context, pythonDir string) error {
+	python := filepath.Join(pythonDir, "python.exe")
+	output, err := runCapturedSetupCommandContext(
+		ctx,
+		setupBytecodeWarmupTimeout,
+		false,
+		sanitizePythonEnv(os.Environ()),
+		python,
+		managedBytecodeWarmupArgs()...,
+	)
+	if err != nil {
+		return setupOperationError(ctx, fmt.Errorf("compile managed CLI bytecode: %w: %s", err, strings.TrimSpace(string(output))))
+	}
+	return nil
+}
+
 func validateInstallContext(ctx context.Context, root, version string) error {
 	var manifest payloadManifest
 	if err := readJSON(filepath.Join(root, "installer", "payload-manifest.json"), &manifest); err != nil {
@@ -2061,98 +2118,49 @@ func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) erro
 	)
 }
 
-const packagedMigrationScript = `import inspect, json, sys
-from defenseclaw import migration_state
-from defenseclaw.migrations import run_migrations
+// The packaged scripts bind the staged wheel to this Setup release through the
+// payload's upgrade manifest, then use only the release-independent migration
+// API: migrate() applies or checks config/data migrations for the data root,
+// and require_current_config() refuses a config that still needs one. The
+// preflight hands migrate() the staged gateway (DEFENSECLAW_GATEWAY_BIN) so a
+// 0.x configuration is converted and validated before anything is swapped.
+// cli/tests/test_setup_packaged_scripts.py runs these against the real package.
+const packagedMigrationScript = `import json, sys
+from defenseclaw.migrations import migrate
 from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-required = tuple(manifest.get("required_cli_migrations", ()))
-parameters = inspect.signature(run_migrations).parameters
-accepts_kwargs = any(
-    parameter.kind == inspect.Parameter.VAR_KEYWORD
-    for parameter in parameters.values()
-)
-
-def supports_keyword(name):
-    parameter = parameters.get(name)
-    return accepts_kwargs or (
-        parameter is not None
-        and parameter.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        )
-    )
-
-kwargs = {}
-if supports_keyword("upgrade_handles_local_bundle"):
-    kwargs["upgrade_handles_local_bundle"] = True
-if supports_keyword("strict_required"):
-    kwargs["strict_required"] = required
-count = run_migrations(
-    from_version,
-    to_version,
-    openclaw_home,
-    data_root,
-    **kwargs,
-)
-state = migration_state.load(data_root)
-applied = set(state.applied if state else ())
-missing = [value for value in required if value not in applied]
-if missing:
-    raise SystemExit("required migrations are missing: " + ", ".join(missing))
-print(count)`
+result = migrate(data_root, openclaw_home=openclaw_home, from_version=from_version or None)
+print(len(result.applied))`
 
 const packagedCanonicalStateValidationScript = `import json, sys
-from defenseclaw import migration_state
-from defenseclaw.config import load, require_v8_config
-data_root, target_version, manifest_path = sys.argv[1:]
+from defenseclaw.config import load, require_current_config
+_data_root, target_version, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != target_version:
     raise SystemExit("upgrade manifest version mismatch")
-require_v8_config()
+require_current_config()
 load()
-state = migration_state.load(data_root)
-if state is None:
-    raise SystemExit("migration cursor is missing")
-if state.package_version != target_version:
-    raise SystemExit(
-        "migration cursor package version mismatch: "
-        + str(state.package_version)
-        + " != "
-        + target_version
-    )
-required = tuple(manifest.get("required_cli_migrations", ()))
-applied = set(state.applied)
-missing = [value for value in required if value not in applied]
-if missing:
-    raise SystemExit("required migrations are missing: " + ", ".join(missing))
 print("ok")`
 
-const packagedMigrationPreflightScript = `import json, sys
-from defenseclaw.migrations import preflight_required_migrations
-from_version, to_version, openclaw_home, data_root, manifest_path, scratch_dir = sys.argv[1:]
+const packagedMigrationPreflightScript = `import json, os, sys
+from defenseclaw.migrations import migrate
+from_version, to_version, openclaw_home, data_root, manifest_path = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as stream:
     manifest = json.load(stream)
 if manifest.get("release_version") != to_version:
     raise SystemExit("upgrade manifest version mismatch")
-required = manifest.get("required_cli_migrations", ())
-count = preflight_required_migrations(
-    from_version,
-    to_version,
-    openclaw_home,
+result = migrate(
     data_root,
-    required,
-    scratch_dir,
+    openclaw_home=openclaw_home,
+    from_version=from_version or None,
+    check=True,
+    gateway_binary=os.environ.get("DEFENSECLAW_GATEWAY_BIN") or None,
 )
-print(count)`
-
-func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
-	return runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion, managedChildEnv(dataRoot))
-}
+print(len(result.applied))`
 
 func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string, env []string) error {
 	openClawRoot, err := defaultOpenClawRoot()
@@ -2215,34 +2223,16 @@ func newCanonicalStateValidationCommand(
 	return cmd
 }
 
+// runPackagedMigrationPreflightWithEnv runs the staged target runtime's
+// read-only migrate(check=True) against the live data root before any service
+// or tree mutation, so a config written by a newer release, or one the target
+// cannot migrate, aborts Setup with nothing changed.
 func runPackagedMigrationPreflightWithEnv(
 	root, dataRoot, fromVersion, toVersion string,
 	env []string,
-) (resultErr error) {
+) error {
 	openClawRoot, err := defaultOpenClawRoot()
 	if err != nil {
-		return err
-	}
-	scratch, err := safeJoin(root, "installer/.migration-preflight")
-	if err != nil {
-		return err
-	}
-	if err := rejectReparseAncestors(filepath.Dir(scratch)); err != nil {
-		return err
-	}
-	if err := os.Mkdir(scratch, 0o700); err != nil {
-		return fmt.Errorf("create migration preflight root: %w", err)
-	}
-	defer func() {
-		resultErr = errors.Join(resultErr, removeTransactionTree(scratch, root))
-	}()
-	if err := safefile.ProtectDirectory(scratch); err != nil {
-		return fmt.Errorf("protect migration preflight root: %w", err)
-	}
-	if err := validatePrivateTransactionPath(scratch, true); err != nil {
-		return fmt.Errorf("validate migration preflight root: %w", err)
-	}
-	if err := rejectReparseTree(scratch); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), setupMigrationTimeout)
@@ -2254,7 +2244,6 @@ func runPackagedMigrationPreflightWithEnv(
 		openClawRoot,
 		fromVersion,
 		toVersion,
-		scratch,
 	)
 	cmd.Env = packagedTargetRuntimeEnv(env, root, dataRoot)
 	output, err := processutil.CombinedOutputTree(cmd, false)
@@ -2298,7 +2287,7 @@ func newPackagedMigrationCommand(ctx context.Context, root, dataRoot, openClawRo
 
 func newPackagedMigrationPreflightCommand(
 	ctx context.Context,
-	root, dataRoot, openClawRoot, fromVersion, toVersion, scratch string,
+	root, dataRoot, openClawRoot, fromVersion, toVersion string,
 ) *exec.Cmd {
 	python := filepath.Join(root, "runtime", "python", "python.exe")
 	manifest := filepath.Join(root, "installer", "upgrade-manifest.json")
@@ -2315,7 +2304,6 @@ func newPackagedMigrationPreflightCommand(
 		openClawRoot,
 		dataRoot,
 		manifest,
-		scratch,
 	)
 	cmd.Env = packagedTargetRuntimeEnv(managedChildEnv(dataRoot), root, dataRoot)
 	return cmd
@@ -2342,10 +2330,6 @@ func packagedTargetRuntimeEnv(input []string, root, dataRoot string) []string {
 		"DEFENSECLAW_INSTALL_ROOT="+root,
 		"DEFENSECLAW_GATEWAY_BIN="+filepath.Join(root, "bin", "defenseclaw-gateway.exe"),
 	)
-}
-
-func startGateway(gatewayPath, dataRoot string) error {
-	return startGatewayWithEnv(gatewayPath, managedChildEnv(dataRoot))
 }
 
 func startGatewayWithEnv(gatewayPath string, env []string) error {
@@ -2496,6 +2480,9 @@ func loadPayload(tempParent string) (loadedPayload, error) {
 	if err := rejectReparseAncestors(tempParent); err != nil {
 		return loadedPayload{}, err
 	}
+	if err := requireFreeSpace(tempParent, zipExpandedSize(reader), "unpack the installer payload"); err != nil {
+		return loadedPayload{}, err
+	}
 	tempRoot, err := os.MkdirTemp(tempParent, ".DefenseClawSetup.")
 	if err != nil {
 		return loadedPayload{}, err
@@ -2528,7 +2515,111 @@ func zipReaderAtFile(file fs.File) (*zip.Reader, error) {
 	return zip.NewReader(readerAt, info.Size())
 }
 
+// setupVerifySignedReport is /verify's report for a signed Setup.
+const setupVerifySignedReport = "DefenseClaw Setup Authenticode verification succeeded"
+
+// verifySetupImage is /verify: it checks the embedded payload against its
+// manifest, then the Setup's Authenticode against the signing state that
+// manifest records. A release built without a code-signing certificate
+// records unsigned: true and must carry no signature; a signed release must
+// carry a valid Cisco RFC3161 signature. Either way a payload that no longer
+// matches its manifest, a signature stripped from a signed build or one
+// added to an unsigned build fails. /verify cannot authenticate an unsigned
+// Setup by itself, so it says so and prints the SHA-256 to compare with the
+// release's Sigstore-verified checksums.
+func verifySetupImage(self string, payload *zip.Reader) (string, error) {
+	manifest, err := verifyEmbeddedPayloadArchive(payload)
+	if err != nil {
+		return "", setupNotPublished(fmt.Errorf("verify setup payload: %w", err))
+	}
+	if err := verifySetupExecutablePolicyAt(self, manifest.Unsigned); err != nil {
+		return "", setupNotPublished(fmt.Errorf("verify setup Authenticode policy: %w", err))
+	}
+	if !manifest.Unsigned {
+		return setupVerifySignedReport, nil
+	}
+	digest, err := fileSHA256(self)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"DefenseClaw Setup %s is not Authenticode signed; its embedded payload matches its manifest. "+
+			"An unsigned Setup is authenticated only by its SHA-256 %s matching the %s entry of the release "+
+			"checksums.txt verified with its Sigstore signature.",
+		manifest.Version, digest, setupArtifactName,
+	), nil
+}
+
+// setupNotPublished leads a /verify failure with what it means: the checks
+// alone ("zip: checksum error") did not tell the user the file was modified
+// or what to do.
+func setupNotPublished(err error) error {
+	return fmt.Errorf("this DefenseClaw Setup is not the published file: it was changed after it was built. "+
+		"Do not run it; download it again and compare its SHA-256 with the release checksums.txt "+
+		"verified with its Sigstore signature (%w)", err)
+}
+
+// verifyEmbeddedPayloadArchive reads the payload manifest from the embedded
+// archive and checks every file it pins, without extracting anything.
+func verifyEmbeddedPayloadArchive(reader *zip.Reader) (payloadManifest, error) {
+	if len(reader.File) > maxZipFiles {
+		return payloadManifest{}, fmt.Errorf("zip payload contains too many entries: %d", len(reader.File))
+	}
+	entries := make(map[string]*zip.File, len(reader.File))
+	for _, file := range reader.File {
+		entries[strings.ReplaceAll(file.Name, `\`, "/")] = file
+	}
+	read := func(rel string) (io.ReadCloser, error) {
+		file := entries["payload/"+filepath.ToSlash(rel)]
+		if file == nil || file.FileInfo().IsDir() {
+			return nil, fmt.Errorf("payload has no file %s", rel)
+		}
+		if file.UncompressedSize64 > uint64(maxZipExpandedBytes) {
+			return nil, fmt.Errorf("payload file %s exceeds the expanded size limit", rel)
+		}
+		return file.Open()
+	}
+	body, err := read("manifest.json")
+	if err != nil {
+		return payloadManifest{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(body, 64<<20))
+	_ = body.Close()
+	if err != nil {
+		return payloadManifest{}, err
+	}
+	var manifest payloadManifest
+	if err := decodeJSONStrict(data, &manifest); err != nil {
+		return payloadManifest{}, fmt.Errorf("parse payload manifest: %w", err)
+	}
+	return manifest, verifyPayloadManifestWith(manifest, func(rel string) (string, error) {
+		file, err := read(rel)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		// The zip reader checks each entry's CRC-32 when it reaches EOF.
+		if _, err := io.Copy(hash, io.LimitReader(file, maxZipExpandedBytes)); err != nil {
+			return "", fmt.Errorf("read payload file %s: %w", rel, err)
+		}
+		return hex.EncodeToString(hash.Sum(nil)), nil
+	})
+}
+
 func verifyPayloadManifest(root string, manifest payloadManifest) error {
+	return verifyPayloadManifestWith(manifest, func(rel string) (string, error) {
+		full, err := safeJoin(filepath.Join(root, "payload"), rel)
+		if err != nil {
+			return "", err
+		}
+		return fileSHA256(full)
+	})
+}
+
+// verifyPayloadManifestWith checks the manifest and the SHA-256 digest of
+// every file it pins; digest returns one file's digest by its payload path.
+func verifyPayloadManifestWith(manifest payloadManifest, digest func(rel string) (string, error)) error {
 	if manifest.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported payload schema version %d", manifest.SchemaVersion)
 	}
@@ -2559,11 +2650,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 		if _, err := hex.DecodeString(expected); err != nil {
 			return fmt.Errorf("payload manifest has an invalid SHA-256 for %s", rel)
 		}
-		full, err := safeJoin(filepath.Join(root, "payload"), rel)
-		if err != nil {
-			return err
-		}
-		sum, err := fileSHA256(full)
+		sum, err := digest(rel)
 		if err != nil {
 			return err
 		}
@@ -3015,6 +3102,9 @@ func managedChildEnv(dataRoot string) []string {
 	return filtered
 }
 
+// managedRecoveryChildEnv lets a restored pre-1.0 gateway delegate its
+// readiness wait during rollback recovery, as that release expects. 1.0+
+// gateways ignore the marker and always wait for readiness.
 func managedRecoveryChildEnv(dataRoot string) []string {
 	return append(managedChildEnv(dataRoot), upgradeFreshProcessEnv+"=1")
 }

@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -136,7 +137,7 @@ class TestAlertsCommand(unittest.TestCase):
                 severity="HIGH",
             ),
         ]
-        result = _invoke(alerts, args=["--no-tui"], app=_make_app(store=store))
+        result = _invoke(alerts, args=[], app=_make_app(store=store))
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Security Alerts", result.output)
 
@@ -164,7 +165,8 @@ class TestPluginCommands(unittest.TestCase):
             _set_plugin_dir(app, tmpdir)
             result = _invoke(list_plugins, app=app)
             self.assertEqual(result.exit_code, 0)
-            self.assertIn("No plugins", result.output)
+            # GAP-2368: plain per-connector empty state.
+            self.assertIn("has no installed plugins", result.output)
 
     def test_plugin_list_with_plugins(self):
         from defenseclaw.commands.cmd_plugin import list_plugins
@@ -225,7 +227,7 @@ class TestPluginCommands(unittest.TestCase):
             app = _make_app()
             _set_plugin_dir(app, tmpdir)
             result = _invoke(remove, ["nonexistent"], app=app)
-            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.exit_code, 1)
             self.assertIn("not found", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
@@ -365,7 +367,7 @@ class TestInitCommand(unittest.TestCase):
                 mock_dc.return_value = cfg
 
                 with patch("defenseclaw.config.config_path") as mock_cp:
-                    mock_cp.return_value = os.path.join(tmpdir, "config.yaml")
+                    mock_cp.return_value = Path(tmpdir) / "config.yaml"
 
                     result = _invoke(init_cmd, ["--skip-install"])
                     self.assertEqual(result.exit_code, 0)

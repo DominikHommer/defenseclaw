@@ -39,7 +39,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "--dist=worksteal" in exhaustive
     assert "name: Python Lint" in workflow
     assert "name: Python Lint & Test" in workflow
-    assert "needs: [release-validation-plan, python-test, python-lint]" in workflow
+    assert "needs: [changes, python-test, python-lint]" in workflow
     assert workflow.count("run: make py-lint") == 1
     assert "pattern: python-coverage-part-*" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
@@ -64,7 +64,9 @@ def test_windows_pr_keeps_native_telemetry_coverage_without_repeating_exhaustive
         "test_telemetry_registry_candidate_renderer.py",
     ):
         assert isolated in workflow
-    assert "-not $fullTelemetryRegistry -and $_.FullName -in $exhaustiveTelemetryPaths" in workflow
+    assert "if (-not $fullTelemetryRegistry) {" in workflow
+    assert "$shardSelectionArgs += @('--exclude', $telemetryFile)" in workflow
+    assert "'scripts/python_test_shards.py', '--shard-count', '8'" in workflow
     for native_test in (
         "test_updater_help_imports_on_native_platform",
         "test_updater_mid_publish_failure_restores_prior_bytes_and_inodes",
@@ -122,7 +124,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "GO_PACKAGE_SHARDS: 8" in workflow
     assert "internal/(audit|gateway)" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
-    assert "needs: [go-test-gateway, go-test-audit, go-test-other]" in workflow
+    # checkptr in the transpiled SQLite doubled the cost of every race shard.
+    race = "go test -race -gcflags=modernc.org/...=-d=checkptr=0 "
+    assert workflow.count("go test -race ") == workflow.count(race) == 3
+    assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
@@ -142,20 +147,23 @@ def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:
 def test_release_dispatch_version_is_stamped_without_a_version_only_pr() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
 
-    assert workflow.count('scripts/stamp-version.sh "$RELEASE_TAG"') >= 2
-    assert "Require reviewed source release identity" not in workflow
-    assert "GitHub source snapshot uses development version" in workflow
-    first_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"')
-    build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', first_stamp + 1)
-    identity_check = workflow.index(
-        "python3 scripts/source_release_identity.py check", build_stamp
-    )
-    extension_build = workflow.index("run: make extensions", build_stamp)
+    assert workflow.count('scripts/stamp-version.sh "$VERSION"') >= 2
+    first_stamp = workflow.index('scripts/stamp-version.sh "$VERSION"')
+    identity_check = workflow.index("python3 scripts/source_release_identity.py check", first_stamp)
+    extension_build = workflow.index("make extensions", identity_check)
     gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    assert build_stamp < identity_check < extension_build < gateway_build
+    assert first_stamp < identity_check < extension_build < gateway_build
 
-    macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(
-        encoding="utf-8"
-    )
+    macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(encoding="utf-8")
     assert 'MARKETING_VERSION="${VERSION}"' in macos_build
-    assert '-X main.version=${VERSION}' in macos_build
+
+
+def test_windows_standalone_setup_jobs_install_uv_first() -> None:
+    # build-setup.sh builds the Python scanner runtime with uv (GAP-0132).
+    for name in ("ci.yml", "release.yaml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+        for job_id, job in workflow["jobs"].items():
+            steps = [str(step.get("uses", "")) + str(step.get("run", "")) for step in job.get("steps", [])]
+            builds = [i for i, step in enumerate(steps) if "standalone/build-setup.sh" in step]
+            uv = [i for i, step in enumerate(steps) if step.startswith("astral-sh/setup-uv@")]
+            assert not builds or (uv and uv[0] < builds[0]), f"{name}:{job_id} runs build-setup.sh without setup-uv"

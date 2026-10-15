@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw import legacy_connector
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
     USER_RUNTIME_PLANES,
@@ -42,7 +43,7 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.gateway import OrchestratorClient, SandboxAPIError
 from defenseclaw.inventory import agent_discovery, ai_signatures
 
 
@@ -51,7 +52,36 @@ def _mapping_block(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-@click.group()
+class _AgentGroup(click.Group):
+    """Keep new identity and IDE commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            # Help is rendered before the root callback loads configuration.
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return ([name for name in names if name not in {"ide-plugins", "identities"}]
+                if self._secure_client(ctx) else names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name in {"ide-plugins", "identities"} and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=_AgentGroup)
 def agent() -> None:
     """Inspect locally installed agent surfaces."""
 
@@ -165,10 +195,27 @@ def discover(
         if otel_result["emitted"]:
             click.echo("  OTel: emitted agent discovery telemetry")
         elif otel_result["error"]:
-            click.echo(f"  OTel: not emitted ({otel_result['error']})", err=True)
+            click.echo(f"  OTel: not emitted - {otel_result['error']}", err=True)
 
 
 _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
+
+
+def _usage_payload(client: Any, refresh: bool) -> dict[str, Any]:
+    """The sidecar's AI usage report, scanned first with ``refresh``.
+
+    The scan answers 503 while AI discovery is off, where the cached view
+    says ``enabled: false``: both read the same, so ``--refresh`` gives the
+    disabled message and the enable command too (GAP-0150).
+    """
+    if not refresh:
+        return client.ai_usage()
+    try:
+        return client.scan_ai_usage()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 503:
+            return {"enabled": False, "signals": []}
+        raise
 
 
 @agent.command("usage")
@@ -216,6 +263,15 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
     ),
 )
 @click.option(
+    "--sandbox",
+    "sandboxes",
+    multiple=True,
+    help=(
+        "Show only what AI discovery found inside this OpenShell sandbox "
+        "(repeatable). Rows found in a sandbox are tagged \"(sandbox NAME)\"."
+    ),
+)
+@click.option(
     "--show-gone",
     is_flag=True,
     help="Include 'gone' signals in the table (suppressed by default to cut noise).",
@@ -239,6 +295,14 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
     default=0,
     help="Cap rows shown (0 = no cap). Use --json for the unfiltered list.",
 )
+@click.option(
+    "--wide",
+    is_flag=True,
+    help=(
+        "Show every column (model format, version, identity and presence "
+        "confidence). The default table keeps the columns that fit."
+    ),
+)
 @click.option("--gateway-host", default=None, help="Sidecar API host override.")
 @click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
 @click.option(
@@ -256,9 +320,11 @@ def usage(
     categories: tuple[str, ...],
     products: tuple[str, ...],
     components: tuple[str, ...],
+    sandboxes: tuple[str, ...],
     show_gone: bool,
     by_detector: bool,
     limit: int,
+    wide: bool,
     gateway_host: str | None,
     gateway_port: int | None,
     gateway_token_env: str | None,
@@ -280,6 +346,17 @@ def usage(
     """
     if limit < 0:
         raise click.BadParameter("--limit must be >= 0", param_hint="--limit")
+    if sandboxes:
+        from defenseclaw.platform_support import host_os
+
+        if host_os() == "windows":
+            # No sandbox can exist here: say so, as `defenseclaw sandbox`
+            # does, instead of an empty table (GAP-0386).
+            from defenseclaw import ux
+            from defenseclaw.commands.cmd_sandbox import UNSUPPORTED_EXIT_CODE, UNSUPPORTED_PLATFORM_MESSAGE
+
+            ux.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
+            raise SystemExit(UNSUPPORTED_EXIT_CODE)
 
     client = _usage_client(
         app,
@@ -288,12 +365,11 @@ def usage(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -301,6 +377,14 @@ def usage(
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
 
+    if payload.get("enabled") is False and not (payload.get("signals") or []):
+        click.echo(
+            "AI discovery is disabled, so there is no AI usage to show. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+        return
+
+    notes = _sandboxes_not_found(client, payload, sandboxes)
     click.echo(
         _render_ai_usage_table(
             payload,
@@ -309,11 +393,192 @@ def usage(
             categories=categories,
             products=products,
             components=components,
+            sandboxes=sandboxes,
             show_gone=show_gone,
             by_detector=by_detector,
             limit=limit,
+            wide=wide,
         ).rstrip()
     )
+    for note in notes:
+        click.echo(note)
+
+
+def _sandboxes_not_found(client: Any, payload: Mapping[str, Any], sandboxes: tuple[str, ...]) -> list[str]:
+    """Check each ``--sandbox`` name AI discovery has no signal for (GAP-0386).
+
+    An unknown name was an empty table and exit 0. It is an error now; a
+    sandbox that exists but was not scanned yet gets a note on how to scan
+    it. A daemon that cannot say leaves the table as it is.
+    """
+    signals = [sig for sig in payload.get("signals") or [] if isinstance(sig, Mapping)]
+    seen = {str(sig.get("sandbox_name") or "").strip().lower() for sig in signals}
+    notes: list[str] = []
+    for name in dict.fromkeys(s.strip() for s in sandboxes if s.strip()):
+        if name.lower() in seen:
+            continue
+        try:
+            client.get_sandbox(name)
+        except SandboxAPIError as exc:
+            if exc.code == "not_found":
+                raise click.ClickException(
+                    f"no sandbox {name}: `defenseclaw sandbox list` shows your sandboxes"
+                ) from exc
+            if exc.code == "disabled":
+                raise click.ClickException(
+                    f"no sandbox {name}: OpenShell sandboxes are not set up here (`defenseclaw sandbox setup`)"
+                ) from exc
+            continue
+        except requests.RequestException:
+            continue
+        notes.append(
+            f"AI discovery has found nothing in sandbox {name} yet: `defenseclaw sandbox discover {name}` scans it now."
+        )
+    return notes
+
+
+_IDE_PLUGIN_ENABLED_LABELS = {
+    "enabled": "yes",
+    "disabled": "no",
+    "client_side_unknown": "client side",
+    "unknown": "unknown",
+}
+
+
+# IDE cell suffix for a plugin of a remote install (the TUI mirrors it).
+_IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
+
+
+def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
+    """IDE cell: the product, plus where it runs for a remote install."""
+    product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    version = str(item.get("ide_version") or "")
+    if version:
+        product = f"{product} {version}"
+    kind = str(item.get("remote_kind") or "")
+    if kind:
+        return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
+    return f"{product} (remote)" if item.get("scope") == "remote" else product
+
+
+def ide_plugin_enabled_label(value: object) -> str:
+    """Short Enabled cell for an IDE plugin row (shared with the TUI)."""
+    text = str(value or "unknown")
+    return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
+
+
+def ide_plugin_rows(plugins: list[Any], versions: Mapping[str, str] | None = None) -> list[list[str]]:
+    """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
+    rows: list[list[str]] = []
+    for item in plugins:
+        if not isinstance(item, Mapping):
+            continue
+        plugin = str(item.get("plugin_id") or "")
+        name = str(item.get("display_name") or "")
+        if name and name.lower() != plugin.lower():
+            plugin = f"{plugin} ({name})" if plugin else name
+        rows.append([
+            str(item.get("user") or item.get("user_id") or "-"),
+            ide_plugin_ide_label({**item, "ide_version": (versions or {}).get(str(item.get("install_id") or ""), "")}),
+            plugin or "-",
+            str(item.get("version") or "-"),
+            ide_plugin_enabled_label(item.get("enabled")),
+            "yes" if item.get("is_ai") else "",
+        ])
+    rows.sort(key=lambda row: (row[0].lower(), row[1], row[2].lower()))
+    return rows
+
+
+@agent.command("ide-plugins")
+@click.option("--user", "user", default="", help="Show only this user's plugins (account name or id).")
+@click.option("--ide", "ide", default="", help="Show only this IDE product, for example vscode, cursor or pycharm.")
+@click.option("--ai-only", "ai_only", is_flag=True, help="Show only AI extensions and plugins.")
+@click.option("--json", "as_json", is_flag=True, help="Output the IDE plugin inventory as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def ide_plugins(
+    app: AppContext,
+    user: str,
+    ide: str,
+    ai_only: bool,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List the extensions and plugins installed in each user's IDEs.
+
+    Covers VS Code and its forks (Cursor, Devin Desktop, Kiro and others,
+    including remote SSH servers), JetBrains IDEs, Visual Studio, Zed,
+    Eclipse and Vim/Neovim, with each plugin's enabled state and an AI flag.
+    The running gateway collects the list during AI discovery.
+    """
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.ai_usage_ide_plugins_all(
+            user=user.strip(),
+            ide="devin-desktop" if ide.strip().lower() == legacy_connector.RETIRED_DESKTOP_ID else ide.strip().lower(),
+            ai_only=ai_only,
+        )
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 404:
+            raise click.ClickException(
+                "this gateway does not list IDE plugins yet; upgrade it with: defenseclaw upgrade"
+            ) from exc
+        raise click.ClickException(f"sidecar rejected IDE plugins request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if payload.get("enabled") is False:
+        click.echo(
+            "AI discovery is disabled, so there are no IDE plugins to show. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+        return
+    if str(payload.get("scope") or "") == "off":
+        click.echo(
+            "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
+            "Turn it on with: defenseclaw config set ai_discovery.ide_inventory all"
+        )
+        return
+    plugins = payload.get("plugins") or []
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in payload.get("installations") or [] if isinstance(inst, Mapping)}
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [], versions)
+    if not rows:
+        filtered = bool(user or ide or ai_only)
+        click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")
+        return
+    click.echo(_render_runtime_table(["User", "IDE", "Plugin", "Version", "Enabled", "AI"], rows).rstrip())
+    counts = _mapping_block(payload.get("counts"))
+    summary = f"{len(rows)} plugin(s)"
+    if counts:
+        summary += (
+            f" shown; {counts.get('total', 0)} in total, {counts.get('ai', 0)} AI, "
+            f"{counts.get('disabled', 0)} disabled, {counts.get('users', 0)} user(s)"
+        )
+    if payload.get("scope") == "ai_only":
+        summary += " (the inventory keeps AI plugins only)"
+    if payload.get("partial") or any(i.get("partial") for i in payload.get("installations") or []):
+        summary += " — partial installation; scan limits were reached"
+    click.echo(summary)
 
 
 # ---------------------------------------------------------------------------
@@ -375,20 +640,19 @@ def processes(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [
+    process_signals = _expand_process_instances([
         s for s in raw_signals
         if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
-    ]
+    ])
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -412,7 +676,31 @@ def processes(
     if process_error:
         raise click.ClickException(f"process snapshot failed: {process_error}")
 
-    click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
+    if payload.get("enabled") is False and not process_signals:
+        # The sidecar answers with an empty list while discovery is off (the
+        # default after init); say so instead of "AI processes (0 live)".
+        click.echo(_AI_DISCOVERY_OFF_PROCESSES_HINT)
+        return
+
+    click.echo(
+        _render_ai_processes_table(
+            process_signals,
+            limit=limit,
+            product_last_active=_product_last_active(raw_signals),
+        ).rstrip()
+    )
+
+
+_AI_DISCOVERY_OFF_PROCESSES_HINT = (
+    "AI discovery is disabled, so no AI processes are observed. "
+    "Enable it with: defenseclaw agent discovery enable"
+)
+
+
+_AI_DISCOVERY_DISABLED_HINT = (
+    "AI discovery is disabled, so there are no components to show. "
+    "Enable it with: defenseclaw agent discovery enable"
+)
 
 
 @agent.group("components", invoke_without_command=True)
@@ -481,12 +769,10 @@ def components_cmd(
 ) -> None:
     """Show the deduped AI components/SDK rollup with versions, install counts, and confidence.
 
-    Calls ``GET /api/v1/ai-usage/components`` so the sidecar does the
-    join across detectors and workspaces; the CLI just filters and
-    renders.
+    The running gateway (sidecar) combines what every detector found across
+    your workspaces; this command filters and prints it.
 
-    Subcommands ``show NAME`` and ``history NAME`` drill into a single
-    component using the same authoritative SQL inventory store.
+    'show NAME' and 'history NAME' drill into one component.
     """
     # Stash the listing options on click_ctx.meta (NOT click_ctx.obj)
     # so children (`components show`, `components history`) can re-use
@@ -523,12 +809,20 @@ def components_cmd(
             client.scan_ai_usage()
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 503:
+            raise click.ClickException(_AI_DISCOVERY_DISABLED_HINT) from exc
         raise click.ClickException(f"sidecar rejected components request: HTTP {status}") from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    if payload.get("enabled") is False and not as_json:
+        # The sidecar answers with an empty rollup while discovery is off
+        # (the default after init); say so instead of an empty table.
+        click.echo(_AI_DISCOVERY_DISABLED_HINT)
+        return
 
     rows = _filter_components(
         payload.get("components", []) or [],
@@ -565,13 +859,10 @@ def components_show(
     ecosystem: str | None,
     as_json: bool,
 ) -> None:
-    """Print the per-install location detail for one component.
+    """Print every place one component was detected.
 
-    Resolves ``NAME`` against the components rollup, then fetches
-    ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/locations``
-    so an operator can see *every* place the SDK was detected (one
-    row per evidence record, including detector + match quality +
-    workspace + basename + raw path when redaction is off).
+    One row per detection: detector, match quality, workspace, file name,
+    and the full path when redaction is off.
     """
     app, host, port, token_env = _components_meta(click_ctx)
     client = _usage_client(
@@ -588,7 +879,7 @@ def components_show(
     try:
         loc_payload = client.ai_usage_component_locations(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -629,9 +920,7 @@ def components_history(
 ) -> None:
     """Print the confidence trend (last N scans) for one component.
 
-    Reads ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/history``
-    so the rendering matches whatever
-    ``inventory.ComputeComponentConfidence`` produced at scan time.
+    The values are the confidence scores recorded at each scan.
     """
     if limit < 0:
         raise click.BadParameter("--limit must be >= 0", param_hint="--limit")
@@ -650,7 +939,7 @@ def components_history(
     try:
         hist_payload = client.ai_usage_component_history(eco, cname)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -777,7 +1066,7 @@ def confidence_policy_show(
     try:
         payload = client.ai_usage_confidence_policy(source=source)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -822,7 +1111,7 @@ def confidence_policy_default(
     try:
         payload = client.ai_usage_confidence_policy(source="default")
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -876,7 +1165,7 @@ def confidence_policy_validate(
     try:
         payload = client.ai_usage_validate_confidence_policy(yaml_text)
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         raise click.ClickException(
@@ -901,11 +1190,11 @@ def confidence_policy_validate(
 # ---------------------------------------------------------------------------
 # agent discovery — one-shot toggle for the sidecar AI-discovery service.
 #
-# Background: ``ai_discovery.enabled`` is read once at sidecar boot
-# (``inventory.NewContinuousDiscoveryService`` returns nil otherwise),
-# so flipping the flag on disk is necessary but not sufficient. The
-# operator-friendly path is "flip + save + restart + (optional) scan",
-# and the previous workflow required three separate commands plus
+# Background: a running gateway hot-reloads ``ai_discovery``, but the
+# reload is asynchronous, so the operator-friendly path stays "flip +
+# save + restart + (optional) scan": the restart waits for the new
+# gateway before the scan runs. The previous workflow required three
+# separate commands plus
 # manual YAML editing. These subcommands fold all of that into one
 # step and stay parameter-compatible with ``defenseclaw guardrail
 # {enable,disable}`` so muscle memory transfers.
@@ -1042,6 +1331,10 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--ide-inventory", type=click.Choice(("all", "ai_only", "off")), default=None,
+    help="IDE plugin inventory scope (all, ai_only or off).",
+)
+@click.option(
     "--enable-host-plane/--no-enable-host-plane",
     default=None,
     help=(
@@ -1078,6 +1371,7 @@ def discovery_enable(
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     enable_host_plane: bool | None,
+    ide_inventory: str | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1085,19 +1379,14 @@ def discovery_enable(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Enable the sidecar AI discovery service.
+    """Turn on AI discovery in the gateway (sidecar).
 
-    Sets ``ai_discovery.enabled = true`` in ``~/.defenseclaw/config.yaml``,
-    persists, and (when ``--restart`` is on) bounces the gateway so
-    ``inventory.NewContinuousDiscoveryService`` actually constructs
-    the service. With ``--scan`` (the default) this command also calls
-    ``POST /api/v1/ai-usage/scan`` once the sidecar is back up so the
-    operator gets the first inventory snapshot in the same flow.
+    Sets ai_discovery.enabled to true in ~/.defenseclaw/config.yaml and, with
+    --restart, restarts the gateway so discovery starts. With --scan (the
+    default) it then runs the first scan, so you get an inventory right away.
 
-    All ``ai_discovery.*`` knobs can be set inline as flags so this
-    command is fully scriptable; for an interactive walkthrough that
-    prompts for each value with the existing config as the default,
-    use ``defenseclaw agent discovery setup``.
+    Every ai_discovery setting is also a flag here, so this command can be
+    scripted. For a guided walkthrough use 'defenseclaw agent discovery setup'.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1116,13 +1405,33 @@ def discovery_enable(
         lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
+        ide_inventory=ide_inventory,
     )
 
     from defenseclaw import ux
 
     diff = _preview_discovery_changes(ad, pending)
     runtime_diff = _preview_runtime_planes(ad, enable_host_plane=enable_host_plane)
+    restart_pending = False
     if ad.enabled and not diff and not runtime_diff:
+        # GAP-2260: on in config but the running gateway started before
+        # that change, so discovery is not running. Restart instead of
+        # answering "already enabled" and scanning a sidecar that 503s.
+        restart_pending = _live_discovery_enabled(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        ) is False
+        if restart_pending and not restart:
+            ux.warn(
+                "AI discovery is on in config, but the running gateway started "
+                "before that change, so it is not running yet.",
+                indent="  ",
+            )
+            ux.subhead("Restart the gateway to start it: defenseclaw-gateway restart", indent="  ")
+            return
+    if ad.enabled and not diff and not runtime_diff and not restart_pending:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
         # than a no-op. Runtime planes are part of the same enable
@@ -1141,7 +1450,14 @@ def discovery_enable(
             )
         return
 
-    if ad.enabled:
+    if restart_pending:
+        ux.section("Starting AI discovery")
+        ux.subhead(
+            "AI discovery is on in config, but the running gateway started before "
+            "that change, so it is not running yet.",
+            indent="  ",
+        )
+    elif ad.enabled:
         ux.section("Updating AI discovery settings")
     else:
         ux.section("Enabling AI discovery")
@@ -1149,7 +1465,7 @@ def discovery_enable(
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
     for field, before, after in runtime_diff:
-        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
+        ux.subhead(_runtime_change_line(field, before, after), indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar starts the discovery service.",
@@ -1193,7 +1509,7 @@ def discovery_enable(
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
             f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
-            f"runtime planes {'a/b/c' if _discovery_runtime(ad).enable_host_plane else 'a/b'} on)",
+            f"{_runtime_planes_saved_phrase(_discovery_runtime(ad).enable_host_plane)})",
             indent="  ",
         )
     except OSError as exc:
@@ -1267,7 +1583,17 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         return
 
     ux.section("Disabling AI discovery")
-    if restart:
+    # GAP-2389: never start a gateway the user stopped. The saved change
+    # applies the next time the gateway starts.
+    gateway_stopped = not _gateway_running(app)
+    if gateway_stopped:
+        restart = False
+        ux.subhead(
+            "The gateway is not running, so it will not be started. AI discovery "
+            "stays off when the gateway next starts.",
+            indent="  ",
+        )
+    elif restart:
         ux.subhead(
             "Will restart the gateway so the discovery service stops immediately.",
             indent="  ",
@@ -1341,12 +1667,11 @@ def discovery_status(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Show on-disk + live AI discovery status.
+    """Show AI discovery settings from config.yaml next to the running gateway's.
 
-    Reports values persisted in ``config.yaml`` alongside the fields
-    the running sidecar exposes via ``GET /api/v1/ai-usage``. Drift is
-    evaluated only for fields present in the live response; the JSON
-    comparison block identifies settings that could not be verified.
+    A setting that differs from what the gateway (sidecar) reports is shown
+    as drift. Settings the gateway does not report are listed as not
+    verified in the JSON output.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1363,6 +1688,15 @@ def discovery_status(
         "lookup_model_provenance_online": bool(
             ad.lookup_model_provenance_online
         ),
+    }
+
+    pack_total, refused_packs = ai_signatures.refused_packs(cfg)
+    packs = {
+        "configured": pack_total,
+        "not_loaded": [
+            {"path": pack.path, "reason": pack.reason, "digest": pack.digest, "pinned": pack.pinned}
+            for pack in refused_packs
+        ],
     }
 
     live: dict[str, Any] = {
@@ -1394,7 +1728,7 @@ def discovery_status(
                 )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
-            live["error"] = f"sidecar unavailable: {exc}"
+            live["error"] = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             live["error"] = f"sidecar rejected request: HTTP {status}"
@@ -1418,6 +1752,7 @@ def discovery_status(
         click.echo(json.dumps(
             {
                 "on_disk": on_disk,
+                "signature_packs": packs,
                 "live": live,
                 "drift": drift,
                 "comparison": {
@@ -1443,6 +1778,15 @@ def discovery_status(
         "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
         indent="  ",
     )
+    if pack_total:
+        ux.kv(
+            "Signature packs",
+            f"{pack_total - len(refused_packs)} of {pack_total} loaded"
+            + (f", {len(refused_packs)} not loaded" if refused_packs else ""),
+            indent="  ",
+        )
+        for pack in refused_packs:
+            ux.warn(f"Not loaded: {pack.path}: {pack.reason}", indent="  ")
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -1459,7 +1803,11 @@ def discovery_status(
         else:
             ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
-        ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
+        last = str(summary.get("scanned_at") or "-")
+        if _is_process_refresh(summary):
+            # GAP-1482: the 60 s process tick is not the full scan.
+            last += f" (process refresh; full scan every {on_disk['scan_interval_min']} min)"
+        ux.kv("Last scan", last, indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
         if live["lookup_model_provenance_online"] is None:
@@ -1677,12 +2025,12 @@ def discovery_setup(
             indent="  ",
         )
     if not diff and not enabled_changed and not runtime_diff:
-        click.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
+        ux.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
         return
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
     for field, before, after in runtime_diff:
-        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
+        ux.subhead(_runtime_change_line(field, before, after), indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar applies these settings.",
@@ -1724,9 +2072,7 @@ def discovery_setup(
             f"{str(ad.enabled).lower()}, mode={ad.mode}, "
             f"scan_interval_min={ad.scan_interval_min}"
             + (
-                ", runtime planes a/b/c on"
-                if enable_pref and host_plane_requested
-                else ", runtime planes a/b on"
+                f", {_runtime_planes_saved_phrase(host_plane_requested)}"
                 if enable_pref
                 else ""
             )
@@ -1787,15 +2133,11 @@ def discovery_scan(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """Trigger one immediate AI discovery scan via the sidecar.
+    """Run one AI discovery scan now through the running gateway (sidecar).
 
-    Thin wrapper around ``POST /api/v1/ai-usage/scan`` that surfaces a
-    friendly summary line on success and an actionable hint on the
-    canonical failure mode (HTTP 503 = ai_discovery disabled in
-    config). Operators were previously typing ``defenseclaw agent
-    usage --refresh`` for this same effect; that command is still
-    around but its name implies "render the table" rather than
-    "trigger a scan", which is the cause of repeated confusion.
+    Prints a one-line summary. If AI discovery is turned off in the
+    config, it says so and shows how to turn it on
+    ('defenseclaw agent discovery enable').
     """
     from defenseclaw import ux
 
@@ -1808,7 +2150,7 @@ def discovery_scan(
     try:
         payload = client.scan_ai_usage()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -1905,11 +2247,13 @@ def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
 
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    from rich.text import Text
+
     table = Table()
     for header in headers:
         table.add_column(header)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*(Text("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(cell))) for cell in row))
     console.print(table)
     return stream.getvalue()
 
@@ -1942,7 +2286,7 @@ def _runtime_snapshot(
     try:
         return client.scan_ai_runtime() if refresh else client.ai_runtime()
     except requests.ConnectionError as exc:
-        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         if status == 503:
@@ -1967,7 +2311,12 @@ def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
     for plane in payload.get("planes") or []:
         name = str(plane.get("name") or plane.get("plane") or "plane")
         if plane.get("running"):
-            ux.ok(f"{name}: running via {plane.get('mechanism') or 'unknown mechanism'}", indent=indent)
+            via = plane.get("mechanism") or "unknown mechanism"
+            if plane.get("reason"):
+                # Running with a stated limit is partial coverage (GAP-1377).
+                ux.warn(f"{name}: partial, running via {via} -- {plane.get('reason')}", indent=indent)
+            else:
+                ux.ok(f"{name}: running via {via}", indent=indent)
         elif plane.get("available"):
             ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
         else:
@@ -2250,6 +2599,7 @@ def _probe_linux_capability(name: str) -> bool | None:
 # ask for, because an incomplete map is better than a stale copy of a header.
 _LINUX_CAPABILITY_BITS = {
     "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_ADMIN": 12,
     "CAP_NET_RAW": 13,
     "CAP_SYS_ADMIN": 21,
 }
@@ -2337,7 +2687,10 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "observation; without it peers are named by reverse DNS, less "
                 "confidently"
             ),
-            "how": "run the gateway as root, or set dns_capture: false to stop asking",
+            "how": (
+                "run the gateway as root, or turn DNS capture off: "
+                "defenseclaw agent discovery runtime enable --no-dns-capture"
+            ),
         },
         {
             "plane": "agent actions (C)",
@@ -2382,12 +2735,14 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         },
         {
             "plane": "agent actions (C), process events",
-            "needs": "nothing",
+            "needs": "CAP_NET_ADMIN",
+            "probe": "cap_net_admin",
             "why": (
-                "the cn_proc netlink connector is readable unprivileged on most "
-                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+                "the cn_proc netlink connector refuses a subscriber without it "
+                "(the bind fails with EPERM), so Plane C sees no exec or exit "
+                "events, including the short-lived processes the /proc poll misses"
             ),
-            "how": None,
+            "how": "run the gateway as root, or grant CAP_NET_ADMIN",
         },
         {
             "plane": "agent actions (C), file events",
@@ -2398,6 +2753,17 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "argv instead of observed, which sees the command but not the read"
             ),
             "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+        {
+            "plane": "agent actions (C), Tetragon",
+            "needs": "nothing",
+            "info": True,
+            "why": (
+                "per-user installs do not connect to Tetragon: its socket is root-only "
+                "and grants kernel policy control. The enterprise sensor helper uses it "
+                "on managed Linux hosts"
+            ),
+            "how": None,
         },
     ],
     "windows": [
@@ -2471,6 +2837,8 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
         return bool(granted and _probe_root())
     if probe == "cap_dac":
         return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_admin":
+        return _probe_linux_capability("CAP_NET_ADMIN")
     if probe == "cap_net_raw":
         return _probe_linux_capability("CAP_NET_RAW")
     if probe == "cap_sys_admin":
@@ -2494,7 +2862,7 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
 # TCC does not let any process grant to itself or to another, at any
 # privilege level. The command opens the exact settings pane instead and
 # waits for the operator, which is the whole of what is achievable.
-_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep"
 
 _WINDOWS_AUDIT_SUBCATEGORIES = (
     "Process Creation",
@@ -2623,6 +2991,14 @@ def runtime_permissions(
         raise SystemExit(f"no permission guidance for {resolved}")
 
     for_this_host = target_os is None
+    dns_capture_on = True
+    if for_this_host:
+        try:
+            dns_capture_on = bool(
+                _load_config_best_effort(app).ai_discovery.runtime.dns_capture
+            )
+        except AttributeError:
+            dns_capture_on = True
     evaluated = []
     for entry in grants:
         if entry["needs"] == "nothing":
@@ -2631,7 +3007,12 @@ def runtime_permissions(
             state: bool | None = True
         else:
             state = _evaluate_grant(entry.get("probe"), for_this_host)  # type: ignore[arg-type]
-        evaluated.append({**entry, "granted": state})
+        item = {**entry, "granted": state}
+        if not dns_capture_on and "DNS naming" in str(entry["plane"]):
+            # dns_capture is off, so nothing is asking for this grant. Calling
+            # it missing would send the operator to grant something unused.
+            item["off"] = True
+        evaluated.append(item)
 
     if as_json:
         click.echo(json.dumps(
@@ -2652,6 +3033,21 @@ def runtime_permissions(
         # shadowing it left the loop's last dict bound to the name, so the
         # command believed --grant had been passed on every invocation.
         state = entry["granted"]
+        if entry.get("info"):
+            # Nothing to grant and nothing missing: a fact about this
+            # platform an operator would otherwise go looking for.
+            ux.subhead(f"[info] {entry['plane']}", indent="  ")
+            ux.subhead(str(entry["why"]), indent="    ")
+            continue
+        if entry.get("off"):
+            ux.subhead(f"[off] {entry['plane']}", indent="  ")
+            ux.subhead(
+                "dns_capture is off, so peers are named by reverse DNS. To name them "
+                "directly: defenseclaw agent discovery runtime enable --dns-capture "
+                f"(needs {entry['needs']})",
+                indent="    ",
+            )
+            continue
         if state is True:
             mark = "[granted]"
         elif state is False:
@@ -2893,7 +3289,7 @@ def _apply_runtime_settings(
         ux.ok("no configuration changes needed", indent="  ")
     else:
         for field, before, after in changes:
-            ux.subhead(f"{field}: {before!r} -> {after!r}", indent="  ")
+            ux.subhead(_runtime_change_line(field, before, after), indent="  ")
         if runtime.enable_host_plane:
             ux.warn(
                 "the host plane reads kernel process, file, and identity events. Every "
@@ -2915,7 +3311,7 @@ def _apply_runtime_settings(
         ux.subhead(
             "--no-restart specified: the setting is saved but the running gateway keeps "
             "its current planes until you restart it "
-            "('defenseclaw setup restart').",
+            "('defenseclaw-gateway restart').",
             indent="  ",
         )
         return
@@ -2938,11 +3334,20 @@ def _apply_runtime_settings(
             connector=connector,
             connectors=connectors,
         )
+    except cmd_setup._OpenClawGatewayNotRunning:
+        # GAP-2548: defenseclaw-gateway, which runs the runtime planes,
+        # restarted fine; only OpenClaw's own gateway is down. That does not
+        # stop the planes, so this is not a failed restart.
+        ux.warn(
+            "The OpenClaw gateway is not running, so OpenClaw traffic is not guarded "
+            "until you start it: 'openclaw gateway run'.",
+            indent="  ",
+        )
     except Exception as exc:  # noqa: BLE001 - the config is already saved
         ux.err(f"Gateway restart failed: {exc}", indent="  ")
         ux.subhead(
             "The configuration is saved. Restart the gateway to apply it: "
-            "'defenseclaw setup restart'.",
+            "'defenseclaw-gateway restart'.",
             indent="    ",
         )
         raise SystemExit(1) from exc
@@ -2987,6 +3392,7 @@ def _build_discovery_overrides(
     lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
+    ide_inventory: str | None = None,
 ) -> dict[str, Any]:
     """Collect non-None overrides into a stable, ordered mapping.
 
@@ -3030,6 +3436,8 @@ def _build_discovery_overrides(
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
+    if ide_inventory is not None:
+        overrides["ide_inventory"] = ide_inventory
     return overrides
 
 
@@ -3049,6 +3457,44 @@ def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
     except Exception:  # noqa: BLE001 - fixtures may be read-only namespaces
         pass
     return created
+
+
+# Plain names for the runtime planes (docs: ai-discovery "The three planes").
+_RUNTIME_PLANE_NAMES = {
+    "a": "A inference heartbeat",
+    "b": "B per-process egress",
+    "c": "C agent actions",
+}
+
+
+def _on_off(value: object) -> str:
+    return "on" if value else "off"
+
+
+def _runtime_planes_phrase(planes: object) -> str:
+    names = [
+        _RUNTIME_PLANE_NAMES.get(str(plane).strip().lower(), str(plane))
+        for plane in (planes or [])  # type: ignore[union-attr]
+    ]
+    return ", ".join(names) if names else "none"
+
+
+def _runtime_change_line(field: str, before: object, after: object) -> str:
+    """One preview line for a runtime-plane config change, in plain words."""
+    if field == "enabled":
+        return f"Runtime monitoring: {_on_off(before)} → {_on_off(after)}"
+    if field == "planes":
+        return f"Runtime planes: {_runtime_planes_phrase(before)} → {_runtime_planes_phrase(after)}"
+    if field == "enable_host_plane":
+        return f"Plane C (agent actions, kernel events): {_on_off(before)} → {_on_off(after)}"
+    if field == "dns_capture":
+        return f"DNS capture: {_on_off(before)} → {_on_off(after)}"
+    return f"{field}: {before!r} → {after!r}"
+
+
+def _runtime_planes_saved_phrase(host_plane: bool) -> str:
+    planes = FULL_RUNTIME_PLANES if host_plane else USER_RUNTIME_PLANES
+    return f"runtime planes on: {_runtime_planes_phrase(planes)}"
 
 
 def _preview_runtime_planes(
@@ -3188,6 +3634,39 @@ def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
     return [connector] if connector else []
 
 
+def _gateway_running(app: AppContext) -> bool:
+    """Whether this user's gateway is running (same probe as cmd_setup._is_pid_alive)."""
+    from defenseclaw.process_liveness import pid_file_alive
+
+    try:
+        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
+        return False
+
+
+def _live_discovery_enabled(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> bool | None:
+    """Return the running gateway's ai_discovery state; None when it can't be read."""
+
+    try:
+        client = _usage_client(
+            app,
+            gateway_host=gateway_host,
+            gateway_port=gateway_port,
+            gateway_token_env=gateway_token_env,
+        )
+        payload = client.ai_usage()
+    except Exception:  # noqa: BLE001 - best-effort probe; callers keep the old path.
+        return None
+    enabled = payload.get("enabled") if isinstance(payload, dict) else None
+    return enabled if isinstance(enabled, bool) else None
+
+
 def _trigger_post_enable_scan(
     app: AppContext,
     *,
@@ -3207,8 +3686,11 @@ def _trigger_post_enable_scan(
 
     delays = (0.5, 1.0, 2.0, 3.0)
     last_err = ""
+    discovery_off = False
     for delay in delays:
         time.sleep(delay)
+        # Only the latest attempt can establish why the scan did not run.
+        discovery_off = False
         try:
             client = _usage_client(
                 app,
@@ -3227,12 +3709,15 @@ def _trigger_post_enable_scan(
             )
             return
         except (requests.ConnectionError, requests.Timeout) as exc:
-            last_err = f"sidecar unavailable: {exc}"
+            last_err = _sidecar_unavailable(exc)
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             last_err = f"sidecar rejected scan: HTTP {status}"
-            # 503 right after restart is expected; keep retrying.
-            if status != 503:
+            # 503 is the endpoint's "AI discovery is off in this gateway".
+            # The restart already waited for the new gateway, so a 503 that
+            # survives the retries is a config disagreement, not a slow start.
+            discovery_off = status == 503
+            if not discovery_off:
                 break
         except requests.RequestException as exc:
             last_err = f"sidecar request failed: {exc}"
@@ -3240,6 +3725,14 @@ def _trigger_post_enable_scan(
         except click.ClickException as exc:
             last_err = str(exc.message)
             break
+    if discovery_off:
+        ux.warn(
+            "Could not run an initial scan: the restarted gateway reports AI "
+            "discovery as disabled. Run 'defenseclaw agent discovery status' "
+            "to compare the saved config with the gateway.",
+            indent="  ",
+        )
+        return
     ux.warn(
         f"Could not run an initial scan ({last_err or 'sidecar unreachable'}). "
         "Re-run with 'defenseclaw agent usage --refresh' once the sidecar is up.",
@@ -3258,7 +3751,10 @@ def _log_discovery_action(app: AppContext, *, action: str, details: str) -> None
     if logger is None:
         return
     try:
-        logger.log_action(action, "config", details)
+        # The gateway admits only registered audit actions, so the
+        # toggle is recorded as config-update with the operation named
+        # in the details (for example "ai_discovery-enable mode=...").
+        logger.log_action("config-update", "config", f"{action} {details}")
     except Exception:
         # Audit failures must never block a config flip.
         pass
@@ -3276,22 +3772,44 @@ def signatures() -> None:
 def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    pins, require_pins = ai_signatures.pack_pins(cfg)
+    configured = list(cfg.ai_discovery.signature_packs)
+    if secure_client:
+        # Secure Client v8 still discovers every pack in this directory. An
+        # empty or absent directory is not an error there, so list the files
+        # that exist instead of a pattern that must match.
+        pack_dir = ai_signatures.signature_pack_dir(cfg.data_dir)
+        configured[:0] = [str(path) for path in sorted(pack_dir.glob("*.json")) if path.is_file()]
     try:
-        sigs = ai_signatures.load_ai_signatures(
-            data_dir=cfg.data_dir,
-            signature_packs=cfg.ai_discovery.signature_packs,
+        sigs, refused = ai_signatures.load_ai_signature_catalog(
+            signature_packs=configured,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            pack_digests=pins,
+            require_digests=require_pins,
+            secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
-        return
-    click.echo(_render_signatures_table(sigs).rstrip())
+        payload = [asdict(sig) for sig in sigs]
+        if secure_client:
+            for sig in payload:
+                for field in ai_signatures.IDE_INVENTORY_FIELDS:
+                    sig.pop(field, None)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(_render_signatures_table(sigs).rstrip())
+    # A pack that fails its pin is not loaded: its signatures are not listed.
+    # Say so where the list is read (stderr keeps --json parseable).
+    for pack in refused:
+        click.echo(f"Not loaded: {pack.path}: {pack.reason}", err=as_json)
 
 
 @signatures.command("validate")
@@ -3315,13 +3833,67 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 @click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
 @pass_ctx
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
-    """Install a validated pack into the managed signature-pack directory."""
-    cfg = _load_config_best_effort(app)
+    """Install a validated pack and configure it for standalone discovery."""
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config import load as load_config
+
+    cfg = _require_loaded_config(app)
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    if secure_client:
+        # Match the v8 command: install into the directory without a config
+        # write. The Secure Client gateway discovers that directory itself.
+        try:
+            legacy_packs = sorted(ai_signatures.signature_pack_dir(cfg.data_dir).glob("*.json"))
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=cfg.data_dir, signature_packs=[str(path) for path in legacy_packs],
+                replace=replace,
+                secure_client=True,
+            )
+        except ai_signatures.SignaturePackError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Installed signature pack: {dest}")
+        return
+
+    config_path = config_path_for_data_dir(cfg.data_dir)
     try:
-        dest = ai_signatures.install_signature_pack(pack_path, data_dir=cfg.data_dir, replace=replace)
+        # A managed refusal must happen before an existing pack is replaced.
+        config_writer.refuse_when_managed(config_path)
+        with config_writer.hold_lock(config_path):
+            config_writer.refuse_when_managed(config_path)
+            # The command may have loaded config before another install committed.
+            # Read it again under the writer lock before checking and editing packs.
+            current_cfg = load_config(data_dir=cfg.data_dir) if Path(config_path).is_file() else cfg
+            configured = list(current_cfg.ai_discovery.signature_packs or [])
+            dest = ai_signatures.signature_pack_destination(pack_path, current_cfg.data_dir)
+            previous = dest.read_bytes() if dest.exists() else None
+            previous_mode = dest.stat().st_mode & 0o777 if previous is not None else None
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=current_cfg.data_dir, signature_packs=configured, replace=replace
+            )
+            original_pins = dict(current_cfg.ai_discovery.signature_pack_digests or {})
+            try:
+                if str(dest) not in configured:
+                    current_cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+                pins = dict(original_pins)
+                if str(dest) in pins:
+                    pins[str(dest)] = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
+                    current_cfg.ai_discovery.signature_pack_digests = pins
+                if str(dest) not in configured or str(dest) in pins:
+                    current_cfg.save()
+                app.cfg = current_cfg
+            except Exception:
+                if previous is None:
+                    dest.unlink()
+                else:
+                    ai_signatures.restore_signature_pack(dest, previous, previous_mode)
+                current_cfg.ai_discovery.signature_packs = configured
+                current_cfg.ai_discovery.signature_pack_digests = original_pins
+                raise
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Installed signature pack: {dest}")
+    click.echo(f"Installed signature pack: {dest} (added to ai_discovery.signature_packs)")
 
 
 @signatures.command("disable")
@@ -3422,9 +3994,11 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
-        if getattr(cfg, "_source_config_version", None) != 8:
+        from defenseclaw.config import is_current_schema
+
+        if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException(
-                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+                "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
             )
         return cfg
     from defenseclaw import config as cfg_mod
@@ -3494,7 +4068,12 @@ def _emit_discovery_report(
         gateway_token_env=gateway_token_env,
     )
     if not token:
-        result["error"] = "gateway token unavailable"
+        # GAP-1553: the token is created the first time the gateway starts.
+        where = f" for {host}:{port}" if host and port else ""
+        result["error"] = (
+            f"no gateway token yet{where}; start the gateway with 'defenseclaw-gateway start' "
+            "(it creates the token), then re-run"
+        )
         return result
 
     try:
@@ -3502,13 +4081,39 @@ def _emit_discovery_report(
         client.emit_agent_discovery(report)
         result["emitted"] = True
     except (requests.ConnectionError, requests.Timeout) as exc:
-        result["error"] = f"sidecar unavailable: {exc}"
+        result["error"] = _sidecar_unavailable(exc, host, port)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         result["error"] = f"sidecar rejected discovery telemetry: HTTP {status}"
     except requests.RequestException as exc:
         result["error"] = f"sidecar request failed: {exc}"
     return result
+
+
+def _usage_rejected(exc: requests.HTTPError) -> click.ClickException:
+    """The error for an AI usage request the sidecar refused.
+
+    A refresh with AI discovery off (503) does not get here: _usage_payload
+    reads it as the disabled view, which says how to enable discovery
+    (GAP-0150, GAP-0281).
+    """
+    response = exc.response
+    status = response.status_code if response is not None else "unknown"
+    return click.ClickException(f"sidecar rejected AI usage request: HTTP {status}")
+
+
+def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:
+    """A plain hint for an unreachable gateway instead of urllib3's text (GAP-1471)."""
+    target = f"{host}:{port}" if host and port else ""
+    if not target:
+        url = getattr(getattr(exc, "request", None), "url", "") or ""
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        target = urlparse(url).netloc if url else ""
+    where = f" on {target}" if target else ""
+    if isinstance(exc, requests.Timeout) and not isinstance(exc, requests.ConnectTimeout):
+        return f"the gateway{where} did not answer in time; check it with 'defenseclaw-gateway status'"
+    return f"the gateway is not running{where}; start it with 'defenseclaw-gateway start'"
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -3631,6 +4236,11 @@ def _format_missing_token_error(app: AppContext) -> str:
     the wording (presence of remediation hints) without bringing the
     whole click.ClickException raise path into the assertion.
     """
+    from defenseclaw import config as config_module
+
+    if not config_module.config_path().is_file():
+        return "DefenseClaw is not initialized — run defenseclaw init first."
+
     configured_env = ""
     cfg = getattr(app, "cfg", None)
     gw = getattr(cfg, "gateway", None) if cfg is not None else None
@@ -3686,6 +4296,7 @@ def _filter_ai_usage_signals(
     products: tuple[str, ...],
     show_gone: bool,
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Apply the operator-supplied filters to the raw signal list.
 
@@ -3709,14 +4320,20 @@ def _filter_ai_usage_signals(
       ``signal.product`` for legacy signatures that carry neither block). Lets the
       operator type ``--component openai`` and pick out every
       OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
+    * ``sandboxes`` — exact, case-insensitive match against
+      ``signal.sandbox_name``: what AI discovery found inside those OpenShell
+      sandboxes, and nothing found on this machine itself.
     """
     state_set = {_canonical_ai_usage_state(s) for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
     product_needles = [p.lower() for p in products] if products else []
     component_needles = [c.lower() for c in components] if components else []
+    sandbox_set = {s.strip().lower() for s in sandboxes if s.strip()} if sandboxes else set()
 
     out: list[dict[str, Any]] = []
     for sig in signals or []:
+        if sandbox_set and str(sig.get("sandbox_name") or "").lower() not in sandbox_set:
+            continue
         state = _canonical_ai_usage_state(sig.get("state", ""))
         if state_set:
             if state not in state_set:
@@ -3950,13 +4567,16 @@ def _summarize_ai_usage_signals_full(
     return rows
 
 
-def _format_runtime(runtime: dict[str, Any]) -> str:
+def _format_runtime(runtime: dict[str, Any], *, live: bool = False) -> str:
     """Render the new ``runtime`` block compactly for the detail view.
 
     Format: ``pid=1234 user=alice up=3h12m`` — fields are dropped when
     the underlying value is missing so signatures from non-process
     detectors (which won't have a runtime block at all) just render an
     empty string and tests that don't seed runtime data stay stable.
+    ``live`` counts the uptime from the process's start: a sandbox's
+    process is as of the sandbox's last read, minutes old, and was running
+    then (GAP-0392).
     """
     if not runtime:
         return ""
@@ -3968,6 +4588,9 @@ def _format_runtime(runtime: dict[str, Any]) -> str:
     if user:
         parts.append(f"user={user}")
     uptime = runtime.get("uptime_sec")
+    started = _parse_iso_ts(runtime.get("started_at")) if live else None
+    if started is not None:
+        uptime = max(0, int(time.time() - started.timestamp()))
     if isinstance(uptime, (int, float)) and uptime > 0:
         parts.append(f"up={_humanize_seconds(int(uptime))}")
     comm = runtime.get("comm")
@@ -3991,6 +4614,23 @@ def _humanize_seconds(seconds: int) -> str:
         return "0s"
     chosen = nonzero[:2]
     return "".join(f"{v}{u}" for v, u in chosen)
+
+
+def _is_process_refresh(summary: dict[str, Any]) -> bool:
+    """True when the report came from the process-only tick, not a full scan."""
+    return str(summary.get("source") or "").strip().lower() == "process"
+
+
+def _discovery_scan_clause(summary: dict[str, Any]) -> str:
+    """'scanned <time>, files=N', or say it was a process refresh (GAP-1482).
+
+    The process-only tick reads no files, so its files=0 is not the count of
+    the last full scan.
+    """
+    when = summary.get("scanned_at", "-") or "-"
+    if _is_process_refresh(summary):
+        return f"process refresh {when}; files are read on full scans"
+    return f"scanned {when}, files={summary.get('files_scanned', 0)}"
 
 
 def _format_relative_time(value: Any) -> str:
@@ -4100,6 +4740,37 @@ def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
     return note + "."
 
 
+def _tag_sandbox_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag what AI discovery found inside an OpenShell sandbox with its name.
+
+    The product reads "Claude Code (sandbox myapp-7f3a)", so a component
+    found in a sandbox never folds into the same product on this machine
+    in the grouped view, and every view says where it was found. (Square
+    brackets would read as Rich markup in the table.)
+    """
+    out: list[dict[str, Any]] = []
+    for sig in signals:
+        name = str(sig.get("sandbox_name") or "").strip()
+        if name:
+            sig = dict(sig)
+            product = str(sig.get("product") or sig.get("name") or "").strip()
+            sig["product"] = f"{product} (sandbox {name})" if product else f"(sandbox {name})"
+        out.append(sig)
+    return out
+
+
+def _ai_usage_counts(signals: list[dict[str, Any]]) -> dict[str, int]:
+    """The summary counts of these signals, counted as the sidecar counts the
+    whole machine: active is every signal that is not gone."""
+    states = [_canonical_ai_usage_state(sig.get("state", "")) for sig in signals]
+    return {
+        "active_signals": sum(state != "gone" for state in states),
+        "new_signals": states.count("new"),
+        "changed_signals": states.count("changed"),
+        "gone_signals": states.count("gone"),
+    }
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -4108,20 +4779,42 @@ def _render_ai_usage_table(
     categories: tuple[str, ...] = (),
     products: tuple[str, ...] = (),
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
     show_gone: bool = False,
     by_detector: bool = False,
     limit: int = 0,
+    wide: bool = False,
 ) -> str:
     raw_signals = payload.get("signals", []) or []
-    filtered = _filter_ai_usage_signals(
-        raw_signals,
-        states=states,
-        categories=categories,
-        products=products,
-        show_gone=show_gone,
-        components=components,
+    filtered = _tag_sandbox_signals(
+        _filter_ai_usage_signals(
+            raw_signals,
+            states=states,
+            categories=categories,
+            products=products,
+            show_gone=show_gone,
+            components=components,
+            sandboxes=sandboxes,
+        )
     )
     summary = payload.get("summary", {}) or {}
+    if sandboxes or categories or products or components:
+        # The header counts what the filters select, not the whole machine
+        # (GAP-0269: --sandbox showed active=32 above that sandbox's 6).
+        summary = {
+            **summary,
+            **_ai_usage_counts(
+                _filter_ai_usage_signals(
+                    raw_signals,
+                    states=(),
+                    categories=categories,
+                    products=products,
+                    show_gone=True,
+                    components=components,
+                    sandboxes=sandboxes,
+                )
+            ),
+        }
     enabled = payload.get("enabled", True)
 
     try:
@@ -4129,7 +4822,7 @@ def _render_ai_usage_table(
         from rich.table import Table
     except Exception:
         return _render_ai_usage_plain(
-            payload,
+            {**payload, "summary": summary},
             signals=filtered,
             detail=detail,
             by_detector=by_detector,
@@ -4139,7 +4832,18 @@ def _render_ai_usage_table(
     from io import StringIO
 
     stream = StringIO()
-    console = Console(file=stream, force_terminal=False, color_system=None, width=120)
+    # Use the real terminal width (never below the historical 120) so a
+    # wide terminal is not squeezed into 120 columns.
+    import shutil
+
+    term_columns = shutil.get_terminal_size((120, 24)).columns
+    # Below 120 columns the default grouped view drops its secondary columns
+    # (model status, component, vendor, last active) and draws at the
+    # terminal width, so rows stop wrapping; --wide keeps every column
+    # (GAP-1284).
+    compact = not wide and not detail and term_columns < 120
+    width = term_columns if compact else max(160 if wide else 120, term_columns)
+    console = Console(file=stream, force_terminal=False, color_system=None, width=width)
 
     title = "AI visibility"
     if not enabled:
@@ -4269,7 +4973,7 @@ def _render_ai_usage_table(
                         sig.get("presence_score"), sig.get("presence_band")))
                     prev_conf_key = conf_key
             if has_runtime:
-                row.append(_format_runtime(runtime))
+                row.append(_format_runtime(runtime, live=sig.get("source") == "sandbox"))
             if has_last_active:
                 row.append(_format_relative_time(sig.get("last_active_at", "")))
             # Prefer the richer evidence records (basename + quality
@@ -4288,11 +4992,7 @@ def _render_ai_usage_table(
             shown_clause = f"{len(displayed)} of {len(rows)} {signal_word} shown"
         else:
             shown_clause = f"{len(rows)} {signal_word} shown"
-        footer = (
-            f"{shown_clause} "
-            f"(scanned {summary.get('scanned_at', '-')}, "
-            f"files={summary.get('files_scanned', 0)})."
-        )
+        footer = f"{shown_clause} ({_discovery_scan_clause(summary)})."
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
         footer += _format_ai_usage_scan_diagnostics(summary)
@@ -4301,15 +5001,14 @@ def _render_ai_usage_table(
 
     full_groups = _summarize_ai_usage_signals_full(filtered, by_detector=by_detector)
     displayed_full = full_groups[:limit] if limit > 0 else full_groups
-    has_component = any(g.get("component") for g in displayed_full)
+    has_component = not compact and any(g.get("component") for g in displayed_full)
     has_model = any(g.get("model") for g in displayed_full)
-    has_version = any(g.get("version") for g in displayed_full)
-    has_last_active = any(g.get("last_active_at") for g in displayed_full)
-    # Surface confidence in the default grouped view so operators
-    # don't have to drop into --detail just to see whether the
-    # gateway is sure about a component. Only render when at least
-    # one row carries the v2 fields (older sidecars stay clean).
-    has_confidence = any(
+    # The default grouped table keeps the columns that fit a normal
+    # terminal; model format, version and the identity/presence
+    # confidence columns only show with --wide (or --detail / --json).
+    has_version = wide and any(g.get("version") for g in displayed_full)
+    has_last_active = not compact and any(g.get("last_active_at") for g in displayed_full)
+    has_confidence = wide and any(
         g.get("identity_band") or g.get("presence_band") for g in displayed_full
     )
 
@@ -4325,16 +5024,19 @@ def _render_ai_usage_table(
     else:
         cat_header, det_header = "Categories", "Detectors"
     table.add_column(cat_header)
-    table.add_column("Product")
+    table.add_column("Product", no_wrap=True)
     if has_model:
         table.add_column("Model")
-        table.add_column("Model status")
-        table.add_column("Format")
+        if not compact:
+            table.add_column("Model status")
+        if wide:
+            table.add_column("Format")
     if has_component:
         table.add_column("Component")
     if has_version:
         table.add_column("Version")
-    table.add_column("Vendor")
+    if not compact:
+        table.add_column("Vendor")
     table.add_column(det_header)
     table.add_column("Count", justify="right")
     if has_confidence:
@@ -4359,11 +5061,11 @@ def _render_ai_usage_table(
             det_cell = detector_join
         row: list[str] = [state, cat_cell, product]
         if has_model:
-            row.extend([
-                str(g.get("model", "")),
-                _format_csv_truncated(g.get("model_statuses") or [], limit=2),
-                _format_csv_truncated(g.get("model_formats") or [], limit=2),
-            ])
+            row.append(str(g.get("model", "")))
+            if not compact:
+                row.append(_format_csv_truncated(g.get("model_statuses") or [], limit=2))
+            if wide:
+                row.append(_format_csv_truncated(g.get("model_formats") or [], limit=2))
         if has_component:
             ecosystem = str(g.get("ecosystem", ""))
             comp_name = str(g.get("component", ""))
@@ -4373,7 +5075,9 @@ def _render_ai_usage_table(
                 row.append(comp_name)
         if has_version:
             row.append(str(g.get("version", "")))
-        row.extend([vendor, det_cell, str(g["count"])])
+        if not compact:
+            row.append(vendor)
+        row.extend([det_cell, str(g["count"])])
         if has_confidence:
             row.append(_format_confidence(
                 g.get("identity_score"), g.get("identity_band")))
@@ -4389,17 +5093,19 @@ def _render_ai_usage_table(
     signal_word = _pluralize(total_signals, "signal", "signals")
     footer = (
         f"{len(full_groups)} {group_word}, {total_signals} {signal_word} "
-        f"(scanned {summary.get('scanned_at', '-')}, "
-        f"files={summary.get('files_scanned', 0)})."
+        f"({_discovery_scan_clause(summary)})."
     )
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
     footer += _format_ai_usage_scan_diagnostics(summary)
+    if compact:
+        footer += " Narrow terminal: model status, component, vendor and last active are hidden."
     footer += (
-        " Use --detail for per-signal rows, --by-detector to split by "
-        "category/detector, --json for raw, --state/--category/--product"
-        "/--component to filter (component also matches local model IDs)."
+        " Use --wide for every column, --detail for per-signal rows, "
+        "--by-detector to split by category/detector, --json for raw, "
+        "--state/--category/--product/--component to filter (component "
+        "also matches local model IDs)."
     )
     console.print(footer)
     return stream.getvalue()
@@ -4462,7 +5168,7 @@ def _render_ai_usage_plain(
                 str(sig.get("detector", "")),
                 _format_confidence(sig.get("identity_score"), sig.get("identity_band")),
                 _format_confidence(sig.get("presence_score"), sig.get("presence_band")),
-                _format_runtime(runtime),
+                _format_runtime(runtime, live=sig.get("source") == "sandbox"),
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
             ])
@@ -4513,10 +5219,82 @@ def _render_ai_usage_plain(
     return "\n".join(lines) + "\n"
 
 
+def _parse_iso_ts(value: Any) -> Any:
+    if not value:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
+def _product_last_active(signals: list[dict[str, Any]]) -> dict[str, str]:
+    """Newest ``last_active_at`` per product across every live signal.
+
+    GAP-1503: a process signal's own ``last_active_at`` is its start time, so
+    the column only repeated Up. Hook and file signals for the same product
+    carry the real activity (what ``agent usage`` shows).
+    """
+    best: dict[str, tuple[Any, str]] = {}
+    for sig in signals:
+        if str(sig.get("state", "")).lower() == "gone":
+            continue
+        product = str(sig.get("product", "") or "")
+        raw = str(sig.get("last_active_at", "") or "")
+        ts = _parse_iso_ts(raw)
+        if product and ts is not None and (product not in best or ts > best[product][0]):
+            best[product] = (ts, raw)
+    return {product: raw for product, (_ts, raw) in best.items()}
+
+
+def _expand_process_instances(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one row per live process.
+
+    The sidecar keeps one signal per product and lists that product's other
+    live processes in ``runtime.other_instances`` (GAP-2633), so two Claude
+    Code sessions are two rows here.
+    """
+    rows: list[dict[str, Any]] = []
+    for sig in signals:
+        runtime = _mapping_block(sig.get("runtime"))
+        others = runtime.get("other_instances")
+        primary = dict(sig)
+        primary["runtime"] = {k: v for k, v in runtime.items() if k != "other_instances"}
+        rows.append(primary)
+        for other in others if isinstance(others, list) else []:
+            if not isinstance(other, dict):
+                continue
+            row = dict(sig)
+            row["runtime"] = {k: v for k, v in other.items() if k != "other_instances"}
+            if other.get("started_at"):
+                row["last_active_at"] = other["started_at"]
+            rows.append(row)
+    return rows
+
+
+def _process_last_active(sig: dict[str, Any], product_last_active: dict[str, str] | None) -> str:
+    own = str(sig.get("last_active_at", "") or "")
+    newer = (product_last_active or {}).get(str(sig.get("product", "") or ""), "")
+    own_ts, newer_ts = _parse_iso_ts(own), _parse_iso_ts(newer)
+    if newer_ts is not None and (own_ts is None or newer_ts > own_ts):
+        return newer
+    return own
+
+
+_PROCESSES_LAST_ACTIVE_NOTE = (
+    "Last active is the newest activity seen for that product (as in 'agent usage'); "
+    "Up is the process uptime."
+)
+
+
 def _render_ai_processes_table(
     process_signals: list[dict[str, Any]],
     *,
     limit: int = 0,
+    product_last_active: dict[str, str] | None = None,
 ) -> str:
     """Render the live AI processes view: PID/PPID/uptime/user/comm/product."""
     displayed = process_signals[:limit] if limit > 0 else process_signals
@@ -4525,7 +5303,7 @@ def _render_ai_processes_table(
         from rich.console import Console
         from rich.table import Table
     except Exception:
-        return _render_ai_processes_plain(displayed)
+        return _render_ai_processes_plain(displayed, product_last_active=product_last_active)
 
     from io import StringIO
 
@@ -4552,7 +5330,7 @@ def _render_ai_processes_table(
             str(sig.get("product", "")),
             str(sig.get("vendor", "")),
             str(runtime.get("comm", "") or ""),
-            _format_relative_time(sig.get("last_active_at", "")),
+            _format_relative_time(_process_last_active(sig, product_last_active)),
         )
     console.print(table)
     hidden = len(process_signals) - len(displayed)
@@ -4561,10 +5339,16 @@ def _render_ai_processes_table(
         footer += f" ({hidden} hidden by --limit)"
     footer += ". Use --json for the full list."
     console.print(footer)
+    if displayed:
+        console.print(_PROCESSES_LAST_ACTIVE_NOTE)
     return stream.getvalue()
 
 
-def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
+def _render_ai_processes_plain(
+    process_signals: list[dict[str, Any]],
+    *,
+    product_last_active: dict[str, str] | None = None,
+) -> str:
     lines = [f"AI processes ({len(process_signals)} live)"]
     for sig in process_signals:
         runtime = _mapping_block(sig.get("runtime"))
@@ -4577,7 +5361,7 @@ def _render_ai_processes_plain(process_signals: list[dict[str, Any]]) -> str:
                 str(sig.get("product", "")),
                 str(sig.get("vendor", "")),
                 str(runtime.get("comm", "") or ""),
-                _format_relative_time(sig.get("last_active_at", "")),
+                _format_relative_time(_process_last_active(sig, product_last_active)),
             ])
         )
     return "\n".join(lines) + "\n"
@@ -4885,7 +5669,7 @@ def _resolve_component(
     try:
         payload = client.ai_usage_components()
     except requests.ConnectionError as exc:
-        return {}, f"sidecar unavailable: {exc}"
+        return {}, _sidecar_unavailable(exc)
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
         return {}, f"sidecar rejected components request: HTTP {status}"
@@ -4904,8 +5688,20 @@ def _resolve_component(
             continue
         matches.append(c)
     if not matches:
-        scope = f" in ecosystem {ecosystem!r}" if ecosystem else ""
-        return {}, f"component {name!r} not found{scope}"
+        from defenseclaw import ux
+
+        # GAP-1928: name the components there are, like policy show does.
+        known = (
+            c.get("name")
+            for c in payload.get("components", []) or []
+            if not eco_filter or str(c.get("ecosystem", "")).lower() == eco_filter
+        )
+        message = ux.not_found_message(
+            "component", name, known, "defenseclaw agent components", empty="No components were found."
+        )
+        if ecosystem:
+            message = message.replace(" not found.", f" not found in ecosystem {ecosystem!r}.", 1)
+        return {}, message
     if len(matches) > 1:
         ecos = sorted({str(c.get("ecosystem", "")) for c in matches})
         return {}, (
@@ -5278,3 +6074,153 @@ def _error_class(error: str) -> str:
     if "failed" in err:
         return "probe_failed"
     return "other"
+
+
+# ---------------------------------------------------------------------------
+# agent identities — the stable agt- identity of each harness install
+# (one connector for one user on one machine), from inventory.db.
+# ---------------------------------------------------------------------------
+
+
+@agent.command("identities")
+@click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
+@click.option("--connector", "connector_name", default=None, help="Only this connector.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Only the N most recently seen.")
+@click.option("--json", "as_json", is_flag=True, help="Output the identities as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def identities(
+    app: AppContext,
+    user: str | None,
+    connector_name: str | None,
+    limit: int | None,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List agent identities: one per connector install, per user, per machine.
+
+    The ID (agt-...) is derived from the machine id, the verified user,
+    the connector and its config root, so it is stable across sessions
+    and gateway restarts. Each session of an agent has its own ais- id.
+    Every identity is listed, most recently seen first.
+    """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+
+    if connector_name:
+        raw_connector, connector_name = connector_name, normalize_connector(connector_name)
+        if connector_name not in KNOWN_CONNECTORS:
+            raise click.BadParameter(
+                f"unknown connector {raw_connector!r}; valid names: {', '.join(KNOWN_CONNECTORS)}",
+                param_hint="--connector",
+            )
+    if limit is not None and limit > 1000:
+        raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.agent_identities_all(user=user, connector=connector_name or None, limit=limit or 0)
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    rows = [row for row in payload.get("identities", []) or [] if isinstance(row, Mapping)]
+    total = payload.get("total")
+    total = total if isinstance(total, int) and total > len(rows) else len(rows)
+    next_cursor = str(payload.get("next_cursor") or "")
+    if next_cursor:
+        hint = "" if limit else " Narrow the list with --user or --connector."
+        click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
+    persisted = payload.get("persisted")
+    persist_error = str(payload.get("persist_error") or "").strip()
+    if as_json:
+        out: dict[str, Any] = {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+                               "total": total, "next_cursor": next_cursor}
+        if isinstance(persisted, bool):
+            out["persisted"] = persisted
+        if persist_error:
+            out["persist_error"] = persist_error
+        click.echo(json.dumps(out, indent=2, sort_keys=True))
+        return
+    if persisted is False and payload.get("enabled") is not False:
+        # GAP-0393: the list is the gateway's memory only.
+        reason = f" ({persist_error})" if persist_error else ""
+        click.echo(
+            f"Warning: agent identities are not being saved to inventory.db{reason}; session counts and "
+            "first-seen times reset at the next gateway restart. Run 'defenseclaw doctor'.",
+            err=True,
+        )
+    if payload.get("enabled") is False:
+        click.echo("Agent identities are not recorded on this deployment.")
+        return
+    if not rows:
+        if user or connector_name:
+            try:
+                existing = client.agent_identities(limit=1).get("total", 0)
+            except requests.ConnectionError as exc:
+                raise click.ClickException(_sidecar_unavailable(exc)) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+            except requests.RequestException as exc:
+                raise click.ClickException(f"sidecar request failed: {exc}") from exc
+            label = f"--user {user}" if user else f"--connector {connector_name}"
+            click.echo(
+                f"No agent identity matches {label} "
+                f"({existing} identities exist; run without a filter to list them)."
+            )
+        else:
+            click.echo(
+                "No agent identities seen yet. They appear after an agent's first hook, "
+                "LLM proxy or ACP request."
+            )
+        return
+    click.echo(_render_agent_identities(rows))
+
+
+def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
+    headers = ("User", "Connector", "Agent identity", "Sessions", "Last seen", "Config root")
+    table = [headers]
+    for row in rows:
+        user = str(row.get("user_name") or row.get("user_id") or "")
+        root = str(row.get("install_fp") or "")
+        hint = str(row.get("install_hint") or "")
+        if hint:
+            root = f"{root} (agent claims {hint})"
+        table.append((
+            # A retired identity's account no longer holds its uid (GAP-0947).
+            _bounded(user, 32) + (" (retired)" if row.get("retired") else ""),
+            str(row.get("connector", "")),
+            str(row.get("agent_id", "")),
+            str(row.get("sessions_seen", 0)),
+            _format_relative_time(str(row.get("last_seen", "") or "")),
+            root,
+        ))
+    from rich.cells import cell_len
+
+    table = [
+        tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line)
+        for line in table
+    ]
+    widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    lines = [
+        "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
+        + "  " + line[-1]
+        for line in table
+    ]
+    return "\n".join(line.rstrip() for line in lines)

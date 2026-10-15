@@ -127,13 +127,54 @@ func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) e
 		Action:        "inspect the effective-plan validation rule and correct this field",
 		cause:         err,
 	}
+	if rule := observabilityV8RuleText(err); rule != "" {
+		result.Summary = rule
+		result.Expected = "a value that satisfies this rule"
+		result.Action = "correct this field"
+	}
+	var secretError *V8SecretReferenceError
+	if errors.As(err, &secretError) && secretError.Credential {
+		result.Summary = "protected credential " + strconv.Quote(secretError.Reference) + " is not stored or not trusted"
+		result.Expected = "a credential stored in a standalone enterprise deployment"
+		result.Action = "store it with `enterprise secret set --name " + secretError.Reference + " --from-stdin` (or --from-file <root-only file>), or remove the reference"
+	} else if errors.As(err, &secretError) {
+		result.Summary = "environment variable " + strconv.Quote(secretError.Reference) + " is not set"
+		result.ReceivedClass = ""
+		result.Expected = "the variable in the environment or in the DefenseClaw .env file"
+		result.Action = "set it with `defenseclaw keys set " + secretError.Reference + "`, or remove the reference"
+	}
 	if document != nil {
 		result.Source = document.Source
 	}
 	if node != nil {
 		result.Line, result.Column = node.Line, node.Column
+		if strings.HasSuffix(path, ".redaction_profile") && node.Kind == yaml.ScalarNode &&
+			strings.Contains(err.Error(), "unknown profile") {
+			result.Summary = "unknown redaction profile " + strconv.Quote(node.Value)
+			result.Expected = "one of the defined redaction profiles: content, none, sensitive, strict, or a name under observability.redaction_profiles"
+			result.Action = "choose a defined profile and restart the gateway"
+		}
 	}
 	return result
+}
+
+// observabilityV8RuleText is the rule a compile error states for its field:
+// the text after "<field path>: ". The compiler names a field and a rule and
+// does not repeat configured values, but a diagnostic that reaches a
+// lifecycle result or a log shows the rule only when it is short and carries
+// no URL or userinfo, so a message that did quote a value is never relayed.
+func observabilityV8RuleText(err error) string {
+	message := err.Error()
+	match := observabilityV8SemanticPathPattern.FindStringSubmatch(message)
+	if len(match) != 2 {
+		return ""
+	}
+	rule, ok := strings.CutPrefix(message[len(match[1]):], ": ")
+	if !ok || rule == "" || len(rule) > 200 ||
+		strings.ContainsAny(rule, "@\n\r") || strings.Contains(rule, "://") {
+		return ""
+	}
+	return rule
 }
 
 func observabilityV8SemanticErrorPath(err error) string {

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,6 +35,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 )
@@ -47,6 +49,15 @@ const (
 	maxWatchdogPIDFileBytes = 16 << 10
 	watchdogStartTimeout    = 15 * time.Second
 	watchdogStartInterval   = 25 * time.Millisecond
+	// A freshly installed watchdog binary can take longer than
+	// watchdogStartTimeout to take its ownership lock on a busy Windows host
+	// (first-run scanning of the new image), so the readiness wait after a
+	// spawn is longer (GAP-1053). It returns as soon as the lock is taken.
+	watchdogSpawnReadyTimeout = 45 * time.Second
+	// watchdogProbeTimeout bounds one /health probe. A gateway on a loaded
+	// Windows host missed 5 s twice in a row and was reported down while it
+	// kept running (GAP-1642).
+	watchdogProbeTimeout = 15 * time.Second
 )
 
 type watchdogState int
@@ -218,7 +229,7 @@ Stop:                   defenseclaw-gateway watchdog stop`,
 var watchdogStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the watchdog as a background daemon",
-	RunE:  runWatchdogStart,
+	RunE:  runWatchdogStartCommand,
 }
 
 var watchdogStopCmd = &cobra.Command{
@@ -240,23 +251,23 @@ func init() {
 	rootCmd.AddCommand(watchdogCmd)
 }
 
-func runWatchdogForeground(_ *cobra.Command, _ []string) error {
-	cfg, err := config.LoadRuntimeV8File(config.ConfigPath())
+// loadWatchdogConfig loads the config the way the daemon does. The watchdog
+// commands skip the root pre-run, so destination secrets kept only in
+// <data_dir>/.env were missing: the config did not compile, a watchdog started
+// with 'watchdog start' exited at once (reported as an ownership-lock
+// timeout), and 'watchdog status' called it disabled while doctor said it was
+// enabled but not running (GAP-1310).
+func loadWatchdogConfig() (*config.Config, error) {
+	loaded, err := loadConfigV8Source(config.ConfigPath(), config.DefaultDataPath(), "", true)
 	if err != nil {
-		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
+		return nil, err
 	}
+	return loaded.runtime, nil
+}
 
-	interval := time.Duration(cfg.Gateway.Watchdog.Interval) * time.Second
-	if interval < time.Second {
-		interval = 30 * time.Second
-	}
-	debounce := cfg.Gateway.Watchdog.Debounce
-	if debounce < 1 {
-		debounce = 2
-	}
-
-	healthURL := watchdogHealthURL(cfg)
-	requirements := watchdogHealthRequirementsFromConfig(cfg)
+func runWatchdogForeground(_ *cobra.Command, _ []string) error {
+	// A background watchdog's watchdog.log lines carry a time (GAP-1578).
+	defer daemon.StampDetachedLog()()
 	currentPID := os.Getpid()
 	exe, exeErr := watchdogExecutablePath()
 	if exeErr != nil {
@@ -273,13 +284,6 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	}
 	if watchdogRequiresStrongProcessIdentity() && !watchdogHasStrongProcessIdentity(pidInfo) {
 		return errors.New("watchdog: complete executable and process start identity are required on Windows")
-	}
-
-	var webhooks *gateway.WebhookDispatcher
-	// Include per-connector webhook overrides (D5b) so a global-empty install
-	// that routes a connector to its own webhook still gets a dispatcher.
-	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
-		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
 	}
 
 	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
@@ -299,12 +303,40 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	pidInfo.ControlName = controlName
 	pidFile, err := acquireWatchdogPIDFile(pidPath, pidInfo)
 	if err != nil {
-		return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+		return watchdogForegroundAcquireError(pidPath, err)
 	}
 	defer func() {
 		_ = pidFile.Close()
 		removeWatchdogPIDIfOwned(pidPath, pidInfo)
 	}()
+	// The configuration loads after the PID record is published: the
+	// gateway start that spawned this process waits for that record, and
+	// the load is a full pass over every guardrail profile, which made each
+	// start wait for it too (GAP-0276). The watchdog start command checks the
+	// configuration before it spawns this process.
+	cfg, err := loadWatchdogConfig()
+	if err != nil {
+		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
+	}
+
+	interval := time.Duration(cfg.Gateway.Watchdog.Interval) * time.Second
+	if interval < time.Second {
+		interval = 30 * time.Second
+	}
+	debounce := cfg.Gateway.Watchdog.Debounce
+	if debounce < 1 {
+		debounce = 2
+	}
+
+	healthURL := watchdogHealthURL(cfg)
+	requirements := watchdogHealthRequirementsFromConfig(cfg)
+	var webhooks *gateway.WebhookDispatcher
+	// Include per-connector webhook overrides (D5b) so a global-empty install
+	// that routes a connector to its own webhook still gets a dispatcher.
+	if len(cfg.Webhooks) > 0 || len(cfg.Observability.Connectors) > 0 {
+		webhooks = gateway.NewWebhookDispatcher(cfg.Webhooks, cfg.Observability)
+	}
+
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
@@ -333,6 +365,9 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr, "[watchdog] warn: gateway token unavailable; recovery telemetry will not be recorded")
 	}
 
+	if watchdogGatewayStarter == nil {
+		watchdogGatewayStarter = startCrashedGatewayFromWatchdog
+	}
 	watchdogLoopRunner(ctx, healthURL, interval, debounce, requirements, webhooks, recoveryRecorder)
 	if webhooks != nil {
 		webhooks.Close()
@@ -341,33 +376,38 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
+// watchdogForegroundAcquireError explains a foreground start that lost the
+// ownership lock to a running watchdog in plain words, with its PID and the
+// next step, instead of the raw lock errno (GAP-1819).
+func watchdogForegroundAcquireError(pidPath string, err error) error {
+	const next = "Stop it first to run it in the foreground: defenseclaw-gateway watchdog stop"
+	if inspection := inspectWatchdogPIDOwnership(pidPath); inspection.locked {
+		if inspection.info.PID > 0 {
+			return fmt.Errorf("the watchdog already runs in the background (PID %d). %s", inspection.info.PID, next)
+		}
+		return fmt.Errorf("the watchdog already runs in the background. %s", next)
+	}
+	return fmt.Errorf("watchdog: another instance is already running (cannot acquire %s): %w", pidPath, err)
+}
+
 func watchdogHealthURL(cfg *config.Config) string {
 	apiPort := 18970
 	if cfg != nil && cfg.Gateway.APIPort != 0 {
 		apiPort = cfg.Gateway.APIPort
 	}
 
-	apiBind := "127.0.0.1"
-	if cfg != nil {
-		if cfg.Gateway.APIBind != "" {
-			apiBind = cfg.Gateway.APIBind
-		} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-			apiBind = cfg.Guardrail.Host
-		}
-	}
-
-	return fmt.Sprintf("http://%s:%d/health", apiBind, apiPort)
+	return fmt.Sprintf("http://%s:%d/health", config.APIBindHost(cfg), apiPort)
 }
 
 func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Duration, debounce int, requirements watchdogHealthRequirements, webhooks *gateway.WebhookDispatcher, recovery watchdogRecoveryRecorder) {
 	dataDir := config.DefaultDataPath()
 	current := loadWatchdogState(dataDir)
-	failCount := 0
+	// Degraded and down probes debounce separately: a shared count let one
+	// slow probe after a run of degraded ones report "protection down ...
+	// unreachable" for a gateway that answered (GAP-1642).
+	degradedCount, downCount := 0, 0
 	pendingRecovery := false
-	if current != stateHealthy {
-		failCount = debounce // carry over so first healthy probe triggers recovery
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: watchdogProbeTimeout}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -381,7 +421,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 
 			switch assessment.state {
 			case stateHealthy:
-				failCount = 0
+				degradedCount, downCount = 0, 0
 				if current != stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
@@ -400,8 +440,11 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				}
 
 			case stateDegraded:
-				failCount++
-				if failCount >= debounce && current == stateHealthy {
+				degradedCount++
+				downCount = 0
+				// From down too: a gateway that came back degraded must not
+				// keep showing an earlier run's "down" (GAP-1847).
+				if degradedCount >= debounce && current != stateDegraded {
 					fmt.Fprintf(os.Stderr, "[watchdog] protection degraded: %s\n", assessment.details)
 					_ = notify.Send("DefenseClaw", assessment.notification)
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
@@ -410,13 +453,23 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				}
 
 			default: // stateDown
-				failCount++
-				if failCount >= debounce && current != stateDown {
-					fmt.Fprintf(os.Stderr, "[watchdog] protection down (after %d failures): %s\n", failCount, assessment.details)
+				downCount++
+				degradedCount = 0
+				if downCount >= debounce && current != stateDown {
+					fmt.Fprintf(os.Stderr, "[watchdog] protection down (after %d failures): %s\n", downCount, assessment.details)
 					_ = notify.Send("DefenseClaw", assessment.notification)
 					dispatchHealthEvent(webhooks, assessment.action, assessment.severity, assessment.details)
 					current = stateDown
 					saveWatchdogState(dataDir, current)
+				}
+				if downCount >= debounce && watchdogGatewayStarter != nil {
+					// A crashed per-user gateway is started again (GAP-0386);
+					// the start keeps its own backoff after a failure.
+					if started, err := watchdogGatewayStarter(dataDir); started && err != nil {
+						fmt.Fprintf(os.Stderr, "[watchdog] the gateway is not running and could not be started: %v\n", err)
+					} else if started {
+						fmt.Fprintln(os.Stderr, "[watchdog] the gateway was not running; started it again")
+					}
 				}
 			}
 		}
@@ -563,6 +616,17 @@ func assessRequiredConnectors(primary *gateway.ConnectorHealth, connectors *[]ga
 	return healthyWatchdogAssessment()
 }
 
+// runWatchdogStartCommand is the watchdog start command: it refuses a configuration
+// the watchdog cannot load before it spawns one, since the spawned watchdog
+// loads it only after it has published its PID record. A gateway start has
+// loaded the configuration already and calls runWatchdogStart.
+func runWatchdogStartCommand(cmd *cobra.Command, args []string) error {
+	if _, err := loadWatchdogConfig(); err != nil {
+		return fmt.Errorf("watchdog: load schema-v8 config: %w", err)
+	}
+	return runWatchdogStart(cmd, args)
+}
+
 func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
@@ -616,13 +680,45 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("watchdog: start background: %w", err)
 	}
 	_ = logFile.Close()
-	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogStartTimeout, watchdogStartInterval); err != nil {
-		return fmt.Errorf("watchdog: start readiness: %w", err)
+	if err := waitForWatchdogStart(pidPath, cmd.pid, watchdogSpawnReadyTimeout, watchdogStartInterval); err != nil {
+		// On a busy machine the child may not even have taken its lock yet;
+		// a live child is slow, not failed (GAP-0478).
+		if watchdogStillStarting(pidPath) || watchdogChildRunning(cmd.pid) {
+			Warn(fmt.Sprintf("Watchdog is still starting (PID %d); on a busy machine this can take a minute", cmd.pid))
+			Subhead("Check it in a minute with: defenseclaw-gateway watchdog status")
+			return nil
+		}
+		return fmt.Errorf(
+			"watchdog: start readiness: %w (PID %d may still be starting; check with 'defenseclaw-gateway watchdog status')",
+			err, cmd.pid,
+		)
 	}
 
 	fmt.Printf("Watchdog %s (PID %d)\n", Style("started", "fg=green", "bold"), cmd.pid)
 	fmt.Printf("  %s %s\n", Style("Log file:", "fg=bright_black", "bold"), logPath)
 	return nil
+}
+
+// watchdogChildRunning reports whether the watchdog process just spawned is
+// still alive.
+func watchdogChildRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return watchdogProcessAlive(pid, proc)
+}
+
+// watchdogStillStarting reports a watchdog that took its ownership lock but
+// has not published its PID record yet. On a loaded Windows host that can
+// outlast the readiness wait; start then said it failed for a watchdog that
+// came up a minute later, and status read "PID 0 does not match" (GAP-1310).
+func watchdogStillStarting(pidPath string) bool {
+	locked, info, err := watchdogIsLocked(pidPath)
+	return locked && ((err == nil && info.PID == 0) || errors.Is(err, fs.ErrNotExist))
 }
 
 func waitForWatchdogOwnedRecord(pidPath string, timeout, interval time.Duration) (watchdogPIDInfo, error) {
@@ -711,6 +807,7 @@ func (c *execCommand) start() error {
 	proc, err := os.StartProcess(c.path, append([]string{c.path}, c.args...), &os.ProcAttr{
 		Dir:   watchdogStartDir(c.path),
 		Files: []*os.File{devNull, c.logFile, c.logFile},
+		Env:   append(os.Environ(), daemon.EnvStampLog+"=1"),
 		Sys:   watchdogSysProcAttr(),
 	})
 	_ = devNull.Close()
@@ -723,7 +820,12 @@ func (c *execCommand) start() error {
 }
 
 func runWatchdogStop(_ *cobra.Command, _ []string) error {
-	dataDir := config.DefaultDataPath()
+	return stopWatchdogAt(config.DefaultDataPath(), os.Stdout)
+}
+
+// stopWatchdogAt stops the watchdog that runs for dataDir, writing its
+// progress to out. Not running is not an error.
+func stopWatchdogAt(dataDir string, out io.Writer) error {
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -746,9 +848,9 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("watchdog: repair stale PID ownership: %w", cleanupErr)
 		}
 		if removed {
-			fmt.Println(Dim("Watchdog is not running (stale or invalid PID file repaired)"))
+			fmt.Fprintln(out, Dim("Watchdog is not running (stale or invalid PID file repaired)"))
 		} else {
-			fmt.Println(Dim("Watchdog is not running"))
+			fmt.Fprintln(out, Dim("Watchdog is not running"))
 		}
 		return nil
 	}
@@ -765,20 +867,20 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 
 	proc, err := os.FindProcess(info.PID)
 	if err != nil {
-		fmt.Println(Dim("Watchdog is not running"))
+		fmt.Fprintln(out, Dim("Watchdog is not running"))
 		removeWatchdogPIDIfOwned(pidPath, info)
 		return nil
 	}
 	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
-	fmt.Printf("Stopping watchdog (PID %d)... ", info.PID)
+	fmt.Fprintf(out, "Stopping watchdog (PID %d)... ", info.PID)
 	if err := watchdogRequestTerminate(info, proc); err != nil {
 		if !verifyWatchdogProcess(info) {
 			removeWatchdogPIDIfOwned(pidPath, info)
-			fmt.Println(Dim("already stopped"))
+			fmt.Fprintln(out, Dim("already stopped"))
 			return nil
 		}
-		fmt.Println(Style("FAILED", "fg=red", "bold"))
+		fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("watchdog: request stop: %w", err)
 	}
 
@@ -787,21 +889,21 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 		// fast-restart-and-PID-reuse window cannot be exploited to kill
 		// the new occupant of the recycled PID.
 		if !verifyWatchdogProcess(info) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return errors.New("watchdog: process identity changed before force stop")
 		}
 		if err := watchdogKill(proc); err != nil && verifyWatchdogProcess(info) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return fmt.Errorf("watchdog: force stop: %w", err)
 		}
 		if !watchdogWaitForExit(proc, info, 2*time.Second) {
-			fmt.Println(Style("FAILED", "fg=red", "bold"))
+			fmt.Fprintln(out, Style("FAILED", "fg=red", "bold"))
 			return errors.New("watchdog: process did not exit after force stop")
 		}
 	}
 
 	removeWatchdogPIDIfOwned(pidPath, info)
-	fmt.Println(Style("OK", "fg=green", "bold"))
+	fmt.Fprintln(out, Style("OK", "fg=green", "bold"))
 	return nil
 }
 
@@ -811,7 +913,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	cfg, cfgErr := config.LoadRuntimeV8File(config.ConfigPath())
+	cfg, cfgErr := loadWatchdogConfig()
 	enabled := cfgErr == nil && cfg.Gateway.Watchdog.Enabled
 
 	inspection := inspectWatchdogPIDOwnership(pidPath)
@@ -826,6 +928,10 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 			return fmt.Errorf("watchdog: PID %d is alive but does not hold the ownership lock; status is indeterminate", info.PID)
 		} else if info.PID > 0 {
 			Warn(fmt.Sprintf("Watchdog: not running (stale PID %d record retained)", info.PID))
+		} else if cfgErr != nil {
+			Warn(fmt.Sprintf("Watchdog: not running (the config does not load: %v)", cfgErr))
+			Subhead("Check it with: defenseclaw config validate")
+			return nil
 		} else if enabled {
 			Warn("Watchdog: enabled but not running")
 		} else {
@@ -836,6 +942,10 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		} else if info.PID == 0 && lockErr == nil {
 			Subhead("Enable in config: gateway.watchdog.enabled = true")
 		}
+		return nil
+	}
+	if watchdogStillStarting(pidPath) {
+		Warn("Watchdog: starting (it holds its ownership lock and has not published its PID yet); check again in a minute")
 		return nil
 	}
 	if lockErr != nil {
@@ -852,13 +962,18 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	fmt.Printf("Watchdog: %s (PID %d)\n", Style("running", "fg=green", "bold"), info.PID)
 
 	state, stateErr := readWatchdogState(dataDir)
+	if errors.Is(stateErr, fs.ErrNotExist) {
+		// Right after start, before the first poll (GAP-1623).
+		fmt.Printf("  %s %s\n", Style("Last known state:", "fg=bright_black", "bold"), "none recorded yet (first poll pending)")
+		return nil
+	}
 	if stateErr != nil {
 		Warn(fmt.Sprintf("Watchdog last known state: unavailable (%v)", stateErr))
 		return nil
 	}
 	switch state {
 	case stateDegraded:
-		Warn("Watchdog last known state: degraded (a required downstream connector or protection subsystem did not converge; restarting the watchdog is not a repair)")
+		printWatchdogDegraded(lastWatchdogDegradedDetail(dataDir))
 	case stateDown:
 		Warn("Watchdog last known state: down (gateway health is unavailable and protection status cannot be verified)")
 	default:
@@ -866,6 +981,59 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// watchdogDegradedLogPrefix starts the line the watchdog writes to
+// watchdog.log when protection becomes degraded.
+const watchdogDegradedLogPrefix = "[watchdog] protection degraded: "
+
+// lastWatchdogDegradedDetail is the cause of the last degraded transition the
+// watchdog logged ("Required connector opencode is missing from the health
+// response"), read from the tail of watchdog.log, or "". watchdog.state holds
+// only the state name.
+func lastWatchdogDegradedDetail(dataDir string) string {
+	file, err := os.Open(filepath.Join(dataDir, watchdogLogFile))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	offset := max(info.Size()-64<<10, 0)
+	tail := make([]byte, info.Size()-offset)
+	if _, err := file.ReadAt(tail, offset); err != nil && !errors.Is(err, io.EOF) {
+		return ""
+	}
+	detail := ""
+	for _, line := range strings.Split(string(tail), "\n") {
+		if index := strings.Index(line, watchdogDegradedLogPrefix); index >= 0 {
+			detail = strings.TrimSpace(line[index+len(watchdogDegradedLogPrefix):])
+		}
+	}
+	if len(detail) > 300 {
+		detail = strings.ToValidUTF8(detail[:300], "") + "..."
+	}
+	return detail
+}
+
+// printWatchdogDegraded names what is degraded and the next step instead of a
+// generic "a connector or subsystem did not converge" (GAP-1968).
+func printWatchdogDegraded(detail string) {
+	if detail == "" {
+		Warn("Watchdog last known state: degraded (a required connector or protection subsystem is not running; restarting the watchdog does not fix it)")
+		Subhead("See which one: defenseclaw-gateway status")
+		return
+	}
+	Warn("Watchdog last known state: degraded: " + detail)
+	if rest, ok := strings.CutPrefix(detail, "Required connector "); ok {
+		if name, _, found := strings.Cut(rest, " "); found && name != "" {
+			Subhead(fmt.Sprintf("See gateway.log for the reason, then run: defenseclaw setup %s", name))
+			return
+		}
+	}
+	Subhead("See which subsystem and why: defenseclaw-gateway status (restarting the watchdog does not fix it)")
 }
 
 // watchdogPIDInfo is the JSON payload of watchdog.pid. The fingerprint

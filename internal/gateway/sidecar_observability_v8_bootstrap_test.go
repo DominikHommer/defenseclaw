@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -31,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/localobservability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	compatredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -39,6 +42,44 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/proto"
 )
+
+// A managed bundle is recorded by the Unix or Windows lifecycle before the
+// gateway observes its config. The runtime graph's own reload audit row must
+// retain that identity, even when it is the only config.change.applied row.
+func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("configwrite.Locked UID-based actor is not available on Windows")
+	}
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	raw := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability: {}\n", fixture.dataDir))
+	const id = "b-01JA0000000000000000000033"
+	if _, err := configwrite.Locked(t.Context(), fixture.configPath, configwrite.Options{
+		Actor: "operator:tip", LocalActor: "os:uid:0:root", Reason: configwrite.BundleReason(id, 1, "guardrail pack update"), Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: id, Version: 1, SignerKeyID: "k1"},
+	}, func() (bool, error) { return true, os.WriteFile(fixture.configPath, raw, 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
+		t.Fatalf("bootstrap: bound=%v err=%v", bound, err)
+	}
+	reader, err := sql.Open("sqlite", fixture.store.DatabasePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var actor, projected string
+	if err := reader.QueryRowContext(t.Context(), `SELECT actor, projected_record_json FROM audit_events WHERE event_name = 'config.change.applied' ORDER BY rowid DESC LIMIT 1`).Scan(&actor, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "os:uid:0:root" {
+		t.Errorf("config.change.applied actor = %q, want local OS account", actor)
+	}
+	for _, want := range []string{`"defenseclaw.admin.actor_ref":"os:uid:0:root"`, `"defenseclaw.admin.principal_ref":"operator:tip"`, id, `"defenseclaw.policy.bundle.version":1`, "k1", "guardrail pack update"} {
+		if !strings.Contains(projected, want) {
+			t.Errorf("config.change.applied lacks %q: %s", want, projected)
+		}
+	}
+}
 
 func TestSidecarObservabilityV8BootstrapErrorReportsOnlySafeRedactionSubcode(t *testing.T) {
 	t.Parallel()
@@ -67,7 +108,15 @@ type sidecarV8BootstrapFixture struct {
 
 func newSidecarV8BootstrapFixture(t *testing.T, configVersion int, storePath string) sidecarV8BootstrapFixture {
 	t.Helper()
-	dataDir := t.TempDir()
+	return newSidecarV8BootstrapFixtureIn(t, configVersion, storePath, t.TempDir())
+}
+
+// newSidecarV8BootstrapFixtureIn starts a gateway on an existing data
+// directory, as a restart does.
+func newSidecarV8BootstrapFixtureIn(
+	t *testing.T, configVersion int, storePath, dataDir string,
+) sidecarV8BootstrapFixture {
+	t.Helper()
 	// Some self-hosted Linux runners create testing.TempDir children under a
 	// permissive process umask. The production audit store correctly rejects an
 	// immediately group-writable database directory, so make the shared success
@@ -76,7 +125,9 @@ func newSidecarV8BootstrapFixture(t *testing.T, configVersion int, storePath str
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	installDefaultRulePackForDataDir(t, dataDir)
+	if _, err := os.Stat(filepath.Join(dataDir, "policies")); err != nil {
+		installDefaultRulePackForDataDir(t, dataDir)
+	}
 	if storePath == "" {
 		storePath = filepath.Join(dataDir, config.DefaultAuditDBName)
 	}
@@ -304,6 +355,9 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 }
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	// This component fixture runs as the test user, not as a pinned Windows
 	// virtual service account. Keep the process identity honest while the
@@ -617,9 +671,14 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 	}))
 	defer server.Close()
 
+	// The destination acknowledges the canary only when its two spans reach
+	// one export. A 10 ms batch delay let the batch timer fire between the
+	// child's and the root's End on a loaded runner, exporting them apart
+	// (canary_failed); the pair now leaves together when the batch of two is
+	// full, or at the canary's flush.
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	raw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 10\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
+		"config_version: 8\ndata_dir: %q\nobservability:\n  destinations:\n    - name: %s\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls:\n        insecure: true\n      network_safety:\n        allow_private_networks: true\n      batch:\n        max_export_batch_size: 2\n        scheduled_delay_ms: 60000\n      send:\n        signals: [traces]\n        buckets: ['*']\n",
 		fixture.dataDir,
 		localobservability.DestinationName,
 		server.URL,
@@ -659,7 +718,7 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 			child = span
 		}
 	}
-	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat gpt-4o-mini" ||
+	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat defenseclaw-diagnostic" ||
 		fmt.Sprintf("%x", root.TraceId) != result.TraceID ||
 		!bytes.Equal(root.TraceId, child.TraceId) || !bytes.Equal(root.SpanId, child.ParentSpanId) {
 		t.Fatalf("canonical root/child pair root=%+v child=%+v result=%+v", root, child, result)
@@ -989,7 +1048,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
-	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil, nil); err == nil || sidecar != nil {
+	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
 }
@@ -1019,7 +1078,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
-			sidecar, err := NewSidecar(candidate, nil, nil, nil)
+			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)
 			}
@@ -1097,6 +1156,9 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 }
 
 func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
 		t.Context(), fixture.configPath, fixture.raw,
@@ -1594,9 +1656,7 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 		t.Fatal(err)
 	}
 	fixture.sidecar.publishConfig(initial)
-	activePack := mustLoadRulePack(t, "")
 	fixture.sidecar.router = NewEventRouter(nil, nil, nil, false)
-	fixture.sidecar.router.SetRulePack(activePack)
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, initialRaw)
 	if err != nil || !bound {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
@@ -1631,8 +1691,11 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 	if err := os.WriteFile(fixture.configPath, candidateRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A config_version 8 candidate meets the invalid pack in its in-memory
+	// migration, which refuses it before the preflight.
+	publishedBefore := currentGeneration()
 	reloadErr := mgr.Reload(t.Context(), "test")
-	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack preflight") {
+	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack yaml_invalid") {
 		t.Fatalf("invalid rule-pack reload error = %v", reloadErr)
 	}
 	if helperCalls != 0 {
@@ -1656,8 +1719,8 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 			mgr.gen.Load(),
 		)
 	}
-	if fixture.sidecar.router.rulePack() != activePack {
-		t.Fatal("invalid rule-pack reload replaced the active router pack")
+	if currentGeneration() != publishedBefore {
+		t.Fatal("invalid rule-pack reload published a generation")
 	}
 }
 
@@ -1717,9 +1780,9 @@ func TestSidecarConfigManagerV8RestartRequiredChangeHelperFailureIsAtomic(t *tes
 }
 
 func TestSidecarConfigManagerV8ArmsRestartModeWithoutImmediateRestart(t *testing.T) {
-	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
+	fixture := newSidecarV8BootstrapFixture(t, config.ConfigVersionV9, "")
 	initialRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nobservability: {}\n",
+		"config_version: 9\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, initialRaw, 0o600); err != nil {
@@ -1751,7 +1814,7 @@ func TestSidecarConfigManagerV8ArmsRestartModeWithoutImmediateRestart(t *testing
 		fixture.sidecar.applyConfigReloadSnapshot,
 	)
 	nextRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
+		"config_version: 9\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
@@ -1818,7 +1881,11 @@ func TestSidecarConfigManagerV8NonObservabilityHotChangeDoesNotReloadGraph(t *te
 	}
 }
 
-func TestSidecarConfigManagerV8ResourceIdentityChangeRequiresRestart(t *testing.T) {
+// TestSidecarConfigManagerV8ResourceIdentityChangeIsHeldForRestart: the
+// resource identity is captured at start, so an environment edit keeps its
+// running value and is reported as pending a restart, without failing the
+// reload and every later one (GAP-0275).
+func TestSidecarConfigManagerV8ResourceIdentityChangeIsHeldForRestart(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 8\ndata_dir: %q\nenvironment: original\nobservability: {}\n",
@@ -1853,19 +1920,20 @@ func TestSidecarConfigManagerV8ResourceIdentityChangeRequiresRestart(t *testing.
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = mgr.Reload(t.Context(), "test")
-	if err == nil || !strings.Contains(err.Error(), "environment") {
+	t.Cleanup(func() { setPendingRestart(nil) })
+	if err := mgr.Reload(t.Context(), "test"); err != nil {
 		t.Fatalf("resource identity reload error = %v", err)
 	}
 	fixture.sidecar.observabilityV8Mu.Lock()
 	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
 	fixture.sidecar.observabilityV8Mu.Unlock()
+	pending, _ := livePendingRestart.Load().([]string)
 	if owner.runtime.Active().Generation() != 1 ||
 		fixture.sidecar.currentConfig().Environment != "original" ||
-		mgr.Current().Environment != "original" {
-		t.Fatalf("identity rollback generation/sidecar/manager = %d/%q/%q",
+		mgr.Current().Environment != "original" || !slices.Contains(pending, "environment") {
+		t.Fatalf("identity hold generation/sidecar/manager/pending = %d/%q/%q/%v",
 			owner.runtime.Active().Generation(), fixture.sidecar.currentConfig().Environment,
-			mgr.Current().Environment)
+			mgr.Current().Environment, pending)
 	}
 }
 
@@ -1966,4 +2034,201 @@ func sidecarV8BootstrapCode(err error) sidecarObservabilityV8BootstrapErrorCode 
 		return target.Code()
 	}
 	return ""
+}
+
+func TestObservabilityClawModeOmittedForSeveralConnectors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Claw.Mode = "claudecode"
+	cfg.Guardrail.Connector = "claudecode"
+	if got := observabilityClawMode(cfg); got != "claudecode" {
+		t.Fatalf("single connector claw mode = %q, want claudecode", got)
+	}
+	cfg.Claw.Mode = "antigravity"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"antigravity": {}, "claudecode": {}}
+	if got := observabilityClawMode(cfg); got != "" {
+		t.Fatalf("multi-connector claw mode = %q, want it omitted", got)
+	}
+}
+
+// GAP-2100: `defenseclaw-gateway stop` waits 10s for a graceful exit before it
+// signals; the normal close in Run and its deferred retry must both fit in
+// that window when a telemetry collector is down or refuses exports.
+func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
+	const gracefulStopWindow = 10 * time.Second
+	if 2*sidecarObservabilityV8ShutdownTimeout >= gracefulStopWindow {
+		t.Fatalf("two shutdown flushes of %s do not fit in the %s stop window", sidecarObservabilityV8ShutdownTimeout, gracefulStopWindow)
+	}
+}
+
+// GAP-2166: a shutdown flush timeout is a warning that names the bound and the
+// next step, not a "bootstrap failed" error. GAP-1096: it names each
+// destination and how many records it lost.
+func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
+	sidecar := &Sidecar{observabilityV8ShutdownLosses: []observabilityruntime.ShutdownLoss{
+		{Destination: "eoi-hec", Signal: observability.SignalLogs, Records: 150},
+	}}
+	got := sidecar.observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{
+		"WARNING", "did not finish within 4s", "150 unsent telemetry records (eoi-hec logs 150)",
+		"setup observability test", "stopped normally",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning %q is missing %q", got, want)
+		}
+	}
+	for _, bad := range []string{"Error:", "bootstrap", "shutdown_degraded"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("warning %q must not contain %q", got, bad)
+		}
+	}
+}
+
+// GAP-0300: strict removes the personal identifiers, except under Secure
+// Client, which keeps every identifier under every profile as on main
+// (issue #1092).
+func TestObservabilityV8RedactionEngineSecureClientKeepsUserEmail(t *testing.T) {
+	key, err := observabilityredaction.LoadOrCreateCorrelationKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	email := observability.TelemetryAttributeDefenseClawUserEmail
+	record, err := observability.NewRecord(observability.RecordInput{
+		Timestamp: time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC), RecordID: "gap-0300",
+		Identity: observability.EventIdentity{
+			Bucket: observability.BucketDiagnostic, Signal: observability.SignalLogs, Name: "diagnostic.message",
+		},
+		Source: observability.SourceGateway,
+		Provenance: observability.Provenance{
+			Producer: "gateway", BinaryVersion: "v8", RegistrySchemaVersion: 1, ConfigGeneration: 1,
+		},
+		Body:         map[string]any{email: "alice@corp.example"},
+		FieldClasses: map[string]observability.FieldClass{"/" + email: observability.FieldClassIdentifier},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, _ := observabilityredaction.BuiltInProfile(observabilityredaction.ProfileStrict)
+	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		engine, err := newObservabilityV8RedactionEngine(cfg, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		projection, _, err := engine.Project(record, strict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, _ := projection.Payload().Object()
+		if _, kept := object[email]; kept != (profile == managed.ProfileSecureClient) {
+			t.Errorf("%s: strict kept %s = %v", profile, email, kept)
+		}
+	}
+}
+
+// GAP-0552: a redaction profile change reaches a running gateway. After the
+// reload a splunk_hec and a jsonl destination project new records with the
+// new profile, tightening and loosening, without a restart.
+func TestSidecarConfigReloadRebindsDestinationRedactionProfiles(t *testing.T) {
+	const tokenEnv = "DC_TEST_GAP_0552_HEC_TOKEN"
+	t.Setenv(tokenEnv, "gap-0552-token")
+	hecProfiles := make(chan [2]string, 256)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		decoder := json.NewDecoder(request.Body)
+		for {
+			var envelope struct {
+				Event struct {
+					Record struct {
+						RecordID   string         `json:"record_id"`
+						Projection map[string]any `json:"projection"`
+					} `json:"record"`
+				} `json:"event"`
+			}
+			if decoder.Decode(&envelope) != nil {
+				break
+			}
+			profile, _ := envelope.Event.Record.Projection["redaction_profile"].(string)
+			hecProfiles <- [2]string{envelope.Event.Record.RecordID, profile}
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"code":0}`)
+	}))
+	defer server.Close()
+
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	jsonlPath := filepath.Join(fixture.dataDir, "records.jsonl")
+	// The destinations follow the capability default (no send block), as
+	// `setup observability add` writes them; `setup redaction defaults set`
+	// changes the global baseline.
+	configFor := func(profile string) []byte {
+		return []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\nobservability:\n"+
+			"  defaults:\n    redaction_profile: %s\n  destinations:\n"+
+			"    - name: cap-hec\n      kind: splunk_hec\n      endpoint: %q\n      token_env: %s\n"+
+			"      network_safety:\n        allow_private_networks: true\n"+
+			"      batch:\n        max_export_batch_size: 1\n        scheduled_delay_ms: 1\n"+
+			"    - name: cap-file\n      kind: jsonl\n      path: %q\n",
+			fixture.dataDir, profile, server.URL+"/services/collector/event", tokenEnv, jsonlPath))
+	}
+	mgr, _ := bootstrapPrivateUpstreamReload(t, fixture, configFor("none"))
+
+	emit := func(requestID string) string {
+		t.Helper()
+		if err := fixture.logger.LogActionCtx(
+			audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{RunID: "gap-0552", RequestID: requestID}),
+			string(audit.ActionConfigUpdate), "config.yaml", "redaction profile reload",
+		); err != nil {
+			t.Fatalf("emit %s: %v", requestID, err)
+		}
+		rows, err := fixture.store.ListEvents(200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.RequestID == requestID {
+				return row.ID
+			}
+		}
+		t.Fatalf("no local row for %s", requestID)
+		return ""
+	}
+	fileProfile := func(recordID string) string {
+		raw, _ := os.ReadFile(jsonlPath)
+		for _, line := range bytes.Split(raw, []byte{'\n'}) {
+			var record struct {
+				RecordID   string         `json:"record_id"`
+				Projection map[string]any `json:"projection"`
+			}
+			if json.Unmarshal(line, &record) == nil && record.RecordID == recordID {
+				profile, _ := record.Projection["redaction_profile"].(string)
+				return profile
+			}
+		}
+		return ""
+	}
+	for _, profile := range []string{"strict", "none"} {
+		if err := os.WriteFile(fixture.configPath, configFor(profile), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.reload(t.Context(), "test", false); err != nil {
+			t.Fatalf("reload to %s: %v", profile, err)
+		}
+		recordID := emit("gap-0552-" + profile)
+		deadline := time.Now().Add(5 * time.Second)
+		gotHEC, gotFile := "", ""
+		for (gotHEC == "" || gotFile == "") && time.Now().Before(deadline) {
+			select {
+			case seen := <-hecProfiles:
+				if seen[0] == recordID {
+					gotHEC = seen[1]
+				}
+			case <-time.After(20 * time.Millisecond):
+			}
+			if gotFile == "" {
+				gotFile = fileProfile(recordID)
+			}
+		}
+		if gotHEC != profile || gotFile != profile {
+			t.Fatalf("after the reload to %s: splunk_hec projected %q, jsonl projected %q", profile, gotHEC, gotFile)
+		}
+	}
 }

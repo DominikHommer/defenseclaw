@@ -1,0 +1,274 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterpriseunix
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// payload is a validated set of files to install.
+type payload struct {
+	Dir            string            // rooted directory holding the binaries
+	Digests        map[string]string // binary name -> sha256
+	CompilerSource string            // rooted path to the optional policy compiler
+	CompilerSHA    string            // sha256 of CompilerSource
+	Version        string
+}
+
+const (
+	compilerFileName     = "policy_compiler.py"
+	compilerArchiveDir   = "edge-connector"
+	compilerPackageDir   = "share/fleet"
+	maxCompilerFileBytes = 1 << 20
+)
+
+func packageCompilerSourcePath(layout managed.StandaloneLayout) string {
+	return filepath.Join(layout.InstallRoot, compilerPackageDir, compilerFileName)
+}
+
+var versionPattern = regexp.MustCompile(`^(dev|[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)$`)
+
+// emptySHA256 is the SHA-256 of zero bytes.
+const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// loadPayload validates dir (an absolute, administrator-staged directory)
+// and reads the gateway's version from it. Every binary must be a regular,
+// non-empty, executable, non-symlink file that is not writable by group or
+// other and is owned by root or the account running the lifecycle.
+func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("payload directory %q must be absolute", dir)
+	}
+	clean := filepath.Clean(dir)
+	if err := checkPayloadPath(clean, true); err != nil {
+		return nil, err
+	}
+	p := &payload{Dir: clean, Digests: map[string]string{}}
+	for _, name := range append(append([]string{}, requiredBinaries...), optionalBinaries...) {
+		path := filepath.Join(clean, name)
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			if contains(optionalBinaries, name) {
+				continue
+			}
+			return nil, fmt.Errorf("payload is missing %s", name)
+		}
+		if err := checkPayloadPath(path, false); err != nil {
+			return nil, err
+		}
+		digest, err := sha256File(path)
+		if err != nil {
+			return nil, err
+		}
+		if digest == emptySHA256 {
+			// A crash during the package unpack can leave a binary empty,
+			// and agents run an empty hook as a script that allows every
+			// tool call (GAP-0680).
+			return nil, fmt.Errorf("payload %s is empty (0 bytes)", path)
+		}
+		p.Digests[name] = digest
+	}
+	version, err := e.binaryVersion(ctx, filepath.Join(clean, binGateway))
+	if err != nil {
+		return nil, err
+	}
+	p.Version = version
+	return p, nil
+}
+
+// payloadPathError is a payload file or directory the lifecycle refuses.
+// fix, when set, is the command that restores an installed binary.
+type payloadPathError struct {
+	path   string
+	reason string
+	fix    string
+}
+
+func (e *payloadPathError) Error() string { return "payload " + e.path + " " + e.reason }
+
+func checkPayloadPath(path string, dir bool) error {
+	return checkPayloadPathMode(path, dir, !dir)
+}
+
+func checkPayloadPathMode(path string, dir, executable bool) error {
+	uid, _, mode, err := statOwnerMode(path)
+	if err != nil {
+		return fmt.Errorf("inspect payload %s: %w", path, err)
+	}
+	if mode&os.ModeSymlink != 0 {
+		return &payloadPathError{path: path, reason: "is a symlink, so its target could be swapped after the check; replace it with the real file"}
+	}
+	if dir && !mode.IsDir() {
+		return &payloadPathError{path: path, reason: "is not a directory"}
+	}
+	if !dir {
+		if !mode.IsRegular() {
+			return &payloadPathError{path: path, reason: "is not a regular file"}
+		}
+		if executable && mode.Perm()&0o111 == 0 {
+			return &payloadPathError{path: path, reason: "is not executable", fix: "chmod 0755 " + path}
+		}
+	}
+	if mode.Perm()&0o022 != 0 {
+		return &payloadPathError{path: path, reason: fmt.Sprintf("is writable by group or other (%04o)", mode.Perm()), fix: "chmod 0755 " + path}
+	}
+	if uid != 0 && uid != os.Geteuid() {
+		return &payloadPathError{path: path, reason: fmt.Sprintf("is owned by uid %d; stage it as root", uid), fix: "chown 0 " + path}
+	}
+	return nil
+}
+
+// loadCompilerFile accepts old payloads that predate the compiler. Once the
+// compiler's own directory exists, a missing or unsafe file is an invalid
+// payload, rather than silently dropping fleet policy compilation. Every
+// directory from base down is checked before the compiler can be copied.
+func loadCompilerFile(base, marker, path string) (string, error) {
+	markerPath := filepath.Join(base, marker)
+	if _, err := os.Lstat(markerPath); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect payload %s: %w", markerPath, err)
+	}
+	if err := checkPayloadPath(base, true); err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(base, filepath.Dir(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("payload compiler %s is outside %s", path, base)
+	}
+	dir := base
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		dir = filepath.Join(dir, part)
+		if err := checkPayloadPath(dir, true); err != nil {
+			return "", err
+		}
+	}
+	if err := checkPayloadPathMode(path, false, false); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() == 0 || info.Size() > maxCompilerFileBytes {
+		return "", fmt.Errorf("payload %s has invalid size %d (want 1..%d bytes)", path, info.Size(), maxCompilerFileBytes)
+	}
+	return sha256File(path)
+}
+
+// checkInstalledCompiler keeps a recorded compiler readable to the gateway
+// service account and immutable to every non-root account. Package files
+// are validated here without being rewritten by the lifecycle.
+func (e *Env) checkInstalledCompiler(canonical string) error {
+	for _, path := range []string{
+		filepath.Join(e.Layout.InstallRoot, "lib"),
+		filepath.Dir(canonical),
+		canonical,
+	} {
+		rooted := e.P(path)
+		_, _, mode, err := statOwnerMode(rooted)
+		if err != nil {
+			return fmt.Errorf("inspect installed compiler %s: %w", path, err)
+		}
+		uid, gid, err := e.OwnerOf(rooted)
+		if err != nil {
+			return fmt.Errorf("inspect installed compiler owner %s: %w", path, err)
+		}
+		wantMode := os.FileMode(0o755)
+		if path == canonical {
+			wantMode = 0o644
+			if !mode.IsRegular() {
+				return fmt.Errorf("installed compiler %s is not a regular file", path)
+			}
+		} else if !mode.IsDir() {
+			return fmt.Errorf("installed compiler directory %s is not a directory", path)
+		}
+		if mode&os.ModeSymlink != 0 || mode.Perm() != wantMode || uid != 0 || gid != 0 {
+			return fmt.Errorf("installed compiler %s is %04o %d:%d, want %04o 0:0 with no symlink", path, mode.Perm(), uid, gid, wantMode)
+		}
+	}
+	return nil
+}
+
+// installedPayloadError adds the remedy to a refusal of the binaries
+// already installed in the layout's bin directory (package channel, or a
+// repair without --payload): restore the file, or put the product's
+// binaries back.
+func (e *Env) installedPayloadError(err error, channel string) error {
+	var pathErr *payloadPathError
+	fix := ""
+	if errors.As(err, &pathErr) && pathErr.fix != "" {
+		fix = "restore it with `" + e.canonicalPayloadFix(pathErr.fix) + "`, or "
+	}
+	if channel == ChannelPackage {
+		return fmt.Errorf("%w; %sreinstall the DefenseClaw enterprise package, then rerun", err, fix)
+	}
+	return fmt.Errorf("%w; %srerun with --payload <staged payload directory>", err, fix)
+}
+
+// canonicalPayloadFix maps the rooted path in a fix command back to the
+// host path the administrator types.
+func (e *Env) canonicalPayloadFix(fix string) string {
+	if e.Root == "" {
+		return fix
+	}
+	return strings.ReplaceAll(fix, e.Root, "")
+}
+
+// binaryVersion runs `<gateway> --version-json` and returns its version.
+func (e *Env) binaryVersion(ctx context.Context, gateway string) (string, error) {
+	result, err := e.Runner.Run(ctx, gateway, "--version-json")
+	if err != nil {
+		return "", fmt.Errorf("read payload version: %w", err)
+	}
+	var report struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(result.Stdout, &report); err != nil {
+		return "", fmt.Errorf("parse payload version: %w", err)
+	}
+	version := strings.TrimPrefix(strings.TrimSpace(report.Version), "v")
+	if report.Name != binGateway || !versionPattern.MatchString(version) {
+		return "", fmt.Errorf("payload gateway reports an unexpected identity %q %q", report.Name, report.Version)
+	}
+	return version, nil
+}
+
+// packageOwned reports whether the dpkg or rpm database claims path.
+func (e *Env) packageOwned(ctx context.Context, path string) bool {
+	if _, err := e.Runner.Run(ctx, "dpkg", "-S", path); err == nil {
+		return true
+	}
+	if _, err := e.Runner.Run(ctx, "rpm", "-qf", "--quiet", path); err == nil {
+		return true
+	}
+	return false
+}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}

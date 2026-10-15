@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -57,6 +58,48 @@ func TestRulePackValidateWireProtocol(t *testing.T) {
 		len(response.Summary.Digest) != 64 ||
 		response.Error != nil {
 		t.Fatalf("unexpected validation response: %+v", response)
+	}
+}
+
+func TestRulePackValidateNamesCustomerToolCallRegexRule(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousErr := rulePackValidateCmd.OutOrStdout(), rulePackValidateCmd.ErrOrStderr()
+	previousProblem := rulePackServiceReadProblemFn
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "" }
+	rulePackValidateJSON = false
+	output, warnings := &strings.Builder{}, &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(warnings)
+	rulePackValidateDir = shippedRulePackForCLITest(t, "default")
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if warnings.Len() != 0 || strings.Contains(output.String(), "tool_call_only") {
+		t.Fatalf("shipped pack warned: %s%s", output.String(), warnings.String())
+	}
+
+	directory := t.TempDir()
+	if err := os.Mkdir(filepath.Join(directory, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rules := "version: 1\ncategory: command\nrules:\n  - id: CUSTOMER-MARKER\n    tool_call_only: true\n    pattern: marker\n    title: Marker\n    severity: HIGH\n    confidence: 0.9\n    tags: [test]\n"
+	if err := os.WriteFile(filepath.Join(directory, "rules", "customer.yaml"), []byte(rules), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rulePackValidateDir = directory
+	warnings.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warnings.String(), "CUSTOMER-MARKER") || !strings.Contains(warnings.String(), "detection-only and cannot block") ||
+		strings.Contains(warnings.String(), "12 enabled") {
+		t.Fatalf("customer rule warning = %q", warnings.String())
 	}
 }
 
@@ -159,4 +202,95 @@ func shippedRulePackForCLITest(t *testing.T, profile string) string {
 		t.Fatal("cannot resolve rulepack test source path")
 	}
 	return filepath.Join(filepath.Dir(source), "..", "..", "policies", "guardrail", profile)
+}
+
+// The validator is the rule-pack check enterprise hosts have (they ship no
+// defenseclaw CLI), so it is listed in help.
+func TestRulePackValidateIsAVisibleCommand(t *testing.T) {
+	command, _, err := rootCmd.Find([]string{"rulepack", "validate"})
+	if err != nil || command != rulePackValidateCmd {
+		t.Fatalf("rulepack validate is not registered: %v", err)
+	}
+	for current := command; current != nil && current != rootCmd; current = current.Parent() {
+		if current.Hidden {
+			t.Fatalf("%q is hidden from help", current.CommandPath())
+		}
+	}
+	if rulePackValidateCmd.Flags().Lookup("dir") == nil || rulePackValidateCmd.Flags().Lookup("json") == nil {
+		t.Fatal("rulepack validate lost its --dir or --json flag")
+	}
+}
+
+// GAP-1274: a pack the service account cannot read is not "valid" with exit 0
+// in text mode; --json keeps its validity-only contract.
+func TestRulePackValidateFailsWhenTheGatewayCannotLoadThePack(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousProblem := rulePackValidateCmd.OutOrStdout(), rulePackServiceReadProblemFn
+	previousErr := rulePackValidateCmd.ErrOrStderr()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "the folder is 0700" }
+	rulePackValidateDir = shippedRulePackForCLITest(t, "default")
+
+	rulePackValidateJSON = false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(&strings.Builder{})
+	err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "the gateway cannot load this pack: the folder is 0700") {
+		t.Fatalf("text mode err = %v", err)
+	}
+	if strings.Contains(output.String(), "valid rule pack:") || !strings.Contains(output.String(), "syntax is valid") {
+		t.Fatalf("text mode output = %q", output.String())
+	}
+
+	rulePackValidateJSON = true
+	output.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatalf("json mode err = %v", err)
+	}
+}
+
+// GAP-1405: a missing --dir is named in the text output and the error, not
+// reported "at .".
+func TestRulePackValidateMissingDirNamesTheDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nonexistent-rs3")
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput := rulePackValidateCmd.OutOrStdout()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+	})
+	rulePackValidateDir = missing
+	rulePackValidateJSON = false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want it to name %s", err, missing)
+	}
+	if !strings.Contains(output.String(), "at "+missing+":") {
+		t.Fatalf("text output does not name the directory:\n%s", output)
+	}
+}
+
+func TestRulePackValidateSecureClientTextMatchesMain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", path)
+	summary := guardrail.RulePackSummary{RuleFileCount: 2, RuleCount: 3, Digest: strings.Repeat("a", 64)}
+	output := &strings.Builder{}
+	if err := writeRulePackValidation(output, rulePackWireResponse{Valid: true, Summary: &summary}, false); err != nil {
+		t.Fatal(err)
+	}
+	want := "valid rule pack: 2 files, 3 rules, digest " + strings.Repeat("a", 64) + "\n"
+	if output.String() != want {
+		t.Fatalf("Secure Client validation = %q, want %q", output.String(), want)
+	}
 }

@@ -31,6 +31,23 @@ func (a *APIServer) emitInspectTraceV8(
 	elapsed time.Duration,
 	evaluation hookEvaluationContext,
 ) {
+	if a == nil {
+		return
+	}
+	a.emitGuardrailApplyTraceV8(ctx, a.connectorName(), tool, targetType, verdict, elapsed, evaluation)
+}
+
+// emitGuardrailApplyTraceV8 emits one apply_guardrail span for a decision
+// made for connectorName.
+func (a *APIServer) emitGuardrailApplyTraceV8(
+	ctx context.Context,
+	connectorName string,
+	tool string,
+	targetType string,
+	verdict *ToolInspectVerdict,
+	elapsed time.Duration,
+	evaluation hookEvaluationContext,
+) {
 	if a == nil || ctx == nil || verdict == nil {
 		return
 	}
@@ -38,7 +55,7 @@ func (a *APIServer) emitInspectTraceV8(
 	if !ok || runtime == nil {
 		return
 	}
-	input, ok := a.inspectTraceV8Input(ctx, tool, targetType, verdict, elapsed, evaluation)
+	input, ok := a.guardrailApplyTraceV8Input(ctx, connectorName, tool, targetType, verdict, elapsed, evaluation)
 	if !ok {
 		return
 	}
@@ -58,6 +75,18 @@ func (a *APIServer) inspectTraceV8Input(
 	elapsed time.Duration,
 	evaluation hookEvaluationContext,
 ) (observability.SpanGuardrailApplyInput, bool) {
+	return a.guardrailApplyTraceV8Input(ctx, a.connectorName(), tool, targetType, verdict, elapsed, evaluation)
+}
+
+func (a *APIServer) guardrailApplyTraceV8Input(
+	ctx context.Context,
+	connectorName string,
+	tool string,
+	targetType string,
+	verdict *ToolInspectVerdict,
+	elapsed time.Duration,
+	evaluation hookEvaluationContext,
+) (observability.SpanGuardrailApplyInput, bool) {
 	if verdict == nil {
 		return observability.SpanGuardrailApplyInput{}, false
 	}
@@ -65,7 +94,7 @@ func (a *APIServer) inspectTraceV8Input(
 	if !severity.Valid || !severity.Present {
 		return observability.SpanGuardrailApplyInput{}, false
 	}
-	connector := hookDecisionMetricConnector(a.connectorName())
+	connector := hookDecisionMetricConnector(connectorName)
 	connectorKnown := connector != "unknown"
 	envelopeConnector := connector
 	if !connectorKnown {
@@ -84,7 +113,11 @@ func (a *APIServer) inspectTraceV8Input(
 		targetType = "tool_call"
 	}
 
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			Source: observability.SourceGateway, Connector: envelopeConnector,
 			Action: "inspect", Phase: "finalize",
@@ -156,6 +189,30 @@ func (a *APIServer) inspectTraceV8Input(
 	}
 	if verdict.Confidence > 0 && verdict.Confidence <= 1 {
 		input.DefenseClawGuardrailConfidence = observability.Present(verdict.Confidence)
+	}
+	caller := auditCallerIdentity(ctx)
+	input.UserID = hookV8OptionalIdentifier(caller.ID)
+	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	// A session id comes from the caller and can collide across users. Resolve
+	// the connector install for the verified caller instead of joining a
+	// session-only registry entry that another account registered.
+	agentID := identity.IdentityID
+	if agentID == "" && !ManagedEnterpriseActive() {
+		if hookAgentIdentityUser(ctx).Verified {
+			if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+				agentID = facts.ID
+			}
+		}
+	}
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps its pre-identity record projection.
+		agentID = agentIdentityIDForTraffic(ctx, identity)
+	}
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentID)
+	caller.Identity.applyTo(&input)
+	if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evaluation.RuleIDs); ok {
+		applyGuardrailApplyOutcome(&input, outcome, caller, envelopeConnector, finishedAt)
 	}
 	return input, true
 }

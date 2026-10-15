@@ -1,0 +1,33 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"context"
+	"io"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
+
+// The Windows standalone guardian steps have no equivalent in the shared
+// reconcile on other platforms (the standalone Unix guardian has its own),
+// except the watch loop's tamper check.
+
+func enterpriseHookStandalonePlatformPrepare(io.Writer) {}
+
+// enterpriseHookStandalonePlatformWatch checks, for the life of the watch
+// loop, for a missing hook binary or a changed machine-policy drop-in.
+func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	go watchUnixStandaloneTamper(ctx, stderr)
+}
+
+func enterpriseHookStandalonePlatformFinish(context.Context, io.Writer, []enterpriseHookReconcileRow, time.Time) {
+}
+
+func enterpriseHookStandalonePlatformRevokeUsers(context.Context, io.Writer, enterprisehooks.Manifest) error {
+	return nil
+}

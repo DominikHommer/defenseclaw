@@ -11,10 +11,15 @@ DefenseClaw connector.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import math
 import os
 import re
+import socket
+import stat
+import subprocess
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -42,7 +47,22 @@ def _decoded(value: str) -> str:
 _API_ADDR = _decoded("{{API_ADDR_B64}}")
 _TOKEN_FILE = _decoded("{{TOKEN_FILE_B64}}")
 _FAIL_MODE = _decoded("{{FAIL_MODE_B64}}")
-_ENDPOINT = f"http://{_API_ADDR}/api/v1/omnigent/hook"
+# A standalone enterprise install names the gateway's peer-authorized unix
+# hook socket and the gateway service uid trusted beside root as its owner.
+# Empty keeps the loopback TCP transport with the scoped credential.
+_HOOK_SOCKET = _decoded("{{HOOK_SOCKET_B64}}")
+try:
+    _SERVICE_UID = int(_decoded("{{SERVICE_UID_B64}}") or "0")
+except ValueError:
+    _SERVICE_UID = 0
+# The administrator-owned hook binary of a standalone managed install, which
+# reads the user's Kerberos credential cache (see _full_session_facts). Empty
+# for a per-user install, which uses its own gateway binary.
+_SESSION_FACTS_BIN = _decoded("{{SESSION_FACTS_BIN_B64}}")
+# The renderer pins the profile; user environment cannot enable new Secure Client headers.
+_SECURE_CLIENT = _decoded("{{SECURE_CLIENT_B64}}") == "1"
+_HOOK_PATH = "/api/v1/omnigent/hook"
+_ENDPOINT = f"http://{_API_ADDR}{_HOOK_PATH}"
 _TIMEOUT_SECONDS = 10
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _MAX_PROMPT_CHARS = 64 * 1024
@@ -80,6 +100,103 @@ _DIRECT_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({}),
     _NoRedirect(),
 )
+
+
+def _trusted_socket_owner(uid: int) -> bool:
+    return uid == 0 or (_SERVICE_UID > 0 and uid == _SERVICE_UID)
+
+
+def _hook_socket_trusted() -> bool:
+    """Accept the hook socket only where no standard user can have made it.
+
+    The socket must be a socket (not a link), and it and its resolved
+    directory must belong to root or the gateway account, with the directory
+    writable by no one else. Another local user can then never be listening
+    on this path, whoever holds the loopback TCP port.
+    """
+    try:
+        directory = os.lstat(os.path.realpath(os.path.dirname(_HOOK_SOCKET)))
+        entry = os.lstat(_HOOK_SOCKET)
+    except (OSError, ValueError):
+        return False
+    return (
+        stat.S_ISDIR(directory.st_mode)
+        and not directory.st_mode & 0o022
+        and _trusted_socket_owner(directory.st_uid)
+        and stat.S_ISSOCK(entry.st_mode)
+        and _trusted_socket_owner(entry.st_uid)
+    )
+
+
+class _HookSocketConnection(http.client.HTTPConnection):
+    """HTTP to the gateway over its unix hook socket."""
+
+    def __init__(self, path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._socket_path = path
+
+    def connect(self) -> None:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            connection.settimeout(self.timeout)
+            connection.connect(self._socket_path)
+        except BaseException:
+            connection.close()
+            raise
+        self.sock = connection
+
+
+def _post_hook_socket(body: bytes, headers: dict[str, str]) -> tuple[int, str, bytes]:
+    connection = _HookSocketConnection(_HOOK_SOCKET, _TIMEOUT_SECONDS)
+    try:
+        connection.request("POST", _HOOK_PATH, body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, response.getheader("Retry-After") or "", response.read(_MAX_RESPONSE_BYTES + 1)
+    finally:
+        connection.close()
+
+
+def _post_direct(body: bytes, headers: dict[str, str]) -> tuple[int, str, bytes]:
+    request = urllib.request.Request(_ENDPOINT, data=body, headers=headers, method="POST")
+    try:
+        with _DIRECT_OPENER.open(request, timeout=_TIMEOUT_SECONDS) as response:
+            return response.status, response.headers.get("Retry-After") or "", response.read(_MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        return exc.code, (exc.headers.get("Retry-After") if exc.headers else "") or "", b""
+
+
+# Outside Secure Client, a 429 means the gateway has not evaluated the call.
+# Retry after 1 to 3 s, at most 3 times and 6 s of waiting in all, inside
+# OmniGent's policy deadline (GAP-0535). Secure Client keeps its original
+# single-request behavior.
+_BUSY_RETRIES = 3
+_BUSY_WAIT_BUDGET_SECONDS = 6
+
+
+def _retry_after_seconds(value: str) -> int:
+    try:
+        seconds = int(str(value or "").strip())
+    except ValueError:
+        seconds = 1
+    return min(max(seconds, 1), 3)
+
+
+def _post(body: bytes, headers: dict[str, str]) -> tuple[int, bytes]:
+    send = _post_hook_socket if _HOOK_SOCKET else _post_direct
+    status, retry_after, response_body = send(body, headers)
+    if _SECURE_CLIENT:
+        return status, response_body
+    waited = 0
+    for _ in range(_BUSY_RETRIES):
+        if status != 429:
+            break
+        delay = _retry_after_seconds(retry_after)
+        if waited + delay > _BUSY_WAIT_BUDGET_SECONDS:
+            break
+        time.sleep(delay)
+        waited += delay
+        status, retry_after, response_body = send(body, headers)
+    return status, response_body
 
 _EVENT_NAMES = {
     "request": "UserPromptSubmit",
@@ -335,6 +452,10 @@ def _credential_failure() -> dict[str, str]:
     return {"result": "DENY", "reason": "DefenseClaw policy credential is unavailable."}
 
 
+def _hook_socket_failure() -> dict[str, str]:
+    return {"result": "DENY", "reason": "DefenseClaw hook socket is not owned by root or the gateway account."}
+
+
 def _trace_headers() -> dict[str, str]:
     """Best-effort propagation from OmniGent's active OpenTelemetry span."""
     try:
@@ -356,6 +477,10 @@ def _identity_headers() -> dict[str, str]:
     so a hostile account name cannot smuggle a second header into every call.
     """
     headers: dict[str, str] = {}
+    if not _SECURE_CLIENT:
+        facts = _session_facts_header()
+        if facts:
+            headers["X-DefenseClaw-Session-Facts"] = facts
     try:
         # os.getuid is absent on Windows, where no POSIX uid exists.
         uid = os.getuid()  # type: ignore[attr-defined]
@@ -376,6 +501,70 @@ def _identity_headers() -> dict[str, str]:
     return headers
 
 
+_SAFE_SESSION_FACT = re.compile(r"[A-Za-z0-9._@/:-]{1,256}")
+
+
+_FULL_SESSION_FACTS = re.compile(r"v1;[A-Za-z0-9._@/:;=-]{1,1020}")
+_session_facts_cache: dict[str, Any] = {"key": None, "value": "", "until": 0.0}
+
+
+def _full_session_facts() -> str:
+    """Ask a DefenseClaw binary for this login's whole session facts.
+
+    The Kerberos principal sits in a credential cache this module cannot read
+    (a KCM cache is a socket protocol), so `hook session-facts` reads it and
+    prints the whole X-DefenseClaw-Session-Facts value, the principal included.
+    The binary keeps its own five-minute cache in ~/.defenseclaw and this
+    module keeps the answer for the same time. No answer is a supported
+    outcome: the SSH and logind variables alone follow.
+    """
+    env = os.environ
+    key = "|".join(env.get(name, "") for name in ("KRB5CCNAME", "XDG_SESSION_ID", "SSH_CONNECTION", "SSH_TTY"))
+    now = time.monotonic()
+    if _session_facts_cache["key"] == key and now < _session_facts_cache["until"]:
+        return str(_session_facts_cache["value"])
+    value = ""
+    binary = _SESSION_FACTS_BIN or os.path.join(
+        os.path.expanduser("~"), ".local", "bin", "defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway"
+    )
+    try:
+        completed = subprocess.run(
+            [binary, "hook", "session-facts"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=3, check=False,
+        )
+        answer = completed.stdout.strip()
+        if completed.returncode == 0 and _FULL_SESSION_FACTS.fullmatch(answer):
+            value = answer
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    _session_facts_cache.update(key=key, value=value, until=now + (300.0 if value else 30.0))
+    return value
+
+
+def _session_facts_header() -> str:
+    """Render the claimed SSH and logind session facts.
+
+    The value is the X-DefenseClaw-Session-Facts header the hook runner also
+    sends. Each value is dropped unless it matches the header's allowlisted
+    charset; everything here is claimed attribution, never authority.
+    """
+    full = _full_session_facts()
+    if full:
+        return full
+    connection = os.environ.get("SSH_CONNECTION", "").split()
+    address = connection[0] if connection else ""
+    tty = os.environ.get("SSH_TTY", "")
+    if tty.startswith("/dev/"):
+        tty = tty[len("/dev/"):]
+    session = os.environ.get("XDG_SESSION_ID", "")
+    kind = "ssh" if address or tty else ("local" if session else "")
+    parts = ["v1"]
+    for key, value in (("k", kind), ("tty", tty), ("ls", session), ("ca", address)):
+        if value and _SAFE_SESSION_FACT.fullmatch(value):
+            parts.append(f"{key}={value}")
+    return ";".join(parts) if len(parts) > 1 else ""
+
+
 def _scoped_hook_token() -> str:
     """Load one strict credential without exposing path, bytes, or read errors."""
     with open(_TOKEN_FILE, "rb") as stream:
@@ -390,14 +579,22 @@ def _scoped_hook_token() -> str:
 
 def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
     """Evaluate one OmniGent policy event through DefenseClaw."""
-    if not _TOKEN_FILE:
+    token = ""
+    if _HOOK_SOCKET:
+        # The gateway identifies a hook-socket caller by its kernel-verified
+        # uid, so no credential is read or sent. An unverified socket is as
+        # unsafe as a missing credential, whatever the transport fail mode.
+        if not _hook_socket_trusted():
+            return _hook_socket_failure()
+    elif not _TOKEN_FILE:
         return _credential_failure()
-    try:
-        token = _scoped_hook_token()
-    except (OSError, UnicodeDecodeError, ValueError):
-        # Credential failures are categorically unsafe at a policy boundary,
-        # regardless of the operator's transport fail mode.
-        return _credential_failure()
+    else:
+        try:
+            token = _scoped_hook_token()
+        except (OSError, UnicodeDecodeError, ValueError):
+            # Credential failures are categorically unsafe at a policy boundary,
+            # regardless of the operator's transport fail mode.
+            return _credential_failure()
     try:
         if not _API_ADDR:
             return _failure("bridge is not configured")
@@ -415,17 +612,14 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
             "Content-Type": "application/json",
             "X-DefenseClaw-Client": "omnigent-policy/1.0",
         })
-        headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(_ENDPOINT, data=body, headers=headers, method="POST")
-        with _DIRECT_OPENER.open(request, timeout=_TIMEOUT_SECONDS) as response:
-            if response.status < 200 or response.status >= 300:
-                return _failure(f"HTTP {response.status}")
-            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
-            if len(response_body) > _MAX_RESPONSE_BYTES:
-                return _failure("gateway response exceeded 1 MiB")
-            result = json.loads(response_body.decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        return _failure(f"HTTP {exc.code}")
+        if not _HOOK_SOCKET:
+            headers["Authorization"] = f"Bearer {token}"
+        status, response_body = _post(body, headers)
+        if status < 200 or status >= 300:
+            return _failure(f"HTTP {status}")
+        if len(response_body) > _MAX_RESPONSE_BYTES:
+            return _failure("gateway response exceeded 1 MiB")
+        result = json.loads(response_body.decode("utf-8"))
     except Exception as exc:
         # Preserve KeyboardInterrupt/SystemExit while routing every ordinary
         # normalization, propagation, serialization, transport, read, and

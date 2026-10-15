@@ -60,7 +60,7 @@ def _llm_to_override(llm: LLMConfig | None) -> dict | None:
     if api_key:
         override["api_key"] = api_key
     if llm.base_url:
-        override["api_base"] = llm.base_url
+        override["api_base"] = llm.request_base_url()
     if llm.provider:
         override["provider"] = llm.provider
     return override or None
@@ -84,6 +84,20 @@ class PluginScannerWrapper:
 
     def name(self) -> str:
         return "plugin-scanner"
+
+    def batch_workers(self, *, use_llm: bool | None = None, llm_model: str = "", **_rest) -> int:
+        """Items ``plugin scan --all`` may scan at once (GAP-2643).
+
+        The LLM lane waits on the network for each plugin, so those scans
+        overlap; with the lane off (``--no-llm`` or no model) they stay one at
+        a time.
+        """
+        from defenseclaw.commands._scan_ui import LLM_SCAN_WORKERS
+
+        if use_llm is False:
+            return 1
+        model = llm_model or (litellm_model(self._llm) if self._llm else "")
+        return LLM_SCAN_WORKERS if model else 1
 
     def scan(
         self,
@@ -150,6 +164,7 @@ class PluginScannerWrapper:
             provider=str(override.get("provider") or ""),
             api_key=str(override.get("api_key") or ""),
             base_url=str(override.get("api_base") or ""),
+            bedrock=self._llm.bedrock if self._llm else None,
         )
         llm_ready = model_configured and llm_analyzer_ready(readiness_llm)
         if use_llm is None:

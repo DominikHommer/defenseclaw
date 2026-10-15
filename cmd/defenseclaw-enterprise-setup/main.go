@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -23,21 +22,59 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
-//go:embed payload/*
-var embeddedPayload embed.FS
+// The signed inner payload used to be embedded at compile time via
+// //go:embed payload/*. The Windows AVC handoff moved to a runtime
+// trailer append so AVC's Windows CI no longer needs Go: DefenseClaw
+// prebuilds the outer EXE (this binary) with NO payload, then a
+// native Windows DefenseClawAssembler.exe appends the AVC-signed
+// payload to the tail as a deterministic trailer.
+// loadEmbeddedEnterprisePayload below reads the trailer off the
+// running EXE at startup and hands the same fs.FS shape
+// ("payload/manifest.json" + "payload/<name>") the existing
+// loadEnterprisePayload validator consumes — so nothing downstream
+// of the loader had to change.
 
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
 	enterpriseFailureExitCode       = 1603
+	enterpriseInvalidArgsExitCode   = 1639 // ERROR_INVALID_COMMAND_LINE
 	defaultLifecycleTimeout         = 30 * time.Minute
 	maximumLifecycleTimeout         = 2 * time.Hour
 	maximumPayloadFileBytes         = int64(512 << 20)
 	maximumPayloadTotalBytes        = int64(1 << 30)
 	managedEnterpriseFlavor         = "managed-enterprise"
 	managedEnterpriseUnsignedFlavor = "managed-enterprise-unsigned"
+	// The standalone flavors carry the MDM-deployable profile: no CMID
+	// credential broker, PowerShell 7, vendor-neutral roots. An unsigned
+	// standalone payload is admitted by SHA-256 pins the Setup writes from
+	// its own embedded manifest (hash_pinned trust).
+	standaloneFlavor         = "standalone"
+	standaloneUnsignedFlavor = "standalone-unsigned"
+	// standalonePayloadTrustName is the hash-pinned trust anchor staged
+	// next to an unsigned standalone payload.
+	standalonePayloadTrustName = "payload-trust.json"
 )
+
+// standaloneSetupArtifactName is the file name the standalone Setup ships
+// under; its usage and errors name it, not the Secure Client Setup
+// (GAP-0353).
+const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+
+// enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
+var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
+
+// enterpriseSetupInvalidArguments marks a command-line error without changing
+// its text. The standalone Setup reports it as 1639 so an MDM does not retry
+// a command line that can never succeed; the Secure Client Setup never
+// produces it and keeps its 0-or-1603 contract.
+type enterpriseSetupInvalidArguments struct{ error }
+
+func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -51,6 +88,33 @@ var requiredPayloadFiles = []string{
 	"defenseclaw-sensor-helper.exe",
 	"defenseclaw.exe",
 	"install-enterprise.ps1",
+}
+
+// standalonePayloadFiles is the standalone flavor's inventory: the Secure
+// Client set without the CMID credential broker, plus the scanner runtime
+// (skill, MCP and plugin scanners) and Fleet policy compiler the standalone
+// lifecycle installs into its own root.
+var standalonePayloadFiles = []string{
+	"DefenseClawEnterprise.psm1",
+	"defenseclaw-acp.exe",
+	"defenseclaw-gateway.exe",
+	"defenseclaw-hook.exe",
+	"defenseclaw-scanners.exe",
+	"defenseclaw-sensor-helper.exe",
+	"defenseclaw.exe",
+	"install-enterprise.ps1",
+	"policy_compiler.py",
+}
+
+func isStandaloneFlavor(flavor string) bool {
+	return flavor == standaloneFlavor || flavor == standaloneUnsignedFlavor
+}
+
+func payloadFilesForFlavor(flavor string) []string {
+	if isStandaloneFlavor(flavor) {
+		return standalonePayloadFiles
+	}
+	return requiredPayloadFiles
 }
 
 type enterpriseSetupOptions struct {
@@ -76,12 +140,10 @@ type enterpriseSetupOptions struct {
 	CoreHardeningCertification    bool
 	AttestAgentApplicationControl bool
 	AttestClaudeEffectivePolicy   bool
-	// DeferredConfig turns on the UCB-friendly late-config install
-	// path from spec 003 (docs/specs/003-windows-deferred-config/):
-	// --config and --manifest become optional at install time; the
-	// installer provisions the canonical drop-point directories with
-	// ACLs but writes no file bodies; the daemon + guardian fsnotify-
-	// wait for UCB to atomically drop them later.
+	// DeferredConfig stages a protected installed deployment with all
+	// managed services disabled. A later Repair supplying both authenticated
+	// config and manifest files performs target preparation and activation;
+	// directly dropping files or starting services is not supported.
 	DeferredConfig bool
 	// Mode / Connector are the macOS-parity QA shorthand: when both are
 	// supplied (and --config / --manifest are empty) the installed
@@ -93,6 +155,26 @@ type enterpriseSetupOptions struct {
 	Mode             string
 	Connector        string
 	LifecycleTimeout time.Duration
+	// AllowedSigners is a comma-separated list of SHA-256 Authenticode
+	// signer thumbprints the standalone lifecycle accepts (customer
+	// re-signing). Standalone Setup only.
+	AllowedSigners string
+	// Force, with /uninstall, removes the deployment without recovering a
+	// pending transaction: the last resort when no ensure, repair or
+	// uninstall can recover it (GAP-0920, GAP-1041). Standalone Setup only.
+	Force bool
+	// Bundle is the signed policy bundle /ensure applies (BUNDLE=) and
+	// TrustAnchors the bundle trust anchor file it installs first
+	// (TRUSTANCHORS=). The bundle carries the config, so BUNDLE= is not
+	// combined with CONFIG=. Standalone Setup only.
+	Bundle               string
+	TrustAnchors         string
+	RefuseCapabilityLoss bool
+
+	// Set from the embedded payload, never from the command line.
+	Standalone         bool
+	StandaloneUnsigned bool
+	ProductVersion     string
 }
 
 type enterprisePayloadManifest struct {
@@ -113,6 +195,19 @@ type enterprisePayloadManifestFile struct {
 type enterprisePayload struct {
 	Manifest enterprisePayloadManifest
 	Files    map[string]enterprisePayloadManifestFile
+	// Required is the flavor's exact file inventory.
+	Required []string
+	// PayloadFS is the fs.FS the platform-specific stage step opens
+	// per-file readers against. Before spec 003 this was a package-
+	// level embed.FS held in `embeddedPayload`; the trailer refactor
+	// carries the FS alongside the validated manifest so the loader
+	// stays the single boundary that decides what's trusted.
+	PayloadFS fs.FS
+}
+
+// Standalone reports whether the payload is the standalone flavor.
+func (payload enterprisePayload) Standalone() bool {
+	return isStandaloneFlavor(payload.Manifest.DistributionFlavor)
 }
 
 type enterpriseSetupFailure struct {
@@ -127,20 +222,65 @@ func main() {
 	os.Exit(runEnterpriseSetup(os.Args[1:], os.Stdout, os.Stderr))
 }
 
+// enterpriseSetupStandaloneFlavor reports whether this Setup embeds the
+// standalone payload. Replaceable in tests.
+var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
+
+// embeddedEnterpriseSetupStandalone reads only the trailer manifest's
+// distribution flavor, before any argument is parsed, so the Secure Client
+// Setup keeps its own action set, usage text and error messages. Anything
+// other than a readable standalone manifest is the Secure Client Setup;
+// executeEnterpriseSetup validates the whole payload before anything runs.
+//
+// Spec 003: the payload is no longer carried via //go:embed; it is
+// appended at assemble time as a deterministic trailer and read off
+// the running EXE here.
+func embeddedEnterpriseSetupStandalone() bool {
+	exePath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	result, err := setuppayload.ReadFile(exePath)
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		DistributionFlavor string `json:"distribution_flavor"`
+	}
+	if json.Unmarshal(result.Manifest, &manifest) != nil {
+		return false
+	}
+	return isStandaloneFlavor(manifest.DistributionFlavor)
+}
+
 func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
-	opts, help, err := parseEnterpriseSetupOptions(arguments)
+	standalone := enterpriseSetupStandaloneFlavor()
+	opts, help, err := parseEnterpriseSetupOptionsForFlavor(arguments, standalone)
 	if help {
-		writeEnterpriseSetupUsage(stdout)
+		writeEnterpriseSetupUsageForFlavor(stdout, standalone)
 		return 0
 	}
+	name := enterpriseSetupArtifactName
+	if standalone {
+		name = standaloneSetupArtifactName
+	}
 	if err != nil {
-		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
-		return enterpriseFailureExitCode
+		code := enterpriseSetupArgumentFailureCode()
+		if standalone {
+			err = enterpriseSetupInvalidArguments{err}
+		}
+		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
+		return code
 	}
 	exitCode, err := executeEnterpriseSetup(context.Background(), opts, stdout, stderr)
 	if err != nil {
-		writeEnterpriseSetupFailure(stdout, stderr, opts, err)
-		return enterpriseFailureExitCode
+		code := enterpriseFailureExitCode
+		var invalid enterpriseSetupInvalidArguments
+		if errors.As(err, &invalid) {
+			code = enterpriseInvalidArgsExitCode
+		}
+		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
+		return code
 	}
 	if exitCode != 0 {
 		return exitCode
@@ -148,10 +288,59 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// enterpriseSetupArgumentFailureCode is the exit code for a command line that
+// does not parse: 1639 when this Setup embeds the standalone payload, the
+// historical 1603 for the Secure Client Setup (and when no payload loads).
+func enterpriseSetupArgumentFailureCode() int {
+	payload, err := enterpriseSetupPayloadLoader()
+	if err == nil && payload.Standalone() {
+		return enterpriseInvalidArgsExitCode
+	}
+	return enterpriseFailureExitCode
+}
+
+// parseEnterpriseSetupOptions parses the Secure Client Setup command line.
 func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bool, error) {
+	return parseEnterpriseSetupOptionsForFlavor(arguments, false)
+}
+
+// parseStandaloneEnterpriseSetupOptions parses the standalone Setup command
+// line, which adds the ensure action and --allowed-signers.
+func parseStandaloneEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bool, error) {
+	return parseEnterpriseSetupOptionsForFlavor(arguments, true)
+}
+
+// enterpriseSetupActions is the flavor's action set.
+func enterpriseSetupActions(standalone bool) []string {
+	actions := []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"}
+	if standalone {
+		actions = append(actions, "ensure")
+	}
+	return actions
+}
+
+// enterpriseSetupMutation reports whether action installs or changes the
+// deployment for this flavor.
+func enterpriseSetupMutation(action string, standalone bool) bool {
+	return action == "install" || action == "upgrade" || action == "repair" || (standalone && action == "ensure")
+}
+
+// enterpriseSetupMutationList names the flavor's mutation actions in the
+// Secure Client Setup's error wording.
+func enterpriseSetupMutationList(standalone bool) string {
+	if standalone {
+		return "install, upgrade, repair, or ensure"
+	}
+	return "install, upgrade, or repair"
+}
+
+func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (enterpriseSetupOptions, bool, error) {
 	opts := enterpriseSetupOptions{LifecycleTimeout: defaultLifecycleTimeout}
-	normalized, help, err := normalizeEnterpriseSetupArguments(arguments)
+	normalized, help, err := normalizeEnterpriseSetupArgumentsForFlavor(arguments, standalone)
 	if err != nil || help {
+		if standalone && err != nil {
+			captureStandaloneSetupErrorIntent(arguments, &opts)
+		}
 		return opts, help, err
 	}
 	flags := flag.NewFlagSet(enterpriseSetupArtifactName, flag.ContinueOnError)
@@ -174,21 +363,40 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
 	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
+	if standalone {
+		flags.StringVar(&opts.AllowedSigners, "allowed-signers", "", "standalone: comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates")
+		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
+		flags.StringVar(&opts.Bundle, "bundle", "", "standalone /ensure: signed policy bundle (.dcbundle) to apply")
+		flags.StringVar(&opts.TrustAnchors, "trust-anchors", "", "standalone /ensure: bundle trust anchor file to install first")
+		flags.BoolVar(&opts.RefuseCapabilityLoss, "refuse-capability-loss", false, "standalone /ensure: refuse a bundle that disables an enforced capability")
+	}
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
 	if err := flags.Parse(normalized); err != nil {
 		return opts, false, err
 	}
 	if flags.NArg() != 0 {
+		if standalone {
+			return opts, false, fmt.Errorf("unexpected argument %q; run %s /? for the actions and the NAME=value properties", flags.Arg(0), standaloneSetupArtifactName)
+		}
 		return opts, false, fmt.Errorf("unexpected positional argument %q", flags.Arg(0))
 	}
 	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
-	validActions := map[string]bool{
-		"install": true, "upgrade": true, "repair": true,
-		"reconcile": true, "status": true, "verify": true, "uninstall": true,
+	validActions := map[string]bool{}
+	for _, action := range enterpriseSetupActions(standalone) {
+		validActions[action] = true
 	}
 	if !validActions[opts.Action] {
+		if standalone {
+			return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, uninstall, or ensure")
+		}
 		return opts, false, errors.New("--action must be install, upgrade, repair, reconcile, status, verify, or uninstall")
+	}
+	for _, signer := range strings.Split(opts.AllowedSigners, ",") {
+		signer = strings.ToLower(strings.TrimSpace(signer))
+		if signer != "" && !sha256Pattern.MatchString(signer) {
+			return opts, false, fmt.Errorf("--allowed-signers entry %q is not a SHA-256 certificate thumbprint", signer)
+		}
 	}
 	modeSupplied := strings.TrimSpace(opts.Mode) != ""
 	connectorSupplied := strings.TrimSpace(opts.Connector) != ""
@@ -208,9 +416,8 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			return opts, false, errors.New("--mode must be observe or action")
 		}
 		opts.Mode = mode
-		mutationAction := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
-		if !mutationAction {
-			return opts, false, errors.New("--mode / --connector are valid only with install, upgrade, or repair")
+		if !enterpriseSetupMutation(opts.Action, standalone) {
+			return opts, false, errors.New("--mode / --connector are valid only with " + enterpriseSetupMutationList(standalone))
 		}
 		// Keep this closed set aligned with the native Windows lifecycle. Each
 		// entry must have reconcile, trusted-runtime, rollback, and teardown
@@ -230,31 +437,45 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			}
 		}
 	}
-	if opts.Action == "install" && !opts.DeferredConfig && !modeSupplied &&
-		(strings.TrimSpace(opts.Config) == "" || strings.TrimSpace(opts.Manifest) == "") {
-		// --deferred-config bypasses the config/manifest requirement:
-		// the installer will provision the drop-point directories
-		// with ACLs but write no file bodies; UCB atomically writes
-		// the bodies later, and the daemon + guardian fsnotify-wait
-		// pick them up. Spec 003 REQ-02 / REQ-03.
-		// --mode + --connector also bypass it: install-enterprise.ps1
-		// renders config.yaml + targets.yaml into the bootstrap
-		// staging directory before invoking the lifecycle.
-		return opts, false, errors.New("install requires both --config and --manifest (or --mode/--connector, or --deferred-config)")
+	configSupplied := strings.TrimSpace(opts.Config) != ""
+	manifestSupplied := strings.TrimSpace(opts.Manifest) != ""
+	if opts.Action == "install" && !modeSupplied {
+		if configSupplied != manifestSupplied {
+			return opts, false, errors.New("install requires config and manifest together")
+		}
+		if opts.DeferredConfig && (configSupplied || manifestSupplied) {
+			return opts, false, errors.New("--deferred-config cannot be combined with --config or --manifest")
+		}
+		if !configSupplied && !manifestSupplied {
+			// A standalone /install with no policy inputs is the supported
+			// first half of the late-configuration lifecycle. It stages a
+			// protected, disabled deployment; a later /repair with BOTH
+			// authenticated files performs target preparation and activation.
+			opts.DeferredConfig = true
+		}
 	}
 	if opts.DeferredConfig && opts.Action != "install" {
-		// Spec 003 --deferred-config is meaningful only at initial
-		// install. Upgrade/repair use the config/manifest already on
-		// disk; deferring them would leave the deployment offline.
-		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
+		// The flag marks only the initial staged install. Its protected
+		// metadata later selects the special complete-Repair activation path.
 		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
-	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
-	if opts.NoStart && !mutation {
-		return opts, false, errors.New("--no-start is valid only with install, upgrade, or repair")
+	if opts.NoStart && !enterpriseSetupMutation(opts.Action, standalone) {
+		return opts, false, errors.New("--no-start is valid only with " + enterpriseSetupMutationList(standalone))
 	}
 	if opts.Purge && opts.Action != "uninstall" {
 		return opts, false, errors.New("--purge is valid only with uninstall")
+	}
+	if opts.Force && opts.Action != "uninstall" {
+		return opts, false, errors.New("FORCE=1 is valid only with /uninstall")
+	}
+	if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "" || opts.RefuseCapabilityLoss) && opts.Action != "ensure" {
+		return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
+	}
+	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
+		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+	}
+	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
+		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
 	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {
 		return opts, false, errors.New("--allow-unsigned requires --certification-codex-home")
@@ -275,7 +496,42 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	return opts, false, nil
 }
 
-func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, error) {
+// captureStandaloneSetupErrorIntent preserves the output mode and action when
+// normalization rejects an earlier property. MDM callers may put JSON=1 after
+// the bad property, so the failure still needs the schema-2 result.
+func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetupOptions) {
+	for _, argument := range arguments {
+		argument = strings.TrimSpace(argument)
+		lower := strings.ToLower(argument)
+		if lower == "--json" {
+			opts.JSON = true
+			continue
+		}
+		if strings.HasPrefix(lower, "/") {
+			for _, action := range enterpriseSetupActions(true) {
+				if lower == "/"+action {
+					opts.Action = action
+					break
+				}
+			}
+			continue
+		}
+		name, value, found := strings.Cut(argument, "=")
+		if !found {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "json", "--json":
+			if enabled, err := strconv.ParseBool(value); err == nil {
+				opts.JSON = enabled
+			}
+		case "action", "--action":
+			opts.Action = strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+}
+
+func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
 		"action": "action", "config": "config", "manifest": "manifest",
@@ -287,7 +543,8 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 	}
 	boolNames := map[string]string{
 		"nostart": "no-start", "purge": "purge", "json": "json",
-		"allowunsigned": "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
+		"deferredconfig": "deferred-config",
+		"allowunsigned":  "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
 		"attestagentapplicationcontrol": "attest-agent-application-control",
 		"attestclaudeeffectivepolicy":   "attest-claude-effective-policy",
 	}
@@ -295,6 +552,17 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 		"/install": "install", "/upgrade": "upgrade", "/repair": "repair",
 		"/reconcile": "reconcile", "/status": "status", "/verify": "verify",
 		"/uninstall": "uninstall",
+	}
+	if standalone {
+		// Only the standalone Setup has the ensure action and signer pins.
+		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors"} {
+			valueNames[name] = canonical
+		}
+		boolNames["force"] = "force"
+		boolNames["refusecapabilityloss"] = "refuse-capability-loss"
+		for switchName, action := range map[string]string{"/ensure": "ensure"} {
+			actions[switchName] = action
+		}
 	}
 	for _, argument := range arguments {
 		trimmed := strings.TrimSpace(argument)
@@ -337,14 +605,53 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 				normalized = append(normalized, fmt.Sprintf("--%s=%t", canonical, enabled))
 				continue
 			}
+			if standalone {
+				return nil, false, fmt.Errorf("unknown property %s; run %s /? for the actions and the NAME=value properties (CONFIG=, MANIFEST=, BUNDLE=, TRUSTANCHORS=, JSON=1, NOSTART=1, PURGE=1, FORCE=1, TIMEOUTSECONDS=, ALLOWEDSIGNERS=, ATTESTCLAUDEEFFECTIVEPOLICY=1)",
+					trimmed[:separator], standaloneSetupArtifactName)
+			}
 		}
 		normalized = append(normalized, argument)
 	}
 	return normalized, false, nil
 }
 
+// loadEmbeddedEnterprisePayload reads the setuppayload trailer off the
+// tail of the running EXE, hands an in-memory fs.FS (the same shape
+// the old //go:embed produced — "payload/manifest.json" +
+// "payload/<name>") to loadEnterprisePayload, and returns the
+// validated result.
+//
+// Failure modes are surfaced as they were before the refactor:
+//   - No trailer at all → "enterprise payload missing; assemble with
+//     DefenseClawAssembler.exe" so the operator sees an actionable
+//     diagnostic instead of a low-level IO error.
+//   - Trailer present but corrupt (CRC / hash mismatch) → the
+//     setuppayload package's ErrTrailerCorrupt is passed through.
+//   - Manifest content wrong shape → the existing loadEnterprisePayload
+//     validator surfaces the same errors it always did (unknown file,
+//     size mismatch, invalid SHA-256, wrong flavor).
 func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
-	return loadEnterprisePayload(embeddedPayload)
+	// os.Executable resolves the running binary's path even when
+	// invoked via a relative name, a symlink, or from a directory that
+	// is not $PWD. On a runtime install (`DefenseClawSetup-Enterprise-x64.exe /install`)
+	// this resolves to the signed outer EXE the trailer was appended
+	// to. Under `go test` it resolves to the test binary, which has
+	// no trailer — the trailer-missing test in main_test.go pins
+	// that failure mode.
+	exePath, err := os.Executable()
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("resolve running EXE for trailer read: %w", err)
+	}
+	result, err := setuppayload.ReadFile(exePath)
+	if err != nil {
+		if errors.Is(err, setuppayload.ErrTrailerMissing) {
+			return enterprisePayload{}, errors.New(
+				"enterprise payload missing; assemble with DefenseClawAssembler.exe",
+			)
+		}
+		return enterprisePayload{}, fmt.Errorf("read enterprise payload trailer: %w", err)
+	}
+	return loadEnterprisePayload(result.AsPayloadFS())
 }
 
 func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
@@ -368,16 +675,23 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 	if manifest.Unsigned {
 		expectedFlavor = managedEnterpriseUnsignedFlavor
 	}
+	if isStandaloneFlavor(manifest.DistributionFlavor) {
+		expectedFlavor = standaloneFlavor
+		if manifest.Unsigned {
+			expectedFlavor = standaloneUnsignedFlavor
+		}
+	}
+	requiredFiles := payloadFilesForFlavor(expectedFlavor)
 	if manifest.SchemaVersion != 1 || strings.TrimSpace(manifest.Version) == "" ||
 		!sourceCommitPattern.MatchString(manifest.SourceCommit) ||
 		manifest.DistributionFlavor != expectedFlavor {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest identity is invalid")
 	}
-	if len(manifest.Files) != len(requiredPayloadFiles) {
+	if len(manifest.Files) != len(requiredFiles) {
 		return enterprisePayload{}, errors.New("embedded enterprise manifest has an unexpected file inventory")
 	}
-	required := make(map[string]struct{}, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	required := make(map[string]struct{}, len(requiredFiles))
+	for _, name := range requiredFiles {
 		required[name] = struct{}{}
 	}
 	files := make(map[string]enterprisePayloadManifestFile, len(manifest.Files))
@@ -408,15 +722,41 @@ func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {
 		totalSize += entry.Size
 		files[entry.Name] = entry
 	}
-	for _, name := range requiredPayloadFiles {
+	for _, name := range requiredFiles {
 		if _, ok := files[name]; !ok {
 			return enterprisePayload{}, fmt.Errorf("embedded enterprise manifest is missing required file %s", name)
 		}
 	}
-	return enterprisePayload{Manifest: manifest, Files: files}, nil
+	return enterprisePayload{Manifest: manifest, Files: files, Required: requiredFiles, PayloadFS: payloadFS}, nil
 }
 
-func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupOptions, err error) {
+// splitStandaloneLifecycleJSON separates the lifecycle's JSON result from
+// diagnostics that share the combined child output (for example a library
+// warning printed at process start). The result is the last line that is a
+// complete JSON object; everything else is returned as diagnostics. Output
+// without such a line is returned unchanged as the document.
+func splitStandaloneLifecycleJSON(output []byte) (document, diagnostics []byte) {
+	lines := bytes.Split(output, []byte("\n"))
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := bytes.TrimSpace(lines[index])
+		if len(line) == 0 || line[0] != '{' || !json.Valid(line) {
+			continue
+		}
+		var rest bytes.Buffer
+		for other, text := range lines {
+			if other == index || len(bytes.TrimSpace(text)) == 0 {
+				continue
+			}
+			rest.Write(bytes.TrimRight(text, "\r"))
+			rest.WriteByte('\n')
+		}
+		return append(append([]byte{}, line...), '\n'), rest.Bytes()
+	}
+	return output, nil
+}
+
+// writeEnterpriseSetupFailureAs reports err under the Setup file name.
+func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts enterpriseSetupOptions, err error) {
 	if err == nil {
 		return
 	}
@@ -431,13 +771,107 @@ func writeEnterpriseSetupFailure(stdout, stderr io.Writer, opts enterpriseSetupO
 		_ = json.NewEncoder(stdout).Encode(report)
 		return
 	}
-	fmt.Fprintf(stderr, "%s: %v\n", enterpriseSetupArtifactName, err)
+	fmt.Fprintf(stderr, "%s: %v\n", name, err)
 }
 
+// writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
+// JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
+// MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
+// reports no deployment state: nothing was inspected.
+func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
+	if !standalone || !opts.JSON || err == nil {
+		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(opts.Action))
+	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
+	code := "setup_failed"
+	var invalid enterpriseSetupInvalidArguments
+	var timeout enterpriseSetupLifecycleTimeout
+	switch {
+	case errors.As(err, &invalid):
+		code = "invalid_arguments"
+	case errors.As(err, &timeout):
+		code = "lifecycle_timeout"
+	}
+	result.AddError(code, err.Error())
+	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
+		name+" /status JSON=1 reports them")
+	result.Finish("windows", exitCode)
+	_ = json.NewEncoder(stdout).Encode(result)
+}
+
+// enterpriseSetupLifecycleTimeout is a lifecycle run Setup stopped at its
+// TIMEOUTSECONDS limit.
+type enterpriseSetupLifecycleTimeout struct{ error }
+
+func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupTimeout names what a stopped run may have left
+// and the command that recovers it: a run stopped mid-transaction leaves it
+// pending with the services stopped, which only an ensure run as
+// LocalSystem recovers (GAP-0509). The recovery run gets the longest limit:
+// leaving TIMEOUTSECONDS out, as the hint said, keeps the default, which a
+// run that hit it would hit again (GAP-1063).
+func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) error {
+	config := opts.Config
+	if strings.TrimSpace(config) == "" {
+		config = "<config.yaml>"
+	}
+	limit := int(opts.LifecycleTimeout / time.Second)
+	maximum := int(maximumLifecycleTimeout / time.Second)
+	recovery := fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d to recover (without TIMEOUTSECONDS the limit is the default %d seconds)",
+		config, maximum, int(defaultLifecycleTimeout/time.Second))
+	if limit >= maximum {
+		recovery = fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d again to recover (%d seconds is the longest limit)", config, maximum, maximum)
+	}
+	return enterpriseSetupLifecycleTimeout{fmt.Errorf(
+		"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). It may have left a lifecycle transaction pending with the DefenseClaw services stopped: "+
+			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
+		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,
+	)}
+}
+
+// writeEnterpriseSetupUsage prints the Secure Client Setup usage.
 func writeEnterpriseSetupUsage(output io.Writer) {
-	actions := []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"}
+	writeEnterpriseSetupUsageForFlavor(output, false)
+}
+
+func writeEnterpriseSetupUsageForFlavor(output io.Writer, standalone bool) {
+	if standalone {
+		writeStandaloneSetupUsage(output)
+		return
+	}
+	actions := enterpriseSetupActions(standalone)
 	sort.Strings(actions)
 	fmt.Fprintf(output, "%s --action <%s> [options]\n", enterpriseSetupArtifactName, strings.Join(actions, "|"))
-	fmt.Fprintln(output, "Install requires --config <config.yaml> and --manifest <targets.yaml>.")
+	fmt.Fprintln(output, "Install takes --config <config.yaml> and --manifest <targets.yaml> together; with neither, it stages a disabled deployment that a later Repair with both files activates.")
+	if standalone {
+		fmt.Fprintln(output, "Ensure (standalone Setup) converges the host: install, upgrade, repair, or no-op.")
+	}
 	fmt.Fprintln(output, "Production paths and service names are fixed by the enterprise lifecycle.")
+}
+
+// writeStandaloneSetupUsage prints the standalone Setup usage in the form
+// windows.mdx documents: /action switches and NAME=value properties. It
+// printed the Secure Client Setup name and --action flags (GAP-0353).
+func writeStandaloneSetupUsage(output io.Writer) {
+	fmt.Fprintf(output, "%s /ensure [NAME=value ...]\n", standaloneSetupArtifactName)
+	fmt.Fprintln(output, "  /ensure converges the computer: install, upgrade, repair, or nothing to do.")
+	fmt.Fprintln(output, "  Other actions: /install /upgrade /repair /reconcile /status /verify /uninstall")
+	fmt.Fprintln(output, "Properties (case-insensitive, dashes ignored):")
+	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
+	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
+	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
+	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first")
+	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
+	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
+	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
+	fmt.Fprintln(output, "  PURGE=1                        with /uninstall: also remove the DefenseClaw files of each enrolled account")
+	fmt.Fprintln(output, "  FORCE=1                        with /uninstall, last resort: remove the deployment without recovering a pending transaction")
+	fmt.Fprintln(output, "  TIMEOUTSECONDS=<n>             lifecycle timeout, 60 to 7200 seconds (default 1800)")
+	fmt.Fprintln(output, "  ALLOWEDSIGNERS=<sha256>,...    accept only these Authenticode signer certificates")
+	fmt.Fprintln(output, "  ATTESTCLAUDEEFFECTIVEPOLICY=1  with /repair: record that Claude Code runs the managed hooks")
+	fmt.Fprintf(output, "Example: %s /ensure CONFIG=C:\\ProgramData\\DefenseClaw-Staging\\config.yaml JSON=1\n", standaloneSetupArtifactName)
+	fmt.Fprintln(output, "Exit codes: 0 success, 1603 failure, 1618 busy, 1639 invalid arguments.")
 }

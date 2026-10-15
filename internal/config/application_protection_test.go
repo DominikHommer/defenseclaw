@@ -13,6 +13,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func appFloatPtr(v float64) *float64 { return &v }
@@ -84,6 +86,42 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	}
 	if got := cfg.EffectiveAssetPolicyModeForConnector("codex"); got != AssetPolicyModeAction {
 		t.Errorf("EffectiveAssetPolicyModeForConnector(codex) = %q, want action", got)
+	}
+}
+
+func TestApplicationProtectionRulesSurviveLoadAndLayer(t *testing.T) {
+	raw := []byte(`config_version: 9
+guardrail:
+  rules: {enable: [GLOBAL-RULE]}
+  connectors:
+    cursor: {rules: {enable: [MANUAL-RULE]}}
+application_protection:
+  enabled: true
+  guardrail:
+    rules: {enable: [AUTO-RULE]}
+  connectors:
+    codex:
+      guardrail:
+        rules: {disable: [CODEX-RULE]}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.EffectiveRulesForConnector("codex"); len(got) != 3 ||
+		len(got[0].Enable) != 1 || got[0].Enable[0] != "GLOBAL-RULE" ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "AUTO-RULE" ||
+		len(got[2].Disable) != 1 || got[2].Disable[0] != "CODEX-RULE" {
+		t.Errorf("automatic codex rules = %+v, want global, auto, connector layers", got)
+	}
+	if got := cfg.EffectiveRulesForConnector("claudecode"); len(got) != 2 ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "AUTO-RULE" {
+		t.Errorf("automatic claudecode rules = %+v, want global and auto layers", got)
+	}
+	if got := cfg.EffectiveRulesForConnector("cursor"); len(got) != 2 ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "MANUAL-RULE" {
+		t.Errorf("manual cursor rules = %+v, want global and manual layers", got)
 	}
 }
 
@@ -226,5 +264,29 @@ func TestApplicationProtectionEffectiveEnabled(t *testing.T) {
 	}
 	if !cfg.EffectiveEnabled("cursor") {
 		t.Error("EffectiveEnabled(cursor) = false, want true")
+	}
+}
+
+// Standalone Devin runs the administrator-owned hook with
+// --enterprise-managed, which fails closed: an administrator's
+// hook_fail_mode open for Devin must not leave the config, the lock and
+// status saying "open" while the hook fails closed. Other profiles keep the
+// configured value.
+func TestStandaloneDevinHookFailModeIsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, profile, want string
+	}{
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone, "closed"},
+		{"secure client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient, "open"},
+		{"per-user", "", "", "open"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &Config{DeploymentMode: test.mode}
+			cfg.Enterprise.Profile = test.profile
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"devin": {HookFailMode: "open"}}
+			if got := cfg.EffectiveHookFailModeForConnector("devin"); got != test.want {
+				t.Fatalf("devin hook fail mode = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

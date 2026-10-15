@@ -34,9 +34,41 @@ func protectDirectory(path string) error {
 		return err
 	}
 	if safe {
-		return preserveExistingProtection(path, path)
+		protected, err := windowsDACLProtected(path)
+		if err != nil {
+			return err
+		}
+		if protected {
+			// Writing a directory DACL makes Windows re-propagate it to every
+			// file below. On a long-lived data dir (.venv, .uv, backups,
+			// rollback copies) each gateway command spent minutes there, so
+			// the gateway missed its startup deadline (GAP-1687, GAP-1348).
+			return nil
+		}
+		return preserveDirectoryProtection(path, path)
 	}
 	return setPrivateDACL(path, true)
+}
+
+// preserveDirectoryProtection is preserveExistingProtection; tests count calls.
+var preserveDirectoryProtection = preserveExistingProtection
+
+// windowsDACLProtected reports whether path's DACL already blocks
+// inheritance from its parent.
+func windowsDACLProtected(path string) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	control, _, err := sd.Control()
+	if err != nil {
+		return false, err
+	}
+	return control&windows.SE_DACL_PROTECTED != 0, nil
 }
 
 func validatePrivateProtection(path string, wantDirectory bool) error {
@@ -74,13 +106,28 @@ func validatePrivateProtection(path string, wantDirectory bool) error {
 // ValidatePrivateDirectory it permits harmless read-only or incomplete DACL
 // drift.
 func ValidatePrivateDirectoryOwnership(path string) error {
-	return validatePrivateOwnership(path, true)
+	return validatePrivateOwnership(path, true, false)
+}
+
+// ValidatePrivateDirectoryOwnershipAllowingAdministrators is
+// ValidatePrivateDirectoryOwnership that also admits write entries for the
+// built-in Administrators group, matched by its well-known SID. Folders an
+// agent or a plain mkdir creates under the profile inherit that entry, and a
+// local administrator can already take over the account's files.
+func ValidatePrivateDirectoryOwnershipAllowingAdministrators(path string) error {
+	return validatePrivateOwnership(path, true, true)
 }
 
 // ValidatePrivateFileOwnership is the file counterpart to
 // ValidatePrivateDirectoryOwnership.
 func ValidatePrivateFileOwnership(path string) error {
-	return validatePrivateOwnership(path, false)
+	return validatePrivateOwnership(path, false, false)
+}
+
+// ValidatePrivateFileOwnershipAllowingAdministrators is the file counterpart
+// to ValidatePrivateDirectoryOwnershipAllowingAdministrators.
+func ValidatePrivateFileOwnershipAllowingAdministrators(path string) error {
+	return validatePrivateOwnership(path, false, true)
 }
 
 // ValidatePrivateHandle verifies that handle names an object owned by the
@@ -107,7 +154,7 @@ func ValidatePrivateHandle(handle windows.Handle) error {
 	return nil
 }
 
-func validatePrivateOwnership(path string, wantDirectory bool) error {
+func validatePrivateOwnership(path string, wantDirectory, trustAdministrators bool) error {
 	if err := rejectReparseChain(path); err != nil {
 		return err
 	}
@@ -130,7 +177,7 @@ func validatePrivateOwnership(path string, wantDirectory bool) error {
 	if !owned {
 		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
 	}
-	repairable, err := privateDACLIsWriterRepairableForSubject(path, identity)
+	repairable, err := privateDACLIsWriterRepairableForSubject(path, identity, trustAdministrators)
 	if err != nil {
 		return err
 	}
@@ -435,9 +482,7 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 	if err != nil {
 		return false, fmt.Errorf("safefile: current token user: %w", err)
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		fmt.Sprintf("O:%sD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", identity.sid),
-	)
+	descriptor, err := privateDirectoryCreationDescriptor(identity.sid)
 	if err != nil {
 		return false, err
 	}
@@ -469,11 +514,32 @@ func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting 
 		if err := rejectReparsePath(directory); err != nil {
 			return false, err
 		}
-		if err := protectDirectory(directory); err != nil {
+		if created {
+			// The creation descriptor keeps the path private from the
+			// first instant. Normalize its inherited ACE representation
+			// before a reader later validates the directory.
+			if err := setPrivateDACL(directory, true); err != nil {
+				return false, err
+			}
+		} else if err := protectDirectory(directory); err != nil {
 			return false, err
 		}
 	}
 	return targetCreated, nil
+}
+
+func privateDirectoryCreationDescriptor(owner *windows.SID) (*windows.SECURITY_DESCRIPTOR, error) {
+	// OWNER RIGHTS is an inheritable placeholder, not the token user's SID.
+	// Windows can materialize it as another SYSTEM ACE for a SYSTEM-owned
+	// child. Give the actual owner an explicit grant instead, and avoid a
+	// duplicate SYSTEM grant when the owner is LocalSystem.
+	ownerGrant := fmt.Sprintf("(A;OICI;FA;;;%s)", owner)
+	if !owner.IsWellKnown(windows.WinLocalSystemSid) {
+		ownerGrant += "(A;OICI;FA;;;SY)"
+	}
+	return windows.SecurityDescriptorFromString(
+		fmt.Sprintf("O:%sD:P%s", owner, ownerGrant),
+	)
 }
 
 func setPrivateDACL(path string, inherit bool) error {
@@ -503,7 +569,11 @@ func setPrivateDACL(path string, inherit bool) error {
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{identity.sid, system} {
+	sids := []*windows.SID{identity.sid}
+	if !identity.sid.Equals(system) {
+		sids = append(sids, system)
+	}
+	for _, sid := range sids {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
@@ -568,7 +638,11 @@ func privateDACLForCurrentUser(inherit bool) (*windows.SID, *windows.ACL, error)
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{user, system} {
+	sids := []*windows.SID{user}
+	if !user.Equals(system) {
+		sids = append(sids, system)
+	}
+	for _, sid := range sids {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
@@ -658,7 +732,10 @@ func privateSecurityDescriptorIsSafeForSubject(
 		}
 	}
 	foundOwner := false
-	foundSystem := false
+	// A LocalSystem subject's owner grant also is the SYSTEM grant. Requiring
+	// two distinct ACEs here would reject the canonical single-ACE DACL that
+	// creation and repair write for SYSTEM-owned directories.
+	foundSystem := identity.sid.Equals(system)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
@@ -729,6 +806,7 @@ func privateSecurityDescriptorIsSafeForSubject(
 func privateDACLIsWriterRepairableForSubject(
 	path string,
 	identity windowsProtectionSubject,
+	trustAdministrators bool,
 ) (bool, error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -742,12 +820,13 @@ func privateDACLIsWriterRepairableForSubject(
 	if err != nil {
 		return false, err
 	}
-	return privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity)
+	return privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity, trustAdministrators)
 }
 
 func privateSecurityDescriptorIsWriterRepairableForSubject(
 	sd *windows.SECURITY_DESCRIPTOR,
 	identity windowsProtectionSubject,
+	trustAdministrators bool,
 ) (bool, error) {
 	if sd == nil {
 		return false, nil
@@ -795,7 +874,8 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
-			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)
+			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
+			(trustAdministrators && sid.IsWellKnown(windows.WinBuiltinAdministratorsSid))
 		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
 			if trusted && ace.Mask != 0 {
 				return false, nil

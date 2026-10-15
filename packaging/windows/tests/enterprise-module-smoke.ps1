@@ -406,6 +406,25 @@ namespace DefenseClaw.Windows.Tests
     $engine = Microsoft.PowerShell.Management\Join-Path `
         $script:System32 `
         'WindowsPowerShell\v1.0\powershell.exe'
+    # Warm Windows PowerShell once with no timer, ordered only on its exit
+    # event, so the bounded captures below measure a warm start rather than
+    # the cold image scan and native-image load. The pytest timeout bounds a
+    # hang here; only the sleep-5 case below asserts a timeout.
+    $warmStart = [Diagnostics.ProcessStartInfo]::new()
+    $warmStart.FileName = $engine
+    $warmStart.Arguments = '-NoLogo -NoProfile -NonInteractive -Command exit 0'
+    $warmStart.UseShellExecute = $false
+    $warmStart.CreateNoWindow = $true
+    $warm = [Diagnostics.Process]::Start($warmStart)
+    try {
+        $warm.WaitForExit()
+        if ($warm.ExitCode -ne 0) {
+            throw 'Windows PowerShell warm-up start failed'
+        }
+    }
+    finally {
+        $warm.Dispose()
+    }
     $success = Invoke-DefenseClawProcess `
         -File $engine `
         -Arguments @(
@@ -907,9 +926,16 @@ if ($elevated) {
                 if ($null -eq $lock) {
                     throw 'protected lifecycle file lock was not returned'
                 }
+                $lockHandle = $lock.SafeFileHandle
             }
             finally {
                 Exit-DefenseClawLifecycleLock -Lock $lock
+            }
+            # Causal precondition for the reacquisition below: this unique
+            # StateRoot's only DefenseClaw holder is the handle just released.
+            # A leaked handle fails here, not as a lock wait.
+            if (-not $lockHandle.IsClosed) {
+                throw 'lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
             }
             $sections = (
                 [Security.AccessControl.AccessControlSections]::Access -bor
@@ -927,6 +953,32 @@ if ($elevated) {
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -Algorithm SHA256).Hash
 
+            # Model an older successful AVC uninstall that retained the exact
+            # zero-byte lock but re-enabled inheritance. A fresh install must
+            # repair only this already-trusted residual object in place.
+            $legacyLockAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            $legacyLockAcl.SetAccessRuleProtection($false, $true)
+            [void]$legacyLockAcl.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new(
+                        $script:UsersSID
+                    ),
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            Set-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -AclObject $legacyLockAcl `
+                -ErrorAction Stop
+            if ((Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop).AreAccessRulesProtected) {
+                throw 'legacy residual lifecycle lock did not inherit before reinstall'
+            }
+
             $lock = Enter-DefenseClawLifecycleLock `
                 -Layout $lockLayout `
                 -TimeoutSeconds 2
@@ -934,9 +986,13 @@ if ($elevated) {
                 if ($null -eq $lock) {
                     throw 'persistent lifecycle file lock was not reusable'
                 }
+                $lockHandle = $lock.SafeFileHandle
             }
             finally {
                 Exit-DefenseClawLifecycleLock -Lock $lock
+            }
+            if (-not $lockHandle.IsClosed) {
+                throw 'reused lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
             }
             $afterItem = Get-Item `
                 -LiteralPath $lockLayout.LifecycleLockPath `
@@ -948,11 +1004,62 @@ if ($elevated) {
             $afterHash = (Get-FileHash `
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -Algorithm SHA256).Hash
-            if ([int64]$beforeItem.Length -ne 0 -or
+            $afterAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            if (-not $afterAcl.AreAccessRulesProtected -or
+                [int64]$beforeItem.Length -ne 0 -or
                 [int64]$afterItem.Length -ne 0 -or
                 $afterHash -cne $beforeHash -or
                 $afterSDDL -cne $beforeSDDL) {
-                throw 'persistent lifecycle file lock changed across consecutive acquisitions'
+                throw 'persistent lifecycle file lock was not canonically repaired in place for reinstall'
+            }
+
+            # The compatibility repair must not turn into ACL seizure. Even an
+            # otherwise well-formed inherited lock remains untrusted when a
+            # standard user can write it.
+            $unsafeLockAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            $unsafeLockAcl.SetAccessRuleProtection($false, $true)
+            [void]$unsafeLockAcl.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new(
+                        $script:UsersSID
+                    ),
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            Set-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -AclObject $unsafeLockAcl `
+                -ErrorAction Stop
+            $unsafeLock = $null
+            $unsafeRejected = $false
+            try {
+                $unsafeLock = Enter-DefenseClawLifecycleLock `
+                    -Layout $lockLayout `
+                    -TimeoutSeconds 2
+            }
+            catch {
+                if ([string]$_.Exception.Message -notmatch
+                    'untrusted principal .* has write-like access') {
+                    throw
+                }
+                $unsafeRejected = $true
+            }
+            finally {
+                if ($null -ne $unsafeLock) {
+                    Exit-DefenseClawLifecycleLock -Lock $unsafeLock
+                }
+                Set-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -AclObject $afterAcl `
+                    -ErrorAction Stop
+            }
+            if (-not $unsafeRejected) {
+                throw 'writable inherited lifecycle lock was silently adopted'
             }
         }
         finally {
@@ -1004,12 +1111,19 @@ $teardownFailurePreserved = & $module {
     $failureLayout = @{
         ManifestPath = 'C:\missing\targets.yaml'
         ManagedHooksTeardownJournalPath = 'C:\missing\managed-hooks-teardown.json'
+        # The teardown wrapper validates the receipt path AND the purge scope
+        # before it invokes the mocked gateway command. Placeholders here let
+        # the wrapper reach the mock so the test can observe the "restricted
+        # fixture" error the mock returns.
+        ManagedHookContractCleanupReceiptPath = 'C:\missing\managed-hook-contract-cleanup-receipt.json'
+        PurgeScopeSHA256 = ('0' * 64)
     }
     $caught = $null
     try {
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $failureLayout `
             -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
             -Action prepare)
     }
     catch {
@@ -1044,6 +1158,12 @@ $guardianFailureDiagnosticPreserved = & $module {
                 connector = 'cursor'
                 sid = 'S-1-5-21-1001'
                 ok = $true
+            },
+            [pscustomobject][ordered]@{
+                connector = 'kiro'
+                sid = 'S-1-5-21-1002'
+                ok = $false
+                pending = $true
             }
         )
     } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress -Depth 4
@@ -1057,7 +1177,10 @@ $guardianFailureDiagnosticPreserved = & $module {
         $diagnostic -notmatch 'immutable managed runtime generation' -or
         $diagnostic -match [regex]::Escape($secretMarker) -or
         $diagnostic -notmatch 'token=<redacted>' -or
-        $diagnostic -match 'cursor@S-1-5-21-1001') {
+        $diagnostic -match 'cursor@S-1-5-21-1001' -or
+        # GAP-1940: a signed-out account's pending row is no failure.
+        $diagnostic -match 'kiro@S-1-5-21-1002' -or
+        $diagnostic -notmatch 'claudecode@S-1-5-21-1000.*1 target\(s\) of signed-out accounts are pending') {
         throw "guardian live verifier diagnostic was not safely preserved: $diagnostic"
     }
     return $true

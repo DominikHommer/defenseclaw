@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,43 @@ func TestActiveConnector_NilSafe(t *testing.T) {
 	var cfg *Config
 	if got := cfg.activeConnector(); got != "openclaw" {
 		t.Errorf("nil cfg activeConnector() = %q, want openclaw", got)
+	}
+}
+
+// TestOpenClawConfigCandidates pins the openclaw.json paths the gateway
+// checks before it reports the claw.mode default as "OpenClaw is not
+// installed" (#958): claw.config_file and <claw.home_dir>/openclaw.json,
+// expanded and deduplicated, with the loader default when both are empty.
+func TestOpenClawConfigCandidates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	defaultPath := filepath.Join(home, ".openclaw", "openclaw.json")
+
+	tests := []struct {
+		name       string
+		configFile string
+		homeDir    string
+		want       []string
+	}{
+		{"loader_defaults_dedupe", "~/.openclaw/openclaw.json", "~/.openclaw", []string{defaultPath}},
+		{"both_empty_uses_default", "", "", []string{defaultPath}},
+		{"custom_home_dir_adds_its_json", "~/.openclaw/openclaw.json", "/srv/oc", []string{defaultPath, filepath.Clean("/srv/oc/openclaw.json")}},
+		{"home_dir_only", "", "/srv/oc", []string{filepath.Clean("/srv/oc/openclaw.json")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{Claw: ClawConfig{ConfigFile: tt.configFile, HomeDir: tt.homeDir}}
+			got := cfg.OpenClawConfigCandidates()
+			if strings.Join(got, "|") != strings.Join(tt.want, "|") {
+				t.Errorf("OpenClawConfigCandidates() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	var nilCfg *Config
+	if got := nilCfg.OpenClawConfigCandidates(); len(got) != 1 || got[0] != defaultPath {
+		t.Errorf("nil cfg OpenClawConfigCandidates() = %q, want [%q]", got, defaultPath)
 	}
 }
 
@@ -259,6 +297,66 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 }
 
+// Kiro has no skills or plugin folder of its own. It must not fall back to
+// OpenClaw's layout: the install watcher creates the folders it watches, and
+// a Kiro-only install left an empty ~/.openclaw tree behind.
+func TestKiroWatchDirsDoNotFallBackToOpenClaw(t *testing.T) {
+	cfg := &Config{}
+	cfg.Claw.HomeDir = filepath.Join(t.TempDir(), ".openclaw")
+	if dirs := cfg.SkillDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(kiro) = %v, want none", dirs)
+	}
+	if dirs := cfg.PluginDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("PluginDirsForConnector(kiro) = %v, want none", dirs)
+	}
+}
+
+func TestReadMCPServersKiroKeepsUserAndWorkspaceScopes(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "project")
+	userPath := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
+	for path, body := range map[string]string{
+		userPath:    `{"mcpServers":{"shared":{"command":"user-server"},"global":{"url":"https://example.test/mcp"}}}`,
+		projectPath: `{"mcpServers":{"shared":{"command":"project-server"}}}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err := cfg.ReadMCPServersForConnector("kiro")
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("Kiro entries = %+v, err = %v; want both scopes and same-name entries", entries, err)
+	}
+	var project, user, global bool
+	for _, entry := range entries {
+		switch {
+		case entry.Name == "shared" && entry.SourceScope == "project":
+			project = entry.Source == projectPath && entry.Project == workspace && entry.Command == "project-server"
+		case entry.Name == "shared" && entry.SourceScope == "user":
+			user = entry.Source == userPath && entry.Project == "" && entry.Command == "user-server"
+		case entry.Name == "global" && entry.SourceScope == "user":
+			global = entry.URL == "https://example.test/mcp"
+		}
+	}
+	if !project || !user || !global {
+		t.Fatalf("Kiro scope provenance = %+v", entries)
+	}
+	if managed := ReadUserMCPServersForHome("kiro", home); len(managed) != 2 || managed[0].Connector != "kiro" {
+		t.Fatalf("managed Kiro user entries = %+v", managed)
+	}
+	cfg.Claw.WorkspaceDir = home
+	if entries, err := cfg.ReadMCPServersForConnector("kiro"); err != nil || len(entries) != 2 {
+		t.Fatalf("home workspace duplicate = %+v, err = %v", entries, err)
+	}
+}
+
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
@@ -433,6 +531,32 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 	}
 	if hasMCPEntry(entries, "daemon-cwd") {
 		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func TestClaudeStateMCPServersIncludesProjectsAfterFirst512(t *testing.T) {
+	root := t.TempDir()
+	projects := make(map[string]any)
+	for i := 0; i < 512; i++ {
+		projects[filepath.Join(root, fmt.Sprintf("a%03d", i))] = map[string]any{}
+	}
+	active := filepath.Join(root, "z-active")
+	projects[active] = map[string]any{}
+	data, err := json.Marshal(map[string]any{"projects": projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+		if project == active {
+			return []byte(`{"mcpServers":{"active":{"command":"echo"}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "active" || entries[0].Project != active {
+		t.Fatalf("active project MCP server missing: %+v", entries)
 	}
 }
 
@@ -960,6 +1084,9 @@ func TestConnectorHomeDir_OpenCodeAntigravity(t *testing.T) {
 	if got := cfg.ConnectorHomeDir("opencode"); strings.Contains(got, "openclaw-home") {
 		t.Errorf("ConnectorHomeDir(opencode) leaked OpenClaw home: %q", got)
 	}
+	if got, want := cfg.ConnectorHomeDir("kiro"), filepath.Join(home, ".kiro"); got != want {
+		t.Errorf("ConnectorHomeDir(kiro) = %q, want %q", got, want)
+	}
 }
 
 func TestConnectorHomeDir_OpenCodeHonorsConfigDir(t *testing.T) {
@@ -1234,7 +1361,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	configYAML := []byte("mcp_servers:\n  native-windows:\n    command: hermes-mcp\nmcp:\n  servers:\n    legacy-dc:\n      command: legacy-mcp\n")
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1256,6 +1383,9 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	}
 	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
 		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
+	}
+	if got := mcpEntriesByName(entries)["legacy-dc"].Command; got != "legacy-mcp" {
+		t.Fatalf("legacy Hermes MCP command = %q, want legacy-mcp; entries=%+v", got, entries)
 	}
 }
 

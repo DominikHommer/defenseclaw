@@ -175,6 +175,9 @@ func (a *ApplicationProtectionConfig) Validate() error {
 			return fmt.Errorf("application_protection.guardrail: %w", err)
 		}
 	}
+	if err := rejectGuardrailLevelOverlay(a.Guardrail); err != nil {
+		return fmt.Errorf("application_protection.guardrail: %w", err)
+	}
 	if err := validateAssetPolicyMode(a.AssetPolicy.Mode); err != nil {
 		return fmt.Errorf("application_protection.asset_policy: %w", err)
 	}
@@ -213,8 +216,31 @@ func (a *ApplicationProtectionConfig) Validate() error {
 				return fmt.Errorf("application_protection.connectors[%q].guardrail: %w", name, err)
 			}
 		}
+		if err := rejectGuardrailLevelOverlay(pc.Guardrail); err != nil {
+			return fmt.Errorf("application_protection.connectors[%q].guardrail: %w", name, err)
+		}
 		if err := validateAssetPolicyMode(pc.AssetPolicy.Mode); err != nil {
 			return fmt.Errorf("application_protection.connectors[%q].asset_policy: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// rejectGuardrailLevelOverlay refuses block_at / alert_at in an
+// application_protection guardrail overlay. The overlay shares
+// PerConnectorGuardrailConfig with guardrail.connectors, but the gateway
+// reads tool-call levels only from guardrail.block_at / alert_at and
+// guardrail.connectors, so accepting them here would silently do nothing.
+func rejectGuardrailLevelOverlay(pc PerConnectorGuardrailConfig) error {
+	for _, field := range []struct{ key, value string }{
+		{"block_at", pc.BlockAt},
+		{"alert_at", pc.AlertAt},
+	} {
+		if strings.TrimSpace(field.value) != "" {
+			return fmt.Errorf(
+				"%s is not supported in application_protection; the gateway reads it only from guardrail.%s and guardrail.connectors.<name>.%s",
+				field.key, field.key, field.key,
+			)
 		}
 	}
 	return nil
@@ -277,10 +303,14 @@ func (c *Config) appProtectionGuardrailOverride(connector string) (PerConnectorG
 	if c == nil || !c.ApplicationProtection.Enabled || c.manualConnectorConfigured(connector) {
 		return PerConnectorGuardrailConfig{}, false
 	}
+	overlay := c.ApplicationProtection.Guardrail
 	if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
-		return pc.Guardrail, true
+		overlay = pc.Guardrail
 	}
-	return c.ApplicationProtection.Guardrail, true
+	// A profile's own connectors[c] entry wins over the automatic-protection
+	// overlay (see guardrail_profiles.go). Only derived configurations carry
+	// one.
+	return c.Guardrail.profileConnectorOverlay(connector, overlay), true
 }
 
 // EffectiveGuardrailModeForConnector resolves manual per-connector guardrail
@@ -333,17 +363,18 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 	if c == nil {
 		return ""
 	}
-	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
-		if strings.TrimSpace(pc.RulePackDir) != "" {
-			return pc.RulePackDir
-		}
-	}
-	return c.Guardrail.EffectiveRulePackDir(connector)
+	return c.ResolveRulePackDir(c.EffectiveRulePackRefForConnector(connector))
 }
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return "closed"
+	}
+	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
+		if strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
+			return "closed"
+		}
+		return "open"
 	}
 	configured := ""
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
@@ -358,17 +389,20 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if configured == "" {
 		configured = c.Guardrail.EffectiveHookFailModeFor(connector)
 	}
-	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured)
+	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
 }
 
 // effectiveManagedEnterpriseHookFailMode keeps the protected deployment
 // contract and every runtime consumer on the same fail-closed value. Native
 // Codex and Claude hooks are enforcement boundaries in managed enterprise
 // deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation.
-func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string) string {
+// allowed to weaken their delivery/response behavior after installation. In
+// the standalone profile Devin runs the administrator-owned
+// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
+// config, the hook-contract lock and status report the same value.
+func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
 	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode") {
+	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
 		return "closed"
 	}
 	if strings.EqualFold(strings.TrimSpace(configured), "open") {

@@ -61,7 +61,11 @@ const (
 // destination fields. Callers obtain them from the validated top-level config.
 type ObservabilityV8ManagedAIDOptions struct {
 	DeploymentMode string
-	Endpoint       string
+	// Profile is the resolved enterprise profile. Only the Secure Client
+	// profile has the CMID-authenticated destination; a standalone
+	// deployment exports to the administrator's own destinations.
+	Profile  string
+	Endpoint string
 	// SourceContentHash is sha256 over the exact accepted config source bytes.
 	// It is a runtime-generation binding, not a user-configurable destination
 	// field and not the masked observability plan digest.
@@ -82,7 +86,8 @@ func WithObservabilityV8ManagedAIDDestination(
 	plan *ObservabilityV8Plan,
 	options ObservabilityV8ManagedAIDOptions,
 ) (*ObservabilityV8Plan, error) {
-	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" {
+	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" ||
+		managed.IsStandaloneProfile(options.Profile) {
 		return plan, nil
 	}
 	origin, ok := observabilityV8ManagedAIDOrigin(options.Endpoint)
@@ -183,6 +188,8 @@ func WithObservabilityV8ManagedAIDDestination(
 			},
 		},
 		managedAIDSourceContentHash: options.SourceContentHash,
+		managedAIDDeploymentAliasesOff: effective.TracePolicy.CompatibilityAliases != nil &&
+			!*effective.TracePolicy.CompatibilityAliases,
 	}
 	effective.Destinations = append(effective.Destinations, destination)
 	base := "observability.destinations." + ObservabilityV8ManagedAIDDestinationName
@@ -231,6 +238,16 @@ func ObservabilityV8ManagedAIDSourceContentHash(
 	value := destination.managedAIDSourceContentHash
 	return value, destination.Generated && validObservabilityV8ManagedAIDIdentity(destination) &&
 		validObservabilityV8SourceContentHash(value)
+}
+
+// ObservabilityV8ManagedAIDDeploymentAliases reports whether the managed AI
+// Defense sink adds deployment.environment and deployment.mode to its
+// resource. On main the provider added them while
+// observability.trace_policy.compatibility_aliases was on (the default), so
+// they follow that switch; only a Secure Client config_version 8 source can
+// still turn it off. defenseclaw.device.id does not depend on it.
+func ObservabilityV8ManagedAIDDeploymentAliases(destination ObservabilityV8EffectiveDestination) bool {
+	return !destination.managedAIDDeploymentAliasesOff
 }
 
 // reserveObservabilityV8ManagedInventory prepends a release-owned drop route

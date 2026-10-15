@@ -85,6 +85,14 @@ _DEPLOYMENT_MODE_ENV: Final = "DEFENSECLAW_DEPLOYMENT_MODE"
 _BACKUP_SCHEMA: Final = 1
 _MAX_SNAPSHOT_BYTES: Final = 64 * 1024 * 1024
 _MIN_SECRET_LEAK_SCAN_BYTES: Final = 8
+# Fields whose value would be a credential: a promoted header value found in
+# one of them is still a secret in the candidate (GAP-0326).
+_SECRET_FIELD_RE: Final = re.compile(
+    r"(?i)(header|token|secret|passw|api_?key|auth|credential|bearer|cookie|private_?key|signature|session)"
+)
+# A value shaped like a key or token (16+ characters, letters and digits, no
+# blanks) is a leak anywhere in the candidate, a URL included.
+_TOKEN_SHAPED_RE: Final = re.compile(r"(?=.*[A-Za-z])(?=.*[0-9])\S{16,}")
 _ENV_NAME_RE: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ENV_LINE_RE: Final = re.compile(
     rb"^[ \t]*(?P<export>export[ \t]+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
@@ -533,6 +541,14 @@ def activate_v8_migration(
             _assert_all_environment_dependencies(env, migration.environment_dependencies)
             _assert_all_ambient_environments_compatible(env, migration.environment_edits)
             _inject_fault(fault_injector, "after_activation")
+
+            # Generation publication is part of activation.  If it fails,
+            # restore both live files instead of reporting a failed migration
+            # while leaving its config and promoted credentials in place.
+            stage = "generation_record"
+            from defenseclaw.config_writer import ACTOR_MIGRATION, record_generation
+
+            record_generation(active_config, migration.candidate_sha256, ACTOR_MIGRATION, "config_version 8 activation")
         except BaseException as exc:
             if isinstance(exc, V8ActivationRollbackError):
                 # The atomic publisher retained recovery evidence because it
@@ -1609,7 +1625,9 @@ def _validate_migration_result(
             raise V8ActivationError("invalid_environment_dependency", "validate_result")
         dependency_names.add(dependency.name)
 
-    candidate_scalars, candidate_document = _candidate_projection(migration.candidate)
+    candidate_document = _candidate_projection(migration.candidate)
+    secret_scalars = _candidate_secret_scalars(candidate_document)
+    candidate_secret_text = _candidate_secret_text(migration.candidate)
     seen: set[str] = set()
     for edit in migration.environment_edits:
         if edit.name in seen or not _ENV_NAME_RE.fullmatch(edit.name):
@@ -1633,42 +1651,72 @@ def _validate_migration_result(
             ) from None
         if _sha256(encoded) != edit.value_sha256:
             raise V8ActivationError("environment_edit_digest_mismatch", "validate_result")
-        # Parse scalar values for exact low-entropy leaks (so a secret "8"
-        # does not collide with the integer config_version) and retain a raw
-        # scan for longer values that could survive in comments.
-        if edit.value in candidate_scalars or (
-            len(encoded) >= _MIN_SECRET_LEAK_SCAN_BYTES and encoded in migration.candidate
+        # The value must not remain where a secret would be: a header or
+        # credential field (compared as parsed strings, so a secret "8" does
+        # not collide with the integer config_version), or, for a longer
+        # value, a comment. An unrelated scalar that happens to equal it (a
+        # label such as "platform", the sink's method or name) is no leak:
+        # that refusal stopped the upgrade with nothing to act on (GAP-0326).
+        if (
+            edit.value in secret_scalars
+            or (len(encoded) >= _MIN_SECRET_LEAK_SCAN_BYTES and encoded in candidate_secret_text)
+            or (_TOKEN_SHAPED_RE.fullmatch(edit.value) and encoded in migration.candidate)
         ):
-            raise V8ActivationError("secret_in_candidate", "validate_result")
+            reference = edit.references[0]
+            raise V8ActivationError(
+                "secret_in_candidate",
+                "validate_result",
+                field_path=f"observability.destinations[{reference.destination}].{'.'.join(reference.path[:-1])}",
+                reason=(
+                    "the value moved from this field to .env is also in another header or credential field "
+                    "(or a comment) of config.yaml; change or remove that copy, then run the upgrade again"
+                ),
+            )
 
 
-def _candidate_projection(candidate: bytes) -> tuple[frozenset[str], object]:
+def _candidate_projection(candidate: bytes) -> object:
     try:
-        document = yaml.safe_load(candidate)
+        return yaml.safe_load(candidate)
     except (yaml.YAMLError, UnicodeDecodeError, RecursionError):
         # The mandatory target validator owns malformed candidates.  Do not
         # render its source or a parser cause at this secret boundary.
-        return frozenset(), None
-    pending = [document]
+        return None
+
+
+def _candidate_secret_scalars(document: object) -> frozenset[str]:
+    """Every string the candidate holds in a header or credential field."""
+    pending: list[tuple[object, bool]] = [(document, False)]
     seen_containers: set[int] = set()
     strings: set[str] = set()
     while pending:
-        value = pending.pop()
+        value, secret = pending.pop()
         if isinstance(value, str):
-            strings.add(value)
+            if secret:
+                strings.add(value)
+            continue
+        if id(value) in seen_containers:
             continue
         if isinstance(value, dict):
-            if id(value) in seen_containers:
-                continue
             seen_containers.add(id(value))
-            pending.extend(value.keys())
-            pending.extend(value.values())
+            for key, item in value.items():
+                pending.append((item, secret or (isinstance(key, str) and bool(_SECRET_FIELD_RE.search(key)))))
         elif isinstance(value, (list, tuple, set)):
-            if id(value) in seen_containers:
-                continue
             seen_containers.add(id(value))
-            pending.extend(value)
-    return frozenset(strings), document
+            pending.extend((item, secret) for item in value)
+    return frozenset(strings)
+
+
+def _candidate_secret_text(candidate: bytes) -> bytes:
+    """The raw lines of credential-named fields, and every comment."""
+    kept = []
+    for line in candidate.splitlines():
+        stripped = line.lstrip(b" \t-")
+        key, separator, _ = stripped.partition(b":")
+        if stripped.startswith(b"#") or (separator and _SECRET_FIELD_RE.search(key.decode("utf-8", "replace"))):
+            kept.append(line)
+        elif (index := line.find(b" #")) >= 0 or (index := line.find(b"\t#")) >= 0:
+            kept.append(line[index + 1 :])
+    return b"\n".join(kept)
 
 
 def _candidate_reference_matches(
@@ -3231,7 +3279,7 @@ def _remove_unexpected_xattrs(descriptor: int, expected: frozenset[str]) -> None
     current = _read_xattrs(descriptor, "staged replacement")
     remove = getattr(os, "removexattr", None)
     for name, _value in current:
-        if name in expected:
+        if name in expected or name in _KERNEL_LABEL_XATTRS:
             continue
         if remove is not None:
             remove(descriptor, name)
@@ -3564,13 +3612,29 @@ def _xattrs_match(
 ) -> bool:
     if actual == expected:
         return True
-    if not allow_platform_xattrs or sys.platform != "darwin":
+    platform_names = _platform_xattr_names()
+    if not allow_platform_xattrs or not platform_names:
         return False
     expected_map = dict(expected)
     actual_map = dict(actual)
     return all(
-        name in {"com.apple.provenance"} or expected_map.get(name) == value for name, value in actual_map.items()
+        name in platform_names or expected_map.get(name) == value for name, value in actual_map.items()
     ) and all(actual_map.get(name) == value for name, value in expected_map.items())
+
+
+# Attributes the OS attaches to every new file. A brand-new private file may
+# carry them even though there was no prior file to copy them from, and an
+# unprivileged user cannot remove the SELinux label (EACCES), so they are
+# never stripped from a staged replacement.
+_KERNEL_LABEL_XATTRS = frozenset({"security.selinux"})
+
+
+def _platform_xattr_names() -> frozenset[str]:
+    if sys.platform == "darwin":
+        return frozenset({"com.apple.provenance"})
+    if sys.platform.startswith("linux"):
+        return _KERNEL_LABEL_XATTRS
+    return frozenset()
 
 
 def _assert_private_file_parent_trust(target: str, owner_root: str, trusted_uids: frozenset[int]) -> None:

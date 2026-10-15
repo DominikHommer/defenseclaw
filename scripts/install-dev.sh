@@ -577,12 +577,6 @@ print_next_steps() {
     echo -e "  • Rebuild gateway after changes:"
     echo -e "    ${CYAN}make gateway${NC}"
     echo ""
-    
-    if [[ "${OS}" == "darwin" ]]; then
-        echo -e "  ${YELLOW}Note:${NC} OpenShell sandbox is not available on macOS."
-        echo "  Scanning, governance, and audit features work normally."
-        echo ""
-    fi
 }
 
 # -----------------------------------------------------------------------------
@@ -649,7 +643,7 @@ main() {
                 echo "  --skip-install          Build only, don't install to ${INSTALL_DIR}"
                 echo "  --check                 Check dependencies only, don't install anything"
                 echo "  --yes, -y               Skip confirmation prompts"
-                echo "  --quickstart            Run 'defenseclaw quickstart --non-interactive' post-install"
+                echo "  --quickstart            Run 'defenseclaw quickstart' post-install"
                 echo "  --quickstart-mode M     Pass --mode M to quickstart (observe|action; implies --quickstart)"
                 echo "  --help, -h              Show this help message"
                 exit 0
@@ -720,7 +714,7 @@ main() {
         local dc_bin="${VENV_DIR}/bin/defenseclaw"
         if [[ ! -x "${dc_bin}" ]]; then
             log_warn "CLI binary not found at ${dc_bin} — skipping quickstart"
-        elif "${dc_bin}" quickstart --non-interactive --yes --mode "${quickstart_mode}"; then
+        elif "${dc_bin}" quickstart --mode "${quickstart_mode}"; then
             log_success "Quickstart completed"
         else
             log_warn "Quickstart reported errors — run 'defenseclaw doctor' to investigate"

@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -36,6 +37,9 @@ type claudeCodeSettingsSource struct {
 	name     string
 	path     string
 	settings map[string]interface{}
+	// origins names, for the merged file-based tier, the file whose value
+	// of each top-level key Claude Code applies (the last one to set it).
+	origins map[string]string
 }
 
 func (s *claudeCodeSettingsSource) active() bool {
@@ -335,9 +339,17 @@ func (s claudeCodeUserSourceSet) highToLow() []*claudeCodeSettingsSource {
 
 func inspectClaudeCodeUserSources(opts SetupOpts) (claudeCodeUserSourceSet, error) {
 	var result claudeCodeUserSourceSet
-	user, err := readOptionalClaudeCodeSettings("user settings", claudeCodeSettingsPath())
+	userPath := claudeCodeSettingsPath()
+	readPath, err := claudeCodeUserSettingsReadPath(userPath)
+	if err != nil {
+		return result, fmt.Errorf("inspect Claude Code user settings %s: %w", userPath, err)
+	}
+	user, err := readOptionalClaudeCodeSettings("user settings", readPath)
 	if err != nil {
 		return result, err
+	}
+	if user != nil {
+		user.path = userPath
 	}
 	result.user = user
 
@@ -449,6 +461,16 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readClaudeCodeManagedFileSettingsAt(root)
+}
+
+// readClaudeCodeManagedFileSettingsAt loads the file-based managed tier under
+// an explicit root exactly as Claude does: managed-settings.json, then every
+// non-hidden managed-settings.d/*.json drop-in in case-insensitive order,
+// deep-merged. It is the root-parameterized core of
+// readClaudeCodeManagedFileSettings, so rendered image artifacts can be laid
+// out under a scratch root and checked with the same reader.
+func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource, error) {
 	paths := []string{filepath.Join(root, "managed-settings.json")}
 	dropin := filepath.Join(root, "managed-settings.d")
 	entries, err := os.ReadDir(dropin)
@@ -469,6 +491,7 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 	}
 
 	merged := map[string]interface{}{}
+	origins := map[string]string{}
 	var loaded []string
 	for _, path := range paths {
 		source, err := readOptionalClaudeCodeSettings("file-based managed settings", path)
@@ -479,6 +502,9 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 			continue
 		}
 		merged = mergeClaudeCodeSettings(merged, source.settings)
+		for key := range source.settings {
+			origins[key] = path
+		}
 		loaded = append(loaded, path)
 	}
 	if len(loaded) == 0 {
@@ -488,7 +514,55 @@ func readClaudeCodeManagedFileSettings() (*claudeCodeSettingsSource, error) {
 		name:     "file-based managed settings",
 		path:     strings.Join(loaded, ", "),
 		settings: merged,
+		origins:  origins,
 	}, nil
+}
+
+// ClaudeCodeManagedHooksOnlyOverride reports a file-based managed settings
+// file that Claude Code applies after DefenseClaw's drop-in ownDropIn and
+// that sets allowManagedHooksOnly to anything but true. Claude Code merges
+// managed-settings.json and then the managed-settings.d files in name order,
+// and a later file's scalar wins, so such a file turns the lock off although
+// DefenseClaw's drop-in carries it. A lock missing from the drop-in
+// itself is the drop-in's own check.
+func ClaudeCodeManagedHooksOnlyOverride(ownDropIn string) error {
+	source, err := readClaudeCodeManagedFileSettings()
+	if err != nil {
+		return err
+	}
+	return claudeCodeManagedHooksOnlyOverride(source, ownDropIn)
+}
+
+func claudeCodeManagedHooksOnlyOverride(source *claudeCodeSettingsSource, ownDropIn string) error {
+	if source == nil {
+		return nil
+	}
+	from := source.origins["allowManagedHooksOnly"]
+	if from == "" || !claudeCodeDropInAppliesAfter(from, ownDropIn) {
+		return nil
+	}
+	value := source.settings["allowManagedHooksOnly"]
+	if value == true {
+		return nil
+	}
+	shown, err := json.Marshal(value)
+	if err != nil {
+		shown = []byte(fmt.Sprintf("%v", value))
+	}
+	return fmt.Errorf(
+		"Claude Code managed settings %s set allowManagedHooksOnly to %s after DefenseClaw's drop-in %s, so user and project hooks can rewrite tool input after inspection; remove the setting from that file, or set managed_hooks_only: preserve for claudecode",
+		from, shown, filepath.Base(ownDropIn),
+	)
+}
+
+// claudeCodeDropInAppliesAfter reports whether Claude Code applies the
+// managed settings file path after ownDropIn: only a managed-settings.d file
+// whose name sorts after it does.
+func claudeCodeDropInAppliesAfter(path, ownDropIn string) bool {
+	if !strings.EqualFold(filepath.Base(filepath.Dir(path)), "managed-settings.d") {
+		return false
+	}
+	return strings.ToLower(filepath.Base(path)) > strings.ToLower(filepath.Base(ownDropIn))
 }
 
 func mergeClaudeCodeSettings(lower, higher map[string]interface{}) map[string]interface{} {
@@ -540,6 +614,36 @@ func jsonValuesEqual(left, right interface{}) bool {
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+// claudeCodeUserSettingsReadPath is the file to read for the per-user
+// ~/.claude/settings.json. A dotfiles layout makes it a symlink; Setup
+// writes through the link, so the inspection follows it too when it ends at
+// a regular file in the user's home that the user owns. Refusing every link
+// left the gateway unable to start while the hooks were already installed,
+// so every Claude Code prompt was blocked (GAP-1062). Windows keeps
+// refusing links.
+func claudeCodeUserSettingsReadPath(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 || runtime.GOOS == "windows" {
+		return path, nil
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+	}
+	home := filepath.Clean(userHomeDir())
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
+	}
+	if err := validatePluginOwner(target); err != nil {
+		return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
+	}
+	return target, nil
 }
 
 func readOptionalClaudeCodeSettings(name, path string) (*claudeCodeSettingsSource, error) {

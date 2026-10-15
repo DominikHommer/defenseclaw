@@ -100,12 +100,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "scripts/gen_envvars_docs.py",
     "docs/ENV-VARS.md",
     "docs-site/content/docs/reference/env-vars.mdx",
-    # Historical-upgrade harness fixture names model environment entries that
-    # the later v8 migration will generate. They are test data, not bridge
-    # runtime inputs, so the v7 bridge registry must not advertise them.
-    "scripts/test-upgrade-release.sh",
-    "scripts/test-developer-target-activation.sh",
-    "cli/tests/test_upgrade_release_smoke_contract.py",
     # Configuration docs that explicitly mention env vars users SOMETIMES
     # try to set (DEFENSECLAW_DATA_DIR, DEFENSECLAW_LOG_LEVEL, ...) but
     # which DefenseClaw does NOT honor. These pages tell users to use
@@ -118,15 +112,17 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
     "docs-site/content/docs/reference/fail-modes.mdx",
+    # The 1.0.0 release notes, and the test that checks them, name the 0.8.x
+    # environment variable 1.0 removed (DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE)
+    # to tell operators what replaces it. They document a removal; nothing
+    # reads the name.
+    "CHANGELOG.md",
+    "cli/tests/test_cmd_config.py",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
     "cli/tests/test_cmd_keys.py",
-    # TUI agent-TTY smoke harness: DEFENSECLAW_AGENT_TTY_TESTS /
-    # DEFENSECLAW_AGENT_TTY_BIN gate and parameterize a test-only PTY
-    # smoke check. Never read by shipped code.
-    "cli/tests/tui/test_agent_tty_smoke.py",
     # End-to-end harness scripts (developer-run, not shipped). They define
     # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
     # providers; none are consumed by the gateway or CLI at runtime.
@@ -144,8 +140,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     "cli/tests/test_cmd_setup_trusted_paths.py",
     "cli/tests/test_observability_v8_activation.py",
     "cli/tests/test_render_telemetry_go.py",
-    "cli/tests/test_upgrade_release_smoke_contract.py",
-    "scripts/test-upgrade-release.sh",
     # Test-only parent/child subprocess sentinels used by Go helper
     # processes; they are not operator configuration and must not be
     # published as such.
@@ -170,6 +164,16 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
 # negative-lookahead avoids matching things like
 # DEFENSECLAW_SOMETHING_${var} which are template fragments.
 _ENV_TOKEN = re.compile(r"\b(MIGRATION_)?DEFENSECLAW_[A-Z][A-Z0-9_]*\b")
+_FLEET_ENV_READ = re.compile(
+    r'''(?:getenv|Getenv|os\.environ\.get|os\.getenv)\(\s*["'](DCLAW_[A-Z0-9_]+)["']'''
+)
+_FLEET_SOURCE_PATHS = (
+    "edge-connector/src",
+    "internal/fleet",
+    "internal/gateway/sidecar.go",
+    "cli/defenseclaw/commands/cmd_edge_install.py",
+    "cli/defenseclaw/commands/cmd_edge_connector_cli.py",
+)
 
 # Tokens that look like env vars but are actually CONSTANT NAMES or
 # HEADER NAMES in code (the registry uses the runtime env-var names, not
@@ -202,6 +206,8 @@ _NON_ENVVAR_TOKENS = frozenset(
         # (internal/cli/windows_enterprise_service_test.go and
         # cli/tests/test_windows_enterprise_service_contract.py), so no
         # token-level exclusion is required.
+        # C header include guard in edge-connector/include/defenseclaw.h.
+        "DEFENSECLAW_H",
     }
 )
 
@@ -213,7 +219,6 @@ _NON_ENVVAR_TOKENS = frozenset(
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
     "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
-    "DEFENSECLAW_LOCAL_": frozenset({"internal/cli/daemon.go"}),
     "DEFENSECLAW_MIGRATED_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
@@ -224,13 +229,11 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
         {
             "cli/defenseclaw/observability/v8_migration.py",
             "docs-site/content/docs/observability/index.mdx",
-            "internal/config/config.go",
-            "internal/config/config_test.go",
-            "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-            "cli/tests/test_upgrade_staged_resolver.py",
-            "scripts/upgrade.sh",
         }
     ),
+    # The sandbox wrappers' DEFENSECLAW_SANDBOX_* family: the test asserts
+    # host hook sources never read any of it.
+    "DEFENSECLAW_SANDBOX_": frozenset({"internal/gateway/require_sandbox_test.go"}),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),
 }
 
@@ -340,6 +343,48 @@ class CodebaseCoverageTests(unittest.TestCase):
             "than reading them.",
         ]
         self.fail("\n".join(msg_lines))
+
+    def test_fleet_runtime_env_reads_are_registered(self) -> None:
+        """Catalog direct Fleet/Edge C, Go and CLI environment readers."""
+        refs: dict[str, set[str]] = {}
+        for relative in _FLEET_SOURCE_PATHS:
+            root = _REPO_ROOT / relative
+            files = root.rglob("*") if root.is_dir() else [root]
+            for path in files:
+                if path.suffix not in {".c", ".go", ".py"}:
+                    continue
+                for name in _FLEET_ENV_READ.findall(path.read_text(errors="replace")):
+                    refs.setdefault(name, set()).add(path.relative_to(_REPO_ROOT).as_posix())
+        self.assertEqual(
+            sorted(refs.keys() - self.declared), [],
+            "Add direct Fleet/Edge DCLAW_* readers to the registry",
+        )
+        for entry in self.registry.by_category("fleet"):
+            for consumer in entry.consumers:
+                path = _REPO_ROOT / consumer.location
+                self.assertTrue(path.is_file(), f"{entry.name}: missing consumer {path}")
+                self.assertIn(entry.name, path.read_text(errors="replace"),
+                              f"{entry.name}: stale consumer {path}")
+
+    def test_managed_ignored_opt_outs_are_read_through_lookup(self) -> None:
+        """A variable a managed device ignores (security opt-outs, debug,
+        telemetry, discovery, ...) is read with ``envvars.lookup``, so the
+        managed-mode policy applies to it. The deployment pins (runtime_path)
+        decide managed mode, and test fixtures only steer tests."""
+        names = [
+            re.escape(e.name)
+            for e in self.registry.entries
+            if e.managed == "ignore" and e.category not in ("runtime_path", "test_fixture")
+        ]
+        direct = re.compile(r'os\.(?:environ\.get|getenv)\(\s*"(?:' + "|".join(names) + r')"')
+        offenders = []
+        for path in (_REPO_ROOT / "cli" / "defenseclaw").rglob("*.py"):
+            rel = path.relative_to(_REPO_ROOT).as_posix()
+            if rel.endswith("observability/v8_migration.py") or "/_data/" in rel:
+                continue  # the 0.x migration reads the retired values once; _data runs outside DefenseClaw
+            if direct.search(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(rel)
+        self.assertEqual(offenders, [], "read these variables with defenseclaw.envvars.lookup")
 
     def test_test_only_entries_are_explicitly_scoped(self) -> None:
         expected = {

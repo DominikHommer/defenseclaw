@@ -1,0 +1,247 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+const standaloneGatewayCheckConfig = `config_version: 8
+deployment_mode: managed_enterprise
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  rule_pack_dir: ""
+  connectors:
+    claudecode:
+      enabled: true
+    codex:
+      enabled: true
+`
+
+func writeStandaloneGatewayCheckConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A config the gateway cannot load is refused with the file, the
+// location and the reason, not installed and left to fail at service start.
+func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
+	dataDir := t.TempDir()
+	valid := writeStandaloneGatewayCheckConfig(t, standaloneGatewayCheckConfig)
+	if err := validateStandaloneGatewayConfig(valid, dataDir, ""); err != nil {
+		t.Fatalf("valid standalone config refused: %v", err)
+	}
+
+	noVersion := writeStandaloneGatewayCheckConfig(t, strings.TrimPrefix(standaloneGatewayCheckConfig, "config_version: 8\n"))
+	err := validateStandaloneGatewayConfig(noVersion, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), noVersion) || !strings.Contains(err.Error(), "config_version_required") {
+		t.Fatalf("config without config_version = %v, want its path and config_version_required", err)
+	}
+
+	// trust.mode "" means unset and is valid. The schema's mode values are
+	// case-sensitive, so a value the lifecycle would read case-insensitively
+	// still fails the gateway's compiler.
+	emptyTrust := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		"  profile: standalone\n", "  profile: standalone\n  trust:\n    mode: \"\"\n", 1))
+	if err := validateStandaloneGatewayConfig(emptyTrust, dataDir, ""); err != nil {
+		t.Fatalf("config with trust.mode \"\" (unset) refused: %v", err)
+	}
+	unknownTrust := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		"  profile: standalone\n", "  profile: standalone\n  trust:\n    mode: AUTHENTICODE\n", 1))
+	err = validateStandaloneGatewayConfig(unknownTrust, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "$.enterprise.trust.mode") || !strings.Contains(err.Error(), "config_schema_invalid") {
+		t.Fatalf("config with trust.mode AUTHENTICODE = %v, want the schema location", err)
+	}
+
+	// A syntax error names its line (GAP-0607).
+	tabbed := writeStandaloneGatewayCheckConfig(t, "deployment_mode: managed_enterprise\nguardrail:\n\tconnectors: {}\n")
+	err = validateStandaloneGatewayConfig(tabbed, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), "at line 3:") || !strings.Contains(err.Error(), "yaml_syntax_invalid") {
+		t.Fatalf("tab-indented config = %v, want its line and yaml_syntax_invalid", err)
+	}
+
+	missingPack := filepath.Join(t.TempDir(), "missing-pack")
+	noPack := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+missingPack+"'", 1))
+	err = validateStandaloneGatewayConfig(noPack, dataDir, "")
+	if err == nil || !strings.Contains(err.Error(), missingPack) || !strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("config naming a missing rule pack = %v, want the directory and directory_not_found", err)
+	}
+}
+
+// GAP-0095: the gateway service account's own read access is checked with
+// the account the preflight pins, and its refusal (which names the account
+// and the icacls fix) comes before the pack is loaded as an administrator.
+func TestStandaloneGatewayConfigCheckAsksTheServiceAccount(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "pack")
+	if err := os.MkdirAll(pack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+pack+"'", 1))
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
+	restore := standaloneServiceCanReadTree
+	t.Cleanup(func() { standaloneServiceCanReadTree = restore })
+	var asked []string
+	standaloneServiceCanReadTree = func(root, label, account string) error {
+		asked = append(asked, label+"|"+root+"|"+account)
+		return errors.New(label + " " + root + ": the gateway service account " + account + " cannot read it; grant it Read & execute, for example: icacls")
+	}
+	err := validateStandaloneGatewayConfig(configPath, t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `NT SERVICE\DefenseClawGateway`) || !strings.Contains(err.Error(), "icacls") {
+		t.Fatalf("service-unreadable pack = %v, want the account and the icacls fix", err)
+	}
+	if len(asked) != 1 || asked[0] != "guardrail.rule_pack_dir|"+pack+`|NT SERVICE\DefenseClawGateway` {
+		t.Fatalf("service read check calls = %q", asked)
+	}
+}
+
+// GAP-1118: a jsonl destination in a folder the gateway service account
+// cannot write is refused before anything changes, naming the folder and the
+// grant it needs; Setup runs as an administrator, who can write it, and the
+// gateway then did not start and the install rolled back.
+func TestStandaloneGatewayConfigCheckRefusesAJSONLFolderTheServiceCannotWrite(t *testing.T) {
+	folder := t.TempDir()
+	sink := filepath.Join(folder, "sink.jsonl")
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: '" + sink + "'\n"
+	const account = `NT SERVICE\DefenseClawGateway`
+	t.Setenv(managed.WindowsServiceAccountEnv, account)
+	restore := standaloneServiceCanWriteFile
+	t.Cleanup(func() { standaloneServiceCanWriteFile = restore })
+	var asked []string
+	standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
+		asked = append(asked, path+"|"+serviceAccount)
+		return errors.New("the gateway service account " + serviceAccount + " cannot create files in " + filepath.Dir(path))
+	}
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `destination "local-copy"`) || !strings.Contains(err.Error(), "cannot create files in "+folder) ||
+		!strings.Contains(err.Error(), `icacls "`+folder+`" /grant "`+account+`:(OI)(CI)M"`) {
+		t.Fatalf("jsonl folder the service cannot write = %v", err)
+	}
+	if len(asked) != 1 || asked[0] != sink+"|"+account {
+		t.Fatalf("service write check calls = %q", asked)
+	}
+}
+
+// GAP-0039: a connector that inherits the selected custom pack is not the key
+// a refusal names, and a custom_packs entry nothing selects is not loaded.
+func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "acme"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"acme":   {Path: "/packs/acme"},
+		"unused": {Path: "/packs/unused"},
+	}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}
+	got := standaloneGatewayRulePackDirs(cfg)
+	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != "/packs/acme" {
+		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
+	}
+}
+
+// GAP-0188: a custom_packs pin the gateway refuses at start is refused here,
+// with the digest to pin, so a Windows upgrade that keeps the config fails
+// before it stops the services instead of after the readiness wait.
+func TestStandaloneGatewayConfigCheckRefusesAStaleCustomPackPin(t *testing.T) {
+	pack := t.TempDir()
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(pack, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`, "  rule_pack: acme\n  custom_packs:\n    acme:\n      path: '"+pack+"'\n      digest: sha256:"+strings.Repeat("0", 64), 1)
+	// An environment-backed token the check cannot resolve does not skip
+	// the pin check (GAP-0188).
+	withToken := body + "observability:\n  destinations:\n    - name: hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://splunk.example.test\n      token_env: DC_TEST_UNSET_HEC_TOKEN\n"
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	for _, config := range []string{body, withToken} {
+		err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, config), t.TempDir(), "")
+		if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") ||
+			!strings.Contains(err.Error(), "rulepack validate --dir") {
+			t.Fatalf("stale custom pack pin = %v, want the digest to pin and the command that prints it", err)
+		}
+	}
+}
+
+// GAP-0558: re-running a pack copy onto an existing pack folder nests a copy
+// inside it; the refusal names that folder instead of only an unexpected
+// YAML component deep inside it.
+func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "edkm")
+	if err := os.MkdirAll(filepath.Join(pack, "edkm", "judge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nested := &guardrail.RulePackError{Path: "edkm/judge/injection.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	if hint := rulePackNestedCopyHint(pack, fmt.Errorf("wrapped: %w", nested)); !strings.Contains(hint, filepath.Join(pack, "edkm")+" is a copy of the pack inside itself") {
+		t.Fatalf("hint = %q", hint)
+	}
+	other := &guardrail.RulePackError{Path: "extra/rules.yaml", Code: "inventory_unexpected", Reason: "unexpected YAML component"}
+	if hint := rulePackNestedCopyHint(pack, other); hint != "" {
+		t.Fatalf("a component that is not a nested copy got hint %q", hint)
+	}
+}
+
+// GAP-0932: inline secrets are refused naming every rejected key, never a
+// value, and how to store a secret; before, Windows Setup said only
+// "configuration could not be compiled safely" at $.
+func TestStandaloneGatewayConfigCheckNamesInlineSecrets(t *testing.T) {
+	body := strings.Replace(standaloneGatewayCheckConfig, "  api_port: 18970\n", "  api_port: 18970\n  token: FAKE-MARKER-3\n", 1) +
+		"llm:\n  api_key: FAKE-MARKER-1\ncisco_ai_defense:\n  api_key: FAKE-MARKER-2\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "remove llm.api_key, cisco_ai_defense.api_key, gateway.token") ||
+		!strings.Contains(err.Error(), "enterprise secret set") || strings.Contains(err.Error(), "FAKE-MARKER") ||
+		strings.Contains(err.Error(), "compiled safely") {
+		t.Fatalf("inline secrets = %v", err)
+	}
+}
+
+// An unresolved service token must not bypass the JSONL path preflight.
+func TestStandaloneGatewayConfigCheckRefusesJSONLDirectoryWithMissingToken(t *testing.T) {
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	destination := t.TempDir()
+	body := standaloneGatewayCheckConfig + "observability:\n  destinations:\n" +
+		"    - name: hec\n      kind: splunk_hec\n      endpoint: https://splunk.example.test\n" +
+		"      token_env: DC_TEST_UNSET_HEC_TOKEN\n" +
+		"    - name: local-copy\n      kind: jsonl\n      path: " + destination + "\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), destination) || !strings.Contains(err.Error(), "which is a directory") {
+		t.Fatalf("JSONL directory with unresolved service token = %v, want path refusal", err)
+	}
+}
+
+// An unresolved service token cannot hide an unrelated runtime semantic error.
+func TestStandaloneGatewayConfigCheckRejectsUnknownProfileWithMissingToken(t *testing.T) {
+	t.Setenv("DC_TEST_UNSET_HEC_TOKEN", "")
+	body := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8", "config_version: 9", 1)
+	body = strings.Replace(body, "  rule_pack_dir: \"\"\n", "  rule_pack: default\n", 1)
+	body = strings.Replace(body, "  mode: observe\n", "  mode: observe\n  default_profile: missing\n", 1)
+	body += "observability:\n  destinations:\n    - name: hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://splunk.example.test\n      token_env: DC_TEST_UNSET_HEC_TOKEN\n"
+	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "guardrail.default_profile") || !strings.Contains(err.Error(), "unknown profile") {
+		t.Fatalf("unknown profile with unresolved token = %v, want profile refusal", err)
+	}
+}

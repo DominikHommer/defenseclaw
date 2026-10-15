@@ -297,6 +297,37 @@ def test_destination_health_rejects_unbounded_circuit_values() -> None:
     assert result.circuit_label == "unavailable"
 
 
+def test_secure_client_queue_label_keeps_main_counter_set() -> None:
+    health = V8DestinationHealth(name="managed", queue_items=0, dropped=0, rejected=0)
+    assert health.queue_label_for(secure_client=True) == "0 items, 0 dropped"
+    assert health.queue_label_for(secure_client=False) == "0 items, 0 dropped, 0 rejected"
+
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="", data_dir="", plan_digest="", bucket_catalog_version=1,
+        retention_days=7, local_path="", judge_bodies_path="",
+        destinations=(V8DestinationStatus(
+            name="managed", kind="otlp", enabled=True, generated=True,
+            capabilities=("logs",), selected_signals=("logs",),
+            policy_form="managed", endpoint="", route_count=1,
+            buckets=(), redaction_profiles=("sensitive",),
+        ),),
+        buckets=(), warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(
+        status, result, secure_client=True,
+        live_health={"telemetry": {"details": {"destinations": [{
+            "name": "managed", "state": "healthy", "queue_items": 0,
+            "queue_dropped": 0, "counters": {"rejected": 0},
+        }]}}},
+    )
+    detail = next(item["detail"] for item in result.checks if item["label"] == "Destination: managed")
+    assert "queue=0 items, 0 dropped" in detail
+    assert "rejected" not in detail
+
+
 def test_destination_health_humanizes_bounded_circuit_tokens() -> None:
     result = V8DestinationHealth(
         name="collector",
@@ -758,7 +789,7 @@ def test_doctor_invalid_v8_never_falls_back_to_legacy_destination_reader(tmp_pat
     assert not hasattr(observability, "list_destinations")
     _check_observability(SimpleNamespace(data_dir=str(tmp_path)), result)
     assert result.failed == 1
-    assert result.checks[0]["label"] == "Observability v8 effective plan"
+    assert result.checks[0]["label"] == "Observability plan"
 
 
 def test_doctor_v8_renders_bounded_live_health_and_never_raw_error_text() -> None:
@@ -1113,6 +1144,86 @@ def test_doctor_galileo_canary_fails_safely_and_skips_disabled_routes() -> None:
     )
 
 
+def test_doctor_galileo_canary_names_gateway_delivery_failure() -> None:
+    # GAP-2393: a 502 from the gateway means its own export failed; the row must
+    # say so and must not point only at the direct destination test.
+    from defenseclaw.commands.cmd_doctor import (
+        _check_galileo_trace_canaries,
+        _DoctorResult,
+    )
+    from defenseclaw.observability.trace_canary import TraceCanaryError
+
+    enabled = V8DestinationStatus(
+        name="galileo",
+        kind="otlp",
+        enabled=True,
+        generated=False,
+        capabilities=("traces",),
+        selected_signals=("traces",),
+        policy_form="capability_default",
+        endpoint="https://api.galileo.ai/otel/traces",
+        route_count=1,
+        buckets=("agent.lifecycle",),
+        redaction_profiles=("none",),
+        preset="galileo",
+    )
+    result = _DoctorResult()
+    with patch(
+        "defenseclaw.observability.trace_canary.run_trace_canary",
+        side_effect=TraceCanaryError("delivery_failed"),
+    ):
+        _check_galileo_trace_canaries(
+            SimpleNamespace(destinations=(enabled,)),
+            result,
+            config_path="/data/config.yaml",
+            data_dir="/data",
+        )
+
+    check = result.checks[0]
+    assert check["status"] == "fail"
+    assert check["detail"].startswith("delivery_failed: the running gateway accepted the canary")
+    assert "gateway_rejected" not in check["detail"]
+    assert "HTTPS_PROXY/NO_PROXY" in check["remediation"]
+    assert "'defenseclaw-gateway restart'" in check["remediation"]
+    assert "connects directly" in check["remediation"]
+
+
+
+def test_doctor_dry_run_galileo_canary_skip_names_dry_run() -> None:
+    # GAP-0102: --fix --dry-run is passive; the skip row must name --dry-run,
+    # not a passive mode the user never chose.
+    from defenseclaw.commands.cmd_doctor import (
+        _check_galileo_trace_canaries,
+        _DoctorResult,
+    )
+
+    enabled = V8DestinationStatus(
+        name="galileo",
+        kind="otlp",
+        enabled=True,
+        generated=False,
+        capabilities=("traces",),
+        selected_signals=("traces",),
+        policy_form="capability_default",
+        endpoint="https://api.galileo.ai/otel/traces",
+        route_count=1,
+        buckets=("agent.lifecycle",),
+        redaction_profiles=("none",),
+        preset="galileo",
+    )
+    result = _DoctorResult(mode="plan", passive=True)
+    _check_galileo_trace_canaries(
+        SimpleNamespace(destinations=(enabled,)),
+        result,
+        config_path="/data/config.yaml",
+        data_dir="/data",
+    )
+
+    check = result.checks[0]
+    assert check["status"] == "skip"
+    assert check["detail"].startswith("--dry-run ")
+    assert "passive" not in check["detail"]
+
 def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes() -> None:
     from defenseclaw.commands.cmd_doctor import (
         _check_galileo_trace_canaries,
@@ -1176,3 +1287,118 @@ def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes()
     assert result.checks[-1]["detail"] == (
         "untested=2; automatic_limit=4; remaining enabled routes retain bounded runtime-health checks"
     )
+
+
+def test_inspect_status_errors_name_the_config_not_the_snapshot(tmp_path: Path) -> None:
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 8\nobservability: {}\n")
+    snapshots: list[str] = []
+
+    def fail(_operation: str, *, config_path: str, data_dir: str, environment_overrides: dict[str, str]):
+        snapshots.append(config_path)
+        raise ConfigInspectError(f"Error: {config_path}:68:9: [config_semantic_invalid] missing variable")
+
+    with (
+        patch("defenseclaw.observability.v8_status.default_data_path", return_value=tmp_path),
+        patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=fail),
+        pytest.raises(ConfigInspectError) as raised,
+    ):
+        inspect_v8_operator_status(path)
+
+    assert f"{path.absolute()}:68:9" in str(raised.value)
+    assert snapshots and snapshots[0] not in str(raised.value)
+
+
+def test_doctor_judge_body_row_says_capture_is_unredacted() -> None:
+    # GAP-1693: the judge-body store is outside every redaction profile.
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=7,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="/tmp/judge.db",
+        destinations=(),
+        buckets=(),
+        warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result)
+
+    checks = {item["label"]: item for item in result.checks}
+    assert checks["Judge-body store"]["detail"] == (
+        "capture=enabled (raw judge text, not redacted; turn off with guardrail.retain_judge_bodies: false); "
+        "retention=7 days; path=/tmp/judge.db"
+    )
+
+
+def test_doctor_v8_local_rows_fail_when_gateway_reports_audit_write_failure() -> None:
+    # GAP-1984: a full data disk made the telemetry row fail while Local SQLite
+    # and Destination: local-sqlite stayed green in the same run.
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml",
+        data_dir="/tmp",
+        plan_digest="a" * 64,
+        bucket_catalog_version=1,
+        retention_days=30,
+        local_path="/tmp/audit.db",
+        judge_bodies_path="",
+        destinations=(
+            V8DestinationStatus(
+                name="local-sqlite",
+                kind="sqlite",
+                enabled=True,
+                generated=True,
+                capabilities=("logs",),
+                selected_signals=("logs",),
+                policy_form="implicit_local",
+                endpoint="/tmp/audit.db",
+                route_count=1,
+                buckets=("compliance.activity",),
+                redaction_profiles=("none",),
+            ),
+        ),
+        buckets=(V8BucketStatus("compliance.activity", ("logs",), "none"),),
+        warnings=(),
+    )
+    full = {
+        "telemetry": {
+            "state": "error",
+            "details": {
+                "event_history_failure": "sqlite_write_failed",
+                "event_history_last_sqlite_class": "full",
+                # The sink's own counters lag the failure (GAP-2002).
+                "destinations": [{"name": "local-sqlite", "health_state": "healthy", "reason": "activated"}],
+            },
+        }
+    }
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=full)
+    checks = {item["label"]: item for item in result.checks}
+    for label in ("Local SQLite", "Destination: local-sqlite"):
+        assert checks[label]["status"] == "fail"
+        assert "disk holding the audit database is full" in checks[label]["detail"]
+        assert checks[label]["remediation"].startswith("free space on the disk")
+    row = checks["Destination: local-sqlite"]["detail"]
+    assert "health=healthy" not in row and "0 consecutive failures" not in row
+
+    healthy = _DoctorResult()
+    _check_observability_v8_status(status, healthy, live_health={"telemetry": {"state": "running"}})
+    assert {c["label"]: c["status"] for c in healthy.checks}["Local SQLite"] == "pass"
+
+
+def test_destination_display_reason_hides_routine_healthy_codes() -> None:
+    """GAP-2557: doctor shows no lifecycle code for a healthy destination."""
+    from defenseclaw.observability.v8_status import V8DestinationHealth
+
+    assert V8DestinationHealth(name="g", state="healthy", reason="delivery_recovered").display_reason == ""
+    assert V8DestinationHealth(name="g", state="healthy", reason="activated").display_reason == ""
+    assert V8DestinationHealth(name="g", state="degraded", reason="queue_full").display_reason == "queue_full"
+    assert V8DestinationHealth(name="g", state="healthy", reason="origin_loop").display_reason == "origin_loop"

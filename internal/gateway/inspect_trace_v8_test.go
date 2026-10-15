@@ -81,7 +81,7 @@ func TestInspectTraceV8ExportsRichGeneratedGuardrailSpanWithoutLegacyProvider(t 
 	span := spans[0]
 	if span.Name != "apply_guardrail inspect tool_call" ||
 		span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
-		span.Status.GetCode() != tracepb.Status_STATUS_CODE_OK {
+		span.Status.GetCode() != tracepb.Status_STATUS_CODE_ERROR {
 		t.Fatalf("generated inspect identity name=%q kind=%s status=%s", span.Name, span.Kind, span.Status.GetCode())
 	}
 	traceID, parentID := spanContext.TraceID(), spanContext.SpanID()
@@ -111,10 +111,40 @@ func TestInspectTraceV8ExportsRichGeneratedGuardrailSpanWithoutLegacyProvider(t 
 		"defenseclaw.destination.app":            "mcp.example",
 		"defenseclaw.guardrail.latency_ms":       "12.5",
 		"defenseclaw.guardrail.finding_count":    "1",
+		"defenseclaw.guardrail.action":           "block",
+		"defenseclaw.guardrail.rule_id":          "CG-EXEC-001",
+		"defenseclaw.guardrail.severity":         "HIGH",
 	} {
 		if got := attributes[key]; got != want {
 			t.Errorf("generated inspect attribute %s=%q want=%q; attributes=%v", key, got, want, attributes)
 		}
+	}
+	if len(span.Events) != 1 || span.Events[0].Name != "defenseclaw.guardrail.block" {
+		t.Fatalf("generated inspect block events=%v", span.Events)
+	}
+}
+
+func TestInspectTraceDoesNotJoinAnotherUsersSessionIdentity(t *testing.T) {
+	registry := InstallSharedAgentRegistry("", "")
+	const session = "review-r2-shared-session"
+	const firstAgent = "agt-0123456789abcdef"
+	registry.AgentInstanceFor(firstAgent, session)
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{
+		UID: 1002, Name: "second-user", Home: t.TempDir(),
+	})
+	ctx = ContextWithSessionID(ctx, session)
+	api := &APIServer{scannerCfg: &config.Config{Guardrail: config.GuardrailConfig{Connector: "codex"}}}
+	input, ok := api.inspectTraceV8Input(ctx, "write_file", "tool_call",
+		&ToolInspectVerdict{Action: "allow", Severity: "NONE"}, time.Millisecond, hookEvaluationContext{})
+	if !ok {
+		t.Fatal("inspect input rejected")
+	}
+	got, present := input.DefenseClawAgentIdentityID.Get()
+	if present && got == firstAgent {
+		t.Fatalf("verified second user inherited first users agent identity %q", got)
+	}
+	if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "codex"}); facts.ID != "" && (!present || got != facts.ID) {
+		t.Fatalf("agent identity = %q, want verified caller identity %q", got, facts.ID)
 	}
 }
 

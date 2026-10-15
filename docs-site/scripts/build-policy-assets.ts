@@ -85,25 +85,6 @@ const REGO_DOMAINS: Array<{
       'defenseclaw/guardrail/action',
     ],
   },
-  {
-    name: 'firewall',
-    source: 'firewall.rego',
-    entrypoints: ['defenseclaw/firewall/action', 'defenseclaw/firewall/rule_name'],
-  },
-  {
-    name: 'audit',
-    source: 'audit.rego',
-    entrypoints: ['defenseclaw/audit/retain', 'defenseclaw/audit/retain_reason'],
-  },
-  {
-    name: 'skill_actions',
-    source: 'skill_actions.rego',
-    entrypoints: [
-      'defenseclaw/skill_actions/runtime_action',
-      'defenseclaw/skill_actions/file_action',
-      'defenseclaw/skill_actions/install_action',
-    ],
-  },
 ];
 
 interface PresetBundle {
@@ -342,7 +323,7 @@ function capabilityForRuleId(id: string): Recipe['tool_capability_class'] {
   return undefined;
 }
 
-function buildRecipes(strict: PresetBundle): Recipe[] {
+function buildRecipes(strict: PresetBundle, balanced?: PresetBundle): Recipe[] {
   const recipes: Recipe[] = [];
 
   // Rule recipes: lifted verbatim from policies/guardrail/strict/rules/*.yaml.
@@ -470,26 +451,24 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
       tags: ['finding'],
     });
   }
-  // Tool suppression placeholder so the picker has a "starter" the
-  // operator can clone. We do NOT lift any from the strict pack
-  // (it ships with [] today) — instead we emit a single illustrative
-  // example matching the docstring in policies.mdx.
-  recipes.push({
-    id: 'RECIPE-SUPP-TOOL-COSMETIC-SHELL',
-    title: 'Suppress cosmetic shell commands (git status / log / diff)',
-    kind: 'tool_suppression',
-    body: {
-      tool_pattern: '^(shell|bash|sh)\\.execute$',
-      suppress_findings: ['JUDGE-INJ-DESTRUCTIVE'],
-      reason: 'Cosmetic shell commands (git status, ls, pwd) generate noise without security risk',
-    },
-    why:
-      'Tool suppressions let you silence findings on tools whose name matches a regex. Use this to drop noisy verdicts on read-only commands while keeping write/destructive commands surfaced.',
-    examples: ['shell.execute', 'bash.execute'],
-    counterexamples: ['shell.write', 'fs.unlink'],
-    source: 'docs-site/scripts/build-policy-assets.ts (illustrative)',
-    tags: ['tool', 'shell', 'noise-reduction'],
-    tool_capability_class: ['exec_shell'],
+  // The strict pack ships no tool suppressions, so lift the balanced
+  // (default) pack's entries instead. Tool suppressions only drop the
+  // listed PII-judge findings for matching tool names.
+  const balancedSupp = (balanced?.guardrail.suppressions ?? {}) as Record<string, unknown>;
+  const toolSupps = (balancedSupp.tool_suppressions ?? []) as Array<Record<string, unknown>>;
+  toolSupps.forEach((s, i) => {
+    const findings = (s.suppress_findings as string[] | undefined) ?? [];
+    recipes.push({
+      id: `RECIPE-SUPP-TOOL-${i + 1}`,
+      title: String(s.reason ?? s.tool_pattern ?? `tool suppression ${i + 1}`),
+      kind: 'tool_suppression',
+      body: s,
+      why: `Tool suppression shipped in the bundled default pack. Drops ${findings.join(', ') || 'the listed'} PII-judge findings for matching tool names; regex and CEL rule findings are unaffected.`,
+      examples: [],
+      counterexamples: [],
+      source: 'policies/guardrail/default/suppressions.yaml',
+      tags: ['tool'],
+    });
   });
 
   return recipes;
@@ -636,69 +615,6 @@ function buildScenarios(): Scenario[] {
         content_length: 256,
       },
     },
-    {
-      id: 'firewall-allowed-domain',
-      title: 'Allowed-domain HTTPS fetch',
-      domain: 'firewall',
-      description: 'Outbound to api.github.com:443. Allowed by default policy.',
-      expectedVerdict: 'allow',
-      input: {
-        target_type: 'plugin',
-        destination: 'api.github.com',
-        port: 443,
-        protocol: 'tcp',
-      },
-    },
-    {
-      id: 'firewall-imds',
-      title: 'AWS IMDS fetch attempt',
-      domain: 'firewall',
-      description: 'Outbound to 169.254.169.254. Blocked by default and strict policies.',
-      expectedVerdict: 'deny',
-      input: {
-        target_type: 'plugin',
-        destination: '169.254.169.254',
-        port: 80,
-        protocol: 'tcp',
-      },
-    },
-    {
-      id: 'audit-recent-info',
-      title: 'Recent INFO event',
-      domain: 'audit',
-      description: '5-day-old INFO event. Retained by default (within retention).',
-      expectedVerdict: 'true',
-      input: {
-        event_type: 'scan',
-        severity: 'INFO',
-        age_days: 5,
-        export_targets: [],
-      },
-    },
-    {
-      id: 'audit-old-critical',
-      title: 'Old CRITICAL event',
-      domain: 'audit',
-      description: '500-day-old CRITICAL. Retained indefinitely under default policy.',
-      expectedVerdict: 'true',
-      input: {
-        event_type: 'block',
-        severity: 'CRITICAL',
-        age_days: 500,
-        export_targets: ['splunk'],
-      },
-    },
-    {
-      id: 'skill-actions-high',
-      title: 'HIGH severity skill verdict',
-      domain: 'skill_actions',
-      description: 'Skill flagged HIGH. Default policy: runtime=disable, file=quarantine, install=block.',
-      expectedVerdict: 'block',
-      input: {
-        severity: 'HIGH',
-        target_type: 'skill',
-      },
-    },
     // ----- Layer 5: session correlator promotions ---------------------------
     // The correlator itself runs in Go (not Rego). These scenarios show
     // what the gateway emits *after* a correlator pattern fires: a
@@ -751,7 +667,7 @@ function buildAll(): BuildResult {
   if (!strict) {
     throw new Error('strict preset is required to seed the recipe catalog');
   }
-  const recipes = buildRecipes(strict);
+  const recipes = buildRecipes(strict, presets.find((p) => p.name === 'default')?.bundle);
   const scenarios = buildScenarios();
   const useCasePacks = buildUseCasePacks();
 

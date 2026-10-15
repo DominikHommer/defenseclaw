@@ -28,10 +28,11 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -64,6 +65,15 @@ func init() {
 }
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
+	// root pre-run usually started the stamper already (GAP-2109).
+	startDaemonLogStamp()
+	defer stopDaemonLogStamp()
+	// Before any outbound client exists: a standalone gateway routes its
+	// outbound clients through enterprise.network.
+	if err := applyStandaloneEgress(cfg); err != nil {
+		return fmt.Errorf("sidecar: apply enterprise.network: %w", err)
+	}
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
@@ -78,36 +88,32 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		cfg.Gateway.Port = sidecarPort
 	}
 
-	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
-
 	fmt.Println("╔══════════════════════════════════════════════╗")
 	fmt.Println("║       DefenseClaw Gateway Sidecar            ║")
 	fmt.Println("╚══════════════════════════════════════════════╝")
 	fmt.Println()
-	fmt.Printf("  Gateway:      %s:%d\n", cfg.Gateway.Host, cfg.Gateway.Port)
+	fmt.Println(fleetBannerLine(cfg))
 	fmt.Printf("  Auto-approve: %v\n", cfg.Gateway.AutoApprove)
-	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg.Gateway.Token))
+	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg))
 	fmt.Printf("  API port:     %d\n", cfg.Gateway.APIPort)
-	fmt.Printf("  Watcher:      %v\n", cfg.Gateway.Watcher.Enabled)
-	if cfg.Gateway.Watcher.Enabled {
-		fmt.Printf("    Skill:      enabled=%v take_action=%v\n",
-			cfg.Gateway.Watcher.Skill.Enabled, cfg.Gateway.Watcher.Skill.TakeAction)
-		if len(cfg.Gateway.Watcher.Skill.Dirs) > 0 {
-			fmt.Printf("    Skill dirs: %v\n", cfg.Gateway.Watcher.Skill.Dirs)
-		} else {
-			fmt.Printf("    Skill dirs: autodiscover (from claw mode)\n")
-		}
+	for _, line := range watcherBannerLines(cfg) {
+		fmt.Println(line)
 	}
-	if cfg.Guardrail.Enabled {
-		fmt.Printf("  Guardrail:    port=%d mode=%s\n", cfg.Guardrail.Port, cfg.Guardrail.Mode)
-		fmt.Printf("    Model:      %s → %s\n", cfg.Guardrail.Model, cfg.Guardrail.ModelName)
-		fmt.Printf("    API key:    %s\n", cfg.Guardrail.APIKeyEnv)
-	} else {
-		fmt.Printf("  Guardrail:    disabled\n")
+	for _, line := range guardrailBannerLines(cfg) {
+		fmt.Println(line)
 	}
 	fmt.Println()
 
-	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
+	// A per-user gateway keeps the connector config roots its setup bound,
+	// whatever the shell that started it has set (GAP-0433). A managed
+	// gateway sets up no user hooks.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		for _, note := range connector.PinConnectorConfigRootsToSetup(cfg.DataDir) {
+			fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+note)
+		}
+	}
+
+	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
@@ -127,7 +133,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		statePath := guardianstate.PathForPlatform(enterpriseHooksStandaloneUnixActive(), cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
 		sc.Health().SetGuardianStateReader(func() string {
 			return guardianstate.ReadState(statePath)
 		})
@@ -305,8 +311,8 @@ func bootstrapConfiguredObservabilityRuntime(
 	if c == nil {
 		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
 	}
-	if c.ConfigVersion != 8 {
-		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+	if !config.CurrentSchemaVersion(c.ConfigVersion) {
+		return fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
 		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
@@ -326,19 +332,91 @@ func bootstrapConfiguredObservabilityRuntime(
 // signal capture, and defer/return diagnostics to stderr. These are
 // intended for CI troubleshooting only — never enable in production.
 func sidecarDiagEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
 	case "1", "true", "yes", "on":
 		return true
 	}
 	return false
 }
 
-func tokenStatus(token string) string {
+// tokenStatus says whether the gateway has a token, never any part of it: the
+// banner reaches the service journal and the lifecycle copies journal lines
+// into the package manager's log. Secure Client keeps the banner of main, the
+// token masked to its first and last 4 characters (GAP-0105, issue #1092).
+func tokenStatus(cfg *config.Config) string {
+	token := cfg.Gateway.Token
 	if token == "" {
 		return "none (will use device identity only)"
+	}
+	if !cfg.SecureClientIntegration() {
+		return "set"
 	}
 	if len(token) > 8 {
 		return token[:4] + "..." + token[len(token)-4:]
 	}
 	return "***"
+}
+
+// fleetBannerLine names the OpenClaw gateway the sidecar dials, or says it
+// dials none: a hook-only or managed install never connects to
+// gateway.host:port, so the default 127.0.0.1:18789 misled (GAP-0077).
+func fleetBannerLine(cfg *config.Config) string {
+	// Secure Client keeps the banner of its service log (issue #1092).
+	if !cfg.SecureClientIntegration() && !gateway.RequiresFleetGateway(cfg) {
+		return "  Gateway:      none (no OpenClaw fleet to connect to)"
+	}
+	return fmt.Sprintf("  Gateway:      %s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
+}
+
+// watcherBannerLines reports the install watcher as it will run: idle when
+// it has no folder to watch, as on a managed service, which never watches
+// its own profile's agent folders (GAP-0026, GAP-0077).
+func watcherBannerLines(cfg *config.Config) []string {
+	w := cfg.Gateway.Watcher
+	secureClient := cfg.SecureClientIntegration()
+	var lines []string
+	switch {
+	case secureClient:
+		// Secure Client keeps the banner of its service log (issue #1092).
+		if lines = []string{fmt.Sprintf("  Watcher:      %v", w.Enabled)}; !w.Enabled {
+			return lines
+		}
+	case !w.Enabled:
+		return []string{"  Watcher:      disabled"}
+	case !gateway.WatcherWatchesDirs(cfg):
+		return []string{"  Watcher:      idle (no directories to watch)"}
+	default:
+		lines = []string{"  Watcher:      enabled"}
+	}
+	lines = append(lines, fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction))
+	if len(w.Skill.Dirs) > 0 {
+		return append(lines, fmt.Sprintf("    Skill dirs: %v", w.Skill.Dirs))
+	}
+	if secureClient {
+		return append(lines, "    Skill dirs: autodiscover (from claw mode)")
+	}
+	return append(lines, "    Skill dirs: autodiscover (from the connector)")
+}
+
+// guardrailBannerLines is the guardrail part of the sidecar start banner.
+// Hook-only installs set no guardrail proxy model, so the Model and API key
+// rows are shown only when one is set; the judge LLM in use is shown instead
+// of blank rows (GAP-2107).
+func guardrailBannerLines(cfg *config.Config) []string {
+	if !cfg.Guardrail.Enabled {
+		return []string{"  Guardrail:    disabled"}
+	}
+	lines := []string{fmt.Sprintf("  Guardrail:    port=%d mode=%s", cfg.Guardrail.Port, cfg.Guardrail.Mode)}
+	if cfg.Guardrail.Model != "" || cfg.Guardrail.ModelName != "" {
+		lines = append(lines,
+			fmt.Sprintf("    Model:      %s → %s", cfg.Guardrail.Model, cfg.Guardrail.ModelName),
+			fmt.Sprintf("    API key:    %s", cfg.Guardrail.APIKeyEnv),
+		)
+	}
+	if cfg.Guardrail.Judge.Enabled {
+		if model := cfg.ResolveLLM("guardrail.judge").Model; model != "" {
+			lines = append(lines, fmt.Sprintf("    Judge:      %s", model))
+		}
+	}
+	return lines
 }

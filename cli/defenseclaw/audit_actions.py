@@ -75,6 +75,7 @@ ACTION_TOOL_RESULT: Final[str] = "tool-result"
 
 # Operator mutations (v7 Activity)
 ACTION_CONFIG_UPDATE: Final[str]   = "config-update"
+ACTION_CONFIG_BUNDLE_RECEIPT: Final[str] = "config.bundle.receipt"
 ACTION_POLICY_UPDATE: Final[str]   = "policy-update"
 ACTION_POLICY_RELOAD: Final[str]   = "policy-reload"
 ACTION_ACTION: Final[str]          = "action"
@@ -109,6 +110,10 @@ ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
 ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 
+# A standalone enterprise hook call from an exempt_users account. Mirrors
+# internal/audit/actions.go::ActionEnterpriseExemptUser.
+ACTION_ENTERPRISE_EXEMPT_USER: Final[str]      = "enterprise-exempt-user"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -117,6 +122,21 @@ ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
 ACTION_CODEX_NOTIFY: Final[str]                     = "codex.notify"
 ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE: Final[str] = "codex.notify.agent-turn-complete"
 ACTION_CODEX_NOTIFY_MALFORMED: Final[str]           = "codex.notify.malformed"
+
+# OpenShell sandbox telemetry. Each key is emitted only by the typed Go
+# SandboxRecorder, which always names the generated v8 family.
+ACTION_SANDBOX_LIFECYCLE: Final[str] = "sandbox-lifecycle"
+ACTION_SANDBOX_WORKSPACE: Final[str] = "sandbox-workspace"
+ACTION_SANDBOX_EGRESS: Final[str]    = "sandbox-egress"
+ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
+ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
+ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
+ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+ACTION_SANDBOX_ACTIVITY: Final[str]  = "sandbox-activity"
+ACTION_SANDBOX_PROCESS: Final[str]   = "sandbox-process"
+ACTION_SANDBOX_POLICY_REMATCHED: Final[str]   = "sandbox.policy.rematched"
+ACTION_SANDBOX_POLICY_FOREIGN_RULE: Final[str] = "sandbox.policy.foreign_rule"
+ACTION_SANDBOX_MANAGED: Final[str]   = "sandbox.managed"
 
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
@@ -198,6 +218,18 @@ ACTION_INSPECT_TOOL_CONFIRM: Final[str] = "inspect-tool-confirm"
 ACTION_INSPECT_TOOL_BLOCK: Final[str] = "inspect-tool-block"
 ACTION_INSPECT_TOOL_ALERT: Final[str] = "inspect-tool-alert"
 ACTION_INSPECT_TOOL_ALLOW: Final[str] = "inspect-tool-allow"
+ACTION_INSPECT_REQUEST_CONFIRM: Final[str] = "inspect-request-confirm"
+ACTION_INSPECT_REQUEST_BLOCK: Final[str] = "inspect-request-block"
+ACTION_INSPECT_REQUEST_ALERT: Final[str] = "inspect-request-alert"
+ACTION_INSPECT_REQUEST_ALLOW: Final[str] = "inspect-request-allow"
+ACTION_INSPECT_RESPONSE_CONFIRM: Final[str] = "inspect-response-confirm"
+ACTION_INSPECT_RESPONSE_BLOCK: Final[str] = "inspect-response-block"
+ACTION_INSPECT_RESPONSE_ALERT: Final[str] = "inspect-response-alert"
+ACTION_INSPECT_RESPONSE_ALLOW: Final[str] = "inspect-response-allow"
+ACTION_INSPECT_TOOL_RESPONSE_CONFIRM: Final[str] = "inspect-tool-response-confirm"
+ACTION_INSPECT_TOOL_RESPONSE_BLOCK: Final[str] = "inspect-tool-response-block"
+ACTION_INSPECT_TOOL_RESPONSE_ALERT: Final[str] = "inspect-tool-response-alert"
+ACTION_INSPECT_TOOL_RESPONSE_ALLOW: Final[str] = "inspect-tool-response-allow"
 ACTION_INSPECT_REVEAL: Final[str] = "inspect-reveal"
 
 # Setup, operator, API, and sink instrumentation.
@@ -235,7 +267,6 @@ ACTION_UPGRADE: Final[str] = "upgrade"
 ACTION_INIT_GATEWAY: Final[str] = "init-gateway"
 ACTION_INIT_GUARDRAIL: Final[str] = "init-guardrail"
 ACTION_INIT_NOTIFICATIONS_TOGGLE: Final[str] = "init-notifications-toggle"
-ACTION_INIT_SANDBOX: Final[str] = "init-sandbox"
 ACTION_INIT_SIDECAR: Final[str] = "init-sidecar"
 ACTION_POLICY_CREATE: Final[str] = "policy-create"
 ACTION_POLICY_ACTIVATE: Final[str] = "policy-activate"
@@ -243,6 +274,10 @@ ACTION_POLICY_DELETE: Final[str] = "policy-delete"
 ACTION_REGISTRY_ADD: Final[str] = "registry-add"
 ACTION_REGISTRY_EDIT: Final[str] = "registry-edit"
 ACTION_REGISTRY_REMOVE: Final[str] = "registry-remove"
+ACTION_REGISTRY_SYNC: Final[str] = "registry-sync"
+ACTION_REGISTRY_REQUIRE: Final[str] = "registry-require"
+ACTION_REGISTRY_APPROVE: Final[str] = "registry-approve"
+ACTION_REGISTRY_REJECT: Final[str] = "registry-reject"
 ACTION_SCAN_ENFORCED: Final[str] = "scan-enforced"
 ACTION_SCAN_FINDING: Final[str] = "scan-finding"
 ACTION_DISMISS_ALERT: Final[str] = "dismiss-alert"
@@ -261,6 +296,7 @@ ACTION_PLUGIN_DISABLE: Final[str] = "plugin-disable"
 ACTION_PLUGIN_ENABLE: Final[str] = "plugin-enable"
 ACTION_PLUGIN_QUARANTINE: Final[str] = "plugin-quarantine"
 ACTION_PLUGIN_RESTORE: Final[str] = "plugin-restore"
+ACTION_PLUGIN_UNBLOCK: Final[str] = "plugin-unblock"
 ACTION_BLOCK_MCP: Final[str] = "block-mcp"
 ACTION_ALLOW_MCP: Final[str] = "allow-mcp"
 ACTION_MCP_UNBLOCK: Final[str] = "mcp-unblock"
@@ -270,6 +306,25 @@ ACTION_MCP_UNSET: Final[str] = "mcp-unset"
 ACTION_TOOL_BLOCK: Final[str] = "tool-block"
 ACTION_TOOL_ALLOW: Final[str] = "tool-allow"
 ACTION_TOOL_UNBLOCK: Final[str] = "tool-unblock"
+
+# Fleet (Edge Connector IoT device management). These actions track
+# device registration, heartbeat processing, verdict decisions,
+# policy pushes, emergency commands, decommissioning, and device
+# alerts detected by the fleet manager's anomaly monitor.
+ACTION_FLEET_DEVICE_REGISTERED: Final[str]   = "fleet.device.registered"
+ACTION_FLEET_DEVICE_HEARTBEAT: Final[str]    = "fleet.device.heartbeat"
+ACTION_FLEET_DEVICE_OFFLINE: Final[str]      = "fleet.device.offline"
+ACTION_FLEET_DEVICE_DECOMMISSION: Final[str] = "fleet.device.decommission"
+ACTION_FLEET_DEVICE_COMMAND: Final[str]      = "fleet.device.command"
+ACTION_FLEET_POLICY_PUSH: Final[str]         = "fleet.policy.push"
+ACTION_FLEET_POLICY_EMERGENCY: Final[str]    = "fleet.policy.emergency"
+ACTION_FLEET_THREAT_INTEL: Final[str]        = "fleet.threat_intel.push"
+ACTION_FLEET_ALERT: Final[str]               = "fleet.alert"
+ACTION_FLEET_DEVICE_REREGISTERED: Final[str] = "fleet.device.reregistered"
+ACTION_FLEET_TOKEN_ROTATED: Final[str]       = "fleet.token.rotated"
+ACTION_FLEET_DEVICE_KEY_ROTATED: Final[str]  = "fleet.device.key_rotated"
+ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED: Final[str] = "fleet.device.credential_provision_authorized"
+ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED: Final[str] = "fleet.device.decommission_authorized"
 
 
 ALL_ACTIONS: Final[tuple[str, ...]] = (
@@ -300,6 +355,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_CALL,
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
+    ACTION_CONFIG_BUNDLE_RECEIPT,
     ACTION_POLICY_UPDATE,
     ACTION_POLICY_RELOAD,
     ACTION_ACTION,
@@ -319,9 +375,18 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_ASSET_POLICY,
     ACTION_CONNECTOR_HOOK_TAMPERED,
     ACTION_CONNECTOR_HOOK_REPAIRED,
+    ACTION_ENTERPRISE_EXEMPT_USER,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
+    ACTION_SANDBOX_LIFECYCLE,
+    ACTION_SANDBOX_WORKSPACE,
+    ACTION_SANDBOX_EGRESS,
+    ACTION_SANDBOX_APPROVAL,
+    ACTION_SANDBOX_POLICY,
+    ACTION_SANDBOX_HEALTH,
+    ACTION_SANDBOX_FINDING,
+    ACTION_SANDBOX_ACTIVITY,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,
@@ -393,6 +458,18 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INSPECT_TOOL_BLOCK,
     ACTION_INSPECT_TOOL_ALERT,
     ACTION_INSPECT_TOOL_ALLOW,
+    ACTION_INSPECT_REQUEST_CONFIRM,
+    ACTION_INSPECT_REQUEST_BLOCK,
+    ACTION_INSPECT_REQUEST_ALERT,
+    ACTION_INSPECT_REQUEST_ALLOW,
+    ACTION_INSPECT_RESPONSE_CONFIRM,
+    ACTION_INSPECT_RESPONSE_BLOCK,
+    ACTION_INSPECT_RESPONSE_ALERT,
+    ACTION_INSPECT_RESPONSE_ALLOW,
+    ACTION_INSPECT_TOOL_RESPONSE_CONFIRM,
+    ACTION_INSPECT_TOOL_RESPONSE_BLOCK,
+    ACTION_INSPECT_TOOL_RESPONSE_ALERT,
+    ACTION_INSPECT_TOOL_RESPONSE_ALLOW,
     ACTION_INSPECT_REVEAL,
     ACTION_API_AUTH_FAILURE,
     ACTION_API_CONFIG_PATCH,
@@ -428,7 +505,6 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INIT_GATEWAY,
     ACTION_INIT_GUARDRAIL,
     ACTION_INIT_NOTIFICATIONS_TOGGLE,
-    ACTION_INIT_SANDBOX,
     ACTION_INIT_SIDECAR,
     ACTION_POLICY_CREATE,
     ACTION_POLICY_ACTIVATE,
@@ -436,6 +512,10 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_REGISTRY_ADD,
     ACTION_REGISTRY_EDIT,
     ACTION_REGISTRY_REMOVE,
+    ACTION_REGISTRY_SYNC,
+    ACTION_REGISTRY_REQUIRE,
+    ACTION_REGISTRY_APPROVE,
+    ACTION_REGISTRY_REJECT,
     ACTION_SCAN_ENFORCED,
     ACTION_SCAN_FINDING,
     ACTION_DISMISS_ALERT,
@@ -454,6 +534,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_PLUGIN_ENABLE,
     ACTION_PLUGIN_QUARANTINE,
     ACTION_PLUGIN_RESTORE,
+    ACTION_PLUGIN_UNBLOCK,
     ACTION_BLOCK_MCP,
     ACTION_ALLOW_MCP,
     ACTION_MCP_UNBLOCK,
@@ -463,6 +544,20 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_TOOL_BLOCK,
     ACTION_TOOL_ALLOW,
     ACTION_TOOL_UNBLOCK,
+    ACTION_FLEET_DEVICE_REGISTERED,
+    ACTION_FLEET_DEVICE_HEARTBEAT,
+    ACTION_FLEET_DEVICE_OFFLINE,
+    ACTION_FLEET_DEVICE_DECOMMISSION,
+    ACTION_FLEET_DEVICE_COMMAND,
+    ACTION_FLEET_POLICY_PUSH,
+    ACTION_FLEET_POLICY_EMERGENCY,
+    ACTION_FLEET_THREAT_INTEL,
+    ACTION_FLEET_ALERT,
+    ACTION_FLEET_DEVICE_REREGISTERED,
+    ACTION_FLEET_TOKEN_ROTATED,
+    ACTION_FLEET_DEVICE_KEY_ROTATED,
+    ACTION_FLEET_DEVICE_CREDENTIAL_PROVISION_AUTHORIZED,
+    ACTION_FLEET_DEVICE_DECOMMISSION_AUTHORIZED,
 )
 
 

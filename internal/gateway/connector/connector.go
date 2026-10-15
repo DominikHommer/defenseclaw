@@ -23,6 +23,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"os"
 	"strings"
@@ -43,6 +44,9 @@ const (
 type SubprocessPolicy string
 
 const (
+	// SubprocessSandbox is retained for inventory/telemetry schema stability.
+	// The legacy openshell-sandbox tier it named was removed; no connector
+	// reports it and ResolveSubprocessPolicy maps it to shims.
 	SubprocessSandbox SubprocessPolicy = "sandbox"
 	SubprocessShims   SubprocessPolicy = "shims"
 	SubprocessNone    SubprocessPolicy = "none"
@@ -70,11 +74,8 @@ type SetupOpts struct {
 	CodexOtelEnvironment string // connector-local tag shared with the live sidecar
 	ProxyAddr            string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr              string // 127.0.0.1:18970 (API server — inspection endpoints)
-	APIToken             string // gateway bearer token; baked into hook curl -H
-	// HybridProxyMode is true when guardrail.proxy_mode=hybrid, meaning a
-	// hook-only connector should also route LLM traffic through the proxy.
-	// When set, Setup injects ANTHROPIC_BASE_URL pointing at ProxyAddr.
-	HybridProxyMode bool
+APIToken        string
+HybridProxyMode bool
 	// ConfigHome is the exact installer-validated user configuration root used
 	// by hidden native-maintenance commands. Ordinary setup leaves it empty and
 	// uses each vendor's documented discovery rules.
@@ -95,6 +96,67 @@ type SetupOpts struct {
 	// disable-sentinel overrides and derive their data directory from the
 	// verified script location instead.
 	ManagedEnterprise bool
+	// ManagedHookSocket is the standalone gateway's peer-authorized unix
+	// hook socket (from the root-owned runtime descriptor). When set on a
+	// unix host, in-agent plugins (OpenCode, Amp) and connector shell hooks
+	// send hook traffic to it instead of the TCP API, and only after
+	// checking that the socket and its directory belong to root or
+	// ManagedServiceUID; the gateway then identifies the caller by
+	// kernel-verified uid, so no bearer token leaves the hook. Empty keeps
+	// the TCP transport (per-user installs and the Secure Client profile).
+	ManagedHookSocket string
+	// ManagedServiceUID is the standalone gateway's service uid, trusted
+	// alongside root as the hook socket owner. Ignored unless
+	// ManagedHookSocket is set.
+	ManagedServiceUID int
+	// HookCredentialIdentity is the OS identity (uid) the standalone
+	// guardian bound APIToken and OTLPPathToken to. The hook contract lock
+	// records it with a digest of those credentials (never the credentials
+	// themselves) so verification can tell hooks rendered with the
+	// connector-scoped credential, another user's or an older key's
+	// credentials apart and have them repaired. Empty for every other
+	// install, whose locks are unchanged.
+	HookCredentialIdentity string
+	// ForeignHookGuardBinary is the administrator-owned hook binary a
+	// standalone managed in-agent plugin (Amp, OpenCode) runs before each
+	// tool call to evaluate the enterprise foreign-hook guard: those
+	// plugins call the gateway directly and never run `defenseclaw hook`.
+	// Empty (per-user installs, Secure Client) keeps the plugin unchanged.
+	ForeignHookGuardBinary string
+	// ManagedHookBinary is the administrator-owned hook binary of a
+	// standalone managed Unix install. A connector shell hook with a hook
+	// socket runs it as `hook session-facts` for what a shell cannot read,
+	// the user's Kerberos credential cache, because a managed user has no
+	// per-user gateway binary to ask (GAP-0194). Empty (per-user installs,
+	// Secure Client, Windows) keeps every hook unchanged.
+	ManagedHookBinary string
+	// ManagedInstallMarker is an administrator-owned directory that exists
+	// exactly while the managed deployment rendering an in-agent plugin
+	// (OpenCode, Amp) is installed; the Windows standalone guardian passes
+	// its hook runtime directory, which uninstall removes last. Uninstall
+	// cannot remove the plugin from a signed-out user's own profile, so when
+	// the gateway is unreachable or the credential is gone and this marker no
+	// longer exists, the plugin treats the deployment as uninstalled and
+	// stops failing closed. Ignored unless ManagedEnterprise is set and the
+	// path is absolute; empty keeps the fail mode unconditional.
+	ManagedInstallMarker string
+	// ManagedListenerProof makes a managed in-agent plugin (OpenCode, Amp)
+	// that keeps the loopback TCP transport ask the listener to prove it can
+	// derive the plugin's per-user hook credential before the plugin sends
+	// that credential or any hook payload (UserScopedListenerProof): a local
+	// user who holds the port while the gateway restarts then receives
+	// nothing to replay and cannot answer with a verdict. The Windows
+	// standalone guardian sets it; per-user installs, the Secure Client
+	// profile and the unix hook socket leave it false.
+	ManagedListenerProof bool
+	// ClaudeAllowManagedHooksOnly adds "allowManagedHooksOnly": true to the
+	// Claude Code managed hook policy, so Claude Code runs only managed hooks
+	// and a user or project hook cannot rewrite tool input (updatedInput)
+	// after DefenseClaw inspected it. The Windows standalone lifecycle sets
+	// it when the claudecode machine policy is managed_hooks_only: enforce
+	// (the default), as the Unix drop-in does. The Secure Client profile and
+	// per-user installs leave it false, so their policy bytes are unchanged.
+	ClaudeAllowManagedHooksOnly bool
 	// WorkspaceDir is the project/workspace root for connectors whose
 	// hook configuration is intentionally repository-scoped (for
 	// example Copilot CLI's .github/hooks/*.json files). When empty,
@@ -167,6 +229,13 @@ type SetupOpts struct {
 	// different hook surface.
 	HookContractID string
 
+	// GOOS is the operating system the agent runs on when that is not this
+	// host, such as "linux" for a harness inside an OpenShell sandbox.
+	// HookProfile then resolves hook contracts and OS-specific profile
+	// surfaces for it instead of runtime.GOOS. Empty means this host. Setup
+	// and hook-writing paths ignore it: they always configure this host.
+	GOOS string
+
 	// CodexEnforcement signals that the operator turned on hard
 	// enforcement for the codex connector (see avarice F-0681).
 	// When true, an empty HookFailMode upgrades to "closed" instead
@@ -177,9 +246,9 @@ type SetupOpts struct {
 	// ClaudeCodeEnforcement is the parallel flag for claudecode.
 	ClaudeCodeEnforcement bool
 
-	// RoutingEnabled is true when routing.enabled=true in config.yaml.
-	// Hook-only connectors use this to redirect LLM traffic through the
-	// proxy for model routing, even when HybridProxyMode is false.
+	ManagedTargetSID      string
+	FailedSetupFailClosed bool
+
 	RoutingEnabled bool
 }
 
@@ -462,6 +531,32 @@ type HookCapabilityProvider interface {
 	HookCapabilities(opts SetupOpts) HookCapability
 }
 
+// ContentEnvelope is the one nested payload object a connector puts hook
+// content in, with the field inside it that holds each event's content.
+type ContentEnvelope struct {
+	// Key is the payload key of the nested object, "" for none.
+	Key string
+	// Fields maps a hook event name, as the agent sends it, to the one
+	// field inside Key that holds the event's content.
+	Fields map[string]string
+}
+
+// Field returns the envelope field holding event's content, "" when the
+// envelope declares none for it.
+func (e ContentEnvelope) Field(event string) string {
+	if e.Key == "" {
+		return ""
+	}
+	return e.Fields[strings.TrimSpace(event)]
+}
+
+func (e ContentEnvelope) clone() ContentEnvelope {
+	if e.Key == "" {
+		return ContentEnvelope{}
+	}
+	return ContentEnvelope{Key: e.Key, Fields: maps.Clone(e.Fields)}
+}
+
 // HookProfile is the declarative description a connector returns to
 // the unified hook collector. handleAgentHook is the sole entry point
 // for every connector hook route; connector-specific differences live
@@ -524,18 +619,16 @@ type HookProfile struct {
 	// events. A zero value means the experimental stateful path is disabled.
 	ToolCallLifecycle ToolCallLifecycleContract
 
-	// ContentEnvelopeKey names the single nested payload object this
-	// connector hides inspectable content in (hermes nests prompt /
-	// result text under "extra"). When set, the generic decoder —
-	// after every top-level content lookup misses — opens exactly
-	// this one declared sub-object and re-runs the expected
-	// content-key search inside it. Empty for flat-payload
-	// connectors, which therefore never take that path. Deliberately
-	// a single declared key, not a recursive scan: tool inputs /
-	// results carry attacker-influenced nested JSON, so the only
-	// sub-object ever opened is the one declared in the audited
-	// contract.
-	ContentEnvelopeKey string
+	// ContentEnvelope names the one nested payload object this connector
+	// puts inspectable content in (Hermes: the prompt, tool result and
+	// model response under "extra"). When every top-level content lookup
+	// misses, the generic decoder reads exactly the one field the
+	// envelope declares for the event, never a recursive scan or a
+	// shared key list: tool inputs and results carry attacker-influenced
+	// nested JSON, and one Hermes event carries several text fields
+	// (post_llm_call has both user_message and assistant_response). Zero
+	// for flat-payload connectors, which never take that path.
+	ContentEnvelope ContentEnvelope
 
 	// DecodeToolArgs extracts the exact structured tool-argument value from
 	// the original request body when a connector nests it outside the shared
@@ -873,6 +966,16 @@ type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
 }
 
+// HookRollbackConverter is implemented by a connector whose hook entries have
+// a shape that an earlier release's teardown does not own. The installers run
+// it through 'defenseclaw-gateway connector prepare-rollback' before a
+// rollback restores an older install, so that release's uninstall still
+// removes them. It returns how many entries it rewrote. See the hook-shape
+// compatibility rule next to the Claude Code launcher guard (GAP-1284).
+type HookRollbackConverter interface {
+	ConvertHooksForRollback(opts SetupOpts) (int, error)
+}
+
 // ScopedHookTokenRequirement is implemented by connector runtimes that depend
 // on a connector-scoped bearer credential. Such connectors must fail setup if
 // the least-privilege sidecar cannot be established; they may never fall back
@@ -888,6 +991,16 @@ type ScopedHookTokenRequirement interface {
 // written by DefenseClaw. Scoped credentials live in separate sidecars.
 type ManagedPluginArtifactOwner interface {
 	ManagedPluginArtifacts(opts SetupOpts) []string
+}
+
+// BundledPluginChecker is implemented by connectors that install DefenseClaw's
+// own plugin into the agent's plugin directory (OpenClaw). The install watcher
+// skips scanning that plugin while it is byte-identical to the shipped copy.
+type BundledPluginChecker interface {
+	IsBundledPlugin(path string) bool
+	// BundledPluginDir is where Setup writes that plugin. Setup rewrites it on
+	// every gateway start, so a stale copy there is about to be replaced.
+	BundledPluginDir() string
 }
 
 // ManagedPluginArtifacts returns the connector's auto-loaded managed plugin

@@ -25,9 +25,11 @@ never attempts to compile policy independently.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import tempfile
+import urllib.parse
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
-from defenseclaw.config_inspect import inspect_v8_config
+from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
@@ -111,6 +113,10 @@ class V8DestinationStatus:
         return "; ".join(parts) or "not-applicable"
 
 
+# Lifecycle codes a healthy destination reports on routine success.
+_ROUTINE_HEALTHY_REASONS = frozenset({"activated", "delivery_recovered", "scrape_recovered"})
+
+
 @dataclass(frozen=True)
 class V8DestinationHealth:
     """One content-free live destination-health snapshot.
@@ -131,6 +137,7 @@ class V8DestinationHealth:
     queue_max_items: int | None = None
     queue_max_bytes: int | None = None
     dropped: int | None = None
+    rejected: int | None = None
     last_success: str = ""
     last_failure: str = ""
     last_error_class: str = ""
@@ -140,7 +147,23 @@ class V8DestinationHealth:
     last_failure_class: str = ""
 
     @property
+    def display_reason(self) -> str:
+        """The reason worth showing next to the state, or "".
+
+        A healthy destination reports "activated" or a "*_recovered" code on
+        routine success; those are not news, as in the TUI (GAP-2523,
+        GAP-2557).
+        """
+
+        if self.state == "healthy" and self.reason in _ROUTINE_HEALTHY_REASONS:
+            return ""
+        return self.reason
+
+    @property
     def queue_label(self) -> str:
+        return self.queue_label_for(secure_client=False)
+
+    def queue_label_for(self, *, secure_client: bool) -> str:
         parts: list[str] = []
         if self.queue_items is not None:
             value = str(self.queue_items)
@@ -156,6 +179,8 @@ class V8DestinationHealth:
             parts.append(value)
         if self.dropped is not None:
             parts.append(f"{self.dropped} dropped")
+        if not secure_client and self.rejected is not None:
+            parts.append(f"{self.rejected} rejected")
         return ", ".join(parts) or "unavailable"
 
     @property
@@ -239,6 +264,49 @@ def source_is_v8(config_path: str | Path) -> bool:
     return True
 
 
+# Warnings for options the operator turns on with --plaintext and
+# --allow-private-networks. For a collector on this machine they are a
+# deliberate choice, not a problem (GAP-1167, GAP-1577).
+LOCAL_COLLECTOR_OPT_IN_CODES = frozenset(("tls_verification_disabled", "private_export_network_allowed"))
+_DESTINATION_IN_PATH = re.compile(r"destinations\[([^\]]+)\]")
+
+
+def endpoint_is_loopback(endpoint: str) -> bool:
+    """Whether an exporter endpoint names this machine (127.0.0.0/8, ::1, localhost)."""
+    text = endpoint.strip()
+    if not text:
+        return False
+    if "://" not in text:
+        text = "//" + text
+    try:
+        host = urllib.parse.urlsplit(text).hostname or ""
+    except ValueError:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def local_collector_opt_in_destination(
+    code: str, path: str, destinations: Sequence[V8DestinationStatus]
+) -> str:
+    """Name of the loopback destination a deliberate --plaintext /
+    --allow-private-networks warning is about; "" for any other warning."""
+    if code not in LOCAL_COLLECTOR_OPT_IN_CODES:
+        return ""
+    match = _DESTINATION_IN_PATH.search(str(path))
+    if not match:
+        return ""
+    name = match.group(1)
+    for destination in destinations:
+        if destination.name == name and endpoint_is_loopback(str(destination.endpoint or "")):
+            return name
+    return ""
+
+
 def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
     """Load one masked canonical effective plan and normalize its status."""
 
@@ -278,18 +346,29 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         # a snapshot in TEMP is incorrectly treated as a different
         # installation (notably when native Windows setup records a data root
         # outside the runner's TEMP profile).
-        result = inspect_v8_config(
-            "effective",
-            config_path=str(snapshot_path),
-            data_dir=inspection_data_dir,
-            environment_overrides={CONFIG_PATH_ENV: str(snapshot_path)},
-        )
+        try:
+            result = inspect_v8_config(
+                "effective",
+                config_path=str(snapshot_path),
+                data_dir=inspection_data_dir,
+                environment_overrides={CONFIG_PATH_ENV: str(snapshot_path)},
+            )
+        except ConfigInspectError as exc:
+            # The helper names the private snapshot, which is deleted below;
+            # point the diagnostic at the operator's own file instead.
+            # Keep the subclass: a helper timeout is a busy host, not a bad
+            # config (GAP-1621).
+            raise type(exc)(
+                str(exc).replace(str(snapshot_path), str(path.absolute())),
+                field_path=exc.field_path,
+                reason=exc.reason,
+            ) from None
         try:
             inspected_source = snapshot_path.read_bytes()
         except OSError:
-            raise ValueError("canonical v8 status snapshot changed during inspection") from None
+            raise ValueError("the status snapshot changed during inspection") from None
         if inspected_source != source:
-            raise ValueError("canonical v8 status snapshot changed during inspection")
+            raise ValueError("the status snapshot changed during inspection")
     finally:
         try:
             if descriptor >= 0:
@@ -300,7 +379,7 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
             except FileNotFoundError:
                 pass
     if result.effective is None:  # defensive; the wire decoder already checks
-        raise ValueError("canonical v8 effective plan is missing")
+        raise ValueError("the effective plan is missing")
     return operator_status_from_effective(
         result.effective,
         source=str(path.absolute()),
@@ -425,6 +504,7 @@ def destination_health_from_gateway(health: Mapping[str, Any] | None) -> dict[st
                 queue.get("max_bytes", item.get("queue_max_bytes", item.get("max_queue_bytes")))
             ),
             dropped=_nonnegative_int(queue.get("dropped", item.get("queue_dropped", counters.get("dropped")))),
+            rejected=_nonnegative_int(counters.get("rejected")),
             last_success=last_success,
             last_failure=last_failure,
             last_error_class=last_error_class,

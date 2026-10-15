@@ -1,0 +1,316 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+)
+
+// A sandbox's egress proxy refuses an HTTPS destination by answering the
+// CONNECT with a 403, and clients show only that the tunnel failed ("curl:
+// (56) CONNECT tunnel failed, response 403"): the JSON body that says why,
+// and how the user can unblock it, never reaches the agent (#954). So the
+// post-tool hook of a shell or fetch tool call carries it instead: when the
+// sandbox's proxy refused CONNECTs shortly before, and the agent has not been
+// told of them, the hook's answer adds a short note naming each destination,
+// why it is blocked and how the user can allow it (the unblock command for
+// this sandbox, when an unblock lifts it). The refusals are the sandbox
+// binding's own, the one whose proxy credential made the request; nothing
+// in the note tells the agent how to reach a destination another way.
+
+// SandboxEgressRefusal is a destination a sandbox's egress proxy refused
+// (SandboxIngressConfig.EgressRefusals).
+type SandboxEgressRefusal struct {
+	Host string
+	Port int
+	// Category is the proxy's reason code (webhook_catcher, admin_block, ...).
+	Category string
+	// What says briefly what the destination is, or why it is refused
+	// ("webhook catcher").
+	What string
+	// Remedy says who can allow it, and how ("the user can allow it for
+	// this sandbox with `defenseclaw sandbox unblock ...`").
+	Remedy string
+	// Cut marks an upload the large-upload block cut on a tunnel it had
+	// let through, after Sent bytes went up: the client saw only the
+	// connection break ("curl: (56) Failure when receiving data from the
+	// peer").
+	Cut  bool
+	Sent int64
+	// Note marks a connection the note tells of that is no block of the
+	// egress policy (manager.NoteSSH, NoteAsked, NoteDeclined): SSH, which
+	// no sandbox opens (Remedy names HTTPS), a connection that waits for
+	// the user's answer to an ask, or one the user declined.
+	Note string
+}
+
+const (
+	// sandboxEgressRefusalExtra is the audit extra key naming the refusals
+	// ("host:category") a hook's answer told the agent of.
+	sandboxEgressRefusalExtra = "sandbox_egress_refused"
+	// sandboxEgressNoticeMaxHosts is how many refused destinations a note
+	// names; it counts the rest.
+	sandboxEgressNoticeMaxHosts = 3
+)
+
+// sandboxEgressNoticeTool reports a tool call that reaches the network
+// through the egress proxy: the connector's shell tool, or a fetch tool
+// (Claude Code's WebFetch, Copilot's web_fetch, an MCP server's fetch).
+func sandboxEgressNoticeTool(connectorName, toolName string) bool {
+	if connector.IsShellTool(connectorName, toolName) {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	// An MCP tool is named by its server and tool (mcp__fetch__fetch,
+	// fetch/fetch_url): the tool decides.
+	for _, sep := range []string{"__", "/", ":"} {
+		if i := strings.LastIndex(name, sep); i >= 0 {
+			name = name[i+len(sep):]
+		}
+	}
+	name = strings.NewReplacer("_", "", "-", "", ".", "").Replace(name)
+	switch name {
+	case "webfetch", "fetch", "fetchurl", "urlfetch", "httpfetch", "httpget", "httprequest", "httppost",
+		"webupload", "uploadurl", "readwebpage", "readurlcontent":
+		return true
+	}
+	return false
+}
+
+// addSandboxEgressRefusals adds the refusals the sandbox's egress proxy
+// made shortly before a post-tool hook of a shell or fetch tool call, which
+// the agent has not been told of, to the hook's additional context, and
+// re-renders the harness output around it. A block or ask keeps its own
+// answer (and leaves the refusals for the next call), and so does every
+// other request.
+func (a *APIServer) addSandboxEgressRefusals(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) agentHookResponse {
+	st := a.sandboxIngressState()
+	if st == nil || st.egressRefusals == nil {
+		return resp
+	}
+	binding, ok := sandboxauth.FromContext(ctx)
+	if !ok {
+		return resp
+	}
+	// postToolContextEvents (kernel_block_notice.go): the post-tool events
+	// whose answer the model reads. The other harnesses' agents are not
+	// told; the user still is, by the session's live notice.
+	if !slices.Contains(postToolContextEvents[binding.Connector], canonicalEvent(req.HookEventName)) ||
+		!sandboxEgressNoticeTool(binding.Connector, req.ToolName) {
+		return resp
+	}
+	switch strings.ToLower(strings.TrimSpace(resp.Action)) {
+	case "block", "confirm":
+		return resp
+	}
+	refusals := st.egressRefusals(binding)
+	if len(refusals) == 0 && sandboxDirectRefusalResult(rawBody) {
+		// OpenShell's record of the refusal may still be on its way.
+		deadline := time.Now().Add(sandboxDirectRefusalWait)
+		for len(refusals) == 0 && ctx.Err() == nil && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			refusals = st.egressRefusals(binding)
+		}
+	}
+	if len(refusals) == 0 {
+		return resp
+	}
+	noteSandboxEgressRefusals(ctx, refusals)
+	notice := sandboxEgressRefusalNotice(refusals)
+	if resp.AdditionalContext != "" {
+		notice = resp.AdditionalContext + "\n\n" + notice
+	}
+	resp.AdditionalContext = notice
+	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, nil, resp)
+	return resp
+}
+
+// sandboxDirectRefusalWait bounds how long the post-tool hook of a call
+// whose result names a connection error to this machine's sandbox address
+// waits for OpenShell's record of the refusal, which its event stream can
+// deliver after the hook: a test that failed in 9 ms got no note of the ask
+// it raised (the note came with the next turn), and the agent took the
+// pending ask for the user's refusal (GAP-0325). A variable for tests.
+var sandboxDirectRefusalWait = 1500 * time.Millisecond
+
+// sandboxDirectRefusalErrors are the words of a connection a sandbox's
+// network policy refused, or a closed port, as tools print them.
+var sandboxDirectRefusalErrors = []string{"eacces", "econnrefused", "connection refused", "permission denied", "failed to connect"}
+
+// sandboxDirectRefusalResult reports a hook payload that names a refused
+// connection to the host alias or its synthetic sandbox address, the
+// direct connections OpenShell refuses (a --host-port ask among them).
+func sandboxDirectRefusalResult(rawBody []byte) bool {
+	body := strings.ToLower(string(rawBody))
+	if !strings.Contains(body, "host.openshell.internal") && !strings.Contains(body, "198.18.") {
+		return false
+	}
+	return slices.ContainsFunc(sandboxDirectRefusalErrors, func(e string) bool { return strings.Contains(body, e) })
+}
+
+// sandboxEgressRefusalNotice is the agent's note of refused destinations.
+func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
+	if len(refusals) == 1 {
+		switch r := refusals[0]; r.Note {
+		case manager.NoteSSH:
+			// Not a destination to leave alone: the same remote over HTTPS
+			// works (GAP-0216).
+			return "This sandbox's SSH connection to " + sandboxEgressTarget(r) + " was refused: SSH does not leave a DefenseClaw sandbox, " +
+				"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) + " Tell the user if the task needs SSH itself."
+		case manager.NoteAsked:
+			// Neither done nor a mystery error (GAP-0268).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " waits for the user: DefenseClaw asked them to approve it, " +
+				"and until they do a tool sees only a connection error. Tell the user, and try again once they approve it " +
+				"(`defenseclaw sandbox approvals`)."
+		case manager.NoteDeclined:
+			return "The user declined this sandbox's connection to " + sandboxAskTarget(r) + " when DefenseClaw asked them; " +
+				"a tool sees only a connection error. Do not try it again unless the user says so."
+		case manager.NotePortClosed, manager.NotePortRefused:
+			// The feed's hint, for the agent too (GAP-0326).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused (" + r.What + "); " +
+				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy))
+		case manager.NoteAccessRefused:
+			// Not an ask that waits: nobody on this computer can approve it
+			// (GAP-0468, GAP-0502).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused by the organization's DefenseClaw policy; " +
+				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy)) +
+				" Tell the user if the task needs it, and do not try to reach it another way."
+		}
+	}
+	if len(refusals) == 1 {
+		r := refusals[0]
+		if r.Cut {
+			// The upload itself went through the tunnel until the cut: an
+			// agent that saw only the broken connection may take the upload
+			// for done (RT U3).
+			return "DefenseClaw's egress policy cut this sandbox's upload to " + sandboxEgressTarget(r) + " after " + sandboxUploadSize(r.Sent) +
+				", because it is a destination this sandbox had not contacted before (the large-upload block); the upload did not complete, " +
+				"and a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) +
+				" Tell the user if the task needs it, and do not try to reach it another way."
+		}
+		connection := "connection to " + sandboxEgressTarget(r)
+		if r.Port == 443 || r.Port == 0 {
+			connection = "HTTPS " + connection
+		}
+		return "DefenseClaw's egress policy just blocked this sandbox's " + connection + " (" + r.What +
+			"); a tool sees only a connection error, not the reason. " + sentence(upperFirst(r.Remedy)) +
+			" Tell the user if the task needs it, and do not try to reach it another way."
+	}
+	var b strings.Builder
+	b.WriteString("DefenseClaw's egress policy just blocked these connections from this sandbox; a tool sees only a connection error, not the reason:")
+	shown := refusals[:min(len(refusals), sandboxEgressNoticeMaxHosts)]
+	for _, r := range shown {
+		what := r.What
+		if r.Cut {
+			what = "upload cut after " + sandboxUploadSize(r.Sent) + ", not completed: a destination this sandbox had not contacted before"
+		}
+		b.WriteString("\n- " + sandboxEgressTarget(r) + " (" + what + "): " + sentence(r.Remedy))
+	}
+	if more := len(refusals) - len(shown); more > 0 {
+		fmt.Fprintf(&b, "\n- and %d more", more)
+	}
+	if slices.ContainsFunc(refusals, func(r SandboxEgressRefusal) bool { return r.Note != "" }) {
+		b.WriteString("\nTell the user if the task needs them; do what each line says, and do not try to reach the others another way.")
+		return b.String()
+	}
+	b.WriteString("\nTell the user if the task needs them, and do not try to reach them another way.")
+	return b.String()
+}
+
+// sandboxEgressTarget is a refused destination as the note names it: its
+// host, and the port unless it is a web port.
+func sandboxEgressTarget(r SandboxEgressRefusal) string {
+	if r.Port == 0 || r.Port == 443 || r.Port == 80 {
+		return r.Host
+	}
+	host := r.Host
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return host + ":" + strconv.Itoa(r.Port)
+}
+
+// sandboxAskTarget names an asked destination: a port on the user's
+// machine (host.openshell.internal) as such.
+func sandboxAskTarget(r SandboxEgressRefusal) string {
+	if r.Host == "host.openshell.internal" && r.Port > 0 {
+		return "port " + strconv.Itoa(r.Port) + " on the user's machine (" + sandboxEgressTarget(r) + ")"
+	}
+	return sandboxEgressTarget(r)
+}
+
+// sandboxUploadSize is what went up before a cut: "1.0 MiB", "512 KiB", or
+// bytes.
+func sandboxUploadSize(n int64) string {
+	const kib, mib = 1 << 10, 1 << 20
+	switch {
+	case n >= mib:
+		return strconv.FormatFloat(float64(n)/mib, 'f', 1, 64) + " MiB"
+	case n >= kib:
+		return strconv.FormatInt(n/kib, 10) + " KiB"
+	}
+	return strconv.FormatInt(max(n, 0), 10) + " bytes"
+}
+
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// noteSandboxEgressRefusals records, for the request's audit row, the
+// refusals its answer told the agent of.
+func noteSandboxEgressRefusals(ctx context.Context, refusals []SandboxEgressRefusal) {
+	coverage, ok := ctx.Value(sandboxCoverageContextKey{}).(*sandboxCoverage)
+	if !ok {
+		return
+	}
+	coverage.mu.Lock()
+	for _, r := range refusals {
+		coverage.refused = append(coverage.refused, r.Host+":"+r.Category)
+	}
+	coverage.mu.Unlock()
+}
+
+// sandboxEgressRefused returns what noteSandboxEgressRefusals recorded.
+func sandboxEgressRefused(ctx context.Context) []string {
+	coverage, ok := ctx.Value(sandboxCoverageContextKey{}).(*sandboxCoverage)
+	if !ok {
+		return nil
+	}
+	coverage.mu.Lock()
+	defer coverage.mu.Unlock()
+	return slices.Clone(coverage.refused)
+}

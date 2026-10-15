@@ -31,8 +31,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -124,11 +126,24 @@ type ToolInspectVerdict struct {
 	// ctx / emitted events. Tri-state (nil/true/false); never
 	// serialized on the hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// aiDefenseBlock is trusted in-process provenance: it is set only when
+	// Cisco AI Defense itself returned a block verdict. Hook finalization uses
+	// it to distinguish an enforced AID decision from a later local asset-policy
+	// escalation. It is intentionally absent from every caller-controlled wire
+	// shape.
+	aiDefenseBlock bool
 	// managedAIDFailOpenReason is an internal accounting marker. The generic
 	// HTTP handler consumes it only after selecting an allow result, so
 	// a timed-out request that the connector fails closed cannot be counted as
 	// a fail-open allow decision. It is never serialized.
 	managedAIDFailOpenReason string
+	// laneVerdict reports that a scan lane (Cisco AI Defense, the LLM
+	// judge) returned a verdict of its own that is not a plain allow. A
+	// lane may block or raise the severity without naming a rule, so the
+	// rule IDs and findings alone cannot show that it took part; the
+	// sandbox unblock lift (liftUnblockedDestinations) must keep such a
+	// verdict. Never serialized.
+	laneVerdict bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -163,31 +178,6 @@ func (v *ToolInspectVerdict) applyMode(mode string) {
 	}
 }
 
-// clampPromptDirectionToolVerdict mirrors clampPromptDirectionVerdict for the
-// tool-inspect verdict shape used by the connector hook handlers. Done before
-// applyMode so the "would-block" telemetry in observe mode reflects the
-// already-clamped policy (alert), not the pre-clamp (block/confirm). The
-// pre-clamp action is preserved in the verdict's Reason for audit.
-//
-// CRITICAL severity is exempt from the demotion — see the matching rationale
-// on clampPromptDirectionVerdict.
-func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction string) {
-	if verdict == nil {
-		return
-	}
-	if guardrailSeverityRank(verdict.Severity) >= severityCritical {
-		return
-	}
-	clamped, demoted := clampPromptDirectionAction(direction, verdict.Action)
-	if !demoted {
-		return
-	}
-	original := strings.TrimSpace(verdict.Action)
-	verdict.Action = clamped
-	verdict.Reason = appendVerdictReason(verdict.Reason,
-		fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
-}
-
 // hookAIDInspect runs the optional Cisco AI Defense lane on the
 // hook-side surface (tool calls + tool results + UserPromptSubmit
 // for hook-only connectors). Returns nil when the AID lane is off
@@ -207,7 +197,7 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 // bypassed. Boot- and reload-reliable: a.scannerCfg.DeploymentMode is
 // the config the APIServer was constructed / reloaded with.
 func (a *APIServer) managedAIDOnly() bool {
-	return a != nil && a.scannerCfg != nil && managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode)
+	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
 // inspectManagedAIDOnly is the managed_enterprise hook-lane inspection
@@ -217,11 +207,12 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	cfg := a.decisionConfig(ctx)
 	failOpenReason := aidFailOpenUnavailable
 	if !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
-		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	} else if a == nil || a.ciscoInspector == nil || cfg == nil ||
+		!cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
@@ -363,7 +354,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if a == nil || a.ciscoInspector == nil {
 		return nil
 	}
-	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
 	if !managedAIDHookContentIsInspectable(toolName, content) {
@@ -378,6 +369,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if toolName != "" && toolName != "message" {
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
+	defer yieldHookRunSlot(ctx)()
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
@@ -397,7 +389,11 @@ func managedAIDHookContentIsInspectable(toolName, content string) bool {
 // (allow → alert → block), severity escalates, findings concatenate.
 // Used by the hook-lane callers below.
 func mergeWithAIDVerdict(local *ToolInspectVerdict, aid *ScanVerdict) *ToolInspectVerdict {
-	return mergeWithLaneVerdict(local, aid, "ai-defense:")
+	merged := mergeWithLaneVerdict(local, aid, "ai-defense:")
+	if merged != nil && aid != nil && strings.EqualFold(strings.TrimSpace(aid.Action), "block") {
+		merged.aiDefenseBlock = true
+	}
+	return merged
 }
 
 // mergeWithJudgeVerdict folds an LLM-judge ScanVerdict into the hook
@@ -445,6 +441,9 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	if local == nil {
 		local = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
+	if rank(aid.Action) > 0 || sevRank(aid.Severity) > 0 || len(aid.Findings) > 0 {
+		local.laneVerdict = true
+	}
 	// AID-only escalation path: escalate the action when AID is
 	// stricter, escalate the severity when AID is stricter, append
 	// findings + reason so the audit trail shows both lanes.
@@ -474,12 +473,23 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// across the AID / judge / regex lanes. Confidence stays at 0
 		// (lane doesn't self-report one); the emitter treats zero as
 		// "not computed" and omits it on the wire.
+		// A judge finding is titled by its category and keeps the
+		// severity of the judge that reported it, not the strictest one
+		// of the judges merged into the lane verdict (GAP-1886).
 		for _, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
+			}
+			if s := aid.findingSeverity[f]; s != "" {
+				rf.Severity = s
+			}
+			if findingTag == "llm-judge:" {
+				if title := judgeFindingTitle(f); title != "" {
+					rf.Title = title
+				}
 			}
 			local.DetailedFindings = append(local.DetailedFindings, rf)
 		}
@@ -528,6 +538,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		Connector:          req.Connector,
 		EnforcementCapable: true,
 	}
+	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
+		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
+		// workdir, ...) next to the command. Left in the arguments they made
+		// the parse partial, so every command block rule was detection-only
+		// (GAP-1450). The directory is the command's working directory when
+		// it is absolute; the session's is not known here.
+		action.Input.Args = args
+		if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
+			action.Input.CWD = dir
+		}
+	}
 	if trustedShimArgvTool(req.Tool) {
 		// Authenticated PATH shims have one closed argv envelope. If that
 		// envelope is malformed, extended, or names another executable, raw
@@ -538,10 +559,19 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		action.Input = actionfacts.Input{
 			Tool:       req.Tool,
 			Argv:       argv,
-			ActiveHome: trustedSameHostHome(),
+			ActiveHome: hookActiveHome(ctx),
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 		action.EnforcementCapable = true
+		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
+	}
+	// An argument TrustedShellArgs leaves for the parser (OpenClaw's env,
+	// elevated, host, node) keeps the parse partial, so a CRITICAL command
+	// rule stayed detection-only and the command ran (GAP-1450). As for a
+	// sandbox's shell calls, the command is also judged on its own, and that
+	// verdict only ever adds to the call's.
+	if command, ok := connector.ShellCommandArgs(req.Connector, req.Tool, req.Args); ok {
+		return a.inspectSandboxShellToolPolicyCtx(ctx, req, action, command, action.Input.Tool)
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 }
@@ -612,52 +642,58 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
 	//   block @C/T → allow @C/T → block T → allow T → scan
-	if a.store != nil {
-		pe := enforce.NewPolicyEngine(a.store)
-		// MCP-server runtime block: a blocked MCP server denies ALL of its
-		// tools, regardless of any per-tool allow. This is the Go-side runtime
-		// enforcement of `defenseclaw mcp block <server>` (global or
-		// --connector scoped); it is checked before the per-tool block/allow so
-		// a server-level block wins over a tool-level allow, and it fails closed
-		// + loud on a store lookup error.
-		if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
-			return &ToolInspectVerdict{
-				Action:     "block",
-				Severity:   "HIGH",
-				Confidence: 1.0,
-				Reason:     reason,
-				Findings:   []string{"MCP-BLOCK"},
-			}
+	// The lists are config.yaml asset_policy (tool and mcp).
+	// Keep all static checks in this decision on the request snapshot. The
+	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
+	policyConfig := a.decisionConfig(ctx)
+	policySource := func() *config.Config { return policyConfig }
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		policySource = a.liveConfig
+	}
+	pe := enforce.NewPolicyEngine(a.store).WithConfig(policySource)
+	// MCP-server runtime block: a blocked MCP server denies ALL of its
+	// tools, regardless of any per-tool allow. This is the Go-side runtime
+	// enforcement of `defenseclaw mcp block <server>` (global or
+	// --connector scoped); it is checked before the per-tool block/allow so
+	// a server-level block wins over a tool-level allow, and it fails closed
+	// + loud on a store lookup error.
+	if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     reason,
+			Findings:   []string{"MCP-BLOCK"},
 		}
-		blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
-		if err != nil {
-			return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+	}
+	blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
+	if err != nil {
+		return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+	}
+	if blocked {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
+			Findings:   []string{"STATIC-BLOCK"},
 		}
-		if blocked {
-			return &ToolInspectVerdict{
-				Action:     "block",
-				Severity:   "HIGH",
-				Confidence: 1.0,
-				Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
-				Findings:   []string{"STATIC-BLOCK"},
-			}
-		}
-		// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-		// still run CodeGuard on their content (D2): the allow bypasses the
-		// scan gate, not code-content inspection.
-		allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
-		if err != nil {
-			return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
-		}
-		if allowed {
-			if !isWriteToolName(strings.ToLower(req.Tool)) {
-				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
-			}
-			if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
-				return a.codeGuardOnlyVerdict(req, cg, true, action.EnforcementCapable)
-			}
+	}
+	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
+	// still run CodeGuard on their content (D2): the allow bypasses the
+	// scan gate, not code-content inspection.
+	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
+	if err != nil {
+		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		if !isWriteToolName(strings.ToLower(req.Tool)) {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
+		if cg := a.runCodeGuardOnArgsWithProvenance(ctx, req); len(cg.findings) > 0 {
+			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
+		}
+		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 	}
 
 	argsStr := string(req.Args)
@@ -691,7 +727,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	isWriteTool := isWriteToolName(tool)
 	var cgScan codeGuardArgsScan
 	if isWriteTool {
-		cgScan = a.runCodeGuardOnArgsWithProvenance(req)
+		cgScan = a.runCodeGuardOnArgsWithProvenance(ctx, req)
 	}
 	cgFindings := codeGuardRuleFindings(cgScan, true, action.EnforcementCapable)
 
@@ -715,12 +751,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailRuntimeActionForFindings(
-			a.scannerCfg, req.Connector, ruleFindings, true,
+		runtimeAction := guardrailActionForConnectorFindings(
+			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailRuntimeActionForConnector(
-				a.scannerCfg, req.Connector, enforceableSeverity, true,
+			codeGuardAction := guardrailActionForConnector(
+				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
@@ -731,6 +767,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				break
 			}
 			reasons = append(reasons, f.RuleID+":"+f.Title)
+		}
+		// A CodeGuard-only hit left the reason an empty "matched: ", which
+		// the agent notice showed as a redaction token (GAP-2029).
+		for _, cf := range cgFindings {
+			if len(reasons) >= 5 {
+				break
+			}
+			reasons = append(reasons, cf.RuleID+":"+cf.Title)
 		}
 
 		findingStrs := FindingStrings(ruleFindings)
@@ -745,6 +789,18 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
 			Findings:         findingStrs,
 			DetailedFindings: append(ruleFindings, cgFindings...),
+		}
+		detectionOnly := len(ruleFindings) > 0 && len(cgFindings) == 0
+		for _, finding := range ruleFindings {
+			if finding.enforcement != findingEnforcementDetectionOnly {
+				detectionOnly = false
+				break
+			}
+		}
+		if detectionOnly {
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				verdict.Reason = "detection-only: tool-call patterns alone cannot block; " + verdict.Reason
+			}
 		}
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
@@ -828,7 +884,7 @@ func isWriteToolName(tool string) bool {
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
-	return a.runCodeGuardOnArgsWithProvenance(req).findings
+	return a.runCodeGuardOnArgsWithProvenance(context.Background(), req).findings
 }
 
 type codeGuardArgsScan struct {
@@ -836,7 +892,7 @@ type codeGuardArgsScan struct {
 	complete bool
 }
 
-func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) codeGuardArgsScan {
+func (a *APIServer) runCodeGuardOnArgsWithProvenance(ctx context.Context, req *ToolInspectRequest) codeGuardArgsScan {
 	// managed_enterprise: local content scanners (CodeGuard/ClawShield)
 	// are disabled — AID is authoritative. Defense-in-depth: short-circuit
 	// here too so no other caller re-introduces CodeGuard blocking in
@@ -869,8 +925,8 @@ func (a *APIServer) runCodeGuardOnArgsWithProvenance(req *ToolInspectRequest) co
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	cg := scanner.NewCodeGuardScanner(rulesDir)
 	scan := cg.ScanContentWithProvenance(filePath, content)
@@ -984,6 +1040,7 @@ const codeGuardBinaryConfidence = 1.0
 // rule/AID/judge scanning, but CodeGuard is retained (D2); severity and action
 // mirror the main inspectToolPolicy path with no rule findings.
 func (a *APIServer) codeGuardOnlyVerdict(
+	ctx context.Context,
 	req *ToolInspectRequest,
 	scan codeGuardArgsScan,
 	trustedBoundary bool,
@@ -997,7 +1054,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, enforceableSeverity, true)
+		action = guardrailActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1073,6 +1130,27 @@ func codeGuardRuleFindings(
 	return applyTrustedActionProofBoundary(result, enforcementCapable)
 }
 
+// withoutBlockMessageEcho drops the configured block message from text the
+// agent hands back: a tool result that carries the denial DefenseClaw
+// returned, or the reply that repeats it. A contact address in that message
+// raised a PII alert on every block (GAP-0400). Only that exact
+// operator-authored text is replaced, by a space so the text around it is
+// not joined, and the rest is still scanned, so nothing else is hidden.
+func withoutBlockMessageEcho(cfg *config.Config, connector, content string) string {
+	if cfg == nil {
+		return content
+	}
+	message := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector))
+	if len(message) < minEchoedBlockMessageLen || !strings.Contains(content, message) {
+		return content
+	}
+	return strings.ReplaceAll(content, message, " ")
+}
+
+// minEchoedBlockMessageLen keeps a very short block message from removing
+// ordinary words from scanned text.
+const minEchoedBlockMessageLen = 16
+
 // inspectMessageContent scans outbound message content for secrets, PII,
 // and data exfiltration patterns. Uses the same rule engine.
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
@@ -1099,6 +1177,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		return verdict
 	}
 
+	if req.Direction == "response" || req.Direction == "tool_result" {
+		content = withoutBlockMessageEcho(a.decisionConfig(ctx), req.Connector, content)
+	}
 	if content == "" {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -1108,14 +1189,34 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	var ruleFindings []RuleFinding
 	if req.contentScope != ruleContentScopeAll {
-		ruleFindings = scanContentRulesForConnector(
+		ruleFindings = scanContentRulesForConnectorFor(
+			ctx,
 			req.Connector,
 			content,
 			"message",
 			req.contentScope,
 		)
 	} else {
-		ruleFindings = ScanAllRulesForConnector(req.Connector, content, "message")
+		ruleFindings = scanAllRulesForConnectorFor(ctx, req.Connector, content, "message")
+	}
+	// Prompts and tool results can contain invisible separators or letters
+	// that resemble Latin script. Keep this extra view confined to trust rules.
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+		if folded := trustPatternText(content); folded != content {
+			generation := snapshotRulePackGenerationFor(ctx, req.Connector)
+			seen := make(map[string]bool, len(ruleFindings))
+			for _, finding := range ruleFindings {
+				seen[finding.RuleID] = true
+			}
+			for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+				contentScope: req.contentScope, onlyCategory: "trust-exploit",
+			}) {
+				if !seen[finding.RuleID] {
+					ruleFindings = append(ruleFindings, finding)
+					seen[finding.RuleID] = true
+				}
+			}
+		}
 	}
 
 	var verdict *ToolInspectVerdict
@@ -1133,8 +1234,8 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 
 		action := guardrailActionAllow
 		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
-			action = guardrailRuntimeActionForConnector(
-				a.scannerCfg,
+			action = guardrailContentAction(
+				a.decisionConfig(ctx),
 				req.Connector,
 				HighestSeverity(enforceable),
 				strings.EqualFold(req.Direction, "outbound"),
@@ -1196,6 +1297,10 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	verdict.RawAction = ""
 	verdict.WouldBlock = false
 	verdict.ApprovalTimeoutMS = 0
+	// Source-only content is never enforceable. Do not let a cloud block
+	// observed while scanning trusted detector/test source survive as AID
+	// enforcement provenance when the untrusted segment is merged later.
+	verdict.aiDefenseBlock = false
 	if detected {
 		verdict.Severity = "LOW"
 	} else {
@@ -1216,9 +1321,10 @@ const maxConcurrentHookJudges = 16
 // guardrail.judge.hook_timeout is unset. Hook scripts call the gateway
 // with curl --max-time 10 (see connector/hooks/*-hook.sh); the proxy
 // lane's 30s judge default would let the client sever the connection
-// before a verdict lands. 5s leaves headroom for the regex/AID phases
-// plus response rendering.
-const defaultHookJudgeTimeout = 5 * time.Second
+// before a verdict lands. 8s fits Bedrock-class judge latency (Haiku 4.5
+// injection calls measured at p90 4.2s, max 5.0s; GAP-1475/GAP-1488) and
+// still leaves 2s for the regex/AID phases plus response rendering.
+const defaultHookJudgeTimeout = 8 * time.Second
 
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
 // connectors gated on via guardrail.judge.hook_connectors. It maps the
@@ -1240,6 +1346,33 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	// Message content threads the caller ctx so the generic /inspect/tool
 	// endpoint's 200ms deadline still short-circuits the judge below.
 	return a.runHookJudge(ctx, direction, direction, req.Connector, content, req.Tool, current)
+}
+
+// connectorRulePack is the composed rule pack the request scans connector
+// with: its guardrail profile scope when one applies, else the connector
+// scope of the request's generation (guardrail.rules with every connector
+// layer), else the global pack.
+func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
+	connector = canonicalConnectorRulePackKey(connector)
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
+		key := effectiveRulePackKey(resolved.derived, connector)
+		if pack := resolved.set.packs[key]; pack != nil {
+			return pack
+		}
+		if retry := resolved.set.missing[key]; retry != nil {
+			if pack := retry.pack.Load(); pack != nil {
+				return pack
+			}
+		}
+	}
+	g := a.decisionGeneration(ctx)
+	if g == nil {
+		return nil
+	}
+	if pack := g.RulePacks["conn:"+connector]; pack != nil {
+		return pack
+	}
+	return g.RulePacks["global"]
 }
 
 // runHookJudge is the shared hook-lane judge core for all three hook
@@ -1272,22 +1405,36 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	if a == nil || a.hookJudge == nil || a.scannerCfg == nil || content == "" {
+	judge := a.judgeFor(ctx)
+	if judge == nil || content == "" {
 		return nil
 	}
-	jcfg := &a.scannerCfg.Guardrail.Judge
+	// Gate on the configuration of the generation the judge came from: the
+	// request pins one, so a reload cannot pair a new gate with a nil or
+	// previous judge. A start-time scannerCfg can have another connector gate.
+	cfg := a.decisionConfig(ctx)
+	if g := pinnedGeneration(ctx); g.published() && cfg != nil && !cfg.SecureClientIntegration() {
+		cfg = a.decisionConfigFrom(ctx, g.Config)
+	}
+	if cfg == nil {
+		return nil
+	}
+	jcfg := &cfg.Guardrail.Judge
 	if !jcfg.HookConnectorEnabled(connector) {
 		return nil
 	}
 
-	switch a.scannerCfg.Guardrail.EffectiveStrategy(strategyDirection) {
+	switch cfg.Guardrail.EffectiveStrategy(strategyDirection) {
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
-		// Mirror the proxy regex_judge semantics: a HIGH+ regex/AID
-		// verdict is already decisive, so the LLM round-trip is spent
-		// only on content the local lanes couldn't condemn.
-		if current != nil && severityRank[strings.ToUpper(current.Severity)] >= severityRank["HIGH"] {
+		// A regex/AID verdict that already blocks, or is CRITICAL, is
+		// decisive: the judge cannot raise it. A HIGH verdict that only
+		// alerts (block-at CRITICAL) is not, so the judge still runs and
+		// the stronger verdict wins; skipping it let a prompt with more
+		// sensitive data through where the judge blocked less (GAP-1677).
+		if current != nil && (strings.EqualFold(current.Action, "block") ||
+			severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]) {
 			return nil
 		}
 	default: // regex_only / unset
@@ -1304,6 +1451,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 		return nil
 	}
 
+	a.hookJudgeSemOnce.Do(func() { a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges) })
 	select {
 	case a.hookJudgeSem <- struct{}{}:
 	default:
@@ -1319,16 +1467,19 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))
 
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
 	var v *ScanVerdict
+	resume := yieldHookRunSlot(ctx)
 	if strings.EqualFold(strategyDirection, "tool_call") {
-		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
+		v = judge.RunToolJudge(jctx, toolName, content)
 	} else {
-		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+		v = judge.RunJudges(jctx, judgeDirection, content, toolName)
 	}
+	resume()
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather
@@ -1342,6 +1493,15 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge unavailable (connector=%s direction=%s scanner=%q); keeping regex/AID verdict\n",
 			connector, strategyDirection, failedScanner)
 		return nil
+	}
+	if !cfg.SecureClientIntegration() {
+		// The judge severity goes through block_at / alert_at like every
+		// other finding: the judges block any HIGH verdict on their own,
+		// which blocked a plain read at the default block_at CRITICAL
+		// (GAP-0235). Secure Client keeps the judge action (issue #1092).
+		out := *v
+		out.Action = guardrailContentAction(cfg, connector, v.Severity, false)
+		return &out
 	}
 	return v
 }
@@ -1427,8 +1587,18 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+
+	// Count the check against the authenticated connector so /health (and the
+	// TUI's "0 requests ... verify your agent is dialing the gateway port"
+	// notice) sees OpenClaw's exec checks, which arrive only here (GAP-1617).
+	if a.recordsConnectorHealth(r.Context()) {
+		a.health.RecordToolInspectionFor(serverConnector)
+		if verdict.Action == "block" {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+	}
 
 	elapsed := time.Since(t0)
 
@@ -1492,10 +1662,28 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			targetType = "prompt"
 		}
 	}
-	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
-		"/api/v1/inspect/tool:"+req.Tool, targetType, verdict, elapsed,
+	// Findings name the connector the call was authenticated for, and the
+	// connector and tool as their target, as hook findings do: an OpenClaw
+	// block was an alert with no connector or target, so `alerts
+	// --connector openclaw` did not find it (GAP-1451).
+	findingCtx := r.Context()
+	if env := audit.EnvelopeFromContext(findingCtx); env.Connector == "" && req.Connector != "" {
+		env.Connector = req.Connector
+		findingCtx = audit.ContextWithEnvelope(findingCtx, env)
+	}
+	evalCtx := a.emitInspectVerdictFindings(findingCtx, "inspect-http",
+		hookEvaluationTarget(req.Connector, req.Tool), targetType, verdict, elapsed,
 		"emit_inspect_tool")
 	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
+	if targetType == "tool_call" && strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") {
+		// The event router puts the decision on the call's tool span
+		// (GAP-1930).
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok {
+			meta := hookDecisionMetricMeta(r.Context(), connectorName)
+			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, req.Args, outcome,
+				AgentIdentityFromContext(r.Context()))
+		}
+	}
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
@@ -1504,7 +1692,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
+	toolEvent := a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails)
+	if verdict.Action != "allow" && verdict.Severity != "" && verdict.Severity != "NONE" {
+		// A block, confirm or alert row carries the verdict's severity.
+		toolEvent.Severity = verdict.Severity
+	}
+	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
@@ -1537,6 +1730,37 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 
+// inspectToolAuditEvent is the inspect-tool-* audit row.
+func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
+	return a.inspectAuditEvent(r, "/api/v1/inspect/tool", action, tool, details)
+}
+
+// inspectAuditEvent is the audit row of a direct /api/v1/inspect/* call. It
+// names the connector the request was authenticated for (the configured
+// connector when the request carries none), the route, and the verified
+// caller, so an administrator can attribute direct inspect calls to the
+// account that made them.
+func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, details string) audit.Event {
+	ctx := r.Context()
+	connectorName := authenticatedInspectConnector(ctx)
+	if connectorName == "" {
+		connectorName = a.connectorName()
+	}
+	structured := map[string]any{"route": route}
+	if connectorName != "" {
+		structured["connector"] = connectorName
+	}
+	auditCallerIdentity(ctx).addTo(structured)
+	return audit.Event{
+		Action:     action,
+		Target:     target,
+		Details:    details,
+		Severity:   "INFO",
+		Connector:  connectorName,
+		Structured: structured,
+	}
+}
+
 func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *ToolInspectRequest, verdict *ToolInspectVerdict) {
 	if verdict == nil || verdict.Action != guardrailActionConfirm {
 		return
@@ -1559,8 +1783,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	if !strings.EqualFold(a.connectorName(), "openclaw") {
 		verdict.Action = guardrailActionBlock
 		verdict.WouldBlock = true
-		verdict.Reason = appendVerdictReason(verdict.Reason,
-			"human approval unsupported on this connector surface; failing closed")
+		verdict.Reason = appendVerdictReason(verdict.Reason, approvalUnsupportedNote)
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -1572,8 +1795,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 
 	verdict.Action = guardrailActionBlock
 	verdict.WouldBlock = true
-	verdict.Reason = appendVerdictReason(verdict.Reason,
-		"human approval requires native OpenClaw approval; failing closed")
+	verdict.Reason = appendVerdictReason(verdict.Reason, approvalNativeOpenClawNote)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}
@@ -1605,7 +1827,7 @@ func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdic
 		return v
 	}
 	cp := *v
-	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
+	cp.Reason = agentVerdictReason(v.Action, v.Reason, defaultSinkDisplayReason(v.Reason, policy), policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}

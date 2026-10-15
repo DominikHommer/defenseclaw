@@ -45,14 +45,17 @@ import {
   normalizeImportedPolicy,
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
-import { emit, __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
+import { emit } from '../components/policy-creator/lib/emit.js';
+import { projectPolicyToData, withPolicyInput } from '../components/policy-creator/lib/data-projection.js';
 import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
+import { pickVerdictEntrypoint } from '../components/policy-creator/lib/opa-eval.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
-import { BLOCK_CARDS } from '../components/policy-creator/quick-start/questions.js';
+import { BLOCK_CARDS, SINK_CARDS, defaultAnswers } from '../components/policy-creator/quick-start/questions.js';
+import { applyAnswers } from '../components/policy-creator/quick-start/apply.js';
 import {
   BOUNDED_CHAINS,
   HIGH_ASSURANCE_PACKS,
@@ -425,7 +428,8 @@ test('install script executes idempotently and activates the emitted policy', ()
     execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
 
     assert.ok(existsSync(join(policyHome, 'policies', 'studio-e2e.yaml')));
-    assert.ok(existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
+    // config_version 9 ignores data.json; activation writes config.yaml.
+    assert.ok(!existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
     assert.equal(
       readFileSync(join(policyHome, 'activation-call'), 'utf8').trim(),
       'policy activate studio-e2e',
@@ -433,6 +437,33 @@ test('install script executes idempotently and activates the emitted policy', ()
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('live test: config_version 9 Rego gets the policy as input.admission and input.thresholds', () => {
+  const policy = policyFromPreset('default');
+  policy.admission.scan_on_install = false;
+  const data = projectPolicyToData(policy);
+  const admission = withPolicyInput('admission', { target_type: 'mcp', target_name: 'm', path: '/x' }, data) as {
+    admission: { scan_on_install: boolean; actions: Record<string, unknown> };
+  };
+  assert.equal(admission.admission.scan_on_install, false);
+  assert.deepEqual(admission.admission.actions.MEDIUM, data.scanner_overrides.mcp?.MEDIUM ?? data.actions.MEDIUM);
+  const guardrail = withPolicyInput('guardrail', { mode: 'action' }, data) as { thresholds: { block: number } };
+  assert.equal(guardrail.thresholds.block, policy.guardrail.block_threshold);
+});
+
+test('live test withholds built-in first-party trust without content verification', () => {
+  const data = projectPolicyToData(policyFromPreset('default'));
+  data.first_party_allow_list = [
+    { target_type: 'skill', target_name: 'codeguard', reason: '', source_path_contains: ['.claude/skills/codeguard'] },
+    { target_type: 'plugin', target_name: 'defenseclaw', reason: '', source_path_contains: ['.claude/extensions/defenseclaw'] },
+    { target_type: 'plugin', target_name: 'acme', reason: '', source_path_contains: ['.acme/plugins/acme'] },
+  ];
+  const entries = (target_type: string) => (withPolicyInput('admission', { target_type }, data) as {
+    admission: { first_party_allow_list: Array<{ name: string }> };
+  }).admission.first_party_allow_list;
+  assert.deepEqual(entries('skill'), []);
+  assert.deepEqual(entries('plugin').map((entry) => entry.name), ['acme']);
 });
 
 test('regex tester supports the shipped Go Unicode scalar syntax', () => {
@@ -488,6 +519,21 @@ test('share: encode → decode preserves the policy verbatim', async () => {
   if (result.ok) {
     assert.deepEqual(result.policy, original);
   }
+});
+
+test('quick start hard block exports action mode for activation', () => {
+  const answers = defaultAnswers();
+  answers.response = 'block';
+  const policy = applyAnswers(answers);
+  const exported = yaml.load(emit(policy).find((f) => f.path.endsWith('.yaml'))!.contents) as {
+    guardrail: { mode: string; block_threshold: number };
+  };
+  assert.equal(exported.guardrail.mode, 'action');
+  assert.equal(exported.guardrail.block_threshold, 2);
+});
+
+test('quick start does not present Splunk HEC as a generic webhook', () => {
+  assert.equal(SINK_CARDS.some((card) => card.id === 'splunk' && card.type === 'generic'), false);
 });
 
 // ── share: failure modes ────────────────────────────────────────────
@@ -696,51 +742,6 @@ test('share: end-to-end round trip of a legacy payload does not crash', async ()
   }
 });
 
-// ── emit: correlator edit detection ─────────────────────────────────
-
-test('emit: canonicalCorrelator is deterministic and identifies identical states', () => {
-  const baseline = policyFromPreset('strict').correlator;
-  const shuffled = [...baseline].reverse();
-  assert.equal(
-    EMIT_INTERNALS.canonicalCorrelator(baseline),
-    EMIT_INTERNALS.canonicalCorrelator(shuffled),
-    'canonical signature must be reorder-stable',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault returns false for an unmodified strict preset', () => {
-  const policy = policyFromPreset('strict');
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(policy),
-    false,
-    'untouched preset must NOT trigger a correlation-patterns.yaml emit',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault detects edits to a bundled pattern', () => {
-  const policy = policyFromPreset('strict');
-  if (policy.correlator.length === 0) {
-    // The build script feeds the bundled defaults into every preset;
-    // if this test stops finding any patterns the test itself is
-    // useless. Surface that explicitly rather than passing vacuously.
-    throw new Error('strict preset has no correlator patterns — fixture drift');
-  }
-  // Mutate a single window_events field on the first bundled pattern.
-  // This is precisely the silent-data-loss path the previous heuristic
-  // missed (only disabled patterns + unknown ids tripped the emit).
-  const edited = {
-    ...policy,
-    correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, window_events: p.window_events + 7 } : p,
-    ),
-  };
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(edited),
-    true,
-    'editing a bundled pattern must trigger a correlation-patterns.yaml emit',
-  );
-});
-
 // Regression for the Quick Start "Cannot read properties of undefined
 // (reading 'enabled')" crash. A stale localStorage draft from an older
 // build is missing `cisco_ai_defense` and `correlator`. PolicyCreator
@@ -768,31 +769,16 @@ test('emit + normalize: stale policy without correlator/cisco_ai_defense survive
   // code path imports a Policy from somewhere new), emit() must not
   // crash on the missing fields. We feed in the raw stale object.
   const files = emit(stale as unknown as Policy);
-  // Sanity: emit returned a useful file list (policy YAML + opa data
-  // at minimum), and none of the entries reference a Cisco AI Defense
+  // Sanity: emit returned a useful file list (the policy YAML at
+  // minimum), and none of the entries reference a Cisco AI Defense
   // block when AID is disabled / absent.
-  assert.ok(files.length >= 2, 'emit must return at least the policy YAML + data.json');
+  assert.ok(files.length >= 1, 'emit must return at least the policy YAML');
   const policyYaml = files.find((f) => f.path.endsWith(`${stale.name}.yaml`));
   assert.ok(policyYaml, 'top-level policy YAML must be emitted');
   assert.equal(
     policyYaml!.contents.includes('cisco_ai_defense'),
     false,
     'AID block must be omitted when the lane is off / missing',
-  );
-});
-
-test('emit: correlatorDiffersFromDefault detects disabled bundled patterns', () => {
-  const policy = policyFromPreset('strict');
-  const disabled = {
-    ...policy,
-    correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, enabled: false } : p,
-    ),
-  };
-  assert.equal(
-    EMIT_INTERNALS.correlatorDiffersFromDefault(disabled),
-    true,
-    'disabling a bundled pattern must trigger an emit',
   );
 });
 
@@ -859,6 +845,46 @@ test('download-button (B5): disabledReason blocks the download', async () => {
       (globalThis.URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = originalRevoke;
     }
   }
+});
+
+test('guardrail Live Test evaluates the action that thresholds control', () => {
+  assert.equal(pickVerdictEntrypoint('guardrail'), 'defenseclaw/guardrail/action');
+});
+
+test('policy export excludes inactive firewall choices and warns before activation', () => {
+  const policy = makePolicy({
+    firewall: { default_action: 'deny', blocked_destinations: ['example.test'], allowed_domains: [], allowed_ports: [443] },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith('test-policy.yaml'));
+  assert.ok(top);
+  const parsed = yaml.load(top.contents) as Record<string, unknown>;
+  assert.equal(parsed.firewall, undefined);
+  assert.match(top.contents, /firewall and audit choices are not applied/i);
+  const script = emitInstallScript(policy);
+  assert.match(script, /WARNING: Firewall and audit choices are not applied/i);
+  assert.ok(script.indexOf('WARNING: Firewall') < script.lastIndexOf('defenseclaw policy activate'));
+});
+
+test('policy export excludes inactive audit choices', () => {
+  const policy = makePolicy({
+    audit: { log_all_actions: false, log_scan_results: false, retention_days: 7 },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith('test-policy.yaml'));
+  assert.ok(top);
+  const parsed = yaml.load(top.contents) as Record<string, unknown>;
+  assert.equal(parsed.audit, undefined);
+  assert.match(top.contents, /firewall and audit choices are not applied/i);
+});
+
+test('manual v9 rollback distinguishes 0.8.4 config v7 from later 0.8.x config v8', () => {
+  const guide = readFileSync(
+    new URL('../content/docs/reference/migrate-v9.mdx', import.meta.url),
+    'utf8',
+  );
+  const rollback = guide.split('## Going back to 0.8.x')[1] ?? '';
+  assert.match(rollback, /0\.8\.4[\s\S]{0,120}version 7|version 7[\s\S]{0,120}0\.8\.4/i);
+  assert.match(rollback, /pre-upgrade backup/i);
+  assert.doesNotMatch(rollback, /only version 0\.8\.x reads/i);
 });
 
 // ── emit branches (B4) ─────────────────────────────────────────────
@@ -1059,16 +1085,7 @@ test('emit: judge file skipped when system_prompt is empty', () => {
   );
 });
 
-test('emit: correlation-patterns.yaml NOT emitted for untouched default preset', () => {
-  const policy = policyFromPreset('default');
-  assert.equal(
-    emit(policy).find((f) => f.path.endsWith('correlation-patterns.yaml')),
-    undefined,
-    'untouched preset must NOT emit a correlation-patterns override',
-  );
-});
-
-test('emit: correlation-patterns.yaml emitted when the operator edits a pattern', () => {
+test('emit: never writes correlation-patterns.yaml (the rule-pack loader rejects it)', () => {
   const policy = policyFromPreset('default');
   if (policy.correlator.length === 0) {
     throw new Error('default preset has no correlator patterns — fixture drift');
@@ -1076,11 +1093,14 @@ test('emit: correlation-patterns.yaml emitted when the operator edits a pattern'
   const edited = {
     ...policy,
     correlator: policy.correlator.map((p, i): CorrelationPattern =>
-      i === 0 ? { ...p, window_events: p.window_events + 3 } : p,
+      i === 0 ? { ...p, enabled: false } : p,
     ),
   };
-  const f = emit(edited).find((x) => x.path.endsWith('correlation-patterns.yaml'));
-  assert.ok(f, 'edit to a bundled pattern must produce a correlation-patterns.yaml override');
+  assert.equal(
+    emit(edited).find((f) => f.path.endsWith('correlation-patterns.yaml')),
+    undefined,
+    'the gateway only runs its compiled-in correlator patterns; an exported file breaks the pack',
+  );
 });
 
 // ── differential parity (B2) ────────────────────────────────────────
@@ -1122,24 +1142,9 @@ test('parity (B2): default preset emits action matrix consistent with policies/d
       'to match — they MUST stay in sync.',
   );
 
-  // 2) firewall.default_action MUST round-trip — operators rely on
-  // "the playground's default = the gateway's default" so they can
-  // download an unmodified preset and get behaviour equivalent to
-  // not installing a policy at all.
-  const wizardFw = wizardYaml.firewall as Record<string, unknown> | undefined;
-  const bundledFw = bundled.firewall as Record<string, unknown> | undefined;
-  assert.equal(
-    wizardFw?.default_action,
-    bundledFw?.default_action,
-    'firewall.default_action in wizard default preset diverges from policies/default.yaml',
-  );
-
-  // Note: name + description are intentionally NOT compared — the
-  // playground preset is a *starting point* the operator will rename
-  // (default name: "my-policy") before activating, whereas
-  // policies/default.yaml ships under the literal name "default".
-  // The structural fields above (action matrix, firewall default)
-  // are the ones that must agree.
+  // Firewall settings are planning notes; activation never consumes them.
+  assert.equal(wizardYaml.firewall, undefined);
+  assert.equal(wizardYaml.audit, undefined);
 });
 
 // ── round-trip property (B1) ───────────────────────────────────────
@@ -1447,7 +1452,7 @@ test('json-highlight: punctuation chars get the punctuation kind', () => {
 
 const FIXTURE = [
   { sectionId: 'firewall', label: 'Allowed domains', group: 'Firewall', keywords: ['domain', 'allowlist'] },
-  { sectionId: 'webhooks', label: 'Splunk HEC sink', group: 'Webhooks', keywords: ['splunk', 'token'] },
+  { sectionId: 'webhooks', label: 'Webhook signing secret', group: 'Webhooks', keywords: ['hmac', 'env var'] },
   { sectionId: 'guardrail', label: 'HILT', group: 'Guardrail', keywords: ['human in the loop', 'hilt severity'] },
 ];
 
@@ -1457,14 +1462,14 @@ test('cmdk-filter: empty / whitespace-only query returns the input unmodified', 
 });
 
 test('cmdk-filter: substring match in label hits the right entry', () => {
-  const out = filterIndex(FIXTURE, 'splunk');
+  const out = filterIndex(FIXTURE, 'webhook');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });
 
 test('cmdk-filter: token AND across label and keyword matches', () => {
-  // "token" is a keyword, "splunk" is in the label — both must match.
-  const out = filterIndex(FIXTURE, 'splunk token');
+  // "env" is a keyword, "webhook" is in the label — both must match.
+  const out = filterIndex(FIXTURE, 'webhook env');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });

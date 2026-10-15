@@ -11,9 +11,12 @@
 package cli
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestMaterializeSidecarGatewayTokenUsesResolvedPrecedence(t *testing.T) {
@@ -152,5 +155,62 @@ func TestFormatDetailValue_NonScalarsAreSkipped(t *testing.T) {
 				t.Fatalf("ok = true (got=%q), want false — non-scalar must be skipped", got)
 			}
 		})
+	}
+}
+
+func TestGuardrailBannerLinesShowJudgeNotBlankProxyRows(t *testing.T) {
+	// GAP-2107: hook-only installs printed "Model:  → " and an empty "API key:".
+	cfg := &config.Config{}
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Port = 4000
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Judge.Enabled = true
+	cfg.Guardrail.Judge.LLM.Model = "bedrock/judge-model"
+	got := strings.Join(guardrailBannerLines(cfg), "\n")
+	if strings.Contains(got, "Model:") || strings.Contains(got, "API key:") {
+		t.Fatalf("blank proxy rows in banner:\n%s", got)
+	}
+	if !strings.Contains(got, "Judge:      bedrock/judge-model") {
+		t.Fatalf("judge model missing from banner:\n%s", got)
+	}
+	cfg.Guardrail.Model = "openai/gpt"
+	if got := strings.Join(guardrailBannerLines(cfg), "\n"); !strings.Contains(got, "Model:      openai/gpt") {
+		t.Fatalf("proxy model row missing:\n%s", got)
+	}
+}
+
+// GAP-0077: a standalone managed service dials no OpenClaw fleet and never
+// watches its own profile's folders, so its banner must not advertise
+// either. On Windows it watches every enrolled user's folders (GAP-0132), so
+// its watcher shows enabled there. Secure Client keeps the banner of main
+// (GAP-0105, issue #1092).
+func TestSidecarBannerManagedShowsNoWatcherOrFleet(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	cfg.Gateway.Host, cfg.Gateway.Port = "127.0.0.1", 18789
+	cfg.Gateway.Watcher.Enabled, cfg.Gateway.Watcher.Skill.Enabled = true, true
+	watcher := "Watcher:      idle (no directories to watch)"
+	if runtime.GOOS == "windows" {
+		watcher = "Watcher:      enabled"
+	}
+	got := fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
+	if strings.Contains(got, "18789") || !strings.Contains(got, "Gateway:      none") || !strings.Contains(got, watcher) {
+		t.Fatalf("standalone banner:\n%s", got)
+	}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	got = fleetBannerLine(cfg) + "\n" + strings.Join(watcherBannerLines(cfg), "\n")
+	want := "  Gateway:      127.0.0.1:18789\n  Watcher:      true\n    Skill:      enabled=true take_action=false\n    Skill dirs: autodiscover (from claw mode)"
+	if got != want {
+		t.Fatalf("Secure Client banner:\n%s\nwant:\n%s", got, want)
+	}
+	// The Auth row too: main masks the token, standalone says only "set".
+	cfg.Gateway.Token = "abcd1234567890wxyz"
+	if got := tokenStatus(cfg); got != "abcd...wxyz" {
+		t.Fatalf("Secure Client Auth row = %q, want the masked token of main", got)
+	}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	if got := tokenStatus(cfg); got != "set" {
+		t.Fatalf("standalone Auth row = %q, want set", got)
 	}
 }

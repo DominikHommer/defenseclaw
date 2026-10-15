@@ -128,6 +128,8 @@ func (j *LLMJudge) judgeTraceInput(
 		DefenseClawConnectorSource:         proxyV8Optional(connector != "", connector),
 		DefenseClawRunID:                   proxyV8OptionalID(envelope.RunID),
 		DefenseClawPolicyID:                proxyV8OptionalID(envelope.PolicyID),
+		DefenseClawRequestID:               proxyV8OptionalID(envelope.RequestID),
+		DefenseClawTurnID:                  proxyV8OptionalID(envelope.TurnID),
 		GenAIConversationID:                proxyV8OptionalID(envelope.SessionID),
 		GenAIAgentID:                       proxyV8OptionalID(envelope.AgentID),
 		GenAIAgentName:                     proxyV8OptionalID(envelope.AgentName),
@@ -150,6 +152,15 @@ func (j *LLMJudge) judgeTraceInput(
 		ConditionConnectorKnown:            connector != "",
 		ConditionOperationTerminal:         true,
 	}
+	// Stamp the caller, directory/session facts and agent identity the
+	// turn's hook spans carry, so judge spans join the user, the agent and
+	// the directory facts in Galileo and Tempo (GAP-2641, GAP-0066).
+	caller := auditCallerIdentity(ctx)
+	input.UserID = hookV8OptionalIdentifier(caller.ID)
+	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+	input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
+	caller.Identity.applyTo(&input)
 	providerName := strings.TrimSpace(j.providerName)
 	if providerName == "" {
 		providerName = judgeGenAISystem(j.model)

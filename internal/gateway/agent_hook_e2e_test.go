@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // TestHandleAgentHook_FullChain_PerConnector is the M6 end-to-end
@@ -55,12 +56,15 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 	// the most common PreToolUse-equivalent so profile runtimes take
 	// a recognised codepath, not the dispatch fallback.
 	type wireShape struct {
-		connector       string
-		event           string
-		toolName        string
-		topLevelOutput  string // expected top-level JSON output key
-		expectAction    string
-		additionalAttrs map[string]string
+		connector      string
+		event          string
+		toolName       string
+		topLevelOutput string // expected top-level JSON output key
+		expectAction   string
+		// name distinguishes a second wire shape for the same connector.
+		name string
+		// argMetadata is merged into the Antigravity tool arguments.
+		argMetadata map[string]interface{}
 	}
 
 	shapes := []wireShape{
@@ -121,6 +125,21 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			expectAction:   "block",
 		},
 		{
+			// The live Antigravity CLI sends scheduling and status-line
+			// metadata beside CommandLine and Cwd.
+			name:           "antigravity-cli-metadata",
+			connector:      "antigravity",
+			event:          "PreToolUse",
+			toolName:       "run_command",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+			argMetadata: map[string]interface{}{
+				"WaitMsBeforeAsync": 5000,
+				"toolAction":        "Running command",
+				"toolSummary":       "Run command",
+			},
+		},
+		{
 			connector:      "opencode",
 			event:          "tool.execute.before",
 			toolName:       "bash",
@@ -133,6 +152,17 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			toolName:  "bash",
 			// The TypeScript plugin consumes canonical top-level action,
 			// reason, and additional_context fields directly.
+			topLevelOutput: "",
+			expectAction:   "block",
+		},
+		{
+			// Amp runs background commands through async_shell_command; it
+			// was not parsed into command facts, so a rule that needs typed
+			// proof was only recorded (CRITICAL, allow).
+			name:           "amp-async-shell",
+			connector:      "amp",
+			event:          "tool.call",
+			toolName:       "async_shell_command",
 			topLevelOutput: "",
 			expectAction:   "block",
 		},
@@ -156,7 +186,11 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 
 	for _, sh := range shapes {
 		sh := sh
-		t.Run(sh.connector, func(t *testing.T) {
+		runName := sh.connector
+		if sh.name != "" {
+			runName = sh.name
+		}
+		t.Run(runName, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = sh.connector
@@ -180,16 +214,20 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				if runtime.GOOS == "windows" {
 					command, cwd = `Remove-Item -Recurse -Force C:\`, `C:\workspace`
 				}
+				args := map[string]interface{}{
+					"Cwd":         cwd,
+					"CommandLine": command,
+				}
+				for key, value := range sh.argMetadata {
+					args[key] = value
+				}
 				requestPayload = map[string]interface{}{
 					"conversationId": "session-antigravity",
 					"stepIdx":        1,
 					"workspacePaths": []string{cwd},
 					"toolCall": map[string]interface{}{
 						"name": sh.toolName,
-						"args": map[string]interface{}{
-							"Cwd":         cwd,
-							"CommandLine": command,
-						},
+						"args": args,
 					},
 				}
 			}
@@ -619,57 +657,6 @@ func TestCopilotHookRejectsMissingOrInvalidTrustedEvent(t *testing.T) {
 	}
 }
 
-// TestHandleAgentHook_FullChain_SyntheticPath drives the
-// codex-notify synthetic hook path top-to-bottom and asserts that:
-//
-//   - the synthesised Stop event reaches the safeEvaluateSyntheticHook
-//     pipeline,
-//   - the response shape is the codex-specific one (codex_output),
-//   - no panic propagates if the evaluator throws — same fail-open
-//     posture as the regular path.
-func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
-	health := NewSidecarHealth()
-	api := &APIServer{health: health}
-	ctx := context.Background()
-
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		HookEventName: "Stop",
-		SessionID:     "session-synth",
-		AgentID:       "codex-test",
-		AgentName:     "codex test",
-		AgentType:     "codex-cli",
-	}
-	body, _ := json.Marshal(map[string]interface{}{
-		"hook_event_name": "Stop",
-		"session_id":      "session-synth",
-	})
-
-	resp := api.handleAgentHookSynthetic(ctx, "codex", req, body)
-	if resp.Action == "" {
-		t.Errorf("synthetic handler returned empty Action (resp=%+v)", resp)
-	}
-	if resp.Mode == "" {
-		t.Errorf("synthetic handler returned empty Mode (resp=%+v)", resp)
-	}
-
-	// The renderAgentHookResponse projection still uses
-	// codex_output for the codex connector even on the synthetic
-	// path — clients that consume the wire shape via /api/v1/codex/notify
-	// expect this contract.
-	wire := renderAgentHookResponse("codex", resp)
-	if _, ok := wire["codex_output"]; !ok && resp.HookOutput != nil {
-		t.Errorf("synthetic codex response missing codex_output: %+v", wire)
-	}
-	connectorHealth := connByName(health.Snapshot().Connectors)["codex"]
-	if connectorHealth.Requests != 1 {
-		t.Errorf("synthetic connector health requests=%d, want 1", connectorHealth.Requests)
-	}
-	if connectorHealth.LastActivityAt == nil {
-		t.Error("synthetic connector health last_activity_at is nil after accepted hook")
-	}
-}
-
 // TestHandleAgentHook_FullChain_PanicFailsOpen is the M6 panic-
 // recovery integration assertion: a panicking evaluator in the
 // unified chain MUST NOT propagate; the HTTP response must remain
@@ -764,6 +751,7 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		surface      string
+		headers      map[string]string
 		wantAction   string
 		wantRaw      string
 		wantWould    bool
@@ -782,6 +770,21 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			// existed. Fall back to the surface that vetoes less.
 			name: "unmarked config records a would-block", surface: "",
 			wantAction: "allow", wantRaw: "block", wantWould: true,
+		},
+		{
+			// The native hook binary (Kiro on Windows) forwards its
+			// --hook-surface value in the generic dialect header.
+			name:       "native hook dialect header vetoes the prompt",
+			headers:    map[string]string{"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
+		},
+		{
+			name: "dialect header wins over the kiro-hook.sh header",
+			headers: map[string]string{
+				"X-DefenseClaw-Hook-Dialect": connector.KiroHookSurfaceV3,
+				"X-DefenseClaw-Kiro-Surface": connector.KiroHookSurfaceV2,
+			},
+			wantAction: "block", wantRaw: "block", wantWould: false, wantDecision: "block",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -802,6 +805,9 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			if tc.surface != "" {
 				req.Header.Set("X-DefenseClaw-Kiro-Surface", tc.surface)
+			}
+			for name, value := range tc.headers {
+				req.Header.Set(name, value)
 			}
 			w := httptest.NewRecorder()
 			http.HandlerFunc(api.handleAgentHook("kiro")).ServeHTTP(w, req)
@@ -829,5 +835,62 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 				t.Errorf("hook_output.decision=%q want %q body=%s", decision, tc.wantDecision, w.Body.String())
 			}
 		})
+	}
+}
+
+// A connector a hot reload adds is evaluated from that reload on, and one it
+// disables is not (GAP-0968): the enablement gate read the start-time
+// configuration, so Kiro and Hermes added by `enterprise windows ensure`
+// were answered allow without a scan until the gateway restarted. The Kiro
+// preToolUse body is the shape kiro-cli 2.x sends on Windows.
+func TestAgentHookEnabledFollowsTheLiveGeneration(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	if err := ApplyRulePackOverrides(&guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{
+		Version: 1, Category: "reload-marker", Rules: []guardrail.RuleDefYAML{{
+			ID: "RELOAD-MARKER", ToolCallOnly: true, Severity: "CRITICAL", Confidence: 0.99,
+			Expression: "f.commands.exists(c, 'dc-reload-marker' in c.argv)", Pattern: "dc-reload-marker", Title: "marker",
+		}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	start := &config.Config{}
+	start.Guardrail.Mode = "action"
+	start.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	live := cloneConfig(start)
+	live.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &off}, "kiro": {}}
+	api := &APIServer{scannerCfg: start, health: NewSidecarHealth(),
+		generationSource: func() *Generation { return &Generation{Config: live} }}
+	if !api.agentHookEnabled(t.Context(), "kiro") || api.agentHookEnabled(t.Context(), "codex") {
+		t.Fatal("hook enablement did not follow the live configuration")
+	}
+	body := `{"hook_event_name":"preToolUse","cwd":"C:\\Users\\u\\proj","session_id":"s1","tool_name":"shell",` +
+		`"tool_input":{"__tool_use_purpose":"Run the exact command requested by the user","command":"echo dc-reload-marker"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/kiro/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	http.HandlerFunc(api.handleAgentHook("kiro")).ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `"raw_action":"block"`) {
+		t.Fatalf("a Kiro shell call matching a CRITICAL tool-call rule was not evaluated after the reload: %s", w.Body.String())
+	}
+}
+
+// A standalone hook's report of a prompt it refused as too large is recorded
+// as a block under HOOK-PAYLOAD-TOO-LARGE and never evaluated (GAP-0965,
+// GAP-1042): the report has no content to judge.
+func TestHandleAgentHookRecordsAHookSideRefusal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook",
+		strings.NewReader(`{"session_id":"sess-1","hook_event_name":"UserPromptSubmit"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hookexec.HookRefusalHeader, hookexec.HookRefusalPayloadTooLarge)
+	w := httptest.NewRecorder()
+	http.HandlerFunc(api.handleAgentHook("claudecode")).ServeHTTP(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, `"raw_action":"block"`) || !strings.Contains(body, hookPayloadTooLargeRuleID) {
+		t.Fatalf("refusal report = %d %s, want a recorded block", w.Code, body)
 	}
 }

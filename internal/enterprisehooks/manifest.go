@@ -37,9 +37,34 @@ type ManifestTarget struct {
 	// The bit lives in the administrator-owned, digest-bound manifest so an
 	// ordinary disabled row can never be mistaken for automatic enrollment.
 	Deferred bool `json:"deferred,omitempty" yaml:"deferred,omitempty"`
+	// HomeInode binds a standalone Unix row to the home directory the
+	// enumerator observed. A reused uid or a recreated home gets a new
+	// inode, so the row is treated as a new enrollment with no prior
+	// repair rights. Zero (absent) on every other platform and profile.
+	HomeInode uint64 `json:"home_inode,omitempty" yaml:"home_inode,omitempty"`
 }
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
+
+// ManifestHomesDropped returns the targets of previous whose profile current
+// no longer lists, one per profile.
+func ManifestHomesDropped(previous, current Manifest) Manifest {
+	key := func(home string) string { return strings.ToLower(filepath.Clean(strings.TrimSpace(home))) }
+	kept := map[string]bool{}
+	for _, target := range current.Targets {
+		kept[key(target.UserHome)] = true
+	}
+	var dropped Manifest
+	for _, target := range previous.Targets {
+		home := key(target.UserHome)
+		if strings.TrimSpace(target.UserHome) == "" || kept[home] {
+			continue
+		}
+		kept[home] = true
+		dropped.Targets = append(dropped.Targets, target)
+	}
+	return dropped
+}
 
 func LoadManifest(path string) (Manifest, error) {
 	manifest, _, err := LoadManifestWithSHA256(path)
@@ -50,6 +75,10 @@ func LoadManifest(path string) (Manifest, error) {
 // from the identity-stable manifest handle. Callers can therefore bind a
 // reconcile receipt to the same file generation they actually processed.
 func LoadManifestWithSHA256(path string) (Manifest, string, error) {
+	return loadManifestWithSHA256(path, validateManifestPlatformTarget)
+}
+
+func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget) error) (Manifest, string, error) {
 	if strings.TrimSpace(path) == "" {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest path is required")
 	}
@@ -157,7 +186,7 @@ func LoadManifestWithSHA256(path string) (Manifest, string, error) {
 		if strings.TrimSpace(target.Connector) == "" {
 			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d requires connector", i)
 		}
-		if err := validateManifestPlatformTarget(i, target); err != nil {
+		if err := validateTarget(i, target); err != nil {
 			return Manifest{}, "", err
 		}
 		key := manifestTargetKey(target)

@@ -1004,7 +1004,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-EVAL",
-        "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)eval\\s+[\"'\\$\\(]",
+        "pattern": "(?i)(?:^|[;&|\\r\\n\"]\\s*)eval\\s+\\\\?[\"'\\$\\(]",
         "title": "Shell eval with dynamic input",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -6017,7 +6017,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-SSH-KEY",
-        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+        "expression": "f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?im)(?:(?:^|[;&|]\\s*)\\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read|open|show|paste|print|display)\\b[^;\\n]*(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])|(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])[^;\\n]{0,120}\\b(?:cat|base64|read|open|show|paste|print|display)\\b)",
         "title": "SSH private key file path",
         "severity": "CRITICAL",
@@ -7365,33 +7365,22 @@
       ]
     },
     {
-      "id": "RECIPE-SUPP-TOOL-COSMETIC-SHELL",
-      "title": "Suppress cosmetic shell commands (git status / log / diff)",
+      "id": "RECIPE-SUPP-TOOL-1",
+      "title": "Status check tools return expected system metadata",
       "kind": "tool_suppression",
       "body": {
-        "tool_pattern": "^(shell|bash|sh)\\.execute$",
+        "tool_pattern": "^(graph_auth_status|session_status|get_status)$",
         "suppress_findings": [
-          "JUDGE-INJ-DESTRUCTIVE"
+          "JUDGE-PII-USER"
         ],
-        "reason": "Cosmetic shell commands (git status, ls, pwd) generate noise without security risk"
+        "reason": "Status check tools return expected system metadata"
       },
-      "why": "Tool suppressions let you silence findings on tools whose name matches a regex. Use this to drop noisy verdicts on read-only commands while keeping write/destructive commands surfaced.",
-      "examples": [
-        "shell.execute",
-        "bash.execute"
-      ],
-      "counterexamples": [
-        "shell.write",
-        "fs.unlink"
-      ],
-      "source": "docs-site/scripts/build-policy-assets.ts (illustrative)",
+      "why": "Tool suppression shipped in the bundled default pack. Drops JUDGE-PII-USER PII-judge findings for matching tool names; regex and CEL rule findings are unaffected.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/default/suppressions.yaml",
       "tags": [
-        "tool",
-        "shell",
-        "noise-reduction"
-      ],
-      "tool_capability_class": [
-        "exec_shell"
+        "tool"
       ]
     }
   ]

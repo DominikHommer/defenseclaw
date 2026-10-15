@@ -82,6 +82,7 @@ type tenantKey struct {
 	tlsID    string // sha256 of tls posture; empty when no per-instance TLS overrides.
 	subID    string // sha256 of per-provider sub-block; empty when none set.
 	aliasID  string // current model only when a per-model identity alias is needed.
+	egressID string // enterprise proxy route when the tenant connects through it; empty otherwise.
 }
 
 // tlsOverrides bundles the per-instance TLS knobs from a custom-providers
@@ -140,7 +141,7 @@ var (
 // are endpoint, TLS, provider sub-block, and optional model-alias posture;
 // none contain raw credentials.
 func tenantKeyString(k tenantKey) string {
-	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID + "|" + k.tlsID + "|" + k.subID + "|" + k.aliasID
+	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID + "|" + k.tlsID + "|" + k.subID + "|" + k.aliasID + "|" + k.egressID
 }
 
 // evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
@@ -284,12 +285,12 @@ func newTenantAccount(
 	}
 	if providerKey == schemas.VLLM {
 		key.VLLMKeyConfig = &schemas.VLLMKeyConfig{
-			URL: schemas.SecretVar{Val: vllmServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: serverRootURL(baseURL)},
 		}
 	}
 	if providerKey == schemas.Ollama {
 		key.OllamaKeyConfig = &schemas.OllamaKeyConfig{
-			URL: schemas.SecretVar{Val: ollamaServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: serverRootURL(baseURL)},
 		}
 	}
 
@@ -359,7 +360,7 @@ func newTenantAccount(
 		DefaultRequestTimeoutInSeconds: 120,
 	}
 	if baseURL != "" {
-		nc.BaseURL = baseURL
+		nc.BaseURL = serverRootURL(baseURL)
 	}
 	if tls.InsecureSkipVerify {
 		nc.InsecureSkipVerify = true
@@ -377,16 +378,14 @@ func newTenantAccount(
 	}
 }
 
-func vllmServerURL(baseURL string) string {
+// serverRootURL drops a trailing "/v1" from a configured base URL. Bifrost
+// appends the provider route ("/v1/chat/completions", "/v1/messages") to the
+// base, while the OpenAI SDK convention, and LiteLLM (which the scanners and
+// doctor use), put "/v1" in the base URL itself. The same llm.base_url
+// therefore reached the judge as /v1/v1/chat/completions (GAP-0064).
+func serverRootURL(baseURL string) string {
 	trimmed := strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(trimmed, "/v1") {
-		return strings.TrimSuffix(trimmed, "/v1")
-	}
-	return trimmed
-}
-
-func ollamaServerURL(baseURL string) string {
-	return vllmServerURL(baseURL)
+	return strings.TrimSuffix(trimmed, "/v1")
 }
 
 func deploymentAliasesToBifrost(aliases map[string]string) schemas.KeyAliases {
@@ -522,6 +521,21 @@ func getBifrostClient(
 	azure *config.AzureKeyConfig,
 	extraHeaders map[string]string,
 ) (*bifrost.Bifrost, error) {
+	// A standalone gateway sends provider traffic through the
+	// enterprise.network proxy unless no_proxy excludes the endpoint.
+	endpoint := baseURL
+	if providerKey == schemas.Azure && azure != nil && strings.TrimSpace(azure.Endpoint) != "" {
+		endpoint = azure.Endpoint
+	}
+	route := currentEnterpriseEgress()
+	proxyConfig, err := bifrostEgressProxy(route, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
+	}
+	egressID := ""
+	if proxyConfig != nil {
+		egressID = route.ID()
+	}
 	tk := tenantKey{
 		provider: providerKey,
 		keyID:    bifrostKeyID(providerKey, apiKey),
@@ -529,6 +543,7 @@ func getBifrostClient(
 		tlsID:    tls.id(),
 		subID:    subBlockID(bedrock, vertex, azure),
 		aliasID:  azureAPIVersionIdentityAliasID(providerKey, model, azure),
+		egressID: egressID,
 	}
 
 	now := time.Now()
@@ -555,11 +570,12 @@ func getBifrostClient(
 	}
 
 	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, model, tls, bedrock, vertex, azure, extraHeaders)
+	acct.config.ProxyConfig = proxyConfig
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
 	if err != nil {
-		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+		return nil, fmt.Errorf("gateway: %s client setup failed: %w", providerDisplayName(providerKey), err)
 	}
 	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
 	return client, nil
@@ -628,7 +644,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 	bCtx := newBifrostRequestContext(ctx, req)
 	resp, bErr := client.ChatCompletionRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bErr)
+		return nil, bifrostErrorToGo(bp.providerKey, bErr)
 	}
 
 	return fromBifrostChatResponse(resp), nil
@@ -644,13 +660,13 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bErr)
+		return nil, bifrostErrorToGo(bp.providerKey, bErr)
 	}
 
 	var usage *ChatUsage
 	for chunk := range stream {
 		if chunk.BifrostError != nil {
-			return usage, bifrostErrorToGo(chunk.BifrostError)
+			return usage, bifrostErrorToGo(bp.providerKey, chunk.BifrostError)
 		}
 		if chunk.BifrostChatResponse == nil {
 			continue
@@ -1110,12 +1126,16 @@ func fromBifrostUsage(u *schemas.BifrostLLMUsage) *ChatUsage {
 	}
 }
 
-func bifrostErrorToGo(bErr *schemas.BifrostError) error {
+// bifrostErrorToGo turns a provider failure into an error that names the
+// provider and the problem in user terms. The text reaches status, doctor and
+// the gateway health line (judge_last_error); the old "gateway: bifrost: 400
+// ..." prefix named an internal library instead (GAP-1673).
+func bifrostErrorToGo(provider schemas.ModelProvider, bErr *schemas.BifrostError) error {
 	if bErr == nil {
 		return nil
 	}
-	msg := "unknown bifrost error"
-	if bErr.Error != nil {
+	msg := "unknown error"
+	if bErr.Error != nil && strings.TrimSpace(bErr.Error.Message) != "" {
 		msg = bErr.Error.Message
 	}
 	code := 0
@@ -1123,9 +1143,36 @@ func bifrostErrorToGo(bErr *schemas.BifrostError) error {
 		code = *bErr.StatusCode
 	}
 	if code > 0 {
-		return fmt.Errorf("gateway: bifrost: %d %s", code, msg)
+		return fmt.Errorf("%s returned %d: %s", providerDisplayName(provider), code, msg)
 	}
-	return fmt.Errorf("gateway: bifrost: %s", msg)
+	return fmt.Errorf("%s request failed: %s", providerDisplayName(provider), msg)
+}
+
+// providerDisplayName is the provider's name as users know it.
+func providerDisplayName(provider schemas.ModelProvider) string {
+	switch provider {
+	case schemas.Bedrock:
+		return "Bedrock"
+	case schemas.OpenAI:
+		return "OpenAI"
+	case schemas.Azure:
+		return "Azure OpenAI"
+	case schemas.Vertex:
+		return "Vertex AI"
+	case schemas.OpenRouter:
+		return "OpenRouter"
+	case schemas.XAI:
+		return "xAI"
+	case schemas.HuggingFace:
+		return "Hugging Face"
+	case schemas.VLLM:
+		return "vLLM"
+	}
+	name := strings.TrimSpace(string(provider))
+	if name == "" {
+		return "The LLM provider"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
 }
 
 func ptrStr(s *string) string {

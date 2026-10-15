@@ -38,7 +38,7 @@ from defenseclaw.tui.panels.setup import (
     _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
-    action_matrix_fields,
+    admission_action_fields,
     build_setup_sections,
     build_wizard_args,
     connector_setup_command,
@@ -114,11 +114,11 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watchdog",
         "Observability",
         "Webhooks",
-        "Skill Actions",
-        "MCP Actions",
-        "Plugin Actions",
+        "Skill Admission",
+        "MCP Admission",
+        "Plugin Admission",
         "Watch",
-        "OpenShell",
+        "OpenShell Sandboxes",
         "Inspect LLM (legacy - read-only)",
         "Cisco AI Defense",
         "Firewall",
@@ -127,7 +127,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
 
 
 def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
-    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    model = SetupPanelModel({"config_version": 8})
     names = tuple(section.name for section in model.sections)
 
     assert "Privacy" not in names
@@ -432,15 +432,30 @@ def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
     assert "desktop toasts" in section.summary.lower()
 
 
-def test_action_matrix_has_header_and_severity_triplets() -> None:
-    fields = action_matrix_fields("skill_actions", {})
+def test_admission_fields_edit_the_v9_admission_actions() -> None:
+    from defenseclaw.config import default_config
+    from defenseclaw.tui.services.setup_state import apply_config_field
 
-    assert len(fields) == 16
-    assert fields[0].kind == "header"
-    assert fields[1].key == "skill_actions.critical.file"
-    assert fields[1].options == ("none", "quarantine")
-    assert fields[2].options == ("enable", "disable")
-    assert fields[3].options == ("none", "block", "allow")
+    fields = admission_action_fields("skill", {})
+    assert fields[0].kind == "header" and len(fields) == 6
+    assert fields[2].key == "admission.skill.actions.high"
+    assert fields[2].options == ("", "block", "quarantine", "warn", "allow")
+
+    cfg = default_config()
+    apply_config_field(cfg, "admission.skill.actions.high", "allow")
+    assert cfg.admission.skill.actions == {"high": "allow"}
+    apply_config_field(cfg, "admission.skill.actions.high", "")
+    assert cfg.admission.skill.actions == {}
+
+    # policy activate writes exact triples: a known one reads as its shorthand
+    # (as config get shows it), a custom one stays selectable.
+    cfg.admission.skill.actions = {
+        "critical": {"install": "block", "file": "quarantine", "runtime": "disable"},
+        "high": {"install": "block", "file": "none", "runtime": "enable"},
+    }
+    critical, high = admission_action_fields("skill", cfg)[1:3]
+    assert critical.value == "quarantine" and critical.options == ("", "block", "quarantine", "warn", "allow")
+    assert "file=none" in high.value and high.value in high.options
 
 
 def test_config_validation_matches_go_setup_state_rules() -> None:
@@ -527,14 +542,14 @@ def test_readiness_renders_every_active_connector_without_setup_filtering() -> N
     checks = build_readiness_checks(cfg, None, None, (), RestartQueue())
     titles = [check.title for check in checks]
 
-    assert "Active Connector: codex" in titles
-    assert "Active Connector: hermes" in titles
-    assert "Active Connector" not in titles
+    assert "Connector: codex" in titles
+    assert "Connector: hermes" in titles
+    assert "Connector" not in titles
 
     model = SetupPanelModel(cfg)
     model_titles = [check.title for check in model.readiness_checks]
-    assert "Active Connector: codex" in model_titles
-    assert "Active Connector: hermes" in model_titles
+    assert "Connector: codex" in model_titles
+    assert "Connector: hermes" in model_titles
 
 
 def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
@@ -543,12 +558,14 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "setup claude-code",
     )
 
-    fields = connector_setup_wizard_fields({})
+    # Linux: Windows has no openclaw, so the form would open on a hook connector.
+    fields = connector_setup_wizard_fields({"guardrail": {"connector": "openclaw"}}, "linux")
     fields = _with_field(fields, "Connector", "openclaw")
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
     fields = _with_field(fields, "Restart Gateway", "no")
-    fields = _with_field(fields, "Verify After Setup", "no")
+    # GAP-0226: the retired Verify After Setup row is gone; doctor is the check.
+    assert "Verify After Setup" not in {field.label for field in fields}
     assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
         "setup",
         "openclaw",
@@ -558,7 +575,6 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "--no-restart",
         "--scanner-mode",
         "both",
-        "--no-verify",
     )
     fields = connector_setup_wizard_fields({})
     fields = _with_field(fields, "Connector", "codex")
@@ -983,10 +999,35 @@ def test_guardrail_wizard_promotes_strategy_when_judge_model_configured() -> Non
     assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg_inherit), "Strategy") == "regex_only"
 
 
+
+def test_guardrail_wizard_prefills_judge_bedrock_region() -> None:
+    # GAP-2298: Region stayed blank although guardrail.judge.llm.bedrock.region was set.
+    cfg = {
+        "guardrail": {
+            "judge": {"llm": {"provider": "bedrock", "model": "m", "bedrock": {"region": "us-east-1"}}},
+        },
+    }
+    assert wizard_field_value(_guardrail_wizard_fields_for({}, cfg), "Region") == "us-east-1"
+
+
+def test_guardrail_wizard_prefills_v5_judge_llm_block() -> None:
+    # GAP-2176: setup guardrail now writes only guardrail.judge.llm, so the
+    # wizard must read the judge model from there (v4 judge.model stays a fallback).
+    cfg = {
+        "guardrail": {
+            "detection_strategy": "regex_only",
+            "judge": {"llm": {"provider": "bedrock", "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0"}},
+        },
+    }
+    fields = _guardrail_wizard_fields_for({}, cfg)
+    assert wizard_field_value(fields, "Model") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert wizard_field_value(fields, "Strategy") == "regex_judge"
+
+
 def test_credentials_matrix_actions_are_data_only_and_validate_required_fields() -> None:
     fields = wizard_form_defs(SetupWizard.CREDENTIALS)
 
-    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list", "--json")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, fields) == ("keys", "list")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "check")) == ("keys", "check")
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "fill-missing")) == (
         "keys",
@@ -1003,11 +1044,17 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     # process listings). ``keys set`` reads it from a hidden stdin prompt;
     # the executor feeds it via the intent's ``secret_stdin``.
     built = build_wizard_args(SetupWizard.CREDENTIALS, set_fields)
-    assert built == ("keys", "set", "OPENAI_API_KEY")
+    assert built == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "--value" not in built
     assert "sk-live" not in built
-    assert render_wizard_value(set_fields[2]) == "****live"
+    assert render_wizard_value(set_fields[2]) == "********"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
+
+    # GAP-1176: a stored credential can be removed from the wizard.
+    remove_fields = _with_field(fields, "Action", "remove")
+    assert missing_required_fields(SetupWizard.CREDENTIALS, remove_fields) == ("Env Name",)
+    remove_fields = _with_field(remove_fields, "Env Name", "VIRUSTOTAL_API_KEY")
+    assert build_wizard_args(SetupWizard.CREDENTIALS, remove_fields) == ("keys", "remove", "VIRUSTOTAL_API_KEY", "--yes")
 
 
 def test_guardrail_wizard_inherits_unified_llm_without_forcing_override() -> None:
@@ -1166,6 +1213,9 @@ def test_modal_toggle_and_uninstall_state_match_go_args_and_copy() -> None:
     assert uninstall_args_for_option("dry-run") == (("uninstall", "--dry-run"), "uninstall dry-run")
     assert uninstall_intent("wipe-data").args == ("uninstall", "--all", "--yes")
     assert uninstall_intent("wipe-data").category == "destructive"
+    assert modal.select_by_hotkey("e") is True
+    assert modal.selected() == "wipe-all"
+    assert uninstall_intent("wipe-all").args == ("uninstall", "--all", "--binaries", "--yes")
 
 
 def test_setup_panel_credentials_restart_and_config_save_state() -> None:
@@ -1191,7 +1241,7 @@ def test_setup_panel_credentials_restart_and_config_save_state() -> None:
     assert result.intent is not None
     # F-0801: the secret is carried on ``secret_stdin`` (fed to the child's
     # hidden prompt), never in argv where `ps` could read it.
-    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY")
+    assert result.intent.args == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "sk-secret" not in result.intent.args
     assert "--value" not in result.intent.args
     assert result.intent.secret_stdin == "sk-secret\n"
@@ -1219,12 +1269,43 @@ def test_setup_panel_credentials_restart_and_config_save_state() -> None:
 
 def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None:
     sections = build_setup_sections(
-        {"llm": {"api_key": "sk-abcdefghijklmnopqrstuvwxyz"}, "openshell": {"auto_pair": None}}
+        {"llm": {"api_key": "sk-abcdefghijklmnopqrstuvwxyz"}, "openshell": {"mode": "standalone"}}
     )
 
     assert _field_by_key(sections, "llm.api_key").kind == "password"
-    assert _field_by_key(sections, "openshell.auto_pair").options == ("", "true", "false")
     assert _field_by_key(sections, "claw.mode").options == supported_connector_choices()
+    # The OpenShell 0.1 section edits the openshell: keys; the retired
+    # standalone marker is not one of them.
+    openshell = next(section for section in sections if section.name.startswith("OpenShell"))
+    assert openshell.name == "OpenShell Sandboxes"
+    assert not any(field.key == "openshell.mode" for field in openshell.fields)
+    assert _field_by_key(sections, "openshell.enabled").kind == "bool"
+    assert _field_by_key(sections, "openshell.profile").options == ("inherit", "open", "balanced", "strict")
+    llm = _field_by_key(sections, "openshell.llm")
+    assert llm.kind == "choice"
+    assert llm.options == ("auto", "none", "anthropic", "claude-oauth", "openai", "bedrock", "gemini")
+    assert _field_by_key(sections, "openshell.keep_headless").kind == "bool"
+    assert _field_by_key(sections, "openshell.egress.block_large_uploads").kind == "bool"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.enabled").kind == "bool"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.max_mb").kind == "int"
+    assert _field_by_key(sections, "openshell.workdir.undo_ignored.dirs").kind == "string"
+
+
+def test_sandbox_wizard_slot_runs_the_openshell_setup_on_linux_and_macos() -> None:
+    from defenseclaw.tui.panels.setup import SANDBOX_WIZARD_UNSUPPORTED_REASON
+
+    assert int(SetupWizard.SANDBOX) == 13
+    for os_name in ("linux", "darwin"):
+        model = SetupPanelModel({}, os_name=os_name)
+        assert model.wizard_available(SetupWizard.SANDBOX) is True
+        assert model.wizard_infos()[13].argv == ("defenseclaw", "sandbox", "setup")
+
+    windows = SetupPanelModel({}, os_name="windows")
+    assert windows.wizard_available(SetupWizard.SANDBOX) is False
+    assert windows.wizard_unavailable_reason(SetupWizard.SANDBOX) == SANDBOX_WIZARD_UNSUPPORTED_REASON
+    assert windows.open_goal_menu(SetupWizard.SANDBOX) is False
+    assert windows.form_error == SANDBOX_WIZARD_UNSUPPORTED_REASON
+    assert windows.wizard_infos()[13].status == "unsupported"
 
 
 def test_setup_wizard_info_and_form_field_hints_are_complete() -> None:
@@ -1373,8 +1454,11 @@ def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
     assert review.hint == "Review 1 config change before saving."
 
     model.mark_saved(datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
+    # A new draft is not saved yet, so no earlier save shows (GAP-0342).
+    assert model.save_restart_hints().saved_hint == ""
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9091"),), ""),)
     hints = model.save_restart_hints()
-    assert hints.saved_hint == "Saved at 2026-05-20T12:00:00+00:00"
+    assert hints.saved_hint == "Saved 12:00 UTC"
     assert hints.saved_hint in hints.action_bar
 
 
@@ -2481,6 +2565,11 @@ def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
     runner = CliRunner()
     cfg = _guardrail_on_cfg("openclaw")
     for wizard in SetupWizard:
+        if not SetupPanelModel(cfg=cfg).wizard_available(wizard):
+            # An unavailable slot (for example Sandbox on Windows) never
+            # opens a form; test_sandbox_wizard_slot_runs_the_openshell_setup_on_linux_and_macos
+            # pins that behavior.
+            continue
         goals = wizard_goals(wizard, cfg)
         for goal in goals:
             model = SetupPanelModel(cfg=cfg)
@@ -2506,7 +2595,7 @@ def _multi_connector_cfg() -> object:
         guardrail=GuardrailConfig(
             enabled=True,
             mode="observe",
-            rule_pack_dir="/global/pack",
+            rule_pack="strict",
             connectors={
                 "codex": PerConnectorGuardrailConfig(mode="action"),
                 "hermes": PerConnectorGuardrailConfig(),
@@ -2521,22 +2610,24 @@ def test_guardrail_section_renders_per_connector_override_groups() -> None:
 
     # Both active connectors get an editable mode + rule-pack override row.
     assert "guardrail.connectors.codex.mode" in fields
-    assert "guardrail.connectors.codex.rule_pack_dir" in fields
+    assert "guardrail.connectors.codex.rule_pack" in fields
     assert "guardrail.connectors.hermes.mode" in fields
-    assert "guardrail.connectors.hermes.rule_pack_dir" in fields
+    assert "guardrail.connectors.hermes.rule_pack" in fields
+    # config_version 9 selects packs by name (guardrail.rule_pack).
+    assert fields["guardrail.rule_pack"].value == "strict"
 
     # codex pins its own mode; the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.mode"].value == "action"
     assert fields["guardrail.connectors.codex.mode"].options == ("observe", "action")
     # hermes has no override → inherits the global mode/rule-pack.
     assert fields["guardrail.connectors.hermes.mode"].value == "observe"
-    assert fields["guardrail.connectors.hermes.rule_pack_dir"].value == "/global/pack"
+    assert fields["guardrail.connectors.hermes.rule_pack"].value == "strict"
 
     # B4/E4c/E4d: every per-connector guardrail control is now exposed.
     for connector in ("codex", "hermes"):
         for leaf in (
             "mode",
-            "rule_pack_dir",
+            "rule_pack",
             "enabled",
             "hook_fail_mode",
             "hilt.enabled",
@@ -2571,11 +2662,11 @@ def test_per_connector_guardrail_field_creates_missing_entry() -> None:
     from defenseclaw.tui.services.setup_state import apply_config_field
 
     cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
-    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack_dir", "/codex/pack")
+    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack", "strict")
 
     entry = cfg.guardrail.connectors["codex"]
     assert isinstance(entry, PerConnectorGuardrailConfig)
-    assert entry.rule_pack_dir == "/codex/pack"
+    assert entry.rule_pack == "strict"
 
 
 def test_guardrail_section_single_connector_omits_per_connector_groups() -> None:
@@ -2881,3 +2972,23 @@ def test_per_connector_asset_policy_field_writes_typed_override() -> None:
 
     apply_config_field(cfg, "asset_policy.connectors.hermes.mcp.registry_required", "")
     assert entry.mcp.registry_required is None
+
+
+def test_multi_action_wizards_clear_their_running_badge() -> None:
+    # Their commands aren't covered by the wizard's WIZARD_COMMANDS prefix.
+    cases = (
+        (SetupWizard.GUARDRAIL_ACTIONS, ("guardrail", "block-message", "Blocked here", "--yes")),
+        (SetupWizard.AI_DISCOVERY, ("agent", "discovery", "disable")),
+        (SetupWizard.SPLUNK_DASHBOARDS, ("setup", "splunk", "dashboards", "destroy")),
+    )
+    for wizard, args in cases:
+        model = SetupPanelModel({}, os_name="linux")
+        model.wizard_status[wizard] = "running..."
+        model.mark_wizard_complete(args, success=True)
+        assert model.wizard_status[wizard] == "done", wizard
+
+    # An unrelated command of the shared setup family leaves a running task alone.
+    model = SetupPanelModel({}, os_name="linux")
+    model.wizard_status[SetupWizard.LLM] = "running..."
+    model.mark_wizard_complete(("setup", "splunk", "dashboards", "destroy"), success=True)
+    assert model.wizard_status[SetupWizard.LLM] == "running..."

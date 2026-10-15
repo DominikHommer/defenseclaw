@@ -1,0 +1,721 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manager
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+)
+
+// HookDecision is one hook verdict the gateway reached for a sandbox
+// binding.
+type HookDecision struct {
+	BindingID   string
+	SandboxName string
+	// Connector is the binding's connector. It selects the harness's
+	// tool-call hook events and how they pair (toolCallHooksByConnector);
+	// empty means Claude Code's.
+	Connector string
+	// Event is the harness hook event (PreToolUse, ...).
+	Event string
+	Tool  string
+	// ToolUseID is the harness's per-call ID (tool_use_id), which pairs a
+	// call's pre-tool event with its post-tool event.
+	ToolUseID string
+	// SessionID and ToolInput are the call's session and tool input. They
+	// name a call whose hooks send no per-call ID the gateway reads (Kiro
+	// CLI, Copilot CLI, Devin CLI); ToolInput is empty when the event
+	// carries no tool input.
+	SessionID string
+	ToolInput json.RawMessage
+	// ResultStatus is the status a post-tool event reports (Amp's
+	// tool.result: done, error or cancelled).
+	ResultStatus string
+	// Action is the verdict (allow, block, alert, confirm).
+	Action     string
+	WouldBlock bool
+	Severity   string
+	Reason     string
+	// ModelError and ModelStatus are the model API failure a turn-ending
+	// hook event reports: the error class of Claude Code's StopFailure
+	// (authentication_failed, rate_limit, ...) and the HTTP status.
+	ModelError  string
+	ModelStatus int
+	// CallRef is the content reference of the call (ContentRef of session,
+	// tool and tool input) when a managed relay delivered the decision:
+	// the tool input stays on the managed gateway, so ToolInput is empty
+	// and content-keyed connectors pair calls by CallRef.
+	CallRef string
+}
+
+// ObserveIngress records an authenticated ingress request, the hook-coverage
+// signal. The gateway calls it on every admitted sandbox request.
+func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route) {
+	now := m.now()
+	m.mu.Lock()
+	box := m.boxes[b.SandboxName]
+	if box == nil || box.rec.BindingID != b.ID {
+		m.mu.Unlock()
+		return
+	}
+	restored := false
+	box.ingressAnsweredLocked(now)
+	switch route {
+	case sandboxauth.RouteHook:
+		box.hooks.lastHook = now
+		box.hooks.requests++
+		box.silentSince, box.silenceSent = time.Time{}, false
+		restored = box.hookReachedLocked()
+	case sandboxauth.RouteNotify:
+		box.hooks.lastNotify = now
+	case sandboxauth.RouteOTLP:
+		// No sign of work, for the reachability check or the silence one:
+		// the Codex TUI exports OTLP from its start, before the first prompt
+		// that fires its hooks, and on and on while it waits at its prompt,
+		// which made an idle session's hooks "silent" (GAP-0220). Its model
+		// calls are its work (watch.go).
+		box.hooks.lastOTLP = now
+	}
+	name := box.rec.Name
+	m.mu.Unlock()
+	if restored {
+		m.publishHooksRestored(name)
+	}
+}
+
+// ObserveHookDecision counts every verdict under its hook event, counts
+// tool calls and blocked and asked tool calls for the session summary, puts
+// blocks and asks on the activity feed, and correlates each tool call's pre-tool and post-tool
+// events to detect hook tamper.
+func (m *Manager) ObserveHookDecision(d HookDecision) {
+	hooks := toolCallHooksFor(d.Connector)
+	pre, result := hooks.classify(d.Event, d.ResultStatus)
+	counted := isToolEvent(d.Event)
+	toolEvent := pre || result != toolResultNone || counted
+	var call toolCallRef
+	if pre || result != toolResultNone {
+		call = hooks.ref(d)
+	}
+	blocked := isBlockAction(d.Action)
+	asked := !blocked && isConfirmAction(d.Action)
+	reason := displayReason(d.Reason)
+	event := hookLabel(d.Event, maxHookEventName)
+	m.mu.Lock()
+	b := m.boxes[d.SandboxName]
+	if b == nil || b.rec.BindingID != d.BindingID {
+		m.mu.Unlock()
+		return
+	}
+	// The sandbox's records name the session its hooks last named
+	// (gen_ai.conversation.id).
+	m.tel.noteSession(d.SandboxName, d.SessionID)
+	b.hooks.countEvent(event)
+	if !toolEvent {
+		prompt := blocked && isPromptEvent(d.Event)
+		if prompt {
+			b.hooks.promptBlocked++
+		}
+		rejected, placeholder := b.observeModelAnswerLocked(d, m.now())
+		b.noteHookAnsweredLocked(m.now())
+		m.mu.Unlock()
+		if rejected != "" {
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Event: d.Event,
+				Severity: "MEDIUM", Reason: sandboxapi.ReasonModelKeyRejected, Message: "⚠ " + rejected})
+		}
+		if placeholder {
+			m.feed.Publish(placeholderFinding(d.SandboxName))
+		}
+		if blocked {
+			// A blocked prompt (or other non-tool hook event) is a block
+			// of the session too: the feed shows every DefenseClaw block.
+			what := "prompt"
+			if !prompt {
+				what = firstNonEmpty(event, "a hook event")
+			}
+			msg := "✗ " + what + " blocked by DefenseClaw"
+			if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+				msg += ": " + truncate(label, 200)
+			}
+			m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookBlocked, Sandbox: d.SandboxName,
+				Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+		}
+		return
+	}
+	tamper := tamperNone
+	switch {
+	case pre:
+		m.toolCalls.ObservePre(d.BindingID, call, blocked)
+	case result != toolResultNone:
+		tamper = m.toolCalls.ObserveResult(d.BindingID, call, result)
+	}
+	if counted {
+		b.hooks.toolCalls++
+		if blocked {
+			b.hooks.toolBlocked++
+			b.hooks.lastBlocked = truncate(firstNonEmpty(reason, d.Tool), 200)
+		}
+		if asked {
+			b.hooks.toolAsked++
+		}
+	}
+	var alarm *tamperAlarm
+	if tamper != tamperNone {
+		alarm = m.noteTamperLocked(b, d, hooks, tamper)
+	}
+	b.noteHookAnsweredLocked(m.now())
+	m.mu.Unlock()
+	if counted && blocked {
+		msg := "✗ tool call blocked by DefenseClaw"
+		if d.Tool != "" {
+			msg = "✗ " + d.Tool + " blocked by DefenseClaw"
+		}
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolBlocked, Sandbox: d.SandboxName, Tool: d.Tool,
+			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+	}
+	if counted && asked {
+		msg := "? DefenseClaw asked you to confirm a tool call"
+		if d.Tool != "" {
+			msg = "? DefenseClaw asked you to confirm " + d.Tool
+		}
+		if label := sandboxapi.VerdictRuleLabel(reason); label != "" {
+			msg += ": " + truncate(label, 200)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
+			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
+	}
+	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !asked && flaggedVerdict(d.Action, reason) {
+		// A verdict that let the tool call run but flagged it (an alert,
+		// or a block the event could not enforce) is a finding of the
+		// session: the feed shows every one.
+		what := firstNonEmpty(d.Tool, d.Event, "a hook event")
+		msg := "⚠ " + what + " allowed but flagged by DefenseClaw"
+		label := sandboxapi.VerdictRuleLabel(reason)
+		if label != "" {
+			// The rule, not the reason's sentence to the agent (GAP-2018).
+			msg += ": " + truncate(label, 200)
+		}
+		if strings.Contains(reason, sandboxapi.UndecidedNote) {
+			// A rule that would have stopped the call matched it, but could
+			// not decide it (GAP-0312).
+			rule := "a DefenseClaw rule that blocks such calls"
+			if label != "" {
+				rule = "DefenseClaw rule " + truncate(label, 200)
+			}
+			msg = "⚠ " + what + " ran although " + rule + " matched it: the rule could not decide the call; " +
+				"DefenseClaw decides only the commands it can read in full " +
+				"(a shell variable, a substitution or a construct it does not analyze leaves a match undecided)"
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: d.SandboxName, Tool: d.Tool,
+			Event: d.Event, Severity: severity, Reason: sandboxapi.ReasonHookFinding, Message: msg})
+	}
+	if alarm != nil {
+		m.raiseTamper(b, *alarm)
+	}
+}
+
+// maxHookEventName bounds a hook event name kept in the per-event counts, in
+// bytes; the harnesses' event names are far shorter.
+const maxHookEventName = 64
+
+// countEvent counts one verdict under its hook event name (hookLabel'd).
+// The names come from the workload, so at most sandboxapi.MaxHookEvents are
+// kept: a verdict for another one, or for an event with no printable name,
+// counts in otherEvents. Callers hold Manager.mu.
+func (h *hookStats) countEvent(name string) {
+	if _, known := h.events[name]; name == "" || !known && len(h.events) >= sandboxapi.MaxHookEvents {
+		h.otherEvents++
+		return
+	}
+	if h.events == nil {
+		h.events = make(map[string]int64)
+	}
+	h.events[name]++
+}
+
+// HookFailure is an authenticated hook post from a sandbox binding that the
+// ingress answered with an error status.
+type HookFailure struct {
+	BindingID   string
+	SandboxName string
+	// Status is the HTTP status of the answer.
+	Status int
+}
+
+// hookFailureNoticeInterval spaces the feed's hook-failure events per
+// sandbox, so a flood of refused posts (the rate limit) cannot crowd out
+// the rest of the feed; the counters see every failure.
+const hookFailureNoticeInterval = 10 * time.Second
+
+// ObserveHookFailure counts a hook post the ingress answered with an error
+// status. Sandbox hooks fail closed, so the harness did not do what the
+// hook was about: list, status and the session summary show the count, and
+// the feed says so.
+func (m *Manager) ObserveHookFailure(f HookFailure) {
+	now := m.now()
+	answer := hookFailureAnswer(f.Status)
+	m.mu.Lock()
+	b := m.boxes[f.SandboxName]
+	if b == nil || b.rec.BindingID != f.BindingID {
+		m.mu.Unlock()
+		return
+	}
+	b.hooks.failed++
+	b.hooks.lastFailure, b.hooks.lastFailureAt = answer, now
+	b.hooks.failureCause, b.hooks.answeredAt = "", time.Time{}
+	b.notePlaceholderFailureLocked()
+	b.hooks.unnoticed++
+	count := int64(0)
+	if b.hooks.failureNoticeAt.IsZero() || now.Sub(b.hooks.failureNoticeAt) >= hookFailureNoticeInterval {
+		count, b.hooks.unnoticed, b.hooks.failureNoticeAt = b.hooks.unnoticed, 0, now
+	}
+	name := b.rec.Name
+	m.mu.Unlock()
+	if count == 0 {
+		return
+	}
+	msg := "✗ a hook call failed (" + answer + "), so the harness's action was blocked (hooks fail closed)"
+	if count > 1 {
+		msg = fmt.Sprintf("✗ %d hook calls failed (last: %s), so the harness's actions were blocked (hooks fail closed)", count, answer)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityHookFailed, Sandbox: name, Reason: answer, Message: msg})
+}
+
+// noteHookAnsweredLocked notes DefenseClaw's first verdict after the last
+// hook failure, which shows the hooks work again (the status says so),
+// unless a conversation OpenShell refuses for its credential placeholder
+// goes on: its hooks that carry none are answered while the rest still
+// fail. Callers hold Manager.mu.
+func (b *box) noteHookAnsweredLocked(now time.Time) {
+	if !b.hooks.lastFailureAt.IsZero() && b.hooks.answeredAt.IsZero() && !b.placeholderInSessionLocked() {
+		b.hooks.answeredAt = now
+	}
+}
+
+// hookFailureAnswer names an HTTP answer: "HTTP 429 Too Many Requests".
+func hookFailureAnswer(status int) string {
+	answer := "HTTP " + strconv.Itoa(status)
+	if text := http.StatusText(status); text != "" {
+		answer += " " + text
+	}
+	return answer
+}
+
+// displayReason keeps a verdict reason fit for the session summary and the
+// activity feed. The gateway gives sandbox verdicts a plain reason built
+// from rule metadata; a reason still carrying a redaction placeholder
+// explains nothing and is dropped.
+func displayReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if strings.Contains(reason, "<redacted") {
+		return ""
+	}
+	return reason
+}
+
+// isToolEvent reports whether a hook event is a harness's pre-tool call,
+// which the session summary counts (every sandboxed harness's spelling).
+func isToolEvent(event string) bool {
+	switch strings.ToLower(strings.NewReplacer("_", "", "-", "", ".", "").Replace(event)) {
+	case "pretooluse", "beforetooluse", "pretoolcall",
+		// OpenCode's tool.execute.before and Amp's tool.call plugin events.
+		"toolexecutebefore", "toolcall":
+		return true
+	}
+	return false
+}
+
+// isPromptEvent reports whether a hook event is a harness's prompt
+// submission (UserPromptSubmit, userPromptSubmitted, beforeSubmitPrompt).
+func isPromptEvent(event string) bool {
+	return strings.Contains(strings.ToLower(event), "prompt")
+}
+
+func isBlockAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "block", "deny", "denied":
+		return true
+	}
+	return false
+}
+
+func isConfirmAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "confirm", "ask":
+		return true
+	}
+	return false
+}
+
+// flaggedVerdict reports a verdict that let the call run but flagged it: an
+// alert action, or a reason the gateway wrote for a flagged allow
+// (sandboxapi.FlaggedReason). A MEDIUM call that stayed below the profile's
+// alert threshold is an allow like any other and no finding of the session
+// (GAP-0634, GAP-0640).
+func flaggedVerdict(action, reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(action), "alert") || sandboxapi.FlaggedReason(reason)
+}
+
+// flaggedSeverity is a verdict's severity when it carries a finding of the
+// session (MEDIUM or worse), upper-cased, else "".
+func flaggedSeverity(severity string) string {
+	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
+	case "MEDIUM", "HIGH", "CRITICAL":
+		return s
+	}
+	// A LOW alert (one email address in a tool's output) stays in the
+	// audit log; it is nothing to review in a session.
+	return ""
+}
+
+// tamperAlarm is one detected hook tamper, captured under Manager.mu.
+type tamperAlarm struct {
+	kind      tamperKind
+	identity  audit.SandboxIdentity
+	name      string
+	bindingID string
+	tool      string
+	event     string
+	toolUseID string
+	// preHook names the harness's pre-tool hook (PreToolUse, preToolUse,
+	// tool.execute.before, ...).
+	preHook  string
+	onTamper string
+	// stop is set for the alarm that schedules the sandbox's stop; later
+	// alarms of the same session only report.
+	stop bool
+}
+
+// noteTamperLocked counts a tamper on the box and decides the response.
+// Callers hold Manager.mu.
+func (m *Manager) noteTamperLocked(b *box, d HookDecision, hooks toolCallHooks, kind tamperKind) *tamperAlarm {
+	b.hooks.tampered++
+	b.hooks.lastTamper = m.now()
+	a := &tamperAlarm{
+		kind: kind, identity: b.identity(), name: b.rec.Name, bindingID: d.BindingID,
+		tool: hookLabel(d.Tool, 64), event: d.Event, preHook: hooks.preHookName(),
+	}
+	if hooks.keying == keyByID {
+		a.toolUseID = hookLabel(d.ToolUseID, 64)
+	}
+	if b.eff != nil {
+		a.onTamper = b.eff.HookOnTamper
+	}
+	return a
+}
+
+// raiseTamper reports a hook tamper as a HIGH hook_tamper finding and on
+// the activity feed, and responds per the pack's hooks.on_tamper: stop
+// stops the sandbox, alert leaves it running.
+func (m *Manager) raiseTamper(b *box, a tamperAlarm) {
+	if a.onTamper == "" {
+		// A sandbox adopted after a restart has no resolved policy yet.
+		if eff, err := m.resolveBox(b); err == nil {
+			a.onTamper = eff.HookOnTamper
+		}
+	}
+	stop := a.onTamper != packs.OnTamperAlert // an unknown response fails toward stopping
+	if stop {
+		m.mu.Lock()
+		if b.rec.BindingID == a.bindingID && !b.tamperStop {
+			b.tamperStop, a.stop = true, true
+		}
+		m.mu.Unlock()
+	}
+
+	tool := a.tool
+	if tool == "" {
+		tool = "a tool"
+	}
+	title := "A tool ran without a DefenseClaw verdict"
+	what := fmt.Sprintf("%s ran in %s, but its %s hook never reached DefenseClaw.", tool, a.name, a.preHook)
+	if a.kind == tamperDenied {
+		title = "A tool DefenseClaw denied ran anyway"
+		what = fmt.Sprintf("%s ran in %s although DefenseClaw denied its %s.", tool, a.name, a.preHook)
+	}
+	description := what + " The workload likely killed or bypassed its DefenseClaw hook, so this call was not judged."
+	remediation := "DefenseClaw is stopping the sandbox (hooks.on_tamper: stop). Review the session's activity before you start it again."
+	if !stop {
+		remediation = "The sandbox keeps running (hooks.on_tamper: alert). Review the session's activity and stop the sandbox if you did not expect this."
+	}
+	evidence := "event=" + a.event
+	if a.tool != "" {
+		evidence += " tool=" + a.tool
+	}
+	if a.toolUseID != "" {
+		evidence += " tool_use_id=" + a.toolUseID
+	}
+	now := m.now()
+	m.tel.RecordSandboxFinding(context.Background(), audit.SandboxFindingEvent{
+		Sandbox: a.identity, Kind: audit.SandboxFindingHookTamper, Severity: "HIGH",
+		Title: title, Description: description, Evidence: evidence, Remediation: remediation,
+		TargetRef: a.name, Timestamp: now,
+	})
+
+	msg := "⚠ hook tamper: " + tool + " ran without a DefenseClaw verdict"
+	if a.kind == tamperDenied {
+		msg = "⚠ hook tamper: " + tool + " ran although DefenseClaw denied it"
+	}
+	switch {
+	case a.stop:
+		msg += "; stopping the sandbox"
+	case stop:
+		msg += "; the sandbox is already stopping"
+	default:
+		msg += "; the sandbox keeps running (hooks.on_tamper: alert)"
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: a.name, Tool: a.tool,
+		Event: a.event, Severity: "HIGH", Reason: string(audit.SandboxFindingHookTamper), Message: msg})
+
+	if a.stop {
+		m.scheduleAlarmStop(a.name, a.bindingID, audit.SandboxFindingHookTamper)
+	}
+}
+
+// scheduleAlarmStop stops sandbox name in the background for a hook alarm
+// (kind hook_tamper or hook_silence), unless the session it was raised in
+// is over by then.
+func (m *Manager) scheduleAlarmStop(name, bindingID string, kind audit.SandboxFindingKind) {
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		m.stopForAlarm(name, bindingID, kind)
+	}()
+}
+
+// stopForAlarm stops a sandbox whose hooks were tampered with or went
+// silent, unless the session that raised the alarm is already over.
+func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFindingKind) {
+	what := "hook tamper"
+	if kind == audit.SandboxFindingHookSilence {
+		what = "silent hooks"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
+	defer cancel()
+	b, unlock, err := m.lockBox(name)
+	if err != nil {
+		m.logf("%s: stop %s: %v", what, name, err)
+		return
+	}
+	defer unlock()
+	m.mu.Lock()
+	current := b.rec.BindingID == bindingID && b.phase == audit.SandboxPhaseReady
+	m.mu.Unlock()
+	if !current {
+		return
+	}
+	if err := m.stop(ctx, b); err != nil {
+		m.logf("%s: stop %s: %v", what, name, err)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
+			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})
+		return
+	}
+	m.logf("%s: stopped %s", what, name)
+}
+
+// pruneToolCalls drops the tool-call ledgers of bindings no sandbox holds
+// any more (a revoke already drops its own; this catches a decision that
+// raced one).
+func (m *Manager) pruneToolCalls() {
+	m.mu.Lock()
+	live := make(map[string]bool, len(m.boxes))
+	for _, b := range m.boxes {
+		if !b.deleted && b.rec.BindingID != "" {
+			live[b.rec.BindingID] = true
+		}
+	}
+	m.mu.Unlock()
+	m.toolCalls.Retain(func(id string) bool { return live[id] })
+}
+
+// hookLabel keeps a workload-supplied label (a tool name or tool-use ID)
+// fit for a finding and the feed: printable, without spaces, bounded.
+func hookLabel(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	var out strings.Builder
+	for _, r := range s {
+		if out.Len() >= limit {
+			break
+		}
+		if unicode.IsPrint(r) && !unicode.IsSpace(r) && r != '"' && r != '\\' {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// hookSilenceInterval paces the silence check, well under the shortest
+// hooks.silence_after a pack may set (packs.MinSilenceAfter).
+const hookSilenceInterval = 15 * time.Second
+
+// silenceResponse is what DefenseClaw does about the silent hooks of a
+// sandbox whose harness is of tamper tier, under eff, and after how long
+// (the pack's hooks.silence_after). A user-tier harness, whose hook
+// registration the agent can edit, gets the pack's hooks.on_silence; an
+// unknown response fails toward stopping. A managed-tier one only alerts:
+// the agent cannot switch its root-owned registration off.
+func silenceResponse(tier string, eff *packs.Effective) (response string, after time.Duration) {
+	response, after = packs.OnSilenceStop, packs.DefaultSilenceAfter
+	if eff != nil {
+		response = eff.HookOnSilence
+		if eff.HookSilenceAfter > 0 {
+			after = eff.HookSilenceAfter
+		}
+	}
+	if tier != connector.SandboxTamperTierUser || response == packs.OnSilenceAlert {
+		return packs.OnSilenceAlert, after
+	}
+	return packs.OnSilenceStop, after
+}
+
+// silenceAlarm is one sandbox whose hooks went silent, captured under
+// Manager.mu.
+type silenceAlarm struct {
+	id              audit.SandboxIdentity
+	name, bindingID string
+	tier, response  string
+	since           time.Time
+	after           time.Duration
+	// stop is set when this alarm schedules the session's stop; stopping
+	// says one was already scheduled (a tamper's).
+	stop, stopping bool
+}
+
+// silenceRef is when the box's hooks were last heard from: the session's
+// last hook request, or its start when none came yet.
+func (b *box) silenceRef() time.Time {
+	if b.hooks.lastHook.After(b.started) {
+		return b.hooks.lastHook
+	}
+	return b.started
+}
+
+// noteActiveLocked records the harness's activity at `at`. Activity goes on
+// one run while each event follows the last by less than the box's
+// hooks.silence_after; a run starts over at the first activity after a hook
+// request (or the session's start), and after an idle stretch that long.
+// So a harness idle for longer than silence_after that wakes for a moment
+// (a new prompt before its first hook, a background request) is no silence.
+// Callers hold Manager.mu.
+func (b *box) noteActiveLocked(at time.Time) {
+	if !at.After(b.activeAt) {
+		return
+	}
+	_, after := silenceResponse(b.rec.TamperTier, b.eff)
+	if b.activeSince.Before(b.silenceRef()) || at.Sub(b.activeAt) >= after {
+		b.activeSince = at
+	}
+	b.activeAt = at
+}
+
+// checkHookSilence raises a hook_silence finding for a ready sandbox whose
+// harness has been at work (OCSF network events of the harness's own
+// binaries, its connections to the egress proxy among them, and its model
+// calls, but not its OTLP exports, which an idle harness makes too;
+// OCSF process events of those binaries count too, but OpenShell 0.1
+// reports only the processes its supervisor starts, never the ones a
+// harness runs, so work without network traffic goes unseen) for the
+// pack's hooks.silence_after, with no idle stretch that long,
+// since its last hook request, or since it became ready when no hook ever
+// arrived (noteActiveLocked). A tampered or disabled hook registration
+// looks exactly like that. A user-tier harness under hooks.on_silence: stop
+// (balanced and strict) is stopped, as a hook tamper is; every other one
+// alerts (silenceResponse).
+func (m *Manager) checkHookSilence(ctx context.Context) {
+	now := m.now()
+	var out []silenceAlarm
+	m.mu.Lock()
+	for _, b := range m.boxes {
+		if b.deleted || b.creating || b.phase != audit.SandboxPhaseReady {
+			continue
+		}
+		response, after := silenceResponse(b.rec.TamperTier, b.eff)
+		ref := b.silenceRef()
+		if ref.IsZero() || b.activeSince.Before(ref) || b.activeAt.Sub(b.activeSince) < after {
+			continue
+		}
+		if b.silentSince.IsZero() {
+			b.silentSince = ref
+		}
+		if b.silenceSent {
+			continue
+		}
+		b.silenceSent = true
+		a := silenceAlarm{id: b.identity(), name: b.rec.Name, bindingID: b.rec.BindingID, tier: b.rec.TamperTier,
+			response: response, since: b.activeSince, after: after}
+		if response == packs.OnSilenceStop {
+			a.stop, a.stopping = !b.tamperStop, b.tamperStop
+			b.tamperStop = true
+		}
+		out = append(out, a)
+	}
+	m.mu.Unlock()
+	for _, a := range out {
+		m.raiseSilence(ctx, now, a)
+	}
+}
+
+// raiseSilence reports silent hooks as a HIGH hook_silence finding and on
+// the activity feed, and stops the sandbox when the alarm says so.
+func (m *Manager) raiseSilence(ctx context.Context, now time.Time, a silenceAlarm) {
+	after := packs.ShortDuration(a.after)
+	var remediation, outcome string
+	switch {
+	case a.response == packs.OnSilenceStop:
+		remediation = "DefenseClaw is stopping the sandbox (hooks.on_silence: stop). Check the harness's hook configuration in the sandbox " +
+			"before you start it again: the agent can edit a user-tier harness's hook registration."
+		outcome = "; stopping the sandbox (hooks.on_silence: stop)"
+		if a.stopping {
+			outcome = "; the sandbox is already stopping"
+		}
+	case a.tier == connector.SandboxTamperTierUser:
+		remediation = "The sandbox keeps running (hooks.on_silence: alert). Check the harness's hook configuration in the sandbox, " +
+			"and stop the sandbox if its hooks were disabled."
+		outcome = "; the sandbox keeps running (hooks.on_silence: alert)"
+	default:
+		remediation = "The sandbox keeps running: the harness's hooks are root-owned (managed tier), so silence only alerts. " +
+			"Check what the harness is doing, and stop the sandbox if you did not expect this."
+		outcome = "; the sandbox keeps running"
+	}
+	quiet := now.Sub(a.since).Round(time.Minute)
+	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		Sandbox: a.id, Kind: audit.SandboxFindingHookSilence, Severity: "HIGH",
+		Title:       "Sandboxed harness is active without DefenseClaw hook traffic",
+		Description: fmt.Sprintf("%s has been doing work for %s without a single hook request reaching DefenseClaw.", a.name, quiet),
+		Evidence:    "on_silence=" + a.response + " silence_after=" + after + " tier=" + firstNonEmpty(a.tier, "unknown"),
+		Remediation: remediation, TargetRef: a.name, Timestamp: now,
+	})
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: a.name, Severity: "HIGH",
+		Reason: string(audit.SandboxFindingHookSilence), Message: "⚠ the harness is active but its hooks are silent" + outcome})
+	if a.stop {
+		m.scheduleAlarmStop(a.name, a.bindingID, audit.SandboxFindingHookSilence)
+	}
+}

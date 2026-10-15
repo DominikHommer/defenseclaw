@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from defenseclaw import connector_paths
@@ -102,6 +103,26 @@ def test_skill_list_to_row_status_precedence_matches_go_oracle() -> None:
         ({"name": "a", "source": "enforcement"}, "removed"),
         ({"name": "a"}, "inactive"),
         ({"name": "a", "status": "blocked"}, "blocked"),
+        # The CLI's policy verdict wins over the severity heuristic, so a
+        # first-party skill the policy allows does not read "warning".
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "allowed",
+                "scan": {"clean": False, "max_severity": "MEDIUM", "total_findings": 3},
+            },
+            "active",
+        ),
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "rejected",
+                "scan": {"clean": False, "max_severity": "CRITICAL", "total_findings": 3},
+            },
+            "rejected",
+        ),
     ]
 
     for raw, want in cases:
@@ -380,10 +401,10 @@ def test_plugin_parse_connector_gate_actions_and_intents() -> None:
     # F-0521: action-menu intents must target the stable plugin id, not the
     # spoofable display name (which previously let actions hit the wrong row).
     assert panel.action_intent("s").args == ("plugin", "scan", "plug_tutor")
-    assert panel.action_intent("u").args == ("plugin", "allow", "plug_tutor")
+    assert panel.action_intent("u").args == ("plugin", "unblock", "plug_tutor")
 
     panel.apply_loaded([PluginRow(id="plug_tutor", name="tutor", verdict="blocked", status="installed")])
-    assert panel.handle_key("u").intent.args == ("plugin", "allow", "plug_tutor")
+    assert panel.handle_key("u").intent.args == ("plugin", "unblock", "plug_tutor")
 
 
 def test_plugin_actions_state_matrix_matches_go() -> None:
@@ -483,6 +504,21 @@ def test_tools_refresh_key_defers_store_read_to_shell_worker() -> None:
     assert action.handled is True
     assert action.reload_requested is True
     assert calls == []
+
+
+def test_tools_refresh_lists_asset_policy_tool_rules_from_config_yaml(tmp_path, monkeypatch) -> None:
+    # GAP-0306: tool block/allow writes asset_policy.tool in config.yaml, and no audit.db rows.
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\nasset_policy:\n  tool:\n    denied:\n"
+        "      - {name: write_file, connector: codex, reason: no writes}\n",
+        encoding="utf-8",
+    )
+    panel = ToolsPanelModel(FakeToolStore([]), config=SimpleNamespace(data_dir=str(tmp_path)))
+    panel.refresh()
+    assert [(row.name, row.status, row.connector, row.reason) for row in panel.items] == [
+        ("write_file", "blocked", "codex", "no writes")
+    ]
 
 
 def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() -> None:
@@ -831,7 +867,8 @@ def test_skill_detail_pane_renders_decisions_scan_and_action_legend() -> None:
     # The legend should surface the actual shortcut keys, not a vague
     # "press o for menu" hint. Blocked status exposes Unblock so the
     # operator can recover without spelunking through the action menu.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
     assert "[u] Unblock" in out
 
 
@@ -873,7 +910,8 @@ def test_mcp_detail_pane_renders_transport_url_and_command() -> None:
     assert "Command    uvx mcp-server-context7" in out
     # MCP legend should expose the unset-target hint via mcp_actions
     # under the action key list.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
 
 
 def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
@@ -899,28 +937,24 @@ def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
     assert "Version    1.2.0" in out
     assert "Origin     builtin" in out
     assert "Scan       [#FBBF24]MEDIUM[/] · 2 findings" in out
-    # Enabled plugin should expose the Disable action shortcut.
-    assert "[d] Disable" in out
+    # Enabled plugin offers Disable (from the o menu, not a row key).
+    assert "Disable" in out.split("[o] more:")[1]
 
 
-def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
-    """The header now groups navigation and action keys on separate
-    lines so operators see the action set (including the previously
-    hidden ``o open menu``) without scanning a single dense line.
+def test_catalog_summary_text_is_one_header_line() -> None:
+    """The header is the title and the row count; keys live in the hint
+    bar, the ``?`` sheet and the detail pane's action legend so the table
+    stays on screen at 80x24.
     """
 
     panel = SkillsPanelModel()
     panel.apply_loaded([SkillRow(name="alpha", status="active")])
 
     text = panel.summary_text("Skills")
-    # Action set is on its own line so it can't be missed.
-    assert "[dim]Actions:[/]" in text
-    assert "o open menu" in text
-    assert "u unblock" in text
-    # Navigation primer is on the row above, not jammed in with actions.
-    assert "[dim]Navigate:[/]" in text
-    # Filter / detail metadata still on line 2.
-    assert "1 of 1 rows" in text
+    assert "\n" not in text
+    assert "1 of 1" in text
+    panel.set_filter("al")
+    assert "filter:" in panel.summary_text("Skills")
 
 
 # ---------------------------------------------------------------------------
@@ -992,7 +1026,7 @@ def test_mcp_and_plugin_mutation_intents_thread_focus() -> None:
     assert plugin.action_intent("i").args == ("plugin", "info", "pg", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg", "--connector", "codex")
     assert plugin.action_intent("a").args == ("plugin", "allow", "pg", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg", "--connector", "codex")
     # Direct-scan ('s' in handle_key) also follows focus.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg", "--connector", "codex")
 
@@ -1050,7 +1084,7 @@ def test_action_intents_target_selected_row_owner_under_all() -> None:
     plugin.select_row(1)
     assert plugin.action_intent("s").args == ("plugin", "scan", "pg-b", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg-b", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg-b", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg-b", "--connector", "codex")
     # Direct-scan ('s' in handle_key) follows the row owner too.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg-b", "--connector", "codex")
 

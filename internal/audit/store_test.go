@@ -17,9 +17,14 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
+	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -551,6 +556,270 @@ func TestInitIdempotent(t *testing.T) {
 	}
 }
 
+func TestOpenDaemonStoreMovesCorruptStoreAsideAndKeepsBlocks(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.SetActionForConnector("tool", "mcp__probe__one", "claudecode", "", ActionState{Install: "block"}, "probe"); err != nil {
+		t.Fatalf("SetActionForConnector: %v", err)
+	}
+	// A block entry that no longer decodes must be reported, not dropped silently.
+	if _, err := store.db.Exec(`INSERT INTO actions (id, target_type, target_name, actions_json, updated_at, connector)
+		VALUES ('damaged', 'tool', 'mcp__probe__two', '{"install":', CURRENT_TIMESTAMP, 'claudecode')`); err != nil {
+		t.Fatalf("insert damaged entry: %v", err)
+	}
+	var rootPage, pageSize int64
+	if err := store.db.QueryRow(`SELECT rootpage FROM sqlite_master WHERE name = 'audit_events'`).Scan(&rootPage); err != nil {
+		t.Fatalf("audit_events root page: %v", err)
+	}
+	if err := store.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		t.Fatalf("page_size: %v", err)
+	}
+	if err := store.Close(); err != nil { // the last connection checkpoints the WAL into audit.db
+		t.Fatalf("Close: %v", err)
+	}
+	// Damage the event-history table only; the block list stays readable.
+	file, err := os.OpenFile(dbPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open for damage: %v", err)
+	}
+	if _, err := file.WriteAt(bytes.Repeat([]byte{0xff}, int(pageSize)), (rootPage-1)*pageSize); err != nil {
+		t.Fatalf("damage page: %v", err)
+	}
+	_ = file.Close()
+
+	var warn bytes.Buffer
+	recovered, err := OpenDaemonStore(dbPath, &warn)
+	if err != nil {
+		t.Fatalf("OpenDaemonStore on a corrupt store: %v", err)
+	}
+	defer recovered.Close()
+	entry, err := recovered.GetActionForConnector("tool", "mcp__probe__one", "claudecode")
+	if err != nil || entry == nil || entry.Actions.Install != "block" {
+		t.Fatalf("block entry after rebuild = %+v, %v; want the block carried over", entry, err)
+	}
+	var check string
+	if err := recovered.db.QueryRow(`PRAGMA quick_check`).Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("new store quick_check = %q, %v", check, err)
+	}
+	moved, _ := filepath.Glob(dbPath + ".corrupt-*")
+	kept := 0
+	for _, name := range moved {
+		if !strings.HasSuffix(name, "-wal") && !strings.HasSuffix(name, "-shm") && !strings.HasSuffix(name, carryOverNoteSuffix) {
+			kept++
+		}
+	}
+	if kept != 1 || !strings.Contains(warn.String(), "block/allow entries carried over: 1.") ||
+		!strings.Contains(warn.String(), "damaged entries skipped: 1") {
+		t.Fatalf("moved stores = %v, warning = %q", moved, warn.String())
+	}
+	if listed := MovedCorruptStores(dbPath); len(listed) != 1 || listed[0].MovedAt.IsZero() ||
+		filepath.Base(listed[0].Path) == filepath.Base(dbPath) {
+		t.Fatalf("MovedCorruptStores = %+v; want the one moved store", listed)
+	} else if !listed[0].CarryOverKnown || listed[0].CarriedOver != 1 ||
+		!strings.Contains(listed[0].BlockAllowSummary(), "1 block/allow entry was carried over, but some could not be read") {
+		t.Fatalf("carry-over note = %+v (%s)", listed[0], listed[0].BlockAllowSummary())
+	}
+}
+
+// GAP-1958: with the file header damaged no block/allow entry can be read, and
+// start, status and doctor must say so instead of "the lists were kept".
+func TestOpenDaemonStoreReportsBlockListsLostWithAnUnreadableStore(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := store.SetActionForConnector("mcp", "drill-mcp", "", "", ActionState{Install: "block"}, "drill"); err != nil {
+		t.Fatalf("SetActionForConnector: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	file, err := os.OpenFile(dbPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open for damage: %v", err)
+	}
+	if _, err := file.WriteAt(bytes.Repeat([]byte{0}, 192), 0); err != nil {
+		t.Fatalf("damage header: %v", err)
+	}
+	_ = file.Close()
+
+	var warn bytes.Buffer
+	recovered, err := OpenDaemonStore(dbPath, &warn)
+	if err != nil {
+		t.Fatalf("OpenDaemonStore: %v", err)
+	}
+	defer recovered.Close()
+	listed := MovedCorruptStores(dbPath)
+	if len(listed) != 1 {
+		t.Fatalf("MovedCorruptStores = %+v; want one store and no note entry", listed)
+	}
+	summary := listed[0].BlockAllowSummary()
+	if !listed[0].CarryOverKnown || listed[0].CarriedOver != 0 || listed[0].CarryOverError == "" ||
+		!strings.Contains(summary, "0 entries were carried over") || strings.Contains(summary, "kept") ||
+		!strings.Contains(summary, "defenseclaw mcp list") {
+		t.Fatalf("summary = %q for %+v", summary, listed[0])
+	}
+}
+
+// GAP-1222: 0.8.x closed its descriptors of audit.db while SQLite held POSIX
+// locks through them, so concurrent writers left 0.8.9 stores whose
+// quick_check fails with "Tree 1 page N cell 0: Rowid M out of order". The
+// upgrade rebuilds such a store in place instead of moving it aside.
+func TestOpenDaemonStoreRebuildsADamaged089StoreInPlace(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	write089Store(t, dbPath)
+	breakSchemaRowidOrder(t, dbPath)
+	assertOpenDaemonStoreRebuilds089Store(t, dbPath, "Rowid 127 out of order")
+}
+
+// GAP-1576: the same 0.8.x writers also leave the quarantine_records index
+// ahead of its table in sqlite_schema, which SQLite then refuses on every
+// statement ("orphan index"). Such a store is rebuilt in place too, so the
+// 0.8.10 store a rollback starts can be upgraded again.
+func TestOpenDaemonStoreRebuildsA089StoreWithAnOrphanIndex(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	write089Store(t, dbPath)
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`PRAGMA writable_schema=ON`,
+		`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+	assertOpenDaemonStoreRebuilds089Store(t, dbPath, "orphan index")
+}
+
+// write089Store writes a store the way DefenseClaw 0.8.9 and 0.8.10 left it
+// (their 29 migrations), with one block/allow row.
+func write089Store(t *testing.T, dbPath string) {
+	t.Helper()
+	const released089Migrations = 29
+	if migrations[released089Migrations-1].description !=
+		"runtime assets: add durable connector session provenance state" {
+		t.Fatal("migration 29 is no longer the last 0.8.9 migration")
+	}
+	legacy, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.db.Exec(`CREATE TABLE schema_version (
+		version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < released089Migrations; i++ {
+		if err := legacy.applyMigration(i+1, migrations[i]); err != nil {
+			t.Fatalf("0.8.9 migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := legacy.db.Exec(`INSERT INTO actions (id, target_type, target_name, actions_json, updated_at, connector)
+		VALUES ('row-of-0.8.9', 'tool', 'mcp__probe__one', '{"runtime":"disable"}', CURRENT_TIMESTAMP, 'claudecode')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil { // the last connection checkpoints the WAL into audit.db
+		t.Fatal(err)
+	}
+}
+
+// assertOpenDaemonStoreRebuilds089Store opens the damaged store as the daemon
+// does and checks that it was rebuilt in place, its row kept.
+func assertOpenDaemonStoreRebuilds089Store(t *testing.T, dbPath, damage string) {
+	t.Helper()
+	var warn bytes.Buffer
+	store, err := OpenDaemonStore(dbPath, &warn)
+	if err != nil {
+		t.Fatalf("OpenDaemonStore: %v", err)
+	}
+	defer store.Close()
+	if moved, _ := filepath.Glob(dbPath + ".corrupt-*"); len(moved) != 0 {
+		t.Fatalf("moved aside: %v; warning = %q", moved, warn.String())
+	}
+	var check, kept string
+	if err := store.db.QueryRow(`PRAGMA quick_check`).Scan(&check); err != nil || check != "ok" {
+		t.Fatalf("quick_check after the rebuild = %q, %v", check, err)
+	}
+	// The row keeps its id: it was not carried over into a new store.
+	if err := store.db.QueryRow(`SELECT id FROM actions WHERE target_name = 'mcp__probe__one'`).Scan(&kept); err != nil ||
+		kept != "row-of-0.8.9" {
+		t.Fatalf("0.8.9 row = %q, %v", kept, err)
+	}
+	if !strings.Contains(warn.String(), damage) || !strings.Contains(warn.String(), "rebuilt in place") {
+		t.Fatalf("warning = %q", warn.String())
+	}
+}
+
+// breakSchemaRowidOrder gives the first row of the leftmost sqlite_schema leaf
+// a rowid above the bound its parent records for that leaf.
+func breakSchemaRowidOrder(t *testing.T, dbPath string) {
+	t.Helper()
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageSize := int(binary.BigEndian.Uint16(data[16:18]))
+	varint := func(b []byte) (uint64, int) {
+		var v uint64
+		for i := 0; i < 8; i++ {
+			if v = v<<7 | uint64(b[i]&0x7f); b[i] < 0x80 {
+				return v, i + 1
+			}
+		}
+		return v<<8 | uint64(b[8]), 9
+	}
+	const rootHeader = 100 // page 1 starts with the file header
+	if data[rootHeader] != 0x05 {
+		t.Fatalf("sqlite_schema root page type %#x, want an interior table page", data[rootHeader])
+	}
+	cell := int(binary.BigEndian.Uint16(data[rootHeader+12:]))
+	leaf := (int(binary.BigEndian.Uint32(data[cell:])) - 1) * pageSize
+	bound, _ := varint(data[cell+4:])
+	if data[leaf] != 0x0d || bound >= 127 {
+		t.Fatalf("leftmost schema leaf type %#x bound %d", data[leaf], bound)
+	}
+	first := leaf + int(binary.BigEndian.Uint16(data[leaf+8:]))
+	_, payloadLen := varint(data[first:])
+	if _, rowidLen := varint(data[first+payloadLen:]); rowidLen != 1 {
+		t.Fatalf("first schema rowid takes %d bytes", rowidLen)
+	}
+	data[first+payloadLen] = 127
+	if err := os.WriteFile(dbPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GAP-2053: one carried-over entry reads "1 block/allow entry was", not "1 ... entries were".
+func TestBlockAllowSummaryUsesSingularForOneEntry(t *testing.T) {
+	one := MovedCorruptStore{CarryOverKnown: true, CarriedOver: 1}.BlockAllowSummary()
+	two := MovedCorruptStore{CarryOverKnown: true, CarriedOver: 2}.BlockAllowSummary()
+	if one != "a new store was started and 1 block/allow entry was carried over." ||
+		two != "a new store was started and 2 block/allow entries were carried over." {
+		t.Fatalf("summaries = %q / %q", one, two)
+	}
+}
+
+// GAP-2429: a store moved without a carry-over note says what to check, not "check them".
+func TestBlockAllowSummaryWithoutNoteNamesTheEntries(t *testing.T) {
+	got := MovedCorruptStore{}.BlockAllowSummary()
+	if !strings.Contains(got, "cannot tell whether the old block/allow entries were carried over") ||
+		!strings.Contains(got, "check your MCP, skill, plugin and tool block/allow entries with defenseclaw mcp list") ||
+		strings.Contains(got, "check them") {
+		t.Fatalf("summary = %q", got)
+	}
+}
+
 func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	store, err := NewStore(":memory:")
 	if err != nil {
@@ -602,7 +871,11 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		('v8-connector-observe', '2026-07-07T10:00:07Z', 'connector-hook', 'gateway', 'observed',
 		 'HIGH', 'tool.activity', 'tool.decision', '{}', 'cursor', 0),
 		('v8-unattributed-block', '2026-07-07T10:00:08Z', 'connector-hook', 'gateway', 'blocked',
-		 'HIGH', 'tool.activity', 'tool.decision', '{}', NULL, 1)`); err != nil {
+		 'HIGH', 'tool.activity', 'tool.decision', '{}', NULL, 1),
+		('v8-legacy-finding', '2026-07-07T10:00:09Z', 'tool-result-pii-alert', 'gateway', 'tool=Bash',
+		 'HIGH', 'security.finding', 'legacy.audit.tool.result.pii.alert', '{}', 'codex', NULL),
+		('v8-legacy-finding-info', '2026-07-07T10:00:10Z', 'tool-result-pii-alert', 'gateway', 'tool=Bash',
+		 'INFO', 'security.finding', 'legacy.audit.tool.result.pii.alert', '{}', 'codex', NULL)`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -613,10 +886,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 5 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+	if len(targets) != 6 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
 		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
-		!targetIDs["v8-connector-block"] ||
-		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
+		!targetIDs["v8-connector-block"] || !targetIDs["v8-legacy-finding"] ||
+		targetIDs["v8-legacy-finding-info"] || targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
 		targetIDs["v8-detection-only-padded-scalar"] {
 		t.Fatalf("targets=%+v", targets)
 	}
@@ -630,10 +903,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		alertIDs[alert.ID] = true
 		alertSeverities[alert.ID] = alert.Severity
 	}
-	if len(alerts) != 5 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+	if len(alerts) != 6 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
 		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
-		!alertIDs["v8-connector-block"] ||
-		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
+		!alertIDs["v8-connector-block"] || !alertIDs["v8-legacy-finding"] ||
+		alertIDs["v8-legacy-finding-info"] || alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
 		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
 	}
@@ -736,6 +1009,12 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
 		 'INFO', 'network.egress', 'egress.decided',
 		 '{"defenseclaw.network.decision":"block"}', NULL),
+		('harness-fetch', '2026-07-17T12:00:01.5Z', 'sandbox-egress', 'defenseclaw', '',
+		 'INFO', 'network.egress', 'egress.blocked',
+		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_HARNESS_FETCH"}', NULL),
+		('lookup-refused', '2026-07-17T12:00:01.7Z', 'sandbox-egress', 'defenseclaw', '',
+		 'INFO', 'network.egress', 'egress.blocked',
+		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_LOOKUP_REFUSED"}', NULL),
 		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
 		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
 		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
@@ -767,7 +1046,7 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
-			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "harness-fetch", "lookup-refused", "health-error", "canonical-allow",
 			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},
@@ -1109,5 +1388,37 @@ func TestTargetSnapshotScannerFingerprintColumn(t *testing.T) {
 	}
 	if row.ScanID != "scan-2" {
 		t.Errorf("ScanID = %q, want scan-2", row.ScanID)
+	}
+}
+
+// GAP-0325: a store whose audit.db was deleted, or deleted and created
+// again, while it ran reports that it no longer writes to the file on disk.
+func TestDatabaseFileReplacedAfterDeleteAndRecreate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to delete an open database file")
+	}
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if store.DatabaseFileReplaced() {
+		t.Fatal("a freshly opened store reports a replaced file")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if !store.DatabaseFileReplaced() {
+		t.Fatal("a deleted audit.db is not reported")
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !store.DatabaseFileReplaced() {
+		t.Fatal("a recreated audit.db is not reported")
 	}
 }

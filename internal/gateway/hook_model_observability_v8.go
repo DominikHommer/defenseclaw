@@ -237,6 +237,8 @@ func hookModelV8TerminalResult(meta llmEventMeta) (observability.Outcome, bool, 
 		return observability.OutcomeCancelled, false, ""
 	case "rejected":
 		return observability.OutcomeRejected, false, ""
+	case "blocked":
+		return observability.OutcomeBlocked, false, ""
 	default:
 		return observability.OutcomeCompleted, false, ""
 	}
@@ -334,6 +336,8 @@ func hookModelV8AgentInput(
 		input.DefenseClawContentOutputOriginalBytes = observability.Present(outputBytes)
 		input.DefenseClawContentOutputMimeType = observability.Present("text/plain")
 	}
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	applyHookModelV8AgentFacts(&input, observation, rootAgentID, rootSessionID)
 	return input, true
 }
@@ -406,6 +410,8 @@ func hookModelV8ModelInput(observation hookModelV8Observation) observability.Spa
 	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	applyHookModelV8ModelFacts(&input, observation)
 	return input
 }
@@ -424,8 +430,10 @@ func applyHookModelV8AgentFacts(
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = observability.Present(observation.sessionID)
@@ -477,8 +485,12 @@ func applyHookModelV8ModelFacts(input *observability.SpanModelChatInput, observa
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
+	input.DefenseClawGuardrailProfileName, input.DefenseClawGuardrailProfileDigest = meta.Profile.Name, meta.Profile.Digest
+	input.DefenseClawGuardrailProfileMatch, input.DefenseClawGuardrailProfileMatchedGroup = meta.Profile.Match, meta.Profile.MatchedGroup
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)
@@ -830,18 +842,6 @@ type hookV8MetricRecordBuilder func(
 	*observability.FamilyBuilder,
 	observability.FamilyEnvelopeInput,
 ) (observability.Record, error)
-
-func newHookV8MetricBatchItem(
-	ctx context.Context,
-	observedAt time.Time,
-	meta llmEventMeta,
-	family observability.EventName,
-	buildRecord hookV8MetricRecordBuilder,
-) observabilityruntime.GeneratedMetricBatchItem {
-	return newHookV8MetricBatchItemForProducer(
-		ctx, observedAt, meta, hookModelV8Producer, family, buildRecord,
-	)
-}
 
 func newHookV8MetricBatchItemForProducer(
 	ctx context.Context,

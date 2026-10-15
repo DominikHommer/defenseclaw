@@ -214,7 +214,7 @@ class _StrictSafeLoader(yaml.SafeLoader):
             mark = event.start_mark
             raise V8YAMLMutationError(
                 "yaml_alias_forbidden",
-                "YAML aliases are not allowed in v8 configuration",
+                "YAML aliases are not allowed in config.yaml",
                 source=getattr(self, "_v8_source_name", "config.yaml"),
                 line=mark.line + 1,
                 column=mark.column + 1,
@@ -235,6 +235,7 @@ def prepare_v8_yaml_write(
     mutations: Iterable[V8YAMLMutation],
     *,
     source_name: str = "config.yaml",
+    any_path: bool = False,
 ) -> PreparedV8YAMLWrite:
     """Validate and prepare a comment-preserving v8 YAML candidate.
 
@@ -242,6 +243,10 @@ def prepare_v8_yaml_write(
     lock, compare the current file digest with ``expected_sha256``, preserve
     permissions, write ``candidate`` to a sibling temporary file, validate it,
     and atomically replace the original.
+
+    ``any_path`` lifts the observability path allowlist for the single
+    config writer (``config_writer``), which validates the whole candidate
+    with the canonical validator before it writes.
     """
 
     original = _source_bytes(source, source_name)
@@ -252,10 +257,10 @@ def prepare_v8_yaml_write(
     candidate = text
     for mutation in mutations:
         path = tuple(mutation.path)
-        if not _supported_path(path):
+        if not any_path and not _supported_path(path):
             raise V8YAMLMutationError(
                 "unsupported_mutation_path",
-                "the requested path is not an exact supported v8 observability mutation",
+                "the requested path is not a supported observability change",
                 source=source_name,
                 path=path,
             )
@@ -265,7 +270,7 @@ def prepare_v8_yaml_write(
         if len(candidate.encode("utf-8")) > _MAX_SOURCE_BYTES:
             raise V8YAMLMutationError(
                 "source_too_large",
-                "v8 configuration exceeds the 4 MiB source limit after mutation",
+                "config.yaml exceeds the 4 MiB source limit after the change",
                 source=source_name,
                 path=path,
             )
@@ -295,7 +300,7 @@ def _source_bytes(source: bytes | str, source_name: str) -> bytes:
     if len(raw) > _MAX_SOURCE_BYTES:
         raise V8YAMLMutationError(
             "source_too_large",
-            "v8 configuration exceeds the 4 MiB source limit",
+            "config.yaml exceeds the 4 MiB source limit",
             source=source_name,
         )
     return raw
@@ -307,7 +312,7 @@ def _decode_source(raw: bytes, source_name: str) -> str:
     except UnicodeDecodeError as error:
         raise V8YAMLMutationError(
             "invalid_utf8",
-            "v8 configuration must be valid UTF-8",
+            "config.yaml must be valid UTF-8",
             source=source_name,
             line=error.start + 1,
         ) from None
@@ -338,7 +343,7 @@ def _parse_v8(text: str, source_name: str) -> _ParsedYAML:
         if root is None:
             raise V8YAMLMutationError(
                 "empty_document",
-                "v8 configuration must contain one mapping document",
+                "config.yaml must contain one mapping document",
                 source=source_name,
             )
         _validate_syntax_tree(root, source_name)
@@ -366,16 +371,16 @@ def _parse_v8(text: str, source_name: str) -> _ParsedYAML:
     if not isinstance(root, MappingNode) or not isinstance(value, dict):
         raise V8YAMLMutationError(
             "invalid_root",
-            "v8 configuration root must be a mapping",
+            "config.yaml root must be a mapping",
             source=source_name,
             line=root.start_mark.line + 1,
             column=root.start_mark.column + 1,
         )
     version = value.get("config_version", _MISSING)
-    if type(version) is not int or version != 8:
+    if type(version) is not int or version not in (8, 9):
         raise V8YAMLMutationError(
             "not_v8_configuration",
-            "comment-preserving observability mutations require config_version 8",
+            "comment-preserving config mutations require config_version 8 or 9",
             source=source_name,
             path=("config_version",),
         )
@@ -390,15 +395,15 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
         nonlocal count
         count += 1
         if count > _MAX_NODES:
-            raise _node_error("too_many_nodes", "v8 configuration exceeds the YAML node limit", source_name, node, path)
+            raise _node_error("too_many_nodes", "config.yaml exceeds the YAML node limit", source_name, node, path)
         is_container = isinstance(node, (MappingNode, SequenceNode))
         if is_container and depth > _MAX_DEPTH:
-            raise _node_error("yaml_too_deep", "v8 configuration exceeds the YAML depth limit", source_name, node, path)
+            raise _node_error("yaml_too_deep", "config.yaml exceeds the YAML depth limit", source_name, node, path)
         if isinstance(node, MappingNode):
             if len(node.value) > _MAX_MAPPING_ENTRIES:
                 raise _node_error(
                     "mapping_too_large",
-                    "a YAML mapping exceeds the v8 entry limit",
+                    "a YAML mapping exceeds the entry limit",
                     source_name,
                     node,
                     path,
@@ -408,7 +413,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if isinstance(key, ScalarNode) and (key.value == "<<" or key.tag == "tag:yaml.org,2002:merge"):
                     raise _node_error(
                         "yaml_merge_forbidden",
-                        "YAML merge keys are not allowed in v8 configuration",
+                        "YAML merge keys are not allowed in config.yaml",
                         source_name,
                         key,
                         path + ("<<",),
@@ -416,7 +421,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if not isinstance(key, ScalarNode) or key.tag != "tag:yaml.org,2002:str":
                     raise _node_error(
                         "non_string_mapping_key",
-                        "v8 mapping keys must be strings",
+                        "mapping keys must be strings",
                         source_name,
                         key,
                         path,
@@ -425,7 +430,7 @@ def _validate_syntax_tree(root: Node, source_name: str) -> None:
                 if key.value in seen:
                     raise _node_error(
                         "duplicate_mapping_key",
-                        "duplicate YAML mapping keys are not allowed in v8 configuration",
+                        "duplicate YAML mapping keys are not allowed in config.yaml",
                         source_name,
                         key,
                         child_path,
@@ -515,7 +520,7 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
         if nodes > _MAX_NODES or depth > _MAX_DEPTH:
             raise V8YAMLMutationError(
                 "replacement_too_complex",
-                "replacement exceeds v8 structural limits",
+                "replacement exceeds the structural limits",
                 source=source,
                 path=path,
             )
@@ -558,7 +563,7 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
             return
         raise V8YAMLMutationError(
             "invalid_replacement_type",
-            "replacement contains a value type unsupported by v8 YAML",
+            "replacement contains a value type config.yaml does not support",
             source=source,
             path=path,
         )
@@ -588,6 +593,14 @@ def _apply_mutation(
             return _delete_existing(text, parent_node, parent_part, node)
         if _same_value(current, mutation.value):
             return text
+        key_node = _mapping_pair(parent_node, parent_part)[0] if (
+            isinstance(parent_node, MappingNode) and isinstance(parent_part, str)
+        ) else None
+        expanded = _expand_empty_flow_value(
+            text, parent_node, key_node, node, mutation.value, newline, source_name, path
+        )
+        if expanded is not None:
+            return expanded
         rendered = _render_replacement(mutation.value, node, newline, source_name, path)
         end = node.end_mark.index
         if isinstance(node, (MappingNode, SequenceNode)) and not node.flow_style:
@@ -640,21 +653,35 @@ def _insert_missing(
 ) -> str:
     node = root
     current = value
+    parent: Node | None = None
+    key_node: Node | None = None
     for offset, part in enumerate(path):
         remainder = path[offset + 1 :]
         if isinstance(part, str) and isinstance(node, MappingNode) and isinstance(current, dict):
             found = _mapping_pair(node, part)
             if found is None or part not in current:
                 nested = _build_missing_value(remainder, replacement, source_name, path)
+                expanded = _expand_empty_flow_value(
+                    text, parent, key_node, node, {part: nested}, newline, source_name, path
+                )
+                if expanded is not None:
+                    return expanded
                 return _insert_mapping_entry(text, node, part, nested, newline, source_name, path)
-            _, node = found
+            parent = node
+            key_node, node = found
             current = current[part]
             continue
         if isinstance(part, int) and isinstance(node, SequenceNode) and isinstance(current, list):
             if part == len(node.value):
                 nested = _build_missing_value(remainder, replacement, source_name, path)
+                expanded = _expand_empty_flow_value(
+                    text, parent, key_node, node, [nested], newline, source_name, path
+                )
+                if expanded is not None:
+                    return expanded
                 return _append_sequence_item(text, node, nested, newline, source_name, path)
             if 0 <= part < len(node.value):
+                parent, key_node = node, None
                 node = node.value[part]
                 current = current[part]
                 continue
@@ -689,6 +716,46 @@ def _build_missing_value(
                 path=path,
             )
     return nested
+
+
+def _expand_empty_flow_value(
+    text: str,
+    parent: Node | None,
+    key_node: Node | None,
+    node: Node,
+    value: Any,
+    newline: str,
+    source_name: str,
+    path: YAMLPath,
+) -> str | None:
+    """Write ``key: {}`` / ``key: []`` that gains content as a block collection.
+
+    A fresh config holds ``observability: {}``.  Keeping that empty flow style
+    would put the whole first destination on one very long line, so an empty
+    flow value of a block-mapping key is rewritten in block style instead.
+    Returns ``None`` when the shape is anything else (the caller keeps the
+    existing style).
+    """
+
+    if not (isinstance(parent, MappingNode) and not parent.flow_style and isinstance(key_node, ScalarNode)):
+        return None
+    if not (isinstance(node, (MappingNode, SequenceNode)) and node.flow_style and not node.value):
+        return None
+    if not isinstance(value, (dict, list)) or not value:
+        return None
+    if key_node.start_mark.line != node.start_mark.line:
+        return None
+    line_end = text.find("\n", node.end_mark.index)
+    if text[node.end_mark.index : len(text) if line_end < 0 else line_end].strip():
+        return None  # a comment or more content follows on the same line
+    start = node.start_mark.index
+    while start > 0 and text[start - 1] in " \t":
+        start -= 1
+    if start == 0 or text[start - 1] != ":":
+        return None
+    block = _dump_block(value, newline, source_name, path).rstrip("\r\n")
+    block = _prefix_lines(block, " " * (key_node.start_mark.column + 2), newline)
+    return text[:start] + newline + block + text[node.end_mark.index :]
 
 
 def _insert_mapping_entry(
@@ -745,11 +812,7 @@ def _delete_existing(text: str, parent: Node, part: PathPart | None, node: Node)
         if parent.flow_style:
             return _delete_flow_element(text, parent, key.start_mark.index, value.end_mark.index, pair)
         if len(parent.value) == 1:
-            end = _block_content_end(text, parent)
-            replacement = "{}" + (
-                _detect_newline(text) if text[parent.start_mark.index : end].endswith(("\n", "\r")) else ""
-            )
-            return text[: parent.start_mark.index] + replacement + text[end:]
+            return _empty_block_collection(text, parent, "{}")
         start = _line_start(text, key.start_mark.index)
         end = _block_content_end(text, value)
         return text[:start] + text[end:]
@@ -757,15 +820,33 @@ def _delete_existing(text: str, parent: Node, part: PathPart | None, node: Node)
         if parent.flow_style:
             return _delete_flow_element(text, parent, node.start_mark.index, node.end_mark.index, node)
         if len(parent.value) == 1:
-            end = _block_content_end(text, parent)
-            replacement = "[]" + (
-                _detect_newline(text) if text[parent.start_mark.index : end].endswith(("\n", "\r")) else ""
-            )
-            return text[: parent.start_mark.index] + replacement + text[end:]
+            return _empty_block_collection(text, parent, "[]")
         start = _line_start(text, node.start_mark.index)
         end = _block_content_end(text, node)
         return text[:start] + text[end:]
     return text
+
+
+def _empty_block_collection(text: str, parent: Node, empty: str) -> str:
+    """Replace a block collection that loses its last entry with ``{}``/``[]``.
+
+    The empty flow value goes on its key's line (``destinations: []``).  A
+    PyYAML-dumped list sits at its key's indent (``  destinations:\n  - a``),
+    so writing ``[]`` where the ``-`` was would make it a sibling of the key
+    and invalid YAML (GAP-2194).
+    """
+
+    start = parent.start_mark.index
+    end = _block_content_end(text, parent)
+    suffix = _detect_newline(text) if text[start:end].endswith(("\n", "\r")) else ""
+    line_start = _line_start(text, start)
+    if not text[line_start:start].strip():
+        cursor = line_start
+        while cursor > 0 and text[cursor - 1] in " \t\r\n":
+            cursor -= 1
+        if cursor > 0 and text[cursor - 1] == ":" and "#" not in text[_line_start(text, cursor - 1) : cursor]:
+            return text[:cursor] + " " + empty + suffix + text[end:]
+    return text[:start] + empty + suffix + text[end:]
 
 
 def _delete_flow_element(
@@ -1026,7 +1107,7 @@ def _supported_path(path: YAMLPath) -> bool:
         return len(path) == 4 and path[2] == "attributes" and isinstance(path[3], str) and bool(path[3])
     if section == "trace_policy":
         if len(path) == 3:
-            return path[2] in {"sampler", "sampler_arg", "semantic_profile", "compatibility_aliases"}
+            return path[2] in {"sampler", "sampler_arg", "semantic_profile"}
         return len(path) == 4 and path[2] == "limits" and path[3] in _TRACE_LIMITS
     if section == "metric_policy":
         return len(path) == 3 and path[2] in {"export_interval_seconds", "temporality"}

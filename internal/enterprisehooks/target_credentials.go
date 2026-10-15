@@ -12,6 +12,14 @@ type TargetCredentials struct {
 	UID      int
 	GID      int
 	SID      string
+	// Username is the account's name as the account database spells it,
+	// when the lookup that produced these credentials reports one. It is
+	// informational: RunAsTarget does not use it.
+	Username string
+	// AllowDisconnected lets RunAsTarget on Windows act under the token of a
+	// disconnected session (an RDP window closed without signing out): the
+	// user is still signed in. Without it only an active session counts.
+	AllowDisconnected bool
 }
 
 // RunAsTarget validates target identity and executes fn with the target user's

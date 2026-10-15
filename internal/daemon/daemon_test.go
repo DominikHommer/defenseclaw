@@ -349,6 +349,32 @@ func TestReadPIDInfoMissingFile(t *testing.T) {
 	}
 }
 
+// GAP-0399: a plain gateway.pid whose PID the OS gave to another program is
+// stale; start must not report that program as the running gateway.
+func TestIsRunningReplacesLegacyPIDOfAnotherProgram(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sleep")
+	}
+	d := New(t.TempDir())
+	other := exec.Command("sleep", "30")
+	if err := other.Start(); err != nil {
+		t.Skipf("sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = other.Process.Kill()
+		_ = other.Wait()
+	})
+	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(other.Process.Pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if running, pid := d.IsRunning(); running {
+		t.Fatalf("IsRunning = true PID %d for an unrelated program", pid)
+	}
+	if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+		t.Fatalf("stale gateway.pid kept: %v", err)
+	}
+}
+
 func TestIsRunningFalseWithStalePID(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
@@ -601,34 +627,7 @@ func TestHasManagedProcessIdentityRejectsStrongRecordWithoutDataDir(t *testing.T
 	}
 }
 
-func TestManagedProcessStartedAtRequiresStrongLiveIdentity(t *testing.T) {
-	d := New(t.TempDir())
-	executable, err := os.Executable()
-	if err != nil {
-		t.Skipf("cannot determine executable: %v", err)
-	}
-	identity, err := processStartIdentity(os.Getpid())
-	if err != nil || identity == "" {
-		t.Skipf("strong process generation unavailable: identity=%q err=%v", identity, err)
-	}
-	before := time.Now().Add(-time.Second)
-	if err := d.writePIDInfo(os.Getpid(), executable, identity); err != nil {
-		t.Fatal(err)
-	}
-	startedAt, ok := d.ManagedProcessStartedAt(os.Getpid())
-	if !ok || startedAt.Before(before) || startedAt.After(time.Now().Add(time.Second)) {
-		t.Fatalf("managed launch generation = (%s, %v), want current strong record", startedAt, ok)
-	}
-
-	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := d.ManagedProcessStartedAt(os.Getpid()); ok {
-		t.Fatal("legacy PID record exposed an unverified launch generation")
-	}
-}
-
-func TestManagedProcessStartedAtPreservesPreSpawnSecondBoundary(t *testing.T) {
+func TestPIDRecordPreservesPreSpawnSecondBoundary(t *testing.T) {
 	d := New(t.TempDir())
 	executable, err := os.Executable()
 	if err != nil {
@@ -644,10 +643,11 @@ func TestManagedProcessStartedAtPreservesPreSpawnSecondBoundary(t *testing.T) {
 	if err := d.writePIDInfoAt(os.Getpid(), executable, identity, preSpawn); err != nil {
 		t.Fatal(err)
 	}
-	recorded, ok := d.ManagedProcessStartedAt(os.Getpid())
-	if !ok {
-		t.Fatal("strong PID record did not expose its pre-spawn lower bound")
+	info, err := d.readPIDInfo()
+	if err != nil {
+		t.Fatal(err)
 	}
+	recorded := time.Unix(info.StartTime, 0)
 	if want := time.Unix(preSpawn.Unix(), 0); !recorded.Equal(want) {
 		t.Fatalf("recorded generation = %s, want pre-spawn floor %s", recorded, want)
 	}
@@ -1138,5 +1138,13 @@ func TestStopGracefullyWaitsForAcceptedRequestBeforeClearingPID(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("helper process was not reaped")
+	}
+}
+
+// GAP-1556: a Windows child registered its PID more than 60 s after launch
+// right after an upgrade, so start killed a gateway that was coming up.
+func TestChildPIDRegistrationWaitsAsLongAsWindowsReadiness(t *testing.T) {
+	if childPIDRegistrationTimeout < 240*time.Second {
+		t.Fatalf("childPIDRegistrationTimeout = %s, want at least the 240s Windows readiness wait", childPIDRegistrationTimeout)
 	}
 }

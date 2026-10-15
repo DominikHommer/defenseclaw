@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +22,14 @@ import (
 var (
 	windowsEnterpriseMutationIdentityCheck = requireWindowsEnterpriseLocalSystem
 	windowsEnterpriseTargetTokenResolver   = resolveWindowsEnterpriseTargetToken
-	windowsEnterpriseSetThreadToken        = windows.SetThreadToken
-	windowsEnterpriseRevertThreadToken     = windows.RevertToSelf
-	windowsEnterpriseLockOSThread          = runtime.LockOSThread
-	windowsEnterpriseUnlockOSThread        = runtime.UnlockOSThread
-	windowsEnterpriseEffectiveTokenCheck   = func(target *windows.SID) error {
+	// windowsEnterpriseSignedInTargetTokenResolver also accepts a
+	// disconnected session (TargetCredentials.AllowDisconnected).
+	windowsEnterpriseSignedInTargetTokenResolver = resolveWindowsEnterpriseSignedInTargetToken
+	windowsEnterpriseSetThreadToken              = windows.SetThreadToken
+	windowsEnterpriseRevertThreadToken           = windows.RevertToSelf
+	windowsEnterpriseLockOSThread                = runtime.LockOSThread
+	windowsEnterpriseUnlockOSThread              = runtime.UnlockOSThread
+	windowsEnterpriseEffectiveTokenCheck         = func(target *windows.SID) error {
 		effective := windows.GetCurrentThreadEffectiveToken()
 		return validateWindowsEnterpriseTargetToken(effective, target)
 	}
@@ -46,13 +48,34 @@ func withWindowsEnterpriseTargetImpersonation(
 	expectedHome string,
 	fn func() error,
 ) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseTargetTokenResolver, fn)
+}
+
+// withWindowsEnterpriseS4UTargetImpersonation is
+// withWindowsEnterpriseTargetImpersonation for an account without a session,
+// under a token from an S4U logon. Only the rollback of a failed first
+// install uses it.
+func withWindowsEnterpriseS4UTargetImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	fn func() error,
+) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseS4UTargetTokenResolver, fn)
+}
+
+func withWindowsEnterpriseTargetTokenImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	resolve func(*windows.SID) (windows.Token, error),
+	fn func() error,
+) error {
 	if target == nil || windowsEnterpriseSystemIdentity(target) {
 		return fmt.Errorf("enterprise hooks: refusing invalid impersonation target SID %s", windowsSIDString(target))
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	token, err := windowsEnterpriseTargetTokenResolver(target)
+	token, err := resolve(target)
 	if err != nil {
 		return err
 	}
@@ -156,6 +179,18 @@ func runWindowsEnterpriseImpersonatedCallback(
 var errWindowsEnterpriseNotLocalSystem = errors.New(
 	"enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service",
 )
+
+// RequireWindowsEnterpriseTargetImpersonationIdentity reports whether this
+// process can act as a target user at all: only LocalSystem can obtain a
+// signed-in user's session token. An elevated administrator cannot.
+func RequireWindowsEnterpriseTargetImpersonationIdentity() error {
+	return windowsEnterpriseMutationIdentityCheck()
+}
+
+// ErrWindowsEnterpriseNotLocalSystem is what a per-user mutation returns when
+// the process is not LocalSystem, for example Setup run from an elevated
+// administrator prompt. Match it with errors.Is.
+var ErrWindowsEnterpriseNotLocalSystem = errWindowsEnterpriseNotLocalSystem
 
 func requireWindowsEnterpriseLocalSystem() error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -416,6 +451,26 @@ func windowsEnterpriseTokenIntegrityRID(token windows.Token) (uint32, error) {
 }
 
 func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseSessionToken(target, false)
+}
+
+// resolveWindowsEnterpriseSignedInTargetToken is
+// resolveWindowsEnterpriseTargetToken that also accepts a disconnected
+// session (TargetCredentials.AllowDisconnected).
+func resolveWindowsEnterpriseSignedInTargetToken(target *windows.SID) (windows.Token, error) {
+	return resolveWindowsEnterpriseSessionToken(target, true)
+}
+
+// withWindowsEnterpriseSessionImpersonation is
+// withWindowsEnterpriseTargetImpersonation under the token of an active or
+// disconnected session: a disconnected user is still signed in. The guardian
+// deferred a quarantine removal for a user with a disconnected RDP session as
+// if that user were signed out (GAP-0795).
+func withWindowsEnterpriseSessionImpersonation(target *windows.SID, expectedHome string, fn func() error) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseSignedInTargetTokenResolver, fn)
+}
+
+func resolveWindowsEnterpriseSessionToken(target *windows.SID, allowDisconnected bool) (windows.Token, error) {
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
@@ -424,15 +479,16 @@ func resolveWindowsEnterpriseTargetToken(target *windows.SID) (windows.Token, er
 	if sessions != nil {
 		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
 	}
-	sessionIDs := make([]uint32, 0, count)
+	states := make([]windowsSessionState, 0, count)
 	if count > 0 && sessions != nil {
 		for _, session := range unsafe.Slice(sessions, count) {
-			if session.State == windows.WTSActive {
-				sessionIDs = append(sessionIDs, session.SessionID)
-			}
+			states = append(states, windowsSessionState{
+				ID: session.SessionID, Active: session.State == windows.WTSActive,
+				Disconnected: session.State == windows.WTSDisconnected,
+			})
 		}
 	}
-	sort.Slice(sessionIDs, func(i, j int) bool { return sessionIDs[i] < sessionIDs[j] })
+	sessionIDs := windowsTargetSessionOrder(states, allowDisconnected)
 	var queryFailures []string
 	for _, sessionID := range sessionIDs {
 		var primary windows.Token

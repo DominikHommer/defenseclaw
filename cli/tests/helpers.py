@@ -38,7 +38,6 @@ from defenseclaw.config import (
     MCPScannerConfig,
     OpenShellConfig,
     ScannersConfig,
-    SkillActionsConfig,
     SkillScannerConfig,
     default_config,
     prepare_fresh_v8_config,
@@ -102,7 +101,7 @@ class _CommandReadModelFixture:
     def __init__(self, store: Store) -> None:
         self.store = store
 
-    def log_scan(self, result: ScanResult) -> None:
+    def log_scan(self, result: ScanResult, *, connector: str | None = None) -> None:
         scan_id = str(uuid.uuid4())
         self.store.insert_scan_result(
             scan_id,
@@ -196,6 +195,11 @@ class _CommandReadModelFixture:
             )
         )
 
+    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+        from defenseclaw.logger import Logger
+
+        Logger.log_config_change(self, operation, details, actor=actor)  # type: ignore[arg-type]
+
     def log_alert(self, source: str, severity: str, summary: str, details=None) -> None:
         self.store.log_event(
             Event(
@@ -236,6 +240,21 @@ def seed_cached_plugin(
     return str(root)
 
 
+def select_pack(cfg: Config, block, path: str) -> None:
+    """Make a guardrail scope (``cfg.guardrail`` or one connector entry) select the pack at *path*.
+
+    A built-in preset name is selected by name; any other folder is registered under its
+    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key).
+    """
+    from defenseclaw.config import CustomRulePack
+    from defenseclaw.policy_catalog import RULE_PACK_PRESETS
+
+    name = os.path.basename(path.rstrip("/\\")) if path else ""
+    if name and name not in RULE_PACK_PRESETS:
+        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path)
+    block.rule_pack = name
+
+
 def make_temp_store() -> tuple[Store, str]:
     """Create a temporary SQLite store. Returns (store, db_path)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -258,12 +277,11 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
     cfg.environment = "macos"
     cfg.claw = ClawConfig(mode="openclaw", home_dir=tmp_dir)
     cfg.scanners = ScannersConfig(
-        skill_scanner=SkillScannerConfig(binary="skill-scanner"),
-        mcp_scanner=MCPScannerConfig(binary="mcp-scanner"),
+        skill_scanner=SkillScannerConfig(),
+        mcp_scanner=MCPScannerConfig(),
     )
-    cfg.openshell = OpenShellConfig(binary="openshell")
+    cfg.openshell = OpenShellConfig()
     cfg.gateway = GatewayConfig(host="127.0.0.1", api_port=18970)
-    cfg.skill_actions = SkillActionsConfig()
     return cfg
 
 

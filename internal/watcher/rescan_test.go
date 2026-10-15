@@ -17,11 +17,14 @@
 package watcher
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -472,7 +475,7 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{root}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
 	targets := w.enumerateTargets()
 	got := make(map[string]InstallEvent)
 	for _, target := range targets {
@@ -507,6 +510,46 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 	if _, ok := byName["manifest-only"]; !ok {
 		t.Fatalf("scanable forged identity missing from live expansion: %+v", events)
 	}
+
+	// GAP-0285: the managed gateway also watches each user's own Hermes
+	// root, which IsRoot does not resolve; its category folders are not
+	// skills there either, and a bundle that account could forge (manifest
+	// and checkout are its own) is still rescanned.
+	profileHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileRoot := filepath.Join(profileHome, ".hermes", "skills")
+	k8s := filepath.Join(profileRoot, "devops", "k8s")
+	if err := os.MkdirAll(k8s, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(k8s, "SKILL.md"), []byte("---\nname: k8s\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(profileRoot, "productivity", "vendor-docs"),
+		filepath.Join(profileHome, ".hermes", "hermes-agent", "skills", "productivity", "vendor-docs"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), bundledMarker, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(profileRoot, ".bundled_manifest"), []byte(fmt.Sprintf("vendor-docs:%x\n", bundledHash)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, target := range New(cfg, []string{profileRoot}, nil, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallSkill {
+			names[target.Name] = true
+		}
+	}
+	if names["devops"] || !names["k8s"] || !names["vendor-docs"] {
+		t.Fatalf("profile Hermes root targets = %v, want the k8s and vendor-docs skills and not the devops category", names)
+	}
 }
 
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
@@ -515,6 +558,9 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 
 	pluginDir := filepath.Join(cfg.DataDir, "plugins")
 	if err := os.MkdirAll(filepath.Join(skillDir, "watched-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "watched-skill", "SKILL.md"), []byte("# watched\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(pluginDir, "watched-plugin"), 0o700); err != nil {
@@ -535,7 +581,7 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	}
 	cfg.Claw.ConfigFile = ocPath
 
-	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
 	targets := w.enumerateTargets()
 
 	seen := make(map[InstallType]map[string]InstallEvent)
@@ -598,7 +644,7 @@ func TestRescan_FromZeptoClawConfig(t *testing.T) {
 	}
 	cfg.Guardrail.Connector = "zeptoclaw"
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	targets := w.enumerateTargets()
 
 	mcpByName := make(map[string]InstallEvent)
@@ -653,7 +699,7 @@ func TestRescan_FromClaudeMCPScopes(t *testing.T) {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.Claw.WorkspaceDir = workspace
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	targets := w.enumerateTargets()
 
 	mcpByName := make(map[string]InstallEvent)
@@ -707,6 +753,33 @@ func TestEnumerateClaudeWatcherPluginsUsesManifestlessCacheVersionBoundary(t *te
 	}
 }
 
+// GAP-1573: a Codex plugin cache holds <marketplace>/<plugin>/<version>. The
+// rescan read it one level deep, so a fresh init scanned the vendor
+// marketplace folder (openai-curated-remote) as a plugin and raised a HIGH
+// MANIFEST-MISSING alert on it.
+func TestEnumerateTargetsReadsCodexPluginCacheAtVersionDepth(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	version := filepath.Join(cache, "openai-curated-remote", "github", "1.2.0")
+	if err := os.MkdirAll(filepath.Join(version, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(version, ".codex-plugin", "plugin.json"), []byte(`{"name":"github"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var plugins []InstallEvent
+	for _, target := range New(cfg, []string{skillDir}, []string{cache}, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target)
+		}
+	}
+	if len(plugins) != 1 || !sameWatcherPath(plugins[0].Path, version) ||
+		plugins[0].Name != "github@openai-curated-remote" || plugins[0].Connector != "codex" {
+		t.Fatalf("codex cache plugin targets = %+v, want only %s as github@openai-curated-remote", plugins, version)
+	}
+}
+
 // TestRescan_FromCodexConfigToml — Codex discovers MCP entries from the user
 // ~/.codex/config.toml table; pinned workspaces additionally contribute layered
 // .codex/config.toml entries, subject to the client's project trust decision.
@@ -729,7 +802,7 @@ args = ["mcp.js"]
 	}
 	cfg.Guardrail.Connector = "codex"
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	targets := w.enumerateTargets()
 
 	var saw bool
@@ -761,8 +834,8 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	}
 	cfg.Claw.ConfigFile = ocPath
 
-	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil, nil)
-	snap, err := w.snapshotMCPServer("remote-mcp")
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp", Path: "remote-mcp"})
 	if err != nil {
 		t.Fatalf("snapshotMCPServer: %v", err)
 	}
@@ -776,5 +849,193 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	}
 	if snap.ContentHash == "" {
 		t.Fatal("expected non-empty content hash")
+	}
+}
+
+func TestEnumerateTargetsSkipsOwnBundledPlugin(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	own := filepath.Join(pluginDir, "defenseclaw")
+	other := filepath.Join(pluginDir, "other")
+	for _, d := range []string{own, other} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+	w.SetBundledPluginCheck(func(path string) bool { return path == own })
+
+	var plugins []string
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target.Path)
+		}
+	}
+	if len(plugins) != 1 || plugins[0] != other {
+		t.Fatalf("rescan plugin targets = %v, want only %s", plugins, other)
+	}
+}
+
+// GAP-2338: Hermes' plugins folder is a Python package with a __pycache__
+// dir. Neither the rescan nor a live create event treats it (or
+// node_modules) as a plugin.
+func TestPluginRootSkipsBytecodeAndDependencyDirs(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	plugin := filepath.Join(pluginDir, "disk-cleanup")
+	for _, d := range []string{plugin, filepath.Join(pluginDir, "__pycache__"), filepath.Join(pluginDir, "node_modules")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+
+	var plugins []string
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target.Path)
+		}
+	}
+	if len(plugins) != 1 || plugins[0] != plugin {
+		t.Fatalf("rescan plugin targets = %v, want only %s", plugins, plugin)
+	}
+	if w.isDirectChildDir(filepath.Join(pluginDir, "__pycache__")) || !w.isDirectChildDir(plugin) {
+		t.Fatal("live create events must admit plugins but not __pycache__")
+	}
+}
+
+// GAP-2411: Hermes nests its bundled plugins in category folders
+// (plugins/browser/browser_use). The rescan scans the nested plugins, not
+// the category folder, which the plugin scanner refuses.
+func TestPluginRootExpandsCategoryFolders(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	flat := filepath.Join(pluginDir, "disk-cleanup")
+	nested := filepath.Join(pluginDir, "browser", "browser_use")
+	for _, d := range []string{flat, nested, filepath.Join(pluginDir, "browser", "_shared")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []string{filepath.Join(flat, "plugin.yaml"), filepath.Join(nested, "plugin.yaml"),
+		filepath.Join(pluginDir, "browser", "_shared", "plugin.yaml")} {
+		if err := os.WriteFile(f, []byte("name: x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+
+	got := map[string]string{}
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			got[target.Name] = target.Path
+		}
+	}
+	want := map[string]string{"disk-cleanup": flat, "browser/browser_use": nested}
+	if len(got) != len(want) || got["disk-cleanup"] != flat || got["browser/browser_use"] != nested {
+		t.Fatalf("rescan plugin targets = %v, want %v", got, want)
+	}
+}
+
+// GAP-2439: Hermes lists its bundled platforms/* plugins by the bare folder
+// name ("a2a"), so the rescan log must too, or "plugin scan platforms/a2a"
+// fails. Other categories and the user plugin root keep category/name.
+func TestHermesBundledPlatformPluginsUseBareID(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "hermes"
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	home := filepath.Dir(skillDir)
+	bundled := filepath.Join(home, "hermes-agent", "plugins")
+	user := filepath.Join(home, "plugins")
+	dirs := map[string]string{
+		"a2a":                 filepath.Join(bundled, "platforms", "a2a"),
+		"browser/browser_use": filepath.Join(bundled, "browser", "browser_use"),
+		"platforms/mine":      filepath.Join(user, "platforms", "mine"),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "plugin.yaml"), []byte("name: x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := New(cfg, nil, []string{user, bundled}, store, logger, nil, nil)
+
+	got := map[string]string{}
+	for _, target := range w.enumerateTargets() {
+		if target.Type == InstallPlugin {
+			got[target.Name] = target.Path
+		}
+	}
+	if len(got) != len(dirs) {
+		t.Fatalf("rescan plugin targets = %v, want %v", got, dirs)
+	}
+	for name, path := range dirs {
+		if got[name] != path {
+			t.Fatalf("rescan plugin targets = %v, want %v", got, dirs)
+		}
+	}
+}
+
+// GAP-1525: on an upgrade the old copy of DefenseClaw's own OpenClaw plugin
+// is still on disk when the startup rescan runs; connector setup replaces it
+// moments later. The startup cycle must not scan that dir, while a later
+// cycle still scans it if it really differs from the bundled copy.
+func TestStartupRescanDefersStaleOwnPluginDir(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	pluginDir := filepath.Join(filepath.Dir(skillDir), "plugins")
+	own := filepath.Join(pluginDir, "defenseclaw")
+	if err := os.MkdirAll(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(own, "index.js"), []byte("// older release\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{pluginDir}, store, logger, nil, nil)
+	w.SetBundledPluginCheck(func(string) bool { return false })
+	w.SetBundledPluginDir(own)
+	var scanned []string
+	w.scannerFactory = func(evt InstallEvent) scanner.Scanner {
+		scanned = append(scanned, evt.Path)
+		return nil
+	}
+
+	w.runRescanCycle(context.Background())
+	if len(scanned) != 0 {
+		t.Fatalf("startup rescan scanned %v, want the own plugin dir deferred", scanned)
+	}
+	w.runRescanCycle(context.Background())
+	if len(scanned) != 1 || scanned[0] != own {
+		t.Fatalf("second rescan scanned %v, want %s (still differs from the bundle)", scanned, own)
+	}
+}
+
+// GAP-2384: a deferred watch folder (Hermes before its first run) and a
+// missing agent config are skipped quietly, as the watcher does.
+func TestEnumerateTargetsSkipsMissingDeferredDirsQuietly(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	home := t.TempDir()
+	t.Setenv("HERMES_HOME", home)
+	cfg.Guardrail.Connector = "hermes"
+	missing := filepath.Join(home, "hermes-agent", "plugins")
+
+	r, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = wr
+	w := New(cfg, []string{filepath.Join(home, "skills")}, []string{missing}, store, logger, nil, nil)
+	targets := w.enumerateTargets()
+	os.Stderr = orig
+	_ = wr.Close()
+	out, _ := io.ReadAll(r)
+
+	if len(targets) != 0 {
+		t.Fatalf("targets = %+v, want none", targets)
+	}
+	if strings.Contains(string(out), "[rescan]") {
+		t.Fatalf("rescan logged an error for a deferred folder: %s", out)
 	}
 }

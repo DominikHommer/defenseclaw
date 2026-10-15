@@ -24,8 +24,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const canonicalTraceRepresentationID = "defenseclaw-otlp-v1"
-
 // canonicalTraceProjectedBuilder implements the generated defenseclaw-otlp-v1
 // direct-span representation. Its input is already destination-routed and
 // redacted immutable bytes; it has no path back to a canonical producer record.
@@ -308,7 +306,7 @@ func (wire canonicalTraceWire) otlp() (canonicalProjectedSpan, bool) {
 
 func canonicalResourceKeyValues(family observability.EventName, resource map[string]any) ([]*commonpb.KeyValue, bool) {
 	attributes, ok := object(resource, "attributes")
-	if !ok || observability.ValidateTelemetryResourceAttributes(attributes) != nil {
+	if !ok || observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(attributes) != nil {
 		return nil, false
 	}
 	return canonicalKeyValues(attributes, func(key string) (observability.OTLPValueKind, bool) {
@@ -601,8 +599,8 @@ func completeCanonicalProjectedCanary(spans []canonicalProjectedSpan) bool {
 			child = &spans[index]
 		}
 	}
-	if root == nil || child == nil || root.spanName != "invoke_agent diagnostic" ||
-		child.spanName != "chat gpt-4o-mini" || root.span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
+	if root == nil || child == nil || root.spanName != observability.RuntimeCanaryAgentSpanName ||
+		child.spanName != observability.RuntimeCanaryModelSpanName || root.span.Kind != tracepb.Span_SPAN_KIND_INTERNAL ||
 		child.span.Kind != tracepb.Span_SPAN_KIND_CLIENT || len(root.span.ParentSpanId) != 0 ||
 		!bytes.Equal(child.span.ParentSpanId, root.span.SpanId) || !bytes.Equal(root.span.TraceId, child.span.TraceId) ||
 		root.span.Flags&1 == 0 || child.span.Flags&1 == 0 || root.span.TraceState != child.span.TraceState ||

@@ -45,6 +45,16 @@ const (
 	// styleActionStderr: no stdout echo; on action=block write reason to
 	// stderr + exit 2. (amp-plugin)
 	styleActionStderr
+	// styleHookDecisionStderr: no stdout; when hook_output's decision is
+	// deny/block write its reason to stderr and exit 2. Kiro adds hook
+	// stdout to the agent's context. (kiro-hook.sh)
+	styleHookDecisionStderr
+	// stylePluginBridge: echo the whole gateway response object as one JSON
+	// line and exit 0. An in-agent plugin that delegates to this runner (the
+	// managed OpenCode plugin) reads hook_output and mode from it exactly as
+	// it would from its own gateway call; failures print a hook_output deny.
+	// There is no .sh counterpart.
+	stylePluginBridge
 )
 
 // failResult is a fail-closed outcome: an optional connector-native JSON body
@@ -64,6 +74,9 @@ type spec struct {
 	endpoint    string // gateway path ("/api/v1/claude-code/hook")
 	outputField string // response field echoed to stdout ("claude_code_output")
 	style       decisionStyle
+	// dialect is the --hook-surface value a dialect-specific spec serves
+	// (copilotVSCodeLocalSpec); "" for a connector's default spec.
+	dialect string
 	// failOpenOnly is set when the upstream host has no exit-status or
 	// fail-closed hook contract. Runtime, authentication, transport, timeout,
 	// and malformed-response failures must then remain an empty exit-0 allow;
@@ -94,6 +107,18 @@ var specs = map[string]spec{
 		oversizedClosed:    failResult{exit: blockExit},
 		unreachableStrict:  failResult{exit: blockExit},
 		responseClosed:     failResult{exit: blockExit},
+	},
+	// The managed OpenCode plugin (machine policy) runs this binary for each
+	// event instead of calling the gateway itself, so the protected managed
+	// runtime selects the transport. Its failures are hook_output denials.
+	"opencode": {
+		connector: "opencode", hookName: "opencode-plugin", errLabel: "opencode",
+		subject: "opencode tool", endpoint: "/api/v1/opencode/hook",
+		outputField: "", style: stylePluginBridge,
+		defaultBlockReason: "DefenseClaw blocked this tool call.",
+		oversizedClosed:    failResult{body: openCodeDenyBody(tooLarge), exit: blockExit},
+		unreachableStrict:  failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
+		responseClosed:     failResult{body: openCodeDenyBody(failedClosed), exit: blockExit},
 	},
 	"claudecode": {
 		connector: "claudecode", hookName: "claude-code-hook", errLabel: "claude-code",
@@ -152,9 +177,25 @@ var specs = map[string]spec{
 		subject: "devin hook", endpoint: "/api/v1/devin/hook",
 		outputField: "hook_output", style: styleHookEchoDecision,
 		defaultBlockReason: "Blocked by DefenseClaw Devin policy.",
-		oversizedClosed:    failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict:  failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:     failResult{body: `{"decision":"block","reason":"` + failedClosed + `"}`, exit: blockExit},
+		// Devin shows an exit-2 hook's stdout verbatim, so its closed
+		// failures print the plain reason (see devinBlockText).
+		oversizedClosed:   failResult{body: tooLarge, exit: blockExit},
+		unreachableStrict: failResult{body: failedClosed, exit: blockExit},
+		responseClosed:    failResult{body: failedClosed, exit: blockExit},
+	},
+	// Kiro blocks PreToolUse (every surface) and, in Kiro IDE,
+	// UserPromptSubmit with exit 2 and shows stderr (kiro-cli 2.24.1 --v3
+	// attaches a prompt hook's result and calls the model); any other non-zero
+	// status is a failed hook Kiro proceeds past, so every closed failure
+	// here exits 2. Kiro appends hook stdout to the agent's context, so the
+	// hook never prints one.
+	"kiro": {
+		connector: "kiro", hookName: "kiro-hook", errLabel: "kiro",
+		subject: "kiro hook", endpoint: "/api/v1/kiro/hook",
+		outputField: "hook_output", style: styleHookDecisionStderr,
+		oversizedClosed:   failResult{exit: blockExit},
+		unreachableStrict: failResult{exit: blockExit},
+		responseClosed:    failResult{exit: blockExit},
 	},
 	"openhands": {
 		connector: "openhands", hookName: "openhands-hook", errLabel: "openhands",
@@ -164,6 +205,11 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 		responseClosed:    failResult{body: `{"decision":"deny","reason":"` + failedClosed + `"}`, exit: blockExit},
 	},
+}
+
+// openCodeDenyBody is the managed OpenCode plugin's block answer.
+func openCodeDenyBody(reason string) string {
+	return `{"hook_output":{"decision":"deny","reason":` + mustJSONString(reason) + `}}`
 }
 
 func cursorFallbackOutput(event string, closed bool, reason string) string {
@@ -212,6 +258,21 @@ func cursorActionOutput(event, action, reason string) string {
 		// exit 2 remains Cursor's documented generic block signal.
 		return `{}`
 	}
+}
+
+// copilotVSCodeLocalSpec serves Copilot hook commands registered for the VS
+// Code Local harness (--hook-surface vscode-local). Unlike the Copilot CLI,
+// that harness has a blocking hook contract (a PreToolUse deny, and exit 2
+// as a blocking error), so the connector fail mode governs local failures;
+// emitCopilotVSCodeLocalResult renders them as structured bodies.
+var copilotVSCodeLocalSpec = spec{
+	connector: "copilot", hookName: "copilot-hook", errLabel: "copilot",
+	subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
+	outputField: "hook_output", style: styleHookEcho, dialect: copilotVSCodeLocalSurface,
+	defaultBlockReason: "Blocked by DefenseClaw policy.",
+	oversizedClosed:    failResult{body: tooLarge, exit: blockExit, closed: true},
+	unreachableStrict:  failResult{body: failedClosed, exit: blockExit, closed: true},
+	responseClosed:     failResult{body: failedClosed, exit: blockExit, closed: true},
 }
 
 func specFor(connector string) (spec, bool) {

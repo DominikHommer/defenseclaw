@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -95,6 +97,13 @@ type cliObservabilityV8Scan struct {
 	Timestamp  time.Time                   `json:"timestamp"`
 	Findings   []cliObservabilityV8Finding `json:"findings"`
 	DurationMS int64                       `json:"duration_ms"`
+	// Error is set when the scan could not finish; it is recorded as
+	// scan.failed so failed scans are visible in audit and OTLP (GAP-1504).
+	Error string `json:"error,omitempty"`
+	// Connector is the connector whose skill, plugin or MCP server the CLI
+	// scanned (skill scan --connector claudecode), so scan.completed and
+	// finding.observed say which agent the asset belongs to (GAP-1381).
+	Connector string `json:"connector,omitempty"`
 }
 
 // cliObservabilityV8Finding deliberately mirrors Finding.to_dict in the
@@ -139,7 +148,18 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	}
 	request, err := decodeCLIObservabilityV8Request(r.Body)
 	if err != nil {
-		http.Error(w, `{"error":"invalid canonical observability request"}`, http.StatusBadRequest)
+		if cfg := a.decisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
+			http.Error(w, `{"error":"invalid canonical observability request"}`, http.StatusBadRequest)
+			return
+		}
+		// The reason is one of this file's fixed strings (never source
+		// payload text), so the CLI can tell the operator what was invalid.
+		body, _ := json.Marshal(map[string]string{
+			"error": "invalid canonical observability request", "reason": err.Error(),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(body)
 		return
 	}
 	if a.logger == nil && request.Kind != "llm_bridge" && request.Kind != "webhook_delivery" {
@@ -155,6 +175,9 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	if err := a.emitCLIObservabilityV8(ctx, request, envelope); err != nil {
 		// The response is intentionally content-free: runtime, database, route,
 		// exporter, and source-payload errors must not cross this API boundary.
+		// The CLI tells the operator gateway.log has the cause, so log it here
+		// (GAP-2381).
+		fmt.Fprintf(os.Stderr, "[api] CLI %s event was not recorded: %v\n", request.Kind, err)
 		http.Error(w, `{"error":"canonical observability emission failed"}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -223,8 +246,11 @@ func (request cliObservabilityV8Request) validate() error {
 			return errors.New("invalid alert")
 		}
 	case "scan":
-		if request.Scan == nil || request.Scan.validate() != nil {
+		if request.Scan == nil {
 			return errors.New("invalid scan")
+		}
+		if err := request.Scan.validate(); err != nil {
+			return err
 		}
 	case "llm_bridge":
 		if request.LLMBridge == nil || request.LLMBridge.validate() != nil {
@@ -276,10 +302,12 @@ func (observation cliObservabilityV8WebhookDelivery) validate() error {
 
 func (scan cliObservabilityV8Scan) validate() error {
 	if !cliObservabilityV8Identifier(scan.Scanner, true) ||
+		!cliObservabilityV8Identifier(scan.Connector, false) ||
 		!cliObservabilityV8Text(scan.Target, cliObservabilityV8MaxTargetBytes, true) ||
 		scan.Timestamp.IsZero() || scan.Timestamp.Year() < 1 || scan.Timestamp.Year() > 9999 ||
 		scan.DurationMS < 0 || scan.DurationMS > math.MaxInt64/int64(time.Millisecond) ||
-		len(scan.Findings) > cliObservabilityV8MaxFindings {
+		len(scan.Findings) > cliObservabilityV8MaxFindings ||
+		!cliObservabilityV8Text(scan.Error, cliObservabilityV8MaxTitleBytes, false) {
 		return errors.New("invalid scan fields")
 	}
 	duration := time.Duration(scan.DurationMS) * time.Millisecond
@@ -302,7 +330,8 @@ func (finding cliObservabilityV8Finding) validate(scanScanner string) error {
 		!cliObservabilityV8Text(finding.Location, cliObservabilityV8MaxLocationBytes, false) ||
 		!cliObservabilityV8Text(finding.Remediation, cliObservabilityV8MaxEvidenceBytes, false) ||
 		(finding.Scanner != "" &&
-			(!cliObservabilityV8Identifier(finding.Scanner, true) || finding.Scanner != scanScanner)) ||
+			(!cliObservabilityV8Identifier(finding.Scanner, true) ||
+				!cliObservabilityV8FindingScannerMatches(finding.Scanner, scanScanner))) ||
 		(finding.RuleID != "" && !cliObservabilityV8Identifier(finding.RuleID, true)) ||
 		(finding.LineNumber != nil && *finding.LineNumber < 1) ||
 		len(finding.Tags) > cliObservabilityV8MaxTags {
@@ -319,6 +348,13 @@ func (finding cliObservabilityV8Finding) validate(scanScanner string) error {
 		}
 	}
 	return nil
+}
+
+// cliObservabilityV8FindingScannerMatches accepts the scan's own scanner name
+// or a sub-analyzer of it ("mcp-scanner/YARA"). Any other scanner is an
+// analyzer name leaking out of the scan it belongs to.
+func cliObservabilityV8FindingScannerMatches(findingScanner, scanScanner string) bool {
+	return findingScanner == scanScanner || strings.HasPrefix(findingScanner, scanScanner+"/")
 }
 
 func cliObservabilityV8Severity(value scanner.Severity) bool {
@@ -454,11 +490,19 @@ func (a *APIServer) emitCLIObservabilityV8(
 			Scanner: scan.Scanner, Target: scan.Target, Timestamp: scan.Timestamp,
 			Findings: findings, Duration: time.Duration(scan.DurationMS) * time.Millisecond,
 		}
+		if strings.TrimSpace(scan.Error) != "" {
+			result.ScanError = scan.Error
+			result.ExitCode = 1
+		}
+		connector := envelope.Connector
+		if connector == "" {
+			connector = scan.Connector
+		}
 		return a.logger.LogScanWithCorrelation(ctx, result, "", audit.ScanCorrelation{
 			RunID: envelope.RunID, RequestID: envelope.RequestID,
 			SessionID: envelope.SessionID, TraceID: envelope.TraceID,
 			AgentID: envelope.AgentID, AgentName: envelope.AgentName,
-			AgentInstanceID: envelope.AgentInstanceID, Connector: envelope.Connector,
+			AgentInstanceID: envelope.AgentInstanceID, Connector: connector,
 		})
 	case "llm_bridge":
 		return a.emitCLILLMBridgeV8(ctx, *request.LLMBridge)
@@ -492,10 +536,19 @@ func (a *APIServer) emitCLILLMBridgeV8(
 	}
 	finishedAt := time.Now().UTC()
 	startedAt := finishedAt.Add(-time.Duration(request.DurationMS * float64(time.Millisecond)))
+	// Attribute the CLI's LLM calls (plugin/skill scans, judge setup checks)
+	// to the calling user the way hook and judge spans are, and carry the
+	// CLI run id so the spans join that run's scan.completed rows
+	// (GAP-2644). A per-user gateway runs as its user, so the local process
+	// user is the fallback; a service-account gateway reports none.
+	caller := auditCallerIdentity(ctx)
+	user := newLLMEventUser(caller.ID, caller.Name, caller.IDKind != "")
 	observation := hookModelV8Observation{
 		meta: llmEventMeta{
 			Source: "python-cli", Provider: request.Provider, Model: request.Model,
 			ResponseID: request.ResponseID, FinishReasons: append([]string(nil), request.FinishReasons...),
+			RunID:  audit.EnvelopeFromContext(ctx).RunID,
+			UserID: user.ID, UserIDKind: user.IDKind, UserName: user.Name,
 		},
 		provider: request.Provider, reportedModel: request.Model, model: request.Model,
 		responseModel: request.ResponseModel, startedAt: startedAt, finishedAt: finishedAt,

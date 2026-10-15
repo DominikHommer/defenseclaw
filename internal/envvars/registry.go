@@ -43,6 +43,7 @@ const (
 	CategoryCredential      = "credential"
 	CategoryDiscovery       = "discovery"
 	CategorySplunkBridge    = "splunk_bridge"
+	CategoryFleet           = "fleet"
 	CategoryTestFixture     = "test_fixture"
 )
 
@@ -58,6 +59,7 @@ var AllowedCategories = map[string]struct{}{
 	CategoryDiscovery:       {},
 	CategorySplunkBridge:    {},
 	CategoryTestFixture:     {},
+	CategoryFleet:           {},
 }
 
 // SecurityImpact levels.
@@ -74,6 +76,25 @@ var AllowedSecurityImpact = map[string]struct{}{
 	ImpactLow:    {},
 	ImpactMedium: {},
 	ImpactHigh:   {},
+}
+
+// Managed-mode policies (the registry's per-entry managed field).
+const (
+	// ManagedAllow reads the variable as set.
+	ManagedAllow = "allow"
+	// ManagedIgnore treats the variable as unset on a managed standalone
+	// host, from the process environment and from .env.
+	ManagedIgnore = "ignore"
+	// ManagedTightenOnly passes the value through; its reader honours it
+	// only when it makes the setting stricter.
+	ManagedTightenOnly = "tighten_only"
+)
+
+// AllowedManaged is the set of valid managed strings.
+var AllowedManaged = map[string]struct{}{
+	ManagedAllow:       {},
+	ManagedIgnore:      {},
+	ManagedTightenOnly: {},
 }
 
 // truthyValues matches cli/defenseclaw/envvars.py _TRUTHY.
@@ -105,6 +126,9 @@ type EnvVar struct {
 	ReplacementHint string     `json:"replacement_hint,omitempty"`
 	Deprecated      bool       `json:"deprecated,omitempty"`
 	MigrationOnly   bool       `json:"migration_only,omitempty"`
+	// Managed is what a managed standalone host does with the variable:
+	// ManagedAllow, ManagedIgnore or ManagedTightenOnly.
+	Managed string `json:"managed"`
 }
 
 // IsActive returns true when the var is set to a value that activates
@@ -113,11 +137,22 @@ func (e EnvVar) IsActive() bool {
 	return e.isActiveWithGetter(os.Getenv)
 }
 
+// activeWhenNonEmpty lists the variables that carry a value rather than a
+// switch: any non-empty value is active. Mirrors _ACTIVE_WHEN_NONEMPTY in
+// cli/defenseclaw/envvars.py.
+var activeWhenNonEmpty = map[string]struct{}{
+	"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": {},
+	"DEFENSECLAW_SANDBOX_ID":              {},
+}
+
 // isActiveWithGetter is the testable seam used by IsActive.
 func (e EnvVar) isActiveWithGetter(get func(string) string) bool {
 	v := strings.ToLower(strings.TrimSpace(get(e.Name)))
 	if v == "" {
 		return false
+	}
+	if _, ok := activeWhenNonEmpty[e.Name]; ok {
+		return true
 	}
 	_, truthy := truthyValues[v]
 	return truthy
@@ -274,10 +309,10 @@ func validateEntry(idx int, e EnvVar) error {
 	if e.Name == "" {
 		return fmt.Errorf("registry.json: entry #%d has empty name", idx)
 	}
-	// Names must start with DEFENSECLAW_ (or be the legacy
-	// MIGRATION_DEFENSECLAW_HOME).
-	if !strings.HasPrefix(e.Name, "DEFENSECLAW_") && e.Name != "MIGRATION_DEFENSECLAW_HOME" {
-		return fmt.Errorf("registry.json: entry %q: name must start with DEFENSECLAW_", e.Name)
+	if !strings.HasPrefix(e.Name, "DEFENSECLAW_") &&
+		!strings.HasPrefix(e.Name, "DCLAW_") &&
+		e.Name != "MIGRATION_DEFENSECLAW_HOME" {
+		return fmt.Errorf("registry.json: entry %q: name must start with DEFENSECLAW_ or DCLAW_", e.Name)
 	}
 	if _, ok := AllowedCategories[e.Category]; !ok {
 		return fmt.Errorf("registry.json: entry %q: unknown category %q", e.Name, e.Category)
@@ -290,6 +325,9 @@ func validateEntry(idx int, e EnvVar) error {
 	}
 	if e.Since == "" {
 		return fmt.Errorf("registry.json: entry %q: since is required", e.Name)
+	}
+	if _, ok := AllowedManaged[e.Managed]; !ok {
+		return fmt.Errorf("registry.json: entry %q: managed must be allow, ignore or tighten_only, not %q", e.Name, e.Managed)
 	}
 	if e.MigrationOnly && !e.Deprecated {
 		return fmt.Errorf("registry.json: entry %q: migration_only requires deprecated=true", e.Name)

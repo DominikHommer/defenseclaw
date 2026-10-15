@@ -412,10 +412,7 @@ func (builder *InboundImportBuilder) BuildTrace(
 				localCustom[key] = value
 			}
 		}
-		mergedCustom, mergeErr := NewTelemetryCustomResourceAttributes(
-			localCustom,
-			input.LocalResource.custom.CompatibilityAliasesEnabled(),
-		)
+		mergedCustom, mergeErr := NewTelemetryCustomResourceAttributes(localCustom)
 		if mergeErr != nil {
 			return Record{}, mergeErr
 		}

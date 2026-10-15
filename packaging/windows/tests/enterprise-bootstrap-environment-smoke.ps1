@@ -7,11 +7,19 @@
 param(
     [switch]$Worker,
     [string]$ResultPath,
+    [string]$StartSignalPath,
     [int]$HoldMilliseconds = 0
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# Race workers must start the way this process was started. Below, the smoke
+# clears the profile variables and the production definitions pin
+# PSModulePath to the engine module directory. In that minimal environment a
+# fresh Windows PowerShell 5.1 resolves its first command (Join-Path) through
+# a full module analysis: 20-35 seconds of CPU per worker on a hosted runner,
+# which used up the race budget before the race began.
+$launchEnvironment = [Environment]::GetEnvironmentVariables('Process')
 
 $installerPath = [IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\install-enterprise.ps1')
@@ -99,6 +107,7 @@ function Invoke-ProtectedEnvironmentProbe {
             [void](Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $root `
                 -ExpectedSecurity $context.Security `
+                -ExpectedParent $windowsTemp `
                 -RequireEmpty)
 
             foreach ($name in @(
@@ -149,19 +158,67 @@ function Invoke-ProtectedEnvironmentProbe {
             # independently catches PS 5.1 Add-Type, struct-layout, entry-point,
             # and native buffer-management regressions on a real Windows host.
             $nativePath = Initialize-DefenseClawBootstrapNativePath
+            foreach ($case in @(
+                [pscustomobject]@{
+                    Name = 'local/domain user'
+                    SID = 'S-1-5-21-1000-2000-3000-1001'
+                    Accepted = $true
+                },
+                [pscustomobject]@{
+                    Name = 'Microsoft Entra ID user'
+                    SID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
+                    Accepted = $true
+                },
+                [pscustomobject]@{
+                    Name = 'truncated Microsoft Entra ID user'
+                    SID = 'S-1-12-1-1111111111-2222222222-3333333333'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'LocalSystem'
+                    SID = 'S-1-5-18'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'LocalService'
+                    SID = 'S-1-5-19'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'NetworkService'
+                    SID = 'S-1-5-20'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'NT SERVICE'
+                    SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+                    Accepted = $false
+                }
+            )) {
+                $parsed = [Security.Principal.SecurityIdentifier]::new($case.SID)
+                $nativeAccepted = [bool]$nativePath::IsInteractiveUserSID($parsed)
+                $scriptAccepted = [bool](
+                    Test-DefenseClawInteractiveUserSID -SID $parsed
+                )
+                if ($nativeAccepted -ne [bool]$case.Accepted -or
+                    $scriptAccepted -ne [bool]$case.Accepted) {
+                    throw (
+                        "interactive SID classification mismatch for $($case.Name): " +
+                        "native=$nativeAccepted script=$scriptAccepted " +
+                        "expected=$($case.Accepted)"
+                    )
+                }
+            }
             $activeSessionSIDs = @($nativePath::GetActiveSessionSIDs())
             $canonicalActiveSessionSIDs = @(
                 foreach ($activeSessionSID in $activeSessionSIDs) {
-                    $canonical = [Security.Principal.SecurityIdentifier]::new(
+                    $parsed = [Security.Principal.SecurityIdentifier]::new(
                         [string]$activeSessionSID
-                    ).Value
-                    if (-not $canonical.StartsWith(
-                            'S-1-5-21-',
-                            [StringComparison]::OrdinalIgnoreCase
-                        )) {
-                        throw "native WTS discovery returned a non-user SID: $canonical"
+                    )
+                    if (-not $nativePath::IsInteractiveUserSID($parsed)) {
+                        throw "native WTS discovery returned a non-user SID: $($parsed.Value)"
                     }
-                    $canonical
+                    $parsed.Value
                 }
             )
             $orderedUniqueActiveSessionSIDs = @(
@@ -292,6 +349,239 @@ function Invoke-ProtectedEnvironmentProbe {
     return $probeResult
 }
 
+function Invoke-SuppliedBootstrapParentProbe {
+    # Exercises the -BootstrapParent code path added for AVC:
+    #   1. Happy path — a caller-supplied parent that mirrors the outer
+    #      signed Setup EXE's protected scratch dir (SYSTEM+Admins FA,
+    #      DACL protected) is accepted; the bootstrap child lands under
+    #      that parent and Remove- restores state without touching the
+    #      caller-supplied parent itself.
+    #   2. Untrusted-ancestor rejection — passing a user-owned path (a
+    #      profile subdirectory) trips
+    #      Assert-DefenseClawBootstrapExternalParentTrust's owner walk.
+    #   3. Reparse-point rejection — a directory junction under the same
+    #      protected parent trips the reparse-in-ancestor-chain guard.
+    #
+    # Fixture roots are staged under the caller's %TEMP% so the smoke
+    # harness stays hermetic. The protected parent's SDDL matches
+    # exactly what cmd/defenseclaw-enterprise-setup/platform_windows.go
+    # createEnterpriseSetupStage emits.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    $elevated = $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+    if (-not $elevated) {
+        # The probe requires elevation to construct the protected parent.
+        # Match the pattern used by the other probes: skip cleanly under
+        # a non-elevated harness rather than failing closed.
+        #
+        # Return the full result-shape (all three contract fields as
+        # $false) so downstream property reads under
+        # `Set-StrictMode -Version Latest` do not throw when the report
+        # emitter walks $suppliedBootstrapParent.supplied_parent_honored
+        # et al.
+        return [pscustomobject]@{
+            skipped = $true
+            reason = 'requires elevation to create a protected parent'
+            supplied_parent_honored = $false
+            untrusted_ancestor_rejected = $false
+            reparse_point_rejected = $false
+        }
+    }
+
+    $originalBootstrapParent = $script:BootstrapParent
+    # Stage the protected parent under %ProgramData%, not %TEMP%. The
+    # Assert-DefenseClawBootstrapExternalParentTrust walk climbs the
+    # ANCESTOR chain from the leaf to the drive root and refuses any
+    # ancestor that grants an untrusted principal replacement rights.
+    # On CI runners %TEMP% resolves to C:\Users\runneradmin\..., whose
+    # ancestor C:\Users\runneradmin is owned by the runner user — so a
+    # leaf under %TEMP% fails the ancestor check even when the leaf's
+    # own SDDL is admin-only. %ProgramData% is SYSTEM-owned with the
+    # Users CreateFiles+AppendData ACE that the walk deliberately
+    # tolerates, so the ancestor chain is admin-clean from C:\ down.
+    $programData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($programData) -or
+        -not [IO.Directory]::Exists($programData)) {
+        $programData = 'C:\ProgramData'
+    }
+    $protectedParent = [IO.Path]::Combine(
+        $programData,
+        "DefenseClaw-BootstrapParentSmoke-$([Guid]::NewGuid().ToString('N'))"
+    )
+    $parentSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $parentSecurity.SetSecurityDescriptorSddlForm(
+        'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+    )
+    $parentDirInfo = [IO.DirectoryInfo]::new($protectedParent)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::Create($parentDirInfo, $parentSecurity)
+    }
+    else {
+        $parentDirInfo.Create($parentSecurity)
+    }
+
+    # Dedicated untrusted fixture: a directory whose DACL explicitly grants
+    # BUILTIN\Users (S-1-5-32-545) modify access. Staged under
+    # %ProgramData% for the same reason as the protected parent — the
+    # ancestor chain must be admin-clean so the assert reaches the leaf's
+    # own DACL, where the planted Users:Modify ACE is what we want to
+    # trip on. Under %TEMP% the walk would reject on the user-owned
+    # ancestor before ever reading our planted ACE, masking whether the
+    # planted-ACE rejection actually works.
+    $untrustedFixture = [IO.Path]::Combine(
+        $programData,
+        "DefenseClaw-BootstrapUntrustedFixture-$([Guid]::NewGuid().ToString('N'))"
+    )
+    $untrustedSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    # 0x001301BF = FILE_MODIFY_ACCESS (write-like — the exact right the
+    # trust walk refuses on untrusted principals). BU = BUILTIN\Users.
+    $untrustedSecurity.SetSecurityDescriptorSddlForm(
+        'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x001301BF;;;BU)'
+    )
+    $untrustedDirInfo = [IO.DirectoryInfo]::new($untrustedFixture)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::Create(
+            $untrustedDirInfo, $untrustedSecurity
+        )
+    }
+    else {
+        $untrustedDirInfo.Create($untrustedSecurity)
+    }
+
+    $bootstrapChildPath = $null
+    try {
+        # Happy path: supplied protected parent is honored.
+        $script:BootstrapParent = $protectedParent
+        $context = New-DefenseClawBootstrapEnvironment
+        try {
+            $bootstrapChildPath = [string]$context.Path
+            $parentOfChild = [IO.Path]::GetDirectoryName(
+                $bootstrapChildPath
+            )
+            if (-not [string]::Equals(
+                    $parentOfChild,
+                    $protectedParent,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [IO.Path]::GetFileName($bootstrapChildPath) -cnotmatch
+                    '^DefenseClaw-Bootstrap-[a-f0-9]{32}$') {
+                throw (
+                    'supplied -BootstrapParent was not honored: root=' +
+                    "$bootstrapChildPath parent=$parentOfChild"
+                )
+            }
+            [void](Assert-DefenseClawBootstrapOneShotRoot `
+                -Path $bootstrapChildPath `
+                -ExpectedSecurity $context.Security `
+                -ExpectedParent $protectedParent `
+                -RequireEmpty)
+            if (-not [string]::Equals(
+                    [string]$context.BootstrapParent,
+                    $protectedParent,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (
+                    'context.BootstrapParent did not record the supplied parent: ' +
+                    [string]$context.BootstrapParent
+                )
+            }
+        }
+        finally {
+            Restore-DefenseClawBootstrapEnvironment -Context $context
+            Remove-DefenseClawBootstrapEnvironment -Context $context
+        }
+        if ([IO.Directory]::Exists($bootstrapChildPath)) {
+            throw (
+                'bootstrap child survived Remove-DefenseClawBootstrapEnvironment: ' +
+                $bootstrapChildPath
+            )
+        }
+        if (-not [IO.Directory]::Exists($protectedParent)) {
+            throw (
+                'cleanup removed the caller-supplied protected parent: ' +
+                $protectedParent
+            )
+        }
+
+        # Untrusted-ancestor rejection: point the validator at the fixture
+        # we staged with an explicit BUILTIN\Users Modify ACE. Deterministic
+        # regardless of whether the harness runs under a normal admin user
+        # or LocalSystem — the planted Users:Modify ACE is always
+        # write-like for an untrusted principal.
+        $untrustedRejected = $false
+        try {
+            [void](Assert-DefenseClawBootstrapExternalParentTrust `
+                -Path $untrustedFixture)
+        }
+        catch {
+            $untrustedRejected = $true
+        }
+        if (-not $untrustedRejected) {
+            throw (
+                'Assert-DefenseClawBootstrapExternalParentTrust accepted a ' +
+                "fixture with a planted Users:Modify ACE: $untrustedFixture"
+            )
+        }
+
+        # Reparse-point rejection: create a junction under the protected
+        # parent and pass its path to the validator. The ancestor-chain
+        # walk refuses any reparse-point node.
+        $reparseTarget = [IO.Path]::Combine(
+            $protectedParent,
+            'reparse-target'
+        )
+        [void][IO.Directory]::CreateDirectory($reparseTarget)
+        $reparseJunction = [IO.Path]::Combine(
+            $protectedParent,
+            'reparse-junction'
+        )
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Junction `
+            -Path $reparseJunction `
+            -Value $reparseTarget `
+            -Force)
+        $reparseRejected = $false
+        try {
+            [void](Assert-DefenseClawBootstrapExternalParentTrust `
+                -Path $reparseJunction)
+        }
+        catch {
+            $reparseRejected = $true
+        }
+        if (-not $reparseRejected) {
+            throw (
+                'Assert-DefenseClawBootstrapExternalParentTrust accepted a ' +
+                "reparse-point parent: $reparseJunction"
+            )
+        }
+    }
+    finally {
+        $script:BootstrapParent = $originalBootstrapParent
+        foreach ($fixture in @($protectedParent, $untrustedFixture)) {
+            if ([IO.Directory]::Exists($fixture)) {
+                try {
+                    [IO.Directory]::Delete($fixture, $true)
+                }
+                catch {
+                    # Best-effort cleanup; log-and-ignore is intentional
+                    # so a probe reporting a real failure does not have
+                    # its stack overwritten by a cleanup exception.
+                }
+            }
+        }
+    }
+    return [pscustomobject]@{
+        skipped = $false
+        supplied_parent_honored = $true
+        untrusted_ancestor_rejected = $true
+        reparse_point_rejected = $true
+    }
+}
+
 function Invoke-CollisionNoSeizeProbe {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -343,6 +633,7 @@ function Invoke-CollisionNoSeizeProbe {
             [void](Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $collisionPath `
                 -ExpectedSecurity $expected `
+                -ExpectedParent $windowsTemp `
                 -RequireEmpty)
         }
         catch {
@@ -467,7 +758,7 @@ function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
     $disconnectedHome = [IO.Path]::Combine($fixtureRoot, 'disconnected')
     [void][IO.Directory]::CreateDirectory($activeHome)
     [void][IO.Directory]::CreateDirectory($disconnectedHome)
-    $activeSID = 'S-1-5-21-1000-2000-3000-1001'
+    $activeSID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
     $disconnectedSID = 'S-1-5-21-1000-2000-3000-1002'
     try {
         $profiles = @(
@@ -487,6 +778,9 @@ function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
             -Profiles $profiles `
             -ActiveSessionSIDs @(
                 $activeSID,
+                'S-1-5-18',
+                'S-1-5-19',
+                'S-1-5-20',
                 'not-a-sid'
             ) `
             -DeferInactiveProfiles
@@ -1662,6 +1956,24 @@ if ($Worker) {
         throw 'bootstrap environment worker requires -ResultPath'
     }
     try {
+        if (-not [string]::IsNullOrWhiteSpace($StartSignalPath)) {
+            # Engine startup, script parsing and the production definition
+            # load are finished. Report readiness and enter the race only on
+            # the parent's shared start signal so every worker's protected
+            # root, compile and cleanup overlap. The wait is bounded so an
+            # abandoned worker exits on its own.
+            [IO.File]::WriteAllText(
+                [IO.Path]::GetFullPath($ResultPath) + '.ready',
+                [string]$PID
+            )
+            $startWait = [Diagnostics.Stopwatch]::StartNew()
+            while (-not [IO.File]::Exists($StartSignalPath)) {
+                if ($startWait.Elapsed.TotalSeconds -ge 600) {
+                    throw 'bootstrap race start signal did not arrive within 600 seconds'
+                }
+                [Threading.Thread]::Sleep(20)
+            }
+        }
         $workerResult = Invoke-ProtectedEnvironmentProbe `
             -Hold $HoldMilliseconds
         [IO.File]::WriteAllText(
@@ -1741,6 +2053,23 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
+$suppliedBootstrapParent = Invoke-SuppliedBootstrapParentProbe
+# Assert the supplied-BootstrapParent contract. When the probe DIDN'T
+# skip (harness is elevated), every named path must have passed. A
+# future refactor that lets one of these fall to false without throwing
+# from within the probe body would otherwise slip through into a
+# successful report.
+if (-not [bool]$suppliedBootstrapParent.skipped -and
+    -not (
+        [bool]$suppliedBootstrapParent.supplied_parent_honored -and
+        [bool]$suppliedBootstrapParent.untrusted_ancestor_rejected -and
+        [bool]$suppliedBootstrapParent.reparse_point_rejected
+    )) {
+    throw (
+        'Invoke-SuppliedBootstrapParentProbe returned without a skip but ' +
+        'did not confirm all three supplied-parent contract fields'
+    )
+}
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
 $renderedTargetsActiveSessionContract =
     Invoke-RenderedEnterpriseTargetsActiveSessionProbe
@@ -1754,6 +2083,34 @@ $raceRoot = [IO.Path]::Combine(
 [void][IO.Directory]::CreateDirectory($raceRoot)
 $processes = [Collections.Generic.List[Diagnostics.Process]]::new()
 $resultPaths = [Collections.Generic.List[string]]::new()
+$raceStartSignalPath = [IO.Path]::Combine($raceRoot, 'start')
+# Worker startup (engine start, script parse and the production definition
+# load) is bounded separately from the race. The race deadline starts at the
+# shared start signal and is one deadline for all six workers, not a fresh
+# wait per worker.
+$raceStartupSeconds = 120
+$raceSeconds = 120
+function Get-BootstrapRaceWorkerDiagnostic {
+    param([int]$Index)
+    $workerProcess = $processes[$Index]
+    $state = if ($workerProcess.HasExited) {
+        "exited $($workerProcess.ExitCode)"
+    }
+    else {
+        'running'
+    }
+    $ready = [IO.File]::Exists($resultPaths[$Index] + '.ready')
+    $result = if ([IO.File]::Exists($resultPaths[$Index])) {
+        [IO.File]::ReadAllText($resultPaths[$Index])
+    }
+    else {
+        'no result'
+    }
+    return (
+        "worker $Index (pid $($workerProcess.Id)) $state, ready=$ready, " +
+        "result: $result"
+    )
+}
 try {
     $engine = if ($PSVersionTable.PSEdition -eq 'Core') {
         [IO.Path]::Combine($PSHOME, 'pwsh.exe')
@@ -1778,6 +2135,8 @@ try {
             '-Worker',
             '-ResultPath',
             ('"{0}"' -f $workerResultPath.Replace('"', '\"')),
+            '-StartSignalPath',
+            ('"{0}"' -f $raceStartSignalPath.Replace('"', '\"')),
             '-HoldMilliseconds',
             '750'
         ) -join ' '
@@ -1786,26 +2145,71 @@ try {
         $start.Arguments = $arguments
         $start.UseShellExecute = $false
         $start.CreateNoWindow = $true
+        $start.EnvironmentVariables.Clear()
+        foreach ($entry in $launchEnvironment.GetEnumerator()) {
+            $start.EnvironmentVariables[[string]$entry.Key] = [string]$entry.Value
+        }
         $process = [Diagnostics.Process]::Start($start)
         if ($null -eq $process) {
             throw "could not start bootstrap race worker $index"
         }
         $processes.Add($process)
     }
-    foreach ($process in $processes) {
-        # Hosted Windows runners can spend well over 30 seconds starting six
-        # concurrent PowerShell workers while Defender scans Add-Type output.
-        if (-not $process.WaitForExit(120000)) {
-            try {
-                $process.Kill()
+    $raceClock = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $notReady = @(
+            for ($index = 0; $index -lt $processes.Count; $index++) {
+                if ([IO.File]::Exists($resultPaths[$index] + '.ready')) {
+                    continue
+                }
+                if ($processes[$index].HasExited) {
+                    throw (
+                        'bootstrap race worker failed before the race: ' +
+                        (Get-BootstrapRaceWorkerDiagnostic -Index $index)
+                    )
+                }
+                $index
             }
-            catch {
-                # Best-effort termination after a bounded test timeout.
-            }
-            throw "bootstrap race worker $($process.Id) timed out"
+        )
+        if ($notReady.Count -eq 0) {
+            break
         }
-        if ($process.ExitCode -ne 0) {
-            throw "bootstrap race worker $($process.Id) exited $($process.ExitCode)"
+        if ($raceClock.Elapsed.TotalSeconds -ge $raceStartupSeconds) {
+            throw (
+                "bootstrap race workers were not ready within $raceStartupSeconds seconds: " +
+                (@(
+                    foreach ($index in $notReady) {
+                        Get-BootstrapRaceWorkerDiagnostic -Index $index
+                    }
+                ) -join '; ')
+            )
+        }
+        [Threading.Thread]::Sleep(50)
+    }
+    [IO.File]::WriteAllText($raceStartSignalPath, '')
+    $raceClock.Restart()
+    for ($index = 0; $index -lt $processes.Count; $index++) {
+        $remaining = [Math]::Max(
+            0,
+            [int](($raceSeconds * 1000) - $raceClock.ElapsedMilliseconds)
+        )
+        if (-not $processes[$index].WaitForExit($remaining)) {
+            throw (
+                "bootstrap race did not finish within $raceSeconds seconds of the start signal: " +
+                (@(
+                    for ($pending = 0; $pending -lt $processes.Count; $pending++) {
+                        if (-not $processes[$pending].HasExited) {
+                            Get-BootstrapRaceWorkerDiagnostic -Index $pending
+                        }
+                    }
+                ) -join '; ')
+            )
+        }
+        if ($processes[$index].ExitCode -ne 0) {
+            throw (
+                'bootstrap race worker failed: ' +
+                (Get-BootstrapRaceWorkerDiagnostic -Index $index)
+            )
         }
     }
     $raceResults = @(
@@ -1831,7 +2235,18 @@ try {
     }
 }
 finally {
+    # Never leave a worker running after a failure: it would keep writing
+    # under the race root while it is deleted and hold the caller's pipes.
     foreach ($process in $processes) {
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill()
+            }
+            catch {
+                # The worker may exit between HasExited and Kill.
+            }
+            [void]$process.WaitForExit(10000)
+        }
         $process.Dispose()
     }
     if ([IO.Directory]::Exists($raceRoot)) {
@@ -1877,6 +2292,14 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$single.hostile_fixture_cleanup_verified
     existing_collision_rejected_without_acl_seizure =
         [bool]$collisionRejected
+    supplied_bootstrap_parent_skipped =
+        [bool]$suppliedBootstrapParent.skipped
+    supplied_bootstrap_parent_honored =
+        [bool]$suppliedBootstrapParent.supplied_parent_honored
+    supplied_bootstrap_parent_untrusted_ancestor_rejected =
+        [bool]$suppliedBootstrapParent.untrusted_ancestor_rejected
+    supplied_bootstrap_parent_reparse_point_rejected =
+        [bool]$suppliedBootstrapParent.reparse_point_rejected
     rendered_targets_version_contract =
         [bool]$renderedTargetsVersionContract
     rendered_targets_active_session_contract =

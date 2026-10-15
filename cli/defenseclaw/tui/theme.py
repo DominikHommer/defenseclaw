@@ -79,6 +79,9 @@ STATE_STYLES: Mapping[str, str] = {
     "warn": DEFAULT_TOKENS.accent_amber,
     "reconnecting": DEFAULT_TOKENS.accent_amber,
     "starting": DEFAULT_TOKENS.accent_amber,
+    # A server the agent skips (url-only Claude Code entry, GAP-2531) reads
+    # amber in the MCPs list as in its detail pane (GAP-2544).
+    "not loaded": DEFAULT_TOKENS.accent_amber,
     "quarantined": DEFAULT_TOKENS.accent_pink,
     "disabled": DEFAULT_TOKENS.text_muted,
     "offline": DEFAULT_TOKENS.text_muted,
@@ -124,7 +127,7 @@ def state_color(state: str, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
         return tokens.accent_green
     if normalized in {"blocked", "error", "rejected", "stopped"}:
         return tokens.accent_red
-    if normalized in {"degraded", "reconnecting", "starting", "warn", "warning"}:
+    if normalized in {"degraded", "not loaded", "reconnecting", "starting", "warn", "warning"}:
         return tokens.accent_amber
     if normalized == "quarantined":
         return tokens.accent_pink
@@ -135,31 +138,6 @@ def state_dot(state: str) -> str:
     """Return the parity dot glyph for a service state."""
 
     return STATE_DOTS.get(state.lower(), "○")
-
-
-def css_variables(tokens: ThemeTokens = DEFAULT_TOKENS) -> dict[str, str]:
-    """Return Textual CSS variable names for the current theme."""
-
-    return {
-        "dc-surface-base": tokens.surface_base,
-        "dc-surface-panel": tokens.surface_panel,
-        "dc-surface-raised": tokens.surface_raised,
-        "dc-surface-hover": tokens.surface_hover,
-        "dc-surface-selected": tokens.surface_selected,
-        "dc-border-muted": tokens.border_muted,
-        "dc-border-active": tokens.border_active,
-        "dc-text-primary": tokens.text_primary,
-        "dc-text-secondary": tokens.text_secondary,
-        "dc-text-muted": tokens.text_muted,
-        "dc-accent-cyan": tokens.accent_cyan,
-        "dc-accent-blue": tokens.accent_blue,
-        "dc-accent-violet": tokens.accent_violet,
-        "dc-accent-green": tokens.accent_green,
-        "dc-accent-amber": tokens.accent_amber,
-        "dc-accent-orange": tokens.accent_orange,
-        "dc-accent-red": tokens.accent_red,
-        "dc-accent-pink": tokens.accent_pink,
-    }
 
 
 def textual_css(tokens: ThemeTokens = DEFAULT_TOKENS) -> str:

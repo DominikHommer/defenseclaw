@@ -17,7 +17,34 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var auditDBWindowsServiceAccountSID = managed.WindowsServiceAccountSID
+var (
+	auditDBWindowsServiceAccountSID           = managed.WindowsServiceAccountSID
+	auditDBWindowsCurrentProcessRunsAsService = managed.WindowsCurrentProcessRunsAsService
+	auditDBWindowsCurrentProcessOwnerSID      = managed.WindowsCurrentProcessOwnerSID
+)
+
+// requireAuditDBWindowsGatewayToken proves this process is the pinned gateway
+// service: its 1.0.0 virtual account, or LocalSystem carrying the service SID
+// as an enabled group. Every managed audit file is checked and written only
+// by that process.
+func requireAuditDBWindowsGatewayToken(gatewayServiceSID *windows.SID) error {
+	runsAsGateway, err := auditDBWindowsCurrentProcessRunsAsService(gatewayServiceSID)
+	if err != nil {
+		return fmt.Errorf("audit: resolve managed gateway token identity: %w", err)
+	}
+	if runsAsGateway {
+		return nil
+	}
+	current := "<unknown>"
+	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user != nil {
+		current = auditDBWindowsSID(user.User.Sid)
+	}
+	return fmt.Errorf(
+		"audit: managed gateway token SID %s does not match pinned service SID %s",
+		current,
+		auditDBWindowsSID(gatewayServiceSID),
+	)
+}
 
 // Shared access masks for the managed audit-database DACL. These form a
 // closed round-trip between auditDBWindowsProtectedDACLForOwner (which
@@ -78,6 +105,39 @@ func openAuditDBFileNoFollow(path string, create, harden bool) (*os.File, error)
 	return file, nil
 }
 
+// auditDBWindowsFileStandardInfo mirrors FILE_STANDARD_INFO.
+type auditDBWindowsFileStandardInfo struct {
+	AllocationSize int64
+	EndOfFile      int64
+	NumberOfLinks  uint32
+	DeletePending  byte
+	Directory      byte
+}
+
+func auditDBWindowsStandardInfo(file *os.File) (auditDBWindowsFileStandardInfo, error) {
+	var info auditDBWindowsFileStandardInfo
+	err := windows.GetFileInformationByHandleEx(
+		windows.Handle(file.Fd()), windows.FileStandardInfo,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)),
+	)
+	return info, err
+}
+
+// auditDBPinnedFileDeleted reports that a pinned file was deleted (delete
+// pending or no remaining links), as after SQLite deletes a WAL or SHM file
+// on its last close.
+func auditDBPinnedFileDeleted(file *os.File) (bool, error) {
+	info, err := auditDBWindowsStandardInfo(file)
+	if err != nil {
+		return false, err
+	}
+	return info.DeletePending != 0 || info.NumberOfLinks == 0, nil
+}
+
+// validateAuditDBSidecarLinkCount is enforced by openAuditDBFileNoFollow on
+// Windows for every database file.
+func validateAuditDBSidecarLinkCount(*os.File) error { return nil }
+
 func auditDBWindowsFileAccess(harden bool) uint32 {
 	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE)
 	if harden {
@@ -121,16 +181,8 @@ func auditDBPlatformFileNeedsHardening(file *os.File) (bool, error) {
 	if gatewayServiceSID == nil {
 		return false, nil
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return false, fmt.Errorf("audit: resolve current Windows user for managed audit validation: %w", err)
-	}
-	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-		return false, fmt.Errorf(
-			"audit: managed gateway token SID %s does not match pinned service SID %s",
-			auditDBWindowsSID(currentUser.User.Sid),
-			auditDBWindowsSID(gatewayServiceSID),
-		)
+	if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
+		return false, err
 	}
 	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
 	if err != nil {
@@ -187,7 +239,21 @@ func validateAuditDBWindowsSecurityDescriptor(
 		return fmt.Errorf("audit: inspect Windows owner: %w", err)
 	}
 	if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) {
-		return fmt.Errorf("audit: Windows owner %s is not trusted", auditDBWindowsSID(owner))
+		// AIFW-34262 ancestor-advisory: an untrusted OWNER on a path under
+		// managed.PlatformInstallerOwnedPath is a permission-shaped verdict,
+		// not a structural failure. Under `protectChildren=false` (an
+		// ancestor of the audit DB) the shared managed-trust helper
+		// downgrades it to a managed_trust_ancestor_advisory warning; the
+		// leaf and every non-installer-owned path keep it fatal.
+		verdict := managed.NewTrustVerdict(
+			"audit: Windows owner %s is not trusted", auditDBWindowsSID(owner),
+		)
+		advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+		if err := managed.RelaxAncestorTrustVerdict(
+			advisory, path, "audit store owner", verdict,
+		); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -318,12 +384,8 @@ func auditDBWindowsProtectedDACLForOwner(
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	if gatewayServiceSID != nil {
-		if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-			return nil, fmt.Errorf(
-				"audit: managed gateway token SID %s does not match pinned service SID %s",
-				auditDBWindowsSID(currentUser.User.Sid),
-				auditDBWindowsSID(gatewayServiceSID),
-			)
+		if err := requireAuditDBWindowsGatewayToken(gatewayServiceSID); err != nil {
+			return nil, err
 		}
 		ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 		if err != nil {
@@ -534,10 +596,27 @@ func rejectUntrustedAuditDBWindowsACEs(
 			continue
 		}
 		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
-			return fmt.Errorf(
+			// AIFW-34262 ancestor-advisory: a foreign-principal ACE on a path
+			// under managed.PlatformInstallerOwnedPath is permission-shaped —
+			// AVC's setup places well-known BUILTIN\Users read ACEs on
+			// %ProgramData%\Cisco that DefenseClaw's stricter DACL policy
+			// otherwise rejects hard-fatal, taking the gateway down on
+			// startup the way the analogous /opt/cisco 0775 rejection did
+			// on macOS. When `protectChildren=false` (ancestor of the audit
+			// DB) the verdict is downgraded to an advisory warning. Leaves
+			// and non-installer-owned paths keep it fatal, as do structural
+			// failures (unsupported ACE type, API errors) via the earlier
+			// returns above. TrustStrictAncestorsEnv=1 restores fatality.
+			verdict := managed.NewTrustVerdict(
 				"audit: untrusted Windows principal %s has access mask 0x%x that can expose or modify audit storage on %s",
 				auditDBWindowsSID(sid), uint32(ace.Mask), path,
 			)
+			advisory := !protectChildren && managed.PlatformInstallerOwnedPath(path)
+			if err := managed.RelaxAncestorTrustVerdict(
+				advisory, path, "audit store DACL", verdict,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -643,3 +722,7 @@ func auditDBModeMatches(os.FileInfo, os.FileMode) bool { return true }
 // who can mutate the directory. validateAuditDBPlatformTrust already proves
 // owner, protected DACL, inheritance, and every write-capable ACE.
 func auditDBImmediateDirectoryModeTrusted(os.FileInfo) bool { return true }
+
+// auditDBOpenElsewhere needs no probe on Windows: SQLite opens the database
+// without delete sharing, so renaming a file another process has open fails.
+func auditDBOpenElsewhere(string) error { return nil }

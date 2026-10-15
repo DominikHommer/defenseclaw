@@ -198,14 +198,14 @@ func (a *APIServer) applyAgentHookToolChains(
 			projectSQLValuePersistenceSink(ctx, req, &projection)
 		}
 		projection = toolChainProjectionForPolicyPosture(
-			a.scannerCfg,
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			projection,
 		)
 	}
 	if len(typedFindings) != 0 {
-		intent := guardrailRuntimeActionForConnector(
-			a.scannerCfg,
+		intent := guardrailActionForConnector(
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			HighestSeverity(typedFindings),
 			true,
@@ -296,6 +296,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		return resp, finalization
 	}
 	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+		ctx,
 		req.ConnectorName,
 		profile,
 	)
@@ -326,7 +327,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			req.Payload,
 		)
 		readPathDigest, readValueDigests :=
-			toolValueLineageSuccessfulReadResult(req, outcome)
+			toolValueLineageSuccessfulReadResult(ctx, req, outcome)
 		var (
 			sqlSource                  audit.ToolChainPendingSQLValueSource
 			sqlProjection              toolValueLineageSQLSuccessfulProjection
@@ -431,7 +432,7 @@ func (a *APIServer) applyAgentHookToolChains(
 
 	caps := profile.Capabilities
 	denyEligible := toolChainProjectionHasBlockIntent(
-		a.scannerCfg,
+		a.decisionConfig(ctx),
 		req.ConnectorName,
 		observationProjection,
 	) &&
@@ -447,7 +448,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// prevents a CRITICAL candidate on the same sink from promoting an
 		// unrelated HIGH match to a block.
 		observationProjection = toolChainBlockEligibleProjection(
-			a.scannerCfg,
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			observationProjection,
 		)
@@ -489,8 +490,8 @@ func (a *APIServer) applyAgentHookToolChains(
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailRuntimeActionForConnector(
-				a.scannerCfg,
+			guardrailActionForConnector(
+				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
 				true,
@@ -530,8 +531,8 @@ func (a *APIServer) applyAgentHookToolChains(
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailRuntimeActionForConnector(
-				a.scannerCfg,
+			guardrailActionForConnector(
+				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
 				true,
@@ -845,7 +846,7 @@ func toolChainProjectionHasBlockIntent(
 		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
 			definition.Step4Bit
 		if projection.EnforcementStepMask&steps != 0 &&
-			guardrailRuntimeActionForConnector(
+			guardrailActionForConnector(
 				cfg,
 				connectorName,
 				definition.Severity,
@@ -863,7 +864,7 @@ func toolChainBlockEligibleProjection(
 	projection guardrail.ToolChainProjection,
 ) guardrail.ToolChainProjection {
 	for index, definition := range guardrail.ToolChainDefinitions() {
-		if guardrailRuntimeActionForConnector(
+		if guardrailActionForConnector(
 			cfg,
 			connectorName,
 			definition.Severity,
@@ -2048,6 +2049,7 @@ func projectToolValueLineageSink(
 }
 
 func toolValueLineageSuccessfulReadResult(
+	ctx context.Context,
 	req agentHookRequest,
 	outcome connector.ToolLifecycleOutcome,
 ) (string, guardrail.ToolChainValueJoinDigests) {
@@ -2075,7 +2077,7 @@ func toolValueLineageSuccessfulReadResult(
 		Tool:       req.ToolName,
 		Args:       args,
 		CWD:        req.CWD,
-		ActiveHome: trustedSameHostHome(),
+		ActiveHome: hookActiveHome(ctx),
 	})
 	pathDigest, exact := exactSingleReadPathDigest(facts)
 	kind, supported := toolValueLineageSourceKindForSensitiveRead(facts)
@@ -2209,18 +2211,6 @@ func exactReportedToolInvocation(
 		strings.TrimSpace(value.Value) != "" && value.Value == req.ToolInvocationID
 }
 
-func firstObject(
-	payload map[string]interface{},
-	keys ...string,
-) map[string]interface{} {
-	for _, key := range keys {
-		if child := objectAt(payload, key); child != nil {
-			return child
-		}
-	}
-	return nil
-}
-
 func exactBool(
 	payload map[string]interface{},
 	keys ...string,
@@ -2321,6 +2311,8 @@ func mergeAgentHookFindings(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.SuppressNotification = resp.SuppressNotification
+	next.aiDefenseEnforced = resp.aiDefenseEnforced && next.Action == "block"
 	return next
 }
 
@@ -2344,6 +2336,8 @@ func committedAgentHookChainBlock(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.SuppressNotification = resp.SuppressNotification
+	next.aiDefenseEnforced = resp.aiDefenseEnforced && next.Action == "block"
 	return next
 }
 
@@ -2490,10 +2484,11 @@ var toolChainRelevantRuleIDs = []string{
 }
 
 func activeToolChainRulesetFingerprint(
+	ctx context.Context,
 	connectorName string,
 	profile connector.HookProfile,
 ) (string, error) {
-	generation := snapshotRulePackGeneration(connectorName)
+	generation := pinnedRuleGeneration(ctx, connectorName)
 	active := make(map[string]PatternRule, len(toolChainRelevantRuleIDs))
 	if generation != nil {
 		for _, category := range generation.categories {

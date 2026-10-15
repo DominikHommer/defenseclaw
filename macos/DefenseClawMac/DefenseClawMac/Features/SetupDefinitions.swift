@@ -111,9 +111,6 @@ enum TUIWizards {
                         defaultValue: "local",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         visibleWhen2: (key: "connector", equals: proxyConnectors)),
-            WizardField(key: "verify", label: "Verify after setup", kind: .bool, defaultValue: "yes",
-                        visibleWhen: (key: "action", equals: ["setup"]),
-                        visibleWhen2: (key: "connector", equals: proxyConnectors)),
             WizardField(key: "replace", label: "Replace existing", kind: .bool, defaultValue: "no",
                         visibleWhen: (key: "action", equals: ["setup"]),
                         visibleWhen2: (key: "connector", equals: hookConnectors),
@@ -162,7 +159,6 @@ enum TUIWizards {
         if restartOff { args.append("--no-restart") }
         if proxyConnectors.contains(connector) {
             append(v, "scanner-mode", flag: "--scanner-mode", to: &args)
-            if value(v, "verify", "yes") == "no" { args.append("--no-verify") }
             return [args]
         }
         flag(v, "replace", "--replace", to: &args)
@@ -210,7 +206,7 @@ enum TUIWizards {
 
     private static let aiDefense = WizardDefinition(
         id: "ai-defense", title: "Cisco AI Defense", icon: "shield.lefthalf.filled",
-        blurb: "Configure the cloud inspection endpoint, credential, scanner mode, and connectivity verification.",
+        blurb: "Configure the cloud inspection endpoint, credential and scanner mode. Check the result with `defenseclaw doctor`.",
         baseArgs: ["setup", "guardrail"],
         commandBuilder: aiDefenseCommands,
         secretInputField: "secret",
@@ -255,7 +251,9 @@ enum TUIWizards {
                 defaultValue: "no"
             ),
             WizardField(key: "restart", label: "Restart gateway", kind: .bool, defaultValue: "yes"),
-            WizardField(key: "verify", label: "Verify connectivity", kind: .bool, defaultValue: "yes"),
+            WizardField(key: "verify", label: "Verify the skill scanner", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "skill-scanner", equals: ["yes"]),
+                        help: "Checks the skill scanner after saving. Check the guardrail with `defenseclaw doctor`."),
         ]
     )
 
@@ -314,7 +312,6 @@ enum TUIWizards {
             WizardField(key: "service-name", label: "Service name", kind: .text(placeholder: "defenseclaw"), defaultValue: "defenseclaw", visibleWhen: (key: "action", equals: ["up"])),
             WizardField(key: "no-wait", label: "Do not wait for readiness", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["up"])),
             WizardField(key: "no-config", label: "Do not update config", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["up"])),
-            WizardField(key: "audit-sink", label: "Configure audit sink", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["up"])),
             // --follow streams forever and would hang the wizard's apply
             // loop; the GUI always fetches a bounded snapshot.
             WizardField(key: "service", label: "Log service", kind: .text(placeholder: "optional service"), visibleWhen: (key: "action", equals: ["logs"])),
@@ -427,7 +424,6 @@ enum TUIWizards {
         baseArgs: ["setup", "rotate-token"], commandBuilder: tokenRotationCommands,
         fields: [
             WizardField(key: "connector", label: "Connector", kind: .choice(options: ["auto"] + connectors), defaultValue: "auto"),
-            WizardField(key: "restart", label: "Refresh hooks and restart", kind: .bool, defaultValue: "yes"),
         ]
     )
 
@@ -599,10 +595,12 @@ enum TUIWizards {
         if let mode = raw["guardrail.mode"]?.string { out["mode"] = mode }
         if let scanner = raw["guardrail.scanner_mode"]?.string { out["scanner-mode"] = scanner }
         if let strategy = raw["guardrail.detection_strategy"]?.string { out["detection-strategy"] = strategy }
-        if let packDir = raw["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
-            let pack = (packDir as NSString).lastPathComponent
-            if ["default", "strict", "permissive"].contains(pack) { out["rule-pack"] = pack }
+        // config_version 9 names the pack; a v8 file carries its folder.
+        var packName = raw["guardrail.rule_pack"]?.string ?? ""
+        if packName.isEmpty, let packDir = raw["guardrail.rule_pack_dir"]?.string {
+            packName = (packDir as NSString).lastPathComponent
         }
+        if ["default", "strict", "permissive"].contains(packName) { out["rule-pack"] = packName }
         if let message = raw["guardrail.block_message"]?.string { out["block-message"] = message }
         if let judge = raw["guardrail.judge.model"]?.string { out["judge-model"] = judge }
         return out
@@ -677,7 +675,6 @@ enum TUIWizards {
             WizardField(key: "sourcetype", label: "Splunk sourcetype", kind: .text(placeholder: "_json"), defaultValue: "_json", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec", "splunk-enterprise"])),
             WizardField(key: "url", label: "Webhook URL", kind: .text(placeholder: "https://…"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "method", label: "Webhook method", kind: .choice(options: ["POST", "PUT"]), defaultValue: "POST", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
-            WizardField(key: "url-path", label: "Webhook URL path", kind: .text(placeholder: "/events"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "verify-tls-hec", label: "Verify HEC TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
             WizardField(key: "verify-tls-webhook", label: "Verify webhook TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "token", label: "Token / API key", kind: .secure(placeholder: "optional token"), visibleWhen: (key: "action", equals: ["add"])),
@@ -714,29 +711,6 @@ enum TUIWizards {
             WizardField(key: "json", label: "JSON output", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["list", "show"])),
             WizardField(key: "test-timeout", label: "Test timeout", kind: .text(placeholder: "5"), defaultValue: "5", visibleWhen: (key: "action", equals: ["test"])),
             WizardField(key: "dry-run-test", label: "Format test payload without delivery", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["test"])),
-        ]
-    )
-
-    private static let sandbox = WizardDefinition(
-        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
-        blurb: "Initialize OpenShell sandbox networking and policy controls (Linux hosts only).",
-        baseArgs: ["sandbox", "setup"], appendNonInteractive: true,
-        validation: { _ in
-            // cmd_init_sandbox exits on non-Linux, and --disable needs sudo
-            // this GUI can't provide — surface that before Run.
-            "Sandbox setup requires a Linux host; run `defenseclaw sandbox setup` there instead."
-        },
-        fields: [
-            WizardField(key: "sandbox-ip", label: "Sandbox IP", kind: .text(placeholder: "10.200.0.2"), defaultValue: "10.200.0.2"),
-            WizardField(key: "host-ip", label: "Host IP", kind: .text(placeholder: "10.200.0.1"), defaultValue: "10.200.0.1"),
-            WizardField(key: "sandbox-home", label: "Sandbox home", kind: .text(placeholder: "/home/sandbox"), defaultValue: "/home/sandbox"),
-            WizardField(key: "openclaw-port", label: "OpenClaw port", kind: .text(placeholder: "18789"), defaultValue: "18789"),
-            WizardField(key: "policy", label: "Policy", kind: .choice(options: ["default", "strict", "permissive"]), defaultValue: "permissive"),
-            WizardField(key: "dns", label: "DNS servers", kind: .text(placeholder: "8.8.8.8,1.1.1.1"), defaultValue: "8.8.8.8,1.1.1.1"),
-            WizardField(key: "no-auto-pair", label: "Disable automatic pairing", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-host-networking", label: "Disable host networking", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "no-guardrail", label: "Disable guardrail", kind: .flagOnly, defaultValue: "no"),
-            WizardField(key: "disable", label: "Disable sandbox", kind: .flagOnly, defaultValue: "no"),
         ]
     )
 
@@ -798,6 +772,84 @@ enum TUIWizards {
             WizardField(key: "scan", label: "Scan immediately", kind: .bool, defaultValue: "yes", visibleWhen: (key: "enable", equals: ["yes"])),
         ]
     )
+
+    /// OpenShell sandbox setup (TUI Setup slot 13). The argv mirrors the TUI's
+    /// `_build_sandbox_args` on macOS byte for byte. The OpenShell install
+    /// runs in a terminal (on a Mac it installs NVIDIA's Homebrew formula,
+    /// and e2fsprogs under the same consent); the app never passes
+    /// --install-openshell. Like the TUI on macOS it asks about OpenShell's
+    /// telemetry, which setup turns off in ~/.config/openshell/gateway.env
+    /// (the Homebrew service reads it), and has no mounts question: setup
+    /// runs macOS sandboxes in OpenShell MicroVMs, which mount no host folders.
+    private static let sandbox = WizardDefinition(
+        id: "sandbox", title: "Sandbox", icon: "cube.transparent",
+        blurb: "Run Claude Code and Codex in NVIDIA OpenShell sandboxes that see only your project folder. "
+            + "On a Mac they run in OpenShell MicroVMs (its vm driver: Apple silicon only, experimental "
+            + "upstream), because Docker Desktop's Linux kernel has no Landlock: setup sets "
+            + "compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway once. "
+            + "A MicroVM mounts no host folders, so every run works on a copy and "
+            + "`defenseclaw sandbox pull` brings the changes back. The first run of each image prepares "
+            + "its MicroVM disk (about a minute and 5 GB). "
+            + "If OpenShell or e2fsprogs is missing, run `defenseclaw sandbox setup --install-openshell` "
+            + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula and e2fsprogs).",
+        baseArgs: ["sandbox", "setup"],
+        commandBuilder: sandboxCommands,
+        validation: sandboxValidation,
+        liveDefaults: sandboxLiveDefaults,
+        fields: [
+            WizardField(key: "action", label: "Action", kind: .choice(options: ["setup", "doctor"]),
+                        defaultValue: "setup",
+                        help: "setup: the one-time sandbox setup. doctor: only check this machine."),
+            WizardField(key: "harness-claudecode", label: "Claude Code", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `claude` in a sandbox (--harness claudecode)."),
+            WizardField(key: "harness-codex", label: "Codex", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Run `codex` in a sandbox (--harness codex)."),
+            WizardField(key: "telemetry-off", label: "OpenShell telemetry off", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Turn OpenShell's anonymous usage telemetry off in ~/.config/openshell/gateway.env, "
+                            + "which the Homebrew service reads; changing it restarts the OpenShell gateway. "
+                            + "Off keeps it on (--upstream-telemetry). A gateway you started yourself keeps "
+                            + "the environment you started it with."),
+            WizardField(key: "wrappers", label: "Shell wrappers", kind: .bool, defaultValue: "no",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "Make `claude` and `codex` run sandboxed when you type them "
+                            + "(undo: defenseclaw sandbox disable <harness>)."),
+            WizardField(key: "build-images", label: "Build images now", kind: .bool, defaultValue: "yes",
+                        visibleWhen: (key: "action", equals: ["setup"]),
+                        help: "The first build is about 3 GB. Off: the first run builds them."),
+        ]
+    )
+
+    static func sandboxCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {
+        func on(_ key: String, _ fallback: String) -> Bool { value(v, key, fallback) == "yes" }
+        if value(v, "action", "setup") == "doctor" { return [["sandbox", "doctor"]] }
+        var args = ["sandbox", "setup", "--non-interactive"]
+        for harness in ["claudecode", "codex"] where on("harness-\(harness)", "yes") {
+            args += ["--harness", harness]
+        }
+        if !on("telemetry-off", "yes") { args.append("--upstream-telemetry") }
+        args.append(on("wrappers", "no") ? "--wrappers" : "--no-wrappers")
+        if !on("build-images", "yes") { args.append("--skip-images") }
+        return [args]
+    }
+
+    static func sandboxValidation(_ values: [String: String]) -> String? {
+        guard value(values, "action", "setup") == "setup" else { return nil }
+        let any = ["claudecode", "codex"].contains { value(values, "harness-\($0)", "yes") == "yes" }
+        return any ? nil : "Choose at least one harness (Claude Code or Codex)."
+    }
+
+    static func sandboxLiveDefaults(_ raw: YAMLNode) -> [String: String] {
+        guard case .sequence(let items)? = raw["openshell.harnesses"] else { return [:] }
+        let harnesses = items.compactMap(\.string)
+        guard !harnesses.isEmpty else { return [:] }
+        return [
+            "harness-claudecode": harnesses.contains("claudecode") ? "yes" : "no",
+            "harness-codex": harnesses.contains("codex") ? "yes" : "no",
+        ]
+    }
 
     private static let splunkDashboards = WizardDefinition(
         id: "splunk-dashboards", title: "Splunk Dashboards", icon: "rectangle.3.group.bubble.left",
@@ -943,7 +995,6 @@ enum TUIWizards {
         append(v, "timeout-ms", flag: "--cisco-timeout-ms", to: &guardrail)
         append(v, "scanner-mode", flag: "--scanner-mode", to: &guardrail)
         guardrail.append(yes(v, "restart") ? "--restart" : "--no-restart")
-        guardrail.append(yes(v, "verify") ? "--verify" : "--no-verify")
         guardrail.append("--non-interactive")
         commands.append(guardrail)
 
@@ -966,7 +1017,6 @@ enum TUIWizards {
             append(v, "service-name", flag: "--service-name", to: &args, unless: "defenseclaw")
             flag(v, "no-wait", "--no-wait", to: &args)
             flag(v, "no-config", "--no-config", to: &args)
-            if !yes(v, "audit-sink") { args.append("--no-audit-sink") }
         } else if action == "logs" {
             append(v, "service", flag: "--service", to: &args)
             flag(v, "follow", "--follow", to: &args)
@@ -1086,7 +1136,6 @@ enum TUIWizards {
         var args = ["setup", "rotate-token", "--yes"]
         let connector = value(v, "connector", "auto")
         if connector != "auto" { args += ["--connector", connector] }
-        if !yes(v, "restart") { args.append("--no-restart") }
         return [args]
     }
 
@@ -1245,7 +1294,7 @@ enum TUIWizards {
             case "newrelic", "grafana-cloud": keys = ["region"]
             case "galileo": keys = ["endpoint", "project", "logstream"]
             case "otlp": keys = ["endpoint", "protocol"]
-            case "webhook": keys = ["url", "method", "url-path"]
+            case "webhook": keys = ["url", "method"]
             default: keys = []
             }
             for key in keys { append(v, key, flag: "--\(key)", to: &args) }

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -319,6 +320,14 @@ func TestCommandRules_FalsePositives(t *testing.T) {
 }
 
 func TestCommandRules_ChmodWorldWritablePrecision(t *testing.T) {
+	check := func(profile, command string) []RuleFinding {
+		connector := "chmod-world-precision-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		return dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo"},
+			LegacyText: command, Connector: connector, EnforcementCapable: true,
+		})
+	}
 	safeCases := []string{
 		`chmod 700 ~/.ssh/id_rsa`,
 		`chmod 755 /usr/local/bin/tool`,
@@ -326,7 +335,7 @@ func TestCommandRules_ChmodWorldWritablePrecision(t *testing.T) {
 	}
 	for _, input := range safeCases {
 		for _, profile := range []string{"default", "permissive", "strict"} {
-			findings := scanTrustedRulesForProfile(t, profile, input, "shell")
+			findings := check(profile, input)
 			for _, f := range findings {
 				if f.RuleID == "CMD-CHMOD-WORLD" {
 					t.Fatalf("profile %s unexpectedly emitted CMD-CHMOD-WORLD for safe mode input %q", profile, input)
@@ -341,14 +350,11 @@ func TestCommandRules_ChmodWorldWritablePrecision(t *testing.T) {
 		`chmod 733 /opt/data`,
 	}
 	for _, input := range riskyCases {
-		for _, profile := range []string{"default", "permissive"} {
-			if findingWithID(scanTrustedRulesForProfile(t, profile, input, "shell"), "CMD-CHMOD-WORLD") != nil {
-				t.Fatalf("profile %s unexpectedly emitted broad chmod rule for %q", profile, input)
+		for _, profile := range []string{"default", "permissive", "strict"} {
+			findings := check(profile, input)
+			if findingWithID(findings, "CMD-CHMOD-WORLD") == nil {
+				t.Fatalf("profile %s did not emit CMD-CHMOD-WORLD for risky mode input %q; findings=%v", profile, input, findingIDs(findings))
 			}
-		}
-		findings := scanTrustedRulesForProfile(t, "strict", input, "shell")
-		if findingWithID(findings, "CMD-CHMOD-WORLD") == nil {
-			t.Fatalf("strict profile did not emit CMD-CHMOD-WORLD for risky mode input %q; findings=%v", input, findingIDs(findings))
 		}
 	}
 }
@@ -1127,8 +1133,10 @@ func resetConnectorRuleCategories(t *testing.T) {
 	savedGlobalGeneration := allRuleGeneration
 	savedConn := connectorRuleCategories
 	savedConnGenerations := connectorRuleGenerations
+	savedLiveRegistered := liveRegisteredRules
 	connectorRuleCategories = map[string][]ruleCategory{}
 	connectorRuleGenerations = map[string]*compiledRulePackCategories{}
+	liveRegisteredRules = nil
 	ruleCategoriesMu.Unlock()
 	t.Cleanup(func() {
 		ruleCategoriesMu.Lock()
@@ -1136,6 +1144,7 @@ func resetConnectorRuleCategories(t *testing.T) {
 		allRuleGeneration = savedGlobalGeneration
 		connectorRuleCategories = savedConn
 		connectorRuleGenerations = savedConnGenerations
+		liveRegisteredRules = savedLiveRegistered
 		ruleCategoriesMu.Unlock()
 	})
 }
@@ -1346,4 +1355,63 @@ func TestPublishConnectorRulePackGenerationRetiresOnlyStaleManualEntries(t *test
 	if !containsRuleID(ruleIDsForConnector("automatic", "dynamic_token"), "DYNAMIC") {
 		t.Error("unrelated automatic connector rule set was removed")
 	}
+}
+
+// GAP-2575: a hook tool call carries the command as a JSON string, so
+// CMD-EVAL never matched eval with a runtime operand. It must alert there
+// (detection only: the operand is unknown until run) and still ignore eval
+// that is only quoted data of another command.
+func TestTrustedToolCallDynamicEvalAlerts(t *testing.T) {
+	for _, command := range []string{
+		`eval \"$(echo true)\"`,
+		`eval \"$PAYLOAD\"`,
+		`cd /tmp && eval \"$(ssh-agent -s)\"`,
+	} {
+		findings := scanTrustedToolArgs(t, "Bash", `{"command":"`+command+`"}`)
+		index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == "CMD-EVAL" })
+		if index < 0 {
+			t.Fatalf("%s: findings=%v, want CMD-EVAL", command, findingIDs(findings))
+		}
+		if f := findings[index]; f.Severity != "HIGH" || f.contributesToEnforcement() || !f.contributesToAlertOnly() {
+			t.Fatalf("%s: CMD-EVAL severity=%s enforcing=%v alertOnly=%v, want HIGH alert only",
+				command, f.Severity, f.contributesToEnforcement(), f.contributesToAlertOnly())
+		}
+	}
+	for _, command := range []string{
+		`echo \"eval $x\"`,
+		`grep -n 'eval \"$' run.sh`,
+	} {
+		findings := scanTrustedToolArgs(t, "Bash", `{"command":"`+command+`"}`)
+		if containsRuleID(findingIDs(findings), "CMD-EVAL") {
+			t.Fatalf("%s: findings=%v, eval as data must not match", command, findingIDs(findings))
+		}
+	}
+}
+
+func TestDisabledComposedCategoryDoesNotRestoreDefaults(t *testing.T) {
+	base, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.RuleFiles = []*guardrail.RulesFileYAML{{
+		Version: 1, Category: "command",
+		Rules: []guardrail.RuleDefYAML{{ID: "CMD-MARKER", Pattern: "operator-marker", Title: "Marker", Severity: "HIGH", Confidence: 0.9, Tags: []string{"test"}}},
+	}}
+	composed, err := guardrail.Compose(base, nil, guardrail.Customization{Disable: []string{"CMD-MARKER"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	categories, _, _, err := mergeRulePackCategories(composed, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, category := range categories {
+		if category.Name == "command" {
+			if len(category.Rules) != 0 {
+				t.Fatalf("disabled command category restored %d default rules", len(category.Rules))
+			}
+			return
+		}
+	}
+	t.Fatal("command category missing")
 }

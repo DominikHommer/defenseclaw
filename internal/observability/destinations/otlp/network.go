@@ -18,10 +18,12 @@ import (
 	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
@@ -52,6 +54,9 @@ func (transport observedRoundTripper) RoundTrip(request *http.Request) (*http.Re
 		WroteRequest: func(httptrace.WroteRequestInfo) { wroteRequest.Store(true) },
 	}))
 	response, err := transport.inner.RoundTrip(traced)
+	if err == nil {
+		captureRejection(request.Context(), response)
+	}
 	if response != nil &&
 		(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
 		transport.tracker.recordAuthentication()
@@ -185,4 +190,23 @@ func closeHTTPTransport(transport *http.Transport) {
 	if transport != nil {
 		transport.CloseIdleConnections()
 	}
+}
+
+// grpcRedialWait bounds how long an export waits for the channel to leave
+// TRANSIENT_FAILURE after redialGRPC reset its backoff.
+const grpcRedialWait = time.Second
+
+// redialGRPC makes an export dial again at once when its channel is waiting
+// out the reconnect backoff of an earlier failed connect. The delivery circuit
+// already spaces the attempts (a cooldown, then one probe), so the channel's
+// own exponential backoff (up to two minutes) on top only kept a destination
+// failing after its collector was reachable again (GAP-0532).
+func redialGRPC(ctx context.Context, connection *grpc.ClientConn) {
+	if connection == nil || connection.GetState() != connectivity.TransientFailure {
+		return
+	}
+	connection.ResetConnectBackoff()
+	waitContext, cancel := context.WithTimeout(ctx, grpcRedialWait)
+	defer cancel()
+	connection.WaitForStateChange(waitContext, connectivity.TransientFailure)
 }

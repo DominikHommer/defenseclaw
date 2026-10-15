@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
@@ -76,6 +78,7 @@ type WebhookDispatcher struct {
 
 type webhookEndpoint struct {
 	url         string
+	logURL      string // redactWebhookURL(url): the only form that may be logged
 	channelType string // slack, pagerduty, webex, generic
 	secret      string
 	roomID      string
@@ -123,7 +126,9 @@ var (
 // endpoints — a global-empty install that routes a connector to its own
 // webhook still yields a live dispatcher.
 func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.ObservabilityConfig) *WebhookDispatcher {
-	logger := log.New(os.Stderr, "[webhook] ", 0)
+	// currentStderrWriter keeps the line on the time-stamped log even when
+	// os.Stderr is replaced after the dispatcher is built (GAP-1696).
+	logger := log.New(currentStderrWriter{}, "[webhook] ", 0)
 	endpoints := buildWebhookEndpoints(cfgs, logger)
 
 	var connectorEndpoints map[string][]webhookEndpoint
@@ -157,7 +162,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 	if len(endpoints) == 0 && connEndpointCount == 0 {
 		return nil
 	}
-	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLoopback := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
 		endpoints:          endpoints,
 		connectorEndpoints: connectorEndpoints,
@@ -166,7 +171,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 		retryBackoff:       webhookRetryBackoff,
 		sem:                make(chan struct{}, webhookMaxConcurrency),
 		logger:             logger,
-		debug:              os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
+		debug:              envvars.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:               make(chan struct{}),
 	}
 }
@@ -182,7 +187,7 @@ func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []we
 			continue
 		}
 		if err := validateWebhookURL(c.URL); err != nil {
-			logger.Printf("rejected endpoint %s: %v", c.URL, err)
+			logger.Printf("rejected endpoint %s: %s", redactWebhookURL(c.URL), scrubWebhookErr(err, c.URL))
 			continue
 		}
 		evts := make(map[string]bool)
@@ -204,6 +209,7 @@ func buildWebhookEndpoints(cfgs []config.WebhookConfig, logger *log.Logger) []we
 		}
 		endpoints = append(endpoints, webhookEndpoint{
 			url:         c.URL,
+			logURL:      redactWebhookURL(c.URL),
 			channelType: strings.ToLower(c.Type),
 			secret:      c.ResolvedSecret(),
 			roomID:      c.RoomID,
@@ -285,14 +291,59 @@ func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
 			}
 			if err := validateWebhookURL(req.URL.String()); err != nil {
 				if logger != nil {
-					logger.Printf("rejected redirect to %s: %v",
-						req.URL.Redacted(), err)
+					logger.Printf("rejected redirect to %s: %s",
+						redactWebhookURL(req.URL.String()), scrubWebhookErr(err, req.URL.String()))
 				}
 				return fmt.Errorf("webhook redirect rejected: %w", err)
 			}
 			return nil
 		},
 	}
+}
+
+// redactWebhookURL keeps only scheme://host[:port] of a webhook URL and
+// replaces any userinfo, path, query and fragment with "***". For Slack,
+// Discord and webhook.site style endpoints the path is the credential, so
+// gateway log lines must never carry it. Mirrors redact_webhook_url in
+// cli/defenseclaw/webhooks/writer.py ("setup webhook list/show/test").
+func redactWebhookURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "***"
+	}
+	host := u.Host
+	if u.User != nil {
+		host = "***@" + host
+	}
+	out := u.Scheme + "://" + host
+	if (u.Path != "" && u.Path != "/") || u.Opaque != "" {
+		out += "/***"
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		out += "?***"
+	}
+	if u.Fragment != "" {
+		out += "#***"
+	}
+	return out
+}
+
+// scrubWebhookErr renders err with every copy of the webhook URL replaced by
+// its redacted form. net/http wraps transport errors in *url.Error, whose
+// text repeats the full request URL (`Post "https://host/secret": ...`).
+func scrubWebhookErr(err error, raw string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.URL != "" {
+		msg = strings.ReplaceAll(msg, ue.URL, redactWebhookURL(ue.URL))
+	}
+	if raw != "" {
+		msg = strings.ReplaceAll(msg, raw, redactWebhookURL(raw))
+	}
+	return msg
 }
 
 func hashWebhookTargetURL(raw string) string {
@@ -353,7 +404,7 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		cooldownKey := event.Target + "\x00" + action
 		if !ep.claimSlot(cooldownKey) {
 			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
-				event.Target, action, ep.url, ep.cooldown)
+				event.Target, action, ep.logURL, ep.cooldown)
 			ctx := webhookMetricContext(event)
 			tHash := hashWebhookTargetURL(ep.url)
 			d.recordDeliveryV8(ctx, ep.channelType, tHash, "cooldown_suppressed", 0, 0, true)
@@ -532,7 +583,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		payload, err = formatGenericPayload(event)
 	}
 	if err != nil {
-		d.logger.Printf("format error for %s: %v", ep.url, err)
+		d.logger.Printf("format error for %s: %v", ep.logURL, err)
 		record(0, 0, "failed")
 		ep.noteWebhookFailure(tctx, d, targetHash)
 		return false
@@ -551,7 +602,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, ep.url, bytes.NewReader(payload))
 		if reqErr != nil {
 			cancel()
-			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
+			d.logger.Printf("request error for %s: %s", ep.logURL, scrubWebhookErr(reqErr, ep.url))
 			lastStatus = 0
 			continue
 		}
@@ -561,8 +612,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		resp, doErr := d.client.Do(req)
 		cancel()
 		if doErr != nil {
-			d.logger.Printf("send to %s attempt %d/%d failed: %v",
-				ep.url, attempt+1, webhookMaxRetries+1, doErr)
+			d.logger.Printf("send to %s attempt %d/%d failed: %s",
+				ep.logURL, attempt+1, webhookMaxRetries+1, scrubWebhookErr(doErr, ep.url))
 			lastStatus = 0
 			continue
 		}
@@ -574,7 +625,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 			ms := time.Since(start).Milliseconds()
 			if d.debug {
 				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
-					ep.url, resp.StatusCode, event.Action, event.Severity)
+					ep.logURL, resp.StatusCode, event.Action, event.Severity)
 			}
 			record(resp.StatusCode, float64(ms), "delivered")
 			ep.noteWebhookSuccess(tctx, d, targetHash)
@@ -583,7 +634,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 
 		if !isRetryable(resp.StatusCode) {
 			d.logger.Printf("%s returned %d (permanent failure), not retrying",
-				ep.url, resp.StatusCode)
+				ep.logURL, resp.StatusCode)
 			ms := time.Since(start).Milliseconds()
 			record(lastStatus, float64(ms), "failed")
 			ep.noteWebhookFailure(tctx, d, targetHash)
@@ -600,9 +651,9 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		}
 
 		d.logger.Printf("%s returned %d, attempt %d/%d",
-			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
+			ep.logURL, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
-	d.logger.Printf("exhausted retries for %s", ep.url)
+	d.logger.Printf("exhausted retries for %s", ep.logURL)
 	ms := time.Since(start).Milliseconds()
 	record(lastStatus, float64(ms), "failed")
 	ep.noteWebhookFailure(tctx, d, targetHash)
@@ -647,6 +698,13 @@ var lookupWebhookIPs = net.LookupIP
 // Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
 // cloud metadata endpoints.
 func validateWebhookURL(rawURL string) error {
+	return validateWebhookURLWith(rawURL, lookupWebhookIPs)
+}
+
+// validateWebhookURLWith is validateWebhookURL with the resolver for host
+// names; a nil resolver checks only what the URL itself shows (scheme, host,
+// IP literals), which is what a config writer can decide without the network.
+func validateWebhookURLWith(rawURL string, lookup func(string) ([]net.IP, error)) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -659,7 +717,7 @@ func validateWebhookURL(rawURL string) error {
 	if host == "" {
 		return fmt.Errorf("empty hostname")
 	}
-	allowLocal := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLocal := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 
 	hostLower := strings.ToLower(host)
 	if hostLower == "localhost" {
@@ -670,7 +728,10 @@ func validateWebhookURL(rawURL string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := lookupWebhookIPs(host)
+		if lookup == nil {
+			return nil
+		}
+		ips, resolveErr := lookup(host)
 		if resolveErr != nil {
 			return nil // allow DNS names that can't be resolved at config time
 		}
@@ -752,6 +813,11 @@ func formatSlackPayload(event audit.Event) ([]byte, error) {
 			"type": "mrkdwn", "text": fmt.Sprintf("*Connector:* %s", event.Connector),
 		})
 	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		fields = append(fields, map[string]interface{}{
+			"type": "mrkdwn", "text": fmt.Sprintf("*%s:* %s", field[0], field[1]),
+		})
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -799,23 +865,28 @@ func formatPagerDutyPayload(event audit.Event, routingKey string) ([]byte, error
 		pdSeverity = "warning"
 	}
 
+	customDetails := map[string]string{
+		"action":    event.Action,
+		"target":    event.Target,
+		"severity":  event.Severity,
+		"details":   event.Details,
+		"event_id":  event.ID,
+		"connector": event.Connector,
+	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		customDetails[field[0]] = field[1]
+	}
+
 	payload := map[string]interface{}{
 		"routing_key":  routingKey,
 		"event_action": "trigger",
 		"dedup_key":    fmt.Sprintf("defenseclaw-%s-%s", event.Target, event.Action),
 		"payload": map[string]interface{}{
-			"summary":   fmt.Sprintf("DefenseClaw %s: %s on %s", event.Action, event.Severity, event.Target),
-			"source":    "defenseclaw",
-			"severity":  pdSeverity,
-			"timestamp": event.Timestamp.Format(time.RFC3339),
-			"custom_details": map[string]string{
-				"action":    event.Action,
-				"target":    event.Target,
-				"severity":  event.Severity,
-				"details":   event.Details,
-				"event_id":  event.ID,
-				"connector": event.Connector,
-			},
+			"summary":        fmt.Sprintf("DefenseClaw %s: %s on %s", event.Action, event.Severity, event.Target),
+			"source":         "defenseclaw",
+			"severity":       pdSeverity,
+			"timestamp":      event.Timestamp.Format(time.RFC3339),
+			"custom_details": customDetails,
 		},
 	}
 	return json.Marshal(payload)
@@ -834,6 +905,9 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 	if event.Connector != "" {
 		markdown += fmt.Sprintf("- **Connector:** %s\n", event.Connector)
 	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		markdown += fmt.Sprintf("- **%s:** %s\n", field[0], field[1])
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -850,6 +924,68 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 		payload["roomId"] = roomID
 	}
 	return json.Marshal(payload)
+}
+
+// webhookRuleKey carries the rule label of a hook block ("rule ID: Title")
+// from dispatchHookBlockWebhook to the generic payload (GAP-1351).
+const webhookRuleKey = "defenseclaw.webhook.rule"
+
+// webhookAttributionKey carries a webhookAttribution in audit.Event.Structured
+// from the code that knows the request to the payload formatters.
+const webhookAttributionKey = "defenseclaw.webhook.attribution"
+
+// webhookAttribution says whose agent raised an alert and where, so a
+// receiver that collects alerts from many hosts can attribute them
+// (GAP-0144). It holds the account, never the directory principal, which
+// follows ai_discovery.include_user_principal on the telemetry path only.
+type webhookAttribution struct {
+	UserID          string
+	UserName        string
+	AgentIdentityID string
+	Profile         string
+	Host            string
+}
+
+// webhookAttributionFor is the attribution of the request on ctx. The hook
+// payload is agent-controlled, so it never names the account here.
+func webhookAttributionFor(ctx context.Context) webhookAttribution {
+	user := resolveHookUser(ctx, nil)
+	agent, _ := agentIdentityFromContext(ctx)
+	profile, _ := guardrailProfileTelemetryFor(ctx).Name.Get()
+	return webhookAttribution{UserID: user.ID, UserName: user.Name, AgentIdentityID: agent, Profile: profile}
+}
+
+var webhookHostname = sync.OnceValue(func() string {
+	host, _ := os.Hostname()
+	return host
+})
+
+// webhookAttributionOf is the attribution of an event: what its sender
+// attached plus this gateway's host name. A managed deployment keeps the
+// historical payload, so it has none.
+func webhookAttributionOf(event audit.Event) webhookAttribution {
+	if ManagedEnterpriseActive() {
+		return webhookAttribution{}
+	}
+	attribution, _ := event.Structured[webhookAttributionKey].(webhookAttribution)
+	if attribution.Host == "" {
+		attribution.Host = webhookHostname()
+	}
+	return attribution
+}
+
+// pairs lists the non-empty fields under their payload names.
+func (a webhookAttribution) pairs() [][2]string {
+	var out [][2]string
+	for _, field := range [][2]string{
+		{"user_id", a.UserID}, {"user_name", a.UserName}, {"agent_identity_id", a.AgentIdentityID},
+		{"guardrail_profile", a.Profile}, {"host", a.Host},
+	} {
+		if field[1] != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 func formatGenericPayload(event audit.Event) ([]byte, error) {
@@ -870,9 +1006,15 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 	if event.Connector != "" {
 		eventData["connector"] = event.Connector
 	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		eventData[field[0]] = field[1]
+	}
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true
 		eventData["defenseclaw_reason"] = event.Details
+		if rule, ok := event.Structured[webhookRuleKey].(string); ok && rule != "" {
+			eventData["defenseclaw_rule"] = rule
+		}
 	}
 	payload := map[string]interface{}{
 		"webhook_type":        "defenseclaw_enforcement",
@@ -922,7 +1064,8 @@ func categorizeAction(action string) string {
 		strings.Contains(action, "gateway-recovered"),
 		strings.Contains(action, "guardrail-degraded"):
 		return "health"
-	case strings.Contains(action, "guardrail"):
+	case strings.Contains(action, "guardrail"),
+		action == string(audit.ActionToolResultPIIAlert):
 		return "guardrail"
 	case strings.Contains(action, "drift"),
 		strings.Contains(action, "rescan"):

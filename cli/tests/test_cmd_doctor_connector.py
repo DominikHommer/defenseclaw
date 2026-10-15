@@ -37,9 +37,11 @@ Coverage:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -96,6 +98,14 @@ from defenseclaw.file_permissions import (
 
 
 class TestCodexOtelAlignment(unittest.TestCase):
+    def setUp(self) -> None:
+        trusted = patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     def _cfg(self, environment: str = "windows") -> MagicMock:
         cfg = MagicMock()
         cfg.environment = environment
@@ -189,6 +199,39 @@ class TestCodexOtelAlignment(unittest.TestCase):
         self.assertEqual(result.checks[0]["status"], "pass")
         self.assertEqual(result.checks[1]["status"], "fail")
         self.assertIn("telemetry state is 'stopped'", result.checks[1]["detail"])
+
+    def test_audit_write_failure_is_not_a_codex_failure(self) -> None:
+        # GAP-1927: a full audit disk already FAILs its own rows.
+        payload = {
+            "runtime": {"environment": "linux"},
+            "health": {
+                "telemetry": {
+                    "state": "error",
+                    "details": {
+                        "event_history_failure": "sqlite_write_failed",
+                        "event_history_last_sqlite_class": "full",
+                    },
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ,
+            {"CODEX_HOME": home},
+            clear=False,
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, json.dumps(payload)),
+        ), patch("defenseclaw.audit_capacity.audit_disk_freed", return_value=False):
+            self._write_codex_config(home, '[otel]\nenvironment = "linux"\n')
+            result = _DoctorResult()
+            _check_codex_otel_alignment(self._cfg("linux"), result)
+
+        row = result.checks[1]
+        self.assertEqual(row["status"], "warn")
+        self.assertNotIn("but telemetry state is", row["detail"])
+        self.assertIn("settings are correct", row["detail"])
+        self.assertIn("disk holding the audit database is full", row["detail"])
+        self.assertIn("audit storage", row["remediation"])
 
 
 from defenseclaw.rulepack_validation import (
@@ -293,7 +336,8 @@ class TestCheckConnectorInventory(unittest.TestCase):
         self.assertEqual(skill_check["status"], "pass")
         self.assertIn("1/1 present", skill_check["detail"])
 
-    def test_skill_paths_warn_when_no_directory_exists(self) -> None:
+    def test_skill_paths_skip_when_no_directory_exists(self) -> None:
+        # No skill folder yet is a healthy setup, not a warning (GAP-1814).
         cfg = self._cfg(
             skill_dirs=["/nonexistent/path/for/test"],
             plugin_dirs=[],
@@ -302,8 +346,10 @@ class TestCheckConnectorInventory(unittest.TestCase):
         r = _DoctorResult()
         _check_connector_inventory(cfg, "codex", r)
         skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
-        self.assertEqual(skill_check["status"], "warn")
+        self.assertEqual(skill_check["status"], "skip")
         self.assertIn("0/1 present", skill_check["detail"])
+        self.assertIn("no skills installed yet", skill_check["detail"])
+        self.assertEqual(r.warned, 0)
 
     def test_skill_paths_skip_when_empty_list(self) -> None:
         cfg = self._cfg(skill_dirs=[], plugin_dirs=[], servers=[])
@@ -395,7 +441,11 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
 
     @patch(
         "defenseclaw.fail_mode.connector_fail_mode_report",
-        return_value={"effective": "open", "provenance": "process-env"},
+        return_value={
+            "effective": "open",
+            "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
+        },
     )
     def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
         cfg = self._cfg()
@@ -408,7 +458,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(len(mode_rows), 1)
         self.assertEqual(
             mode_rows[0]["detail"],
-            "action; fail-mode=open; provenance=process-env",
+            "action; fail-mode=open (observe mode keeps hooks fail-open; "
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -558,6 +609,9 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="observe",
                 fail_closed=False,
             )
+            # Cursor has no approval prompt: an inherited human_approval is
+            # the Human approval row's warning, not an inconsistent posture.
+            cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True)
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,
@@ -699,6 +753,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="action",
                 fail_closed=True,
             )
+            from defenseclaw.config import GuardrailConfig, PerConnectorGuardrailConfig
+
+            # An upgraded v8 action-mode config may still store open.
+            cfg.guardrail = GuardrailConfig(
+                mode="action",
+                hook_fail_mode="open",
+                connectors={"cursor": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open")},
+            )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,
@@ -794,6 +856,19 @@ class TestCheckConnectorHooks(unittest.TestCase):
         )
         self.assertEqual(run_mock.call_args.kwargs["env"]["SystemRoot"], r"C:\Windows")
         self.assertEqual(run_mock.call_args.kwargs["env"]["WINDIR"], r"C:\Windows")
+        # A cold profile analyzes the modules on PSModulePath the first time a
+        # cmdlet must be auto-loaded. The wrapper imports the two core modules
+        # from $PSHOME before its only other cmdlet, so nothing is discovered.
+        script = base64.b64decode(argv[4]).decode("utf-16-le")
+        self.assertRegex(
+            script,
+            r'^\$OutputEncoding = [^;]+; Import-Module -ErrorAction Stop -Name '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Management\\Microsoft\.PowerShell\.Management\.psd1", '
+            r'"\$PSHOME\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1"; ',
+        )
+        self.assertEqual(
+            re.findall(r"\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b", script), ["Import-Module", "Get-Content"]
+        )
         self.assertEqual(
             run_mock.call_args.kwargs["timeout"],
             _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
@@ -943,7 +1018,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         with self.assertRaises(subprocess.TimeoutExpired):
             _run_cursor_windows_runtime_process(
-                ["powershell.exe"],
+                [sys.executable],
                 env={},
                 timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
             )
@@ -991,7 +1066,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         job.terminate_sync.side_effect = terminate_sync
 
         result = _run_cursor_windows_runtime_process(
-            ["powershell.exe"],
+            [sys.executable],
             env={},
             timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
@@ -1128,6 +1203,45 @@ class TestCheckHookContractLock(unittest.TestCase):
             check["detail"],
         )
 
+    def test_agent_update_to_compatible_version_is_not_drift_failure(self) -> None:
+        cases = (
+            ("claudecode", "Claude Code 2.1.276", "claudecode-hooks-v2", "2.1.285 (Claude Code)", "pass", True),
+            (
+                "amp",
+                "0.0.1785334225-gabc (released 2026-09-14T00:00:00.000Z, 3d ago)",
+                "amp-plugin-v1",
+                "0.0.1785334225-gabc (released 2026-09-14T00:00:00.000Z, 16d ago)",
+                "pass",
+                False,
+            ),
+            ("claudecode", "Claude Code 2.1.276", "claudecode-hooks-v2", "Claude Code 2.1.100", "fail", False),
+        )
+        for connector, locked, contract, discovered, want, updated in cases:
+            with self.subTest(discovered=discovered), tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                    json.dump(
+                        {
+                            "connectors": {
+                                connector: {
+                                    "connector": connector,
+                                    "compatibility_status": "known",
+                                    "contract_id": contract,
+                                    "raw_agent_version": locked,
+                                }
+                            }
+                        },
+                        fh,
+                    )
+                r = _DoctorResult()
+                with patch(
+                    "defenseclaw.commands.cmd_doctor._discovered_agent_version",
+                    return_value=discovered,
+                ):
+                    _check_hook_contract_lock(self._cfg(tmp), connector, r, platform_name="linux")
+                check = r.checks[-1]
+                self.assertEqual(check["status"], want, check["detail"])
+                self.assertEqual("agent_updated=" in check["detail"], updated, check["detail"])
+
     def test_active_devin_without_lock_fails_with_setup_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
@@ -1230,6 +1344,7 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=missing", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes`", check["detail"])
 
     def test_windows_opencode_known_lock_with_digest_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1261,6 +1376,8 @@ class TestCheckHookContractLock(unittest.TestCase):
         check = r.checks[-1]
         self.assertEqual(check["status"], "fail")
         self.assertIn("exact_setup_executable_evidence=invalid:digest", check["detail"])
+        self.assertIn("executable changed since setup sealed it", check["detail"])
+        self.assertIn("run `defenseclaw setup opencode --yes` to re-seal it", check["detail"])
 
     def test_non_windows_opencode_seal_does_not_suppress_version_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1284,7 +1401,7 @@ class TestCheckHookContractLock(unittest.TestCase):
                 )
             with patch(
                 "defenseclaw.commands.cmd_doctor._discovered_agent_version",
-                return_value="2.0.0",
+                return_value="1.18.9",  # below the floor: an update to a newer version is not drift
             ) as discovered_version:
                 r = _DoctorResult()
                 _check_hook_contract_lock(self._cfg(tmp), "opencode", r, platform_name="linux")
@@ -1526,7 +1643,10 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "local_pattern_count": 6,
             "suppression_count": 3,
             "sensitive_tool_count": 5,
+            "stale_rule_count": 0,
+            "alert_only_rule_count": 0,
             "digest": "a" * 64,
+            "files_digest": "b" * 64,
         }
         summary.update(overrides)
         return RulePackValidationResult(
@@ -1573,6 +1693,56 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertEqual(rp["status"], "pass")
         self.assertIn("11/12 rules enabled", rp["detail"])
         validate.assert_called_once_with(os.getcwd())
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_custom_pack_edited_after_pinning_fails_and_names_the_v9_key(self, validate):
+        validate.return_value = self._valid()  # files_digest is "b" * 64
+        cfg = self._cfg(rule_pack_dir="/packs/mine")
+        cfg.guardrail.effective_rule_pack.return_value = "mine"
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "c" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn('configured rule pack "mine"', rp["detail"])
+        self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
+        self.assertNotIn("rule_pack_dir", rp["detail"])
+        # Re-pin in place, keeping per-connector pack choices (GAP-0332).
+        self.assertEqual(
+            rp["remediation"], "defenseclaw config set guardrail.custom_packs.mine.digest sha256:" + "b" * 64
+        )
+
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_pack_whose_action_rules_cannot_block_warns(self, validate):
+        # GAP-0360: a 0.8.x copy of the default pack showed PASS and blocked nothing.
+        validate.return_value = self._valid(stale_rule_count=26, alert_only_rule_count=1)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("26 are 0.8.x copies of built-in", rp["detail"])
+        self.assertIn("never block", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
+
+        # GAP-1225: a pack whose only gap is the operator's own pattern rules
+        # (any category) warns too, and says how to make them block again.
+        validate.return_value = self._valid(alert_only_rule_count=2)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("2 are custom rules of yours", rp["detail"])
+        self.assertIn("detection-only for tool calls", rp["detail"])
+        self.assertIn("expression", rp["remediation"])
 
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
@@ -1853,12 +2023,62 @@ class TestCheckHookHealth(unittest.TestCase):
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
-            r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertEqual(r.checks[-1]["label"], "Hermes hooks (fail-open)")
-        self.assertIn(hook, r.checks[-1]["detail"])
-        self.assertIn("live=false", r.checks[-1]["detail"])
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail")
+        self.assertEqual(results[True]["label"], "Hermes hooks (fail-open)")
+        self.assertIn(hook, results[True]["detail"])
+        self.assertIn("live=false", results[True]["detail"])
+        # With no Hermes host running there is nothing to reload.
+        self.assertEqual(results[False]["status"], "pass", results[False])
+
+    def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
+        from defenseclaw.commands import cmd_doctor
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        uid = os.getuid()
+        for args, want in (
+            ("/usr/bin/python3 /home/u/.local/bin/hermes", True),
+            ("uv run hermes", None),
+            ("python3 -m hermes_cli.main", None),
+            ("vim notes.txt", False),
+            ("claude --system-prompt You are polly, not hermes", False),
+            ("claude hermes help", False),
+            # GAP-1804: arguments of another Python program are its own.
+            ("/u/.defenseclaw/.venv/bin/python -m defenseclaw.main plugin list --json --connector hermes", False),
+            ("python3 -c import --connector hermes", False),
+            ("/home/u/.hermes/tools/python-3.14/bin/python3 -I -c import os, re, sys import hermes_bootstrap from hermes_cli.main import main", True),
+            ("python3 -u /u/.local/bin/hermes chat", True),
+            ("python3 -Wignore -m hermes_cli", None),
+            ("/u/.hermes/hermes-agent/venv/bin/python -m gateway.run", None),
+        ):
+            listing = f"{os.getpid()} {uid} defenseclaw doctor --connector hermes\n4242 {uid} {args}\n"
+            done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+            with patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done), patch(
+                "defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=None
+            ):
+                self.assertIs(cmd_doctor._hermes_host_running(), want, args)
+
+    def test_hermes_multiline_python_launcher_uses_proc_argv(self) -> None:
+        from defenseclaw.commands import cmd_setup
+
+        if not hasattr(os, "getuid"):
+            self.skipTest("POSIX process table only")
+        python = "/home/u/.hermes/tools/python-3.14.7+20260901-linux-x64/bin/python3"
+        listing = f"4242 {os.getuid()} {python} -I -c import os, re, sys\nimport hermes_bootstrap\n"
+        done = subprocess.CompletedProcess([], 0, stdout=listing, stderr="")
+        argv = (python, "-I", "-c", "import os, re, sys\nimport hermes_bootstrap\nfrom hermes_cli.main import main")
+        with (
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", return_value=done),
+            patch("defenseclaw.commands.cmd_doctor._hermes_proc_argv", return_value=argv) as proc,
+        ):
+            self.assertFalse(cmd_setup._hermes_hosts_idle())
+        proc.assert_called_once_with("4242")
 
     def test_lock_path_without_marker_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1940,9 +2160,24 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_hook_health(cfg, "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
-        self.assertIn("does not revalidate the Windows DACL", r.checks[-1]["detail"])
-        self.assertIn("not tamper-proof", r.checks[-1]["detail"])
+        self.assertNotIn("DACL", r.checks[-1]["detail"])
+        self.assertIn("plugin installed at", r.checks[-1]["detail"])
         self.assertIn("authenticated load heartbeat is fresh", r.checks[-1]["detail"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
+        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
+        # gateway would not start and doctor only said the hook file is missing.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+            plugins = Path(tmp) / ".config" / "opencode" / "plugins"
+            plugins.mkdir(parents=True)
+            plugins.chmod(0o775)
+            r = _DoctorResult()
+            cfg = self._cfg(tmp, "opencode", [str(plugins / "defenseclaw.js")])
+            _check_hook_health(cfg, "opencode", r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn(f"chmod go-w {os.path.realpath(plugins)}", r.checks[-1]["detail"])
 
     def test_opencode_missing_load_heartbeat_is_unverified_without_guessing_pure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1986,9 +2221,12 @@ class TestCheckHookHealth(unittest.TestCase):
             ):
                 _check_hook_health(cfg, "opencode", r)
 
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertIn("no authenticated load heartbeat", r.checks[-1]["detail"])
-        self.assertNotIn("--pure", r.checks[-1]["detail"])
+        # GAP-1565: an idle OpenCode is normal, not a warning.
+        self.assertEqual(r.checks[-1]["status"], "skip")
+        self.assertIn("normal while OpenCode is closed", r.checks[-1]["detail"])
+        self.assertIn("no load heartbeat yet", r.checks[-1]["detail"])
+        for internal in ("--pure", "DACL", "tamper-proof", "authenticated"):
+            self.assertNotIn(internal, r.checks[-1]["detail"])
 
     def test_opencode_runtime_status_rejects_stale_and_malformed_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2775,7 +3013,20 @@ class TestCheckHookHealth(unittest.TestCase):
                 return_value=("pass", f"live effective config verified through --config={config}"),
             ):
                 _check_omnigent_policy_health(cfg, r)
-        self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+                    return_value=("fail", "live server policy does not match"),
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._omnigent_tmux_requirement",
+                    return_value="; managed terminals require tmux 3.3 or newer",
+                ),
+            ):
+                _check_omnigent_policy_health(cfg, r)
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn("tmux 3.3", r.checks[-1]["detail"])
 
     def test_omnigent_repair_command_preserves_action_closed_hilt_posture(self) -> None:
         cfg = MagicMock()
@@ -2841,6 +3092,26 @@ class TestCheckHookHealth(unittest.TestCase):
             detail,
         )
         self.assertIn("without changing enforcement posture", detail)
+
+    def test_omnigent_config_rewritten_by_omnigent_is_not_drift(self) -> None:
+        managed = (
+            "policy_modules: [defenseclaw_omnigent_policy]\n"
+            "policies:\n"
+            "  defenseclaw_guardrail: {type: function, handler: defenseclaw_omnigent_policy.defenseclaw_policy}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = os.path.join(tmp, "config.yaml")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed)
+            self._write_omnigent_backup(tmp, "config", artifact)
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write("hosts: {local: {port: 62998}}\n" + managed)
+            self.assertEqual(_omnigent_managed_artifact_drift(cfg, "config", artifact), "")
+            with open(artifact, "w", encoding="utf-8") as fh:
+                fh.write(managed.replace("defenseclaw_policy}", "other}"))
+            self.assertIn("drift detected", _omnigent_managed_artifact_drift(cfg, "config", artifact))
 
     def test_omnigent_missing_import_shim_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2977,12 +3248,13 @@ class TestCheckHookHealth(unittest.TestCase):
             ),
             patch(
                 "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", config),
+                # ``omnigent run`` starts its server through the module CLI.
+                return_value=("/usr/bin/python3", "-P", "-m", "omnigent.cli", "server", "--config", config),
             ),
         ):
             status, detail = _omnigent_live_config_evidence(config)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
         self.assertIn("action/fail-closed enforcement is unverified", detail)
@@ -3019,7 +3291,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("--config", detail)
         self.assertIn("pending reload/restart", detail)
 
@@ -3097,7 +3369,7 @@ class TestCheckHookHealth(unittest.TestCase):
         ):
             status, detail = _omnigent_live_config_evidence(managed)
 
-        self.assertEqual(status, "warn")
+        self.assertEqual(status, "bound")
         self.assertIn("OMNIGENT_CONFIG", detail)
         self.assertIn("loaded policy generation/module/config identity", detail)
 
@@ -3299,6 +3571,17 @@ class TestDetectionStrategyRow(unittest.TestCase):
         _check_connector_inventory(cfg, connector, r)
         return next(c for c in r.checks if c["label"] == "Detection")
 
+    def test_failing_runtime_judge_is_not_reported_active(self):
+        cfg = self._cfg(judge_enabled=True, hook_connectors=["codex"])
+        result = _DoctorResult()
+        _check_connector_inventory(
+            cfg, "codex", result,
+            live_health={"guardrail": {"details": {"judge_state": "failing", "judge_recent_calls": 7}}},
+        )
+        row = next(check for check in result.checks if check["label"] == "Detection")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("judge failing", row["detail"])
+
     def test_strategy_surfaced(self):
         row = self._detection_row(self._cfg(strategy="judge_first"), "codex")
         self.assertIn("strategy=judge_first", row["detail"])
@@ -3311,7 +3594,11 @@ class TestDetectionStrategyRow(unittest.TestCase):
         # judge enabled but this hook connector is NOT in hook_connectors →
         # surfaces root #4: the judge won't actually fire for it.
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
-        self.assertIn("NOT gated", row["detail"])
+        self.assertIn("not turned on for this connector's hook lane", row["detail"])
+        # GAP-1731: the next step is the CLI command, not a config key.
+        self.assertIn("opt in: defenseclaw guardrail judge add codex", row["detail"])
+        self.assertNotIn("hook_connectors", row["detail"])
+        self.assertIn("Cisco AI Defense", row["detail"])
 
     def test_hook_connector_gated_explicit(self):
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")
@@ -3460,12 +3747,49 @@ if __name__ == "__main__":
 
 
 class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
-    """Kiro discovers hooks only from ``.kiro/hooks/*.json`` relative to the
-    project root and documents no user-level location, so a global-only
-    install enforces nothing. Reporting that as a pass is how an operator
-    ends up believing an unguarded Kiro is guarded: the connector reports
-    healthy and the gateway keeps recording findings, but no hook ever runs.
+    """Kiro merges hooks from every scope. Kiro IDE 1.0.182+ and
+    ``kiro-cli --v3`` read the global ``~/.kiro/hooks/defenseclaw.json`` that
+    setup writes, so a global install with that registration passes (naming
+    the older IDE builds that read only the project's ``.kiro/hooks``).
+    Without the global registration and without claw.workspace_dir no
+    DefenseClaw hook runs, and that still fails.
     """
+
+    def setUp(self) -> None:
+        self._kiro_home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._kiro_home.cleanup)
+        patcher = patch(
+            "defenseclaw.commands.cmd_doctor.connector_home",
+            side_effect=lambda name, **_: self._kiro_home.name if name == "kiro" else "",
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._ide_products: list[str] = []
+        ide_patcher = patch(
+            "defenseclaw.commands.cmd_doctor._kiro_ide_product_candidates",
+            side_effect=lambda: self._ide_products,
+        )
+        ide_patcher.start()
+        self.addCleanup(ide_patcher.stop)
+
+    def _write_global_hooks(self, command: str, name: str = "defenseclaw-pre-tool") -> str:
+        path = os.path.join(self._kiro_home.name, "hooks", "defenseclaw.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": "v1",
+                    "hooks": [
+                        {
+                            "name": name,
+                            "trigger": "PreToolUse",
+                            "action": {"type": "command", "command": command},
+                        }
+                    ],
+                },
+                fh,
+            )
+        return path
 
     def _cfg(self, workspace: str) -> MagicMock:
         cfg = MagicMock()
@@ -3486,12 +3810,53 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         self.assertEqual(len(rows), 1, "expected exactly one scope row")
         return rows[0]
 
-    def test_kiro_without_workspace_fails(self) -> None:
+    def test_kiro_without_workspace_or_global_hooks_fails(self) -> None:
         row = self._scope_row("kiro", "")
         self.assertEqual(row["status"], "fail")
-        self.assertIn("project root", row["detail"])
+        self.assertIn("claw.workspace_dir is unset", row["detail"])
         self.assertEqual(row["reason_code"], "kiro_hooks_not_workspace_scoped")
-        self.assertIn("claw.workspace_dir", row["remediation"])
+        self.assertIn("defenseclaw setup kiro", row["remediation"])
+
+    def test_kiro_global_hooks_without_workspace_pass(self) -> None:
+        path = self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "pass")
+        self.assertIn(path, row["detail"])
+        self.assertIn("claw.workspace_dir", row["detail"])
+
+    def test_kiro_ide_below_global_hooks_floor_warns(self) -> None:
+        self._write_global_hooks("/home/u/.defenseclaw/hooks/kiro-hook.sh --hook-surface v3")
+        product = os.path.join(self._kiro_home.name, "product.json")
+        with open(product, "w", encoding="utf-8") as fh:
+            json.dump({"nameShort": "Kiro", "applicationName": "kiro", "version": "1.0.181"}, fh)
+        self._ide_products.append(product)
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["reason_code"], "kiro_ide_below_global_hooks_floor")
+
+    def test_kiro_custom_default_agent_is_reported(self) -> None:
+        # The global hook file stays authoritative; a custom default agent is
+        # reported: hooked (Kiro IDE hides it) or unhooked (bare kiro-cli).
+        settings = os.path.join(self._kiro_home.name, "settings", "cli.json")
+        agent = os.path.join(self._kiro_home.name, "agents", "team.json")
+        os.makedirs(os.path.dirname(settings))
+        os.makedirs(os.path.dirname(agent))
+        with open(settings, "w", encoding="utf-8") as fh:
+            json.dump({"chat.defaultAgent": "team"}, fh)
+        codes = []
+        for hooks in ({"preToolUse": [{"command": "/home/u/.defenseclaw/hooks/kiro-hook.sh"}]}, {}):
+            with open(agent, "w", encoding="utf-8") as fh:
+                json.dump({"name": "team", "hooks": hooks}, fh)
+            r = _DoctorResult()
+            _check_connector_inventory(self._cfg(""), "kiro", r)
+            codes += [c["reason_code"] for c in r.checks if c["label"] == "Kiro default agent"]
+        self.assertEqual(codes, ["kiro_custom_agent_hooked", "kiro_custom_agent_unhooked"])
+
+    def test_kiro_global_file_without_defenseclaw_hooks_fails(self) -> None:
+        self._write_global_hooks("/usr/local/bin/other-audit-hook", name="team-audit")
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "fail")
+        self.assertEqual(row["reason_code"], "kiro_hooks_not_workspace_scoped")
 
     def test_kiro_with_workspace_passes(self) -> None:
         row = self._scope_row("kiro", "/repo")
@@ -3504,3 +3869,37 @@ class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
         row = self._scope_row("codex", "")
         self.assertEqual(row["status"], "pass")
         self.assertEqual(row["detail"], "global user config")
+
+
+def test_safe_display_path_keeps_windows_backslashes_and_escapes_controls():
+    # WIN2-U2-23: the doctor Rule pack line doubled every backslash.
+    assert safe_display_path("C:\\Users\\u\\rules") == '"C:\\Users\\u\\rules"'
+    assert safe_display_path('a"b\x1b') == '"a\\"b\\u001b"'
+
+
+class TestConnectorSkippedAtStart(unittest.TestCase):
+    """GAP-2621: a connector the gateway skipped at start gets a WARN with the fix."""
+
+    def test_skipped_connector_warns_with_setup_command(self):
+        from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
+
+        health = {"guardrail": {"state": "running", "details": {"connectors_not_started": ["openhands"]}}}
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("openhands", health, r)
+        _check_connector_skipped_at_start("codex", health, r)
+        self.assertEqual(len(r.checks), 1)
+        row = r.checks[0]
+        self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
+        self.assertIn("OpenHands was skipped", row["detail"])
+        self.assertEqual(row["remediation"], "defenseclaw setup openhands")
+
+
+
+def test_omnigent_tmux_requirement_reports_old_managed_terminal_runtime() -> None:
+    from defenseclaw.commands import cmd_doctor
+    with (
+        patch.object(cmd_doctor.os, "name", "posix"),
+        patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/tmux"),
+        patch.object(cmd_doctor.subprocess, "run", return_value=SimpleNamespace(stdout="tmux 3.2a")),
+    ):
+        assert "tmux 3.3" in cmd_doctor._omnigent_tmux_requirement()

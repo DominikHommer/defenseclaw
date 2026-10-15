@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,7 @@ __all__ = [
     "CATEGORY_DISCOVERY",
     "CATEGORY_SPLUNK_BRIDGE",
     "CATEGORY_TEST_FIXTURE",
+    "CATEGORY_FLEET",
     "ALLOWED_CATEGORIES",
     "ALLOWED_SECURITY_IMPACT",
 ]
@@ -69,6 +70,7 @@ CATEGORY_CREDENTIAL = "credential"
 CATEGORY_DISCOVERY = "discovery"
 CATEGORY_SPLUNK_BRIDGE = "splunk_bridge"
 CATEGORY_TEST_FIXTURE = "test_fixture"
+CATEGORY_FLEET = "fleet"
 
 ALLOWED_CATEGORIES = frozenset(
     {
@@ -82,6 +84,7 @@ ALLOWED_CATEGORIES = frozenset(
         CATEGORY_DISCOVERY,
         CATEGORY_SPLUNK_BRIDGE,
         CATEGORY_TEST_FIXTURE,
+        CATEGORY_FLEET,
     }
 )
 
@@ -91,7 +94,16 @@ ALLOWED_SECURITY_IMPACT = frozenset({"none", "low", "medium", "high"})
 # (internal/envvars/registry.go: isTruthy) so doctor and tests agree.
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
+# Managed-mode policies (the registry's per-entry ``managed`` field).
+# Mirrors internal/envvars/lookup.go.
+MANAGED_ALLOW = "allow"
+MANAGED_IGNORE = "ignore"
+MANAGED_TIGHTEN_ONLY = "tighten_only"
+ALLOWED_MANAGED = frozenset({MANAGED_ALLOW, MANAGED_IGNORE, MANAGED_TIGHTEN_ONLY})
+
+# Variables that carry a value rather than a switch: any non-empty value is
+# active. Mirrors activeWhenNonEmpty in internal/envvars/registry.go.
+_ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "DEFENSECLAW_SANDBOX_ID"})
 
 @dataclass(frozen=True)
 class Consumer:
@@ -118,6 +130,8 @@ class EnvVar:
     replacement_hint: str = ""
     deprecated: bool = False
     migration_only: bool = False
+    #: What a managed standalone host does with the variable (MANAGED_*).
+    managed: str = "allow"
 
     def is_active(self, env: dict[str, str] | None = None) -> bool:
         """Return True when this var is set to a value that activates the
@@ -183,10 +197,12 @@ def _registry_path() -> Path:
     A module imported from ``<repo>/cli/defenseclaw`` uses the authoritative
     source registry. An installed package uses only its adjacent package-data
     mirror, even when its virtualenv happens to live below a source checkout.
-    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes.
+    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes and
+    per-user hosts. A managed standalone host ignores it: the registry decides
+    which variables that host ignores, so a standard user must not pick it.
     """
     env_root = os.environ.get("DEFENSECLAW_REPO_ROOT", "").strip()
-    if env_root:
+    if env_root and not managed_standalone():
         p = Path(env_root) / _REGISTRY_RELATIVE_PATH
         if p.is_file():
             return p
@@ -222,9 +238,13 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
             )
 
     name = raw["name"]
-    if not isinstance(name, str) or not name.startswith("DEFENSECLAW_") and name != "MIGRATION_DEFENSECLAW_HOME":
+    if not isinstance(name, str) or (
+        not name.startswith("DEFENSECLAW_")
+        and not name.startswith("DCLAW_")
+        and name != "MIGRATION_DEFENSECLAW_HOME"
+    ):
         raise ValueError(
-            f"{path}: entry name {name!r} must start with 'DEFENSECLAW_' "
+            f"{path}: entry name {name!r} must start with 'DEFENSECLAW_' or 'DCLAW_' "
             "(or be the legacy MIGRATION_DEFENSECLAW_HOME)"
         )
 
@@ -268,6 +288,11 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
             raise ValueError(
                 f"{path}: entry {name}: {field_name} must be a boolean"
             )
+    managed = raw.get("managed")
+    if managed not in ALLOWED_MANAGED:
+        raise ValueError(
+            f"{path}: entry {name}: managed must be one of {sorted(ALLOWED_MANAGED)}, not {managed!r}"
+        )
     deprecated = boolean_fields["deprecated"]
     migration_only = boolean_fields["migration_only"]
     surface_in_doctor = boolean_fields["surface_in_doctor"]
@@ -305,6 +330,7 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
         replacement_hint=str(raw.get("replacement_hint", "")),
         deprecated=deprecated,
         migration_only=migration_only,
+        managed=managed,
     )
 
 
@@ -393,6 +419,82 @@ def active_security_overrides(
     return out
 
 
-def iter_entries() -> Iterable[EnvVar]:
-    """Convenience iterator over every entry."""
-    return iter(load_registry().entries)
+def managed_policy(name: str) -> str:
+    """The registry's managed policy for ``name`` (``allow`` when undeclared).
+
+    A registry that cannot be loaded fails closed (``ignore``). Callers drop a
+    value only on a managed standalone host, so other hosts are unchanged.
+    """
+    try:
+        entry = load_registry().get(name)
+    except (OSError, ValueError, KeyError, TypeError):
+        return MANAGED_IGNORE
+    return entry.managed if entry is not None else MANAGED_ALLOW
+
+
+def managed_standalone() -> bool:
+    """Whether this host is managed on the standalone enterprise profile.
+
+    Decided by the active config.yaml (or ``DEFENSECLAW_DEPLOYMENT_MODE``),
+    the same test as the config writer's managed gate. Secure Client and
+    per-user hosts are not standalone, so their environment is read raw.
+    """
+    from defenseclaw.config import config_path
+    from defenseclaw.config_writer import standalone_managed
+
+    try:
+        with open(config_path(), "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
+        raw = b""
+    return standalone_managed(raw)
+
+
+#: Variables only a Secure Client host reads. Every other host ignores them;
+#: the registry purpose of each names the config key that replaces it.
+_SECURE_CLIENT_ONLY = ("DEFENSECLAW_JUDGE_TRACE",)
+
+
+def ignored_off_secure_client(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of set Secure-Client-only variables on a host that is not one."""
+    from defenseclaw.config import config_path
+    from defenseclaw.config_writer import secure_client_managed
+
+    environ = os.environ if env is None else env
+    set_names = sorted(name for name in _SECURE_CLIENT_ONLY if str(environ.get(name) or "").strip())
+    if not set_names:
+        return []
+    try:
+        with open(config_path(), "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
+        raw = b""
+    return [] if secure_client_managed(raw) else set_names
+
+
+def lookup(name: str, env: Mapping[str, str] | None = None, *, managed: bool | None = None) -> str | None:
+    """``os.environ.get`` under the managed-mode policy.
+
+    On a managed standalone host a variable the registry marks ``ignore``
+    reads as unset; ``tighten_only`` and ``allow`` read as set.
+    """
+    environ = os.environ if env is None else env
+    value = environ.get(name)
+    if value is None:
+        return None
+    if managed_policy(name) == MANAGED_IGNORE and (managed_standalone() if managed is None else managed):
+        return None
+    return value
+
+
+def ignored_in_managed_mode(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of set variables a managed standalone host ignores."""
+    if not managed_standalone():
+        return []
+    environ = os.environ if env is None else env
+    return sorted(
+        entry.name
+        for entry in load_registry().entries
+        if entry.managed == MANAGED_IGNORE and environ.get(entry.name)
+    )
+

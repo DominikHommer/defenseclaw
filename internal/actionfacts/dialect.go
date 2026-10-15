@@ -62,7 +62,7 @@ func chooseRawCommandDialect(
 
 func genericRawExecutionTool(name string) bool {
 	switch name {
-	case "shell", "shell_command", "terminal", "run_command",
+	case "shell", "shell_command", "async_shell_command", "terminal", "run_command",
 		"run_shell", "run_shell_command", "runshellcommand", "shell_exec",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
@@ -70,6 +70,17 @@ func genericRawExecutionTool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// InferredRawCommandDialect is the dialect inferRawCommandDialect reads from
+// the grammar of source, as for a generic execution tool, or DialectNone when
+// its signals are mixed.
+func InferredRawCommandDialect(source string) Dialect {
+	dialect, ambiguous := inferRawCommandDialect(source)
+	if ambiguous {
+		return DialectNone
+	}
+	return dialect
 }
 
 func inferRawCommandDialect(source string) (Dialect, bool) {
@@ -193,7 +204,7 @@ func rawFirstWord(source string) string {
 
 func powerShellCmdlet(program string) bool {
 	switch program {
-	case "get-content", "set-content", "add-content", "out-file",
+	case "get-content", "set-content", "add-content", "out-file", "tee-object",
 		"remove-item", "get-childitem", "new-item", "test-path", "get-item",
 		"get-itemproperty", "set-item", "set-itemproperty",
 		"new-itemproperty", "remove-itemproperty", "copy-item", "move-item",
@@ -210,7 +221,7 @@ func powerShellCmdlet(program string) bool {
 
 func powerShellAlias(program string) bool {
 	switch program {
-	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm":
+	case "gc", "gci", "gi", "gp", "sp", "rp", "ri", "ni", "iwr", "irm", "tee":
 		return true
 	default:
 		return false

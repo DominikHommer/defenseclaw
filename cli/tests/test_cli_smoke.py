@@ -17,6 +17,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import unittest
@@ -47,6 +48,51 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("Commands:", result.output)
         self.assertIn("init", result.output)
         self.assertIn("skill", result.output)
+
+    def test_top_level_help_fits_80_columns(self):
+        # GAP-2138: the Multi-connector paragraph is a \b block, so click
+        # keeps its hand wrapping; every line must fit an 80-column terminal.
+        from defenseclaw.main import cli
+
+        result = CliRunner().invoke(cli, ["--help"], terminal_width=80)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("tracked under\n", result.output)
+        wide = [line for line in result.output.splitlines() if len(line) > 80]
+        self.assertEqual(wide, [])
+    def test_group_help_rows_show_whole_summaries(self):
+        # GAP-2036: Click cut command summaries off with '...' at 80 columns.
+        import click
+        from defenseclaw.main import cli
+
+        for group in ("mcp", "skill", "setup", "guardrail", "audit"):
+            command = cli.commands[group]
+            text = command.get_help(click.Context(command, info_name=group, terminal_width=80))
+            commands = text.split("Commands:", 1)[1]
+            self.assertNotIn("...", commands, f"{group}: {commands}")
+            if group == "mcp":
+                self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
+
+    def test_help_never_shows_internal_ledger_ids(self):
+        # Ledger ids belong in code comments and commit messages; click
+        # prints command docstrings and option help to users.
+        import re
+
+        import click
+        from defenseclaw.main import cli
+
+        leaks = []
+
+        def walk(command, ctx):
+            if re.search(r"GAP-\d", command.get_help(ctx)):
+                leaks.append(ctx.command_path)
+            if isinstance(command, click.Group):
+                for name in command.list_commands(ctx):
+                    sub = command.get_command(ctx, name)
+                    walk(sub, click.Context(sub, info_name=name, parent=ctx))
+
+        walk(cli, click.Context(cli, info_name="defenseclaw"))
+        self.assertEqual(leaks, [])
 
     def test_init_help_works(self):
         from defenseclaw.main import cli
@@ -85,7 +131,7 @@ class CliSmokeTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["path"], expected)
             document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            self.assertEqual(document["config_version"], 8)
+            self.assertEqual(document["config_version"], 9)
             self.assertEqual(
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected],
@@ -93,6 +139,11 @@ class CliSmokeTests(unittest.TestCase):
             self.assertFalse((home / "audit.db").exists())
 
     def test_trusted_path_bootstrap_survives_init_and_authorizes_codex_receipt(self):
+        # setup gateway refuses a port another process holds, so use one
+        # that is free now instead of a fixed port a parallel job may own.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            api_port = probe.getsockname()[1]
         from defenseclaw.bootstrap import StepResult
         from defenseclaw.commands.cmd_config import ValidationResult
         from defenseclaw.main import cli
@@ -176,7 +227,7 @@ class CliSmokeTests(unittest.TestCase):
                         "setup",
                         "gateway",
                         "--api-port",
-                        "19091",
+                        str(api_port),
                         "--non-interactive",
                         "--no-verify",
                     ],
@@ -195,8 +246,8 @@ class CliSmokeTests(unittest.TestCase):
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected_root],
             )
-            self.assertEqual(document["gateway"]["api_port"], 19091)
-            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], 19091)
+            self.assertEqual(document["gateway"]["api_port"], api_port)
+            self.assertEqual(json.loads(shown.output)["gateway"]["api_port"], api_port)
             initialized_selection = initialized_receipt["selections"]["codex"]
             self.assertEqual(initialized_selection["executable"], expected_codex)
             receipt = json.loads((home / "agent_selection.json").read_text())
@@ -440,55 +491,10 @@ class CliSmokeTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("Configuration schema v8 is required", result.output)
+            self.assertIn("written by an older DefenseClaw", result.output)
             self.assertEqual(config_file.read_text(encoding="utf-8"), original)
             self.assertFalse((home / "audit.db").exists())
 
-    def test_direct_upgrade_refuses_active_recovery_and_points_to_resolver(self):
-        from defenseclaw.main import cli
-
-        for journal_name in ("phase-one-active.json", "phase-two-active.json"):
-            with self.subTest(journal_name=journal_name):
-                argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.5"]
-                runner = CliRunner()
-                with runner.isolated_filesystem():
-                    home = Path.cwd() / ".defenseclaw"
-                    journal = home / ".upgrade-recovery" / journal_name
-                    journal.parent.mkdir(parents=True)
-                    journal.write_text("{}\n", encoding="utf-8")
-                    before = {path.relative_to(home) for path in home.rglob("*")}
-                    with (
-                        patch.object(sys, "argv", argv),
-                        patch.dict(
-                            os.environ,
-                            {"DEFENSECLAW_HOME": str(home)},
-                        ),
-                    ):
-                        result = runner.invoke(cli, argv[1:])
-                    self.assertEqual(journal.read_text(encoding="utf-8"), "{}\n")
-                    self.assertEqual(
-                        {path.relative_to(home) for path in home.rglob("*")},
-                        before,
-                    )
-
-                self.assertEqual(result.exit_code, 1)
-                self.assertIn("requires the release-owned resolver", result.output)
-                self.assertIn("without --version/-Version", result.output)
-                self.assertIn("mktemp -d", result.output)
-                self.assertIn("cosign verify-blob", result.output)
-                self.assertIn("releases/download/", result.output)
-                self.assertIn("defenseclaw-upgrade.sh", result.output)
-                self.assertIn("DefenseClaw upgrade resolver complete v1", result.output)
-                self.assertIn(
-                    '/bin/bash --noprofile --norc -p -n "$d/defenseclaw-upgrade.sh"',
-                    result.output,
-                )
-                self.assertNotIn("upgrade.sh | bash", result.output)
-                self.assertIn("[Guid]::NewGuid()", result.output)
-                self.assertIn("-ErrorAction Stop", result.output)
-                self.assertIn("finally", result.output)
-                self.assertIn("& $r -Yes", result.output)
-                self.assertIn("no recovery mutation was attempted", result.output)
 
     def test_upgrade_help_never_triggers_interrupted_recovery(self):
         from defenseclaw.main import cli
@@ -518,7 +524,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Usage:", result.output)
 
-    def test_upgrade_preflight_does_not_initialize_audit_store(self):
+    def test_upgrade_does_not_load_config_or_initialize_audit_store(self):
         from defenseclaw.main import cli
 
         argv = ["defenseclaw", "upgrade", "--yes", "--version", "0.8.3"]
@@ -531,18 +537,17 @@ class CliSmokeTests(unittest.TestCase):
                     os.environ,
                     {"DEFENSECLAW_HOME": str(home), "HOME": str(Path.cwd())},
                 ),
-                patch("defenseclaw.config.load", return_value=object()) as load,
+                patch("defenseclaw.config.load") as load,
                 patch("defenseclaw.db.Store") as store,
             ):
                 result = runner.invoke(cli, argv[1:])
 
             self.assertFalse(home.exists())
-            load.assert_called_once_with()
+            load.assert_not_called()
             store.assert_not_called()
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Refusing to downgrade", result.output)
-        self.assertIn("No changes were made", result.output)
+        self.assertIn("installs only 1.0.0 or later", result.output)
 
     def test_setup_splunk_o11y_bootstraps_clean_home(self):
         from defenseclaw.commands.cmd_config import ValidationResult
@@ -572,8 +577,12 @@ class CliSmokeTests(unittest.TestCase):
                 ),
                 patch.object(Logger, "from_config", return_value=Logger.no_runtime()),
                 patch("defenseclaw.observability.v8_writer._validate_candidate"),
+                # Never start a real gateway for a temporary home (#1031).
+                # --no-start-gateway would switch init to the guided flow.
+                patch("defenseclaw.commands.cmd_init._start_gateway"),
             ):
-                runner.invoke(cli, ["init", "--skip-install"])
+                init = runner.invoke(cli, ["init", "--skip-install"])
+                self.assertEqual(init.exit_code, 0, init.output)
                 result = runner.invoke(
                     cli,
                     ["setup", "splunk", "--o11y", "--access-token", "test-tok", "--realm", "us1", "--non-interactive"],
@@ -584,7 +593,7 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(config_exists)
-        self.assertIn("config_version: 8", config_text)
+        self.assertIn("config_version: 9", config_text)
         self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
         self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)

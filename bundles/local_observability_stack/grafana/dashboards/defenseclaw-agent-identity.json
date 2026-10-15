@@ -42,6 +42,13 @@
       "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",
       "icon": "external link",
       "targetBlank": false
+    },
+    {
+      "title": "Identity & Users",
+      "type": "link",
+      "url": "/d/defenseclaw-identity?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
     }
   ],
   "templating": {
@@ -124,6 +131,26 @@
         ],
         "skipUrlSync": false,
         "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel except Discovery runs: discovery run summaries carry no user. Prometheus metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
       }
     ]
   },
@@ -155,7 +182,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [5m]))) or vector(0)",
+          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [5m]))) or vector(0)",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -182,7 +209,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_instance_id=\"{{.body_defenseclaw_agent_instance_id}}\" | agent_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_instance_id=\"{{or .body_defenseclaw_agent_instance_id .correlation_agent_instance_id}}\" | agent_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -214,7 +241,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | label_format sidecar_instance_id=\"{{.correlation_sidecar_instance_id}}\" | sidecar_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | label_format sidecar_instance_id=\"{{.correlation_sidecar_instance_id}}\" | sidecar_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true
         }
@@ -223,7 +250,7 @@
     {
       "type": "stat",
       "title": "Discovery runs ($__range)",
-      "description": "Exact canonical agent.discovery.completed and agent.discovery.rejected summary events recorded during the selected range. This log count includes a first report even when Prometheus has not yet scraped two counter samples.",
+      "description": "Exact canonical agent.discovery.completed, agent.discovery.rejected and ai.discovery.completed summary events recorded during the selected range. This log count includes a first report even when Prometheus has not yet scraped two counter samples.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -236,7 +263,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.](completed|rejected)\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.](completed|rejected)|ai[.]discovery[.]completed\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -392,7 +419,7 @@
       },
       "targets": [
         {
-          "expr": "count by (agent_name) (sum by (agent_name, agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\", agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id != \"\" [$__interval])))",
+          "expr": "count by (agent_name) (sum by (agent_name, agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\", agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id != \"\" [$__interval])))",
           "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
@@ -423,7 +450,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" | body_gen_ai_agent_id != \"\" [$__interval])) / sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" [$__interval]))",
+          "expr": "sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" | body_gen_ai_agent_id != \"\" [$__interval])) / sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" [$__interval]))",
           "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
@@ -694,7 +721,7 @@
     {
       "type": "timeseries",
       "title": "AI signals by category",
-      "description": "Observed signals by the bounded continuous-discovery taxonomy. Per-sidecar cumulative counter maxima are summed across the selected range so a one-export discovery run is not undercounted.",
+      "description": "Observed signals by the bounded continuous-discovery taxonomy. A series first seen in the range counts in full, so a one-export discovery run is not undercounted.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -707,7 +734,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range]))",
+          "expr": "sum by (signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total[$__range])))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -733,7 +760,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range])))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -828,7 +855,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.].*|ai[.]discovery[.].*|ai_component[.].*\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"agent[.]discovery[.].*|ai[.]discovery[.].*|ai_component[.].*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -871,7 +898,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
+          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -899,12 +926,12 @@
               "defenseclaw_agent_lifecycle_event": true,
               "defenseclaw_agent_lifecycle_id": true,
               "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
+              "defenseclaw_device_public_key_fingerprint": true,
               "defenseclaw_gateway_host": true,
               "defenseclaw_gateway_port": true,
               "defenseclaw_instance_id": true,
               "defenseclaw_session_root_id": true,
-              "deployment_environment": true,
+              "deployment_environment_name": true,
               "host_arch": true,
               "host_name": true,
               "instance": true,
@@ -918,6 +945,7 @@
             },
             "renameByName": {
               "Value": "Observations",
+              "Value #A": "Observations",
               "connector": "Connector",
               "gen_ai_agent_id": "Agent ID",
               "gen_ai_agent_name": "Name",

@@ -353,6 +353,9 @@ class AIUsageSignal:
     model: AIUsageModel | None = None
     runtime: AIUsageRuntime | None = None
     evidence_types: tuple[str, ...] = ()
+    # The OpenShell sandbox a sandbox scan found the signal in (empty: this
+    # machine).
+    sandbox_name: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> AIUsageSignal:
@@ -388,7 +391,15 @@ class AIUsageSignal:
             model=AIUsageModel.from_mapping(model_raw if isinstance(model_raw, Mapping) else None),
             runtime=AIUsageRuntime.from_mapping(runtime_raw if isinstance(runtime_raw, Mapping) else None),
             evidence_types=evidence_types,
+            sandbox_name=str(raw.get("sandbox_name") or ""),
         )
+
+    @property
+    def display_product(self) -> str:
+        """The product, tagged with the sandbox it was found in."""
+        if not self.sandbox_name:
+            return self.product
+        return f"{self.product} (sandbox {self.sandbox_name})" if self.product else f"(sandbox {self.sandbox_name})"
 
 
 @dataclass(frozen=True)
@@ -446,6 +457,10 @@ class AIUsageSnapshot:
     enabled: bool = False
     # Runtime opt-in reported by the currently running gateway generation.
     lookup_model_provenance_online: bool = False
+    # ai_discovery.enabled in config.yaml (None = unknown). When it is true
+    # but the gateway reports enabled=false, the gateway started before the
+    # change and needs a restart (GAP-2260).
+    configured_enabled: bool | None = None
     summary: AIUsageSummary = field(default_factory=AIUsageSummary)
     signals: tuple[AIUsageSignal, ...] = ()
     fetched_at: datetime | None = None
@@ -464,10 +479,17 @@ class AIUsageSnapshot:
             lookup_model_provenance_online=_coerce_bool(
                 raw.get("lookup_model_provenance_online")
             ),
+            configured_enabled=_coerce_optional_bool(raw.get("configured_enabled")),
             summary=AIUsageSummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
             signals=signals,
             fetched_at=_parse_datetime(raw.get("fetched_at")) or _parse_datetime(raw.get("fetchedAt")),
         )
+
+    @property
+    def restart_pending(self) -> bool:
+        """Config turns discovery on, but the running gateway has not started it."""
+
+        return not self.enabled and self.configured_enabled is True
 
     @classmethod
     def from_json(cls, text: str) -> AIUsageSnapshot:
@@ -917,6 +939,14 @@ class AIDiscoveryPanelModel:
         if key == "r":
             return AIDiscoveryPanelAction(True, self.load_intent())
         if key == "s":
+            if getattr(self.snapshot, "restart_pending", False):
+                return AIDiscoveryPanelAction(
+                    True,
+                    hint="AI discovery is on in config but not running yet. Press d to restart the gateway, then s.",
+                )
+            if self.snapshot is not None and not self.snapshot.enabled:
+                # A scan only fails with HTTP 503 while discovery is off (GAP-2230).
+                return AIDiscoveryPanelAction(True, hint="AI discovery is off. Press d to turn it on, then s to scan.")
             return AIDiscoveryPanelAction(True, self.scan_intent())
         if key == "/":
             self.filter_text = ""
@@ -927,6 +957,19 @@ class AIDiscoveryPanelModel:
                 hint="Type to filter products and models. Enter applies; Esc clears.",
             )
         return AIDiscoveryPanelAction(False)
+
+    def hint_conditions(self) -> tuple[str, ...]:
+        """Hint bar conditions: ``disabled`` (discovery off), ``restart_pending``
+        (on in config, gateway not restarted yet), ``all_models``."""
+
+        conditions: list[str] = []
+        if self.snapshot is not None and not self.snapshot.enabled:
+            conditions.append("disabled")
+        if getattr(self.snapshot, "restart_pending", False):
+            conditions.append("restart_pending")
+        if self.show_all_models:
+            conditions.append("all_models")
+        return tuple(conditions)
 
     def toggle_model_scope_action(self) -> AIDiscoveryPanelAction:
         """Toggle model scope independently of keyboard filter input."""
@@ -966,6 +1009,11 @@ class AIDiscoveryPanelModel:
                 "AI discovery snapshot not yet available. "
                 "Ensure the gateway is running and DEFENSECLAW_GATEWAY_TOKEN matches the configured token."
             )
+        if getattr(self.snapshot, "restart_pending", False):
+            return (
+                "AI discovery is on in config, but the running gateway started before that change. "
+                "Press d to restart it, or run: defenseclaw-gateway restart"
+            )
         if not self.snapshot.enabled:
             return "AI discovery disabled. Run: defenseclaw agent discovery enable"
         if self.filter_text and not self.filtered and not self.filtered_models:
@@ -996,7 +1044,10 @@ class AIDiscoveryPanelModel:
             parts.append(f"changed={summary.changed_signals}")
         if summary.gone_signals:
             parts.append(f"gone={summary.gone_signals}")
-        parts.append(f"files={summary.files_scanned}")
+        if summary.files_scanned:
+            # The daemon's stored summary has no file count until a scan runs
+            # in this session; "files=0" contradicted the CLI's 942 (GAP-1402).
+            parts.append(f"files={summary.files_scanned}")
         result = summary.result.strip().lower()
         if result and result not in {"ok", "success", "complete"}:
             parts.append(f"scan={result}")
@@ -1056,7 +1107,8 @@ class AIDiscoveryPanelModel:
             lines.append(sig_id(signal))
             if signal.detector or signal.source:
                 source = f" source={signal.source}" if signal.source else ""
-                lines.append(f"detector={signal.detector}{source}".strip())
+                sandbox = f" sandbox={signal.sandbox_name}" if signal.sandbox_name else ""
+                lines.append(f"detector={signal.detector}{source}{sandbox}".strip())
             if signal.model:
                 model = signal.model
                 parts = [f"model: id={model.id or '(unknown)'}"]
@@ -1085,8 +1137,12 @@ class AIDiscoveryPanelModel:
                 parts = [f"runtime: pid={signal.runtime.pid}"]
                 if signal.runtime.user:
                     parts.append(f"user={signal.runtime.user}")
-                if signal.runtime.uptime_sec:
-                    parts.append(f"up={humanize_age(timedelta(seconds=signal.runtime.uptime_sec))}")
+                uptime = timedelta(seconds=signal.runtime.uptime_sec)
+                if signal.sandbox_name and signal.runtime.started_at:
+                    # As of the sandbox's last read, and running then (GAP-0392).
+                    uptime = max(now - signal.runtime.started_at, timedelta(0))
+                if uptime:
+                    parts.append(f"up={humanize_age(uptime)}")
                 if signal.runtime.comm:
                     parts.append(f"comm={signal.runtime.comm}")
                 lines.append(" ".join(parts))
@@ -1162,8 +1218,8 @@ class AIDiscoveryPanelModel:
             self._apply_filter()
             return
 
-        groups: dict[tuple[str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
-        order: list[tuple[str, str, str, str, str, str]] = []
+        groups: dict[tuple[str, str, str, str, str, str, str], _MutableAIDiscoveryRow] = {}
+        order: list[tuple[str, str, str, str, str, str, str]] = []
         model_groups: dict[str, _MutableAIDiscoveryRow] = {}
         model_order: list[str] = []
         for signal in self.snapshot.signals:
@@ -1201,12 +1257,14 @@ class AIDiscoveryPanelModel:
                 component_name = signal.component.name.lower()
                 if signal.component.version:
                     version = signal.component.version
-            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version)
+            # What a sandbox holds is its own row, never folded into the
+            # same product on this machine.
+            key = (signal.state, signal.product, signal.vendor, ecosystem, component_name, version, signal.sandbox_name)
             row = groups.get(key)
             if row is None:
                 row = _MutableAIDiscoveryRow(
                     state=signal.state,
-                    product=signal.product,
+                    product=signal.display_product,
                     vendor=signal.vendor,
                     ecosystem=signal.component.ecosystem if signal.component else "",
                     component=signal.component.name if signal.component else "",

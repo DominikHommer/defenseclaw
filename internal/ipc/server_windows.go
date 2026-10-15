@@ -87,10 +87,11 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	if err := winpath.RejectReparseChain(dir); err != nil {
 		return nil, fmt.Errorf("ipc: reject reparse chain %s: %w", dir, err)
 	}
-	// Directory gets the traverse+list-only Authenticated Users ACE.
-	// FILE_ADD_FILE is deliberately refused so an auth-user cannot
-	// pre-create a decoy at the socket path while the daemon is
-	// stopped (CR spec-004:PRRT_kwDORuAK-s6ankzk).
+	// Directory gets the read-only traversal/inspection Authenticated Users
+	// ACE. AVC needs to inspect the recreated endpoint after restart;
+	// FILE_ADD_FILE remains deliberately refused so an auth-user cannot
+	// pre-create a decoy at the socket path while the daemon is stopped
+	// (CR spec-004:PRRT_kwDORuAK-s6ankzk).
 	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
 		return nil, err
 	}
@@ -187,7 +188,13 @@ func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	if programFiles == "" {
 		return fmt.Errorf("ipc: trusted program files root is empty; refusing to bind IPC surface")
 	}
-	trustedParent := filepath.Clean(filepath.Join(programFiles, windowsManagedIPCRelativeDir))
+	// The managed IPC directory follows the service's enterprise profile pin
+	// (Secure Client or standalone), exactly as the sensor helper and the
+	// gateway resolve it; without a pin it is the Secure Client directory.
+	trustedParent := winpath.ManagedIPCDir()
+	if trustedParent == "" {
+		return fmt.Errorf("ipc: trusted managed IPC directory is unresolved; refusing to bind IPC surface")
+	}
 	if !strings.EqualFold(parent, trustedParent) {
 		return fmt.Errorf(
 			"ipc: socket path override must live under the trusted managed root %q (got parent %q)",

@@ -39,7 +39,6 @@ from defenseclaw.tui.services.config_watch import (
     ConfigChangeWatcher,
     probe_config_generation,
 )
-from textual.containers import VerticalScroll
 
 
 def _config_payload(
@@ -100,6 +99,14 @@ def test_atomic_replace_emits_one_generation(tmp_path: Path) -> None:
     assert generation is not None
     watcher.accept(generation)
     assert watcher.poll(now=2.0) is None
+
+
+def test_writer_generation_is_part_of_the_signature(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("mode: observe\n", encoding="utf-8")
+    assert probe_config_generation(path).config_generation == 0
+    (tmp_path / "config.generation.json").write_text('{"generation": 4}', encoding="utf-8")
+    assert probe_config_generation(path).config_generation == 4
 
 
 def test_same_size_rapid_in_place_updates_use_content_fallback(
@@ -205,8 +212,8 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     initial = _config_payload(
         tmp_path,
         {
-            "claudecode": {"mode": "observe", "rule_pack_dir": "/packs/base"},
-            "codex": {"mode": "action", "rule_pack_dir": "/packs/strict"},
+            "claudecode": {"mode": "observe", "rule_pack": "default"},
+            "codex": {"mode": "action", "rule_pack": "strict"},
         },
     )
     path = _configure_active_path(monkeypatch, tmp_path, initial)
@@ -217,9 +224,9 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     changed = _config_payload(
         tmp_path,
         {
-            "claudecode": {"mode": "action", "rule_pack_dir": "/packs/strict"},
-            "codex": {"mode": "observe", "rule_pack_dir": "/packs/base", "enabled": False},
-            "cursor": {"mode": "observe", "rule_pack_dir": "/packs/cursor"},
+            "claudecode": {"mode": "action", "rule_pack": "strict"},
+            "codex": {"mode": "observe", "rule_pack": "default", "enabled": False},
+            "cursor": {"mode": "observe", "rule_pack": "permissive"},
         },
     )
     changed["asset_policy"] = {
@@ -238,8 +245,8 @@ async def test_multi_connector_add_disable_and_independent_policy_refresh(
     }
     assert dict(cfg.connector_packs) == {
         "claudecode": "strict",
-        "codex": "base",
-        "cursor": "cursor",
+        "codex": "default",
+        "cursor": "permissive",
     }
     assert cfg.connector_is_disabled("codex") is True
     assert app.overview_model.enforcement.total_scans == 17
@@ -401,41 +408,38 @@ async def test_external_refresh_preserves_active_setup_form_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
+async def test_config_draft_moves_onto_an_external_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    initial = _config_payload(
-        tmp_path,
-        {
-            "claudecode": {"mode": "observe"},
-            "codex": {"mode": "action"},
-            "cursor": {"mode": "observe"},
-            "opencode": {"mode": "action"},
-        },
-    )
+    # GAP-0342: with an editor draft open, another writer sets block_at and
+    # alert_at. The untouched row shows the new value, Review shows the
+    # on-disk value as "before" and says the save replaces it.
+    from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel
+
+    initial = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
     path = _configure_active_path(monkeypatch, tmp_path, initial)
     app = DefenseClawTUI(config=config_module.load(), config_path=path)
-    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "guardrail.alert_at"
+    )
+    assert model.set_current_field_value("CRITICAL")
+    changed = {**initial, "guardrail": {**initial["guardrail"], "block_at": "HIGH", "alert_at": "LOW"}}
+    _atomic_write(path, changed)
+    await app._poll_config_once(now=1.0)  # noqa: SLF001
+    await app._poll_config_once(now=2.0)  # noqa: SLF001
 
-    async with app.run_test(size=(110, 18)) as pilot:
-        app._set_connector_filter("codex")  # noqa: SLF001
-        scroller = app.query_one("#body-scroll", VerticalScroll)
-        scroller.scroll_to(y=min(8, scroller.max_scroll_y), animate=False, immediate=True)
-        await pilot.pause()
-        before = scroller.scroll_y
-        assert before > 0
-
-        changed = copy.deepcopy(initial)
-        changed["guardrail"]["connectors"]["codex"]["mode"] = "observe"  # type: ignore[index]
-        _atomic_write(path, changed)
-        await app._poll_config_once(now=1.0)  # noqa: SLF001
-        await pilot.pause()
-
-        assert app._connector_filter() == "codex"  # noqa: SLF001
-        assert scroller.scroll_y == before
+    rows = {field.key: field for section in model.sections for field in section.fields}
+    assert model.disk_change_pending and rows["guardrail.block_at"].value == "HIGH"
+    (entry,) = model.config_diff()
+    assert (entry.key, entry.before, entry.after, entry.disk_changed) == ("guardrail.alert_at", "LOW", "CRITICAL", True)
+    assert "changed on disk; saving replaces it" in ConfigDiffModalModel.from_entries((entry,)).preview_text()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows current-source acceptance")
@@ -502,16 +506,27 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.overview_model.cfg.guardrail_mode == "observe"
         cli_log = tmp_path / "setup-cli.log"
         with cli_log.open("wb") as output_stream:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                cwd=repo_root,
-                env=environment,
-                stdout=output_stream,
-                stderr=subprocess.STDOUT,
-                timeout=90,
-                check=False,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    command,
+                    cwd=repo_root,
+                    env=environment,
+                    # --yes is the whole interaction; never hand the CLI (or
+                    # the probes it starts) the test runner's stdin.
+                    stdin=subprocess.DEVNULL,
+                    stdout=output_stream,
+                    stderr=subprocess.STDOUT,
+                    timeout=90,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                # Name the step the CLI was still in rather than only the
+                # expired budget.
+                pytest.fail(
+                    "setup CLI did not finish within 90s; its output so far:\n"
+                    + cli_log.read_text(encoding="utf-8", errors="replace")
+                )
         output = cli_log.read_text(encoding="utf-8", errors="replace")
         assert result.returncode == 0, output
         assert "Config saved" in output
@@ -532,3 +547,154 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.config.guardrail.effective_mode("claudecode") == "action"
         assert app.setup_model.config is app.config
         assert app._config_reload_count == 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_config_editor_save_records_an_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-2121: saving asset_policy.mode in the config editor was unaudited.
+    from defenseclaw.tui.services import config_audit
+
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    recorded: list[tuple] = []
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, entries: recorded.append(entries) or True)
+    model = app.setup_model
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "saved" in action.hint
+    (entries,) = recorded
+    assert [(e.key, e.after) for e in entries] == [("asset_policy.mode", "action")]
+
+
+@pytest.mark.asyncio
+async def test_save_over_an_unparseable_file_keeps_the_file_and_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-0370: a save over a config.yaml that no longer parses replaced it
+    # with only the edited fields; it is refused and the draft stays.
+    payload = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, payload)
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+    broken = path.read_text(encoding="utf-8") + "\nbroken: [unclosed\n"
+    path.write_text(broken, encoding="utf-8")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "not valid YAML (line" in action.hint and "draft is kept" in action.hint, action.hint
+    assert path.read_text(encoding="utf-8") == broken
+    assert model.has_changes()
+
+
+@pytest.mark.asyncio
+async def test_asset_policy_save_applies_without_a_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The gateway reloads asset_policy hot (GAP-0056), and CLI admission reads
+    # it at once (GAP-2145): the save asks for no restart.
+    from defenseclaw.tui.services import config_audit
+
+    payload = {**_config_payload(tmp_path, {"claudecode": {}}), "observability": {}}
+    path = _configure_active_path(monkeypatch, tmp_path, payload)
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, _entries: True)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "after a restart" not in action.hint and "Restart the gateway" not in action.hint, action.hint
+    banner = app._setup_config_body_text()  # noqa: SLF001 - the banner under test.
+    assert "Saved" in banner and "restart" not in banner.lower(), banner
+
+
+@pytest.mark.asyncio
+async def test_failed_config_save_keeps_draft_for_retry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+    original_save = app.config.save
+    monkeypatch.setattr(app.config, "save", lambda **_kwargs: (_ for _ in ()).throw(OSError("read-only directory")))
+
+    action = app._save_setup_config()
+    assert "failed" in action.hint
+    assert model.has_changes()
+    assert any(entry.key == "asset_policy.mode" for entry in model.config_diff())
+
+    monkeypatch.setattr(app.config, "save", original_save)
+    assert "saved" in app._save_setup_config().hint
+    assert not model.has_changes()
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["asset_policy"]["mode"] == "action"
+
+
+@pytest.mark.asyncio
+async def test_failed_config_save_revert_does_not_leak_into_later_save(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    model = app.setup_model
+    model.mode = "config"
+
+    def edit(key: str, value: str) -> None:
+        model.active_section, model.active_line = next(
+            (si, li)
+            for si, section in enumerate(model.sections)
+            for li, field in enumerate(section.fields)
+            if field.key == key
+        )
+        assert model.set_current_field_value(value)
+
+    edit("asset_policy.mode", "action")
+    original_save = app.config.save
+    monkeypatch.setattr(app.config, "save", lambda **_kwargs: (_ for _ in ()).throw(OSError("read-only directory")))
+    assert "failed" in app._save_setup_config().hint
+    assert "reverted" in app._handle_setup_config_key("r").hint
+    assert not model.has_changes()
+
+    monkeypatch.setattr(app.config, "save", original_save)
+    edit("environment", "later-change")
+    assert "saved" in app._save_setup_config().hint
+    persisted = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert persisted["environment"] == "later-change"
+    assert persisted.get("asset_policy", {}).get("mode") != "action"

@@ -16,6 +16,7 @@ package destinations
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -119,6 +120,7 @@ func (function CAFileLoaderFunc) LoadObservabilityCA(ctx context.Context, path s
 // resolved until PrepareDestination, so a new generation observes legitimate
 // rotation without the factory caching prior material.
 type Options struct {
+	SecureClient  bool
 	ConsoleStream ConsoleStream
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -145,7 +147,9 @@ type Options struct {
 // Factory owns no generation resource. Every successful preparation returns a
 // distinct adapter and retryable, idempotent cleanup closure.
 type Factory struct {
+	secureClient     bool
 	console          io.Writer
+	stderr           io.Writer
 	secrets          config.ObservabilityV8SecretResolver
 	caLoader         CAFileLoader
 	resolver         netguard.V8Resolver
@@ -178,7 +182,8 @@ func NewFactory(options Options) (*Factory, error) {
 		return nil, newError(ErrorInvalidDependencies)
 	}
 	return &Factory{
-		console: console, secrets: options.Secrets, caLoader: options.CALoader,
+		secureClient: options.SecureClient,
+		console:      console, stderr: options.Stderr, secrets: options.Secrets, caLoader: options.CALoader,
 		resolver: options.Resolver, dialer: options.Dialer, warnings: options.Warnings,
 		redaction: options.RedactionEngine, deliveryObserver: options.DeliveryObserver,
 		otlpObserver: options.OTLPCanonicalObserver, galileoObserver: options.GalileoObserver,
@@ -220,10 +225,30 @@ func (factory *Factory) PrepareDestination(
 		adapter, err := local.NewJSONL(local.JSONLConfig{
 			Path: destination.Transport.Path, MaxSizeMB: rotation.MaxSizeMB,
 			MaxBackups: rotation.MaxBackups, MaxAgeDays: rotation.MaxAgeDays,
-			Compress: rotation.Compress,
+			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
+			// Secure Client keeps the origin/main startup refusal without
+			// this line (GAP-1018).
+			if !nilInterface(factory.stderr) && !factory.secureClient {
+				// The destination, the path and the rule: start failed with
+				// only runtime_unavailable (GAP-0890).
+				reason := local.JSONLPathProblem(destination.Transport.Path)
+				if reason == "" {
+					reason = "cannot be opened safely: the file or its folder belongs to an account the gateway does not trust, or the folder cannot be created"
+				}
+				_, _ = fmt.Fprintf(factory.stderr,
+					"defenseclaw: observability destination %q: %s %s; fix the path or remove the destination\n",
+					destination.Name, destination.Transport.Path, reason)
+			}
 			return nil, cleanup, newError(ErrorAdapterPrepare)
+		}
+		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
+			// The administrator's own destination name and file path: the one
+			// line that says why this destination delivers nothing.
+			_, _ = fmt.Fprintf(factory.stderr,
+				"defenseclaw: observability destination %q cannot open %s for writing; the gateway runs without it and retries the file on every delivery\n",
+				destination.Name, destination.Transport.Path)
 		}
 		cleanup = retryableCleanup(adapter.Close)
 		if err := ctx.Err(); err != nil {
@@ -272,8 +297,9 @@ func (factory *Factory) prepareManagedAID(
 			SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 			DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),
 		},
-		Network:  push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
-		Warnings: factory.warnings,
+		DeploymentAliases: config.ObservabilityV8ManagedAIDDeploymentAliases(destination),
+		Network:           push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
+		Warnings:          factory.warnings,
 	}, factory.managedProvider)
 	if err != nil {
 		return nil, noResource, newError(ErrorAdapterPrepare)
@@ -378,7 +404,7 @@ func (factory *Factory) prepareSplunk(
 	destination config.ObservabilityV8EffectiveDestination,
 	noResource observabilityruntime.DestinationAdapterCleanup,
 ) (delivery.Adapter, observabilityruntime.DestinationAdapterCleanup, error) {
-	token, ok := factory.resolveToken(destination.Transport.TokenEnv)
+	token, ok := factory.resolveTokenReference(destination.Transport.TokenEnv, destination.Transport.TokenCredential)
 	if !ok {
 		return nil, noResource, newError(ErrorSecretUnavailable)
 	}
@@ -426,9 +452,9 @@ func (factory *Factory) prepareHTTPJSONL(
 		return nil, noResource, err
 	}
 	bearer := ""
-	if destination.Transport.BearerEnv != "" {
+	if destination.Transport.BearerEnv != "" || destination.Transport.BearerCredential != "" {
 		var ok bool
-		bearer, ok = factory.resolveToken(destination.Transport.BearerEnv)
+		bearer, ok = factory.resolveTokenReference(destination.Transport.BearerEnv, destination.Transport.BearerCredential)
 		if !ok {
 			return nil, noResource, newError(ErrorSecretUnavailable)
 		}
@@ -507,8 +533,14 @@ func (factory *Factory) resolveHeaders(
 				return nil, newError(ErrorInvalidDestination)
 			}
 			result[name] = *value.Static
-		case value.Static == nil && value.Secret != nil && validSecretReference(value.Secret.Env):
+		case value.Static == nil && value.Secret != nil && value.Secret.Credential == "" && validSecretReference(value.Secret.Env):
 			resolved, ok := factory.resolveReference(value.Secret.Env)
+			if !ok || !validHeaderValue(resolved) || strings.TrimSpace(resolved) == "" {
+				return nil, newError(ErrorSecretUnavailable)
+			}
+			result[name] = resolved
+		case value.Static == nil && value.Secret != nil && value.Secret.Env == "" && value.Secret.Credential != "":
+			resolved, ok := factory.resolveCredential(value.Secret.Credential)
 			if !ok || !validHeaderValue(resolved) || strings.TrimSpace(resolved) == "" {
 				return nil, newError(ErrorSecretUnavailable)
 			}
@@ -528,6 +560,16 @@ func (factory *Factory) resolveToken(reference string) (string, bool) {
 	return value, ok && validToken(value)
 }
 
+// resolveTokenReference resolves a token named by an env reference or by a
+// protected credential; the plan carries at most one of them.
+func (factory *Factory) resolveTokenReference(env, credential string) (string, bool) {
+	if credential == "" {
+		return factory.resolveToken(env)
+	}
+	value, ok := factory.resolveCredential(credential)
+	return value, ok && validToken(value)
+}
+
 func (factory *Factory) resolveReference(reference string) (value string, ok bool) {
 	defer func() {
 		if recover() != nil {
@@ -535,6 +577,18 @@ func (factory *Factory) resolveReference(reference string) (value string, ok boo
 		}
 	}()
 	return factory.secrets.ResolveObservabilitySecret(reference)
+}
+
+func (factory *Factory) resolveCredential(name string) (value string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			value, ok = "", false
+		}
+	}()
+	if !config.ValidEnterpriseCredentialName(name) {
+		return "", false
+	}
+	return config.ResolveObservabilityV8Credential(factory.secrets, name)
 }
 
 func (factory *Factory) loadTLS(
@@ -659,6 +713,7 @@ func validManagedAIDDestination(destination config.ObservabilityV8EffectiveDesti
 		transport.Protocol == "http/json" && transport.Method == http.MethodPost &&
 		transport.LoggerName == "defenseclaw" && transport.TimeoutMS > 0 && transport.TimeoutMS <= 10_000 &&
 		len(transport.Headers) == 0 && transport.TokenEnv == "" && transport.BearerEnv == "" &&
+		transport.TokenCredential == "" && transport.BearerCredential == "" &&
 		transport.Path == "" && transport.Rotation == nil && transport.Listen == "" &&
 		transport.Index == "" && transport.Source == "" && transport.SourceType == "" &&
 		len(transport.SourceTypeOverrides) == 0 && transport.TLS == nil && transport.NetworkSafety == nil &&
@@ -740,7 +795,8 @@ func validConsoleTransport(transport config.ObservabilityV8TransportPlan) bool {
 func noCommonRemoteFields(transport config.ObservabilityV8TransportPlan) bool {
 	return transport.Listen == "" && transport.Endpoint == "" && transport.Protocol == "" &&
 		transport.Method == "" && transport.Headers == nil && transport.TokenEnv == "" &&
-		transport.BearerEnv == "" && transport.Index == "" && transport.Source == "" &&
+		transport.BearerEnv == "" && transport.TokenCredential == "" && transport.BearerCredential == "" &&
+		transport.Index == "" && transport.Source == "" &&
 		transport.SourceType == "" && transport.SourceTypeOverrides == nil &&
 		transport.LoggerName == "" && transport.TimeoutMS == 0 && transport.TLS == nil &&
 		transport.NetworkSafety == nil && transport.SignalOverrides == nil
@@ -773,7 +829,8 @@ func validPushBatch(batch *config.ObservabilityV8BatchSource) bool {
 
 func validSplunkTransport(transport config.ObservabilityV8TransportPlan) bool {
 	if !validPushTransport(transport) || transport.Method != "" || transport.Headers != nil ||
-		transport.BearerEnv != "" || !validSecretReference(transport.TokenEnv) {
+		transport.BearerEnv != "" || transport.BearerCredential != "" ||
+		!validTokenReference(transport.TokenEnv, transport.TokenCredential) {
 		return false
 	}
 	if len(transport.Index) > maxWireValueBytes || len(transport.Source) > maxWireValueBytes ||
@@ -789,14 +846,15 @@ func validSplunkTransport(transport config.ObservabilityV8TransportPlan) bool {
 }
 
 func validHTTPJSONLTransport(transport config.ObservabilityV8TransportPlan) bool {
-	if !validPushTransport(transport) || transport.TokenEnv != "" || transport.Index != "" ||
+	if !validPushTransport(transport) || transport.TokenEnv != "" || transport.TokenCredential != "" || transport.Index != "" ||
 		transport.Source != "" || transport.SourceType != "" || transport.SourceTypeOverrides != nil {
 		return false
 	}
 	if transport.Method != "POST" && transport.Method != "PUT" && transport.Method != "PATCH" {
 		return false
 	}
-	if transport.BearerEnv != "" && !validSecretReference(transport.BearerEnv) {
+	if (transport.BearerEnv != "" || transport.BearerCredential != "") &&
+		!validTokenReference(transport.BearerEnv, transport.BearerCredential) {
 		return false
 	}
 	return len(transport.Headers) <= 1_024
@@ -805,6 +863,7 @@ func validHTTPJSONLTransport(transport config.ObservabilityV8TransportPlan) bool
 func validOTLPTransport(transport config.ObservabilityV8TransportPlan, requiredSignals []observability.Signal) bool {
 	if transport.Path != "" || transport.Rotation != nil || transport.Listen != "" ||
 		transport.Method != "" || transport.TokenEnv != "" || transport.BearerEnv != "" ||
+		transport.TokenCredential != "" || transport.BearerCredential != "" ||
 		transport.Index != "" || transport.Source != "" || transport.SourceType != "" ||
 		transport.SourceTypeOverrides != nil || transport.TimeoutMS <= 0 || transport.TLS == nil ||
 		transport.TLS.InsecureSkipVerify || len(transport.TLS.CACert) > 4_096 ||
@@ -875,6 +934,15 @@ func emitFactoryWarning(observer push.WarningObserver, warning push.Warning) {
 
 func validSecretReference(reference string) bool {
 	return secretReferencePattern.MatchString(reference)
+}
+
+// validTokenReference accepts exactly one of an env reference and a
+// protected credential name.
+func validTokenReference(env, credential string) bool {
+	if credential != "" {
+		return env == "" && config.ValidEnterpriseCredentialName(credential)
+	}
+	return validSecretReference(env)
 }
 
 func validHeaderValue(value string) bool {

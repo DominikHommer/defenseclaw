@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -46,15 +47,19 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
-	brokerBinary                  string
-	gatewayBinary                 string
-	acpBinary                     string
-	hookBinary                    string
-	sensorHelperBinary            string
-	cliBinary                     string
-	configPath                    string
-	manifestPath                  string
-	installerPath                 string
+	brokerBinary       string
+	gatewayBinary      string
+	acpBinary          string
+	hookBinary         string
+	sensorHelperBinary string
+	policyCompiler     string
+	cliBinary          string
+	configPath         string
+	manifestPath       string
+	installerPath      string
+	// resolvedInstaller is the install-enterprise.ps1 the standalone
+	// lifecycle runs; the payload's scanner runtime is staged beside it.
+	resolvedInstaller             string
 	installRoot                   string
 	stateRoot                     string
 	gatewayServiceName            string
@@ -65,18 +70,26 @@ type windowsEnterpriseLifecycleOptions struct {
 	attestClaudeEffectivePolicy   bool
 	noStart                       bool
 	purge                         bool
-	allowUnsigned                 bool
-	// deferredConfig requests the UCB-friendly install path (spec 003
-	// / Workstream B). When true: --config and --manifest are
-	// optional at install time; the installer provisions the
-	// canonical drop-point directories with ACLs but writes no file
-	// bodies; both services register but are NOT started so the
-	// bounded fsnotify wait loops in the gateway daemon
-	// (internal/cli/config_v8_wait.go) and hook-guardian
-	// (internal/cli/enterprise_hooks.go) pick the files up once UCB
-	// atomically drops them. See
-	// docs/specs/003-windows-deferred-config/.
+	// force is the standalone uninstall last resort: remove the deployment
+	// without recovering a pending transaction (GAP-0920, GAP-1041).
+	force         bool
+	allowUnsigned bool
+	// deferredConfig stages a protected installed deployment with every
+	// managed service disabled. A later Repair with both authenticated
+	// policy files prepares user runtimes and performs guardian-first
+	// activation; direct file publication or SCM start is not supported.
 	deferredConfig bool
+	// bootstrapParent forwards the outer signed DefenseClawSetup EXE's
+	// protected %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch
+	// path to install-enterprise.ps1's -BootstrapParent, so the
+	// installer's one-shot bootstrap directory lives inside an admin-
+	// only ancestor chain rather than C:\Windows\Temp. Required on
+	// Azure-AD-joined hosts, where C:\Windows\Temp carries an inherited
+	// Allow ACE for the interactive AAD principal with Delete rights;
+	// the module's later trusted-ancestor walk on rendered config /
+	// targets YAML would reject it otherwise. Empty falls back to
+	// C:\Windows\Temp for direct-caller compatibility on stock Windows.
+	bootstrapParent string
 	// mode / connector are the macOS-parity QA shorthand. When both
 	// are supplied (and configPath / manifestPath are empty),
 	// install-enterprise.ps1 renders a minimal managed_enterprise
@@ -86,6 +99,66 @@ type windowsEnterpriseLifecycleOptions struct {
 	connector       string
 	jsonOutput      bool
 	providerLibrary string
+	// profile selects the enterprise profile (secure_client or
+	// standalone). Empty resolves from the supplied config, then the
+	// profile this host records, then Secure Client; resolvedProfile holds
+	// the result. The trust, signer, and version options apply only to
+	// the standalone profile.
+	profile         string
+	resolvedProfile string
+	trustMode       string
+	payloadManifest string
+	allowedSigners  []string
+	productVersion  string
+	// payloadPins are the payload manifest's SHA-256 pins, read when a
+	// hash_pinned run verifies its installer. The scanner runtime the
+	// lifecycle installs itself is admitted by them too.
+	payloadPins map[string]string
+	// bundlePath is the signed policy bundle ensure applies (--bundle,
+	// Setup BUNDLE=) and trustAnchors the anchor file it installs first
+	// (--trust-anchors, Setup TRUSTANCHORS=). Standalone ensure only.
+	bundlePath           string
+	trustAnchors         string
+	refuseCapabilityLoss bool
+	// bundle is the bundle state of the run; bundleRollback marks the
+	// internal ensure that puts the last good config back.
+	bundle         *windowsBundleRun
+	bundleRollback bool
+	// ignoredDeploymentRecords lists deployment records profile resolution
+	// found but ignored because an administrator did not write them. Only
+	// the standalone result reports them.
+	ignoredDeploymentRecords []string
+	// localEnforcementEntriesIgnored counts the audit.db block/allow entries
+	// a config_version 9 migration in this run left in place (the
+	// actions_rows_ignored of the migration-v9.json it wrote). The standalone
+	// result reports them as local_enforcement_entries_ignored.
+	localEnforcementEntriesIgnored int
+	// configMigration is the migration-v9.json a config_version 9
+	// migration in this run wrote, and configMigrationPath the config it
+	// migrated; the standalone result reports it in changes (GAP-0472).
+	configMigration     *config.MigrationRecord
+	configMigrationPath string
+	// deploymentTrustMode is the payload trust the deployment records
+	// (deployment.json trust_mode), taken from the installer report the
+	// standalone result was built from. The marker publishes it rather than
+	// trustMode, which defaults to authenticode when no flag is given.
+	deploymentTrustMode string
+	// diagnostics holds the enumerator's per-profile lines from a JSON
+	// ensure. They go to the lifecycle log, not next to the JSON result an
+	// MDM parses.
+	diagnostics []string
+	// activationStartedAt is when a standalone change action started, and
+	// installedBeforeRun whether a deployment was installed then: a run
+	// that installs one records its activation (GAP-0967), dated when the
+	// run finished (windowsEnterpriseActivationNow).
+	activationStartedAt     time.Time
+	installedBeforeRun      bool
+	previousConnectors      []string
+	previousConnectorsKnown bool
+	// previousTargets are the targets the guardian manifest enrolled before
+	// the run, keyed as windowsEnterpriseManifestRowKey (GAP-1435).
+	previousTargets      map[string]bool
+	previousTargetsKnown bool
 }
 
 type windowsEnterpriseACLHeader struct {
@@ -132,6 +205,9 @@ type windowsServiceConfigValidation struct {
 	DeploymentMode string `json:"deployment_mode"`
 	APIBind        string `json:"api_bind"`
 	GuardrailBind  string `json:"guardrail_bind,omitempty"`
+	// Profile is reported only for the standalone profile so the Secure
+	// Client report keeps its original shape.
+	Profile string `json:"profile,omitempty"`
 }
 
 var (
@@ -144,6 +220,7 @@ var (
 	windowsEnterpriseProgramDataResolver     = trustedWindowsEnterpriseProgramData
 	windowsEnterpriseMachineRootsResolver    = resolveWindowsEnterpriseMachineRoots
 	windowsEnterpriseProviderLibraryResolver = managed.DiscoverCMIDLibrary
+	windowsEnterpriseStandaloneHostValidator = validateWindowsEnterpriseStandaloneHost
 )
 
 type windowsEnterprisePowerShellTempOps struct {
@@ -172,15 +249,18 @@ daemon unless an administrator explicitly invokes a lifecycle action.`,
 }
 
 func init() {
-	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"} {
+	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall", "ensure"} {
 		enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseLifecycleCommand(action))
 	}
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsSecureClientFleetPreflightCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsManagedHookContractCleanupCommand())
 	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
@@ -207,6 +287,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.acpBinary, "acp-binary", "", "source defenseclaw-acp.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
 	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
+	flags.StringVar(&opts.policyCompiler, "policy-compiler", "", "standalone source policy_compiler.py")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
 	flags.StringVar(&opts.configPath, "config", "", "administrator-approved managed config.yaml")
 	flags.StringVar(&opts.manifestPath, "manifest", "", "administrator-approved guardian targets.yaml")
@@ -220,19 +301,60 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.BoolVar(&opts.attestAgentApplicationControl, "attest-agent-application-control", false, "attest that approved-client WDAC or AppLocker rules are live")
 	flags.BoolVar(&opts.attestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "refresh live proof that DefenseClaw is Claude's effective managed-policy source")
 	flags.BoolVar(&opts.noStart, "no-start", false, "stage with both services disabled and stopped; activate with a later repair")
-	flags.BoolVar(&opts.purge, "purge", false, "remove managed state as well as services and binaries (authenticated purge or fail-closed exact-scope recovery)")
+	flags.BoolVar(&opts.purge, "purge", false, "also remove managed state (Secure Client; a standalone uninstall always removes it) and each enrolled account's %USERPROFILE%\\.defenseclaw and per-user binaries in %USERPROFILE%\\.local\\bin, naming each account in the result (authenticated purge or fail-closed exact-scope recovery)")
+	if action == "ensure" {
+		flags.StringVar(&opts.bundlePath, "bundle", "",
+			"standalone: apply this signed policy bundle (.dcbundle file); the bundle carries the config, so not with --config")
+		flags.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
+		flags.StringVar(&opts.trustAnchors, "trust-anchors", "",
+			"standalone: install this administrator-only bundle trust anchor file (bundle-anchors.json) first")
+	}
+	if action == "uninstall" {
+		flags.BoolVar(&opts.force, "force", false,
+			"standalone, last resort: remove the deployment without recovering a pending transaction that no ensure, repair or uninstall can recover; run it from Setup (FORCE=1) as LocalSystem")
+	}
 	flags.BoolVar(&opts.allowUnsigned, "allow-unsigned", false, "allow unsigned artifacts only for controlled test builds")
 	// Spec 003 Workstream B: UCB-friendly late-config install.
 	// Requires managed-enterprise deployment mode; enforced by the
 	// installer, not here (this flag is a passthrough).
 	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
-		"provision drop points and register services stopped; config.yaml and targets.yaml may arrive later via UCB")
+		"stage services disabled; activate later with repair plus both config.yaml and targets.yaml")
+	flags.StringVar(&opts.bootstrapParent, "bootstrap-parent", "",
+		"protected admin-only parent directory for the installer's one-shot bootstrap dir (outer signed Setup EXE passes its own %ProgramData%\\DefenseClaw-Enterprise-Setup-<hex>\\scratch path here)")
 	flags.StringVar(&opts.mode, "mode", "",
 		"QA shorthand: observe|action (paired with --connector; the installed install-enterprise.ps1 renders config.yaml + targets.yaml)")
 	flags.StringVar(&opts.connector, "connector", "",
 		"QA shorthand: comma-separated connector list (paired with --mode)")
 	flags.BoolVar(&opts.jsonOutput, "json", false, "emit machine-readable JSON")
+	flags.StringVar(&opts.profile, "profile", "",
+		"enterprise profile: secure_client or standalone (default: the supplied config's enterprise.profile, then the installed profile, then secure_client)")
+	flags.StringVar(&opts.trustMode, "trust-mode", "",
+		"standalone payload trust: authenticode (default) or hash_pinned")
+	flags.StringVar(&opts.payloadManifest, "payload-manifest", "",
+		"standalone hash_pinned trust anchor: administrator-owned JSON of payload SHA-256 digests")
+	flags.StringArrayVar(&opts.allowedSigners, "allowed-signer", nil,
+		"standalone: SHA-256 thumbprint of an accepted Authenticode signer certificate (repeatable)")
+	flags.StringVar(&opts.productVersion, "product-version", "",
+		"standalone: version recorded for this deployment (default: this CLI's version)")
+	if action == "status" || action == "verify" {
+		// Status and verify only read the deployment. The install,
+		// upgrade, uninstall and certification inputs stay accepted but
+		// out of their help (GAP-1073).
+		for _, name := range windowsEnterpriseInspectionHiddenFlags {
+			_ = flags.MarkHidden(name)
+		}
+	}
 	return cmd
+}
+
+// windowsEnterpriseInspectionHiddenFlags are the lifecycle flags status and
+// verify leave out of their help.
+var windowsEnterpriseInspectionHiddenFlags = []string{
+	"broker-binary", "gateway-binary", "acp-binary", "hook-binary", "sensor-helper-binary", "policy-compiler", "cli-binary",
+	"install-root", "state-root", "gateway-service-name", "guardian-service-name",
+	"certification-codex-home", "core-hardening-certification",
+	"attest-agent-application-control", "attest-claude-effective-policy",
+	"no-start", "purge", "deferred-config", "mode", "connector", "product-version",
 }
 
 func windowsEnterpriseLifecycleSummary(action string) string {
@@ -250,7 +372,9 @@ func windowsEnterpriseLifecycleSummary(action string) string {
 	case "verify":
 		return "Verify files, DACLs, service policy, mode pin, and readiness"
 	case "uninstall":
-		return "Remove enterprise services while preserving state by default"
+		return "Remove enterprise services, hooks and (standalone) machine state; users keep their data unless --purge"
+	case "ensure":
+		return "Converge a standalone deployment: install, upgrade, repair, or no-op"
 	default:
 		return "Manage Windows enterprise services"
 	}
@@ -274,23 +398,102 @@ func runWindowsEnterpriseLifecycle(
 	if opts == nil {
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
+	// On a standalone host, a standard account cannot change the managed
+	// deployment whatever file it passes, so the elevation refusal comes
+	// before --config is read, parsed or compiled (GAP-0120). Uninstall
+	// likewise refuses before loading the installer module (GAP-0640), and
+	// so does reconcile, which ran the module and answered 1603 with
+	// installed:false for a deployment that exists (GAP-0931).
+	if (windowsEnterpriseMutationAction(action) || action == "uninstall" || action == "reconcile") && !windowsEnterpriseIsElevated() &&
+		managed.IsStandaloneProfile(opts.profile) {
+		// A trusted Secure Client record already makes this request invalid.
+		// Preserve its profile refusal before the standalone elevation check.
+		// A standalone host still refuses before reading the caller's --config.
+		if !windowsEnterpriseCertificationScope(opts) {
+			deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileSecureClient)
+			if err != nil || deployment.State == winpath.EnterpriseDeploymentInstalled ||
+				deployment.State == winpath.EnterpriseDeploymentUnknown {
+				if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
+					return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+				}
+			}
+		}
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
+			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
+	}
+	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
+		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+		return failPreflight(err)
+	}
+	if (opts.bundlePath != "" || opts.trustAnchors != "") && !windowsEnterpriseStandalone(opts) {
+		return failPreflight(errors.New("--bundle and --trust-anchors are valid only with --profile standalone"))
+	}
+	if windowsEnterpriseStandalone(opts) {
+		failPreflight = func(err error) error {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
+		if err := windowsEnterpriseStandaloneHostValidator(); err != nil {
+			return failPreflight(err)
+		}
+		if action == "install" || action == "upgrade" || action == "repair" || action == "ensure" {
+			opts.activationStartedAt = time.Now().UTC()
+			opts.installedBeforeRun = windowsEnterpriseStandaloneInstalled()
+			if opts.installedBeforeRun {
+				connectors, connectorErr := windowsEnterpriseEnrolledConnectors()
+				opts.previousConnectors, opts.previousConnectorsKnown = connectors, connectorErr == nil
+				targets, targetsErr := windowsEnterpriseEnrolledTargets()
+				opts.previousTargets, opts.previousTargetsKnown = targets, targetsErr == nil
+			}
+		}
+	}
+	if windowsEnterpriseStandalone(opts) {
+		// Before --config is read: a bundle supplies it, and bundle mode
+		// refuses one that is not the current bundle config.
+		if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, action, opts); done {
+			return err
+		}
+		if opts.bundle != nil {
+			defer opts.bundle.release()
+		}
+	}
+	// The Secure Client profile keeps its historical preflight text exactly;
+	// only the standalone profile classifies misuse as invalid arguments
+	// (1639) and accepts ensure.
 	if opts.purge && action != "uninstall" {
+		if windowsEnterpriseStandalone(opts) {
+			return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
+		}
 		return failPreflight(errors.New("--purge is valid only with enterprise windows uninstall"))
 	}
+	if opts.force && !windowsEnterpriseStandalone(opts) {
+		return failPreflight(errors.New("--force is valid only with enterprise windows uninstall --profile standalone"))
+	}
 	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" {
-		return failPreflight(errors.New("--no-start is valid only with install, upgrade, or repair"))
+		if !windowsEnterpriseStandalone(opts) {
+			return failPreflight(errors.New("--no-start is valid only with install, upgrade, or repair"))
+		}
+		if action != "ensure" {
+			return failPreflight(windowsEnterpriseInvalidArguments("--no-start is valid only with install, upgrade, repair, or ensure"))
+		}
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
+		if windowsEnterpriseStandalone(opts) {
+			err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+		}
 		return failPreflight(err)
 	}
 	mutation := action == "install" || action == "upgrade" || action == "repair"
-	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+	if mutation && !windowsEnterpriseStandalone(opts) && strings.TrimSpace(opts.brokerBinary) != "" {
+		// A full XDR installation sequences Cloud Management last, so
+		// cmidapi.dll is routinely absent while DefenseClaw installs.
+		// That is no longer a preflight failure: the deployment completes
+		// without the library and the credential broker discovers it at
+		// runtime, enabling the CMID lane once Cloud Management lands. An
+		// already-installed library is still pinned here so nothing
+		// changes for the Cloud-Management-first order.
 		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
-		if opts.providerLibrary == "" {
-			return failPreflight(errors.New(
-				"the managed credential provider library was not found in the trusted Secure Client installation",
-			))
-		}
 	}
 	script, err := windowsEnterpriseScriptFinder(opts.installerPath)
 	if err != nil {
@@ -308,7 +511,34 @@ func runWindowsEnterpriseLifecycle(
 		defer func() { _ = cleanup() }()
 		script = staged
 	}
-	args := windowsEnterprisePowerShellArgs(action, opts)
+	if windowsEnterpriseStandalone(opts) && opts.trustMode == windowsEnterpriseTrustHashPinned {
+		pins, err := verifyWindowsEnterpriseHashPinnedInstaller(script, opts.payloadManifest)
+		if err != nil {
+			return failPreflight(err)
+		}
+		opts.payloadPins = pins
+	}
+	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade" ||
+		(action == "repair" && strings.TrimSpace(opts.configPath) != "")) {
+		if refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(ctx, cmd, action, opts, script); refused {
+			return err
+		}
+	}
+	if windowsEnterpriseStandalone(opts) && action == "upgrade" && windowsEnterpriseKeepsInstalledConfig(opts) {
+		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+		}
+	}
+	if windowsEnterpriseStandalone(opts) && action == "repair" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+		}
+	}
+	opts.resolvedInstaller = script
+	if action == "ensure" {
+		return runWindowsEnterpriseStandaloneEnsure(ctx, cmd, opts, script)
+	}
+	args := windowsEnterprisePowerShellArgs(action, windowsEnterpriseRepairRecordingOptions(action, opts))
 	executable, executableErr := windowsEnterpriseExecutableResolver()
 	if executableErr != nil {
 		normalizedAction := strings.ToLower(strings.TrimSpace(action))
@@ -339,18 +569,43 @@ func runWindowsEnterpriseLifecycle(
 					"or omit --cli-binary",
 			))
 		}
+		if windowsEnterpriseStandalone(opts) &&
+			windowsEnterpriseInstalledNonCLIUninstallCaller(action, script, executable) {
+			return failPreflight(windowsEnterpriseInvalidArguments(
+				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
+					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
+					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
+					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+				filepath.Base(executable),
+				filepath.Dir(filepath.Dir(executable)),
+				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
+			))
+		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
 			action,
 			script,
 			executable,
 			os.Getpid(),
 		); ok {
+			if windowsEnterpriseStandalone(opts) {
+				installRoot := filepath.Dir(filepath.Dir(executable))
+				started, _ := os.Getwd()
+				if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+					return failPreflight(err)
+				}
+				if err := windowsEnterpriseInstallRootStillInUse(installRoot, started); err != nil {
+					return failPreflight(err)
+				}
+			}
 			args = append(
 				args,
 				"-SelfUninstallCallerPID",
 				strconv.FormatUint(uint64(callerPID), 10),
 			)
 		}
+	}
+	if windowsEnterpriseStandalone(opts) {
+		return runWindowsEnterpriseStandaloneAction(ctx, cmd, action, opts, script, args)
 	}
 	return windowsEnterpriseCommandRunner(ctx, cmd, script, args)
 }
@@ -381,13 +636,18 @@ func writeWindowsEnterpriseLifecyclePreflightFailure(
 		Error:         cause.Error(),
 		Errors:        []string{cause.Error()},
 	}
-	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
+	if err := newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
 		return fmt.Errorf(
 			"Windows enterprise %s preflight failed and its JSON report could not be encoded: %w",
 			report.Action,
 			err,
 		)
 	}
+	// A coded caller error (naming the Secure Client profile on a standalone
+	// computer, exit 1639) is answered by this JSON alone, as the standalone
+	// results are (GAP-2445). Uncoded Secure Client failures keep their
+	// historical stderr line.
+	silenceJSONReportedError(cmd, true, cause)
 	return cause
 }
 
@@ -513,6 +773,117 @@ func windowsEnterpriseSelfUninstallCaller(
 	return uint32(processID), true
 }
 
+// windowsEnterpriseInstalledNonCLIUninstallCaller reports an uninstall that
+// runs from an installed image other than bin\defenseclaw.exe, such as
+// bin\defenseclaw-gateway.exe. Only the installed CLI hands its running image
+// to the detached self-uninstall finalizer; any other running image inside
+// InstallRoot keeps the folder from being retired, so the uninstall committed
+// and then failed 1603 halfway (GAP-1679).
+func windowsEnterpriseInstalledNonCLIUninstallCaller(action, installer, executable string) bool {
+	if !strings.EqualFold(strings.TrimSpace(action), "uninstall") {
+		return false
+	}
+	cleanInstaller, err := filepath.Abs(strings.TrimSpace(installer))
+	if err != nil ||
+		!strings.EqualFold(filepath.Base(cleanInstaller), "install-enterprise.ps1") ||
+		!strings.EqualFold(filepath.Base(filepath.Dir(cleanInstaller)), "libexec") {
+		return false
+	}
+	cleanExecutable, err := filepath.Abs(strings.TrimSpace(executable))
+	if err != nil {
+		return false
+	}
+	installRoot := filepath.Dir(filepath.Dir(cleanInstaller))
+	if !windowsEnterprisePathWithin(cleanExecutable, installRoot) {
+		return false
+	}
+	return !strings.EqualFold(
+		filepath.Clean(cleanExecutable),
+		filepath.Join(installRoot, "bin", "defenseclaw.exe"),
+	)
+}
+
+// windowsEnterprisePathWithin reports whether path is root or inside it.
+func windowsEnterprisePathWithin(path, root string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// windowsEnterpriseUninstallWorkingDirectory is replaceable in tests.
+var windowsEnterpriseUninstallWorkingDirectory = trustedWindowsEnterpriseWorkingDirectory
+
+// windowsEnterpriseLeaveInstallRoot moves the CLI's working directory out of
+// installRoot before a self-uninstall. A working directory inside InstallRoot
+// (the MDM uninstall script started the CLI in its bin folder, or an
+// administrator ran it from there) is an open handle that keeps the folder
+// from being renamed aside, so the uninstall committed and then failed 1603
+// (GAP-1684).
+func windowsEnterpriseLeaveInstallRoot(installRoot string) error {
+	current, err := os.Getwd()
+	if err != nil || !windowsEnterprisePathWithin(current, installRoot) {
+		return nil
+	}
+	directory, err := windowsEnterpriseUninstallWorkingDirectory()
+	if err != nil {
+		return err
+	}
+	if err := os.Chdir(directory); err != nil {
+		return fmt.Errorf("leave the install folder before the uninstall: %w", err)
+	}
+	return nil
+}
+
+// windowsEnterpriseDirectoryInUse is replaceable in tests.
+var windowsEnterpriseDirectoryInUse = windowsDirectoryOpenWithoutDeleteSharing
+
+// windowsEnterpriseInstallRootStillInUse refuses a self-uninstall started in a
+// folder inside installRoot that another process still uses once the CLI has
+// left it. That is usually the prompt it was typed into (cmd.exe after
+// cd /d ...\bin): the CLI can move only its own working folder, and the
+// prompt's keeps InstallRoot from being renamed aside, so the uninstall
+// committed and then failed 1603, and so did every retry from that prompt
+// (GAP-1794). Nothing has changed yet when this refuses.
+func windowsEnterpriseInstallRootStillInUse(installRoot, started string) error {
+	if started == "" || !windowsEnterprisePathWithin(started, installRoot) || !windowsEnterpriseDirectoryInUse(started) {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"another program, usually the prompt this was run from, is using %s as its working folder, "+
+			"so the uninstall could not remove %s and would stop halfway. Nothing was changed. "+
+			"Change that prompt to a folder outside %s (for example, cd /d C:\\) and run the uninstall again",
+		started,
+		installRoot,
+		installRoot,
+	)
+}
+
+// windowsDirectoryOpenWithoutDeleteSharing reports whether another handle to
+// the directory denies delete sharing, as a process's working-folder handle
+// does. Any other failure (access denied, missing) is not reported as in use.
+func windowsDirectoryOpenWithoutDeleteSharing(path string) bool {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return false
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+	}
+	_ = windows.CloseHandle(handle)
+	return false
+}
+
 func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifecycleOptions) []string {
 	args := []string{"-Action", canonicalWindowsEnterpriseAction(action)}
 	appendValue := func(flag, value string) {
@@ -526,6 +897,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-ACPBinary", opts.acpBinary)
 	appendValue("-HookBinary", opts.hookBinary)
 	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
+	appendValue("-PolicyCompiler", opts.policyCompiler)
 	appendValue("-CLIBinary", opts.cliBinary)
 	appendValue("-Config", opts.configPath)
 	appendValue("-Manifest", opts.manifestPath)
@@ -536,6 +908,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-GatewayServiceName", opts.gatewayServiceName)
 	appendValue("-GuardianServiceName", opts.guardianServiceName)
 	appendValue("-CertificationCodexHome", opts.certificationCodexHome)
+	appendValue("-BootstrapParent", opts.bootstrapParent)
 	if opts.coreHardeningCertification {
 		args = append(args, "-CoreHardeningCertification")
 	}
@@ -560,7 +933,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	if opts.jsonOutput {
 		args = append(args, "-Json")
 	}
-	return args
+	return append(args, windowsEnterpriseStandalonePowerShellArgs(opts)...)
 }
 
 func validateWindowsEnterpriseLifecycleSecurityOptions(
@@ -613,13 +986,8 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			)
 		}
 	}
-	// Spec 003 --deferred-config is meaningful only for the initial
-	// Install action. On upgrade/repair the config.yaml + targets.yaml
-	// artefacts are already on disk; deferring them would leave the
-	// deployment offline and mask a real re-signing failure. Reject
-	// the combination up front so the CLI-side matches the PowerShell
-	// installer's Install-only relaxation in Get-DefenseClawLifecycleSources.
-	// See CR spec-003:PRRT_kwDORuAK-s6alkr4.
+	// The flag marks only the initial staged install. Protected deployment
+	// metadata later selects the complete Repair activation path.
 	if opts.deferredConfig && action != "install" {
 		return fmt.Errorf(
 			"--deferred-config is valid only with install (got: %s)", action,
@@ -652,7 +1020,10 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			return errors.New("--mode must be observe or action")
 		}
 		opts.mode = mode
-		if action != "install" && action != "upgrade" && action != "repair" {
+		// Standalone ensure installs from the same shorthand when the host has
+		// no deployment yet, which is how an MDM first reaches a clean device.
+		standaloneEnsure := action == "ensure" && windowsEnterpriseStandalone(opts)
+		if action != "install" && action != "upgrade" && action != "repair" && !standaloneEnsure {
 			return fmt.Errorf(
 				"--mode / --connector are valid only with install, upgrade, or repair (got: %s)",
 				action,
@@ -759,6 +1130,32 @@ func runWindowsEnterprisePowerShell(
 	if err != nil {
 		return err
 	}
+	_, err = runWindowsEnterprisePowerShellEngine(
+		ctx,
+		cmd,
+		powerShell,
+		trustedWindowsEnterpriseEnvironment,
+		script,
+		args,
+		cmd.OutOrStdout(),
+		cmd.ErrOrStderr(),
+	)
+	return err
+}
+
+// runWindowsEnterprisePowerShellEngine runs the installer on one validated
+// engine with a strict environment. stdout receives the installer's output
+// as it is produced; the bounded capture is returned for diagnostics.
+func runWindowsEnterprisePowerShellEngine(
+	ctx context.Context,
+	cmd *cobra.Command,
+	powerShell string,
+	environment func(string) ([]string, error),
+	script string,
+	args []string,
+	stdout io.Writer,
+	stderr io.Writer,
+) (*windowsEnterpriseOutputCapture, error) {
 	commandArgs := []string{
 		"-NoLogo",
 		"-NoProfile",
@@ -770,7 +1167,7 @@ func runWindowsEnterprisePowerShell(
 	child := exec.CommandContext(ctx, powerShell, commandArgs...)
 	powerShellTemp, cleanupTemp, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cleanupPending := true
 	defer func() {
@@ -778,20 +1175,20 @@ func runWindowsEnterprisePowerShell(
 			_ = cleanupTemp()
 		}
 	}()
-	childEnvironment, err := trustedWindowsEnterpriseEnvironment(powerShellTemp)
+	childEnvironment, err := environment(powerShellTemp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	workingDirectory, err := trustedWindowsEnterpriseWorkingDirectory()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	child.Env = childEnvironment
 	child.Dir = workingDirectory
 	child.Stdin = cmd.InOrStdin()
-	var childOutput windowsEnterpriseOutputCapture
-	child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
-	child.Stderr = cmd.ErrOrStderr()
+	childOutput := &windowsEnterpriseOutputCapture{}
+	child.Stdout = io.MultiWriter(stdout, childOutput)
+	child.Stderr = stderr
 	runErr := child.Run()
 	cleanupErr := cleanupTemp()
 	cleanupPending = false
@@ -825,9 +1222,9 @@ func runWindowsEnterprisePowerShell(
 		if cleanupErr != nil {
 			failures = append(failures, fmt.Errorf("remove protected Windows enterprise PowerShell temp: %w", cleanupErr))
 		}
-		return errors.Join(failures...)
+		return childOutput, errors.Join(failures...)
 	}
-	return nil
+	return childOutput, nil
 }
 
 func windowsEnterpriseInstallerFailureDiagnostic(
@@ -990,6 +1387,11 @@ func prepareWindowsEnterprisePowerShellTempWithOps(
 	}
 	cleanup := func() error {
 		if err := ops.validate(path); err != nil {
+			// An uninstall can remove the folder with the rest of
+			// DefenseClaw's ProgramData state; nothing is left to clean.
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return fmt.Errorf("refusing unsafe temp cleanup: %w", err)
 		}
 		if err := ops.removeAll(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1231,6 +1633,8 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		dataDir        string
 		serviceAccount string
 		jsonOutput     bool
+		record         bool
+		recordRestored bool
 	)
 	cmd := &cobra.Command{
 		Use:          "validate-service-config",
@@ -1238,17 +1642,20 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount)
+			if recordRestored {
+				return recordRestoredWindowsServiceConfig(cmd, configPath, dataDir, serviceAccount, jsonOutput)
+			}
+			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
 			if jsonOutput {
 				if err != nil {
-					_ = json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+					_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{
 						"schema_version": 1,
 						"ok":             false,
 						"error":          err.Error(),
 					})
 					return errors.New("Windows enterprise service config validation failed")
 				}
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+				return newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(report)
 			}
 			if err != nil {
 				return err
@@ -1261,15 +1668,101 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "expected protected runtime directory")
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "", "gateway NT SERVICE virtual account")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	cmd.Flags().BoolVar(&record, "record-lifecycle", false,
+		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
+	cmd.Flags().BoolVar(&recordRestored, "record-restored", false,
+		"record the config a lifecycle rollback restored as a new generation, without validating or migrating it")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
 }
 
+// The signed enterprise module calls this on its authenticated source config
+// before changing the installed tree or SCM services. It shares the gateway's
+// bounded YAML parser, while avoiding asset checks that require installation.
+func newWindowsSecureClientFleetPreflightCommand() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "preflight-secure-client-fleet",
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := managed.ValidateTrustedFilePath(configPath, "Secure Client config"); err != nil {
+				return fmt.Errorf("Secure Client config source is untrusted: %w", err)
+			}
+			raw, err := readConfigV8Source(configPath)
+			if err != nil {
+				return err
+			}
+			return config.CheckSecureClientFleetSource(configPath, raw)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")
+	_ = cmd.MarkFlagRequired("config")
+	return cmd
+}
+
+// The signed standalone installer asks its authenticated gateway whether the
+// candidate config opts into Fleet before admitting or copying the compiler.
+// The answer is one exact boolean line, with any parser error on stderr.
+func newWindowsStandaloneFleetInspectCommand() *cobra.Command {
+	var configPath string
+	cmd := &cobra.Command{
+		Use:          "inspect-standalone-fleet",
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := managed.ValidateTrustedFilePath(configPath, "standalone config"); err != nil {
+				return fmt.Errorf("standalone config source is untrusted: %w", err)
+			}
+			raw, err := readConfigV8Source(configPath)
+			if err != nil {
+				return err
+			}
+			enabled, err := config.FleetEnabledFromSource(configPath, raw)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), enabled)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "", "authenticated source config path")
+	_ = cmd.MarkFlagRequired("config")
+	return cmd
+}
+
+// recordRestoredWindowsServiceConfig is the rollback step of the standalone
+// lifecycle: see recordRestoredManagedStandaloneConfig.
+func recordRestoredWindowsServiceConfig(cmd *cobra.Command, configPath, dataDir, serviceAccount string, jsonOutput bool) error {
+	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	restore := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv:            configPath,
+		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
+		managed.WindowsServiceAccountEnv: strings.TrimSpace(serviceAccount),
+		"DEFENSECLAW_HOME":               strings.TrimSpace(dataDir),
+	})
+	defer restore()
+	err = recordRestoredManagedStandaloneConfig(cmd.Context(), configPath)
+	if jsonOutput {
+		_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "ok": err == nil})
+	}
+	return err
+}
+
+// validateWindowsServiceConfig checks the installed config. Only the
+// install-like lifecycle passes record, inside its transaction: verify and
+// status run the same check read-only, so a hand edit is never recorded as
+// a lifecycle generation and a v8 file is not migrated without a snapshot.
 func validateWindowsServiceConfig(
 	configPath string,
 	expectedDataDir string,
 	serviceAccount string,
+	record bool,
 ) (windowsServiceConfigValidation, error) {
 	var report windowsServiceConfigValidation
 	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
@@ -1325,6 +1818,32 @@ func validateWindowsServiceConfig(
 	}
 	if loaded.Guardrail.Enabled {
 		report.GuardrailBind = loaded.Guardrail.EffectiveHost()
+	}
+	// The lifecycle pins DEFENSECLAW_ENTERPRISE_PROFILE for standalone
+	// helpers exactly as it pins the services; the loader has already
+	// rejected a config that contradicts the pin.
+	if managed.IsStandaloneProfile(os.Getenv(managed.EnterpriseProfileEnv)) {
+		if !loaded.StandaloneEnterprise() {
+			return windowsServiceConfigValidation{}, fmt.Errorf(
+				"managed config resolves the %q enterprise profile, not %s",
+				loaded.EnterpriseProfile(), managed.ProfileStandalone,
+			)
+		}
+		report.Profile = managed.ProfileStandalone
+		// In the lifecycle transaction a config_version 8 administrator
+		// config becomes 9 here, and the installed config is recorded in
+		// config.generation.json.
+		if record {
+			if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
+				return windowsServiceConfigValidation{}, err
+			}
+		}
+		// The gateway service compiles this file strictly at start; prove
+		// it can before the lifecycle starts it. Secure Client
+		// keeps its historical validation.
+		if err := validateStandaloneGatewayConfig(configPath, expectedDataDir, ""); err != nil {
+			return windowsServiceConfigValidation{}, err
+		}
 	}
 	return report, nil
 }

@@ -11,6 +11,11 @@ concurrency:
   group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: false
 
+# Neither job pushes commits, tags or releases, so the token on the
+# persistent runner only needs to read the repository.
+permissions:
+  contents: read
+
 jobs:
   core:
     name: Core E2E
@@ -82,6 +87,58 @@ jobs:
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
             echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
           } >> "$GITHUB_ENV"
+
+      - name: Repair runner workspace ownership
+        # This must run before checkout: the repo's own repair helpers live
+        # in the checkout. If the workspace vanishes while a container with
+        # a bind mount starts, Docker recreates the missing source path as
+        # root-owned directories. actions/checkout then cannot empty the
+        # workspace (its follow-up "--local can only be used inside a git
+        # repository" error hides the EACCES) and every later job fails
+        # before the repo is on disk.
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          gid="$(id -g)"
+          base="${RUNNER_WORKSPACE}"
+          ws="${GITHUB_WORKSPACE}"
+          if [ "$(dirname -- "$ws")" != "$base" ] || [ -L "$base" ] || [ -L "$ws" ]; then
+            echo "::error::Unexpected runner workspace layout (${ws} under ${base}); refusing to repair it."
+            exit 1
+          fi
+          # Only the workspace root itself (not its sibling install slots,
+          # which have their own ownership checks) and the checkout tree.
+          # A scan error counts as an unowned entry: a runner-owned directory
+          # without read or search permission can hide root-owned entries.
+          unowned() {
+            if [ -e "$base" ]; then
+              find "$base" -maxdepth 0 ! -user "$uid" -print || echo "$base (scan failed)"
+            fi
+            if [ -e "$ws" ]; then
+              find "$ws" ! -user "$uid" -print -quit || echo "$ws (scan failed)"
+            fi
+          }
+          if [ -z "$(unowned)" ]; then
+            exit 0
+          fi
+          echo "::warning::Runner workspace has entries not owned by $(id -un); repairing before checkout:"
+          unowned
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::Passwordless sudo is unavailable, so the runner workspace cannot be repaired here."
+            echo "::error::Run once on the runner host: sudo chown ${uid}:${gid} '${base}' && sudo chown -hR ${uid}:${gid} '${ws}'"
+            exit 1
+          fi
+          if [ -e "$base" ]; then
+            sudo -n chown -h "${uid}:${gid}" -- "$base"
+          fi
+          if [ -e "$ws" ]; then
+            sudo -n chown -hR "${uid}:${gid}" -- "$ws"
+            chmod -R u+rwX -- "$ws"
+          fi
+          if [ -n "$(unowned)" ]; then
+            echo "::error::Runner workspace still has entries not owned by $(id -un) after repair."
+            exit 1
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -736,6 +793,58 @@ jobs:
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
             echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
           } >> "$GITHUB_ENV"
+
+      - name: Repair runner workspace ownership
+        # This must run before checkout: the repo's own repair helpers live
+        # in the checkout. If the workspace vanishes while a container with
+        # a bind mount starts, Docker recreates the missing source path as
+        # root-owned directories. actions/checkout then cannot empty the
+        # workspace (its follow-up "--local can only be used inside a git
+        # repository" error hides the EACCES) and every later job fails
+        # before the repo is on disk.
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          gid="$(id -g)"
+          base="${RUNNER_WORKSPACE}"
+          ws="${GITHUB_WORKSPACE}"
+          if [ "$(dirname -- "$ws")" != "$base" ] || [ -L "$base" ] || [ -L "$ws" ]; then
+            echo "::error::Unexpected runner workspace layout (${ws} under ${base}); refusing to repair it."
+            exit 1
+          fi
+          # Only the workspace root itself (not its sibling install slots,
+          # which have their own ownership checks) and the checkout tree.
+          # A scan error counts as an unowned entry: a runner-owned directory
+          # without read or search permission can hide root-owned entries.
+          unowned() {
+            if [ -e "$base" ]; then
+              find "$base" -maxdepth 0 ! -user "$uid" -print || echo "$base (scan failed)"
+            fi
+            if [ -e "$ws" ]; then
+              find "$ws" ! -user "$uid" -print -quit || echo "$ws (scan failed)"
+            fi
+          }
+          if [ -z "$(unowned)" ]; then
+            exit 0
+          fi
+          echo "::warning::Runner workspace has entries not owned by $(id -un); repairing before checkout:"
+          unowned
+          if ! sudo -n true 2>/dev/null; then
+            echo "::error::Passwordless sudo is unavailable, so the runner workspace cannot be repaired here."
+            echo "::error::Run once on the runner host: sudo chown ${uid}:${gid} '${base}' && sudo chown -hR ${uid}:${gid} '${ws}'"
+            exit 1
+          fi
+          if [ -e "$base" ]; then
+            sudo -n chown -h "${uid}:${gid}" -- "$base"
+          fi
+          if [ -e "$ws" ]; then
+            sudo -n chown -hR "${uid}:${gid}" -- "$ws"
+            chmod -R u+rwX -- "$ws"
+          fi
+          if [ -n "$(unowned)" ]; then
+            echo "::error::Runner workspace still has entries not owned by $(id -un) after repair."
+            exit 1
+          fi
 
       - uses: actions/checkout@v4
         with:
@@ -1461,12 +1570,6 @@ jobs:
               shared_key_env = os.environ.get('DEFAULT_LLM_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
               if shared_key_env:
                   cfg['default_llm_api_key_env'] = shared_key_env
-              cfg['skill_actions'] = {
-                  'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-                  'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-              }
 
           with open(cfg_path, 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)
@@ -1678,17 +1781,42 @@ jobs:
       # connector; we use -run to filter to just one connector per
       # matrix cell so failures point at exactly which connector
       # regressed instead of a mass red.
+      #
+      # Each test runs on its own and must report its connector subtest:
+      # a renamed or removed test matches nothing and go test still exits
+      # 0, which is how two names in the old combined pattern
+      # (TestV7Observability_DestinationAppPerConnector,
+      # TestHandleGuardrailEvent_OTelAgentName_PerConnector) went unnoticed.
       - name: Connector lifecycle matrix
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
-          go test -count=1 -v ./test/e2e/ \
-            -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}"
-      # Watcher rescan + gateway proxy + OTel parity tests are
-      # connector-parameterized too; run only the active matrix cell's
-      # subtests for fast iteration on PRs.
+          set -euo pipefail
+          for test in TestConnectorLifecycle_Matrix TestConnectorVerifyCleanOnFreshDataDir; do
+            go test -count=1 -v ./test/e2e/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
+            if ! grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+              if [[ "$CONNECTOR" != openclaw ]] || ! grep -q -- "--- SKIP: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+                echo "::error::${test}/${CONNECTOR} did not run"
+                exit 1
+              fi
+            fi
+          done
+      # Gateway proxy parity tests are connector-parameterized too; run only
+      # the active matrix cell's subtests for fast iteration on PRs.
       - name: Per-connector parity tests
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
-          go test -count=1 -v ./internal/gateway/ \
-            -run "TestProxy_PerConnectorPrefixStrip/${{ matrix.connector }}|TestSwitchConnector_PerConnectorPersistsState/${{ matrix.connector }}|TestApplyRuntime_PerConnectorSwitch/${{ matrix.connector }}|TestHandleGuardrailEvent_OTelAgentName_PerConnector/${{ matrix.connector }}"
+          set -euo pipefail
+          for test in TestProxy_PerConnectorPrefixStrip TestSwitchConnector_PerConnectorPersistsState TestApplyRuntime_PerConnectorSwitch; do
+            go test -count=1 -v ./internal/gateway/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
+            if ! grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+              if [[ "$CONNECTOR" != openclaw ]] || ! grep -q -- "--- SKIP: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+                echo "::error::${test}/${CONNECTOR} did not run"
+                exit 1
+              fi
+            fi
+          done
       - name: Per-connector watcher rescan tests
         if: matrix.connector != 'openclaw'
         run: |

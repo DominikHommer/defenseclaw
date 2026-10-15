@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type blockingEvaluator struct{}
@@ -102,6 +103,55 @@ func TestCopyFramesObserveFailsClosedOnRuntimeModeMismatch(t *testing.T) {
 	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
 	if !errors.Is(err, ErrModeMismatch) || forwarded.Len() != 0 {
 		t.Fatalf("mode mismatch did not fail closed: err=%v forwarded=%q", err, forwarded.String())
+	}
+	// The user is told what changed and which command to run, not "re-run
+	// managed setup" (GAP-0355).
+	state.peerProtocolFixes = true
+	err = copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, Profile: "p", Evaluator: modeMismatchEvaluator{}, Stderr: &stderr, Managed: true,
+		SetupCommand: "/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp setup --client zed --agent kiro --profile p",
+	}, state, ClientToAgent, bytes.NewBufferString(frame), &forwarded, &rejected)
+	// An entry set up without --activate is not told that the administrator
+	// changed the mode (GAP-0924).
+	if !errors.Is(err, ErrModeMismatch) || !strings.Contains(err.Error(), "profile p is in action mode, but this editor entry is set up for observe mode") ||
+		!strings.Contains(err.Error(), "set up without --activate") ||
+		!strings.Contains(err.Error(), "enterprise acp setup --client zed --agent kiro --profile p --activate") {
+		t.Fatalf("mode drift message = %v", err)
+	}
+}
+
+// chanWriter hands every write to the test.
+type chanWriter chan []byte
+
+func (w chanWriter) Write(p []byte) (int, error) {
+	w <- append([]byte(nil), p...)
+	return len(p), nil
+}
+
+// A prompt the agent does not answer gets a notice, once: Hermes waiting for
+// its first-run questions on a terminal left the thread on a spinner with no
+// text (GAP-0870). Any agent frame cancels it.
+func TestSilentAgentPromptGetsAWaitNotice(t *testing.T) {
+	previous := agentSilenceNotice
+	agentSilenceNotice = 20 * time.Millisecond
+	t.Cleanup(func() { agentSilenceNotice = previous })
+	client := make(chanWriter, 4)
+	state := &proxyState{peerProtocolFixes: true}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s1", client)
+	select {
+	case frame := <-client:
+		if !strings.Contains(string(frame), `"sessionId":"s1"`) || !strings.Contains(string(frame), "run hermes once in a terminal") {
+			t.Fatalf("notice = %s", frame)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no notice for a silent agent")
+	}
+	state.armSilenceNotice(ProxyOptions{AgentID: "hermes"}, "s2", client)
+	state.agentSpoke()
+	select {
+	case frame := <-client:
+		t.Fatalf("a notice after the agent answered: %s", frame)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -377,11 +427,349 @@ func TestCopyFramesEvaluatorFailureIsClosedOnlyInActionMode(t *testing.T) {
 		var forwarded, rejected, stderr bytes.Buffer
 		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
 		err := copyFrames(context.Background(), ProxyOptions{Mode: mode, Evaluator: evaluator, Stderr: &stderr}, state, ClientToAgent, input, &forwarded, &rejected)
-		if mode == ModeAction && (err == nil || forwarded.Len() != 0) {
-			t.Fatalf("action mode did not fail closed: err=%v forwarded=%q", err, forwarded.String())
+		// Action mode refuses the frame, not the whole session (GAP-1834).
+		if mode == ModeAction && (err != nil || forwarded.Len() != 0) {
+			t.Fatalf("action mode did not fail closed for the frame only: err=%v forwarded=%q", err, forwarded.String())
 		}
 		if mode == ModeObserve && (err != nil || forwarded.String() != frame) {
 			t.Fatalf("observe mode did not fail open: err=%v forwarded=%q", err, forwarded.String())
+		}
+	}
+}
+
+func TestCopyFramesActionBlockedPromptDoesNotWedgeNextPrompt(t *testing.T) {
+	input := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n" +
+			`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	evaluator := contentBlockingEvaluator(`"id":1,`)
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: evaluator}, state, ClientToAgent, input, &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("second prompt after a block was refused: %v", err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":2`) {
+		t.Fatalf("second prompt was not forwarded: %s", forwarded.String())
+	}
+	text, stop := blockedTurn(t, rejected.Bytes(), "1")
+	if text != "DefenseClaw blocked this request: test content policy" || stop != "end_turn" {
+		t.Fatalf("blocked turn = %q / %q: %s", text, stop, rejected.String())
+	}
+}
+
+// blockedTurn decodes the two frames that end a refused prompt turn: the
+// agent_message_chunk text and the prompt result's stopReason.
+func blockedTurn(t *testing.T, out []byte, id string) (string, string) {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("blocked turn frames = %q, want a session/update and a result", out)
+	}
+	var update struct {
+		Method string `json:"method"`
+		Params struct {
+			Update struct {
+				SessionUpdate string `json:"sessionUpdate"`
+				Content       struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"update"`
+		} `json:"params"`
+	}
+	var result struct {
+		ID     json.RawMessage `json:"id"`
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			StopReason string `json:"stopReason"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(lines[0]), &update) != nil || json.Unmarshal([]byte(lines[1]), &result) != nil {
+		t.Fatalf("blocked turn frames are not JSON: %q", out)
+	}
+	if update.Method != "session/update" || update.Params.Update.SessionUpdate != "agent_message_chunk" ||
+		string(result.ID) != id || len(result.Error) != 0 {
+		t.Fatalf("blocked turn frames = %q", out)
+	}
+	return update.Params.Update.Content.Text, result.Result.StopReason
+}
+
+// A blocked prompt ends the turn with the reason as agent text, not a
+// JSON-RPC error that Toad reports as "Agent failed to run" (GAP-1394), and
+// a gateway-worded reason is not prefixed twice (GAP-1793).
+func TestCopyFramesActionBlockedPromptEndsTurnWithReason(t *testing.T) {
+	const reason = "DefenseClaw policy blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in another form."
+	input := bytes.NewBufferString(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	evaluator := staticEvaluator{Action: "block", Reason: reason}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: evaluator}, state, ClientToAgent, input, &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if forwarded.Len() != 0 {
+		t.Fatalf("blocked prompt reached the agent: %s", forwarded.String())
+	}
+	if text, stop := blockedTurn(t, rejected.Bytes(), "3"); text != reason || stop != "end_turn" {
+		t.Fatalf("blocked turn = %q / %q", text, stop)
+	}
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+			Data    struct {
+				Details string `json:"details"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(blockResponse(json.RawMessage("4"), reason), &resp); err != nil ||
+		resp.Error.Message != reason || resp.Error.Data.Details != reason {
+		t.Fatalf("block response wording = %+v (%v)", resp, err)
+	}
+}
+
+type staticEvaluator Verdict
+
+func (v staticEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict(v), nil
+}
+
+// failingEvaluator fails the first `failures` evaluations, then allows.
+type failingEvaluator struct{ failures, calls int }
+
+func (e *failingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	e.calls++
+	if e.calls <= e.failures {
+		return Verdict{}, errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// One slow gateway answer must not end the agent session: the guard retries
+// once, then refuses only that prompt and keeps proxying (GAP-1834).
+func TestCopyFramesActionEvaluationTimeoutRefusesOnlyThatFrame(t *testing.T) {
+	prompt := func(id int) string {
+		return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`+"\n", id)
+	}
+	retried := &failingEvaluator{failures: 1}
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: retried}, state, ClientToAgent, bytes.NewBufferString(prompt(3)), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":3`) || rejected.Len() != 0 || retried.calls != 2 {
+		t.Fatalf("one failed evaluation was not retried: calls=%d forwarded=%q rejected=%q", retried.calls, forwarded.String(), rejected.String())
+	}
+
+	failing := &failingEvaluator{failures: 2}
+	forwarded.Reset()
+	var stderr bytes.Buffer
+	state = &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: failing, Stderr: &stderr}, state, ClientToAgent,
+		bytes.NewBufferString(prompt(3)+prompt(4)), &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("evaluation timeout ended the session: %v", err)
+	}
+	if strings.Contains(forwarded.String(), `"id":3`) || !strings.Contains(forwarded.String(), `"id":4`) {
+		t.Fatalf("forwarded = %q, want only the prompt evaluated after the gateway answered", forwarded.String())
+	}
+	if text, stop := blockedTurn(t, rejected.Bytes(), "3"); text != evaluationUnavailableReason || stop != "end_turn" {
+		t.Fatalf("refused turn = %q / %q", text, stop)
+	}
+	if !strings.Contains(stderr.String(), "evaluation unavailable") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// Agent output refused mid-turn ends the turn for the editor and cancels it
+// in the agent; the agent's late output and answer are dropped instead of
+// ending the proxy as an unmatched response.
+func TestCopyFramesActionAbortedTurnDropsLateAgentAnswer(t *testing.T) {
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	var agentInput, clientOutput bytes.Buffer
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: contentBlockingEvaluator("blocked-text")}
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent,
+		bytes.NewBufferString(`{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`+"\n"), &agentInput, &clientOutput); err != nil {
+		t.Fatal(err)
+	}
+	agentInput.Reset()
+	chunk := func(text string) string {
+		return `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"` + text + `"}}}}` + "\n"
+	}
+	agentOut := chunk("blocked-text") + chunk("late") + `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"cancelled"}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, bytes.NewBufferString(agentOut), &clientOutput, &agentInput); err != nil {
+		t.Fatalf("late answer of an aborted turn ended the proxy: %v", err)
+	}
+	if text, stop := blockedTurn(t, clientOutput.Bytes(), "5"); text != "DefenseClaw blocked this request: test content policy" || stop != "end_turn" {
+		t.Fatalf("aborted turn = %q / %q", text, stop)
+	}
+	if !strings.Contains(agentInput.String(), `"method":"session/cancel"`) {
+		t.Fatalf("agent was not asked to cancel: %q", agentInput.String())
+	}
+	if len(state.abortedPrompts) != 0 || len(state.mutedSessions) != 0 {
+		t.Fatalf("aborted turn state left behind: %v %v", state.abortedPrompts, state.mutedSessions)
+	}
+}
+
+// notReadyEvaluator answers HTTP 503 (ErrGatewayNotReady) `failures` times.
+type notReadyEvaluator struct{ failures, calls int }
+
+func (e *notReadyEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	e.calls++
+	if e.calls <= e.failures {
+		return Verdict{}, fmt.Errorf("%w: ACP evaluator returned HTTP 503", ErrGatewayNotReady)
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// Right after acp setup turned the guard on, the gateway answered 503 until
+// it reloaded the config, and the editor was told it "did not answer"
+// (GAP-2135). The guard now waits before its one retry, and a refusal names
+// the real cause.
+func TestCopyFramesActionGatewayNotReadyRetriesAfterAPauseAndNamesTheCause(t *testing.T) {
+	saved := gatewayNotReadyRetryDelay
+	gatewayNotReadyRetryDelay = 20 * time.Millisecond
+	t.Cleanup(func() { gatewayNotReadyRetryDelay = saved })
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}` + "\n"
+
+	loading := &notReadyEvaluator{failures: 1}
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	started := time.Now()
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: loading}, state, ClientToAgent, bytes.NewBufferString(prompt), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(forwarded.String(), `"id":3`) || rejected.Len() != 0 || loading.calls != 2 {
+		t.Fatalf("a 503 was not retried: calls=%d forwarded=%q rejected=%q", loading.calls, forwarded.String(), rejected.String())
+	}
+	if elapsed := time.Since(started); elapsed < gatewayNotReadyRetryDelay {
+		t.Fatalf("retried after %v, want a pause of at least %v", elapsed, gatewayNotReadyRetryDelay)
+	}
+
+	notReady := &notReadyEvaluator{failures: 2}
+	forwarded.Reset()
+	state = &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: notReady, Stderr: io.Discard}, state, ClientToAgent, bytes.NewBufferString(prompt), &forwarded, &rejected); err != nil {
+		t.Fatal(err)
+	}
+	if text, _ := blockedTurn(t, rejected.Bytes(), "3"); text != gatewayNotReadyReason || strings.Contains(text, "did not answer") {
+		t.Fatalf("refused turn = %q", text)
+	}
+}
+
+// An error response with a null id is valid JSON-RPC 2.0: an editor answers
+// an agent notification it could not parse that way. Action mode forwards it
+// and the session goes on (GAP-0351).
+func TestCopyFramesActionForwardsANullIDErrorResponse(t *testing.T) {
+	nullID := `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"Method not found"}}`
+	input := bytes.NewBufferString(nullID + "\n" + `{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"prompt":[]}}` + "\n")
+	var forwarded, rejected bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}}, state, ClientToAgent, input, &forwarded, &rejected)
+	if err != nil {
+		t.Fatalf("a null-id error response ended the session: %v", err)
+	}
+	if !strings.Contains(forwarded.String(), nullID) || !strings.Contains(forwarded.String(), `"id":8`) {
+		t.Fatalf("frames were not forwarded: %s", forwarded.String())
+	}
+}
+
+type profileMovedEvaluator struct{}
+
+func (profileMovedEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, &BindingRefusedError{Code: RefusalProfileChanged, Profile: "act", Mode: "action",
+		Message: "ACP profile does not match the configured binding for this client and agent; re-run acp setup"}
+}
+
+// A profile the administrator moved the pair away from ends the session,
+// in observe mode too, and the editor is told the new profile and the
+// command; it ran unchecked (GAP-0723).
+func TestCopyFramesProfileMovedEndsTheSessionAndSaysWhy(t *testing.T) {
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}` + "\n"
+	var forwarded, client bytes.Buffer
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	err := copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeObserve, ClientID: "zed", AgentID: "hermes", Profile: "obs", Evaluator: profileMovedEvaluator{},
+		Managed: true, Stderr: io.Discard,
+		SetupCommandFor: func(profile string, mode Mode) string { return "setup --profile " + profile + " " + string(mode) },
+	}, state, ClientToAgent, strings.NewReader(prompt), &forwarded, &client)
+	if !errors.Is(err, ErrBindingRefused) || forwarded.Len() != 0 {
+		t.Fatalf("err = %v, forwarded = %q; want the session ended before the prompt reached the agent", err, forwarded.String())
+	}
+	for _, text := range []string{err.Error(), client.String()} {
+		if !strings.Contains(text, "from ACP profile obs to act") || !strings.Contains(text, "setup --profile act action") ||
+			strings.Contains(text, "did not answer") {
+			t.Fatalf("the user is not told what changed and what to run: %s", text)
+		}
+	}
+}
+
+// An oversized or broken frame ends an action session in words, without Go
+// package or decoder text, and an observe session passes the oversized frame
+// on (GAP-0685).
+func TestCopyFramesOversizedAndBrokenFramesSayWhy(t *testing.T) {
+	huge := `{"jsonrpc":"2.0","method":"x","params":{"pad":"` + strings.Repeat("a", MaxFrameBytes) + `"}}` + "\n"
+	newState := func() *proxyState {
+		return &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	}
+	for input, want := range map[string]string{
+		huge: "larger than the 1 MiB ACP frame limit",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":true}\n": "not valid ACP JSON-RPC",
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":7}\n":    `"method" field has the wrong type`,
+		"{\"jsonrpc\":hello}\n":                            "it is not valid JSON",
+	} {
+		err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+			newState(), ClientToAgent, strings.NewReader(input), io.Discard, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "bufio") ||
+			strings.Contains(err.Error(), "Go struct") || strings.Contains(err.Error(), "invalid character") {
+			t.Errorf("action mode, %.40q: err = %v, want %q", input, err, want)
+		}
+	}
+	var forwarded bytes.Buffer
+	next := `{"jsonrpc":"2.0","method":"initialized"}` + "\n"
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeObserve, Evaluator: AllowEvaluator{}, Stderr: io.Discard},
+		newState(), ClientToAgent, strings.NewReader(huge+next), &forwarded, io.Discard); err != nil ||
+		forwarded.String() != huge+next {
+		t.Fatalf("observe mode did not pass the oversized frame on: err=%v forwarded %d bytes", err, forwarded.Len())
+	}
+}
+
+type rejectingEvaluator struct{}
+
+func (rejectingEvaluator) Evaluate(context.Context, Evaluation) (Verdict, error) {
+	return Verdict{}, ErrCredentialRejected
+}
+
+// A revoked credential says so and points a managed user at the
+// administrator, not at a gateway that "did not answer" and a command the
+// host lacks; observe mode tells the user once that nothing is checked
+// (GAP-0354).
+func TestCopyFramesRejectedCredentialNamesTheRevocation(t *testing.T) {
+	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}`
+	for _, mode := range []Mode{ModeAction, ModeObserve} {
+		var forwarded, client bytes.Buffer
+		state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+		opts := ProxyOptions{Mode: mode, Evaluator: rejectingEvaluator{}, Managed: true, Stderr: io.Discard}
+		input := strings.NewReader(prompt + "\n" + strings.Replace(prompt, `"id":3`, `"id":4`, 1) + "\n")
+		if err := copyFrames(context.Background(), opts, state, ClientToAgent, input, &forwarded, &client); err != nil {
+			t.Fatal(err)
+		}
+		text := client.String()
+		if !strings.Contains(text, "revoked") || !strings.Contains(text, "administrator") ||
+			strings.Contains(text, "defenseclaw status") || strings.Contains(text, "did not answer") {
+			t.Fatalf("%s mode: the editor was not told the credential was refused: %s", mode, text)
+		}
+		if mode == ModeObserve && (strings.Count(text, "not checking this session") != 1 || strings.Count(forwarded.String(), "session/prompt") != 2) {
+			t.Fatalf("observe mode: want one notice and both prompts forwarded: client=%s agent=%s", text, forwarded.String())
+		}
+		if mode == ModeObserve {
+			// A new thread of the same running guard is told too (Zed keeps
+			// one guard for every thread).
+			client.Reset()
+			other := strings.NewReader(strings.Replace(strings.Replace(prompt, `"s1"`, `"s2"`, 1), `"id":3`, `"id":5`, 1) + "\n")
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, other, &forwarded, &client); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(client.String(), "not checking this session") {
+				t.Fatalf("a new thread was not told: %s", client.String())
+			}
 		}
 	}
 }

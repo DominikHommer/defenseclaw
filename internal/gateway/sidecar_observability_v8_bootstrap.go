@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -47,7 +48,14 @@ import (
 )
 
 const (
-	sidecarObservabilityV8CloseTimeout      = 30 * time.Second
+	sidecarObservabilityV8CloseTimeout = 30 * time.Second
+	// sidecarObservabilityV8ShutdownTimeout bounds each telemetry flush when
+	// the gateway stops. Run may try twice (the normal close, then its deferred
+	// retry), and both must fit in the 10s that `defenseclaw-gateway stop`
+	// waits before it escalates to signals: a down or refusing collector
+	// otherwise held the stop for about 20s and the process was killed
+	// (GAP-2100).
+	sidecarObservabilityV8ShutdownTimeout   = 4 * time.Second
 	sidecarDeliveryHealthPersistenceTimeout = 2 * time.Second
 	sidecarDeliveryHealthAction             = "telemetry-destination"
 )
@@ -121,11 +129,12 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if err != nil {
 		return false, err
 	}
-	if configVersion != 8 {
+	// config_version 9 keeps the v8 observability document.
+	if !config.CurrentSchemaVersion(configVersion) {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	cfg := s.currentConfig()
-	if cfg == nil || cfg.ConfigVersion != 8 || strings.TrimSpace(cfg.DataDir) == "" {
+	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) || strings.TrimSpace(cfg.DataDir) == "" {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	s.observabilityV8Mu.Lock()
@@ -134,6 +143,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if alreadyBound {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapBinding, nil)
 	}
+	s.bootConfigSourceName, s.bootConfigSource = sourceName, raw
 	compiled, err := config.ParseCompileObservabilityV8(
 		sourceName,
 		raw,
@@ -144,6 +154,11 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 			return false, err
 		}
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
+	}
+	// A jsonl destination whose folder the gateway account cannot reach
+	// starts deferred; say which path and why (GAP-1265).
+	for _, warning := range compiled.PathWarnings {
+		_, _ = fmt.Fprintf(os.Stderr, "defenseclaw: warning: %s: %s\n", warning.Path, warning.Summary)
 	}
 	if err := applySidecarObservabilityV8ManagedDestination(
 		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(cfg, raw),
@@ -177,7 +192,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	version, err := sidecarObservabilityConfigVersion(raw)
-	if err != nil || version != 8 {
+	if err != nil || !config.CurrentSchemaVersion(version) {
 		if err != nil {
 			return runtimegraph.ReloadResult{}, err
 		}
@@ -201,7 +216,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		}
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
-	candidateConfig, candidateErr := config.LoadRuntimeV8CandidateFromBytes(sourceName, raw)
+	candidateConfig, candidateErr := loadRuntimeConfigCandidate(sourceName, raw)
 	if candidateErr != nil || candidateConfig == nil {
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(
 			sidecarObservabilityV8BootstrapCompile, candidateErr,
@@ -216,6 +231,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 	if reloadErr != nil {
 		return result, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapReload, reloadErr)
 	}
+	s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
 	return result, nil
 }
 
@@ -244,7 +260,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
-	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	engine, err := newObservabilityV8RedactionEngine(s.currentConfig(), key)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRedaction, err)
 	}
@@ -266,6 +282,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapReporter, err)
 	}
+	configPath := s.currentConfig().ConfigFilePath
+	if configPath == "" {
+		configPath = s.bootConfigSourceName
+	}
+	reporter.SetBundleAttribution(func() (observabilityruntime.BundleAttribution, bool) {
+		return observabilityruntime.ReadBundleAttribution(configPath)
+	})
 	failureBuilder, err := observability.NewRecordBuilder(
 		observability.ClockFunc(func() time.Time { return time.Now().UTC() }),
 		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
@@ -274,13 +297,13 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	reaper, err := audit.NewRetentionReaper(
-		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{},
+		s.store, s.judgeBodyStore, int64(snapshot.Local.RetentionDays), audit.RetentionOptions{SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	retention, err := observabilityruntime.NewRetentionController(
-		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}},
+		reaper, observabilityruntime.RetentionControllerOptions{Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration()},
 	)
 	if err != nil {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
@@ -289,11 +312,15 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		s.observeObservabilityV8Delivery(transition)
 	})
 	destinationFactory, err := destinations.NewFactory(destinations.Options{
+		SecureClient:  s.currentConfig().SecureClientIntegration(),
 		ConsoleStream: destinations.ConsoleStderr,
 		Stdout:        os.Stdout, Stderr: os.Stderr,
-		Secrets:  sidecarObservabilityV8SecretResolver{},
+		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
-		Resolver: net.DefaultResolver, Dialer: &net.Dialer{},
+		// Exporters check each destination, then connect through the
+		// standalone enterprise.network proxy when one is set, otherwise
+		// through HTTPS_PROXY (NO_PROXY and loopback connect directly).
+		Resolver: net.DefaultResolver, Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),
@@ -318,7 +345,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ServiceInstanceID:     gatewaylog.SidecarInstanceID(),
 		DefenseClawInstanceID: gatewaylog.SidecarInstanceID(),
 		TenantID:              cfg.TenantID, WorkspaceID: cfg.WorkspaceID,
-		DeploymentMode: cfg.DeploymentMode, ConnectorMode: string(cfg.Claw.Mode),
+		DeploymentMode: cfg.DeploymentMode, ConnectorMode: observabilityClawMode(cfg),
 		DiscoverySource: cfg.DiscoverySource, DeviceKeyFile: cfg.Gateway.DeviceKeyFile,
 		GenerationPipelines: destinationFactory.GenerationPipelineFactory(prometheus.Options{}),
 	})
@@ -327,13 +354,17 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ctx,
 		runtimegraph.ConfigFromPlan(compiled.Plan, retainJudgeBodies),
 		observabilityruntime.Options{
-			Store: s.store, Engine: engine, Signer: signer,
+			SecureClient: s.currentConfig().SecureClientIntegration(),
+			Store:        s.store, Engine: engine, Signer: signer,
 			RecordBuilder: failureBuilder, Reporter: reporter,
 			EventHistoryHealthReporter: sidecarV8EventHistoryObserver{s: s},
 			RetentionController:        retention,
 			DestinationAdapterFactory:  destinationFactory,
 			DestinationObserver:        deliveryObserver,
 			TelemetryProviderFactory:   providerFactory,
+			LocalWriteLossJournalPath: filepath.Join(
+				compiled.DataDir, observabilityruntime.LocalWriteLossJournalFile,
+			),
 		},
 	)
 	if err != nil {
@@ -343,6 +374,18 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies,
 	}, nil
+}
+
+// newObservabilityV8RedactionEngine builds the projection engine every
+// destination, the local store and the reporter share. Secure Client keeps
+// every identifier under every profile, as on main (issue #1092); elsewhere
+// strict removes the personal identifiers.
+func newObservabilityV8RedactionEngine(cfg *config.Config, key redaction.CorrelationKey) (*redaction.Engine, error) {
+	engine, err := redaction.NewEngineWithCorrelationKey(key)
+	if err != nil || !cfg.SecureClientIntegration() {
+		return engine, err
+	}
+	return engine.WithPersonalIdentifiersKept(), nil
 }
 
 type sidecarOwnedObservabilityV8Runtime struct {
@@ -421,6 +464,43 @@ func (owner *sidecarOwnedObservabilityV8Runtime) Emit(
 		return pipeline.LocalLogOutcome{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
 	}
 	return owner.runtime.Emit(ctx, metadata, builder)
+}
+
+// EmitAtomicBatch persists a group of related records with one commit
+// (observabilityruntime.Runtime.EmitAtomicBatch).
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitAtomicBatch(
+	ctx context.Context,
+	items []observabilityruntime.LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	if owner == nil || owner.runtime == nil {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.EmitAtomicBatch(ctx, items)
+}
+
+// LatestLifecycleProjection reads the newest verified lifecycle record of a
+// hook agent through the active generation. The API server restores a hook
+// session's lineage from it after a restart; without it on the runtime the
+// gateway runs, the restore never ran and a child session's first hook after
+// a restart lost its parent link (GAP-0158).
+func (owner *sidecarOwnedObservabilityV8Runtime) LatestLifecycleProjection(
+	ctx context.Context,
+	query audit.LifecycleProjectionQuery,
+) (audit.LifecycleProjection, bool, error) {
+	if owner == nil || owner.runtime == nil {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return audit.LifecycleProjection{}, false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	return owner.runtime.LatestLifecycleProjection(ctx, query)
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitLocalOnly(
@@ -708,7 +788,11 @@ func (owner *sidecarOwnedObservabilityV8Runtime) reload(
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) closeWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sidecarObservabilityV8CloseTimeout)
+	return owner.closeWithin(sidecarObservabilityV8CloseTimeout)
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) closeWithin(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return owner.close(ctx)
 }
@@ -742,6 +826,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	if !ok || owner == nil {
 		return nil
 	}
+	s.flushDestinationLossMetricsV8()
 	// Stop new control-plane producers from acquiring this owner before Close
 	// waits for already-started emissions. Sidecar shutdown has already joined
 	// the config/API/proxy producers, so no selected v8 action can legitimately
@@ -760,8 +845,10 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithTimeout(); err != nil {
-		return err
+	closeErr := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout)
+	s.noteObservabilityV8ShutdownLosses(owner, closeErr == nil)
+	if closeErr != nil {
+		return closeErr
 	}
 	if s.health != nil {
 		s.health.clearObservabilityV8HealthSource()
@@ -806,7 +893,29 @@ func (s *Sidecar) observabilityV8ActivePlan() *config.ObservabilityV8Plan {
 	return owner.runtime.Active().Plan()
 }
 
-type sidecarObservabilityV8SecretResolver struct{}
+// applyAIDiscoveryHistoryRetention bounds the discovery service's
+// inventory.db scan history by the same effective
+// observability.local.retention_days window the audit retention reaper uses,
+// read from the committed graph so defaults and reloads match exactly. Without
+// an owned graph the service keeps its built-in default. Callers must not
+// hold observabilityV8Mu.
+func (s *Sidecar) applyAIDiscoveryHistoryRetention(service *inventory.ContinuousDiscoveryService) {
+	if service == nil {
+		return
+	}
+	plan := s.observabilityV8ActivePlan()
+	if plan == nil {
+		return
+	}
+	service.SetHistoryRetentionDays(plan.Snapshot().Local.RetentionDays)
+}
+
+// sidecarObservabilityV8SecretResolver resolves env references from the key
+// store and environment, and protected credential references from
+// credentialsDir, which is set only in a standalone enterprise deployment.
+type sidecarObservabilityV8SecretResolver struct {
+	credentialsDir string
+}
 
 func (sidecarObservabilityV8SecretResolver) ResolveObservabilitySecret(name string) (string, bool) {
 	if value, ok := config.GetKey(name); ok && strings.TrimSpace(value) != "" {
@@ -814,6 +923,10 @@ func (sidecarObservabilityV8SecretResolver) ResolveObservabilitySecret(name stri
 	}
 	value, ok := os.LookupEnv(name)
 	return value, ok && strings.TrimSpace(value) != ""
+}
+
+func (resolver sidecarObservabilityV8SecretResolver) ResolveObservabilityCredential(name string) (string, bool) {
+	return config.ResolveObservabilityV8ProtectedCredential(resolver.credentialsDir, name)
 }
 
 func sidecarLoadObservabilityV8CA(ctx context.Context, path string) ([]byte, error) {
@@ -870,6 +983,7 @@ func sidecarObservabilityV8ManagedOptionsFromConfig(
 	}
 	return config.ObservabilityV8ManagedAIDOptions{
 		DeploymentMode:    cfg.DeploymentMode,
+		Profile:           cfg.EnterpriseProfile(),
 		Endpoint:          cfg.CiscoAIDefense.Endpoint,
 		SourceContentHash: config.ObservabilityV8SourceContentHash(raw),
 	}
@@ -1093,6 +1207,12 @@ func (observer sidecarV8EventHistoryObserver) ReportEventHistoryHealth(
 		return
 	}
 	observer.s.health.observeObservabilityV8EventHistory(transition)
+	if transition.Code == audit.EventHistoryHealthWriteFailed && transition.State == audit.EventHistoryHealthRecovered {
+		// Writes resumed (or the first write of this run succeeded): report
+		// the records local history lacks (GAP-1100, GAP-1129).
+		// Off this callback, which the writer's health queue delivers.
+		go observer.s.recordLocalWriteGapV8()
+	}
 }
 
 func newSidecarObservabilityV8BootstrapError(
@@ -1123,4 +1243,17 @@ var (
 	_ audit.RuntimeV8Emitter                     = (*sidecarOwnedObservabilityV8Runtime)(nil)
 	_ audit.RuntimeV8FindingContentFingerprinter = (*sidecarOwnedObservabilityV8Runtime)(nil)
 	_ config.ObservabilityV8SecretResolver       = sidecarObservabilityV8SecretResolver{}
+	_ config.ObservabilityV8CredentialResolver   = sidecarObservabilityV8SecretResolver{}
 )
+
+// observabilityClawMode is the gateway-wide defenseclaw.claw.mode resource
+// attribute. With several connectors active, the configured claw mode is only
+// the roster's first connector, and stamping it on every record showed one
+// agent's traffic as another's; each record already names its own agent, so
+// the attribute is left out then.
+func observabilityClawMode(cfg *config.Config) string {
+	if cfg == nil || len(cfg.ActiveConnectors()) > 1 {
+		return ""
+	}
+	return string(cfg.Claw.Mode)
+}

@@ -141,6 +141,57 @@ func TestLocalLogPipelinePersistsEveryCatalogBucketExactlyOnce(t *testing.T) {
 	}
 }
 
+// batchAppender records how many commits a batch of appends took.
+type batchAppender struct {
+	*recordingAppender
+	batches int
+}
+
+func (appender *batchAppender) AppendBatchContext(
+	ctx context.Context,
+	records []observability.Record,
+	projections []redaction.Projection,
+) error {
+	appender.batches++
+	for index := range records {
+		if err := appender.recordingAppender.AppendContext(ctx, records[index], projections[index]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GAP-0246: a group of related occurrences (the relationship rows of one
+// hook) is persisted with one commit, each one persisted when it returns.
+func TestLocalLogPipelineAtomicBatchCommitsOnce(t *testing.T) {
+	plan, evaluator := mustPlanEvaluator(t, nil)
+	appender := &batchAppender{recordingAppender: &recordingAppender{graphDigest: plan.Digest()}}
+	pipeline, err := NewLocalLogPipeline(plan, evaluator, mustEngine(t), appender, mustFailureFactory(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	test := catalogLogCases()[0]
+	items := make([]AtomicBatchItem, 3)
+	for index := range items {
+		id := fmt.Sprintf("batch-record-%d", index)
+		items[index] = AtomicBatchItem{Metadata: mustMetadata(t, test), Builder: func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, id)
+		}}
+	}
+	outcomes, err := pipeline.ProcessAtomicBatch(context.Background(), items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appender.batches != 1 || len(appender.snapshot()) != 3 || len(outcomes) != 3 {
+		t.Fatalf("batches=%d appends=%d outcomes=%d, want one commit of three", appender.batches, len(appender.snapshot()), len(outcomes))
+	}
+	for index, outcome := range outcomes {
+		if !outcome.LocalPersisted() {
+			t.Fatalf("outcome %d not persisted", index)
+		}
+	}
+}
+
 func TestLocalLogPipelineAdmissionIsLazyAndFloorIsLocalOnly(t *testing.T) {
 	falseValue := false
 	source := &config.ObservabilityV8Source{
@@ -243,7 +294,7 @@ func TestLocalLogPipelineUsesCustomBucketProfileForLocalProjection(t *testing.T)
 	}
 }
 
-func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
+func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 	source := &config.ObservabilityV8Source{Destinations: []config.ObservabilityV8DestinationSource{
 		{Name: "remote-a", Kind: config.ObservabilityV8DestinationConsole},
 		{Name: "remote-b", Kind: config.ObservabilityV8DestinationConsole},
@@ -257,7 +308,8 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 			failure: redaction.ProjectionFailureSerialization,
 		}
 		pipeline, appender := mustPipeline(t, source, projector)
-		outcome, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+		ctx := legacyredaction.WithSinkPolicy(t.Context(), legacyredaction.SinkPolicyRedact)
+		outcome, err := pipeline.Process(ctx, metadata, func(admission router.Admission) (observability.Record, error) {
 			return buildClassifiedLog(test, admission, "raw-original-marker-8172")
 		})
 		assertPipelineError(t, err, ErrorLocalProjection)
@@ -277,6 +329,9 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 		}
 		if bytes.Contains(projected, []byte("raw-original-marker-8172")) {
 			t.Fatal("projection failure health record retained the failed record ID")
+		}
+		if got := calls[0].projection.Metadata().RedactionProfile; got != string(redaction.ProfileSensitive) {
+			t.Fatalf("projection failure profile = %s, want sensitive", got)
 		}
 	})
 
@@ -301,18 +356,30 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 		if strings.Contains(err.Error(), "bearer-value") {
 			t.Fatalf("write failure leaked persistence diagnostics: %v", err)
 		}
-		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 0 || len(appender.snapshot()) != 1 {
-			t.Fatalf("write failure leaked work: %+v calls:%d", outcome, len(appender.snapshot()))
+		// GAP-1536: a failed local write (disk full) still hands back the
+		// remote projections so the record is exported while SQLite is down.
+		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 2 || len(appender.snapshot()) != 1 {
+			t.Fatalf("write failure outcome: %+v calls:%d", outcome, len(appender.snapshot()))
+		}
+		local, localErr := pipeline.ProcessLocalOnly(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, "write-failure-local-only")
+		})
+		assertPipelineError(t, localErr, ErrorLocalWrite)
+		if len(local.OptionalWork()) != 0 {
+			t.Fatalf("local-only write failure produced remote work: %+v", local)
 		}
 	})
 
 	t.Run("cancel during write", func(t *testing.T) {
 		pipeline, appender := mustPipeline(t, source, mustEngine(t))
 		appender.err = context.Canceled
-		_, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+		outcome, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
 			return buildClassifiedLog(test, admission, "cancelled-write")
 		})
 		assertPipelineError(t, err, ErrorLocalWrite)
+		if len(outcome.OptionalWork()) != 0 {
+			t.Fatalf("cancelled write produced remote work: %+v", outcome)
+		}
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("mid-write cancellation identity was lost: %v", err)
 		}
@@ -797,8 +864,7 @@ func TestLocalLogPipelinePreservesCanonicalAndOutcomeImmutability(t *testing.T) 
 		t.Fatal(err)
 	}
 	projectionBytes[0] ^= 0xff
-	failures := outcome.OptionalFailures()
-	failures = append(failures, OptionalFailure{destinationName: "mutated"})
+	_ = append(outcome.OptionalFailures(), OptionalFailure{destinationName: "mutated"})
 
 	after, err := canonical.Bytes()
 	if err != nil {

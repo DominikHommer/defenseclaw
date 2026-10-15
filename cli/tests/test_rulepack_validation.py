@@ -25,7 +25,10 @@ def _summary(**overrides: int | str) -> dict[str, int | str]:
         "local_pattern_count": 6,
         "suppression_count": 3,
         "sensitive_tool_count": 5,
+        "stale_rule_count": 0,
+        "alert_only_rule_count": 0,
         "digest": "a" * 64,
+        "files_digest": "b" * 64,
     }
     result.update(overrides)
     return result
@@ -55,7 +58,7 @@ def test_valid_protocol_invokes_offline_gateway_command() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="/opt/defenseclaw-gateway",
         ),
         patch.object(
@@ -101,7 +104,7 @@ def test_invalid_protocol_is_a_typed_nonzero_result() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -136,7 +139,7 @@ def test_zero_returncode_with_invalid_result_is_a_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -164,7 +167,7 @@ def test_nonzero_returncode_with_valid_result_is_a_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -187,7 +190,7 @@ def test_helper_invalid_text_is_a_safe_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -217,7 +220,7 @@ def test_helper_oversized_stdout_is_a_safe_protocol_error() -> None:
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -270,7 +273,7 @@ def test_incompatible_protocol_is_rejected(
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -299,7 +302,7 @@ def test_incompatible_protocol_extra_key_is_rejected_without_echoing_payload() -
     with (
         patch.object(
             rulepack_validation,
-            "resolve_gateway_binary",
+            "resolve_trusted_gateway_binary",
             return_value="gateway",
         ),
         patch.object(
@@ -481,3 +484,50 @@ def test_offline_validation_preflight_matches_only_exact_command_sequence(
     ctx = SimpleNamespace(invoked_subcommand=invoked_subcommand)
     with patch("sys.argv", argv):
         assert main._is_offline_rulepack_validation(ctx) is expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["defenseclaw", "guardrail", "use-pack", "./pack"], True),
+        (["defenseclaw", "guardrail", "--json", "use-pack", "./pack"], False),
+        (["defenseclaw", "guardrail", "mode", "use-pack"], False),
+    ],
+    ids=("exact", "intervening-flag", "different-guardrail-subcommand"),
+)
+def test_use_pack_skips_the_pre_command_validation_so_it_can_repin(argv: list[str], expected: bool) -> None:
+    from defenseclaw import main
+
+    ctx = SimpleNamespace(invoked_subcommand="guardrail")
+    with patch("sys.argv", argv):
+        assert main._is_pack_repin(ctx) is expected
+
+
+def test_validate_pack_accepts_discovered_bare_name(tmp_path) -> None:
+    pack = tmp_path / "team"
+    pack.mkdir()
+    valid = rulepack_validation.RulePackValidationResult(wire_version=1, kind="validation", valid=True, summary=_summary())
+    with (
+        patch("defenseclaw.config.load", return_value=object()) as load_config,
+        patch("defenseclaw.policy_catalog.discover_rule_packs", return_value=[SimpleNamespace(name="team", path=str(pack))]),
+        patch.object(rulepack_validation, "validate_rule_pack", return_value=valid) as validator,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["team"])
+    load_config.assert_called_once_with()
+    assert result.exit_code == 0, result.output
+    validator.assert_called_once_with(str(pack))
+
+
+def test_validate_pack_prefers_local_directory_over_discovered_name(tmp_path, monkeypatch) -> None:
+    local = tmp_path / "strict"
+    local.mkdir()
+    monkeypatch.chdir(tmp_path)
+    valid = rulepack_validation.RulePackValidationResult(wire_version=1, kind="validation", valid=True, summary=_summary())
+    with (
+        patch("defenseclaw.config.load", return_value=object()),
+        patch("defenseclaw.policy_catalog.discover_rule_packs", return_value=[SimpleNamespace(name="strict", path="/installed/strict")]),
+        patch.object(rulepack_validation, "validate_rule_pack", return_value=valid) as validator,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["strict"])
+    assert result.exit_code == 0, result.output
+    validator.assert_called_once_with("strict")

@@ -42,9 +42,10 @@ type windowsGenericCodexFixture struct {
 }
 
 type windowsGenericCodexTestConnector struct {
-	configPath string
-	setupCalls *int
-	name       string
+	configPath   string
+	setupCalls   *int
+	name         string
+	teardownOpts *[]connector.SetupOpts
 }
 
 const windowsGenericTestConnectorName = "codex"
@@ -247,7 +248,10 @@ func (c *windowsGenericCodexTestConnector) Setup(_ context.Context, opts connect
 	}
 	return os.WriteFile(c.configPath, append(body, '\n'), 0o600)
 }
-func (c *windowsGenericCodexTestConnector) Teardown(_ context.Context, _ connector.SetupOpts) error {
+func (c *windowsGenericCodexTestConnector) Teardown(_ context.Context, opts connector.SetupOpts) error {
+	if c.teardownOpts != nil {
+		*c.teardownOpts = append(*c.teardownOpts, opts)
+	}
 	return os.WriteFile(c.configPath, []byte("{\"model\":\"gpt-5\"}\n"), 0o600)
 }
 func (c *windowsGenericCodexTestConnector) Authenticate(*http.Request) bool { return false }
@@ -302,9 +306,11 @@ func newWindowsTrustedHookExecutableFixture(t *testing.T, targetSID *windows.SID
 	if err := os.WriteFile(path, []byte("MZ test native hook"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, dir, targetSID)
 	if err := setWindowsUserPathProtection(dir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, path, targetSID)
 	if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
 		t.Fatal(err)
 	}
@@ -334,6 +340,10 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 	beforeProtection func(configPath string),
 ) windowsGenericCodexFixture {
 	t.Helper()
+	// The managed hook-contract lock entry binds to the running gateway
+	// service identity. Production installs inherit this env from the
+	// authenticated SCM process; tests must supply it explicitly.
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	targetSID := currentWindowsTestSID(t)
 	home := filepath.Join(t.TempDir(), "home")
 	configDir := filepath.Join(home, ".codex")
@@ -351,6 +361,7 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 		path string
 		dir  bool
 	}{{home, true}, {configDir, true}, {configPath, false}} {
+		setWindowsTestPathExactOwner(t, path.path, targetSID)
 		if err := setWindowsUserPathProtection(path.path, targetSID, path.dir); err != nil {
 			t.Fatalf("protect generic Codex fixture %s: %v", path.path, err)
 		}
@@ -515,10 +526,14 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 			t.Fatal(err)
 		}
 	}
+	// Elevated runners assign BUILTIN\Administrators as the default owner;
+	// establish the target-owned precondition like the home above.
+	setWindowsTestPathExactOwner(t, trustedDir, targetSID)
 	if err := setWindowsUserPathProtection(trustedDir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{hookExe, gatewayExe} {
+		setWindowsTestPathExactOwner(t, path, targetSID)
 		if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
 			t.Fatal(err)
 		}
@@ -2134,6 +2149,46 @@ func TestInstallWindowsClaudeRejectsInvalidReverseOrphanManagedState(t *testing.
 	}
 }
 
+// GAP-1108: DefenseClaw's own drop-in, edited or deleted outside DefenseClaw,
+// is put back byte for byte from its ownership record (the guardian does
+// this, and Setup /repair before its snapshot), and the install path then
+// accepts it again; a drop-in that matches its record is left alone.
+func TestWindowsClaudeManagedPolicyDriftIsPutBack(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	opts := windowsManagedInstallOptions(fixture)
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || restored {
+		t.Fatalf("untouched drop-in: restored=%v err=%v, want nothing to do", restored, err)
+	}
+	edited := bytes.Replace(original, []byte("defenseclaw-hook.exe"), []byte("defenseclaw-hook-edited.exe"), 1)
+	if bytes.Equal(edited, original) {
+		t.Fatal("fixture policy names no hook executable to edit")
+	}
+	for _, change := range []func() error{
+		func() error { return os.WriteFile(fixture.policyPath, edited, 0o600) },
+		func() error { return os.Remove(fixture.policyPath) },
+	} {
+		if err := change(); err != nil {
+			t.Fatal(err)
+		}
+		if restored, err := RestoreWindowsClaudeManagedPolicyDrift(); err != nil || !restored {
+			t.Fatalf("changed drop-in: restored=%v err=%v, want it put back", restored, err)
+		}
+		if got, err := os.ReadFile(fixture.policyPath); err != nil || !bytes.Equal(got, original) {
+			t.Fatalf("restored drop-in differs from the one DefenseClaw wrote (err=%v)", err)
+		}
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install after the restore: %v", err)
+	}
+}
+
 func TestInstallWindowsClaudeRefusesAdministratorPolicyEdit(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)
@@ -2965,5 +3020,17 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// GAP-1940: an account deleted with its profile during Setup is named as
+// such, not as the raw Win32 lookup error, and still reads as not-exist.
+func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "dcw-gone")
+	_, _, err := validateWindowsEnterpriseHome(home, "")
+	if err == nil || !errors.Is(err, os.ErrNotExist) ||
+		!strings.Contains(err.Error(), "no longer exists: the account was deleted or its profile folder removed") ||
+		strings.Contains(err.Error(), "GetFileAttributesEx") {
+		t.Fatalf("vanished profile error = %v", err)
 	}
 }

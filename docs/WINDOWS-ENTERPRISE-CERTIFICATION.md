@@ -10,6 +10,12 @@ Run the host-mutating procedure only on a disposable Windows endpoint or
 ephemeral CI runner with an independent administrator recovery channel. Do not
 run it on a production workstation.
 
+**Scope.** This runbook certifies the Cisco Secure Client profile. The
+harness, `scripts/test-windows-enterprise-hardening.ps1`, has no standalone
+profile yet, so a run does not certify a standalone deployment.
+
+For the standalone profile across Windows, macOS and Linux, follow the [enterprise manual test plan](ENTERPRISE-TEST-PLAN.md).
+
 ## Acceptance boundary
 
 The deployed endpoint passes only when all of these statements have direct
@@ -22,9 +28,9 @@ evidence:
 | Managed-root provenance | Default install, state, staging, and work roots come from Windows known folders. Poisoned process `ProgramFiles` or `ProgramData` variables cannot redirect them and no poisoned path is created. |
 | Trusted release input | The installer, module, broker, gateway, hook, CLI, config, manifest, and required separately version-stamped upgrade binaries are copied byte-stably into an administrator/System-only staging tree before full lifecycle execution. The Cisco provider DLL remains at its trusted Secure Client path and must match the public CLI resolver selection with an exact Cisco signer and pinned digest. `-AllowUnsigned` is accepted before module import only for `Install`/`Upgrade`/`Repair` with the exact same-id certification service names, roots, and required certification CODEX_HOME scope marker; production defaults and near misses fail closed. It does not weaken either source-path trust boundary. |
 | Drive-namespace integrity | Every enterprise source, managed root, certification home, and target profile uses an exact mount-manager drive root on fixed NTFS. Effective-drive, global-drive, and volume-GUID DOS-device targets are single, well-formed, and identical. A medium user raw `DefineDosDevice` alias that still reports `Fixed`/`NTFS` is rejected by the CLI, bootstrap, module, Codex machine-policy path, and target-profile path before mutation. |
-| Service control | The gateway runs as `NT SERVICE\<gateway-name>`; the credential broker and guardian run as LocalSystem. All three start automatically, and a standard user cannot stop, disable, reconfigure, delete, or obtain `PROCESS_TERMINATE` access to any of those three services. Direct `taskkill` fails and their PIDs remain unchanged. The derived LocalSystem Enumerator is covered in this run only by exact-name collision refusal and uninstall/fallback-cleanup absence checks; this broker-focused matrix does not claim its full token/recovery behavior. |
+| Service control | The gateway, credential broker and guardian all run as LocalSystem; the gateway keeps its restricted service SID and needs no "Log on as a service" right. All three start automatically, and a standard user cannot stop, disable, reconfigure, delete, or obtain `PROCESS_TERMINATE` access to any of those three services. Direct `taskkill` fails and their PIDs remain unchanged. The derived LocalSystem Enumerator is covered in this run only by exact-name collision refusal and uninstall/fallback-cleanup absence checks; this broker-focused matrix does not claim its full token/recovery behavior. |
 | Process/token object isolation | A standard user may obtain query-limited process access, but cannot terminate, suspend, inject into, create threads in, duplicate handles from, change quota/information/DACL/owner on, or obtain all-access to the broker, gateway, or guardian process. It also cannot obtain any duplicate/impersonate/assign-primary/adjust/DACL/owner token handle. Those three original PIDs remain responsive after every probe. |
-| Actual service tokens | A read-only C#/PInvoke probe records the broker, gateway, and guardian live PIDs' TokenUser, integrity, privileges, groups, and restricted SIDs. The gateway is the exact virtual service SID with a restricted high-integrity token and only ChangeNotify. The LocalSystem broker is unrestricted with only ChangeNotify. The LocalSystem guardian has exactly Tcb/Impersonate/ChangeNotify/Backup/Restore; Backup and Restore must be present-but-disabled at idle and enabled only on the dedicated bounded DACL-repair thread. TakeOwnership is never retained. |
+| Actual service tokens | A read-only C#/PInvoke probe records the broker, gateway, and guardian live PIDs' TokenUser, integrity, privileges, groups, and restricted SIDs. The gateway is LocalSystem at System integrity with a write-restricted token carrying its service SID (as a non-deny-only group and in the restricted SID list) and only ChangeNotify. The LocalSystem broker is unrestricted with only ChangeNotify. The LocalSystem guardian has exactly Tcb/Impersonate/ChangeNotify/Backup/Restore; Backup and Restore must be present-but-disabled at idle and enabled only on the dedicated bounded DACL-repair thread. TakeOwnership is never retained. |
 | Recovery semantics | The broker, gateway, and guardian each have only restart actions at 5s/15s/60s, with the final 60s action repeated indefinitely and no terminal NONE. Controlled unexpected failures 1-4 replace each of those PIDs every time. Servicing persists intent, disables and stops all managed services, and the certification observes the three-service set through a fresh 65-second queued-restart drain before guardian-first activation. `-NoStart` keeps those three disabled/stopped until a complete public `Repair`; raw SCM start is rejected as an activation path. |
 | Shared Codex prerequisite | Explicit enterprise lifecycle securely creates missing `C:\ProgramData\OpenAI\Codex` parents with System/Administrators full control and Users read/traverse. Status and normal mode do not create them; unsafe preexisting owners/DACLs/reparse points fail without takeover; rollback removes only transaction-created empty directories; preexisting legitimate directories survive failure and purge. |
 | Codex machine policy | `%ProgramData%\OpenAI\Codex\requirements.toml` contains exactly ten managed hook groups and points only to the protected installed hook. Its protected enrollment state, ownership record, and ACL preimage are non-user-writable and guardian-repaired after deletion, event removal, or DACL drift. Managed enterprise never reads, writes, or patches `<profile>\.codex`. |
@@ -245,7 +251,9 @@ and prints JSON, but creates no user, service, directory, or policy:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -270,7 +278,9 @@ From an elevated 64-bit PowerShell 7 window:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -292,7 +302,9 @@ supplying credentials:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -403,7 +415,9 @@ second build:
   -BrokerBinary .\v1\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\v1\defenseclaw-gateway.exe `
+  -ACPBinary .\v1\defenseclaw-acp.exe `
   -HookBinary .\v1\defenseclaw-hook.exe `
+  -SensorHelperBinary .\v1\defenseclaw-sensor-helper.exe `
   -CLIBinary .\v1\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -413,7 +427,9 @@ second build:
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeACPBinary .\v2\defenseclaw-acp.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
@@ -726,8 +742,8 @@ Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Cert\<id>\hook-gua
 ```
 
 The service image paths must be absolute and remain under the unique install
-root. The gateway identity must be its exact virtual account. The broker,
-guardian, and Enumerator identities must be LocalSystem. The service registry
+root. The gateway, broker, guardian, and Enumerator identities must be
+LocalSystem. The service registry
 environment must pin
 `managed_enterprise`, installed config/home/authorization paths, and the
 correct service role. No protected-user, `BUILTIN\Users`, `Everyone`, or

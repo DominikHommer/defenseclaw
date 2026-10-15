@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any
 
 from defenseclaw.safety import is_symlink
 from defenseclaw.skill_discovery import (
+    decode_skill_text,
     discover_skill_directories,
     skill_dir_is_eligible,
 )
@@ -105,14 +106,13 @@ def _list_skills_via_openclaw_cli() -> list[dict[str, Any]] | None:
     non-JSON.
     """
     try:
-        from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
-        prefix = openclaw_cmd_prefix()
+        from defenseclaw.config import openclaw_bin
     except Exception:
         return None
 
     try:
         result = subprocess.run(
-            [*prefix, openclaw_bin(), "skills", "list", "--json"],
+            [openclaw_bin(), "skills", "list", "--json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -233,8 +233,8 @@ def _read_skill_description(path: str) -> str:
         if is_symlink(marker_path) or not os.path.isfile(marker_path):
             continue
         try:
-            with open(marker_path, encoding="utf-8", errors="replace") as f:
-                text = f.read(2048)
+            with open(marker_path, "rb") as f:
+                text = decode_skill_text(f.read(4096))[:2048]
         except OSError:
             continue
         frontmatter_description = _frontmatter_description(text)

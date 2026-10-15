@@ -31,7 +31,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
+from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 RULEPACK_WIRE_VERSION: Final = 1
 RULEPACK_HELPER_TIMEOUT_SECONDS: Final = 15
@@ -45,8 +46,11 @@ _SUMMARY_COUNT_FIELDS: Final = (
     "local_pattern_count",
     "suppression_count",
     "sensitive_tool_count",
+    "stale_rule_count",
+    "alert_only_rule_count",
 )
-_SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, "digest"))
+_SUMMARY_DIGEST_FIELDS: Final = ("digest", "files_digest")
+_SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, *_SUMMARY_DIGEST_FIELDS))
 _ERROR_FIELDS: Final = frozenset({"path", "code", "reason"})
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SHA256_DIGEST = re.compile(r"^[a-f0-9]{64}$")
@@ -106,7 +110,13 @@ def validate_rule_pack(
     protocol drift raise :class:`RulePackValidationBridgeError`; callers must
     not reinterpret those states as successful validation.
     """
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise RulePackValidationBridgeError(
+            unsafe_gateway_remedy(exc),
+            code="gateway_untrusted",
+        ) from exc
     if not binary:
         raise RulePackValidationBridgeError(
             "defenseclaw-gateway is required for authoritative rule-pack validation; "
@@ -176,8 +186,15 @@ def validate_rule_pack(
 
 
 def safe_display_path(path: str) -> str:
-    """Quote an operator/config path without emitting terminal control bytes."""
-    return json.dumps(str(path), ensure_ascii=True)
+    """Quote an operator/config path without emitting terminal control bytes.
+
+    Only quotes and non-printable characters are escaped, so a Windows path
+    keeps its single backslashes.
+    """
+    text = "".join(
+        '\\"' if ch == '"' else ch if ch.isprintable() else f"\\u{ord(ch):04x}" for ch in str(path)
+    )
+    return f'"{text}"'
 
 
 def bridge_error_wire(error: RulePackValidationBridgeError) -> dict[str, Any]:
@@ -236,10 +253,13 @@ def _decode_summary(value: Any) -> dict[str, int | str]:
         if type(count) is not int or count < 0:
             raise _protocol_error()
         summary[field] = count
-    digest = value.get("digest")
-    if not isinstance(digest, str) or _SHA256_DIGEST.fullmatch(digest) is None:
-        raise _protocol_error()
-    summary["digest"] = digest
+    # digest fingerprints the loaded pack; files_digest covers only the
+    # pack's own files and is what guardrail.custom_packs pins.
+    for field in _SUMMARY_DIGEST_FIELDS:
+        digest = value.get(field)
+        if not isinstance(digest, str) or _SHA256_DIGEST.fullmatch(digest) is None:
+            raise _protocol_error()
+        summary[field] = digest
     return summary
 
 

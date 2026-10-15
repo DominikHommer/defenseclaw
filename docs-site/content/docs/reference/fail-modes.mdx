@@ -18,9 +18,16 @@ and invalid-response failures.
 
 | Control | Effect | Default and scope |
 | --- | --- | --- |
-| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Can be overridden per connector. |
+| `guardrail.hook_fail_mode` | `open` allows or `closed` blocks supported hook events when delivery or the gateway response fails. | `closed` on a fresh install. Migrated legacy configs can retain explicit `open`. Can be overridden per connector. See [Which value applies](#which-value-applies). |
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
+
+On a managed standalone host, gateway peer verification remains fail-closed
+when the gateway is unavailable, even if `hook_fail_mode: open` is set.
+
+On a managed standalone host both variables are *tighten-only*: a value that
+makes hooks stricter is honored, and one that would loosen the administrator's
+posture is ignored. See [Environment variables](/docs/reference/env-vars).
 
 <Callout type="warning" title="Older transport-only descriptions are stale">
 The effective hook fail mode now covers connection refusal, timeout, gateway
@@ -28,6 +35,26 @@ The effective hook fail mode now covers connection refusal, timeout, gateway
 decision field. `closed` no longer silently opens only because a failure was
 classified as transport.
 </Callout>
+
+### Which value applies
+
+Each connector's effective fail mode resolves in this order:
+
+1. The connector's own value (`guardrail.connectors.<name>.hook_fail_mode`),
+   set with `guardrail fail-mode open|closed --connector <name>`.
+2. Otherwise, a connector in **observe** mode stays `open`, whatever the global
+   value says. Switch it to action mode with
+   `defenseclaw guardrail mode action --connector <name>`, or give it its own
+   fail mode.
+3. Otherwise, the global `guardrail.hook_fail_mode`.
+
+When rule 2 keeps a connector open although the global value is `closed`,
+`defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
+`fail-mode=open`, so it does not read as drift.
+
+Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
+their generated hooks stay open even when the effective mode is `closed`. See
+[Connector response shapes](#connector-response-shapes).
 
 ## Effective behavior
 
@@ -40,6 +67,30 @@ classified as transport.
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
 | Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
+
+Fail mode applies only to a hook the agent can start. A hook script that is
+missing, cannot be read or is not executable (an antivirus quarantine, a
+restored backup with the wrong mode, an account rename or home move that left
+the agent hooks pointing at the old home) makes the shell exit 126 or 127,
+which Claude Code and the other agents treat as a non-blocking hook error: the
+tool call runs unguarded whatever the fail mode. `defenseclaw guardrail
+status`, `defenseclaw status` and `defenseclaw doctor` say that the connector
+is not guarded and name the repair (`defenseclaw doctor --fix` restores the
+script mode; `defenseclaw setup <connector>` or `defenseclaw-gateway restart`
+renders the scripts and re-points the hooks after a home move).
+
+On a managed Linux or macOS host the hook is the administrator-owned
+`defenseclaw-hook` binary. When it is missing, empty (agents run an empty
+file as a script that allows every call), not executable, not owned by root
+or not the binary the deployment installed (hash mismatch),
+`enterprise linux status` (or `macos`) and `verify` fail with the path, the
+state and `security_complete: false`, and the hook guardian starts the
+lifecycle's config-apply job within seconds, which puts the binary back from
+the copy the lifecycle sealed when it committed the deployment (checked
+against its recorded SHA-256 before it is made executable, then renamed into
+place as root with mode 0755). `enterprise linux repair` does the same at
+once. On Windows the standalone guardian puts a missing, empty or different
+`defenseclaw-hook.exe` back from its protected copy within seconds.
 
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a
@@ -68,30 +119,81 @@ defenseclaw guardrail fail-mode closed --connector codex --yes
 defenseclaw guardrail fail-mode closed --connector claudecode --yes
 ```
 
+Run bare, `guardrail fail-mode` prints the global value and each active
+connector's effective value. On a Claude Code and Codex install in observe
+mode, after `guardrail fail-mode closed --connector codex --yes`:
+
+```text
+  guardrail.hook_fail_mode: closed
+
+  per connector:
+      - Claude Code (claudecode): open
+      - Codex (codex): closed
+
+  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above; Hermes remains fail-open.
+  ! Still fail-open: claudecode (observe mode keeps hooks fail-open). Switch to action with: defenseclaw guardrail mode action --connector <name>
+  Switch to open:   defenseclaw guardrail fail-mode open
+```
+
+Claude Code shows `open` because it is in observe mode and has no value of its
+own; Codex shows `closed` because of its connector override.
+
 Omitting `--connector` writes the broad posture. On a multi-connector install,
 a broad write reconciles active connector overrides so an old per-connector
 value cannot silently keep one peer on the prior mode.
 
-The command restarts the gateway and reconciles native hook state by default.
-`--no-restart` persists desired state but can leave the running generation on
-the prior value. `guardrail status` reports configured and runtime values so
-that drift is visible.
+The fail mode is written to `guardrail.hook_fail_mode` (or the connector's own
+`hook_fail_mode`) in `config.yaml`, and it is also baked into the generated hook
+scripts: each carries a `# defenseclaw-derived: sha256=... fail_mode=closed`
+header. The scripts are derived files, so the command restarts the gateway by
+default to render them again and reconcile native hook state. The key is
+not one of the
+[restart-required keys](/docs/reference/cli#restart-required-keys): with
+`--no-restart` the running gateway still reloads the new mode and, with hook
+self-heal on, renders the hook scripts again itself. `guardrail status` reports configured and runtime
+values so that drift is visible, and `defenseclaw doctor` warns with `stale
+generated script (... bakes hook fail mode open; config.yaml says closed)` and
+names the command that renders the scripts again.
+
+On a managed standalone host the administrator's config sets the fail mode;
+change it there.
+
+A connector turned off with `guardrail disable --connector X` has no hooks, so
+it has no fail mode: `guardrail status` shows `-` in its Fail column and
+`guardrail fail-mode` lists it as `disabled (no hooks)`.
+
+OpenClaw and ZeptoClaw are proxy-backed and have no hooks, so the hook fail
+mode does not apply to them: while the gateway is down, their requests are
+blocked (fail-closed) whatever `guardrail.hook_fail_mode` says.
+`guardrail fail-mode` lists them as `closed (proxy-backed, no hooks ...)`.
 
 ## Connector response shapes
 
-Fail mode can block only where the agent protocol has a block shape:
+Fail mode can block only where the agent protocol has a block shape. A
+closed failure returns the same block response a policy denial would, on the
+events below:
 
-- Codex can deny/block its declared prompt, tool, permission, post-tool, and
-  stop events. It has no native ask response.
-- Claude Code can deny/block its declared prompt, expansion, tool, permission,
-  batch, task, stop, subagent, config, compaction, and elicitation events.
-  `PreToolUse` also has native ask.
+| Connector | Events that can block | Native ask | Fail closed |
+| --- | --- | --- | --- |
+| Claude Code | `UserPromptSubmit`, `UserPromptExpansion`, `PreToolUse`, `PermissionRequest`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `SubagentStop`, `ConfigChange`, `PreCompact`, `Elicitation`, `ElicitationResult` | `PreToolUse` | Yes |
+| Codex | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `SubagentStop`, `PreCompact`, `PostCompact`, `Stop` | None | Yes |
+| Cursor | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | None | Yes |
+| GitHub Copilot CLI | `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop` | `preToolUse` | No |
+| Devin | `PreToolUse`, `PermissionRequest`, `UserPromptSubmit`, `Stop` | None | Yes |
+| Antigravity | `PreToolUse` | `PreToolUse` | No |
+| Hermes | `pre_tool_call` | None | No |
+| OpenCode | `tool.execute.before` | None | Yes |
+| OpenHands | `pre_tool_use`, `user_prompt_submit`, `stop` | None | Yes |
+| Kiro | `UserPromptSubmit`, `PreToolUse` | None | Yes |
+| Amp | `tool.call`, `tool.result` | `tool.call`, `tool.result` (foreground thread) | Yes |
+| OmniGent | `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `AfterAgentResponse`, `BeforeModel`, `AfterModel` | `UserPromptSubmit`, `PreToolUse`, `BeforeModel` | Yes |
+
 - An already-completed result event cannot undo its original side effect.
 - An observation-only event remains observation-only even when fail mode is
   closed.
 
 See the [connector platform details](/docs/connectors#platform-support)
-or the [capability matrix](/docs/capability-matrix) before relying on a specific
+or the [capability matrix](/docs/connectors/capability-matrix) before relying on a specific
 event.
 
 ## Strict availability
@@ -127,14 +229,9 @@ case-variants with different values.
 defenseclaw version
 defenseclaw-gateway status
 defenseclaw status
-defenseclaw guardrail status
-defenseclaw doctor
-
-# Avoid synthetic telemetry, LLM, and inspection-content probes
-defenseclaw doctor --passive
-
-# Machine-readable schema v2 (--json is an alias)
-defenseclaw doctor --json-output
+defenseclaw guardrail status      # configured and runtime fail mode per connector
+defenseclaw guardrail fail-mode   # effective value per connector
+defenseclaw doctor --passive      # no synthetic telemetry, LLM, or inspection probes
 ```
 
 Hook delivery and response failures can also be recorded under
@@ -143,94 +240,10 @@ install the pinned default is
 `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl`. Treat it as sensitive
 operational data and do not publish the whole file.
 
-Schema-v2 Doctor output keeps health `checks`/`summary` separate from
-`repairs`/`repair_summary`. A failed health check or failed/dependency-blocked
-repair sets the top-level outcome to failed and exits 1; manual, declined, or
-confirmation-required work remains visible without being counted as a repaired
-health check. Each repair record includes its stable ID, risk, dependencies,
-effects, blockers, restart potential, and platform.
-
-If doctor identifies a missing token or token drift, preview its safe repair
-plan with `defenseclaw doctor --fix --dry-run`. Dry-run invokes planners only,
-is always passive, and cannot write or restart anything. `--fix-id REPAIR_ID`
-is repeatable and selects the exact repair plus its declared dependencies. A
-real JSON repair requires `--yes`; blanket `--yes` cannot opt into policy or
-experimental repairs. The real repair runs before the diagnostic pass, so its
-health summary describes the repaired state.
-
-Doctor may generate a local token, start a stopped managed gateway, or restart
-a gateway whose in-memory token or subsystem state is stale; it does not
-overwrite a custom `token_env`. Generated tokens are stored with mode `0600` on
-POSIX or a private DACL on Windows and are never printed. An intentional
-master-token rotation uses `defenseclaw setup rotate-token --yes`, reconciles
-all active connectors, and requires each agent to be restarted afterward.
-Never diagnose auth by printing or comparing token values.
-
-When `.env` was readable by another local principal, Doctor does not simply
-tighten permissions around the exposed value. It crosses a verified
-stop-A/commit-B/start-B boundary and authenticates B before reporting the
-rotation as repaired. A failed activation does not intentionally revive
-compromised A. Rotate every other credential that was present in the exposed
-file separately. Doctor refuses to consume a foreign-owned, attacker-writable,
-linked/reparsed, non-regular, or oversized `.env`.
-
-Credential dotenv files cannot set process-control variables such as `PATH`,
-dynamic-loader injection variables, connector-home overrides, proxy variables,
-TLS trust overrides, or DefenseClaw security opt-outs. Supply those through the
-trusted service environment instead.
-
-For an absent audit database, preview or select the safe recovery explicitly:
-
-```bash
-defenseclaw doctor --fix --dry-run \
-  --fix-id doctor.state.audit-db.initialize
-```
-
-Doctor creates and validates an empty current schema only when the target name
-is safely absent and gateway inactivity is established. Publication is atomic
-and no-overwrite on Linux, macOS, and Windows. Existing, corrupt,
-linked/reparsed, foreign-custody, or ambiguous database state must be restored
-or migrated; Doctor never erases it.
-
-A missing device identity has a stricter recovery boundary:
-
-```bash
-# Attended only; do not add --yes
-defenseclaw doctor --fix \
-  --fix-id doctor.identity.device-key.initialize
-```
-
-The prompt warns that prior pairings cannot be recovered. If approved, Doctor
-publishes HMAC-bound provenance before exposing a new Ed25519 key. It refuses
-blanket `--yes`, an existing key, and any ambiguous continuity evidence.
-
-Unsupported or untested active connector versions are health findings and
-appear under `doctor.connector.compatibility.review` in a repair plan. Doctor
-reports the registered range or interactive vendor/setup guidance. Exact
-attended selection may refresh bounded local version evidence without
-telemetry, but never installs, upgrades, downgrades, or launches an unsupported
-connector workload; unresolved compatibility remains manual/experimental.
-
-DefenseClaw component release drift appears separately under
-`doctor.component.compatibility.review`, with authenticated upgrade or trusted
-reinstall guidance. Doctor does not bypass the upgrade controller by changing
-components inside its repair transaction.
-
-Repeated optional observability export failures open a per-destination,
-per-signal circuit for logs, traces, or metrics. Transient and payload-specific
-failures must reach the bounded threshold, so a single bad payload does not
-suppress later valid telemetry. Authentication and unsafe-endpoint failures
-open that signal route immediately. While open, export work for that route is
-suppressed before adapter and size-estimation work, but mandatory local SQLite,
-sibling signals, and sibling destinations continue. Doctor reports the bounded
-failure class and recovery window; it warns for transient/half-open recovery
-and fails an open authentication, permanent-payload, or unsafe-endpoint
-circuit. This does not silently edit policy. Repair and reload the destination,
-or disable the optional route explicitly:
-
-```bash
-defenseclaw setup observability disable NAME
-```
+If doctor reports a missing token or token drift, preview its repair with
+`defenseclaw doctor --fix --dry-run`. For how doctor repairs tokens, the audit
+database, the device key, and observability circuits, see
+[Doctor repair safety](/docs/reference/cli#doctor-repair-safety).
 
 ## Legacy connector fields
 

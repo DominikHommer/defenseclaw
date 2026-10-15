@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -346,6 +347,19 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["provenance"] == "process-env"
     assert report["configured"] == "closed"
     assert report["drift"] == ["process-env-open"]
+    assert report["note"] == ""
+
+    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    observe = ConnectorFailModeState(
+        connector="claudecode",
+        desired="open",
+        configured="closed",
+        runtime="open",
+        sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
+        drift=(),
+    ).to_report()
+    assert observe["effective"] == "open" and observe["drift"] == []
+    assert observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
 
 
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
@@ -436,7 +450,11 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 
     assert _WINDOWS_REGISTRATION_FRESHNESS(cfg, "codex") is None
     assert observed["install_root"] == str(install_root)
-    assert observed["config_path"] == str(codex_home / "managed_config.toml")
+    # Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+    # per-user install is checked at config.toml and a managed-layer
+    # registration is reported stale.
+    assert observed["config_path"] == str(codex_home / "config.toml")
+    assert observed["codex_per_user"] is True
 
 
 def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
@@ -651,11 +669,16 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
         *(Path(cfg.data_dir) / "hooks" / name for name in _SHARED_HOOK_SCRIPTS),
     ]
     original_runtime = {path: path.read_bytes() for path in tracked_paths}
+    config_yaml = dcconfig.config_path_for_data_dir(cfg.data_dir)
+    config_yaml.write_text("config_version: 9\n", encoding="utf-8")
+    concurrent = b"config_version: 9\nasset_policy: {}\n"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
 
     def fail_after_partial_write(_cfg: object, _connector: str) -> None:
+        # Another writer commits config.yaml while the refresh runs.
+        config_yaml.write_bytes(concurrent)
         (home / ".claude" / "settings.json").write_text('{"partial":true}', encoding="utf-8")
         for path in tracked_paths:
             path.write_text("partial reconciliation", encoding="utf-8")
@@ -678,6 +701,10 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert (home / ".claude" / "settings.json").read_bytes() == original_settings
     assert {path: path.read_bytes() for path in tracked_paths} == original_runtime
     assert "restored" in result.output
+    # The rollback is a second save through the single writer, never a raw
+    # copy of the snapshot over the other writer's commit (GAP-0303).
+    assert cfg.save.call_count == 2
+    assert config_yaml.read_bytes() == concurrent
 
 
 def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -735,6 +762,19 @@ def test_runtime_digest_hashes_raw_windows_binary_bytes(tmp_path: Path) -> None:
     body = b"MZ\r\nraw-before\x1araw-after\r\n"
     artifact.write_bytes(body)
     assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+def test_runtime_digest_hashes_a_launcher_larger_than_128_mib(tmp_path: Path) -> None:
+    # GAP-1922: a source-built defenseclaw-hook.exe is about 148 MiB.
+    artifact = tmp_path / "defenseclaw-hook.exe"
+    size = 150 * 1024 * 1024
+    with artifact.open("wb") as stream:
+        stream.truncate(size)
+    digest = hashlib.sha256()
+    chunk = bytes(1024 * 1024)
+    for _ in range(size // len(chunk)):
+        digest.update(chunk)
+    assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + digest.hexdigest()
 
 
 def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(
@@ -846,3 +886,67 @@ def test_unix_registration_freshness_requires_current_script_path(
             encoding="utf-8",
         )
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: observe connectors already run fail-open, and a mixed roster
+    # (hermes has no runtime registration) must not start a stopped gateway.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    reconcile.assert_called_once_with(cfg, "claudecode")
+    assert "closed → open" not in result.output
+    assert "(hermes): already open; saved as its own setting" in result.output
+    assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: the change list shows the installed runtime value that
+    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "observe"
+    cfg.guardrail.connectors["cursor"].mode = "action"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    stale = SimpleNamespace(runtime="closed", desired="open", current=False, drift=("installed hook",))
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=stale),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    assert "(codex): closed → open" in result.output
+    assert "(codex): already open" not in result.output
+    assert "(cursor): stays closed" in result.output
+    assert "Cursor action mode keeps hook failures closed" in result.output
+
+
+def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("guardrail: {}")
+    # Use the mode the filesystem reports: Windows has no 0o644 (it reports 0o666 or read-only 0o444).
+    mode = stat.S_IMODE(path.stat().st_mode)
+    snapshot = fail_mode_runtime.FileSnapshot(path=path, existed=True, data=path.read_bytes(), mode=mode)
+    with patch.object(fail_mode_runtime.os, "replace", side_effect=PermissionError("immutable")) as replace:
+        fail_mode_runtime.restore_fail_mode_transaction((snapshot,))
+    replace.assert_not_called()

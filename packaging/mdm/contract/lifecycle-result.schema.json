@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json",
+  "title": "DefenseClaw standalone enterprise lifecycle result",
+  "description": "The one JSON document every standalone lifecycle action prints with --json on Linux, macOS and Windows (internal/enterprisestatus.Result). MDM wrappers, detection scripts, status and verify parse only this contract. Schema version 1 is the Secure Client Windows status document, which this does not describe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "ok", "action", "noop", "profile", "platform", "product_version",
+    "coverage_complete", "security_complete", "errors", "exit_code"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "ok": { "type": "boolean", "description": "True only when errors is empty." },
+    "action": {
+      "type": "string",
+      "enum": ["install", "upgrade", "repair", "ensure", "reconcile", "status", "verify", "uninstall"]
+    },
+    "noop": { "type": "boolean", "description": "ensure/uninstall found nothing to change." },
+    "noop_reason": { "type": "string" },
+    "floor_source": { "type": "string", "description": "Where the signed-bundle version floor came from when a bundle was refused as not newer: trust_anchor_min_version or last_confirmed_bundle." },
+    "profile": { "type": "string", "enum": ["standalone", "secure_client"] },
+    "platform": { "type": "string", "enum": ["linux", "darwin", "windows"] },
+    "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
+    "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
+    "installed": { "type": "boolean" },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateway", "guardian", "enumerator", "sensor_helper"],
+      "properties": {
+        "gateway": { "type": "boolean" },
+        "guardian": { "type": "boolean" },
+        "enumerator": { "type": "boolean" },
+        "sensor_helper": { "type": "boolean" }
+      }
+    },
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local", "ai_defense"],
+      "properties": {
+        "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
+        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+      }
+    },
+    "machine_policy": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z][a-z0-9_-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/machinePolicy" }
+    },
+    "enrollment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targets", "pending", "failed", "exempt"],
+      "properties": {
+        "targets": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "exempt": { "type": "integer", "minimum": 0 },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["account", "connectors"],
+            "properties": {
+              "account": { "type": "string" },
+              "sid": { "type": "string" },
+              "reason": { "type": "string", "description": "Why a connector of this account is pending or failed, and what happens next." },
+              "connectors": {
+                "type": "object",
+                "additionalProperties": { "enum": ["enrolled", "pending", "failed"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage_complete": { "type": "boolean", "description": "True only when required services are ready and no known running agent session still needs a restart to load managed hooks." },
+    "security_complete": { "type": "boolean" },
+    "errors": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "warnings": { "type": "array", "items": { "$ref": "#/$defs/message" } },
+    "changes": { "type": "array", "items": { "type": "string" } },
+    "api_port_holders": { "type": "array", "items": { "$ref": "#/$defs/portHolder" }, "description": "With error api_port_held: the processes other than the DefenseClaw gateway that listen where the gateway API binds." },
+    "policy": { "$ref": "#/$defs/policyState", "description": "Effective policy state; omitted under the Secure Client integration." },
+    "bundle": { "$ref": "#/$defs/bundleState", "description": "Last bundle receipt that reached staging and the confirmed bundle that enforces. Omitted when none reached staging and no bundle is confirmed." },
+    "last_refusal": { "$ref": "#/$defs/bundleRefusal", "description": "Latest bundle delivery refused before staging; the receipt remains in the root-only history." },
+    "scanners": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "description": "Standalone Windows scanner runtime; omitted everywhere else.",
+      "properties": {
+        "state": { "type": "string", "enum": ["ready", "not_prepared", "untrusted", "missing"] },
+        "versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "policy": { "type": "string" },
+        "judge_model": { "type": "string" }
+      }
+    },
+    "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "log_path": { "type": "string" },
+    "exit_code": { "type": "integer" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "properties": { "errors": { "maxItems": 0 } } },
+      "else": { "properties": { "errors": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "platform": { "const": "windows" } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
+    },
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 3010] } } },
+      "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } } } }
+    },
+    {
+      "$comment": "A not_root result (Linux, macOS) checked nothing: a standard user cannot read the root-only deployment record, so it leaves out every field that reports the deployment. Every other result has them.",
+      "if": {
+        "required": ["errors"],
+        "properties": { "errors": { "contains": { "required": ["code"], "properties": { "code": { "const": "not_root" } } } } }
+      },
+      "then": {
+        "properties": {
+          "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
+          "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false
+        }
+      },
+      "else": {
+        "required": ["installed", "transaction_pending", "services", "readiness", "inspection", "machine_policy", "enrollment"]
+      }
+    }
+  ],
+
+  "$defs": {
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "state", "required"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "gateway, guardian, enumerator, sensor_helper, socket, timer, path, oneshot, ..." },
+        "state": { "type": "string" },
+        "start_mode": { "type": "string" },
+        "pid": { "type": "integer", "minimum": 0 },
+        "restarts": { "type": "integer", "minimum": 0 },
+        "required": { "type": "boolean" }
+      }
+    },
+    "machinePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownership", "owned_entries", "foreign_entries"],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["merge", "verify_only", "off", ""] },
+        "lock": { "type": "string" },
+        "effective_lock": { "type": "string" },
+        "owned_entries": { "type": "integer", "minimum": 0 },
+        "foreign_entries": { "type": "integer", "minimum": 0 },
+        "higher_precedence": { "type": "array", "items": { "type": "string" } },
+        "conflicts": { "type": "array", "items": { "type": "string" } },
+        "live_verified_at": { "type": "string" }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "enabled", "signals", "redaction_profiles"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean" },
+        "preset": { "type": "string" },
+        "signals": { "type": "array", "items": { "enum": ["logs", "traces", "metrics"] } },
+        "redaction_profiles": { "type": "array", "items": { "type": "string" }, "description": "Distinct effective profiles of the destination's send routes; empty when it sends only metrics." }
+      }
+    },
+    "portHolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["address", "pid"],
+      "properties": {
+        "address": { "type": "string", "minLength": 1 },
+        "pid": { "type": "integer", "minimum": 0 },
+        "image": { "type": "string", "description": "Empty when the reporting account cannot identify the process." },
+        "account": { "type": "string" }
+      }
+    },
+    "policyState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effective_digest", "config_generation", "applied"],
+      "properties": {
+        "effective_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "config_generation": { "type": "integer", "minimum": 0 },
+        "applied": { "type": "boolean" },
+        "gateway_reported_digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" },
+        "last_reload_error": { "type": "string", "description": "policy.last_reload_error from /health; set while the gateway keeps an older policy because it rejected the last reload." },
+        "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
+      }
+    },
+    "bundleRefusal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["receipt_id", "error_code", "time"],
+      "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "version": { "type": "integer", "minimum": 0 },
+        "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "warning_codes": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } },
+        "disabled_by_bundle": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" } },
+        "time": { "type": "string", "format": "date-time" }
+      }
+    },
+    "bundleState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_id", "version", "state"],
+      "properties": {
+        "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
+        "version": { "type": "integer", "minimum": 0 },
+        "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
+        "disabled_by_bundle": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]*$" }, "description": "Capabilities enabled in the enforced config and disabled by this bundle." },
+        "warning_codes": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "description": "Receipt warning codes, including digest_unverifiable when the signed digest could not be compared." },
+        "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Bundle error code of a failed receipt." },
+        "effective_policy_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "config_generation": { "type": "integer", "minimum": 0, "description": "Persistent config generation (config.generation.json), not the gateway policy generation." },
+        "applied_at": { "type": "string", "format": "date-time" },
+        "confirmed_at": { "type": "string", "format": "date-time" },
+        "restart": { "type": "boolean", "description": "True when applying this bundle restarted the gateway." },
+        "restart_required": { "type": "boolean", "description": "True when the bundle changed settings that only take effect after a gateway restart." },
+        "sessions_restart_required": { "$ref": "#/$defs/sessionRestartStatus", "description": "Live process scan; a confirmed receipt can coexist with sessions that retain earlier hooks." },
+        "current_bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The confirmed bundle that enforces, when this receipt is not its confirmed receipt: a newer bundle pending or failed, or the enforcing bundle delivered again." },
+        "current_version": { "type": "integer", "minimum": 1 }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "failed" } } }, "then": { "required": ["error_code"] }, "else": { "not": { "required": ["error_code"] } } },
+        { "if": { "properties": { "state": { "const": "confirmed" } } }, "then": { "required": ["effective_policy_digest", "confirmed_at"] } },
+        { "if": { "properties": { "bundle_id": { "const": "" } } }, "then": { "properties": { "state": { "enum": ["received", "failed"] } } } }
+      ]
+    },
+    "sessionRestartStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "count", "entries"],
+      "properties": {
+        "state": { "enum": ["known", "unknown"] },
+        "count": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "description": "Why the live process scan could not establish the session count, present when state is unknown." },
+        "entries": {
+          "type": "array", "maxItems": 20,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["pid", "user", "agent", "started_at"],
+            "properties": {
+              "pid": { "type": "integer", "minimum": 1 },
+              "user": { "type": "string" },
+              "agent": { "type": "string" },
+              "started_at": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

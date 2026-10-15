@@ -38,7 +38,6 @@ const (
 	CorrelationProfileOpenClawV1    CorrelationProfileVersion = "openclaw-correlation-v1"
 	CorrelationProfileZeptoClawV1   CorrelationProfileVersion = "zeptoclaw-correlation-v1"
 	CorrelationProfileClaudeCodeV1  CorrelationProfileVersion = "claudecode-correlation-v1"
-	CorrelationProfileCodexV1       CorrelationProfileVersion = "codex-correlation-v1"
 	CorrelationProfileCodexV2       CorrelationProfileVersion = "codex-correlation-v2"
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"
@@ -203,6 +202,15 @@ const (
 	CorrelationInferenceSubagentIdentity           CorrelationInferenceRule = "derive_subagent_identity"
 	CorrelationInferenceUniquePendingTool          CorrelationInferenceRule = "unique_pending_tool"
 	CorrelationInferenceTraceLink                  CorrelationInferenceRule = "w3c_trace_link"
+	// CorrelationInferenceAgentlessMainAgent attributes a hook that reports
+	// no agent to the session's main agent, also while subagents of the
+	// session are active. A profile may declare it only for a connector that
+	// stamps every hook a subagent fires with that subagent's ID. Claude Code
+	// does (2.1.156, measured for #957): the main thread's hooks carry no
+	// agent_id, and every hook of a subagent's work (its PreToolUse,
+	// PermissionRequest, PostToolUse, PostToolUseFailure, PostToolBatch,
+	// SubagentStart and SubagentStop) carries agent_id and agent_type.
+	CorrelationInferenceAgentlessMainAgent CorrelationInferenceRule = "agentless_hook_is_main_agent"
 )
 
 type CorrelationLifecycle string
@@ -587,6 +595,11 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 
 	switch name {
 	case "kiro":
+		if kiroWindowsManagedHookContractID(hookContractID) {
+			// Managed Windows Kiro hooks keep the explicit canonical
+			// correlation every unpinned Kiro hook uses.
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "params.sessionId"),
 			reported(CorrelationTargetTurn, ns, "request", "id"),
@@ -682,7 +695,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetModelRequest, ns, "client_request", "client_request_id"),
 			reported(CorrelationTargetModelResponse, ns, "model_response", "request_id"),
 		)
-		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
+		spec, ok := makeSpec(CorrelationProfileClaudeCodeV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook, CorrelationSurfaceNativeOTLP}, bindings, native, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool, CorrelationInferenceTraceLink, CorrelationInferenceAgentlessMainAgent}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, "prompt_id is available in Claude Code 2.1.196 and later; hook events do not report provider request/response IDs"))
 		if ok {
 			// prompt_id is the exact hook/native turn anchor, but it was added
 			// after the broader v1 hook contract. Record the narrower reviewed
@@ -731,6 +744,14 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		correlationContractID := hookContractID
 		switch correlationContractID {
 		case "copilot-hooks-v1", "copilot-hooks-v2":
+		case CopilotVSCodeLocalContractID:
+			// The VS Code Local harness sends a snake_case body with a
+			// session and a per-call tool_use_id.
+			bindings := appendBindings(base,
+				reported(CorrelationTargetSession, ns, "session", "session_id"),
+				reported(CorrelationTargetTool, ns, "tool_use", "tool_use_id"),
+			)
+			return makeSpec(CorrelationProfileCopilotV1, correlationContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "the VS Code Local harness reports session_id and tool_use_id but no turn, agent or model IDs, and its tool_use_id is not an authoritative invocation ID (no failure events; stateful enforcement is detection-only)"))
 		default:
 			return CorrelationSpec{}, false
 		}

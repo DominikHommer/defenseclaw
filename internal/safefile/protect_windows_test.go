@@ -61,6 +61,30 @@ func TestWriteWindowsRemovesInheritedUnauthorizedWriter(t *testing.T) {
 	assertNoUnauthorizedWindowsWriter(t, dir)
 }
 
+func TestProtectDirectoryWindowsLeavesAProtectedPrivateDirectoryAlone(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	previous := preserveDirectoryProtection
+	t.Cleanup(func() { preserveDirectoryProtection = previous })
+	rewrites := 0
+	preserveDirectoryProtection = func(source, destination string) error {
+		rewrites++
+		return previous(source, destination)
+	}
+	// Rewriting the DACL re-propagates it to every file below (GAP-1687).
+	if err := ProtectDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	if rewrites != 0 {
+		t.Fatalf("ProtectDirectory rewrote an already protected private DACL %d time(s)", rewrites)
+	}
+	if safe, err := privateDACLIsSafe(dir); err != nil || !safe {
+		t.Fatalf("private DACL safe = %v, %v", safe, err)
+	}
+}
+
 func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
 	const (
 		accessAllowedObjectACE         = 0x05
@@ -184,6 +208,7 @@ func TestWindowsPrivateOwnershipRepairUsesImpersonatedSubject(t *testing.T) {
 	repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(
 		descriptor,
 		identity,
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -194,12 +219,38 @@ func TestWindowsPrivateOwnershipRepairUsesImpersonatedSubject(t *testing.T) {
 	repairable, err = privateSecurityDescriptorIsWriterRepairableForSubject(
 		descriptor,
 		windowsProtectionSubject{sid: processUser.User.Sid},
+		false,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if repairable {
 		t.Fatal("repairability accepted the different process-token subject")
+	}
+}
+
+// A profile folder inherits an Administrators full-control entry (WIN2-U2-06).
+func TestWriterRepairabilityAdmitsAdministratorsOnlyWhenAsked(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + sid + "D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)(A;OICIID;FA;;;" + sid + ")",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := windowsProtectionSubject{sid: user.User.Sid}
+	for _, trust := range []bool{false, true} {
+		repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(descriptor, subject, trust)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repairable != trust {
+			t.Fatalf("trustAdministrators=%v: repairable=%v", trust, repairable)
+		}
 	}
 }
 
@@ -512,7 +563,9 @@ func TestWindowsPrivateDACLImpersonatedPolicyRequiresProtection(t *testing.T) {
 }
 
 func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "owned.json")
+	dir := privateTestTempDir(t)
+	ownWindowsTestPath(t, dir)
+	path := filepath.Join(dir, "owned.json")
 	if err := WritePrivate(path, []byte("{}")); err != nil {
 		t.Fatal(err)
 	}
@@ -539,6 +592,159 @@ func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
 		t.Fatal(err)
 	} else if safe {
 		t.Fatal("private security descriptor accepted a foreign owner")
+	}
+}
+
+func TestPrivateSystemDescriptorFromPurge(t *testing.T) {
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, sddl string
+		want       bool
+	}{
+		{"duplicate SYSTEM grant", "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;;GA;;;SY)", true},
+		{"inherit-only SYSTEM grant", "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICIIO;GA;;;SY)", true},
+		{"single SYSTEM grant", "O:SYG:SYD:P(A;OICI;FA;;;SY)", true},
+		{"other principal read", "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;;GR;;;WD)", false},
+		{"other principal write", "O:SYG:SYD:P(A;OICI;FA;;;SY)(A;;GW;;;WD)", false},
+		{"administrators full control", "O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", false},
+		{"foreign owner", "O:BAD:P(A;OICI;FA;;;SY)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString(tc.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			safe, err := privateSecurityDescriptorIsSafeForSubject(sd, windowsProtectionSubject{sid: system})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if safe != tc.want {
+				t.Fatalf("safe = %v, want %v", safe, tc.want)
+			}
+		})
+	}
+}
+
+func TestPrivateDirectoryCreationDescriptorValidatesForEachOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name, sid string
+	}{
+		{"LocalSystem", "S-1-5-18"},
+		{"elevated Administrator", "S-1-5-21-1-2-3-500"},
+		{"standard user", "S-1-5-21-1-2-3-1001"},
+		{"Administrators owner", "S-1-5-32-544"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, err := windows.StringToSid(tc.sid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sd, err := privateDirectoryCreationDescriptor(owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			safe, err := privateSecurityDescriptorIsSafeForSubject(sd, windowsProtectionSubject{sid: owner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !safe {
+				t.Fatal("creation descriptor fails private DACL validation")
+			}
+			dacl, _, err := sd.DACL()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantACEs := uint16(2)
+			if owner.IsWellKnown(windows.WinLocalSystemSid) {
+				wantACEs = 1
+			}
+			if dacl.AceCount != wantACEs {
+				t.Fatalf("ACE count = %d, want %d", dacl.AceCount, wantACEs)
+			}
+		})
+	}
+}
+
+// The Claude uninstall transaction prepares this directory through
+// ProtectDirectory, then immediately checks it with ValidatePrivateDirectory.
+// On a SYSTEM test run, the path mirrors the SYSTEM profile beneath the test's
+// temporary root so it never writes to the real profile.
+func TestPrivatePurgeTransactionDirectoryOnCurrentToken(t *testing.T) {
+	path := filepath.Join(privateTestTempDir(t), "systemprofile", "AppData", "Local", "DefenseClaw", "claude-settings-teardown")
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatalf("prepare purge transaction directory: %v", err)
+	}
+	if err := ValidatePrivateDirectory(path); err != nil {
+		t.Fatalf("validate purge transaction directory: %v", err)
+	}
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatalf("reuse purge transaction directory: %v", err)
+	}
+	if err := ValidatePrivateDirectory(path); err != nil {
+		t.Fatalf("validate reused purge transaction directory: %v", err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("purge transaction directory: %s", path)
+	t.Logf("purge transaction SDDL: %s", sd.String())
+}
+
+func privateTestTempDir(t *testing.T) string {
+	t.Helper()
+	root := os.Getenv("SAFEFILE_TEST_TMPDIR")
+	if root == "" {
+		return t.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "safefile-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove test directory: %v", err)
+		}
+	})
+	return dir
+}
+
+func TestProtectDirectoryRepairsAdministratorsDrift(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude-settings-teardown")
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drift, err := windows.SecurityDescriptorFromString(
+		"D:PAI(A;OICI;FA;;;" + user.String() + ")(A;OICI;FA;;;BA)",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := drift.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePrivateDirectory(path); err == nil {
+		t.Fatal("accepted drifted Administrators grant before repair")
+	}
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatalf("repair drifted transaction directory: %v", err)
+	}
+	if err := ValidatePrivateDirectory(path); err != nil {
+		t.Fatalf("validate repaired transaction directory: %v", err)
 	}
 }
 

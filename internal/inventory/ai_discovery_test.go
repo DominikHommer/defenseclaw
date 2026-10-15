@@ -18,12 +18,16 @@ package inventory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -33,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -424,8 +429,10 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
   }]
 }`)
 
+	// A pack loads only when configured; another file in the folder does not.
+	mustWrite(t, filepath.Join(packDir, "unlisted.json"), `{"version": 1, "signatures": [{"id": "unlisted-ai", "name": "Unlisted", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
 	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
-		DataDir:              tmp,
+		SignaturePacks:       []string{filepath.Join(packDir, "custom.json")},
 		DisabledSignatureIDs: []string{"codex"},
 	})
 	if err != nil {
@@ -440,6 +447,159 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 	if seen["codex"] {
 		t.Fatalf("disabled built-in signature still present")
+	}
+	if seen["unlisted-ai"] {
+		t.Fatalf("an unlisted pack under signature-packs/ was loaded")
+	}
+}
+
+func TestLoadAISignaturesResolvesPackPinSymlink(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"version": 1, "signatures": [{"id": "linked-ai", "name": "Linked", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	target := filepath.Join(dir, "target.json")
+	mustWrite(t, target, body)
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("pack with a resolved-path pin was not loaded")
+	}
+	legacy, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+		SecureClient:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(legacy, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("Secure Client changed its legacy pin lookup")
+	}
+}
+
+// TestLoadAISignaturesPinnedByDigest: a pack pinned in
+// ai_discovery.signature_pack_digests loads only when it matches, and a
+// managed device loads no unpinned pack (a file dropped into a glob).
+func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "packs")
+	body := `{"version": 1, "signatures": [{"id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	pack := filepath.Join(packDir, "pinned.json")
+	mustWrite(t, pack, body)
+	mustWrite(t, filepath.Join(packDir, "dropped.json"), `{"version": 1, "signatures": [{"id": "dropped-ai", "name": "Dropped", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
+	sum := sha256.Sum256([]byte(body))
+	load := func(digest string, require bool) map[string]bool {
+		sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+			SignaturePacks: []string{filepath.Join(packDir, "*.json")},
+			PackDigests:    map[string]string{pack: digest},
+			RequireDigests: require,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, sig := range sigs {
+			seen[sig.ID] = true
+		}
+		return seen
+	}
+	if seen := load("sha256:"+hex.EncodeToString(sum[:]), true); !seen["pinned-ai"] || seen["dropped-ai"] {
+		t.Fatalf("managed load = %v, want only the pinned pack", seen)
+	}
+	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
+		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
+	}
+
+	// An apply refuses what the loader would skip, instead of accepting it
+	// with only a log line (GAP-0173); a host that is not managed standalone
+	// is left alone.
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + hex.EncodeToString(sum[:])}
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("matching pin refused: %v", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + strings.Repeat("0", 64)}
+	if err := CheckSignaturePackPins(cfg); err == nil || !strings.Contains(err.Error(), "does not match the pinned") {
+		t.Fatalf("mismatched pin: err = %v, want a refusal naming the mismatch", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = nil
+	if err := CheckSignaturePackPins(cfg); err == nil {
+		t.Fatal("an unpinned pack on a managed standalone host was accepted")
+	}
+	cfg.DeploymentMode = ""
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("an unmanaged host was refused: %v", err)
+	}
+}
+
+func TestConfidencePolicyPinnedByDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "confidence.yaml")
+	body := "version: 1\ndetectors:\n  process:\n    identity_lr: 12\n    presence_lr: 75\n"
+	mustWrite(t, path, body)
+	sum := sha256.Sum256([]byte(body))
+	pin := "sha256:" + hex.EncodeToString(sum[:])
+	identityLR := func(digest string, required bool) (float64, string) {
+		policy, refusal, err := loadPinnedConfidencePolicy(path, digest, required)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return policy.Detectors["process"].IdentityLR, refusal
+	}
+	if lr, refusal := identityLR(pin, true); lr != 12 || refusal != "" {
+		t.Fatalf("pinned load = %v %q, want the file applied", lr, refusal)
+	}
+	if lr, refusal := identityLR("sha256:"+strings.Repeat("0", 64), false); lr == 12 || refusal == "" {
+		t.Fatalf("mismatched pin = %v %q, want the built-in default", lr, refusal)
+	}
+	// A pinned file that cannot be read is refused, never loaded later.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if lr, refusal := identityLR(pin, true); lr == 12 || refusal == "" {
+		t.Fatalf("unreadable pinned file = %v %q, want a refusal", lr, refusal)
+	}
+}
+
+// GAP-0170: the Secure Client profile keeps the embedded catalog of 1.0.0
+// (issue #1092); every other profile gets the signatures added since.
+func TestLoadAISignaturesSecureClientKeepsReleaseCatalog(t *testing.T) {
+	load := func(profile string) map[string]AISignature {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		byID := map[string]AISignature{}
+		for _, sig := range sigs {
+			byID[sig.ID] = sig
+		}
+		return byID
+	}
+	secureClient, standalone := load(managed.ProfileSecureClient), load(managed.ProfileStandalone)
+	if _, ok := standalone["jetbrains-ai"]; !ok || len(standalone["codex"].ExtensionIDs) == 0 {
+		t.Fatalf("standalone catalog lacks the post-1.0.0 signatures")
+	}
+	if _, ok := secureClient["jetbrains-ai"]; ok || len(secureClient) != len(standalone)-1 {
+		t.Fatalf("Secure Client catalog has %d signatures (jetbrains-ai %t), want %d", len(secureClient), ok, len(standalone)-1)
+	}
+	for id, sig := range secureClient {
+		if (id == "codex" || id == "claudecode") && len(sig.ExtensionIDs) != 0 ||
+			len(sig.JetBrainsPluginIDs)+len(sig.ZedExtensionIDs)+len(sig.VimPlugins) != 0 {
+			t.Fatalf("Secure Client signature %s keeps post-1.0.0 ids: %+v", id, sig)
+		}
 	}
 }
 
@@ -456,9 +616,23 @@ func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
   }]
 }`)
 
-	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{DataDir: tmp})
+	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "dup.json")}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
 		t.Fatalf("expected duplicate id error, got %v", err)
+	}
+}
+
+// A configured pack whose file is gone is left out and the rest of the
+// catalog loads, so a missing optional pack does not reject every later
+// config reload; Secure Client keeps the refusal it shipped (GAP-0232).
+func TestLoadAISignaturesWithOptionsLeavesOutAMissingPack(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.json")
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}})
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("missing pack: %d signatures, err %v; want the embedded catalog", len(sigs), err)
+	}
+	if _, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}, SecureClient: true}); err == nil {
+		t.Fatal("Secure Client loaded a catalog with a configured pack that matches nothing")
 	}
 }
 
@@ -517,7 +691,8 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 	cfg := &config.Config{
 		DataDir: tmp,
 		AIDiscovery: config.AIDiscoveryConfig{
-			Enabled: true,
+			Enabled:        true,
+			SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "custom.json")},
 		},
 	}
 	svc, err := NewContinuousDiscoveryService(cfg)
@@ -730,6 +905,43 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 	// And the second scan must NOT report it as a fresh detection.
 	if second.Summary.NewSignals != 0 {
 		t.Fatalf("second scan reported NewSignals=%d, want 0 (history churn must not look like a new detection)", second.Summary.NewSignals)
+	}
+}
+
+// TestContinuousDiscoveryShellHistoryHasNoLastActive: a shell-history
+// substring match says nothing about when the tool last ran, so the scan
+// must not stamp LastActiveAt with the scan time (GAP-2268).
+func TestContinuousDiscoveryShellHistoryHasNoLastActive(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	mustWrite(t, filepath.Join(home, ".zsh_history"), "openai chat --model gpt-4\n")
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:             true,
+		Mode:                "enhanced",
+		IncludeShellHistory: true,
+		DataDir:             filepath.Join(tmp, "data"),
+		HomeDir:             home,
+		MaxFilesPerScan:     20,
+		MaxFileBytes:        64 * 1024,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	report, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Detector != "shell_history" {
+			continue
+		}
+		found = true
+		if sig.LastActiveAt != nil {
+			t.Fatalf("shell_history signal %q LastActiveAt = %v, want nil", sig.Product, *sig.LastActiveAt)
+		}
+	}
+	if !found {
+		t.Fatalf("scan produced no shell_history signal: %+v", report.Signals)
 	}
 }
 
@@ -1041,6 +1253,225 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	}
 	if got := report.Signals[0].Source; got != AISourceExternal {
 		t.Errorf("signal.source = %q, want %q", got, AISourceExternal)
+	}
+}
+
+// The standalone gateway cannot see user homes or other accounts'
+// processes. It ingests the guardian's per-user scans instead: each signal
+// belongs to the account the guardian's record names (not to anything the
+// scan reported), identical files of two users stay distinct, and the
+// gateway's own process detector is reported as covered, not failed. A
+// record's IDE inventory is attributed the same way.
+func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
+	withoutMachineIDEs(t)
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "alice")
+	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".vscode-server", "extensions", "extensions.json"),
+		`[{"identifier":{"id":"example.shadowai"},"version":"1.0.0","relativeLocation":"example.shadowai-1.0.0"}]`)
+	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	signature.ExtensionIDs = []string{"example.shadowai"}
+	catalog := []AISignature{signature}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: 10, User: "alice", Comm: "shadowai"}, {PID: 11, User: "bob", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), home, "alice", 1001, UserScanOptions{Mode: "enhanced"}, catalog)
+	for i := range report.Signals {
+		report.Signals[i].UserName = "mallory"
+	}
+	if err := SanitizeUserScanReport(&report, catalog, false, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
+		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
+	}
+	spool := filepath.Join(tmp, "spool")
+	// The guardian names an SSSD account as NSS does; its records carry the
+	// bare name, as its hook records do (GAP-0447).
+	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
+		userReport := report
+		if uid == 1002 {
+			userReport.IDEInventory = nil
+		}
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(spool, fmt.Sprintf("%d.json", uid)), string(data))
+	}
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, DataDir: filepath.Join(tmp, "data"), HomeDir: filepath.Join(tmp, "gateway"), UserScanDir: spool,
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	got, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if got.Summary.Result != "ok" || got.Summary.DetectorNotes["process"] != userScanProcessNote {
+		t.Fatalf("summary = %+v, want ok with the process detector covered by per-user scans", got.Summary)
+	}
+	fingerprints := map[string]string{}
+	processes := 0
+	for _, sig := range got.Signals {
+		if sig.Source != AISourceUserScan {
+			t.Fatalf("the gateway's own scan reported %+v", sig)
+		}
+		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		if want == "" || sig.UserName != want {
+			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
+		}
+		if sig.Runtime != nil {
+			processes++
+			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
+			}
+		}
+		if other, dup := fingerprints[sig.Fingerprint]; dup {
+			t.Fatalf("users %s and %s share fingerprint %s", other, sig.UserName, sig.Fingerprint)
+		}
+		fingerprints[sig.Fingerprint] = sig.UserName
+	}
+	if processes != 2 || len(got.Signals) != 8 {
+		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
+	}
+	ide := svc.IDEInventory()
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
+		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
+	}
+	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
+		t.Fatalf("report leaked a raw path: %s", raw)
+	}
+}
+
+// A pass over many homes can outlast a record's lifetime. While the
+// guardian's pass is running (or as long as its last pass took), a record it
+// has not reached again stays current (#1036).
+func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
+	spool := t.TempDir()
+	now := time.Now().UTC()
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	report.Summary.FilesScanned = 7
+	data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: 1001, User: "alice", UpdatedAt: now.Add(-40 * time.Minute), Report: report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(spool, "1001.json"), string(data))
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{UserScanDir: spool, ScanInterval: 5 * time.Minute}}
+	current := func() bool {
+		t.Helper()
+		_, files, _, errs := svc.detectUserScans(now)
+		if len(errs) > 0 {
+			t.Fatalf("errors = %v", errs)
+		}
+		return files == 7
+	}
+	if current() {
+		t.Fatal("a 40-minute-old record is current with no pass record")
+	}
+	pass, _ := json.Marshal(UserScanPass{Version: UserScanRecordVersion, StartedAt: now.Add(-45 * time.Minute), Running: true})
+	mustWrite(t, filepath.Join(spool, UserScanPassName), string(pass))
+	if !current() {
+		t.Fatal("a record expired while the pass that will refresh it is still running")
+	}
+}
+
+// Linux ps prints a user name longer than eight characters truncated
+// ("longname+"). A per-user scan still keeps its account's own processes.
+func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux ps truncates user names")
+	}
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "firstna+", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "firstname.lastname", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
+}
+
+// cursor-agent runs node under its own argv[0], and Node renames the main
+// thread, so comm is "mainthread". The per-user scan still reports it, with
+// a real last_seen time (GAP-1207).
+func TestScanUserHomeFindsARenamedMainThreadByArgv0(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "cursor-agent"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			if sig.LastSeen.IsZero() || sig.FirstSeen.IsZero() || sig.Runtime.Comm != "cursor-agent" {
+				t.Fatalf("signal = %+v, want cursor-agent with first/last seen set", sig)
+			}
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want an active_process signal for cursor-agent", report.Signals)
+}
+
+// Cursor's `agent` alias is a symlink to .../cursor-agent; argv[0]'s basename
+// is "agent", which the catalog leaves out (ssh-agent, gpg-agent), so the
+// resolved name is what matches (GAP-1865).
+func TestScanUserHomeFindsCursorStartedThroughItsAgentAlias(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "agent", Argv0Target: "cursor-agent"},
+			{PID: os.Getpid() + 1, User: "alice", Comm: "ssh-agent"},
+		}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Runtime == nil {
+			continue
+		}
+		if sig.Runtime.PID != os.Getpid() || sig.Runtime.Comm != "cursor-agent" {
+			t.Fatalf("signal = %+v, want only the cursor-agent alias process", sig)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("signals = %+v, want an active_process signal for the agent alias", report.Signals)
+	}
+}
+
+// A partial per-user scan names the detector that failed. Only the process
+// and model file scans used to, so a package manifest walk error on macOS
+// reached the gateway as "partial scan: " with no cause.
+func TestScanUserHomeNamesAFailingPackageManifestWalk(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this account cannot read")
+	}
+	home := t.TempDir()
+	locked := filepath.Join(home, "project")
+	if err := os.Mkdir(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	opts := UserScanOptions{Mode: "enhanced", IncludePackageManifests: true}
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), opts, []AISignature{testAISignature()})
+	if report.Summary.Result != "partial" || report.Summary.DetectorErrors["package_manifest"] == "" {
+		t.Fatalf("summary = %+v, want partial naming package_manifest", report.Summary)
 	}
 }
 
@@ -1961,6 +2392,81 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
+// Without Full Disk Access the scans never open a folder that makes macOS
+// prompt the user, so an employee is not asked about "defenseclaw-gateway"
+// (GAP-0128); with it, or elsewhere, they walk them like any other folder.
+func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	fullDiskAccess := false
+	macOSFullDiskAccess = func() bool { return fullDiskAccess }
+
+	home := t.TempDir()
+	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
+		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+	}
+	mustWrite(t, filepath.Join(home, "Documents", "models", "m.gguf"), "gguf")
+	mustWrite(t, filepath.Join(home, "work", "models", "m.gguf"), "gguf")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	newService := func(roots ...string) *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: roots, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	manifestProjects := func() int {
+		signals, _, err := newService(home).detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatalf("detectPackageManifests: %v", err)
+		}
+		count := 0
+		for _, sig := range signals {
+			if sig.Component != nil && sig.Component.Name == "ai" {
+				count++
+			}
+		}
+		return count
+	}
+	modelRoots := func() int {
+		count := 0
+		for _, root := range newService(filepath.Join(home, "Documents", "models"), filepath.Join(home, "work", "models")).modelFileScanRoots() {
+			if strings.HasPrefix(root.path, home+string(filepath.Separator)) && !strings.HasPrefix(root.path, filepath.Join(home, "data")) {
+				count++
+			}
+		}
+		return count
+	}
+	if projects, roots := manifestProjects(), modelRoots(); projects != 1 || roots != 1 {
+		t.Fatalf("without Full Disk Access: %d manifest projects and %d model roots, want only work/ (1 and 1)", projects, roots)
+	}
+	fullDiskAccess = true
+	if projects, roots := manifestProjects(), modelRoots(); projects != 4 || roots != 2 {
+		t.Fatalf("with Full Disk Access: %d manifest projects and %d model roots, want every folder (4 and 2)", projects, roots)
+	}
+	discoveryGOOS, fullDiskAccess = "linux", false
+	if projects := manifestProjects(); projects != 4 {
+		t.Fatalf("off macOS: %d manifest projects, want 4", projects)
+	}
+
+	for rel, want := range map[string]bool{
+		"Desktop": true, "documents/app": true, "Library/Containers": true,
+		"Library/Group Containers/group.example": true, "Library/Mobile Documents/com~apple~CloudDocs": true,
+		"Library/Application Support/AddressBook/Sources": true,
+		"Library": false, "Library/Application Support/Slack": false, "Library/Containers2": false,
+		"work/Documents": false, ".claude": false, "Desktops": false,
+	} {
+		if got := macOSTCCProtectedPath(filepath.Join(home, rel), []string{home}); got != want {
+			t.Errorf("macOSTCCProtectedPath(~/%s) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
 // TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
 // the per-service mutex instead of racing on the state store / detector
 // fanout. It uses the single-flight boundary directly so the assertion does
@@ -2320,11 +2826,12 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	}{
 		{"unmanaged_default_stays_60s", false, 60 * time.Second, 60 * time.Second},
 		{"unmanaged_zero_falls_back_to_60s", false, 0, 60 * time.Second},
-		{"managed_default_60s_promoted_to_5m", true, 60 * time.Second, 5 * time.Minute},
-		{"managed_zero_promoted_to_5m", true, 0, 5 * time.Minute},
-		{"managed_below_floor_promoted", true, 90 * time.Second, 5 * time.Minute},
-		{"managed_at_floor_preserved", true, 5 * time.Minute, 5 * time.Minute},
-		{"managed_above_floor_preserved", true, 10 * time.Minute, 10 * time.Minute},
+		{"managed_default_60s_promoted_to_30m", true, 60 * time.Second, 30 * time.Minute},
+		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
+		{"managed_below_floor_promoted", true, 90 * time.Second, 30 * time.Minute},
+		{"managed_previous_5m_floor_promoted", true, 5 * time.Minute, 30 * time.Minute},
+		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
+		{"managed_above_floor_preserved", true, 45 * time.Minute, 45 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2339,5 +2846,319 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 					opts.ProcessInterval, tc.want, tc.managed, tc.input)
 			}
 		})
+	}
+}
+
+// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the 30 min
+// managed_enterprise floor on the FULL-scan cadence — the field that
+// gates every AI Defense publish through fanoutReport. Non-managed
+// installs preserve the historical 5-min default so local dev / OSS
+// behavior does not shift.
+func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
+	cases := []struct {
+		name    string
+		managed bool
+		input   time.Duration
+		want    time.Duration
+	}{
+		{"unmanaged_default_zero_falls_back_to_5m", false, 0, 5 * time.Minute},
+		{"unmanaged_configured_preserved", false, 5 * time.Minute, 5 * time.Minute},
+		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
+		{"managed_previous_5m_default_promoted", true, 5 * time.Minute, 30 * time.Minute},
+		{"managed_below_floor_promoted", true, 15 * time.Minute, 30 * time.Minute},
+		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
+		{"managed_above_floor_preserved", true, 60 * time.Minute, 60 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+				DataDir:           t.TempDir(),
+				HomeDir:           t.TempDir(),
+				ScanInterval:      tc.input,
+				ManagedEnterprise: tc.managed,
+			})
+			if opts.ScanInterval != tc.want {
+				t.Fatalf("ScanInterval = %s, want %s (managed=%t, input=%s)",
+					opts.ScanInterval, tc.want, tc.managed, tc.input)
+			}
+		})
+	}
+}
+
+// TestNormalizeAIDiscoveryOptionsPublishJitter pins the fleet-wide jitter
+// default and the non-managed opt-out. In managed_enterprise the jitter
+// defaults to 10 % of ScanInterval so a fleet-wide reboot or AI Defense
+// outage recovery never translates into a synchronized ingest spike.
+// Non-managed installs get zero jitter and keep the fixed-cadence tick.
+func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
+	cases := []struct {
+		name    string
+		managed bool
+		scan    time.Duration
+		input   time.Duration
+		want    time.Duration
+	}{
+		{"unmanaged_default_zero", false, 5 * time.Minute, 0, 0},
+		{"unmanaged_configured_preserved", false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
+		{"unmanaged_negative_clamped_to_zero", false, 5 * time.Minute, -1 * time.Second, 0},
+		{"managed_default_ten_percent_of_scan", true, 30 * time.Minute, 0, 3 * time.Minute},
+		{"managed_default_tracks_promoted_scan", true, 5 * time.Minute, 0, 3 * time.Minute},
+		{"managed_configured_preserved", true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
+		{"managed_negative_falls_back_to_default", true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+				DataDir:           t.TempDir(),
+				HomeDir:           t.TempDir(),
+				ScanInterval:      tc.scan,
+				PublishJitter:     tc.input,
+				ManagedEnterprise: tc.managed,
+			})
+			if opts.PublishJitter != tc.want {
+				t.Fatalf("PublishJitter = %s, want %s (managed=%t, scan=%s, input=%s)",
+					opts.PublishJitter, tc.want, tc.managed, tc.scan, tc.input)
+			}
+		})
+	}
+}
+
+// TestNextScheduledDelayJitterBounds pins the [interval, interval+jitter)
+// range on the timer-reset helper. Verifies the non-managed path (zero
+// jitter) collapses to the configured interval — that is the "legacy
+// fixed-cadence ticker behavior" contract non-managed installs rely on.
+func TestNextScheduledDelayJitterBounds(t *testing.T) {
+	base := 30 * time.Minute
+	t.Run("no_jitter_collapses_to_interval", func(t *testing.T) {
+		svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: 0}}
+		for i := 0; i < 200; i++ {
+			if got := svc.nextScheduledDelay(base); got != base {
+				t.Fatalf("nextScheduledDelay = %s, want exact %s (i=%d)", got, base, i)
+			}
+		}
+	})
+	t.Run("nonpositive_interval_returns_zero", func(t *testing.T) {
+		svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: 3 * time.Minute}}
+		if got := svc.nextScheduledDelay(0); got != 0 {
+			t.Fatalf("nextScheduledDelay(0) = %s, want 0", got)
+		}
+	})
+	jitterCases := []struct {
+		name   string
+		jitter time.Duration
+	}{
+		{"managed_default_ten_percent_bounded", 3 * time.Minute},
+		{"tight_jitter_bounded", 1 * time.Second},
+	}
+	for _, tc := range jitterCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{PublishJitter: tc.jitter}}
+			min, max := base, base+tc.jitter
+			for i := 0; i < 500; i++ {
+				got := svc.nextScheduledDelay(base)
+				if got < min || got >= max {
+					t.Fatalf("nextScheduledDelay = %s, want [%s, %s) (i=%d)", got, min, max, i)
+				}
+			}
+		})
+	}
+}
+
+// TestSleepWithJitterCancellation pins the two shutdown-facing contracts on
+// the startup-jitter helper: a cancelled context short-circuits the sleep
+// (returns false), and a zero total delay never touches the timer path
+// (returns true immediately even with a live ctx). Regression guard for
+// runClaimed's `if !s.sleepWithJitter(ctx, 0, PublishJitter) { return }`
+// early-return — a false result from a live ctx would swallow the startup
+// scan across every managed_enterprise sidecar.
+func TestSleepWithJitterCancellation(t *testing.T) {
+	svc := &ContinuousDiscoveryService{}
+	t.Run("zero_delay_returns_true_without_blocking", func(t *testing.T) {
+		start := time.Now()
+		if !svc.sleepWithJitter(context.Background(), 0, 0) {
+			t.Fatalf("sleepWithJitter(0,0) = false, want true")
+		}
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			t.Fatalf("sleepWithJitter(0,0) blocked for %s, want ~0", elapsed)
+		}
+	})
+	t.Run("cancelled_ctx_short_circuits", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		start := time.Now()
+		if svc.sleepWithJitter(ctx, 500*time.Millisecond, 500*time.Millisecond) {
+			t.Fatalf("sleepWithJitter with cancelled ctx = true, want false")
+		}
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			t.Fatalf("sleepWithJitter with cancelled ctx blocked %s, want ~0", elapsed)
+		}
+	})
+	t.Run("live_ctx_returns_true_after_sleep", func(t *testing.T) {
+		if !svc.sleepWithJitter(context.Background(), 5*time.Millisecond, 0) {
+			t.Fatalf("sleepWithJitter with live ctx = false, want true")
+		}
+	})
+}
+
+// TestAIDiscoveryOptionsFromConfigPublishJitter pins the config → options
+// bridge for the new PublishJitter field. An operator override
+// (`ai_discovery.publish_jitter_ms: 45000`) must survive normalization
+// verbatim in managed_enterprise; a zero value must still fall back to the
+// 10 % managed default.
+func TestAIDiscoveryOptionsFromConfigPublishJitter(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		scanMin  int
+		jitterMs int
+		want     time.Duration
+	}{
+		{"managed_default_zero_uses_ten_percent", "managed_enterprise", 30, 0, 3 * time.Minute},
+		{"managed_operator_override_preserved", "managed_enterprise", 30, 45_000, 45 * time.Second},
+		{"managed_operator_override_below_normalize_floor_preserved", "managed_enterprise", 30, 500, 500 * time.Millisecond},
+		{"unmanaged_default_zero_stays_zero", "", 5, 0, 0},
+		{"unmanaged_operator_override_preserved", "", 5, 15_000, 15 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				DataDir:        t.TempDir(),
+				DeploymentMode: tc.mode,
+				AIDiscovery: config.AIDiscoveryConfig{
+					Enabled:         true,
+					ScanIntervalMin: tc.scanMin,
+					PublishJitterMs: tc.jitterMs,
+				},
+			}
+			opts := AIDiscoveryOptionsFromConfig(cfg)
+			if opts.PublishJitter != tc.want {
+				t.Fatalf("PublishJitter = %s, want %s (mode=%q, scan_min=%d, jitter_ms=%d)",
+					opts.PublishJitter, tc.want, tc.mode, tc.scanMin, tc.jitterMs)
+			}
+		})
+	}
+}
+
+// TestRunClaimedResetsTimerBeforeScan is a regression guard for the
+// CodeRabbit finding on PR #820 — the scheduled/process timers must be
+// Reset BEFORE the synchronous runScan call so the next interval is
+// measured from scan START, not from scan END. A slow scan therefore
+// does not stretch the effective cadence.
+//
+// The test holds scanMu across a scheduled tick. That makes runScan block
+// synchronously while the timer is running. Report observers run in separate
+// goroutines, so sleeping in one cannot simulate a slow scan.
+func TestRunClaimedResetsTimerBeforeScan(t *testing.T) {
+	dataDir := t.TempDir()
+	homeDir := t.TempDir()
+	scanInterval := 750 * time.Millisecond
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		DataDir:         dataDir,
+		HomeDir:         homeDir,
+		ScanRoots:       []string{homeDir},
+		ScanInterval:    scanInterval,
+		ProcessInterval: 10 * time.Second, // silence the process timer for this test
+		PublishJitter:   0,
+	}, nil)
+	t.Cleanup(func() {
+		if svc.InventoryStore() != nil {
+			_ = svc.InventoryStore().Close()
+		}
+	})
+
+	arrivals := make(chan struct{}, 4)
+	svc.AddReportObserver(func(_ context.Context, _ AIDiscoveryReport) {
+		arrivals <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- svc.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-runDone; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run error = %v, want context.Canceled", err)
+		}
+	}()
+	await := func(label string, timeout time.Duration) {
+		t.Helper()
+		select {
+		case <-arrivals:
+		case <-time.After(timeout):
+			t.Fatalf("%s scan did not complete within %s", label, timeout)
+		}
+	}
+	await("startup", 5*time.Second)
+	// Hold the real scan lock through the first scheduled tick and past the
+	// next timer deadline. Reset-before queues the next tick while blocked;
+	// reset-after cannot fire it until a full interval after release.
+	svc.scanMu.Lock()
+	time.Sleep(2 * scanInterval)
+	svc.scanMu.Unlock()
+	await("first scheduled", 5*time.Second)
+	await("queued second scheduled", scanInterval/2)
+}
+
+// A Secure Client host still loads the packs in <data_dir>/signature-packs
+// (GAP-0146, issue #1092); every other profile loads only the packs that
+// ai_discovery.signature_packs lists.
+func TestSecureClientLoadsTheDataDirSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"),
+		`{"version": 1, "signatures": [{"id": "custom-data-dir-ai", "name": "Custom", "vendor": "Example", "category": "ai_cli", "confidence": 0.8}]}`)
+	loaded := func(cfg *config.Config) bool {
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "custom-data-dir-ai" })
+	}
+	if !loaded(&config.Config{DeploymentMode: "managed_enterprise", DataDir: tmp}) {
+		t.Fatal("Secure Client did not load the data directory pack")
+	}
+	if loaded(&config.Config{DataDir: tmp}) {
+		t.Fatal("a per-user host loaded an unlisted data directory pack")
+	}
+}
+
+func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	manifest := filepath.Join(project, "package.json")
+	mustWrite(t, filepath.Join(home, "shared", "manifest.json"), `{"dependencies":{"openai":"^4.0.0"}}`)
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "shared", "manifest.json"), manifest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := func(secureClient bool) bool {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", SecureClient: secureClient,
+			DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: []string{project}, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		signals, _, err := svc.detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, signal := range signals {
+			if signal.Component != nil && signal.Component.Name == "openai" {
+				return true
+			}
+		}
+		return false
+	}
+	if !scan(true) {
+		t.Fatal("Secure Client lost the symlinked package dependency")
+	}
+	if scan(false) {
+		t.Fatal("standalone scan followed a package manifest symlink")
 	}
 }

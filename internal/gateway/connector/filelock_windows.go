@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -32,7 +34,64 @@ import (
 var (
 	windowsManagedFileLockTimeout = 2 * time.Second
 	windowsManagedFileLockRetry   = 25 * time.Millisecond
+
+	// fileLockSentinels names the lock files this process opened, for
+	// RemoveIdleFileLockSentinels.
+	fileLockSentinelsMu sync.Mutex
+	fileLockSentinels   = map[string]struct{}{}
 )
+
+// RemoveIdleFileLockSentinels removes the empty lock files this process
+// locked (an agent config's settings.json.lock, say) that no process holds
+// open now. Windows locks never delete their file, so `connector teardown`
+// calls this last: the agent config it restored keeps no DefenseClaw lock
+// file beside it. A lock file another process has open stays; a later lock
+// creates it again.
+func RemoveIdleFileLockSentinels() {
+	fileLockSentinelsMu.Lock()
+	paths := make([]string, 0, len(fileLockSentinels))
+	for path := range fileLockSentinels {
+		paths = append(paths, path)
+	}
+	fileLockSentinels = map[string]struct{}{}
+	fileLockSentinelsMu.Unlock()
+	for _, path := range paths {
+		removeIdleWindowsLockSentinel(path)
+	}
+}
+
+// removeIdleWindowsLockSentinel deletes path when it is an empty regular
+// file with one link that it can open without sharing: no other handle, so no
+// lock holder, is open on it.
+func removeIdleWindowsLockSentinel(path string) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		info.NumberOfLinks != 1 || info.FileSizeHigh != 0 || info.FileSizeLow != 0 {
+		return
+	}
+	deleteFile := byte(1) // FILE_DISPOSITION_INFO.DeleteFile
+	_ = windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &deleteFile, 1)
+}
 
 // withFileLock acquires an exclusive, blocking lock on path+".lock" before
 // running fn, and releases it when fn returns.
@@ -53,6 +112,15 @@ func withFileLock(path string, fn func() error) error {
 // a per-user .lock indefinitely; managed reconciliation must report that row
 // and continue to later targets/ticks instead of blocking the service thread.
 func withFileLockMode(path string, managedEnterprise bool, fn func() error) error {
+	return withFileLockModeForTarget(path, managedEnterprise, nil, fn)
+}
+
+func withFileLockModeForTarget(
+	path string,
+	managedEnterprise bool,
+	managedTarget *windows.SID,
+	fn func() error,
+) error {
 	lockPath := path + ".lock"
 
 	// O_RDWR (not O_EXCL): every caller opens the shared lock file; mutual
@@ -65,7 +133,10 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	var lockParent *os.File
 	var err error
 	if managedEnterprise {
-		lockFile, lockParent, err = openWindowsManagedFileLock(lockPath)
+		lockFile, lockParent, err = openWindowsManagedFileLockForTarget(
+			lockPath,
+			managedTarget,
+		)
 	} else {
 		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	}
@@ -73,6 +144,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 		return fmt.Errorf("open lock file %s: %w", lockPath, err)
 	}
 	defer lockFile.Close()
+	if !managedEnterprise {
+		fileLockSentinelsMu.Lock()
+		fileLockSentinels[lockPath] = struct{}{}
+		fileLockSentinelsMu.Unlock()
+	}
 	if lockParent != nil {
 		// The parent handle excludes delete sharing, so the target-controlled
 		// directory cannot be renamed away and replaced while the callback uses
@@ -88,7 +164,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	}
 	deadline := time.Now().Add(windowsManagedFileLockTimeout)
 	for {
-		err = windows.LockFileEx(handle, flags, 0, 1, 0, overlapped)
+		if managedEnterprise {
+			err = windows.LockFileEx(handle, flags, 0, 1, 0, overlapped)
+		} else {
+			err = lockWindowsFileExclusive(handle, overlapped, lockPath)
+		}
 		if err == nil {
 			break
 		}
@@ -115,10 +195,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 	}()
 	if managedEnterprise {
-		if err := validateWindowsManagedFileLockName(
+		if err := validateWindowsManagedFileLockNameForTarget(
 			lockParent,
 			filepath.Base(lockPath),
 			lockFile,
+			managedTarget,
 		); err != nil {
 			return fmt.Errorf("validate held managed lock %s: %w", lockPath, err)
 		}
@@ -127,12 +208,63 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 	return fn()
 }
 
+// windowsLockContendedHookForTest, when set, is told that a blocking lock
+// acquisition found the lock held and is about to wait for it. Tests use it to
+// prove a contender reached the held lock instead of sleeping and hoping.
+var windowsLockContendedHookForTest atomic.Pointer[func(lockPath string)]
+
+// lockWindowsFileExclusive takes the exclusive byte-range lock on handle,
+// blocking until it is available. A contended attempt is reported to the
+// test hook before the blocking wait.
+func lockWindowsFileExclusive(handle windows.Handle, overlapped *windows.Overlapped, lockPath string) error {
+	err := windows.LockFileEx(
+		handle,
+		windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0,
+		overlapped,
+	)
+	if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return err
+	}
+	if hook := windowsLockContendedHookForTest.Load(); hook != nil {
+		(*hook)(lockPath)
+	}
+	return windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped)
+}
+
 // openWindowsManagedFileLock opens or creates a target-owned lock leaf without
 // trusting a path-based create. FILE_OPEN_IF preserves the shared persistent
 // lock-file protocol, while FILE_SHARE_READ|FILE_SHARE_WRITE matches Go's
 // ordinary Windows os.OpenFile sharing and deliberately excludes delete/rename
 // sharing for the lifetime of the mutex handle.
 func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
+	return openWindowsManagedFileLockForTarget(path, nil)
+}
+
+func openWindowsManagedFileLockForTarget(
+	path string,
+	target *windows.SID,
+) (*os.File, *os.File, error) {
+	var err error
+	if target == nil {
+		target, err = windowsEffectiveUserSID()
+		if err != nil || target == nil {
+			return nil, nil, fmt.Errorf(
+				"resolve effective Windows user for managed lock: %w",
+				err,
+			)
+		}
+	}
+	// Reject caller-supplied broad group and virtual-account SIDs so the
+	// protected lock DACL owner slot always resolves to a specific
+	// interactive user. A group SID here would let any authenticated user
+	// race the managed target-runtime write path.
+	if !windowsManagedHookContractInteractiveUserSID(target) {
+		return nil, nil, fmt.Errorf(
+			"managed lock target %s is not an interactive user",
+			target.String(),
+		)
+	}
 	parent, err := openAtomicTransformBoundDirectoryPlatform(filepath.Dir(path))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open managed lock parent: %w", err)
@@ -142,7 +274,7 @@ func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
 		return nil, nil, fmt.Errorf("validate managed lock parent: %w", err)
 	}
 
-	descriptor, err := windowsManagedFileLockSecurityDescriptor()
+	descriptor, err := windowsManagedFileLockSecurityDescriptorForTarget(target)
 	if err != nil {
 		_ = parent.Close()
 		return nil, nil, err
@@ -176,7 +308,7 @@ func openWindowsManagedFileLock(path string) (*os.File, *os.File, error) {
 		_ = parent.Close()
 		return nil, nil, err
 	}
-	if err := validateWindowsManagedFileLockHandle(handle); err != nil {
+	if err := validateWindowsManagedFileLockHandleForTarget(handle, target); err != nil {
 		_ = windows.CloseHandle(handle)
 		_ = parent.Close()
 		return nil, nil, err
@@ -195,6 +327,15 @@ func validateWindowsManagedFileLockName(
 	name string,
 	held *os.File,
 ) error {
+	return validateWindowsManagedFileLockNameForTarget(parent, name, held, nil)
+}
+
+func validateWindowsManagedFileLockNameForTarget(
+	parent *os.File,
+	name string,
+	held *os.File,
+	target *windows.SID,
+) error {
 	if parent == nil || held == nil {
 		return fmt.Errorf("managed lock has no bound parent or held file")
 	}
@@ -203,7 +344,10 @@ func validateWindowsManagedFileLockName(
 		return fmt.Errorf("open managed lock name relative to held parent: %w", err)
 	}
 	defer named.Close()
-	if err := validateWindowsManagedFileLockHandle(windows.Handle(named.Fd())); err != nil {
+	if err := validateWindowsManagedFileLockHandleForTarget(
+		windows.Handle(named.Fd()),
+		target,
+	); err != nil {
 		return err
 	}
 	heldIdentity, err := atomicTransformOpenFileIdentity(held)
@@ -229,6 +373,15 @@ func windowsManagedFileLockSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, e
 	target, err := windowsEffectiveUserSID()
 	if err != nil || target == nil {
 		return nil, fmt.Errorf("resolve effective Windows user for managed lock: %w", err)
+	}
+	return windowsManagedFileLockSecurityDescriptorForTarget(target)
+}
+
+func windowsManagedFileLockSecurityDescriptorForTarget(
+	target *windows.SID,
+) (*windows.SECURITY_DESCRIPTOR, error) {
+	if target == nil {
+		return nil, fmt.Errorf("managed lock target SID is required")
 	}
 	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 	if err != nil {
@@ -289,6 +442,13 @@ func windowsManagedFileLockSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, e
 }
 
 func validateWindowsManagedFileLockHandle(handle windows.Handle) error {
+	return validateWindowsManagedFileLockHandleForTarget(handle, nil)
+}
+
+func validateWindowsManagedFileLockHandleForTarget(
+	handle windows.Handle,
+	target *windows.SID,
+) error {
 	if err := validateAtomicTransformWindowsHandleType(handle, false); err != nil {
 		return fmt.Errorf("managed lock type: %w", err)
 	}
@@ -310,9 +470,11 @@ func validateWindowsManagedFileLockHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("inspect managed lock protection: %w", err)
 	}
-	target, err := windowsEffectiveUserSID()
-	if err != nil || target == nil {
-		return fmt.Errorf("resolve effective Windows user for managed lock validation: %w", err)
+	if target == nil {
+		target, err = windowsEffectiveUserSID()
+		if err != nil || target == nil {
+			return fmt.Errorf("resolve effective Windows user for managed lock validation: %w", err)
+		}
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {

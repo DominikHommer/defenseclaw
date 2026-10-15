@@ -5,10 +5,13 @@ package gateway
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/compatibility/profilemanifest"
@@ -57,6 +60,24 @@ func TestAMPEventsEnterCorrectGuardrailLanes(t *testing.T) {
 		"block", "action", "tool.result", profile.Capabilities, profile, req.Payload,
 	); action != "block" || wouldBlock {
 		t.Fatalf("tool.result block verdict=(%q,%v), want enforced block", action, wouldBlock)
+	}
+	// Amp cannot block a prompt, and neither can Hermes at pre_llm_call: in
+	// action mode the notice is how DefenseClaw acts on the blocking rule,
+	// not observe-mode text.
+	hermes := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	for _, tc := range []struct {
+		name, event string
+		profile     connector.HookProfile
+	}{{"amp", "agent.start", profile}, {"hermes", "pre_llm_call", hermes}} {
+		for _, mode := range []string{"action", "observe"} {
+			action, wouldBlock := mapHookActionForProfile("block", mode, tc.event, tc.profile.Capabilities, tc.profile, nil)
+			notice := agentHookResponseForProfile(tc.profile, agentHookRequest{ConnectorName: tc.name, HookEventName: tc.event},
+				action, "block", "HIGH", "marker rule", nil, mode, wouldBlock, tc.profile.Capabilities).AdditionalContext
+			enforced := strings.Contains(notice, "must not be carried out") && !strings.Contains(notice, "would block")
+			if action == "block" || !strings.Contains(notice, "a HIGH "+tc.name+" hook finding") || enforced != (mode == "action") {
+				t.Fatalf("%s %s-mode %s action=%q notice=%q", tc.name, mode, tc.event, action, notice)
+			}
+		}
 	}
 }
 
@@ -256,8 +277,13 @@ func TestAMPFiveEventCanonicalObservability(t *testing.T) {
 			for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
 				eventCounts[logStringAttribute(record.Attributes, "defenseclaw.event.name")]++
 			}
+			// Wait for every span the assertions below count: the second
+			// agent-invoke span could still be in flight once the tool and
+			// model spans were in (seen on the Windows CI runner).
 			if familyCounts[observability.TelemetryFamilyToolExecute] == 1 &&
 				familyCounts[observability.TelemetryFamilyModelChat] == 1 &&
+				familyCounts[observability.TelemetryFamilyAgentInvoke] == 2 &&
+				familyCounts[observability.TelemetryFamilyAgentTransition] == 3 &&
 				eventCounts[observability.TelemetryEventModelResponse] == 1 {
 				break
 			}
@@ -462,4 +488,56 @@ func TestAMPFiveEventCanonicalObservability(t *testing.T) {
 			t.Fatal("Amp lifecycle transition bypassed Galileo's generated compatibility route")
 		}
 	})
+}
+
+// GAP-1234: Amp loads a skill with its skill tool ({"name": <skill>}), which
+// the skill probe did not read, so a skill on asset_policy.skill.denied was
+// loaded and followed while Devin refused it. The connector's own loader
+// (Amp, OpenCode, Hermes skill_view with a "<category>:<skill>" name) and a
+// file read of the denied skill's folder are refused; an allowed skill and
+// another tool's "name" argument are not.
+func TestHookConnectorDeniedSkillLoadIsRefused(t *testing.T) {
+	home := t.TempDir()
+	for _, tc := range []struct {
+		connector, event, tool string
+		input                  map[string]interface{}
+		block                  bool
+	}{
+		{"amp", "tool.call", "skill", map[string]interface{}{"name": "dcmain-marker-skill"}, true},
+		{"amp", "tool.call", "skill", map[string]interface{}{"name": "mm2-clean-skill"}, false},
+		{"amp", "tool.call", "oracle", map[string]interface{}{"name": "dcmain-marker-skill", "prompt": "review"}, false},
+		{"amp", "tool.call", "Read", map[string]interface{}{
+			"path": filepath.Join(home, ".config", "amp", "skills", "dcmain-marker-skill", "SKILL.md"),
+		}, true},
+		{"opencode", "tool.execute.before", "skill", map[string]interface{}{"name": "dcmain-marker-skill"}, true},
+		{"hermes", "pre_tool_call", "skill_view", map[string]interface{}{"name": "software-development:dcmain-marker-skill"}, true},
+		// Kiro CLI 2.x reads the SKILL.md; v3 loads it with disclose_context
+		// (live shapes, kiro-cli 2.26.1, GAP-1249).
+		{"kiro", "preToolUse", "read", map[string]interface{}{"operations": []interface{}{map[string]interface{}{
+			"mode": "Line", "path": filepath.Join(home, ".kiro", "skills", "dcmain-marker-skill", "SKILL.md"),
+		}}}, true},
+		{"kiro", "PreToolUse", "disclose_context", map[string]interface{}{"name": "dcmain-marker-skill"}, true},
+		{"cursor", "preToolUse", "Read", map[string]interface{}{
+			"path": filepath.Join(home, ".cursor", "skills", "dcmain-marker-skill", "SKILL.md"),
+		}, true},
+	} {
+		store, logger := newNativeSkillRuntimeTestStore(t)
+		cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+		cfg.Guardrail.Connector = tc.connector
+		cfg.Guardrail.Mode = "action"
+		cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "dcmain-marker-skill"}}
+		api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+		payload, err := json.Marshal(map[string]interface{}{
+			"hook_event_name": tc.event, "session_id": "T-gap1234", "tool_call_id": "toolu-1",
+			"tool_name": tc.tool, "tool_input": tc.input, "cwd": home,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := invokeNativeSkillHook(t, api, tc.connector, string(payload))
+		blocked := response.Action == "block" && strings.Contains(response.Reason, "dcmain-marker-skill")
+		if blocked != tc.block {
+			t.Errorf("%s %s %v: action=%q reason=%q, want block=%v", tc.connector, tc.tool, tc.input, response.Action, response.Reason, tc.block)
+		}
+	}
 }

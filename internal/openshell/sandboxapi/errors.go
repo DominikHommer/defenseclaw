@@ -1,0 +1,191 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package sandboxapi
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// Error codes. They are stable machine tokens; Message is for people.
+const (
+	// CodeDisabled: openshell.enabled is false (or the platform has no
+	// sandbox support).
+	CodeDisabled = "disabled"
+	// CodeUnavailable: the daemon is not connected to a supported local
+	// OpenShell gateway right now.
+	CodeUnavailable = "unavailable"
+	CodeInvalid     = "invalid_request"
+	CodeNotFound    = "not_found"
+	// CodeConflict: the sandbox exists already or is in the wrong phase.
+	CodeConflict = "conflict"
+	// CodeNeedsCopy: the project cannot be mounted live (a linked worktree,
+	// a git directory outside the folder, a compute driver that mounts no
+	// host folders, and the like; Detail says why); it can run in copy mode.
+	CodeNeedsCopy = "needs_copy"
+	// CodeAdminViolation: openshell.admin refused the request ("blocked by
+	// your organization's DefenseClaw policy").
+	CodeAdminViolation = "admin_violation"
+	// CodePolicyViolation: the pack, profile or a DefenseClaw invariant
+	// refused the request.
+	CodePolicyViolation = "policy_violation"
+	CodePackInvalid     = "pack_invalid"
+	// CodeImageUnavailable: no hook-verified overlay image exists (and
+	// building one was refused or failed).
+	CodeImageUnavailable = "image_unavailable"
+	// CodePolicyRejected: OpenShell rejected the sandbox configuration, or
+	// the sandbox it made does not run as DefenseClaw prepared it (the
+	// workload check after ready).
+	CodePolicyRejected = "policy_rejected"
+	// CodeUpstream: an OpenShell call failed.
+	CodeUpstream = "upstream_error"
+	CodeInternal = "internal"
+)
+
+// DisabledMessage is what every surface says while openshell.enabled is
+// false: sandbox run, connect and list, the gateway API and the manager.
+const DisabledMessage = "OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on"
+
+// OffMessage is DisabledMessage for st, which reports sandboxes off: for an
+// account whose setup would stop at another account's gateway it says so,
+// with the way on, instead of sending the user to setup first (GAP-0307).
+//
+// On a managed computer (Status.Managed set) the user can neither run setup
+// nor see another account's gateway: the message says what the user may know
+// (another account, or the unavailable reason), never the other account's
+// name, uid or PID, and ends with the organization's contact.
+func (st *Status) OffMessage() string {
+	if st != nil && st.Managed != nil {
+		return st.managedOffMessage()
+	}
+	if st == nil || st.GatewayElsewhere == "" {
+		return DisabledMessage
+	}
+	return "OpenShell sandboxes are off for this account, and another account runs this machine's OpenShell gateway (" +
+		st.GatewayElsewhere + "); one gateway runs on a machine, under the account that started it: run sandboxes from " +
+		"that account, or have it hand its gateway over, then run `defenseclaw sandbox setup` here " +
+		"(`defenseclaw sandbox doctor` names the hand-over command)"
+}
+
+// AccountBusyMessage is what a user on a single-sandbox-account computer is
+// told while another account holds the sandbox ports (Q2): neutral, without
+// the other account's name, uid or PID.
+const AccountBusyMessage = "Sandboxes aren't available for your account on this computer right now: another account is using them"
+
+// managedOffMessage is OffMessage for a managed computer.
+func (st *Status) managedOffMessage() string {
+	m := st.Managed
+	var msg string
+	switch {
+	case st.GatewayElsewhere != "":
+		msg = AccountBusyMessage + "; try again when it has no sandbox running."
+	case m.Unavailable != "":
+		msg = UnavailableSentence(m.Unavailable)
+	default:
+		msg = "Sandboxes are off on this computer; your organization manages this setting."
+	}
+	return msg + " " + AccessContact(m.RequestAccess)
+}
+
+// UnavailableSentence is the sentence for why, the caller-facing reason
+// sandboxes can't run for the caller ("OpenShell is not installed"): the
+// reason travels bare (ManagedStatus.Unavailable, the managed gateway's
+// settings) and only this sentence frames it, so it is never framed twice
+// (GAP-0175).
+func UnavailableSentence(why string) string {
+	why = strings.TrimRight(strings.TrimSpace(DisplayText(why)), ". ")
+	if why == "" {
+		return "Sandboxes aren't available on this computer."
+	}
+	return "Sandboxes aren't available on this computer: " + why + "."
+}
+
+// AdminMessage is the sentence every admin refusal starts with.
+const AdminMessage = "blocked by your organization's DefenseClaw policy"
+
+// Error is the JSON error body of every non-2xx sandbox API response.
+type Error struct {
+	Code    string `json:"code"`
+	Message string `json:"error"`
+	Detail  string `json:"detail,omitempty"`
+	// Violation is the refusing policy decision, when there is one.
+	Violation *Violation `json:"violation,omitempty"`
+	// Status is the HTTP status; it is not serialized.
+	Status int `json:"-"`
+}
+
+func (e *Error) Error() string {
+	if e.Detail == "" {
+		return e.Message
+	}
+	return e.Message + ": " + e.Detail
+}
+
+// HTTPStatus returns the status the gateway answers with.
+func (e *Error) HTTPStatus() int {
+	if e.Status != 0 {
+		return e.Status
+	}
+	return StatusForCode(e.Code)
+}
+
+// StatusForCode maps an error code onto its HTTP status.
+func StatusForCode(code string) int {
+	switch code {
+	case CodeDisabled, CodeUnavailable:
+		return http.StatusServiceUnavailable
+	case CodeInvalid, CodePackInvalid:
+		return http.StatusBadRequest
+	case CodeNotFound:
+		return http.StatusNotFound
+	case CodeConflict, CodeNeedsCopy, CodeImageUnavailable:
+		return http.StatusConflict
+	case CodeAdminViolation, CodePolicyViolation:
+		return http.StatusForbidden
+	case CodePolicyRejected:
+		return http.StatusUnprocessableEntity
+	case CodeUpstream:
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// Errorf builds an *Error.
+func Errorf(code, format string, args ...any) *Error {
+	return &Error{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// AsError returns err as an *Error, wrapping anything else as internal.
+func AsError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	var e *Error
+	if errors.As(err, &e) {
+		return e
+	}
+	return &Error{Code: CodeInternal, Message: err.Error()}
+}
+
+// IsCode reports whether err is an *Error with code.
+func IsCode(err error, code string) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == code
+}

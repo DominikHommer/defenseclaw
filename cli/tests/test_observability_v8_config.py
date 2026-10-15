@@ -36,7 +36,9 @@ from defenseclaw.observability.v8_config import (
     QUEUE_BOUNDS,
     QUEUE_DEFAULTS,
     V8ConfigError,
+    _go_schema_pattern,
     _parse_source,
+    _schema_validator,
     _shape,
     load_validate_v8,
     observability_v8_parity_contract,
@@ -108,7 +110,7 @@ def test_reference_source_validates_against_canonical_schema(tmp_path: Path) -> 
     validated = load_validate_v8(source, source_name=str(reference))
 
     assert validated.source["config_version"] == 8
-    assert len(validated.source["observability"]["destinations"]) == 7
+    assert len(validated.source["observability"]["destinations"]) == 9
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -253,10 +255,57 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
         load_validate_v8(f"config_version: 8\n{legacy}\n")
 
     assert captured.value.keyword in {"additionalProperties", "oneOf"}
-    assert "run defenseclaw upgrade" in str(captured.value)
+    # An upgrade cannot fix a released key left in a current file.
+    assert "run defenseclaw upgrade" not in str(captured.value)
 
 
-@pytest.mark.parametrize("version", [7, 9, "8", 8.0, True])
+def test_v9_schema_refusals_say_v9() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nobservability: 5\n")
+
+    assert "v8" not in str(captured.value)
+
+
+def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nguardrail: {no_such_key: 1}\n")
+
+    assert captured.value.keyword == "additionalProperties"
+    assert "$.guardrail.no_such_key" in str(captured.value)
+    assert "upgrade" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("removed", "path", "action"),
+    [
+        ("skill_actions: {high: {install: block}}", "$.skill_actions", "use admission.skill.actions"),
+        ("guardrail: {rule_pack_dir: /x}", "$.guardrail.rule_pack_dir", "use rule_pack or custom_packs"),
+        (
+            "guardrail: {connectors: {codex: {rule_pack_dir: /x}}}",
+            "$.guardrail.connectors.codex.rule_pack_dir",
+            "use rule_pack or custom_packs",
+        ),
+        ("privacy: {disable_redaction: true}", "$.privacy", "remove it: config_version 9 has no privacy section"),
+        (
+            "observability: {trace_policy: {compatibility_aliases: false}}",
+            "$.observability.trace_policy.compatibility_aliases",
+            "remove it: telemetry carries only canonical attribute names",
+        ),
+    ],
+)
+def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, action: str) -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(f"config_version: 9\n{removed}\n")
+
+    assert captured.value.path == path
+    assert captured.value.keyword == "legacy-key-forbidden"
+    message = str(captured.value)
+    assert action in message
+    assert "invalid configuration" in message and "invalid v9" not in message
+    assert "defenseclaw upgrade" not in message
+
+
+@pytest.mark.parametrize("version", [7, 10, "8", 8.0, True])
 def test_exact_v8_rejects_other_version_values(version: object) -> None:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8({"config_version": version})
@@ -391,6 +440,62 @@ def test_timestamp_and_binary_scalars_project_as_source_text_like_go() -> None:
     assert binary.source["environment"] == "Zm9v"
 
 
+@pytest.mark.parametrize("spelling", ["yes", "No", "ON", "off"])
+def test_yaml11_boolean_words_are_strings_like_go(spelling: str) -> None:
+    # Go's yaml.v3 follows the YAML 1.2 core schema: these words are strings,
+    # so the gateway's schema refuses them for a boolean key.
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(f"config_version: 8\nopenshell:\n  yolo: {spelling}\n")
+    assert captured.value.keyword == "type"
+    assert load_validate_v8(f"config_version: 8\nenvironment: {spelling}\n").source["environment"] == spelling
+    keyed = load_validate_v8(f"config_version: 8\nopenshell:\n  image: {{harness_versions: {{{spelling}: '1'}}}}\n")
+    assert keyed.source["openshell"]["image"]["harness_versions"] == {spelling: "1"}
+
+
+@pytest.mark.parametrize("spelling", ["true", "True", "TRUE", "false", "False", "FALSE"])
+def test_yaml_core_booleans_stay_booleans(spelling: str) -> None:
+    source = load_validate_v8(f"config_version: 8\nopenshell:\n  yolo: {spelling}\n").source
+    assert source["openshell"]["yolo"] is (spelling.lower() == "true")
+
+
+def test_packaged_v8_schema_is_a_valid_draft_2020_12_schema() -> None:
+    # _schema_validator no longer self-checks the static schema on every run (GAP-0199).
+    from jsonschema import Draft202012Validator
+
+    Draft202012Validator.check_schema(_schema_validator().schema)
+
+
+def test_schema_patterns_anchor_at_the_end_of_text_like_go() -> None:
+    # Python's "$" also matches before a final newline; RE2's does not.
+    for source in (
+        'config_version: 8\nopenshell:\n  harnesses: ["codex\\n"]\n',
+        'config_version: 8\nopenshell:\n  resources: {cpu: "2\\n"}\n',
+    ):
+        with pytest.raises(V8ConfigError) as captured:
+            load_validate_v8(source)
+        assert captured.value.keyword == "pattern"
+    load_validate_v8("config_version: 8\nopenshell:\n  harnesses: [codex]\n  resources: {cpu: '2'}\n")
+
+
+@pytest.mark.parametrize(
+    ("pattern", "value", "matches"),
+    [
+        ("^a$", "a", True),
+        ("^a$", "a\n", False),
+        ("^(a|b)$", "b\n", False),
+        ("^[$]$", "$", True),
+        (r"^\$$", "$", True),
+        (r"^\$$", "$\n", False),
+        ("^[]$]x$", "$x", True),
+        ("^[^]$]$", "a", True),
+        ("^[^]$]$", "$", False),
+        ("^a", "ab\n", True),
+    ],
+)
+def test_go_schema_pattern_rewrites_only_end_anchors(pattern: str, value: str, matches: bool) -> None:
+    assert (_go_schema_pattern(pattern).search(value) is not None) is matches
+
+
 def test_yaml_node_depth_and_mapping_boundaries_match_go_preflight() -> None:
     at_node_limit = {"config_version": 8, "unknown": [0] * (MAX_YAML_NODES - 5)}
     over_node_limit = {"config_version": 8, "unknown": [0] * (MAX_YAML_NODES - 4)}
@@ -496,11 +601,11 @@ def test_resource_attribute_aggregate_boundary() -> None:
 @pytest.mark.parametrize(
     ("attributes", "message"),
     [
-        ({"custom.label": ""}, "canonical v8 schema"),
+        ({"custom.label": ""}, "configuration schema"),
         ({"custom.label": " \u00a0 "}, "nonblank"),
         ({"custom.label": "line\nvalue"}, "control characters"),
         ({"custom.label": "\ud800"}, "valid UTF-8"),
-        ({"custom/label": "value"}, "canonical v8 schema"),
+        ({"custom/label": "value"}, "configuration schema"),
         ({"defenseclaw.instance.id": "value"}, "process-owned"),
         ({"defenseclaw.preset": "generic-otlp"}, "process-owned"),
         (
@@ -541,7 +646,7 @@ observability:
     rendered = str(captured.value)
     assert canary not in rendered
     assert "redacted.yaml" in rendered
-    assert captured.value.path == "$.observability"
+    assert captured.value.path == "$.observability.unknown_field"
 
 
 def test_semantic_diagnostics_do_not_render_resource_credentials() -> None:
@@ -611,6 +716,35 @@ observability:
     assert "query-secret" not in rendered
     assert "fragment-secret" not in rendered
     assert "path-secret-canary" not in rendered
+
+
+def test_masked_source_keeps_asset_policy_rule_urls_readable() -> None:
+    source = """config_version: 8
+asset_policy:
+  mcp:
+    registry:
+      - name: deepwiki
+        reason: registry:t2r4-local
+        url: https://mcp.deepwiki.com/mcp
+      - name: keyed
+        url: https://mcp.example.test/s/k3yS3cretValue0123456789abcd/mcp?api_key=query-secret
+      - name: userinfo
+        url: https://user:pass-secret@mcp.example.test/mcp
+    allowed:
+      - url: https://mcp.example.test/v1/sse
+observability: {}
+"""
+    validated = load_validate_v8(source)
+    mcp = validated.masked["asset_policy"]["mcp"]["registry"]
+
+    assert mcp[0]["url"] == "https://mcp.deepwiki.com/mcp"
+    assert mcp[1]["url"] == "https://mcp.example.test/s/[REDACTED]/mcp?[REDACTED]"
+    assert mcp[2]["url"] == "[REDACTED_URL]"
+    assert validated.masked["asset_policy"]["mcp"]["allowed"][0]["url"] == "https://mcp.example.test/v1/sse"
+    rendered = validated.masked_json()
+    assert "k3yS3cretValue0123456789abcd" not in rendered
+    assert "query-secret" not in rendered
+    assert "pass-secret" not in rendered
 
 
 def test_returned_source_and_masked_views_are_detached() -> None:
@@ -761,7 +895,16 @@ observability:
 """
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8(wrong_kind)
-    assert captured.value.keyword == "oneOf"
+    # GAP-0186: the problem inside the chosen shape, not every shape's key list.
+    assert captured.value.keyword == "additionalProperties"
+    assert captured.value.path.endswith("destinations[0].logger_name")
+
+    unknown_kind = wrong_kind.replace("http_jsonl", "carrier_pigeon")
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(unknown_kind)
+    assert captured.value.path.endswith("destinations[0].kind")
+    assert captured.value.corrective_action == "use one of jsonl, console, prometheus, splunk_hec, http_jsonl, otlp"
+    assert len(str(captured.value)) < 200
 
 
 def test_compatibility_adapter_fields_enforce_utf8_byte_bounds() -> None:

@@ -18,6 +18,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -73,6 +75,9 @@ type V8YAMLError struct {
 	Column  int
 	Summary string
 	Action  string
+	// FirstLine is the line of the first definition of a duplicate key, so
+	// the CLI can say "the first one is at line 3" (GAP-2188).
+	FirstLine int
 }
 
 func (e *V8YAMLError) Error() string {
@@ -88,6 +93,15 @@ func (e *V8YAMLError) Error() string {
 		if e.Column > 0 {
 			source += ":" + strconv.Itoa(e.Column)
 		}
+	}
+	if e.Code == V8YAMLErrorSyntax && e.Path == "$" {
+		// The whole file does not parse: the line and the parser's reason are
+		// the useful part, not the code or the root path (GAP-1767).
+		message := source + ": " + e.Summary
+		if e.Action != "" {
+			message += "; " + e.Action
+		}
+		return message
 	}
 	path := ""
 	if e.Path != "" {
@@ -108,10 +122,99 @@ type V8YAMLDocument struct {
 	Plain    map[string]any
 }
 
+// v8YAMLParseCacheMaxBytes bounds the source whose parse is kept: a larger
+// tree would stay in memory for the life of the process.
+const v8YAMLParseCacheMaxBytes = 1 << 20
+
+// v8YAMLParseCache holds the last successful parse. One start or reload reads
+// the same source through the strict parser, the schema pass, the compiler and
+// the runtime decoder, and every one of them parsed it again: with 100
+// profiles and 2,000 assignments (154 KB) that was eight parses and a third of
+// the load, which made the gateway start 1.6 s slower (GAP-0264). The document
+// is never written to after the parse.
+var v8YAMLParseCache struct {
+	sync.Mutex
+	source string
+	sum    [sha256.Size]byte
+	doc    *V8YAMLDocument
+}
+
+// sourceYAMLCache holds the plain YAML parse of the last configuration source
+// a key reader decoded. One load reads config_version, deployment_mode,
+// enterprise.profile and ai_discovery.signature_pack_digests through separate
+// helpers, and each parsed the whole file again for its key: with 1,000
+// guardrail profiles those parses were a fifth of every config load, paid by
+// gateway start, the watchdog and each CLI command (GAP-0276). The node is
+// shared: read it, never change it.
+var sourceYAMLCache struct {
+	sync.Mutex
+	sum  [sha256.Size]byte
+	node *yaml.Node
+	err  error
+}
+
+// decodeSourceYAML is yaml.Unmarshal(raw, out) through sourceYAMLCache.
+func decodeSourceYAML(raw []byte, out any) error {
+	node, err := sourceYAMLNode(raw)
+	if err != nil {
+		return err
+	}
+	return node.Decode(out)
+}
+
+// sourceYAMLNode is the yaml.Unmarshal parse of raw into a document node,
+// kept for the next reader of the same bytes. The result is read-only.
+func sourceYAMLNode(raw []byte) (*yaml.Node, error) {
+	if len(raw) > v8YAMLParseCacheMaxBytes {
+		var node yaml.Node
+		err := yaml.Unmarshal(raw, &node)
+		return &node, err
+	}
+	sum := sha256.Sum256(raw)
+	cache := &sourceYAMLCache
+	cache.Lock()
+	if cache.node != nil && cache.sum == sum {
+		node, err := cache.node, cache.err
+		cache.Unlock()
+		return node, err
+	}
+	cache.Unlock()
+	var node yaml.Node
+	err := yaml.Unmarshal(raw, &node)
+	cache.Lock()
+	cache.sum, cache.node, cache.err = sum, &node, err
+	cache.Unlock()
+	return &node, err
+}
+
 // ParseV8YAML performs source-safety, exact-version, and targeted legacy-key
 // checks. It does not apply defaults, migrations, environment overrides, schema
-// validation, or observability compilation.
+// validation, or observability compilation. The result is shared between
+// callers that pass the same source and bytes: treat it as read-only.
 func ParseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
+	if len(data) > v8YAMLParseCacheMaxBytes {
+		return parseV8YAML(source, data)
+	}
+	sum := sha256.Sum256(data)
+	cache := &v8YAMLParseCache
+	cache.Lock()
+	if cache.doc != nil && cache.source == source && cache.sum == sum {
+		doc := cache.doc
+		cache.Unlock()
+		return doc, nil
+	}
+	cache.Unlock()
+	doc, err := parseV8YAML(source, data)
+	if err != nil {
+		return nil, err
+	}
+	cache.Lock()
+	cache.source, cache.sum, cache.doc = source, sum, doc
+	cache.Unlock()
+	return doc, nil
+}
+
+func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if len(data) > V8YAMLMaxSourceBytes {
 		return nil, v8Error(source, V8YAMLErrorSourceTooLarge, "$", nil,
 			"configuration source exceeds the 4 MiB limit", "reduce the source to 4 MiB or less")
@@ -149,8 +252,24 @@ func ParseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := validateV8YAMLVersion(source, root); err != nil {
 		return nil, err
 	}
-	if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
+	if v9SecureClientDocument(root) {
+		// Secure Client stays on v8 and rejects v9-only provider routing.
+		if node := v8YAMLMapValue(root, "llm_providers"); node != nil {
+			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.llm_providers", node,
+				"llm_providers is not accepted in Secure Client config_version 8",
+				"remove llm_providers from the Secure Client source")
+		}
+		// Keep the legacy-key errors of main (issue #1092); elsewhere
+		// the schema refuses those keys.
+		if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
+			return nil, err
+		}
+	}
+	if err := rejectV9RemovedKeys(source, root); err != nil {
 		return nil, err
+	}
+	if !v9SecureClientDocument(root) {
+		dropRetiredScannerKeys(root)
 	}
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
@@ -180,15 +299,15 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 	}
 	if node.Kind == yaml.AliasNode {
 		return v8Error(w.source, V8YAMLErrorAliasForbidden, path, node,
-			"YAML aliases are not allowed in v8 configuration", "replace the alias with explicit configuration")
+			"YAML aliases are not allowed in config.yaml", "replace the alias with explicit configuration")
 	}
 	if v8YAMLIsMerge(node) {
 		return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, node,
-			"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+			"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 	}
 	if !v8YAMLTagAllowed(node) {
 		return v8Error(w.source, V8YAMLErrorCustomTagForbidden, path, node,
-			"custom or unsupported YAML tags are not allowed in v8 configuration",
+			"custom or unsupported YAML tags are not allowed in config.yaml",
 			"use ordinary mappings, sequences, and scalar values")
 	}
 
@@ -208,7 +327,7 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 			key, value := node.Content[index], node.Content[index+1]
 			if v8YAMLIsMerge(key) {
 				return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, key,
-					"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+					"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 			}
 			// Report aliases/custom tags with their specific code before the
 			// more general string-key diagnostic.
@@ -226,9 +345,11 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 				return err
 			}
 			if first, exists := seen[key.Value]; exists {
-				return v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
+				duplicate := v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
 					fmt.Sprintf("duplicate mapping key; the first definition is at line %d, column %d", first.Line, first.Column),
 					"remove one definition so precedence is unambiguous")
+				duplicate.FirstLine = first.Line
+				return duplicate
 			}
 			seen[key.Value] = key
 			childDepth := depth
@@ -266,33 +387,166 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	value := v8YAMLMapValue(root, "config_version")
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
-			"config_version is required by the v8 configuration entrypoint",
-			"run defenseclaw upgrade to create a config_version: 8 source")
+			"config_version is required in config.yaml",
+			"run `defenseclaw migrate` to create a current source")
 	}
 	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8",
-			"set config_version: 8 only after completing the DefenseClaw upgrade")
+			"config_version must be an integer",
+			"run `defenseclaw migrate` instead of editing config_version by hand")
 	}
 	var version int64
 	if err := value.Decode(&version); err != nil {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
 	switch {
-	case version == v8YAMLConfigVersion:
+	case version > v8YAMLConfigVersion && v9SecureClientDocument(root):
+		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			newerConfigAction)
+	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
-			"this configuration requires the v7-to-v8 upgrade", "run defenseclaw upgrade before starting a v8 gateway")
-	case version > v8YAMLConfigVersion:
+			fmt.Sprintf("config_version %d is older than %d", version, v8YAMLConfigVersion),
+			"run `defenseclaw migrate`")
+	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
-			"this configuration version is newer than the supported v8 contract",
-			"use a DefenseClaw build that supports the newer configuration")
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			newerConfigAction)
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
+}
+
+// newerConfigAction is the way out of a config_version this release does not
+// read: a managed host keeps the pre-upgrade copy next to the config, a
+// per-user install in its previous folder.
+const newerConfigAction = "upgrade DefenseClaw, or restore the config saved before the upgrade " +
+	"(config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous on a per-user install)"
+
+// rejectV9RemovedKeys refuses, in a config_version 9 source, the v8 keys
+// that config_version 9 replaced. A v8 source keeps them: they are the
+// input of the v8 to v9 migration (MigrateV9).
+func rejectV9RemovedKeys(source string, root *yaml.Node) error {
+	version := v8YAMLMapValue(root, "config_version")
+	var number int64
+	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
+		return nil
+	}
+	for _, removed := range []struct{ key, target string }{
+		{"otel", "observability.destinations"},
+		{"skill_actions", "admission.skill.actions"},
+		{"mcp_actions", "admission.mcp.actions"},
+		{"plugin_actions", "admission.plugin.actions"},
+	} {
+		if node := v8YAMLMapValue(root, removed.key); node != nil {
+			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
+		}
+	}
+	if node := v8YAMLMapValue(root, "privacy"); node != nil {
+		return v9RemovedKeyAction(source, "$.privacy", node, "remove it: config_version 9 has no privacy section")
+	}
+	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
+		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,
+			"admission.<type>.allow_list_bypass_scan")
+	}
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	if err := rejectV9RulePackDir(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if err := rejectV9ConnectorRulePackDirs(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if profiles := v8YAMLMapValue(guardrail, "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(profiles.Content); index += 2 {
+			path := v8YAMLChildPath("$.guardrail.profiles", profiles.Content[index].Value)
+			profile := profiles.Content[index+1]
+			if err := rejectV9RulePackDir(source, profile, path); err != nil {
+				return err
+			}
+			if err := rejectV9ConnectorRulePackDirs(source, profile, path); err != nil {
+				return err
+			}
+		}
+	}
+	observability := v8YAMLMapValue(root, "observability")
+	if node := v8YAMLMapValue(v8YAMLMapValue(observability, "trace_policy"), "compatibility_aliases"); node != nil {
+		return v9RemovedKeyAction(source, "$.observability.trace_policy.compatibility_aliases", node,
+			"remove it: telemetry carries only canonical attribute names")
+	}
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v8YAMLMapValue(attributes, "deployment.environment"); node != nil {
+		return v9RemovedKeyError(source, v8YAMLChildPath("$.observability.resource.attributes", "deployment.environment"),
+			node, "deployment.environment.name")
+	}
+	scanners := v8YAMLMapValue(root, "scanners")
+	for _, removed := range []struct{ scanner, key, target string }{
+		{"skill_scanner", "binary", "the managed scanner install"},
+		{"skill_scanner", "use_virustotal", "scanners.skill_scanner.analyzers.virustotal.enabled"},
+		{"skill_scanner", "use_aidefense", "scanners.skill_scanner.analyzers.aidefense.enabled"},
+		{"skill_scanner", "virustotal_api_key", "a key stored with defenseclaw keys set"},
+		{"skill_scanner", "virustotal_api_key_env", "scanners.skill_scanner.analyzers.virustotal.api_key_env"},
+		{"mcp_scanner", "binary", "the managed scanner install"},
+	} {
+		if node := v8YAMLMapValue(v8YAMLMapValue(scanners, removed.scanner), removed.key); node != nil {
+			return v9RemovedKeyError(source, "$.scanners."+removed.scanner+"."+removed.key, node, removed.target)
+		}
+	}
+	return nil
+}
+
+// retiredScannerKeys are scanner keys that no scan path ever read and that
+// config_version 9 dropped (GAP-0295, GAP-0301). 1.0 pre-release builds
+// accepted and wrote them, so a source that still holds one loads with the
+// key ignored, and the next write leaves it out. A Secure Client document
+// keeps the closed schema of main (issue #1092), which never had them.
+// Remove this after 1.1, when no pre-release config is left to load.
+var retiredScannerKeys = [][]string{
+	{"scanners", "mcp_scanner", "api"},
+	{"scanners", "mcp_scanner", "timeouts"},
+	{"scanners", "skill_scanner", "timeouts", "llm_s"},
+}
+
+func dropRetiredScannerKeys(root *yaml.Node) {
+	for _, path := range retiredScannerKeys {
+		parent := root
+		for _, key := range path[:len(path)-1] {
+			parent = v8YAMLMapValue(parent, key)
+		}
+		if parent == nil || parent.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 0; index+1 < len(parent.Content); index += 2 {
+			if parent.Content[index].Value == path[len(path)-1] {
+				parent.Content = append(parent.Content[:index], parent.Content[index+2:]...)
+				break
+			}
+		}
+	}
+}
+
+func rejectV9RulePackDir(source string, scope *yaml.Node, path string) error {
+	if node := v8YAMLMapValue(scope, "rule_pack_dir"); node != nil {
+		return v9RemovedKeyError(source, path+".rule_pack_dir", node, "rule_pack or custom_packs")
+	}
+	return nil
+}
+
+func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string) error {
+	connectors := v8YAMLMapValue(scope, "connectors")
+	if connectors == nil || connectors.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(connectors.Content); index += 2 {
+		connectorPath := v8YAMLChildPath(path+".connectors", connectors.Content[index].Value)
+		if err := rejectV9RulePackDir(source, connectors.Content[index+1], connectorPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
@@ -347,6 +601,15 @@ func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) erro
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
 		"a legacy v7 configuration key is not accepted by the v8 entrypoint",
 		"run defenseclaw upgrade; use "+target)
+}
+
+func v9RemovedKeyError(source, path string, node *yaml.Node, target string) error {
+	return v9RemovedKeyAction(source, path, node, "use "+target)
+}
+
+func v9RemovedKeyAction(source, path string, node *yaml.Node, action string) error {
+	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
+		"a retired configuration key is not accepted in config_version 9", action)
 }
 
 func projectV8YAML(source string, node *yaml.Node, path string) (any, error) {
@@ -487,15 +750,44 @@ func v8Error(source string, code V8YAMLErrorCode, path string, node *yaml.Node, 
 
 var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 
+// yaml.v3 reports parser errors (unlike scanner errors) with the 0-based
+// line of their context mark, one line before the bad line that Python and
+// editors name (GAP-1430).
+var v8YAMLParserError = regexp.MustCompile(
+	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
+
+// v8YAMLSyntaxReasonPrefix strips the "yaml: line N: " lead from a yaml.v3
+// error so only the parser's reason is left.
+var v8YAMLSyntaxReasonPrefix = regexp.MustCompile(`^(?:yaml: )?(?:line [0-9]+: )?`)
+
+// v8YAMLSyntaxReason returns the parser's fixed-text reason, or "" when the
+// reason could quote the file (anchor or tag names) or is not a short phrase.
+func v8YAMLSyntaxReason(cause error) string {
+	reason := strings.TrimSpace(v8YAMLSyntaxReasonPrefix.ReplaceAllString(cause.Error(), ""))
+	lower := strings.ToLower(reason)
+	if reason == "" || len(reason) > 80 || strings.ContainsAny(reason, "\"`\n") ||
+		strings.Contains(lower, "anchor") || strings.Contains(lower, "tag") {
+		return ""
+	}
+	return reason
+}
+
 func v8SyntaxError(source string, cause error) error {
 	line := 0
+	summary := "invalid YAML"
 	if cause != nil {
 		if match := v8YAMLSyntaxLine.FindStringSubmatch(cause.Error()); len(match) == 2 {
 			line, _ = strconv.Atoi(match[1])
+			if line > 0 && v8YAMLParserError.MatchString(cause.Error()) {
+				line++
+			}
+		}
+		if reason := v8YAMLSyntaxReason(cause); reason != "" {
+			summary += " (" + reason + ")"
 		}
 	}
 	return &V8YAMLError{
 		Code: V8YAMLErrorSyntax, Source: source, Path: "$", Line: line,
-		Summary: "configuration source is not valid YAML", Action: "correct the YAML syntax and retry",
+		Summary: summary, Action: "fix that line",
 	}
 }

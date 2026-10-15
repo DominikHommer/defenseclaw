@@ -32,8 +32,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"regexp/syntax"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"gopkg.in/yaml.v3"
@@ -61,6 +65,12 @@ type RulePack struct {
 	// defaults" — explicitly different from an empty struct, which
 	// would override every field to empty.
 	LocalPatterns *LocalPatterns
+	// filesDigest is FilesDigest, set by LoadRulePack.
+	filesDigest string
+	// manifestDigest is the sha256 of the pack's defenseclaw-pack.json, ""
+	// without one. Its posture sets the pack's default levels, so it is
+	// part of the pin and of Summary (GAP-0431).
+	manifestDigest string
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -87,15 +97,25 @@ func (e *RulePackError) Error() string {
 // RulePack, but none of the source regexes, prompts, suppression values, tool
 // names, or filesystem paths are exposed.
 type RulePackSummary struct {
-	JudgeCount         int    `json:"judge_count"`
-	JudgeCategoryCount int    `json:"judge_category_count"`
-	RuleFileCount      int    `json:"rule_file_count"`
-	RuleCount          int    `json:"rule_count"`
-	EnabledRuleCount   int    `json:"enabled_rule_count"`
-	LocalPatternCount  int    `json:"local_pattern_count"`
-	SuppressionCount   int    `json:"suppression_count"`
-	SensitiveToolCount int    `json:"sensitive_tool_count"`
+	JudgeCount         int `json:"judge_count"`
+	JudgeCategoryCount int `json:"judge_category_count"`
+	RuleFileCount      int `json:"rule_file_count"`
+	RuleCount          int `json:"rule_count"`
+	EnabledRuleCount   int `json:"enabled_rule_count"`
+	LocalPatternCount  int `json:"local_pattern_count"`
+	SuppressionCount   int `json:"suppression_count"`
+	SensitiveToolCount int `json:"sensitive_tool_count"`
+	// StaleRuleCount counts enabled action rules (command, sensitive-path,
+	// cognitive-file, c2) that are 0.8.x copies of built-in rules without
+	// the expression 1.0 needs to block; AlertOnlyRuleCount the operator's
+	// own rules, of any category, without one: on a tool call they record a
+	// match and never block (GAP-1225).
+	StaleRuleCount     int    `json:"stale_rule_count"`
+	AlertOnlyRuleCount int    `json:"alert_only_rule_count"`
 	Digest             string `json:"digest"`
+	// FilesDigest is FilesDigest: the pin guardrail.custom_packs.<name>.digest
+	// holds (hex).
+	FilesDigest string `json:"files_digest"`
 }
 
 // LocalPatterns mirrors `rules/local-patterns.yaml`. Each field corresponds
@@ -271,6 +291,8 @@ type rulePackInventory struct {
 	files     map[string]diskRulePackFile
 	ruleFiles []string
 	totalSize int64
+	// manifest is the pack's defenseclaw-pack.json, nil without one.
+	manifest *diskRulePackFile
 }
 
 // LoadRulePack loads and validates a rule pack. An empty dir selects the
@@ -279,6 +301,16 @@ type rulePackInventory struct {
 // present unreadable, malformed, unsupported, or invalid component fails
 // closed. At least one recognized component must be present.
 func LoadRulePack(dir string) (*RulePack, error) {
+	return loadRulePack(dir, true)
+}
+
+// LoadRulePackForSecureClient preserves the pre-v9 Secure Client loader's
+// treatment of optional manifests until that profile adopts v9 (#1092).
+func LoadRulePackForSecureClient(dir string) (*RulePack, error) {
+	return loadRulePack(dir, false)
+}
+
+func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 	rp, err := loadEmbeddedRulePack()
 	if err != nil {
 		return nil, err
@@ -299,6 +331,7 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	}
 
 	var bytesRead int64
+	fileSums := make(map[string]string, len(inventory.files))
 	decode := func(rel string, out any) error {
 		file, ok := inventory.files[rel]
 		if !ok {
@@ -308,6 +341,8 @@ func LoadRulePack(dir string) (*RulePack, error) {
 		if err != nil {
 			return err
 		}
+		sum := sha256.Sum256(data)
+		fileSums[rel] = hex.EncodeToString(sum[:])
 		bytesRead += int64(len(data))
 		if bytesRead > maxRulePackAggregateBytes {
 			return rulePackErr(".", "aggregate_size_limit", "rule-pack YAML exceeds the aggregate byte limit")
@@ -366,7 +401,61 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	if err := rp.Validate(); err != nil {
 		return nil, err
 	}
+	// The manifest's posture changes the levels the gateway enforces, so a
+	// manifest added or edited changes the pin and the effective policy
+	// digest like any rule file (GAP-0431).
+	if manifest := inventory.manifest; manifest != nil {
+		data, err := readRulePackFile(*manifest)
+		if err != nil {
+			return nil, err
+		}
+		if validateManifest {
+			var parsed struct {
+				Posture string `json:"posture"`
+			}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must be valid JSON with a known posture")
+			}
+			switch strings.ToLower(strings.TrimSpace(parsed.Posture)) {
+			case "default", "strict", "permissive":
+			default:
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+			}
+		}
+		sum := sha256.Sum256(data)
+		rp.manifestDigest = hex.EncodeToString(sum[:])
+		fileSums[PackManifestFile] = rp.manifestDigest
+	}
+	rp.filesDigest = filesDigest(fileSums)
 	return rp, nil
+}
+
+// filesDigest hashes the pack's own component files: each relative path
+// and the sha256 of its bytes, in path order.
+func filesDigest(sums map[string]string) string {
+	rels := make([]string, 0, len(sums))
+	for rel := range sums {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		fmt.Fprintf(h, "%s\n%s\n", rel, sums[rel])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// FilesDigest is the hex digest of the files the pack was loaded from (each
+// relative path and the sha256 of its bytes). guardrail.custom_packs pins a
+// custom pack by it. Unlike Summary().Digest it leaves out the components
+// the pack inherits from the binary's embedded defaults, so a release that
+// changes those defaults does not break a pinned pack; the effective policy
+// digest covers them separately (builtin). The embedded pack has no files.
+func (rp *RulePack) FilesDigest() string {
+	if rp == nil || rp.filesDigest == "" {
+		return filesDigest(nil)
+	}
+	return rp.filesDigest
 }
 
 func loadEmbeddedRulePack() (*RulePack, error) {
@@ -395,6 +484,16 @@ func loadEmbeddedRulePack() (*RulePack, error) {
 	return rp, nil
 }
 
+// EmbeddedToolInjectionPrompt returns the embedded default tool-injection
+// judge prompt, the fallback for a judge built without a rule pack.
+var EmbeddedToolInjectionPrompt = sync.OnceValue(func() string {
+	judge, err := decodeEmbeddedYAML[JudgeYAML](path.Join("judge", "tool-injection.yaml"))
+	if err != nil {
+		return ""
+	}
+	return judge.SystemPrompt
+})
+
 func decodeEmbeddedYAML[T any](rel string) (*T, error) {
 	embeddedPath := path.Join("defaults", rel)
 	data, err := fs.ReadFile(defaultsFS, embeddedPath)
@@ -411,26 +510,45 @@ func decodeEmbeddedYAML[T any](rel string) (*T, error) {
 	return &out, nil
 }
 
+// rulePackDirectoryUnreadable names why the rule-pack directory could not be
+// inspected. It carries the operating system's reason, never a path: the
+// caller already names the directory.
+func rulePackDirectoryUnreadable(err error) *RulePackError {
+	const reason = "rule-pack directory cannot be inspected"
+	if errors.Is(err, fs.ErrPermission) {
+		return rulePackErr(".", "directory_unreadable", reason+
+			" (access denied): the account the gateway runs as needs read and list access to the directory and to each of its parent folders")
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return rulePackErr(".", "directory_unreadable", reason+" ("+errno.Error()+")")
+	}
+	return rulePackErr(".", "directory_unreadable", reason)
+}
+
 func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, rulePackErr(".", "directory_not_found", "rule-pack directory does not exist")
 		}
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 	if !info.IsDir() {
 		return nil, rulePackErr(".", "not_directory", "rule-pack path is not a directory")
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 
 	inventory := &rulePackInventory{files: make(map[string]diskRulePackFile)}
 	entries := 0
 	err = filepath.WalkDir(resolvedDir, func(full string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be read by this account (permission denied); folders need 0755 and files 0644")
+			}
 			return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be inspected")
 		}
 		if full == resolvedDir {
@@ -448,6 +566,16 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		rel = filepath.ToSlash(rel)
 		if entry.Type()&os.ModeSymlink != 0 {
 			return rulePackErr(safeInventoryPath(rel), "file_type", "component must be a regular file")
+		}
+		if isPackManifestName(rel) {
+			if !entry.Type().IsRegular() {
+				return rulePackErr(PackManifestFile, "file_type", "component must be a regular file")
+			}
+			if inventory.manifest != nil {
+				return rulePackErr(PackManifestFile, "inventory_unexpected", "rule pack has more than one manifest")
+			}
+			inventory.manifest = &diskRulePackFile{relPath: PackManifestFile, full: full}
+			return nil
 		}
 		extension := strings.ToLower(path.Ext(rel))
 		if extension != ".yaml" && extension != ".yml" {
@@ -488,6 +616,20 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// isPackManifestName reports whether rel names the pack manifest. Windows
+// and macOS volumes are normally case-insensitive, so ReadPackPosture opens a
+// differently cased manifest there and the pin must cover it (GAP-1313).
+func isPackManifestName(rel string) bool {
+	return packManifestNameMatches(rel, runtime.GOOS == "windows" || runtime.GOOS == "darwin")
+}
+
+func packManifestNameMatches(rel string, caseInsensitive bool) bool {
+	if caseInsensitive {
+		return strings.EqualFold(rel, PackManifestFile)
+	}
+	return rel == PackManifestFile
 }
 
 func isRecognizedRulePackYAML(rel string) bool {
@@ -815,13 +957,19 @@ func (c *JudgeCategory) EffectiveSeverity(direction, fallback string) string {
 // the first error is returned as a value-safe RulePackError and no invalid
 // pack is returned by LoadRulePack.
 func (rp *RulePack) Validate() error {
+	return rp.validate(false)
+}
+
+// validate permits an empty enabled category only in a composed in-memory pack.
+// On-disk packs still require an enabled rule in every category.
+func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	if rp == nil {
 		return rulePackErr(".", "validation", "rule pack must not be nil")
 	}
 	if err := rp.validateJudges(); err != nil {
 		return err
 	}
-	if err := rp.validateRuleFiles(); err != nil {
+	if err := rp.validateRuleFiles(allowEmptyCategories); err != nil {
 		return err
 	}
 	if err := rp.validateLocalPatterns(); err != nil {
@@ -833,8 +981,8 @@ func (rp *RulePack) Validate() error {
 	return rp.validateSensitiveTools()
 }
 
-func (rp *RulePack) validateRuleFiles() error {
-	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
+func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
+	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
 	totalRules := 0
 	semanticRules := 0
@@ -852,10 +1000,12 @@ func (rp *RulePack) validateRuleFiles() error {
 		if category == "" {
 			return rulePackErr(rel, "validation", "category must not be blank")
 		}
-		if _, exists := seenCategories[category]; exists {
-			return rulePackErr(rel, "duplicate_category", "category duplicates another rule file")
+		if first, exists := seenCategories[category]; exists {
+			// Name the edit: 0.8.x took such a pack (GAP-1339).
+			return rulePackErr(rel, "duplicate_category", fmt.Sprintf("category repeats %s; categories must be "+
+				"unique: move the rules of %s into %s and delete %s", first, rel, first, rel))
 		}
-		seenCategories[category] = struct{}{}
+		seenCategories[category] = rel
 		if len(ruleFile.Rules) > maxRulesPerFile {
 			return rulePackErr(rel, "rule_count_limit", "rule file contains too many rules")
 		}
@@ -875,7 +1025,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
 			}
 			seenIDs[ruleID] = struct{}{}
-			if err := validateRequiredRegex(rel, fmt.Sprintf("rule %d pattern", ruleIndex), rule.Pattern); err != nil {
+			if err := validateRequiredRegex(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
 				return err
 			}
 			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
@@ -899,16 +1049,15 @@ func (rp *RulePack) validateRuleFiles() error {
 				}
 				program, code := compiler.Compile(rule.Expression)
 				if code != semantic.CompileOK {
-					return rulePackErr(
-						rel,
-						"semantic_"+string(code),
-						fmt.Sprintf("rule %d expression is invalid", ruleIndex),
-					)
+					return rulePackErr(rel, "semantic_"+string(code), semanticCompileReason(ruleFieldLabel(ruleIndex, ruleID), code))
 				}
 				if rule.Enabled == nil || *rule.Enabled {
 					semanticCost += program.StaticCost()
 					if semanticCost > maxEnabledSemanticStaticCost {
-						return rulePackErr(rel, "semantic_catalog_cost_limit", "enabled semantic rules exceed the catalog cost limit")
+						return rulePackErr(rel, "semantic_catalog_cost_limit", fmt.Sprintf(
+							"enabled semantic rules exceed the catalog cost limit of %d (rule %d brings the estimated total to %d); "+
+								"disable or simplify semantic rules, or split them across packs",
+							maxEnabledSemanticStaticCost, ruleIndex, semanticCost))
 					}
 				}
 			}
@@ -943,7 +1092,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				enabled++
 			}
 		}
-		if enabled == 0 {
+		if enabled == 0 && !allowEmptyCategories {
 			return rulePackErr(rel, "empty_category", "category must contain at least one enabled rule")
 		}
 	}
@@ -1261,9 +1410,31 @@ func validateRequiredRegex(rel, field, pattern string) error {
 		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
 	}
 	if _, err := regexp.Compile(pattern); err != nil {
-		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression")
+		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
 	}
 	return nil
+}
+
+// safeRuleIDPattern bounds the rule ids echoed in validation errors.
+var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+
+// ruleFieldLabel names a rule by its id and its 1-based place in the file, so
+// an author can find it (GAP-1225). An id outside the safe set is left out.
+func ruleFieldLabel(index int, id string) string {
+	if safeRuleIDPattern.MatchString(id) {
+		return fmt.Sprintf("rule %s (entry %d)", id, index+1)
+	}
+	return fmt.Sprintf("rule entry %d", index+1)
+}
+
+// regexErrorReason returns the RE2 reason (for example "missing closing ]")
+// without the expression text, so no source regex reaches the error.
+func regexErrorReason(err error) string {
+	var syntaxErr *syntax.Error
+	if errors.As(err, &syntaxErr) && syntaxErr.Code != "" {
+		return ": " + string(syntaxErr.Code)
+	}
+	return ""
 }
 
 func validSeverity(severity string) bool {
@@ -1303,6 +1474,17 @@ func safeJudgeName(name string) string {
 	return "component"
 }
 
+// RulePackDigest is the FilesDigest of the valid pack in dir, the value
+// config.yaml pins a custom pack by (the v9 migration's
+// MigrateV9Input.RulePackDigest).
+func RulePackDigest(dir string) (string, error) {
+	pack, err := LoadRulePack(dir)
+	if err != nil {
+		return "", err
+	}
+	return pack.FilesDigest(), nil
+}
+
 // Summary returns deterministic counts and a SHA-256 fingerprint of the
 // complete loaded RulePack configuration. Rule counts cover loaded YAML
 // overrides, not compiled gateway fallback rules. Source paths are excluded.
@@ -1311,6 +1493,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 		var summary RulePackSummary
 		sum := sha256.Sum256([]byte("null"))
 		summary.Digest = hex.EncodeToString(sum[:])
+		summary.FilesDigest = filesDigest(nil)
 		return summary
 	}
 	summary := rp.counts()
@@ -1330,12 +1513,14 @@ func (rp *RulePack) Summary() RulePackSummary {
 		SensitiveTools *SensitiveToolsConfig
 		RuleFiles      []RulesFileYAML
 		LocalPatterns  *LocalPatterns
+		Manifest       string `json:",omitempty"`
 	}{
 		Suppressions:   rp.Suppressions,
 		JudgeConfigs:   rp.JudgeConfigs,
 		SensitiveTools: rp.SensitiveTools,
 		RuleFiles:      ruleFiles,
 		LocalPatterns:  rp.LocalPatterns,
+		Manifest:       rp.manifestDigest,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
@@ -1343,6 +1528,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 	}
 	sum := sha256.Sum256(encoded)
 	summary.Digest = hex.EncodeToString(sum[:])
+	summary.FilesDigest = rp.FilesDigest()
 	return summary
 }
 
@@ -1387,6 +1573,7 @@ func (rp *RulePack) counts() RulePackSummary {
 	if tools := rp.SensitiveTools; tools != nil {
 		summary.SensitiveToolCount = len(tools.Tools)
 	}
+	summary.StaleRuleCount, summary.AlertOnlyRuleCount = rp.ruleGaps()
 	return summary
 }
 
@@ -1403,4 +1590,52 @@ func (rp *RulePack) String() string {
 		summary.RuleFileCount,
 		summary.RuleCount,
 	)
+}
+
+// semanticRuleStaticCostLimit mirrors the semantic compiler's per-rule
+// worst-case cost bound (internal/guardrail/semantic limits.go,
+// maxRuleStaticCost), which it does not export. It is only quoted in the
+// refusal; the compiler enforces its own value, and a test keeps the two
+// equal.
+const semanticRuleStaticCostLimit uint64 = 6_000_000
+
+// semanticCompileReason explains a refused semantic expression without
+// echoing it. The cost refusals name the limit and how to get under it; the
+// other codes say what kind of problem it is. An author used to see only
+// "rule 0 expression is invalid" (GAP-1898). label names the rule by id and
+// entry (ruleFieldLabel).
+func semanticCompileReason(label string, code semantic.CompileCode) string {
+	switch code {
+	case semantic.CompileStaticCost:
+		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
+			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
+			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
+	case semantic.CompileStaticCostUnbounded:
+		return fmt.Sprintf("%s expression has no bounded worst-case evaluation cost (it uses a value whose size "+
+			"cannot be bounded); test the rule-pack fields directly", label)
+	}
+	if why, ok := semanticCompileProblems[code]; ok {
+		return fmt.Sprintf("%s expression is invalid: %s", label, why)
+	}
+	return fmt.Sprintf("%s expression is invalid", label)
+}
+
+// semanticCompileProblems describes each refused-expression code in words.
+var semanticCompileProblems = map[semantic.CompileCode]string{
+	semantic.CompileExpressionEncoding: "it is not valid UTF-8",
+	semantic.CompileExpressionSize:     "it is too long",
+	semantic.CompileSyntax:             "it has a syntax error",
+	semantic.CompileASTNodes:           "it has too many terms; split it into separate rules",
+	semantic.CompileASTDepth:           "it is nested too deeply; split it into separate rules",
+	semantic.CompileType: "it does not type-check: it names something that is not a rule-pack field or function, " +
+		"or compares values of different types (quote string literals, for example \"rm\")",
+	semantic.CompileResultType:         "it must evaluate to true or false",
+	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
+	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
+	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
+	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
+	semantic.CompileRegexSize:          "the matches() pattern is too long",
+	semantic.CompileRegexSyntax:        "the matches() pattern is not a valid RE2 regular expression",
 }

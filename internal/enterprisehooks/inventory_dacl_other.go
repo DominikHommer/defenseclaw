@@ -9,6 +9,12 @@ package enterprisehooks
 // platforms. macOS uses per-user launchd agents that inherit user permissions
 // naturally; Linux systemd-user runs likewise. Only the Windows service model
 // requires the gateway service SID to be added to the user profile DACLs.
-func GrantGatewayInventoryReadForManifest(_ Manifest, _ string, _ EnumerationLogger) error {
+func GrantGatewayInventoryReadForManifest(_ Manifest, _ string, _ bool, _ EnumerationLogger) error {
+	return nil
+}
+
+// RevokeGatewayInventoryReadForManifest is a Windows-only no-op on other
+// platforms.
+func RevokeGatewayInventoryReadForManifest(_ Manifest) error {
 	return nil
 }

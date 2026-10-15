@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
+	"golang.org/x/sys/unix"
 )
 
 func openAuditDBFileNoFollow(path string, create, _ bool) (*os.File, error) {
@@ -32,6 +34,38 @@ func openAuditDBFileNoFollow(path string, create, _ bool) (*os.File, error) {
 	return file, nil
 }
 
+// auditDBPinnedFileDeleted reports that a pinned file is no longer linked
+// anywhere, as after SQLite deletes a WAL or SHM file on its last close.
+func auditDBPinnedFileDeleted(file *os.File) (bool, error) {
+	links, err := auditDBPinnedLinkCount(file)
+	return links == 0, err
+}
+
+// validateAuditDBSidecarLinkCount refuses a sidecar that is a hard link to
+// another file. SQLite never creates one.
+func validateAuditDBSidecarLinkCount(file *os.File) error {
+	links, err := auditDBPinnedLinkCount(file)
+	if err != nil {
+		return err
+	}
+	if links != 1 {
+		return fmt.Errorf("audit: database file has %d hard links, expected exactly 1", links)
+	}
+	return nil
+}
+
+func auditDBPinnedLinkCount(file *os.File) (uint64, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("audit: database file link count is unavailable")
+	}
+	return uint64(stat.Nlink), nil
+}
+
 func auditDBPlatformFileNeedsHardening(*os.File) (bool, error) { return false, nil }
 
 // Preserve the Unix sidecar repair seam: chmod/permission hardening remains
@@ -40,7 +74,22 @@ func auditDBPlatformSidecarNeedsHardening(*os.File) (bool, error) { return true,
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return false }
 
-func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool) error {
+// validateAuditDBPlatformTrust judges the ownership + permission posture of an
+// audit-DB path element.
+//
+// The fourth parameter (strict) toggles the AIFW-34262 advisory downgrade for
+// ancestor permission verdicts. When strict is false, the caller is walking
+// an ANCESTOR (not the leaf) — a permission-shaped 0o022 verdict on a path
+// under managed.PlatformInstallerOwnedPath (e.g. /opt/cisco, /Library/Logs/Cisco)
+// is downgraded to a managed_trust_ancestor_advisory warning and swallowed.
+// That mirrors the softening that internal/managed/trust_unix.go already does
+// for the config and data_dir ancestors; without it, /opt/cisco at 0775
+// (group-writable, root-owned) trips this check and fails-closed at gateway
+// startup even though PR #884 softened the parallel managed-package walker.
+// When strict is true (leaf), every verdict stays fatal. Structural failures
+// (untrusted owner, ownership lookup failure) also stay fatal in either mode.
+// managed.TrustStrictAncestorsEnv=1 forces every verdict fatal.
+func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, strict bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return errors.New("audit: database path ownership is unavailable")
@@ -57,7 +106,10 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 		if directory {
 			kind = "directory"
 		}
-		return fmt.Errorf("audit: database %s is group- or other-writable", kind)
+		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
+		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		label := fmt.Sprintf("audit store database %s", kind)
+		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
 	return nil
 }
@@ -91,4 +143,26 @@ func auditDBModeMatches(info os.FileInfo, want os.FileMode) bool {
 
 func auditDBImmediateDirectoryModeTrusted(info os.FileInfo) bool {
 	return info.Mode().Perm()&0o022 == 0
+}
+
+// auditDBOpenElsewhere reports another process that holds a SQLite lock on the
+// database: its PENDING, RESERVED and SHARED lock bytes start at 1 GiB. The
+// caller holds no connection, so closing this probe drops no lock of its own.
+func auditDBOpenElsewhere(path string) error {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	probe := unix.Flock_t{Type: unix.F_WRLCK, Whence: 0, Start: 0x40000000, Len: 512}
+	if err := unix.FcntlFlock(file.Fd(), unix.F_GETLK, &probe); err != nil {
+		return fmt.Errorf("audit: check whether the database is in use: %w", err)
+	}
+	if probe.Type != unix.F_UNLCK {
+		return fmt.Errorf("audit: the database is still open in process %d; stop it and start the gateway again", probe.Pid)
+	}
+	return nil
 }

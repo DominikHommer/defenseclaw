@@ -6,10 +6,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,14 +21,97 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// Keep the running Setup image open without write/delete sharing while the
+// trailer is decoded and its Authenticode signature is verified. The Python
+// compiler cannot be individually Authenticode signed; the signed outer
+// image and its digest manifest authenticate those bytes as one unit.
+func loadTrustedEnterprisePayload() (enterprisePayload, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("resolve enterprise Setup image: %w", err)
+	}
+	encoded, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	handle, err := windows.CreateFile(encoded, windows.GENERIC_READ, windows.FILE_SHARE_READ,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("lock enterprise Setup image: %w", err)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return enterprisePayload{}, errors.New("wrap enterprise Setup image handle")
+	}
+	defer file.Close()
+	var identity windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &identity); err != nil {
+		return enterprisePayload{}, err
+	}
+	if identity.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		return enterprisePayload{}, errors.New("enterprise Setup image is not a regular non-reparse file")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	result, err := setuppayload.Read(file, info.Size())
+	if err != nil {
+		return enterprisePayload{}, fmt.Errorf("read enterprise Setup image trailer: %w", err)
+	}
+	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	if payload.Standalone() && !payload.Manifest.Unsigned {
+		if err := verifySignedEnterpriseSetup(file, path); err != nil {
+			return enterprisePayload{}, fmt.Errorf("signed standalone Setup image is not trusted: %w", err)
+		}
+	}
+	return payload, nil
+}
+
+func verifySignedEnterpriseSetup(file *os.File, path string) error {
+	encoded, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	fileInfo := &windows.WinTrustFileInfo{
+		Size: uint32(unsafe.Sizeof(windows.WinTrustFileInfo{})), FilePath: encoded,
+		File: windows.Handle(file.Fd()),
+	}
+	data := &windows.WinTrustData{
+		Size: uint32(unsafe.Sizeof(windows.WinTrustData{})), UIChoice: windows.WTD_UI_NONE,
+		RevocationChecks: windows.WTD_REVOKE_NONE, UnionChoice: windows.WTD_CHOICE_FILE,
+		FileOrCatalogOrBlobOrSgnrOrCert: unsafe.Pointer(fileInfo),
+		StateAction:                     windows.WTD_STATEACTION_VERIFY,
+		ProvFlags:                       windows.WTD_CACHE_ONLY_URL_RETRIEVAL | windows.WTD_REVOCATION_CHECK_NONE | windows.WTD_DISABLE_MD2_MD4,
+		UIContext:                       windows.WTD_UICONTEXT_INSTALL,
+	}
+	verifyErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
+	data.StateAction = windows.WTD_STATEACTION_CLOSE
+	closeErr := windows.WinVerifyTrustEx(windows.InvalidHWND, &windows.WINTRUST_ACTION_GENERIC_VERIFY_V2, data)
+	if verifyErr != nil {
+		return fmt.Errorf("WinVerifyTrust rejected outer Setup signature: %w", verifyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close WinVerifyTrust state: %w", closeErr)
+	}
+	return nil
+}
 
 const (
 	enterpriseSetupStagePrefix = "DefenseClaw-Enterprise-Setup-"
@@ -39,6 +124,12 @@ const (
 	// stage cleanup runs.
 	enterpriseSetupScratchDirName = "scratch"
 	maximumLifecycleOutput        = 2 << 20
+	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
+	// enterpriseSetupStageStaleAge is the age after which a staging folder
+	// belongs to no Setup still staging: unpacking the payload takes
+	// seconds to minutes. A Setup whose lifecycle still runs holds its
+	// folder as the working directory, which the rename below needs free.
+	enterpriseSetupStageStaleAge = 30 * time.Minute
 )
 
 func executeEnterpriseSetup(
@@ -52,33 +143,71 @@ func executeEnterpriseSetup(
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return 0, errors.New("DefenseClaw enterprise Setup requires an elevated administrator token")
 	}
-	payload, err := loadEmbeddedEnterprisePayload()
+	payload, err := enterpriseSetupPayloadLoader()
 	if err != nil {
 		return 0, err
 	}
-	if payload.Manifest.Unsigned && !opts.AllowUnsigned {
+	standalone := payload.Standalone()
+	if payload.Manifest.Unsigned && !opts.AllowUnsigned && !standalone {
 		return 0, errors.New("this enterprise Setup is unsigned and can run only with --allow-unsigned in exact disposable certification scope")
 	}
 	if !payload.Manifest.Unsigned && opts.AllowUnsigned {
-		return 0, errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		err := errors.New("--allow-unsigned is forbidden for a signed enterprise Setup payload")
+		if standalone {
+			return 0, enterpriseSetupInvalidArguments{err}
+		}
+		return 0, err
 	}
+	if !standalone && (opts.Action == "ensure" || strings.TrimSpace(opts.AllowedSigners) != "") {
+		return 0, errors.New("ensure and --allowed-signers are available only in the standalone enterprise Setup")
+	}
+	opts.Standalone = standalone
+	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
+	opts.ProductVersion = payload.Manifest.Version
 	for _, input := range []struct {
 		label string
 		value *string
 	}{
 		{label: "config", value: &opts.Config},
 		{label: "manifest", value: &opts.Manifest},
+		{label: "trust anchors", value: &opts.TrustAnchors},
 	} {
 		if strings.TrimSpace(*input.value) == "" {
 			continue
 		}
 		canonical, err := validateEnterpriseSetupInput(*input.value, input.label)
 		if err != nil {
-			return 0, err
+			return 0, standaloneEnterpriseSetupInputError(standalone, err)
 		}
 		*input.value = canonical
 	}
 
+	if strings.TrimSpace(opts.Bundle) != "" {
+		// A signed bundle may come from any folder: the lifecycle copies it
+		// into its store and verifies that copy, never this path again.
+		bundle, err := validateEnterpriseSetupBundle(opts.Bundle)
+		if err != nil {
+			return 0, standaloneEnterpriseSetupInputError(standalone, err)
+		}
+		opts.Bundle = bundle
+	}
+	if standalone {
+		// Refuse a too-full volume before anything is staged. The Secure
+		// Client Setup keeps its historical behavior.
+		if programData, err := winpath.TrustedProgramData(); err == nil {
+			// A removed folder is progress, not a failure: an MDM reads any
+			// stderr output as a failed script (GAP-1353, GAP-1069), and in
+			// a JSON run stdout is the result alone.
+			progress := stdout
+			if opts.JSON {
+				progress = io.Discard
+			}
+			removeStaleEnterpriseSetupStages(programData, time.Now(), progress, stderr)
+			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
+				return 0, err
+			}
+		}
+	}
 	stageRoot, cleanup, err := stageEnterprisePayload(payload)
 	if err != nil {
 		return 0, err
@@ -105,7 +234,21 @@ func executeEnterpriseSetup(
 	child := processutil.CommandContext(ctx, cliPath, arguments...)
 	child.Dir = stageRoot
 	child.Env = childEnvironment
-	output, runErr := processutil.CombinedOutputTree(child, false)
+	var output []byte
+	var runErr error
+	if opts.Standalone {
+		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
+		// once. Its scanner runtime progress goes to stdout for a person and
+		// to the lifecycle log in a JSON run, never to stderr, which an MDM
+		// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
+		var captured bytes.Buffer
+		child.Stdout = &captured
+		child.Stderr = lifecycleProgress{stderr}
+		runErr = processutil.RunTree(child)
+		output = captured.Bytes()
+	} else {
+		output, runErr = processutil.CombinedOutputTree(child, false)
+	}
 	if len(output) > maximumLifecycleOutput {
 		return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
 	}
@@ -121,16 +264,35 @@ func executeEnterpriseSetup(
 		}
 		return 0, cleanupErr
 	}
+	timedOut := ctx.Err() != nil
 	if len(output) != 0 {
 		destination := stdout
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
+		if opts.Standalone && opts.JSON && timedOut {
+			// A stopped run printed no result: what it wrote is diagnostics,
+			// and stdout carries the timeout result alone (GAP-0509).
+			destination = stderr
+		} else if opts.Standalone && opts.JSON {
+			// The lifecycle child's stderr is merged into this capture. An MDM
+			// parses stdout, so only the lifecycle's JSON result goes there.
+			document, diagnostics := splitStandaloneLifecycleJSON(output)
+			if len(diagnostics) != 0 {
+				if _, err := stderr.Write(diagnostics); err != nil {
+					return 0, fmt.Errorf("publish enterprise lifecycle diagnostics: %w", err)
+				}
+			}
+			output = document
+		}
 		if _, err := destination.Write(output); err != nil {
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}
 	}
-	if ctx.Err() != nil {
+	if timedOut {
+		if opts.Standalone {
+			return 0, standaloneEnterpriseSetupTimeout(opts, ctx.Err())
+		}
 		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
 	}
 	if runErr == nil {
@@ -140,16 +302,91 @@ func executeEnterpriseSetup(
 	if !errors.As(runErr, &exitErr) {
 		return 0, fmt.Errorf("launch enterprise lifecycle: %w", runErr)
 	}
+	if opts.Standalone {
+		// The standalone lifecycle reports MSI-compatible codes so an MDM
+		// retries a busy host (1618) and does not retry bad arguments
+		// (1639). Anything else is the fatal-install code.
+		switch code := exitErr.ExitCode(); code {
+		case enterpriseBusyExitCode, enterpriseInvalidArgsExitCode:
+			return code, nil
+		}
+	}
 	// The public enterprise lifecycle promises only 0 and 1603. Collapse any
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
 }
 
+// enterpriseSetupPathError is a CONFIG=/MANIFEST= value that is not an
+// existing absolute local path: a command-line error, not a security
+// refusal. Its text is unchanged.
+type enterpriseSetupPathError struct{ error }
+
+func (err enterpriseSetupPathError) Unwrap() error { return err.error }
+
+// enterpriseSetupUntrustedInput is an existing CONFIG=/MANIFEST= file Setup
+// will not take: a link or other non-regular file, or one a principal other
+// than Administrators, SYSTEM or TrustedInstaller owns or can change. Its
+// text is unchanged.
+type enterpriseSetupUntrustedInput struct {
+	label string
+	path  string
+	error
+}
+
+func (err enterpriseSetupUntrustedInput) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupInputError reports, for the standalone Setup
+// only, a malformed or missing input path and an input it will not take as
+// invalid arguments (1639), as the lifecycle reports every config it
+// refuses; an ownership or write-access refusal names the account and the
+// icacls fix (GAP-0528, GAP-0562). The Secure Client Setup keeps 1603.
+func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
+	if !standalone {
+		return err
+	}
+	var path enterpriseSetupPathError
+	if errors.As(err, &path) {
+		return enterpriseSetupInvalidArguments{err}
+	}
+	var untrusted enterpriseSetupUntrustedInput
+	if errors.As(err, &untrusted) {
+		if text, ok := managed.DescribeUntrustedSource(untrusted.label, untrusted.path, untrusted.error); ok {
+			return enterpriseSetupInvalidArguments{errors.New(text)}
+		}
+		return enterpriseSetupInvalidArguments{err}
+	}
+	return err
+}
+
+// validateEnterpriseSetupBundle accepts an existing absolute local
+// regular file that is not a link. Unlike CONFIG=, the folder need not be
+// administrator-only: the bundle signature and file hashes are checked on
+// the copy the lifecycle makes in its store.
+func validateEnterpriseSetupBundle(value string) (string, error) {
+	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
+		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
+		return "", enterpriseSetupPathError{errors.New("bundle path is empty, relative, padded, or environment-expanded")}
+	}
+	full := filepath.Clean(value)
+	volume := filepath.VolumeName(full)
+	if len(volume) != 2 || volume[1] != ':' {
+		return "", enterpriseSetupPathError{errors.New("bundle must use an absolute local Win32 drive path")}
+	}
+	info, err := os.Lstat(full)
+	if err != nil {
+		return "", enterpriseSetupPathError{fmt.Errorf("inspect bundle: %w", err)}
+	}
+	if !info.Mode().IsRegular() {
+		return "", enterpriseSetupPathError{fmt.Errorf("bundle is not a regular non-link file: %s", full)}
+	}
+	return full, nil
+}
+
 func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if value == "" || strings.TrimSpace(value) != value || strings.Contains(value, "%") ||
 		strings.ContainsAny(value, "\x00\r\n") || !filepath.IsAbs(value) {
-		return "", fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s path is empty, relative, padded, or environment-expanded", label)}
 	}
 	full, err := filepath.Abs(value)
 	if err != nil {
@@ -159,17 +396,20 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 	if len(volume) != 2 || volume[1] != ':' || strings.HasPrefix(full, `\\`) ||
 		strings.HasPrefix(full, `//`) || strings.HasPrefix(full, `\\?\`) ||
 		strings.HasPrefix(full, `\\.\`) {
-		return "", fmt.Errorf("%s must use an absolute local Win32 drive path", label)
+		return "", enterpriseSetupPathError{fmt.Errorf("%s must use an absolute local Win32 drive path", label)}
 	}
 	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", enterpriseSetupPathError{fmt.Errorf("inspect %s: %w", label, err)}
+	}
 	if err != nil {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%s is not a regular non-link file: %s", label, full)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("%s is not a regular non-link file: %s", label, full)}
 	}
 	if err := managed.ValidateTrustedFilePath(full, label); err != nil {
-		return "", fmt.Errorf("refusing untrusted %s: %w", label, err)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("refusing untrusted %s: %w", label, err)}
 	}
 	return filepath.Clean(full), nil
 }
@@ -193,7 +433,11 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		return "", nil, errors.Join(fmt.Errorf("create enterprise Setup scratch directory: %w", err), cleanupEnterpriseSetupStage(stageRoot, programData))
 	}
 	cleanup := func() error { return cleanupEnterpriseSetupStage(stageRoot, programData) }
-	for _, name := range requiredPayloadFiles {
+	required := payload.Required
+	if len(required) == 0 {
+		required = requiredPayloadFiles
+	}
+	for _, name := range required {
 		expected, ok := payload.Files[name]
 		if !ok {
 			return "", nil, errors.Join(fmt.Errorf("validated enterprise payload is missing manifest entry %s", name), cleanup())
@@ -203,7 +447,7 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		if err != nil {
 			return "", nil, errors.Join(fmt.Errorf("create staged enterprise payload %s: %w", name, err), cleanup())
 		}
-		source, sourceErr := embeddedPayload.Open("payload/" + name)
+		source, sourceErr := payload.PayloadFS.Open("payload/" + name)
 		if sourceErr != nil {
 			_ = file.Close()
 			return "", nil, errors.Join(fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr), cleanup())
@@ -236,7 +480,39 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 			return "", nil, errors.Join(fmt.Errorf("staged enterprise payload digest mismatch: %s", name), cleanup())
 		}
 	}
+	if payload.Standalone() && payload.Manifest.Unsigned {
+		if err := writeStandalonePayloadTrust(stageRoot, payload, required); err != nil {
+			return "", nil, errors.Join(err, cleanup())
+		}
+	}
 	return stageRoot, cleanup, nil
+}
+
+// writeStandalonePayloadTrust stages the hash_pinned trust anchor for an
+// unsigned standalone payload: the digests this Setup verified against its
+// own embedded manifest, in the lifecycle's
+// {"schema_version":1,"files":{...}} form.
+func writeStandalonePayloadTrust(stageRoot string, payload enterprisePayload, required []string) error {
+	files := make(map[string]string, len(required))
+	for _, name := range required {
+		files[name] = strings.ToLower(payload.Files[name].SHA256)
+	}
+	body, err := json.Marshal(map[string]any{"schema_version": 1, "files": files})
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(stageRoot, standalonePayloadTrustName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create the standalone payload trust manifest: %w", err)
+	}
+	_, writeErr := file.Write(append(body, '\n'))
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("write the standalone payload trust manifest: %w", err)
+	}
+	return managed.ValidateTrustedFilePath(path, "standalone payload trust manifest")
 }
 
 func createEnterpriseSetupStage(programData string) (string, error) {
@@ -301,8 +577,9 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	if err != nil {
 		return err
 	}
-	allowed := make(map[string]bool, len(requiredPayloadFiles))
-	for _, name := range requiredPayloadFiles {
+	stagedNames := append(append(append([]string{}, requiredPayloadFiles...), standalonePayloadFiles...), standalonePayloadTrustName)
+	allowed := make(map[string]bool, len(stagedNames))
+	for _, name := range stagedNames {
 		allowed[name] = true
 	}
 	for _, entry := range entries {
@@ -310,7 +587,7 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 			return fmt.Errorf("refusing enterprise Setup cleanup with unexpected staged object: %s", entry.Name())
 		}
 	}
-	for _, name := range requiredPayloadFiles {
+	for name := range allowed {
 		path := filepath.Join(cleanStage, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -319,21 +596,84 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	return os.Remove(cleanStage)
 }
 
+// cleanupStaleEnterpriseSetupStage removes a renamed stale staging folder.
+// A seam for tests: a test folder is not owned by the administrators group,
+// so the real cleanup keeps it.
+var cleanupStaleEnterpriseSetupStage = cleanupEnterpriseSetupStage
+
+// removeStaleEnterpriseSetupStages removes the staging folders that
+// interrupted standalone Setup runs left in ProgramData (a stopped Setup
+// cannot clean up; each holds the whole payload, GAP-0525). Only a folder
+// older than enterpriseSetupStageStaleAge that can be renamed is taken: a
+// Setup whose lifecycle still runs holds its folder as the working
+// directory, so the rename fails for it. The renamed folder keeps the stage
+// prefix, so one this run cannot clean (unexpected content) is swept by a
+// later run or by uninstall. A removed folder is reported to progress, one
+// it had to keep to diagnostics.
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, progress, diagnostics io.Writer) {
+	entries, err := os.ReadDir(programData)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		capability, found := strings.CutPrefix(name, enterpriseSetupStagePrefix)
+		if !found || !entry.IsDir() || len(capability) != 32 || strings.Trim(capability, "0123456789abcdef") != "" {
+			continue
+		}
+		path := filepath.Join(programData, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
+		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < enterpriseSetupStageStaleAge {
+			continue
+		}
+		retired := ""
+		for attempt := 0; attempt < 4 && retired == ""; attempt++ {
+			next := make([]byte, 16)
+			if _, err := rand.Read(next); err != nil {
+				return
+			}
+			candidate := filepath.Join(programData, enterpriseSetupStagePrefix+hex.EncodeToString(next))
+			if err := os.Rename(path, candidate); err == nil {
+				retired = candidate
+			} else if !errors.Is(err, os.ErrExist) {
+				break
+			}
+		}
+		if retired == "" {
+			continue
+		}
+		if err := cleanupStaleEnterpriseSetupStage(retired, programData); err != nil {
+			fmt.Fprintf(diagnostics, "%s: kept the staging folder an interrupted Setup run left, %s: %v\n", standaloneSetupArtifactName, retired, err)
+			continue
+		}
+		fmt.Fprintf(progress, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
+	}
+}
+
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {
 	arguments := []string{"enterprise", "windows", opts.Action, "--installer", filepath.Join(stageRoot, "install-enterprise.ps1")}
-	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
+	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair" || opts.Action == "ensure"
 	appendValue := func(flag, value string) {
 		if strings.TrimSpace(value) != "" {
 			arguments = append(arguments, flag, value)
 		}
 	}
 	if mutation {
-		appendValue("--broker-binary", filepath.Join(stageRoot, "defenseclaw-cmid-broker.exe"))
+		if !opts.Standalone {
+			appendValue("--broker-binary", filepath.Join(stageRoot, "defenseclaw-cmid-broker.exe"))
+		}
 		appendValue("--gateway-binary", filepath.Join(stageRoot, "defenseclaw-gateway.exe"))
 		appendValue("--acp-binary", filepath.Join(stageRoot, "defenseclaw-acp.exe"))
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
 		appendValue("--sensor-helper-binary", filepath.Join(stageRoot, "defenseclaw-sensor-helper.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
+		if opts.Standalone {
+			appendValue("--policy-compiler", filepath.Join(stageRoot, "policy_compiler.py"))
+		}
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)
 		// QA shorthand pair. Forwarded only when both are non-empty
@@ -348,11 +688,23 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	appendValue("--gateway-service-name", opts.GatewayServiceName)
 	appendValue("--guardian-service-name", opts.GuardianServiceName)
 	appendValue("--certification-codex-home", opts.CertificationCodexHome)
+	// Forward the outer Setup's protected scratch directory under
+	// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch as the
+	// installer's one-shot bootstrap parent. install-enterprise.ps1 uses
+	// this instead of C:\Windows\Temp so its rendered YAML content passes
+	// the module's later trusted-ancestor walk on Azure-AD-joined hosts,
+	// where C:\Windows\Temp carries an inherited Allow ACE for the
+	// interactive AAD principal with Delete rights.
+	arguments = append(arguments, "--bootstrap-parent",
+		filepath.Join(stageRoot, enterpriseSetupScratchDirName))
 	if opts.NoStart {
 		arguments = append(arguments, "--no-start")
 	}
 	if opts.Purge {
 		arguments = append(arguments, "--purge")
+	}
+	if opts.Force {
+		arguments = append(arguments, "--force")
 	}
 	if opts.JSON {
 		arguments = append(arguments, "--json")
@@ -375,6 +727,25 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	// spec-003:PRRT_kwDORuAK-s6alkr4.
 	if opts.DeferredConfig && opts.Action == "install" {
 		arguments = append(arguments, "--deferred-config")
+	}
+	if opts.Standalone {
+		arguments = append(arguments, "--profile", "standalone")
+		appendValue("--product-version", opts.ProductVersion)
+		if opts.StandaloneUnsigned {
+			arguments = append(arguments,
+				"--trust-mode", "hash_pinned",
+				"--payload-manifest", filepath.Join(stageRoot, standalonePayloadTrustName))
+		}
+		for _, signer := range strings.Split(opts.AllowedSigners, ",") {
+			appendValue("--allowed-signer", strings.ToLower(strings.TrimSpace(signer)))
+		}
+		if opts.Action == "ensure" {
+			appendValue("--bundle", opts.Bundle)
+			appendValue("--trust-anchors", opts.TrustAnchors)
+			if opts.RefuseCapabilityLoss {
+				arguments = append(arguments, "--refuse-capability-loss")
+			}
+		}
 	}
 	return arguments
 }
@@ -417,4 +788,14 @@ func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
 		environment = append(environment, key+"="+allowed[key])
 	}
 	return environment, nil
+}
+
+// lifecycleProgress passes the lifecycle stderr on. It is not an *os.File,
+// so the child always gets a pipe: a scheduled task can start Setup with no
+// usable stderr, and a failed write must not end the copy or the lifecycle.
+type lifecycleProgress struct{ w io.Writer }
+
+func (p lifecycleProgress) Write(b []byte) (int, error) {
+	_, _ = p.w.Write(b)
+	return len(b), nil
 }

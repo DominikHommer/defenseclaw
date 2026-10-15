@@ -185,11 +185,26 @@ type Report struct {
 	ComponentName string
 	Generation    uint64
 	OccurredAt    time.Time
+	// Bundle is captured when the reload applies. Delivery may occur after
+	// a failed transaction has rolled config.generation.json back.
+	Bundle              *BundleAttribution
+	AttributionCaptured bool
 	// DeliverySequence and DeliveryIndex form a manager-scoped stable
 	// envelope identity. Production reporters combine them with their process
 	// run ID and idempotently deduplicate retries.
 	DeliverySequence uint64
 	DeliveryIndex    uint32
+}
+
+// BundleAttribution identifies the local actor and signed bundle principal of
+// the config generation that caused a runtime graph reload.
+type BundleAttribution struct {
+	Actor, Principal, ID, SignerKeyID, ChangeSummary string
+	Version                                          uint64
+}
+
+type bundleAttributionReporter interface {
+	BundleAttribution() (BundleAttribution, bool)
 }
 
 // Reporter emits bounded reload state through the graph supplied by Manager.
@@ -442,6 +457,11 @@ type Manager struct {
 	pending           map[*cleanupBatch]struct{}
 	cleanupProgress   chan struct{}
 	asyncCleanup      atomic.Int64
+	// closeReports counts Close calls that have not yet admitted their own
+	// lifecycle reports. Close marks the manager closed and may hand retirement
+	// to cleanupAfterQuiescence before it builds its drain-failure batch, so the
+	// reporter must stay open until that batch is sequenced and admitted.
+	closeReports atomic.Int64
 }
 
 type cleanupBatch struct {
@@ -479,6 +499,7 @@ type managerTestHooks struct {
 	afterAcquireIncrement          func(*Graph)
 	afterAcquireActiveRevalidation func(*Graph)
 	afterSwapBeforeRetire          func(*Graph, *Graph)
+	afterCloseRetire               func(*Graph)
 	beforeReportDispatch           func(uint64)
 }
 
@@ -676,13 +697,19 @@ func (manager *Manager) Reload(ctx context.Context, candidate Config) (ReloadRes
 	}
 	if err := ctx.Err(); err != nil {
 		bounded := &Error{code: ErrorInitialization, contextCause: contextIdentity(err)}
-		manager.addRejected(&reports, old, bounded, "")
 		return finish(ReloadResult{active: old, status: ReloadRejected}, bounded)
 	}
 
 	newGraph, err := manager.build(ctx, candidate, old.generation+1, old, &reports)
 	if err != nil {
-		manager.addRejected(&reports, old, err, err.ComponentName())
+		// A reload the gateway's own stop or restart cancelled changed
+		// nothing: the old graph stays until the restart applies the new
+		// config. It is not a rejected change, so it records nothing; a
+		// "config.reload.rejected" next to every successful setup --restart
+		// read as a failure (GAP-1698; GAP-1295 dropped its health alert).
+		if ctx.Err() == nil {
+			manager.addRejected(&reports, old, err, err.ComponentName())
+		}
 		return finish(ReloadResult{active: old, status: ReloadRejected}, err)
 	}
 
@@ -720,6 +747,10 @@ func (manager *Manager) Close(ctx context.Context) *Error {
 		return &Error{code: ErrorInvalidDependency}
 	}
 	manager.reloadMu.Lock()
+	// Registered before closed becomes visible: asynchronous cleanup that
+	// finishes first must not close the reporter and drop this Close's batch,
+	// which would leave FlushReports waiting for a sequence that never lands.
+	manager.closeReports.Add(1)
 	reports := reportBatch{}
 	finish := func(err *Error) *Error {
 		manager.sequenceReports(&reports)
@@ -728,6 +759,7 @@ func (manager *Manager) Close(ctx context.Context) *Error {
 			manager.testHooks.beforeReportDispatch(reports.sequence)
 		}
 		_ = manager.dispatchReports(context.Background(), reports)
+		manager.closeReports.Add(-1)
 		manager.maybeCloseReporter()
 		return err
 	}
@@ -739,6 +771,9 @@ func (manager *Manager) Close(ctx context.Context) *Error {
 		manager.testHooks.afterSwapBeforeRetire(graph, nil)
 	}
 	cleanup := manager.retire(graph, graph, ctx)
+	if manager.testHooks != nil && manager.testHooks.afterCloseRetire != nil {
+		manager.testHooks.afterCloseRetire(graph)
+	}
 	if !cleanup.failed {
 		return finish(nil)
 	}
@@ -971,7 +1006,8 @@ func (manager *Manager) WaitCleanup(ctx context.Context) *Error {
 }
 
 func (manager *Manager) maybeCloseReporter() {
-	if manager == nil || !manager.closed.Load() || manager.asyncCleanup.Load() != 0 {
+	if manager == nil || !manager.closed.Load() || manager.asyncCleanup.Load() != 0 ||
+		manager.closeReports.Load() != 0 {
 		return
 	}
 	manager.cleanupMu.Lock()
@@ -1364,11 +1400,28 @@ func (manager *Manager) FlushReports(ctx context.Context) *Error {
 		manager.reportProgressMu.Unlock()
 		select {
 		case <-progress:
+		case <-manager.stoppedReporter():
+			// The worker has exited, so no later progress can arrive. Report the
+			// undelivered sequence instead of waiting on a condition that can
+			// never become true (for example with a context that has no deadline).
+			if manager.reportCompleted.Load() >= target {
+				return nil
+			}
+			return &Error{code: ErrorReporting}
 		case <-ctx.Done():
 			return &Error{code: ErrorReporting, contextCause: contextIdentity(ctx.Err())}
 		}
 	}
 	return nil
+}
+
+// stoppedReporter returns the worker's exit signal, or nil (never ready) when
+// the worker was never started.
+func (manager *Manager) stoppedReporter() <-chan struct{} {
+	if !manager.reporterStarted.Load() {
+		return nil
+	}
+	return manager.reporterStopped
 }
 
 // WaitReporter waits for the delivery worker to terminate after Close. A
@@ -1398,10 +1451,19 @@ func (manager *Manager) newReport(
 	if graph != nil {
 		generation = graph.Generation()
 	}
-	return Report{
+	report := Report{
 		Code: code, Outcome: outcome, FieldPath: fieldPath, ComponentName: component,
 		Generation: generation, OccurredAt: manager.clock.Now().UTC(),
 	}
+	if code == ReportReloadApplied {
+		if source, ok := manager.reporter.(bundleAttributionReporter); ok {
+			report.AttributionCaptured = true
+			if bundle, found := source.BundleAttribution(); found {
+				report.Bundle = &bundle
+			}
+		}
+	}
+	return report
 }
 
 func contextIdentity(err error) error {

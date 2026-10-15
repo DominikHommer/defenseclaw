@@ -33,7 +33,6 @@ actor GatewayClient {
     private let responseByteLimit: Int
 
     static let defaultTimeout: TimeInterval = 5
-    static let pluginTimeout: TimeInterval = 90
     static let scanTimeout: TimeInterval = 120
     static let maximumResponseBytes = 4 * 1024 * 1024
     private static let pathSegmentCharacters = CharacterSet.alphanumerics
@@ -107,7 +106,10 @@ actor GatewayClient {
             guard let http = response as? HTTPURLResponse else {
                 throw GatewayError.badResponse("non-HTTP response")
             }
-            if http.statusCode == 401 || http.statusCode == 403 {
+            // The sandbox API answers policy and organization refusals with
+            // 403 and a {"code","error"} body; those are not token failures.
+            let sandboxRefusal = http.statusCode == 403 && path.hasPrefix(Self.sandboxPrefix)
+            if http.statusCode == 401 || (http.statusCode == 403 && !sandboxRefusal) {
                 throw GatewayError.unauthorized
             }
             let expectedLength = http.expectedContentLength
@@ -444,79 +446,7 @@ actor GatewayClient {
         (try await getJSON("/status") as? [String: Any]) ?? [:]
     }
 
-    // MARK: - Catalogs
-
-    func skills() async throws -> [SkillItem] {
-        let json = try await getJSON("/skills")
-        let rows = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["skills"] as? [[String: Any]]) ?? []
-        return rows.map { r in
-            SkillItem(
-                key: (r["key"] as? String) ?? (r["skillKey"] as? String) ?? (r["name"] as? String) ?? "?",
-                name: (r["name"] as? String) ?? (r["key"] as? String) ?? "?",
-                version: (r["version"] as? String) ?? "—",
-                source: (r["source"] as? String) ?? ((r["bundled"] as? Bool) == true ? "bundled" : "custom"),
-                enabled: (r["enabled"] as? Bool) ?? true,
-                bundled: (r["bundled"] as? Bool) ?? false
-            )
-        }
-    }
-
-    func mcps() async throws -> [MCPItem] {
-        let json = try await getJSON("/mcps")
-        let rows = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["mcps"] as? [[String: Any]]) ?? []
-        return rows.map { r in
-            MCPItem(
-                name: (r["name"] as? String) ?? "?",
-                transport: (r["transport"] as? String) ?? (r["type"] as? String) ?? "stdio",
-                endpoint: (r["endpoint"] as? String) ?? (r["url"] as? String) ?? (r["command"] as? String) ?? "—",
-                version: (r["version"] as? String) ?? "—",
-                enabled: (r["enabled"] as? Bool) ?? true,
-                bundled: (r["bundled"] as? Bool) ?? false
-            )
-        }
-    }
-
-    func plugins() async throws -> [PluginItem] {
-        let dict = try await status()
-        let rows = (dict["plugins"] as? [[String: Any]]) ?? []
-        return rows.map { r in
-            PluginItem(
-                name: (r["name"] as? String) ?? "?",
-                version: (r["version"] as? String) ?? "—",
-                category: (r["category"] as? String) ?? (r["kind"] as? String) ?? "plugin",
-                enabled: (r["enabled"] as? Bool) ?? true
-            )
-        }
-    }
-
-    func toolsCatalog() async throws -> [ToolItem] {
-        let json = try await getJSON("/tools/catalog")
-        let rows = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["tools"] as? [[String: Any]]) ?? []
-        return rows.map { r in
-            ToolItem(
-                name: (r["name"] as? String) ?? "?",
-                summary: (r["description"] as? String) ?? "",
-                signature: (r["signature"] as? String) ?? (r["schema"] as? String) ?? "",
-                state: .allow,
-                usageCount: (r["usage_count"] as? Int) ?? (r["usageCount"] as? Int) ?? 0
-            )
-        }
-    }
-
     // MARK: - Mutations (parity with TUI write actions)
-
-    func setSkill(key: String, enabled: Bool) async throws {
-        try await post(enabled ? "/skill/enable" : "/skill/disable", ["skillKey": key])
-    }
-
-    func setMCP(name: String, enabled: Bool) async throws {
-        try await post(enabled ? "/mcp/enable" : "/mcp/disable", ["name": name])
-    }
-
-    func setPlugin(name: String, enabled: Bool) async throws {
-        try await post(enabled ? "/plugin/enable" : "/plugin/disable",
-                       ["pluginName": name], timeout: Self.pluginTimeout)
-    }
 
     func enforceBlock(targetType: String, targetName: String, reason: String) async throws {
         try await post("/enforce/block",
@@ -582,20 +512,82 @@ actor GatewayClient {
 
     /// Fetch the runtime-plane snapshot.
     ///
-    /// Throws on a malformed payload so the caller keeps the last good
-    /// snapshot: replacing a stale-but-true coverage report with an empty one
-    /// would read as a clean host rather than as a lost connection.
+    /// Throws on a malformed or incomplete payload so the caller keeps the
+    /// last good snapshot: replacing a stale-but-true coverage report with an
+    /// empty one would read as a clean host rather than as a lost connection.
     func aiRuntime() async throws -> AIRuntimeSnapshot {
         let json = try await getJSON("/api/v1/ai-usage/runtime")
-        guard json is [String: Any] else {
-            throw GatewayError.badResponse("/api/v1/ai-usage/runtime not an object")
+        guard let object = json as? [String: Any],
+              object["enabled"] is Bool, object["planes"] is [Any],
+              object["findings"] is [Any] else {
+            throw GatewayError.badResponse("Runtime coverage response is incomplete.")
         }
-        return AIRuntimeDecoding.snapshot(from: json)
+        return AIRuntimeDecoding.snapshot(from: object)
     }
 
     /// Trigger one immediate runtime-plane poll.
     func scanAIRuntime() async throws {
         try await post("/api/v1/ai-usage/runtime/scan", timeout: Self.scanTimeout)
+    }
+
+    // MARK: - OpenShell sandboxes (/api/v1/sandbox, internal/openshell/sandboxapi)
+
+    static let sandboxPrefix = "/api/v1/sandbox/"
+    // Stop and undo run the CLI (SandboxesView), which says when the stop
+    // ends a detached run and remembers what a copy held as it stopped; the
+    // daemon's stop keeps the run's log for `sandbox logs`.
+
+    func sandboxStatus() async throws -> SandboxStatus {
+        let json = try await getJSON("/api/v1/sandbox/status")
+        guard json is [String: Any] else { throw GatewayError.badResponse("/api/v1/sandbox/status not an object") }
+        return SandboxDecoding.status(from: json)
+    }
+
+    func sandboxes() async throws -> [SandboxRow] {
+        let json = try await getJSON("/api/v1/sandbox/sandboxes")
+        guard (json as? [String: Any])?["sandboxes"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/sandboxes has no sandboxes list")
+        }
+        return SandboxDecoding.sandboxes(from: json)
+    }
+
+    func sandboxApprovals() async throws -> [SandboxAsk] {
+        let json = try await getJSON("/api/v1/sandbox/approvals")
+        guard (json as? [String: Any])?["approvals"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/approvals has no approvals list")
+        }
+        return SandboxDecoding.approvals(from: json)
+    }
+
+    /// Buffered activity after `since` (the app polls; the TUI streams).
+    func sandboxActivity(since: Int) async throws -> [SandboxActivity] {
+        let items = since > 0 ? [URLQueryItem(name: "since", value: String(since))] : []
+        let data = try await request("GET", "/api/v1/sandbox/activity", queryItems: items)
+        let json = try JSONSerialization.jsonObject(with: data)
+        guard (json as? [String: Any])?["events"] is [Any] else {
+            throw GatewayError.badResponse("/api/v1/sandbox/activity has no events list")
+        }
+        return SandboxDecoding.activity(from: json)
+    }
+
+    /// Lift an egress block for one sandbox, or with `always` for every sandbox.
+    @discardableResult
+    func unblockSandboxEgress(host: String, sandbox: String, always: Bool) async throws -> String {
+        var body: [String: Any] = ["host": host]
+        if !sandbox.isEmpty { body["sandbox"] = sandbox }
+        if always { body["always"] = true }
+        let json = try await post("/api/v1/sandbox/egress/unblock", body, timeout: 30)
+        return ((json as? [String: Any])?["message"] as? String) ?? "\(host) unblocked"
+    }
+
+    /// Approve or reject one ask; `always` keeps the decision for future sandboxes.
+    @discardableResult
+    func decideSandboxApproval(id: String, approve: Bool, always: Bool) async throws -> String {
+        var body: [String: Any] = ["decision": approve ? "approve" : "reject"]
+        if always { body["always"] = true }
+        let path = "/api/v1/sandbox/approvals/\(try encodedPathSegment(id))"
+        let json = try await post(path, body, timeout: 30)
+        return ((json as? [String: Any])?["message"] as? String) ?? (approve ? "Approved" : "Rejected")
     }
 
     func aiComponents() async throws -> [AIComponent] {

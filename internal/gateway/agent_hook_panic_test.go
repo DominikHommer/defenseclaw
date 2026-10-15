@@ -15,24 +15,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
-
-// stubPanicLogger captures audit envelopes written via logger.LogActionCtx
-// so the panic-path assertions can verify that the synthetic
-// result="panic" row reached the audit sink.
-type stubPanicLogger struct {
-	rows []map[string]interface{}
-}
-
-func (s *stubPanicLogger) entries() []map[string]interface{} {
-	out := make([]map[string]interface{}, len(s.rows))
-	copy(out, s.rows)
-	return out
-}
 
 // TestSafeEvaluateHook_RecoversAndReturnsFailOpen exercises
 // safeEvaluateHook directly: a panicking evaluator must not propagate
@@ -79,35 +67,6 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	)
 	if len(panicMetrics) != 1 {
 		t.Fatalf("generated panic metrics=%d; recovered hook must not require a legacy Provider", len(panicMetrics))
-	}
-}
-
-// TestHandleAgentHookSynthetic_PropagatesConnector proves the
-// codex-notify bridge path carries the connector name through to the
-// fail-open response. We force a panic in the generic evaluator; the
-// fail-open response's AdditionalContext names the connector, which is
-// sourced from the connectorName parameter threaded into
-// safeEvaluateSyntheticHook, so a present name proves the synthetic
-// path propagates connector identity.
-func TestHandleAgentHookSynthetic_PropagatesConnector(t *testing.T) {
-	prev := hookEvaluatorPanicHook
-	hookEvaluatorPanicHook = func() { panic("synthetic connector-propagation test panic") }
-	defer func() { hookEvaluatorPanicHook = prev }()
-
-	api := &APIServer{}
-	req := agentHookRequest{
-		HookEventName: "Stop",
-		SessionID:     "sess-syn",
-		ToolName:      "codex-notify",
-		Direction:     "tool_result",
-		Payload:       map[string]interface{}{},
-	}
-	resp := api.handleAgentHookSynthetic(context.Background(), "codex", req, []byte(`{}`))
-	if resp.Action != "allow" || !resp.WouldBlock {
-		t.Fatalf("synthetic panic response = %+v, want fail-open allow + would_block", resp)
-	}
-	if !strings.Contains(resp.AdditionalContext, "codex") {
-		t.Errorf("AdditionalContext = %q, want it to name connector codex (synthetic connector propagation lost)", resp.AdditionalContext)
 	}
 }
 
@@ -252,8 +211,8 @@ func TestEnrichAgentHookSpanPanic_MarksErrorAndAttribute(t *testing.T) {
 
 // TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan guards the
 // defensive nil + non-recording short-circuit: callers may invoke
-// the helper from a ctx with no span (e.g. handleAgentHookSynthetic
-// running outside an HTTP wrapper), and panicking inside a panic-
+// the helper from a ctx with no span (a handler running outside an
+// HTTP wrapper), and panicking inside a panic-
 // recovery code path would defeat the whole fail-open contract.
 func TestEnrichAgentHookSpanPanic_NoOpOnNonRecordingSpan(t *testing.T) {
 	// No tracer provider installed → SpanFromContext returns a
@@ -383,5 +342,66 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 	}
 	if connectorHookRows != 1 {
 		t.Fatalf("connector-hook audit row count = %d, want exactly 1 (post-finalize panic must not re-run finalizeAgentHook)", connectorHookRows)
+	}
+}
+
+// TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
+// a sandbox binding is blocked, with a reason that says DefenseClaw failed,
+// when the evaluator panics or when a panic after evaluation reaches the
+// handler's outer recover, instead of taking the host's fail-open path. The
+// sandbox hook is the only gate on the tool call.
+func TestHandleAgentHook_SandboxPanicFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		inject func(t *testing.T)
+	}{
+		{"evaluator", func(t *testing.T) {
+			prev := hookEvaluatorPanicHook
+			hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic for sandbox test") }
+			t.Cleanup(func() { hookEvaluatorPanicHook = prev })
+		}},
+		// Managed enterprise mode defers EmitLLMEvent until after
+		// safeEvaluateHook returns, so its panic takes the outer recover.
+		{"post-evaluation", func(t *testing.T) {
+			prev := managedEnterpriseActive.Load()
+			managedEnterpriseActive.Store(true)
+			prevRuntime, had := hookProfileRuntimes["hermes"]
+			hookProfileRuntimes["hermes"] = func(profile connector.HookProfile) hookProfileRuntime {
+				runtime := defaultHookProfileRuntime(profile)
+				runtime.EmitLLMEvent = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}, []string) {
+					panic("synthetic post-evaluation panic for sandbox test")
+				}
+				return runtime
+			}
+			t.Cleanup(func() {
+				managedEnterpriseActive.Store(prev)
+				if had {
+					hookProfileRuntimes["hermes"] = prevRuntime
+				} else {
+					delete(hookProfileRuntimes, "hermes")
+				}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.inject(t)
+			body, _ := json.Marshal(map[string]interface{}{
+				"hook_event_name": "pre_tool_call", "session_id": "session-sandbox-panic-" + tc.name,
+				"agent_id": "hermes-test", "tool_name": "shell", "tool_input": map[string]interface{}{"command": "echo marker"},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			binding := sandboxauth.Binding{ID: "sb_panic", Connector: sandboxauth.CanonicalConnector("hermes")}
+			req = req.WithContext(sandboxauth.WithRequest(req.Context(), binding, nil))
+			w := httptest.NewRecorder()
+			http.HandlerFunc((&APIServer{}).handleAgentHook("hermes")).ServeHTTP(w, req)
+			var parsed map[string]interface{}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &parsed) != nil {
+				t.Fatalf("status=%d body=%s, want a 200 JSON verdict", w.Code, w.Body.String())
+			}
+			if parsed["action"] != "block" || parsed["reason"] != sandboxInternalErrorReason {
+				t.Fatalf("sandbox panic verdict = %v, want a block with %q", parsed, sandboxInternalErrorReason)
+			}
+		})
 	}
 }

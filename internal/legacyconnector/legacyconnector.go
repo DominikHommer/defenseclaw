@@ -77,6 +77,19 @@ const (
 // vendor still reads them, so inventory and access-control code keeps them.
 var InventoryDotDirs = []string{".windsurf", ".codeium"}
 
+// DesktopDataName is the pre-rename app's user-data folder name (under the
+// platform's application-support directory). Devin Desktop installs from
+// before the rename keep their extension state there.
+const DesktopDataName = "Windsurf"
+
+// The vendor's IDE plugins still carry the pre-rename ids. The IDE inventory
+// flags them as Devin plugins.
+var (
+	VSCodeExtensionIDs = []string{"codeium.codeium"}
+	JetBrainsPluginIDs = []string{"com.codeium.intellij"}
+	VimPlugins         = []string{"codeium.vim", "codeium.nvim", "windsurf.vim", "windsurf.nvim"}
+)
+
 // Canonical maps the retired Desktop ID to its replacement. The comparison
 // ignores case and surrounding or embedded whitespace. Any other name is
 // returned unchanged with migrated=false.
@@ -154,6 +167,22 @@ func quoteAll(values []string) []string {
 // only to remove entries an older DefenseClaw release wrote there.
 func CascadeUserHooksPath(home string) string {
 	return filepath.Join(home, ".codeium", "windsurf", "hooks.json")
+}
+
+// Pre-rename machine-level Cascade hooks folder names, which Devin Desktop
+// still reads when no Devin one exists (docs.devin.ai/desktop/cascade/hooks):
+// /Library/Application Support/Windsurf on macOS, /etc/windsurf on Linux and
+// %ProgramData%\Windsurf on Windows.
+const (
+	CascadeMachineFolder     = "Windsurf"
+	CascadeMachineFolderUnix = "windsurf"
+)
+
+// DesktopBundledCLIDir is where a Devin Desktop app keeps the Devin CLI it
+// bundles, relative to the app's resources/app folder: the pre-rename
+// extension folder extensions/windsurf/devin (from the 3.10 packages).
+func DesktopBundledCLIDir() string {
+	return filepath.Join("extensions", VendorToken, "devin")
 }
 
 // DesktopLegacyRulePaths are pre-rename rule locations Devin Desktop still

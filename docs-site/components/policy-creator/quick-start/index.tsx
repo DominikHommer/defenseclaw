@@ -182,7 +182,7 @@ export function QuickStart({
         )}
       </section>
 
-      <footer className="sticky bottom-2 flex items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
+      <footer className="flex items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
         <button
           type="button"
           onClick={() => setStepIdx((n) => Math.max(0, n - 1))}
@@ -268,9 +268,9 @@ function Stepper({
                 className={[
                   'inline-flex size-5 items-center justify-center rounded-full text-[10px] font-mono',
                   state === 'active'
-                    ? 'bg-white/20'
+                    ? 'border border-current'
                     : state === 'done'
-                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
                       : 'bg-fd-card',
                 ].join(' ')}
                 aria-hidden
@@ -300,7 +300,7 @@ interface StepProps {
 
 function StepHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
-    <header className="mb-4">
+    <header className="not-prose mb-4">
       <h3 className="text-base font-semibold text-fd-foreground">{title}</h3>
       {subtitle && <p className="mt-0.5 text-[12px] text-fd-muted-foreground">{subtitle}</p>}
     </header>
@@ -346,7 +346,7 @@ function StepBlock({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we block?"
-        subtitle="Pick everything you want flagged. We'll enable the matching rules and add destinations to the firewall."
+        subtitle="Pick rules to include. Firewall destinations are planning notes and are not applied by the install script."
       />
       <div className="space-y-5">
         {BLOCK_CATEGORIES.map((cat) => {
@@ -358,7 +358,7 @@ function StepBlock({ answers, update }: StepProps) {
                 <h4 className="text-[12px] font-semibold uppercase tracking-wide text-fd-muted-foreground">
                   {cat.title}
                 </h4>
-                <span className="text-[11px] text-fd-muted-foreground/80">{cat.blurb}</span>
+                <span className="text-[11px] text-fd-muted-foreground">{cat.blurb}</span>
               </div>
               <div className="grid gap-2 md:grid-cols-2">
                 {cards.map((card) => (
@@ -388,7 +388,7 @@ function StepAllow({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we allow even when flagged?"
-        subtitle="Reduce alert noise by letting known-safe tools / domains / first-party plugins through."
+        subtitle="Let your own plugins skip admission scans. Internal domains are planning notes; the install script does not configure a firewall."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {ALLOW_CARDS.map((card) => (
@@ -418,7 +418,7 @@ function StepAllow({ answers, update }: StepProps) {
           placeholder="*.corp.internal"
           items={answers.domainsExtra}
           onChange={(next) => update((d) => void (d.domainsExtra = next))}
-          hint="One per line. Added to firewall.allowed_domains."
+          hint="One per line. Planning notes only; policy activation does not configure the firewall."
         />
       </div>
     </>
@@ -430,7 +430,7 @@ function StepResponse({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="When something risky happens, what should we do?"
-        subtitle="Sets the block / alert thresholds and HILT (human-in-the-loop) configuration."
+        subtitle="Sets the block / alert thresholds and HITL (human-in-the-loop) configuration."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {RESPONSES.map((r) => (
@@ -452,8 +452,12 @@ function StepSinks({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="Where should events go?"
-        subtitle="Wire one or more destinations. Local audit log is on by default — turn it off only if you really mean to."
+        subtitle="Wire webhook destinations. Local audit settings are planning notes; policy activation does not apply them."
       />
+      <p className="mb-3 text-xs text-fd-muted-foreground">
+        Splunk HEC uses a separate observability destination. Configure it with{' '}
+        <a href="/docs/observability/splunk" className="underline">setup splunk</a> after installing this policy.
+      </p>
       <div className="space-y-2">
         {SINK_CARDS.map((card) => (
           <SinkRow
@@ -523,7 +527,7 @@ function StepReview({
           <div className="min-w-[200px] flex-1">
             <div className="text-sm font-semibold text-fd-foreground">Download &amp; run</div>
             <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
-              One self-contained bash script. Drops every YAML / <code>data.json</code> / Rego file
+              One self-contained bash script. Drops every YAML and Rego file
               under <code>~/.defenseclaw/policies/</code> via heredocs (no curl, no scp), then
               runs <code>defenseclaw policy activate {policy.name}</code>. Re-runs are idempotent.
             </p>
@@ -674,7 +678,7 @@ function CheckCard({
         )}
         {(card.destinations?.length ?? 0) > 0 && (
           <span className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">
-            {card.destinations!.length} firewall destination
+            {card.destinations!.length} planned firewall destination
             {card.destinations!.length === 1 ? '' : 's'}
           </span>
         )}
@@ -734,7 +738,7 @@ function AllowCheckCard({
             href={docsHref(card.cookbookHref)}
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto text-[10px] text-emerald-600 hover:underline dark:text-emerald-400"
+            className="ml-auto text-[10px] text-emerald-700 hover:underline dark:text-emerald-400"
           >
             see cookbook →
           </a>
@@ -785,7 +789,7 @@ function FreeFormList({
             }
           }}
           placeholder={placeholder}
-          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:border-[var(--brand-cisco)] focus:outline-none"
+          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none"
         />
         <button
           type="button"
@@ -806,7 +810,7 @@ function FreeFormList({
               <button
                 type="button"
                 onClick={() => onChange(items.filter((_, idx) => idx !== i))}
-                className="text-fd-muted-foreground hover:text-red-500"
+                className="text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 aria-label={`Remove ${it}`}
               >
                 ×

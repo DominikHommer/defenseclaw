@@ -75,6 +75,10 @@ const (
 	StateStopped      SubsystemState = "stopped"
 	StateError        SubsystemState = "error"
 	StateDisabled     SubsystemState = "disabled"
+	// StateDegraded marks a subsystem that is up but needs operator action:
+	// the sandbox subsystem reports it when a sandbox listener, the sandbox
+	// manager or the OpenShell gateway fails (sidecar_sandbox.go).
+	StateDegraded SubsystemState = "degraded"
 )
 
 type SubsystemHealth struct {
@@ -187,12 +191,36 @@ const InterceptionSelfTestFreshness = 3 * time.Minute
 
 // InterceptionHealth is the additive doctor signal that a live
 // :4000 listener is actually receiving interceptor-rewritten LLM
-// traffic, not just answering /health/liveliness.
+// traffic, not just answering /health.
 type InterceptionHealth struct {
 	Verified           bool   `json:"verified"`
 	LastVerifiedAt     string `json:"last_verified_at,omitempty"`
 	LastAgentTrafficAt string `json:"last_agent_traffic_at,omitempty"`
+	// LastAgentModelActivityAt is when the agent last completed a model call, as
+	// the gateway event stream reports it.
+	LastAgentModelActivityAt string `json:"last_agent_model_activity_at,omitempty"`
+	// AgentModelCalls counts the model calls OpenClaw reported as completed
+	// since this gateway started; AgentModelCallsProxied counts those paired
+	// with an agent proxy hop of their own. Each hop pairs with at most one
+	// call, so a proxied call never vouches for a later one (GAP-0836). Both
+	// are omitted at zero, so a Secure Client health document is unchanged.
+	AgentModelCalls        uint64 `json:"agent_model_calls,omitempty"`
+	AgentModelCallsProxied uint64 `json:"agent_model_calls_proxied,omitempty"`
+	// LastUnproxiedModelCallAt and LastProxiedModelCallAt are when a model
+	// call last completed without and with a hop of its own.
+	LastUnproxiedModelCallAt string `json:"last_unproxied_model_call_at,omitempty"`
+	LastProxiedModelCallAt   string `json:"last_proxied_model_call_at,omitempty"`
 }
+
+// agentHopPairingWindow bounds how long an agent proxy hop waits for the
+// model call it carried to complete; an older hop pairs with no call.
+const agentHopPairingWindow = 10 * time.Minute
+
+// maxUnpairedAgentHops and maxCountedModelCallIDs bound the pairing state.
+const (
+	maxUnpairedAgentHops   = 256
+	maxCountedModelCallIDs = 512
+)
 
 type SidecarHealth struct {
 	mu                                    sync.RWMutex
@@ -216,7 +244,14 @@ type SidecarHealth struct {
 	observabilityV8RetentionDays          int64
 	observabilityV8EventHistoryGeneration uint64
 	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
-	managed                               *SubsystemHealth
+	// observabilityV8LastChange is when the latest event-history or
+	// destination health change happened. telemetryShownState and
+	// telemetryShownSince remember the telemetry state the last snapshot
+	// rendered and when it began, so "since" moves with each change (GAP-1800).
+	observabilityV8LastChange time.Time
+	telemetryShownState       SubsystemState
+	telemetryShownSince       time.Time
+	managed                   *SubsystemHealth
 	// enumerator tracks the DefenseClawHookEnumerator SCM service
 	// (spec 005 Workstream D). Nil until SetEnumerator is called at
 	// least once — a nil pointer omits the "enumerator" block from
@@ -253,10 +288,21 @@ type SidecarHealth struct {
 	// installer already applied (CR spec-003:PRRT_kwDORuAK-s6al7aV).
 	guardianStateReaderEpoch uint64
 
-	interceptionReported    bool
-	interceptionVerified    bool
-	interceptionVerifiedAt  time.Time
-	lastAgentProxyTrafficAt time.Time
+	interceptionReported     bool
+	interceptionVerified     bool
+	interceptionVerifiedAt   time.Time
+	lastAgentProxyTrafficAt  time.Time
+	lastAgentModelActivityAt time.Time
+	// Model-call pairing (GAP-0836): agent proxy hops not yet paired with a
+	// completed model call (oldest first), the paired counters, and the
+	// message IDs already counted, so a repeated frame counts once.
+	unpairedAgentHops        []time.Time
+	agentModelCalls          uint64
+	agentModelCallsProxied   uint64
+	lastProxiedModelCallAt   time.Time
+	lastUnproxiedModelCallAt time.Time
+	countedModelCallIDs      map[string]struct{}
+	countedModelCallOrder    []string
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -363,6 +409,8 @@ func connName(name string) string {
 
 func NewSidecarHealth() *SidecarHealth {
 	now := time.Now()
+	// The judge summary covers the calls since this gateway started.
+	judgeHealth.reset()
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
@@ -704,6 +752,24 @@ func (h *SidecarHealth) SetWatcher(state SubsystemState, lastErr string, details
 	h.notifySubscribers()
 }
 
+// SetWatcherDetail sets one detail of the watcher health, keeping its state
+// and since; a zero value removes it.
+func (h *SidecarHealth) SetWatcherDetail(key string, value int) {
+	h.mu.Lock()
+	details := make(map[string]interface{}, len(h.watcher.Details)+1)
+	for k, v := range h.watcher.Details {
+		details[k] = v
+	}
+	if value == 0 {
+		delete(details, key)
+	} else {
+		details[key] = value
+	}
+	h.watcher.Details = details
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
 func (h *SidecarHealth) SetAPI(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.api = SubsystemHealth{
@@ -750,8 +816,61 @@ func (h *SidecarHealth) RecordAgentProxyTraffic() {
 	if h == nil {
 		return
 	}
+	now := time.Now()
 	h.mu.Lock()
-	h.lastAgentProxyTrafficAt = time.Now().UTC()
+	h.lastAgentProxyTrafficAt = now.UTC()
+	h.unpairedAgentHops = append(h.unpairedAgentHops, now)
+	if n := len(h.unpairedAgentHops); n > maxUnpairedAgentHops {
+		h.unpairedAgentHops = h.unpairedAgentHops[n-maxUnpairedAgentHops:]
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// RecordAgentModelActivity records that the agent completed the model call
+// messageID, as the OpenClaw gateway event stream reports it, and pairs it
+// with the oldest unpaired agent proxy hop of the pairing window. A call with
+// no hop left did not go through the proxy. A failed call is counted only
+// when it took a hop: one that failed before any request is no evidence of a
+// bypass. Doctor reads the paired counters (GAP-0836).
+func (h *SidecarHealth) RecordAgentModelActivity(messageID string, failed bool) {
+	if h == nil {
+		return
+	}
+	now := time.Now()
+	h.mu.Lock()
+	if messageID != "" {
+		if _, seen := h.countedModelCallIDs[messageID]; seen {
+			h.mu.Unlock()
+			return
+		}
+		if h.countedModelCallIDs == nil {
+			h.countedModelCallIDs = make(map[string]struct{})
+		}
+		h.countedModelCallIDs[messageID] = struct{}{}
+		h.countedModelCallOrder = append(h.countedModelCallOrder, messageID)
+		if len(h.countedModelCallOrder) > maxCountedModelCallIDs {
+			delete(h.countedModelCallIDs, h.countedModelCallOrder[0])
+			h.countedModelCallOrder = h.countedModelCallOrder[1:]
+		}
+	}
+	for len(h.unpairedAgentHops) > 0 && now.Sub(h.unpairedAgentHops[0]) > agentHopPairingWindow {
+		h.unpairedAgentHops = h.unpairedAgentHops[1:]
+	}
+	paired := len(h.unpairedAgentHops) > 0
+	if paired {
+		h.unpairedAgentHops = h.unpairedAgentHops[1:]
+	}
+	if paired || !failed {
+		h.lastAgentModelActivityAt = now.UTC()
+		h.agentModelCalls++
+		if paired {
+			h.agentModelCallsProxied++
+			h.lastProxiedModelCallAt = now.UTC()
+		} else {
+			h.lastUnproxiedModelCallAt = now.UTC()
+		}
+	}
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
@@ -787,6 +906,8 @@ func (h *SidecarHealth) bindObservabilityV8HealthSource(source observabilityV8He
 	h.mu.Lock()
 	h.observabilityV8Source = source
 	h.telemetry = SubsystemHealth{State: StateRunning, Since: time.Now()}
+	h.telemetryShownState, h.telemetryShownSince = StateRunning, h.telemetry.Since
+	h.observabilityV8LastChange = time.Time{}
 	if h.observabilityV8Failures == nil {
 		h.observabilityV8Failures = make(map[string]observabilityV8FailureObservation)
 	}
@@ -807,6 +928,7 @@ func (h *SidecarHealth) clearObservabilityV8HealthSource() {
 		h.observabilityV8EventHistoryGeneration = 0
 		h.observabilityV8EventHistory = nil
 		h.telemetry = SubsystemHealth{State: StateStopped, Since: time.Now()}
+		h.telemetryShownState, h.telemetryShownSince = "", time.Time{}
 		changed = true
 	}
 	h.mu.Unlock()
@@ -848,6 +970,7 @@ func (h *SidecarHealth) observeObservabilityV8Failure(
 	h.observabilityV8Failures[destination] = observabilityV8FailureObservation{
 		generation: generation, code: code, occurredAt: occurredAt.UTC(),
 	}
+	h.noteObservabilityV8ChangeLocked(occurredAt)
 	h.mu.Unlock()
 	h.notifySubscribers()
 }
@@ -861,8 +984,12 @@ func validObservabilityV8FailureCode(code string) bool {
 		string(delivery.HealthReasonPartial), string(delivery.HealthReasonDeliveryFailed),
 		string(delivery.HealthReasonOriginLoop),
 		"generation_mismatch", "pipeline_failed", "projection_failed",
-		"route_identity_mismatch", "unsupported_shape", "payload_failed",
+		"route_identity_mismatch", "payload_failed",
 		"queue_rejected", "panic_isolated", "compatibility_projection_failed":
+		// unsupported_shape is not listed: a record the destination's profile
+		// does not project (Galileo takes traces only) is dropped by design
+		// and counted by the consumer, so it is not a destination failure
+		// (GAP-0078).
 		return true
 	default:
 		return false
@@ -925,8 +1052,34 @@ func (h *SidecarHealth) observeObservabilityV8EventHistory(
 		observation.lastFailurePrimary = transition.SQLitePrimaryCode
 	}
 	h.observabilityV8EventHistory[code] = observation
+	h.noteObservabilityV8ChangeLocked(transition.OccurredAt)
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) noteObservabilityV8ChangeLocked(at time.Time) {
+	if at.After(h.observabilityV8LastChange) {
+		h.observabilityV8LastChange = at
+	}
+}
+
+// telemetrySince returns when the rendered telemetry state began. The bind
+// time holds until the state changes; a change dates from the health event
+// behind it (now, when none is newer). Keeping the bind time made a recovered
+// audit store read "RUNNING since" the start of the outage (GAP-1800).
+func (h *SidecarHealth) telemetrySince(state SubsystemState, fallback time.Time) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.telemetryShownState == "" {
+		h.telemetryShownState, h.telemetryShownSince = state, fallback
+	} else if state != h.telemetryShownState {
+		since := h.observabilityV8LastChange
+		if !since.After(h.telemetryShownSince) {
+			since = time.Now()
+		}
+		h.telemetryShownState, h.telemetryShownSince = state, since
+	}
+	return h.telemetryShownSince
 }
 
 func (h *SidecarHealth) bindObservabilityV8EventHistoryGeneration(generation uint64) {
@@ -1322,6 +1475,28 @@ func (h *SidecarHealth) registerConnector(name string, mode connector.ToolInspec
 	}
 }
 
+// RetainConnectors drops the connectors set up from config ("manual") that
+// are not in names, so a connector set that changed in-process leaves the
+// roster a fresh start would show. Connectors activated by application
+// protection keep their entries.
+func (h *SidecarHealth) RetainConnectors(names ...string) {
+	keep := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		keep[connName(name)] = struct{}{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for key, s := range h.connStats {
+		if _, ok := keep[key]; ok || s.source != "manual" {
+			continue
+		}
+		delete(h.connStats, key)
+		if h.primaryConn == key {
+			h.primaryConn = ""
+		}
+	}
+}
+
 func (h *SidecarHealth) HasConnector(name string) bool {
 	key := connName(name)
 	if key == "" {
@@ -1425,7 +1600,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Watcher:               h.watcher,
 		Config:                h.config,
 		API:                   h.api,
-		Guardrail:             h.guardrail,
+		Guardrail:             withJudgeHealth(h.guardrail),
 		Routing:               h.routing,
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
@@ -1488,7 +1663,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 			snap.Connector = &ch
 		}
 	}
-	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() {
+	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() || !h.lastAgentModelActivityAt.IsZero() {
 		verified := h.interceptionVerified
 		if verified && (h.interceptionVerifiedAt.IsZero() || time.Since(h.interceptionVerifiedAt) > InterceptionSelfTestFreshness) {
 			verified = false
@@ -1499,6 +1674,17 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		}
 		if !h.lastAgentProxyTrafficAt.IsZero() {
 			info.LastAgentTrafficAt = h.lastAgentProxyTrafficAt.UTC().Format(time.RFC3339)
+		}
+		if !h.lastAgentModelActivityAt.IsZero() {
+			info.LastAgentModelActivityAt = h.lastAgentModelActivityAt.UTC().Format(time.RFC3339)
+		}
+		info.AgentModelCalls = h.agentModelCalls
+		info.AgentModelCallsProxied = h.agentModelCallsProxied
+		if !h.lastUnproxiedModelCallAt.IsZero() {
+			info.LastUnproxiedModelCallAt = h.lastUnproxiedModelCallAt.UTC().Format(time.RFC3339)
+		}
+		if !h.lastProxiedModelCallAt.IsZero() {
+			info.LastProxiedModelCallAt = h.lastProxiedModelCallAt.UTC().Format(time.RFC3339)
 		}
 		snap.Interception = info
 	}
@@ -1524,6 +1710,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
 		}
+		snap.Telemetry.Since = h.telemetrySince(snap.Telemetry.State, snap.Telemetry.Since)
 	}
 
 	return snap
@@ -1765,6 +1952,14 @@ func renderObservabilityV8Health(
 		}
 	}
 	if eventHistory.activeCode != "" {
+		aggregate = StateError
+	}
+	// While the loss journal cannot be written, records missing from the
+	// local history are counted in memory only and a restart would lose
+	// that count (GAP-1129).
+	if journal := snapshot.LocalWriteLossJournal; journal.State == observabilityruntime.LocalWriteLossJournalFailing {
+		details["local_write_loss_journal"] = journal.State
+		details["local_write_loss_journal_failed_writes"] = journal.FailedWrites
 		aggregate = StateError
 	}
 	appendObservabilityV8EventHistoryDetails(details, eventHistory)

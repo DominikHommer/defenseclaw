@@ -157,6 +157,9 @@ func TestWatchdogHealthRequirementsFromConfig(t *testing.T) {
 
 	t.Run("fleet topology", func(t *testing.T) {
 		cfg := config.DefaultConfig()
+		// An agent discovery cache on the test host that found no OpenClaw
+		// would turn the loopback fleet dial off, so use an empty data dir.
+		cfg.DataDir = t.TempDir()
 		cfg.Guardrail.Connector = "openclaw"
 		cfg.Guardrail.Connectors = nil
 		cfg.Gateway.FleetMode = "auto"
@@ -324,12 +327,13 @@ func TestWatchdogHealthURL(t *testing.T) {
 		}
 	})
 
-	t.Run("uses guardrail host in standalone mode", func(t *testing.T) {
+	// guardrail.host never moves the API (the retired standalone sandbox
+	// did, from its veth address; the config_version 9 migration resets it).
+	t.Run("ignores the guardrail host", func(t *testing.T) {
 		cfg := config.DefaultConfig()
-		cfg.OpenShell.Mode = "standalone"
-		cfg.Guardrail.Host = "192.168.65.2"
+		cfg.Guardrail.Host = "10.200.0.1"
 		got := watchdogHealthURL(cfg)
-		want := "http://192.168.65.2:18970/health"
+		want := "http://127.0.0.1:18970/health"
 		if got != want {
 			t.Fatalf("watchdogHealthURL() = %q, want %q", got, want)
 		}

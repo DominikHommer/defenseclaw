@@ -47,6 +47,7 @@ def test_golden_ci_bridge_cleanup_uses_the_managed_reset_contract() -> None:
 
 def _copy_make_bundle_inputs(destination: Path) -> None:
     for relative in (
+        Path("edge-connector"),
         Path("policies"),
         Path("bundles/llm"),
         Path("bundles/local_observability_stack"),
@@ -60,7 +61,6 @@ def _copy_make_bundle_inputs(destination: Path) -> None:
     for relative in (
         Path("Makefile"),
         Path("scripts/gen_envvars_docs.py"),
-        Path("scripts/install-openshell-sandbox.sh"),
         Path("scripts/refuse-sudo-user-checkout.sh"),
         Path("scripts/telemetry_runtime_assets.py"),
         Path("internal/envvars/registry.json"),

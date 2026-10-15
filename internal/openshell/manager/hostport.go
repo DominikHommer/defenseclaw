@@ -1,0 +1,434 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manager
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/policy"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+)
+
+// Host ports. A run's --host-port consents to one port on this machine; the
+// sandbox policy keeps it closed until the user approves the sandbox's
+// first connection to it. OpenShell drafts no proposal for a connection to
+// host.openshell.internal (its transparent mapping, not a policy rule,
+// refuses the port), so DefenseClaw raises that ask itself (hostPortAsk),
+// and approving it merges an allow rule for the port into the sandbox
+// policy (applyHostPortAsk), which adds the port to the mapping. A denied
+// connection to a port the run did not declare gets one feed line per
+// session that names the flag instead.
+
+// hostPortRule is the network_policies key of an approved host port, in
+// the allow_<host>_<port> shape triage and enforcement judge.
+func hostPortRule(port int) string {
+	return "allow_host_openshell_internal_" + strconv.Itoa(port)
+}
+
+// hostPortProposal is the rule approving host port port opens: the port on
+// host.openshell.internal for every binary of the sandbox, which the
+// --host-port consent names. binary is the executable whose connection was
+// denied, for the ask's display only.
+func hostPortProposal(sandbox string, port int, binary string) triage.Proposal {
+	digest := "host-port:" + strconv.Itoa(port)
+	return triage.Proposal{
+		Sandbox: sandbox, RuleName: hostPortRule(port), Binary: binary, Binaries: []string{policy.AnyBinary},
+		Endpoints: []triage.Endpoint{{Host: openshellHostAlias, Port: port}},
+		Digest:    digest, RuleDigest: digest,
+	}
+}
+
+// hostPortDenied handles OpenShell's denial of a sandbox connection to a
+// host port other than DefenseClaw's own listeners. A connection OpenShell
+// closed on a policy reload, or that the mapping denied for a port it
+// covers (republished under the connection), reaches nothing new and is
+// left alone. Every other denial is a blocked request: a declared port the
+// policy opens becomes an ask, any other port gets its feed line.
+func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	if policyReloadCut(r) {
+		return
+	}
+	port := r.Port
+	m.mu.Lock()
+	if b.rec.HostAlias != nil && slices.Contains(b.rec.HostAlias.Ports, port) && mappingDenial(r) {
+		m.mu.Unlock()
+		return
+	}
+	name, id, eff := b.rec.Name, b.identity(), b.eff
+	declared := slices.Contains(b.rec.Flags.HostPorts, port)
+	m.mu.Unlock()
+	replayed := at.Before(m.startedAt)
+	refusal := errors.New("the sandbox policy is not resolved")
+	if eff != nil {
+		refusal = eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: port})
+	}
+	// A declared port whose ask the floor doesn't let the user answer
+	// (user_approvals: none, allow_host_ports: false) is refused at once:
+	// no ask is listed, and the line says who to ask (GAP-0468).
+	orgRefusal := ""
+	if declared && refusal == nil {
+		orgRefusal = m.hostPortAskRefusal(b, eff, port)
+	}
+	ask := declared && refusal == nil && orgRefusal == "" && !replayed
+	ev := audit.SandboxEgressEvent{
+		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
+		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(openshellReason(r, openshellHostAlias), 512),
+		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+	}
+	if ask {
+		// The refusal reads as the ask it raises (GAP-0138).
+		ev.DecisionCode = "SANDBOX_EGRESS_HOST_PORT_ASK"
+		ev.Reason = truncate(fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals (%s)",
+			port, port, firstNonEmpty(r.Reason, r.Message)), 512)
+	}
+	m.tel.RecordSandboxEgress(ctx, ev)
+	if ask {
+		// An ask, not a blocked destination (until it is answered).
+		m.hostPortAsk(ctx, b, port, r.Binary)
+		return
+	}
+	if !replayed {
+		// The agent sees only a connection error: its next post-tool hook
+		// says the port is closed and what opens it, as the feed line does
+		// (GAP-0326).
+		switch {
+		case orgRefusal != "":
+			m.refusals.noteRefused(id.BindingID, name, openshellHostAlias, port, orgRefusal, m.now())
+		case refusal != nil:
+			m.refusals.noteDirect(id.BindingID, name, openshellHostAlias, port, NotePortRefused, m.now())
+		default:
+			m.refusals.noteDirect(id.BindingID, name, openshellHostAlias, port, NotePortClosed, m.now())
+		}
+	}
+	// The feed names it blocked (now, or when the port was first denied),
+	// and so do the sandbox's destinations and its egress counts.
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: port, at: at, denied: true,
+		binary: r.Binary, pid: ocsfPID(r)})
+	m.mu.Lock()
+	news := b.newPortLine(port, false)
+	m.mu.Unlock()
+	if !news {
+		return
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name,
+		Host: openshellHostAlias, Port: port, Source: sandboxapi.SourceOpenShell, Reason: sandboxapi.ReasonHostPortClosed,
+		Message: hostPortClosedMessage(port, declared, refusal, orgRefusal != ""), Refusal: orgRefusal, Replayed: replayed})
+}
+
+// hostPortAskRefusal is the managed refusal (accessRefusal) of the ask a
+// denied connection to the declared host port port raises, when the floor
+// of eff doesn't let the user answer it (user_approvals: none,
+// allow_host_ports: false), "" when the user may. Callers must not hold
+// m.mu.
+func (m *Manager) hostPortAskRefusal(b *box, eff *packs.Effective, port int) string {
+	f := m.floor(eff)
+	err := sandboxreg.CheckDecision(f, sandboxrelay.DecisionRequest{Kind: sandboxrelay.DecisionEgressAllow, Host: openshellHostAlias,
+		Scope: sandboxrelay.DecisionScopeSession})
+	var refusal *sandboxreg.DecisionRefusedError
+	if !errors.As(err, &refusal) || refusal.Rule == sandboxreg.RuleInvalid {
+		return ""
+	}
+	return m.accessRefusal(b, f, refusal.Message, refusal.Rule, sandboxapi.HostPort(openshellHostAlias, port))
+}
+
+// hostPortAllowed records OpenShell's allowed connection to a host port
+// other than DefenseClaw's own listeners: a --host-port service the user
+// approved, or a local model endpoint the sandbox policy opens. It is an
+// allowed egress record (server.address host.openshell.internal) and a row
+// of the sandbox's destinations. The feed shows the session's first
+// connection to the port, as it shows a host's first request through the
+// proxy: the ask, its approval and the use read as one story (GAP-0154).
+func (m *Manager) hostPortAllowed(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	m.mu.Lock()
+	id, name := b.identity(), b.rec.Name
+	news := b.newPortLine(r.Port, true)
+	m.mu.Unlock()
+	if !m.connectionRequest(b, r, openshellHostAlias, at) {
+		m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: r.Port,
+			DecisionCode: "SANDBOX_EGRESS_ALLOWED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
+			PolicyOutcome: truncate(r.Policy, 256), Timestamp: at, Executable: r.Binary, PID: ocsfPID(r),
+		})
+	}
+	m.observeDestination(ctx, b, destinationSighting{host: openshellHostAlias, port: r.Port, at: at, rule: r.Policy,
+		binary: r.Binary, pid: ocsfPID(r)})
+	if news {
+		m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: name,
+			Host: openshellHostAlias, Port: r.Port, Source: sandboxapi.SourceOpenShell, Rule: truncate(r.Policy, 256),
+			Message: fmt.Sprintf("✓ %s:%d (port %d on this machine)", openshellHostAlias, r.Port, r.Port), Replayed: at.Before(m.startedAt)})
+	}
+}
+
+// newPortLine records that the feed says host port port is reached or
+// closed, and reports whether that is news: the feed's last line about the
+// port this session said otherwise, or there was none. Callers hold
+// Manager.mu.
+func (b *box) newPortLine(port int, reached bool) bool {
+	if said, ok := b.portLines[port]; ok && said == reached {
+		return false
+	}
+	if b.portLines == nil {
+		b.portLines = map[int]bool{}
+	}
+	b.portLines[port] = reached
+	return true
+}
+
+// hostPortClosedMessage is the feed line of a denied connection to host
+// port port that no ask covers.
+// orgRefused marks a declared port whose ask the floor refuses
+// (hostPortAskRefusal).
+func hostPortClosedMessage(port int, declared bool, refusal error, orgRefused bool) string {
+	target := openshellHostAlias + ":" + strconv.Itoa(port)
+	switch {
+	case refusal != nil:
+		return truncate(fmt.Sprintf("✗ %s: the sandbox policy does not open port %d on this machine to the sandbox (%v)", target, port, refusal), 512)
+	case orgRefused:
+		return fmt.Sprintf("✗ %s: port %d on this machine stays closed: your profile doesn't let you approve the sandbox's ask for it",
+			target, port)
+	case declared:
+		return fmt.Sprintf("✗ %s: port %d on this machine stays closed until you approve the sandbox's ask for it: defenseclaw sandbox approvals",
+			target, port)
+	default:
+		return fmt.Sprintf("✗ %s: port %d on this machine is closed to the sandbox; run the sandbox with --host-port %d to be asked about it",
+			target, port, port)
+	}
+}
+
+// hostPortAsk raises the ask for the sandbox's first denied connection to
+// the declared host port port, unless one is waiting or being applied, the
+// port was approved moments ago (the mapping is being republished), or the
+// user rejected it within collapseWindow.
+func (m *Manager) hostPortAsk(ctx context.Context, b *box, port int, binary string) {
+	now := m.now()
+	m.mu.Lock()
+	name := b.rec.Name
+	p := hostPortProposal(name, port, binary)
+	id := approvalID(name, p.RuleDigest)
+	pending := 0
+	for _, other := range m.approvals {
+		if other.sandbox == name && other.status == sandboxapi.ApprovalPending {
+			pending++
+		}
+	}
+	prev := m.approvals[id]
+	skip := pending >= maxPendingApprovals
+	if prev != nil {
+		switch {
+		case prev.unresolved():
+			skip = true
+		case prev.status == sandboxapi.ApprovalApproved && now.Sub(prev.resolvedAt) < collapseWindow:
+			skip = true
+		case prev.status == sandboxapi.ApprovalRejected && prev.actor == actorOperator && now.Sub(prev.resolvedAt) < collapseWindow:
+			skip = true
+		}
+	}
+	ident := b.identity()
+	m.mu.Unlock()
+	if skip {
+		return
+	}
+	d := triage.Decision{
+		Verdict: triage.Ask, Reason: triage.ReasonHostLocal, Kind: triage.KindHostPort, Host: openshellHostAlias, Port: port, Risky: true,
+		Message: fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d)", port, port),
+	}
+	a := &approval{id: id, sandbox: name, decision: d, proposal: p, status: sandboxapi.ApprovalPending, createdAt: now.UTC(), local: true}
+	m.storeApproval(a)
+	m.recordApproval(ctx, ident, a, audit.SandboxApprovalRequested, "", "")
+	// The connection that asked failed at once: the agent's next hook
+	// says it waits for the user (GAP-0268).
+	m.refusals.noteDirect(ident.BindingID, name, openshellHostAlias, port, NoteAsked, now)
+	m.feed.Publish(sandboxapi.ActivityEvent{
+		Kind: sandboxapi.ActivityApprovalRequested, Sandbox: name, Host: openshellHostAlias, Port: port,
+		ApprovalID: id, Reason: string(d.Reason), Message: d.Message,
+	})
+}
+
+// declaredHostPortAsk turns the egress proxy's refusal of a --host-port the
+// run declared (host.openshell.internal, or its synthetic address, on that
+// port) into the ask a direct connection to it raises. After a daemon
+// restart lost the pending ask, the agent's retries of 198.18.0.2:8765
+// through the proxy read "✗ … (this machine)", and the agent told the user
+// to relaunch with the --host-port it had (GAP-0233). It reports whether it
+// did.
+func (m *Manager) declaredHostPortAsk(ctx context.Context, b *box, e egress.Event) bool {
+	if triage.NormalizeHost(m.namedHost(b, e.Host, e.Port)) != openshellHostAlias {
+		return false
+	}
+	m.mu.Lock()
+	declared, eff, ident, name := slices.Contains(b.rec.Flags.HostPorts, e.Port), b.eff, b.identity(), b.rec.Name
+	m.mu.Unlock()
+	if !declared || eff == nil || eff.Allow(packs.Action{Kind: packs.ActionHostPort, Port: e.Port}) != nil {
+		return false
+	}
+	if text := m.hostPortAskRefusal(b, eff, e.Port); text != "" {
+		// No ask the user can't answer (GAP-0468): the agent and the feed
+		// hear the organization's refusal instead of "this machine".
+		m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
+		m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+			Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
+			DecisionCode: "SANDBOX_EGRESS_HOST_PORT_REFUSED", Timestamp: e.Time, Reason: truncate(strings.ReplaceAll(text, "\n", " "), 512),
+		})
+		m.refusals.noteRefused(e.BindingID, name, openshellHostAlias, e.Port, text, m.now())
+		m.mu.Lock()
+		news := b.newPortLine(e.Port, false)
+		m.mu.Unlock()
+		if news {
+			m.feed.Publish(sandboxapi.ActivityEvent{Time: e.Time, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name,
+				Host: openshellHostAlias, Port: e.Port, Source: sandboxapi.SourceProxy, Reason: sandboxapi.ReasonHostPortClosed,
+				Message: hostPortClosedMessage(e.Port, true, nil, true), Refusal: text})
+		}
+		return true
+	}
+	m.tel.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: openshellHostAlias, Port: e.Port, Blocked: true,
+		DecisionCode: "SANDBOX_EGRESS_HOST_PORT_ASK", Timestamp: e.Time,
+		Reason: fmt.Sprintf("the sandbox asks to reach port %d on your machine (--host-port %d): answer it with defenseclaw sandbox approvals", e.Port, e.Port),
+	})
+	// The agent hears of the ask, not of "this machine".
+	m.refusals.forgetNote(e.BindingID, strings.TrimSuffix(strings.ToLower(e.Host), "."), e.Port, "")
+	m.hostPortAsk(ctx, b, e.Port, "")
+	m.refusals.noteDirect(e.BindingID, name, openshellHostAlias, e.Port, NoteAsked, m.now())
+	return true
+}
+
+// hostPortApplyTimeout bounds applying an approved host port.
+const hostPortApplyTimeout = 2 * time.Minute
+
+// applyHostPortAsk opens an approved host port: once the sandbox has no
+// hook request open (a policy reload closes its connections, as approved
+// proposals wait for in the batcher), the port's rule is merged into the
+// sandbox policy.
+func (m *Manager) applyHostPortAsk(a *approval, bindingID string) {
+	ctx := m.running()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, hostPortApplyTimeout)
+	defer cancel()
+	if q := m.opts.Quiesce; q != nil && bindingID != "" {
+		wait, done := context.WithTimeout(ctx, profileQuiesceWait)
+		_ = q.WaitQuiescent(wait, bindingID, profileQuiesceIdle)
+		done()
+	}
+	res, err := m.mergeHostPortRule(ctx, a)
+	m.hostPortApplied(context.WithoutCancel(ctx), a, res, err)
+}
+
+// mergeHostPortRule checks an approved host port against the policy as it
+// is now and merges its rule into the sandbox policy.
+func (m *Manager) mergeHostPortRule(ctx context.Context, a *approval) (*openshell.ConfigUpdateResult, error) {
+	m.mu.Lock()
+	b := m.boxes[a.sandbox]
+	p := a.proposal
+	m.mu.Unlock()
+	if b == nil || len(p.Endpoints) != 1 {
+		return nil, errors.New("the sandbox is gone")
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		return nil, err
+	}
+	if err := triage.CheckProposal(eff, p, false); err != nil {
+		return nil, err
+	}
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return nil, err
+	}
+	port := uint32(p.Endpoints[0].Port)
+	rule := v1.NetworkPolicyRule{
+		Name:      p.RuleName,
+		Endpoints: []v1.PolicyNetworkEndpoint{{Host: openshellHostAlias, Port: port, Ports: []uint32{port}}},
+		Binaries:  []v1.PolicyNetworkBinary{{Path: policy.AnyBinary}},
+	}
+	res, err := gw.Client.MergePolicy(ctx, a.sandbox, []openshell.PolicyMergeOperation{{AddRule: &v1.AddNetworkRule{RuleName: p.RuleName, Rule: rule}}},
+		openshell.PolicyUpdateOptions{Annotations: map[string]string{"source": "defenseclaw", "reason": "host-port-approval"}})
+	if err != nil && !openshell.IsAlreadyExists(err) {
+		return nil, upstream("open host port "+strconv.Itoa(int(port)), err)
+	}
+	return res, nil
+}
+
+// hostPortApplied records the outcome of applying an approved host port.
+func (m *Manager) hostPortApplied(ctx context.Context, a *approval, res *openshell.ConfigUpdateResult, err error) {
+	m.mu.Lock()
+	b := m.boxes[a.sandbox]
+	var ident audit.SandboxIdentity
+	saveRules := false
+	if b != nil {
+		ident = b.identity()
+		if err == nil {
+			b.rulesAdded++
+			saveRules = noteApprovedRule(b, a.proposal.RuleName, actorOperator)
+			if res != nil && res.Version != 0 && b.sb != nil {
+				b.sb.Status.CurrentPolicyVersion = res.Version
+				ident.PolicyVersion = res.Version
+			}
+		}
+	}
+	a.resolvedAt = m.now().UTC()
+	a.status = sandboxapi.ApprovalApproved
+	if err != nil {
+		a.status = sandboxapi.ApprovalFailed
+	}
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	if saveRules {
+		if serr := m.saveRecord(b); serr != nil {
+			m.logf("record the approved rule %s of %s: %v", a.proposal.RuleName, a.sandbox, serr)
+		}
+	}
+	port := a.decision.Port
+	if err != nil {
+		m.logf("open host port %d of %s: %v", port, a.sandbox, err)
+		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalCancelled, a.actor)
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
+			Host: openshellHostAlias, Port: port, Reason: "apply_failed",
+			Message: truncate(fmt.Sprintf("port %d on your machine could not be opened: %v", port, err), 300)})
+		return
+	}
+	m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalApproved, a.actor)
+	ev := audit.SandboxPolicyEvent{Sandbox: ident, Operation: audit.SandboxPolicyRuleAdd, Actor: m.actorRef(a.actor),
+		Origin: originFor(a.actor), Target: openshellHostAlias, Reason: policyReasonApproval, ChangeCount: 1, Timestamp: m.now()}
+	if res != nil {
+		ev.PolicyHash = res.PolicyHash
+	}
+	m.tel.RecordSandboxPolicy(ctx, ev)
+	m.refusals.forgetNote(ident.BindingID, openshellHostAlias, port, NoteAsked)
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: a.sandbox, ApprovalID: a.id,
+		Host: openshellHostAlias, Port: port, Reason: a.actor,
+		Message: fmt.Sprintf("approved port %d on your machine (%s:%d)", port, openshellHostAlias, port)})
+}

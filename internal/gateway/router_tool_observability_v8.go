@@ -176,6 +176,7 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 	if !authoritative {
 		return
 	}
+	applyOpenClawToolOutcome(&observation)
 	observation.meta.ToolIDReported = observation.meta.ToolID != ""
 	correlated, correlationState := r.correlateEventRouterToolV8(
 		context.Background(), connector.CorrelationLifecycleToolEnd, observation,
@@ -194,7 +195,7 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 		correlationContext = correlated.ctx
 	}
 	outcome, _, _, _ := generatedToolV8Result(observation)
-	logKind := eventRouterToolLogCompleted
+	var logKind eventRouterToolLogKind
 	switch outcome {
 	case observability.OutcomeBlocked:
 		logKind = eventRouterToolLogBlocked

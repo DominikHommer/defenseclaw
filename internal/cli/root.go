@@ -31,8 +31,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -88,7 +90,7 @@ func writeMachineVersion(w io.Writer) error {
 	})
 }
 
-func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if versionJSON {
 		return nil
 	}
@@ -103,6 +105,25 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
 		return nil
 	}
+	// The bare root command (it has no parent) is the per-user gateway
+	// daemon. On a managed host it must refuse before any side effect:
+	// before PID registration, before a per-user .env can set the
+	// deployment pin, and before the config load and audit store open that
+	// would create ~/.defenseclaw/audit.db.
+	if cmd != nil && !cmd.HasParent() {
+		// Stamp gateway.log before the config load and the audit store open
+		// write to it, so their lines carry a time too (GAP-2109).
+		startDaemonLogStamp()
+		defer func() {
+			if err != nil {
+				stopDaemonLogStamp()
+			}
+		}()
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+			return err
+		}
+		pinManagedUnixGatewayInputs(os.Stderr)
+	}
 	// Enterprise hook commands also use this initializer so they receive the
 	// same authenticated v8 runtime context as the root sidecar command.
 	// A Windows daemon may explicitly break away from the TUI's Job Object.
@@ -113,7 +134,6 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	}
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
-	var err error
 	cfgPath := config.ConfigPath()
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
 	if err != nil {
@@ -128,6 +148,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 			return waitErr
 		}
 		if !retry {
+			if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
+				return answer
+			}
 			return fmt.Errorf("failed to load config: %w", err)
 		}
 		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
@@ -139,19 +162,38 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
+	// Every command that resolves directory facts verifies an account of a
+	// child AD domain only when the administrator lists it (GAP-1255).
+	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
 		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
 			return fmt.Errorf("failed to prepare audit store directory: %w", err)
 		}
 	}
-	auditStore, err = audit.NewStore(cfg.AuditDB)
-	if err != nil {
-		return fmt.Errorf("failed to open audit store: %w", err)
+	if cmd != nil && !cmd.HasParent() {
+		// The daemon owns the store: it moves a corrupt one aside and starts
+		// on a new one instead of failing.
+		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
+		if err != nil {
+			return fmt.Errorf("failed to open audit store: %w", err)
+		}
+	} else {
+		auditStore, err = openCommandAuditStore(cfg.AuditDB, auditStoreOptions(cfg)...)
+		if err != nil {
+			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
+				return err
+			}
+			// Connector teardown and verify never write audit events. A
+			// damaged audit DB must not block restoring the agent's config
+			// (uninstall aborted on it, GAP-1048).
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %v; continuing without the audit store\n", err)
+			auditStore = nil
+		}
 	}
-	if err := auditStore.Init(); err != nil {
-		return fmt.Errorf("failed to init audit store: %w", err)
+	auditLog = nil
+	if auditStore != nil {
+		auditLog = audit.NewLogger(auditStore)
 	}
-	auditLog = audit.NewLogger(auditStore)
 	installCorrelator(auditStore, os.Stderr)
 	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
 		loadDotEnvIntoOS(resolved)
@@ -159,14 +201,53 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// auditStoreOptions are the options every opener of cfg's audit.db passes:
+// on a Secure Client host the store keeps main's schema (GAP-0246).
+func auditStoreOptions(cfg *config.Config) []audit.StoreOption {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return []audit.StoreOption{audit.WithSecureClientSchema()}
+	}
+	return nil
+}
+
+// auditOptionalAnnotation marks a subcommand that writes no audit events, so
+// an audit store that does not open is a warning instead of an error.
+const auditOptionalAnnotation = "defenseclaw.audit-optional"
+
+// openCommandAuditStore opens and initializes the audit store for a CLI
+// subcommand (the daemon uses audit.OpenDaemonStore instead).
+func openCommandAuditStore(path string, opts ...audit.StoreOption) (*audit.Store, error) {
+	store, err := audit.NewStore(path, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open audit store: %w", err)
+	}
+	// A command's output is not the place for per-migration notes (GAP-0153).
+	// Secure Client keeps them on stderr, as on main (issue #1092).
+	if cfg == nil || !cfg.SecureClientIntegration() {
+		store.SetMigrationProgress(io.Discard)
+	}
+	if err := store.Init(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("failed to init audit store: %w", err)
+	}
+	return store, nil
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "defenseclaw-gateway",
 	Short: "DefenseClaw gateway sidecar daemon",
-	Long: `DefenseClaw gateway sidecar — connects to the OpenClaw gateway WebSocket,
-monitors tool_call and tool_result events, enforces policy in real time,
-and exposes a local REST API for the Python CLI.
+	Long: `DefenseClaw gateway sidecar - the per-user policy runtime. It answers the
+hook calls of connected agents (Claude Code, Codex, Cursor, ...), runs the
+guardrail proxy for LLM traffic, writes the audit log, and exposes the local
+REST API used by the defenseclaw CLI and TUI. With OpenClaw configured it also
+monitors the OpenClaw gateway WebSocket.
 
-Run without arguments to start the sidecar daemon.`,
+On a managed enterprise host it runs as a system service for every enrolled
+account; administrators use 'defenseclaw-gateway enterprise linux|macos|windows'
+(status, verify, repair, ...).
+
+Run without arguments to start the sidecar daemon in the foreground; use
+'defenseclaw-gateway start' to run it in the background.`,
 	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
 		if auditLog != nil {
@@ -177,8 +258,13 @@ Run without arguments to start the sidecar daemon.`,
 		}
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Drain the gateway.log stamper before cobra prints an error.
+		defer stopDaemonLogStamp()
 		if versionJSON {
 			return writeMachineVersion(cmd.OutOrStdout())
+		}
+		if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+			return err
 		}
 		return runSidecar(cmd, args)
 	},
@@ -215,7 +301,7 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	if err := daemon.RegisterCurrentProcess(); err != nil {
 		return err
 	}
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigFor(cmd); err != nil {
 		return err
 	}
 	return nil
@@ -227,6 +313,12 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 // SQLite owner beside the running daemon, because closing that connection can
 // unlink the daemon's live WAL/SHM files on supported SQLite implementations.
 func loadGatewayCommandConfigOnly() error {
+	return loadGatewayCommandConfigFor(nil)
+}
+
+// loadGatewayCommandConfigFor is loadGatewayCommandConfigOnly for cmd, so the
+// managed Windows answer names the command the user ran.
+func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 	// Cobra normally executes this process once, but tests and embedders can
 	// execute the command tree repeatedly. Never retain a previous source.
 	activeObservabilityV8Startup = nil
@@ -240,7 +332,10 @@ func loadGatewayCommandConfigOnly() error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
+			return answer
+		}
+		return fmt.Errorf("failed to load config: %w", describeManagedConfigLoadError(err))
 	}
 	version.SetBinaryVersion(appVersion)
 
@@ -254,20 +349,25 @@ func loadGatewayCommandConfigOnly() error {
 
 // loadGatewayConfigV8 strict-parses and compiles the exact source snapshot
 // before the general Config decoder sees it. The target gateway therefore
-// never invokes v7 compatibility decoding or runtime migration; those belong
-// exclusively to `defenseclaw upgrade`.
+// never decodes an unconverted 0.8.x source; `defenseclaw migrate` converts a
+// released config once, and this runtime refuses what it has not converted.
 func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
-	loaded, err := loadConfigV8File(path, config.DefaultDataPath())
+	// An un-migrated config_version 8 file runs as the v9 migration would
+	// write it (read-only), so its data.json and audit.db policy still apply.
+	// A failed migration refuses the file: run as raw v8 it would drop the
+	// data.json admission policy and the audit.db block/allow entries.
+	loaded, err := loadConfigV8Source(path, config.DefaultDataPath(), "", true)
 	if err != nil {
 		return nil, nil, err
 	}
-	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
-	if err != nil {
-		return nil, nil, err
+	candidate := loaded.runtime
+	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
+		return nil, nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
-	if candidate.ConfigVersion != config.ObservabilityV8ConfigVersion {
-		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw upgrade' first")
-	}
+	// The managed-mode environment policy (envvars.Lookup) follows the
+	// loaded config: on a standalone enterprise host ignore-listed variables
+	// read as unset. Secure Client and per-user hosts read the raw env.
+	envvars.SetManagedStandalone(candidate.StandaloneEnterprise())
 	startup, err := prepareCompiledObservabilityV8Startup(candidate, loaded)
 	if err != nil {
 		return nil, nil, err
@@ -279,8 +379,8 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 // callers that already hold a proven v8 Config. Production startup uses
 // loadGatewayConfigV8 so strict parsing always precedes Config decoding.
 func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, error) {
-	if c == nil || c.ConfigVersion != config.ObservabilityV8ConfigVersion {
-		return nil, fmt.Errorf("schema version 8 is required")
+	if c == nil || !config.CurrentSchemaVersion(c.ConfigVersion) {
+		return nil, fmt.Errorf("the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	sourceName := strings.TrimSpace(c.ConfigFilePath)
 	if sourceName == "" {
@@ -330,6 +430,8 @@ func SetCommandName(name string) {
 
 func init() {
 	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
+	// A config reload reads credentials added to .env since the gateway started.
+	config.RegisterDotEnvLoader(loadDotEnvIntoOS)
 }
 
 // Execute runs the root command and returns the exit code. The actual
@@ -363,7 +465,25 @@ func ExecuteContext(ctx context.Context) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	err := rootCmd.ExecuteContext(ctx)
+	// Started as the package's defenseclaw symlink on a managed host, the
+	// binary is the standard user's sandbox launcher (launcher.go).
+	if launcherActive() {
+		return executeLauncher(ctx, rootCmd, os.Args[1:])
+	}
+	addManagedWindowsSetupAnswer(rootCmd)
+	addManagedHostHelp(rootCmd)
+	keepCommandTreeOfMainOnSecureClient(rootCmd)
+	installUsageArgChecks(rootCmd)
+	pendingUnknownSubcommand = nil
+	return executeResult(rootCmd, rootCmd.ExecuteContext(ctx))
+}
+
+// executeResult turns the outcome of running root into the process exit code.
+func executeResult(root *cobra.Command, err error) int {
+	if err == nil && pendingUnknownSubcommand != nil {
+		err, pendingUnknownSubcommand = pendingUnknownSubcommand, nil
+		root.PrintErrln(root.ErrPrefix(), err.Error())
+	}
 	if err == nil {
 		return 0
 	}
@@ -377,7 +497,15 @@ func ExecuteContext(ctx context.Context) int {
 		return rc
 	}
 	// integration-branch withExitCode helper.
-	return commandExitCode(err)
+	if rc := commandExitCode(err); rc != 1 {
+		return rc
+	}
+	// An unknown top-level command is a usage error, as in the Python CLI
+	// (GAP-1549).
+	if isUnknownRootCommand(root, err) {
+		return 2
+	}
+	return 1
 }
 
 // exitCodeFor is the pure error-to-int mapping for the scrub subcommand.
@@ -431,6 +559,7 @@ func loadDotEnvIntoOS(path string) {
 	if err != nil {
 		return
 	}
+	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -445,6 +574,10 @@ func loadDotEnvIntoOS(path string) {
 		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
 			continue
 		}
+		// A managed standalone host skips what the registry ignores there.
+		if managedHost && envvars.ManagedPolicy(k) == envvars.ManagedIgnore {
+			continue
+		}
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
@@ -454,6 +587,14 @@ func loadDotEnvIntoOS(path string) {
 	}
 }
 
+// dotEnvManagedSource reports whether the active config.yaml describes a
+// managed standalone host, for .env loading that runs before the config is
+// loaded.
+func dotEnvManagedSource() bool {
+	raw, err := safefile.ReadRegularFileBounded(config.ConfigPath(), int64(config.ObservabilityV8MaxSourceBytes))
+	return err == nil && config.StandaloneManagedSource(raw)
+}
+
 func dotEnvKeyIsProcessControl(key string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(key))
 	switch normalized {
@@ -461,13 +602,18 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"CURL_CA_BUNDLE",
 		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
 		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
+		// The deployment mode and profile pins come only from the service
+		// definition; a writable .env must not make an unmanaged host
+		// invalid or move a service onto another mode or profile.
+		managed.DeploymentModeEnv, managed.EnterpriseProfileEnv,
 		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
 		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
 		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
-		"DEFENSECLAW_JSONL_DISABLE", "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+		"DEFENSECLAW_JSONL_DISABLE",
 		"DEFENSECLAW_OTEL_TLS_INSECURE", "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
-		"DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "DEFENSECLAW_REVEAL_PII",
-		"DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", "DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_REVEAL_PII",
+		"DEFENSECLAW_SANDBOX_ID", "DEFENSECLAW_SANDBOX_NAME", "DEFENSECLAW_SANDBOX_TOKEN",
+		"DEFENSECLAW_STRICT_AVAILABILITY",
 		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
 		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
 		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",

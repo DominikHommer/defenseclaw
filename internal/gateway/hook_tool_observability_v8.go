@@ -277,6 +277,11 @@ func hookToolV8AgentInput(observation generatedToolV8Observation) (observability
 	applyHookModelV8AgentFacts(&input, identity, rootAgentID, rootSessionID)
 	input.DefenseClawAgentPhase = observability.Present("tool")
 	input.DefenseClawAgentPhaseCode = observability.Present[int64](4)
+	// The agent root of a blocked (or asked, alerted) tool call names the
+	// rule as its tool span does, so Galileo and Tempo show the rule of a
+	// turn blocked at a tool call, not only of a blocked prompt (GAP-2525).
+	input.DefenseClawGuardrailAction, input.DefenseClawGuardrailRuleID, input.DefenseClawGuardrailSeverity =
+		guardrailOutcomeAttributes(meta.Guardrail)
 	return input, true
 }
 
@@ -326,6 +331,7 @@ func generatedToolV8Input(observation generatedToolV8Observation) observability.
 	input.GenAIToolCallID = hookModelV8OptionalID(meta.ToolID)
 	input.DefenseClawToolID = hookModelV8OptionalID(meta.ToolID)
 	applyGeneratedToolV8Identity(&input, observation)
+	applyToolGuardrailOutcome(&input, observation)
 	return input
 }
 
@@ -368,8 +374,12 @@ func applyGeneratedToolV8Identity(input *observability.SpanToolExecuteInput, obs
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
+	input.DefenseClawGuardrailProfileName, input.DefenseClawGuardrailProfileDigest = meta.Profile.Name, meta.Profile.Digest
+	input.DefenseClawGuardrailProfileMatch, input.DefenseClawGuardrailProfileMatchedGroup = meta.Profile.Match, meta.Profile.MatchedGroup
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)

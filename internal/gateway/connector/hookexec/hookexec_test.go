@@ -19,6 +19,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,12 +27,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
@@ -621,6 +626,27 @@ func TestDecisionGolden(t *testing.T) {
 	}
 }
 
+// GAP-0205: a 429 from a busy gateway is retried, so a burst the gateway
+// clears in seconds does not fail the tool call.
+func TestRunRetriesAfterTheGatewayAnswers429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited","reason":"enterprise_managed_overloaded"}`
+		if s.requests > 2 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		header := make(http.Header)
+		header.Set("Retry-After", "1")
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) { opts.FailMode = "closed" })
+	if result.code != 0 || rt.requests != 3 {
+		t.Fatalf("code %d after %d requests, want an allow on the third; stderr=%q", result.code, rt.requests, result.stderr)
+	}
+	if got := retryAfterDelay("90"); got != 3*time.Second {
+		t.Fatalf("a long Retry-After was kept at %s", got)
+	}
+}
+
 func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
 	for _, connector := range []string{
 		"amp",
@@ -855,8 +881,18 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		if r.stdout != "" {
-			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
+		// the per-user outage notice from systemMessage, as on Unix.
+		var notice map[string]string
+		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start", r.stdout)
+		}
+		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
+			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
+		})
+		if managed.stdout != "" {
+			t.Errorf("socket hook stdout = %q, want no per-user notice", managed.stdout)
 		}
 	})
 
@@ -877,7 +913,9 @@ func TestUnreachable(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if r.stdout != `{"decision":"deny","reason":"DefenseClaw hook failed closed"}`+"\n" {
+		// GAP-1337: the denial names the stopped gateway and the start command.
+		if !strings.HasPrefix(r.stdout, `{"decision":"deny","reason":"DefenseClaw blocked this `) ||
+			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
@@ -893,6 +931,29 @@ func TestUnreachable(t *testing.T) {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
+}
+
+// GAP-0159: a per-user hook the gateway refused with its own message (a
+// Codex update left the protected hook setup stale: HTTP 409) showed only
+// "DefenseClaw hook failed closed" in the agent. The denial names the
+// refusal and doctor; a managed hook, and a body that is not the gateway's
+// JSON, keep the generic text.
+func TestPerUserGatewayRefusalNamesDoctor(t *testing.T) {
+	refusal := `{"error":"Codex hook contract does not match protected runtime lock"}`
+	for _, status := range []int{409, 503} {
+		r := run(t, "codex", &stubRT{status: status, body: refusal}, func(o *Options) { o.FailMode = "closed" })
+		if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
+			!strings.Contains(r.stdout, fmt.Sprintf("refused it (HTTP %d: Codex hook contract does not match protected runtime lock)", status)) ||
+			!strings.Contains(r.stdout, "Run `defenseclaw doctor`") {
+			t.Fatalf("HTTP %d: code=%d stdout=%q", status, r.code, r.stdout)
+		}
+	}
+	if text := perUserRefusalText(Options{ManagedEnterprise: true}, 409, []byte(refusal)); text != "" {
+		t.Fatalf("managed hook text = %q, want the generic one", text)
+	}
+	if text := perUserRefusalText(Options{}, 409, []byte("conflict")); text != "" {
+		t.Fatalf("plain body text = %q, want the generic one", text)
+	}
 }
 
 func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
@@ -1031,6 +1092,18 @@ func TestResponseFailure(t *testing.T) {
 		}
 		if r.stdout != "" {
 			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("surface refusal blocks even in fail-open mode", func(t *testing.T) {
+		r := run(t, "claudecode", &stubRT{status: 403, body: `{"error":"forbidden","reason":"enterprise_managed_surface_unverified"}`}, func(o *Options) {
+			o.AgentSurface = "Extension"
+		})
+		if r.code != blockExit || !strings.Contains(r.stderr, "this editor extension is not verified") {
+			t.Fatalf("code = %d stderr = %q, want a surface block", r.code, r.stderr)
+		}
+		if got := r.rt.gotReq.Header.Get(AgentSurfaceHeader); got != "extension" {
+			t.Fatalf("%s = %q, want extension", AgentSurfaceHeader, got)
 		}
 	})
 
@@ -1195,7 +1268,9 @@ func TestMissingToken(t *testing.T) {
 		if r.code != 2 {
 			t.Fatalf("code = %d, want 2", r.code)
 		}
-		if !strings.Contains(r.stderr, "missing gateway token") {
+		// GAP-1425: name the file, not an env var the scoped hook ignores.
+		if !strings.Contains(r.stderr, ".hook-claudecode.token not found") ||
+			strings.Contains(r.stderr, "DEFENSECLAW_GATEWAY_TOKEN") {
 			t.Errorf("stderr = %q", r.stderr)
 		}
 	})
@@ -1254,6 +1329,7 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 		"copilot":     "/api/v1/copilot/hook",
 		"antigravity": "/api/v1/antigravity/hook",
 		"hermes":      "/api/v1/hermes/hook",
+		"kiro":        "/api/v1/kiro/hook",
 	}
 	for connector, endpoint := range tests {
 		t.Run(connector, func(t *testing.T) {
@@ -1349,6 +1425,9 @@ func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
 	}
 }
 
+// Per-user Copilot hooks fail open on every DefenseClaw-side failure;
+// administrator-managed (standalone enterprise) Copilot hooks deny the tool
+// call with Copilot's native structured decision instead.
 func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 	type failureCase struct {
 		name   string
@@ -1374,23 +1453,29 @@ func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := run(t, "copilot", tc.rt, func(o *Options) {
-				o.Event = "preToolUse"
-				o.FailMode = "closed"
-				o.StrictAvailability = true
-				o.ManagedEnterprise = true
-				if tc.mutate != nil {
-					tc.mutate(o)
+		for _, managedHook := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managedHook), func(t *testing.T) {
+				result := run(t, "copilot", tc.rt, func(o *Options) {
+					o.Event = "preToolUse"
+					o.FailMode = "closed"
+					o.StrictAvailability = true
+					o.ManagedEnterprise = managedHook
+					if tc.mutate != nil {
+						tc.mutate(o)
+					}
+				})
+				want := ""
+				if managedHook {
+					want = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw policy service is unavailable."}` + "\n"
+				}
+				if result.code != 0 || result.stdout != want {
+					t.Fatalf(
+						"Copilot failure result: code=%d stdout=%q stderr=%q, want stdout %q",
+						result.code, result.stdout, result.stderr, want,
+					)
 				}
 			})
-			if result.code != 0 || result.stdout != "" {
-				t.Fatalf(
-					"Copilot failure synthesized enforcement: code=%d stdout=%q stderr=%q",
-					result.code, result.stdout, result.stderr,
-				)
-			}
-		})
+		}
 	}
 }
 
@@ -1899,6 +1984,124 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
 		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
 	}
+
+	// The Windows standalone hook says the account is not
+	// enrolled instead of "gateway unreachable", and still blocks.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != blockExit || rt.requests != 0 {
+		t.Fatalf("unenrolled account: code = %d requests = %d, want fail-closed without a gateway call", code, rt.requests)
+	}
+	if !strings.Contains(errb.String(), "this account is not enrolled") || strings.Contains(errb.String(), "gateway unreachable") {
+		t.Fatalf("stderr = %q, want the enrollment explanation", errb.String())
+	}
+	// GAP-0388: an SSH-only account waited for an enrollment that cannot happen.
+	if !strings.Contains(errb.String(), "Remote Desktop") || !strings.Contains(errb.String(), "SSH") {
+		t.Fatalf("stderr = %q, want the desktop sign-in requirement", errb.String())
+	}
+	// Codex shows its structured denial, not stderr, so the denial names
+	// the reason too instead of the generic failed-closed text.
+	// GAP-1242: the refusal is reported to the gateway's refusal pipe, which
+	// writes the audit row; the denial does not change.
+	var reports []refusalpipe.Report
+	restoreSend := sendUnenrolledRefusal
+	sendUnenrolledRefusal = func(_ context.Context, report refusalpipe.Report) error {
+		reports = append(reports, report)
+		return nil
+	}
+	t.Cleanup(func() { sendUnenrolledRefusal = restoreSend })
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "codex",
+		Event:                    "PreToolUse",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		FailMode:                 "open",
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader(`{"tool_name":"shell","tool_input":{"command":"echo marker"}}`),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || !strings.Contains(out.String(), `"permissionDecision":"deny"`) ||
+		!strings.Contains(out.String(), "this account is not enrolled") || strings.Contains(out.String(), failedClosed) {
+		t.Fatalf("codex denial: code = %d stdout = %q, want a deny that names the enrollment", code, out.String())
+	}
+	if len(reports) != 1 || reports[0] != (refusalpipe.Report{
+		Connector: "codex", Reason: "enterprise_managed_sid_unregistered", Event: "PreToolUse", Tool: "shell",
+	}) {
+		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
+	}
+	// Hermes has no fail-closed contract: the same refusal allows, so the
+	// hook must not claim to block.
+	out.Reset()
+	errb.Reset()
+	code = Run(context.Background(), Options{
+		Connector:                "hermes",
+		APIAddr:                  "127.0.0.1:1",
+		Home:                     home,
+		HookDir:                  filepath.Join(home, "hooks"),
+		ManagedEnterprise:        true,
+		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+		ExplainUnenrolledAccount: true,
+		Stdin:                    strings.NewReader("{}"),
+		Stdout:                   &out,
+		Stderr:                   &errb,
+		HTTPClient:               &http.Client{Transport: rt},
+	})
+	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
+		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	}
+}
+
+// GAP-0385: Claude Code shows only the first 80-odd characters of the hook's
+// stderr line, so the Windows refusal of a new account leads with the wait
+// and the next step instead of "defenseclaw: blocking claude-code tool: this
+// account is not enrolled in DefenseClaw on t...".
+func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
+	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
+	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+		var out, errb bytes.Buffer
+		home := t.TempDir()
+		rt := ok(`{"action":"allow"}`)
+		code := Run(context.Background(), Options{
+			Connector:                "claudecode",
+			Event:                    "PreToolUse",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			FailMode:                 "open",
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    reason,
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader("{}"),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		first, _, _ := strings.Cut(errb.String(), "\n")
+		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
+			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)
+		}
+	}
 }
 
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
@@ -1991,7 +2194,7 @@ func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedM
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "openhands"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -2104,6 +2307,11 @@ func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
 	}
 }
 
+// gatewayDownReason is the per-user denial text of an unreachable gateway (GAP-1337).
+func gatewayDownReason(event string) string {
+	return mustJSONString(perUserGatewayDownText(Options{Event: event}, "gateway unreachable"))
+}
+
 func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	tests := []struct {
 		event      string
@@ -2111,19 +2319,24 @@ func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
 	}{
 		{
 			event:      "SessionStart",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n",
 		},
 		{
 			event:      "PreCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PreCompact") + "}\n",
 		},
 		{
 			event:      "PostCompact",
-			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"continue":false,"stopReason":` + gatewayDownReason("PostCompact") + "}\n",
 		},
 		{
 			event:      "SubagentStop",
-			wantStdout: `{"decision":"block","reason":"DefenseClaw hook failed closed"}` + "\n",
+			wantStdout: `{"decision":"block","reason":` + gatewayDownReason("SubagentStop") + "}\n",
+		},
+		{
+			event: "PreToolUse",
+			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",` +
+				`"permissionDecisionReason":` + gatewayDownReason("PreToolUse") + "}}\n",
 		},
 		{
 			event:      "SessionEnd",
@@ -2155,7 +2368,7 @@ func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
 		opts.FailMode = "closed"
 		opts.StrictAvailability = true
 	})
-	wantStdout := `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n"
+	wantStdout := `{"continue":false,"stopReason":` + gatewayDownReason("SessionStart") + "}\n"
 	if result.code != 0 || result.stdout != wantStdout {
 		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
 	}
@@ -2384,5 +2597,173 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302 (redirect surfaced, not followed)", resp.StatusCode)
+	}
+}
+
+// Work the hook did before Run (the standalone foreign-hook guard's scan)
+// counts against the request budget: a budget already spent must fail
+// closed before gateway contact instead of granting a fresh full budget
+// that outlives the agent's own hook timeout.
+func TestRunChargesWorkBeforeRunToTheRequestBudget(t *testing.T) {
+	r := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) {
+		o.StartedAt = time.Now().Add(-time.Hour)
+		o.FailMode = "closed"
+	})
+	if r.rt.requests != 0 {
+		t.Fatalf("a spent budget must not contact the gateway: %d requests", r.rt.requests)
+	}
+	if r.code == 0 || !strings.Contains(r.stderr, "budget exhausted") {
+		t.Fatalf("a spent budget must fail closed: code=%d stderr=%q", r.code, r.stderr)
+	}
+	if fresh := run(t, "cursor", ok(`{"action":"allow"}`), func(o *Options) { o.FailMode = "closed" }); fresh.rt.requests != 1 {
+		t.Fatalf("a zero StartedAt keeps the full budget: %d requests", fresh.rt.requests)
+	}
+}
+
+// A foreign-hook guard denial must reach the user in each connector's
+// native block response with the guard's reason (file and allowlist key),
+// not the generic "policy service unavailable" text, and must never
+// contact the gateway.
+func TestForeignHookBlockNamesTheFileInEveryConnectorsResponse(t *testing.T) {
+	reason := ForeignHookBlockedReasonPrefix + " The project file /repo/.cursor/hooks.json defines a hook (digest sha256:ab). Ask your administrator to add the digest to enterprise.machine_policy.connectors.x.allowed_hooks."
+	for _, tc := range []struct {
+		connector, event, payload string
+		code                      int
+		stdout, stderr            string
+	}{
+		{connector: "cursor", payload: `{"hook_event_name":"preToolUse","tool_name":"Shell"}`, code: 2, stdout: `"permission":"deny"`},
+		{connector: "codex", event: "PreToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+		{connector: "antigravity", event: "PreToolUse", code: 0, stdout: `"decision":"deny"`},
+		{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stdout: ForeignHookBlockedReasonPrefix},
+		{connector: "claudecode", payload: `{"hook_event_name":"PreToolUse"}`, code: 2, stderr: "blocking claude-code tool"},
+		{connector: "copilot", event: "preToolUse", code: 0, stdout: `"permissionDecision":"deny"`},
+	} {
+		rt := ok(`{"action":"allow"}`)
+		r := run(t, tc.connector, rt, func(o *Options) {
+			o.ManagedEnterprise = true
+			o.ManagedRuntimeFailure = reason
+			o.Event = tc.event
+			if tc.payload != "" {
+				o.Stdin = strings.NewReader(tc.payload)
+			}
+		})
+		if rt.requests != 0 {
+			t.Fatalf("%s: a foreign-hook block must not contact the gateway", tc.connector)
+		}
+		if r.code != tc.code || !strings.Contains(r.stdout, tc.stdout) || !strings.Contains(r.stderr, tc.stderr) {
+			t.Fatalf("%s: code=%d stdout=%q stderr=%q", tc.connector, r.code, r.stdout, r.stderr)
+		}
+		shown := r.stdout
+		if tc.connector == "claudecode" {
+			shown = r.stderr
+		}
+		if !strings.Contains(shown, "/repo/.cursor/hooks.json") || !strings.Contains(shown, "allowed_hooks") {
+			t.Fatalf("%s: the block must name the file and the allowlist key: stdout=%q stderr=%q", tc.connector, r.stdout, r.stderr)
+		}
+		if strings.Contains(r.stderr, "gateway unreachable") {
+			t.Fatalf("%s: a policy block is not a gateway outage: %q", tc.connector, r.stderr)
+		}
+	}
+}
+
+// A managed Copilot hook that cannot get a decision denies in Copilot's own
+// shape (permissionRequest answers with behavior), while sessionStart, which
+// cannot block, keeps the fail-open result.
+func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
+	sp := specs["copilot"]
+	var stdout, stderr bytes.Buffer
+	opts := Options{Connector: "copilot", Event: "permissionRequest", ManagedEnterprise: true, Stdout: &stdout, Stderr: &stderr}
+	var body map[string]string
+	if code := failUnreachable(opts, sp, "closed", "enterprise_managed_sid_unregistered"); code != 0 ||
+		json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &body) != nil || body["behavior"] != "deny" {
+		t.Fatalf("permissionRequest = %d %q", code, stdout.String())
+	}
+	stdout.Reset()
+	opts.Event = "sessionStart"
+	if code := failUnreachable(opts, sp, "closed", "x"); code != 0 || stdout.Len() != 0 {
+		t.Fatalf("sessionStart = %d %q", code, stdout.String())
+	}
+	// GAP-0578: a stopped gateway service is named, not a vague outage.
+	stdout.Reset()
+	opts.Event = "preToolUse"
+	if code := failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason); code != 0 ||
+		!strings.Contains(stdout.String(), "ask your administrator to check DefenseClaw on this computer") {
+		t.Fatalf("stopped gateway preToolUse = %d %q", code, stdout.String())
+	}
+}
+
+// A per-user hook names the next step after "gateway unreachable" instead of
+// repeating it; a managed hook and any other reason keep the reason (GAP-1204).
+func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
+	const next = "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	for _, tc := range []struct {
+		opts   Options
+		reason string
+		want   string
+	}{
+		{Options{}, "gateway unreachable", next},
+		{Options{}, "gateway returned HTTP 502", "gateway returned HTTP 502"},
+		{Options{ManagedEnterprise: true}, "gateway unreachable", "gateway unreachable"},
+		{Options{ManagedUnixSocket: "/run/defenseclaw/hook.sock"}, "gateway unreachable", "gateway unreachable"},
+	} {
+		if got := unreachableDetail(tc.opts, tc.reason); got != tc.want {
+			t.Errorf("unreachableDetail(%+v, %q) = %q, want %q", tc.opts, tc.reason, got, tc.want)
+		}
+	}
+}
+
+// A Secure Client hook sends no session facts (GAP-0148, issue #1092): it
+// runs no klist and writes no session-facts cache in the home of the user,
+// while a per-user hook in the same SSH session sends them.
+func TestSecureClientHookSendsNoSessionFacts(t *testing.T) {
+	// useridentity computes the session facts once per process, so any
+	// earlier hook test fixes them without the SSH session set here. The
+	// checks run in a fresh test process.
+	if os.Getenv("DC_TEST_SESSION_FACTS_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSecureClientHookSendsNoSessionFacts$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "DC_TEST_SESSION_FACTS_CHILD=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("session facts checks in a fresh test process: %v\n%s", err, out)
+		}
+		return
+	}
+	t.Cleanup(func() { useridentity.KeepQualifiedNames(false) })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("SSH_TTY", "/dev/pts/9")
+	secureClient := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(secureClient, Options{ManagedEnterprise: true})
+	if got := secureClient.Header.Get(useridentity.SessionFactsHeader); got != "" {
+		t.Fatalf("Secure Client hook sent session facts %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client hook wrote in the home of the user: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	perUser := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(perUser, Options{})
+	if perUser.Header.Get(useridentity.SessionFactsHeader) == "" {
+		t.Fatal("per-user hook in an SSH session sent no session facts")
+	}
+}
+
+// GAP-0756: Secure Client handles the first 429 as the pre-1.0 hook did.
+func TestSecureClientHookDoesNotRetry429(t *testing.T) {
+	rt := &stubRT{onRequest: func(s *stubRT, _ *http.Request) (*http.Response, error) {
+		status, body := http.StatusTooManyRequests, `{"error":"rate_limited"}`
+		if s.requests > 1 {
+			status, body = http.StatusOK, `{"action":"allow"}`
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	}}
+	result := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.SecureClient = true
+	})
+	if rt.requests != 1 || result.code != blockExit {
+		t.Fatalf("Secure Client: %d requests, code %d, stdout %q, stderr %q", rt.requests, result.code, result.stdout, result.stderr)
 	}
 }

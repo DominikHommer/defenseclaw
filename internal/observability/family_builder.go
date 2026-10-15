@@ -221,6 +221,9 @@ func (builder *FamilyBuilder) buildGeneratedTrace(
 	if err != nil {
 		return Record{}, err
 	}
+	if input.importProvenance == nil {
+		classifyToolBatchCallIdentifiers(attributeClasses, attributes, input.envelope.Connector)
+	}
 	if err := validateFamilyCrossFieldValues(base.crossFieldRelations, attributes); err != nil {
 		return Record{}, err
 	}
@@ -569,16 +572,6 @@ func preflightGeneratedLogRecord(
 		return familyBuildFailure(FamilyBuildRecordRejected)
 	}
 	return nil
-}
-
-// recordInput is deliberately the last construction step. Family descriptors,
-// producer inputs, payload size, field-class coverage, and signal invariants are
-// preflighted before the occurrence provider is called. A trusted clock or ID
-// provider can still return an invalid candidate; that attempt is consumed and
-// reported with a stable, value-free occurrence error rather than gaplessly
-// retrying or exposing the rejected candidate.
-func (builder *FamilyBuilder) recordInput(input RecordInput) (RecordInput, error) {
-	return builder.recordInputAt(input, Absent[time.Time]())
 }
 
 // recordInputAt is used only after a private accepted-record constructor has

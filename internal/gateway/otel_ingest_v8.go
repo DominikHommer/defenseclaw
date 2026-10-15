@@ -385,6 +385,10 @@ func buildOTLPIngestGeneratedLog(
 		severity = observability.Present(observability.SeverityMedium)
 		logLevel = observability.Present(observability.LogLevelWarn)
 	}
+	if otlpDropIsExpectedUnmapped(event.eventName, event.reasonClass) {
+		severity = observability.Present(observability.SeverityInfo)
+		logLevel = observability.Present(observability.LogLevelInfo)
+	}
 	switch event.eventName {
 	case observability.EventName(observability.TelemetryEventTelemetryBatchAccepted):
 		return builder.BuildLogTelemetryBatchAccepted(observability.LogTelemetryBatchAcceptedInput{
@@ -437,6 +441,16 @@ func buildOTLPIngestGeneratedLog(
 	}
 }
 
+// otlpDropIsExpectedUnmapped reports a drop of native records that match no
+// inbound binding (unsupported_identity). Native Claude Code and Codex
+// exporters send many record types DefenseClaw does not import; counting them
+// is by design, so their per-batch drop event is INFO, not a WARN stream
+// (GAP-1165). Every other drop class stays a WARN.
+func otlpDropIsExpectedUnmapped(eventName observability.EventName, reasonClass string) bool {
+	return eventName == observability.EventName(observability.TelemetryEventTelemetryRecordsDropped) &&
+		reasonClass == string(otlpInboundUnsupportedIdentity)
+}
+
 func (a *APIServer) emitOTLPBatchAccountingV8(
 	ctx context.Context,
 	signal otelIngestSignal,
@@ -462,9 +476,13 @@ func (a *APIServer) emitOTLPBatchAccountingV8(
 		return err
 	}
 	for _, reason := range accounting.permanentDropReasons() {
+		rawSeverity := "WARN"
+		if otlpDropIsExpectedUnmapped("telemetry.records.dropped", string(reason.reason)) {
+			rawSeverity = "INFO"
+		}
 		_, dropErr := a.emitOTLPIngestV8(ctx, otlpIngestV8Event{
 			producerKey: otlpIngestProducerKey(signal), eventName: "telemetry.records.dropped",
-			rawSeverity: "WARN", phase: "normalization", outcome: observability.OutcomePartial,
+			rawSeverity: rawSeverity, phase: "normalization", outcome: observability.OutcomePartial,
 			signal: signal, connector: connector, payloadFormat: payloadFormat,
 			reasonClass: string(reason.reason), records: reason.count,
 			resources: stats.Resources, wireBytes: wireBytes, normalizedBytes: normalizedBytes,
@@ -475,34 +493,6 @@ func (a *APIServer) emitOTLPBatchAccountingV8(
 		}
 	}
 	return nil
-}
-
-func (a *APIServer) emitOTLPBatchAcceptedV8(
-	ctx context.Context,
-	signal otelIngestSignal,
-	connector string,
-	payloadFormat string,
-	stats otelIngestStats,
-	wireBytes int64,
-	normalizedBytes int64,
-	started time.Time,
-) (pipeline.LocalLogOutcome, error) {
-	return a.emitOTLPIngestV8(ctx, otlpIngestV8Event{
-		producerKey:     otlpIngestProducerKey(signal),
-		eventName:       "telemetry.batch.accepted",
-		rawSeverity:     "INFO",
-		phase:           "admission",
-		outcome:         observability.OutcomeCompleted,
-		signal:          signal,
-		connector:       connector,
-		payloadFormat:   payloadFormat,
-		records:         stats.Records,
-		resources:       stats.Resources,
-		wireBytes:       wireBytes,
-		normalizedBytes: normalizedBytes,
-		latency:         time.Since(started),
-		correlation:     otlpIngestCorrelation(ctx, connector),
-	})
 }
 
 func (a *APIServer) emitOTLPBatchRejectedV8(
@@ -541,18 +531,8 @@ func (a *APIServer) emitOTLPBatchRejectedV8(
 }
 
 type otlpIngestV8MetricSummary struct {
-	recorded    int
-	unsupported int
-	failed      int
-}
-
-func (summary *otlpIngestV8MetricSummary) add(other otlpIngestV8MetricSummary) {
-	if summary == nil {
-		return
-	}
-	summary.recorded += other.recorded
-	summary.unsupported += other.unsupported
-	summary.failed += other.failed
+	recorded int
+	failed   int
 }
 
 type otlpGeneratedMetricBuild func(

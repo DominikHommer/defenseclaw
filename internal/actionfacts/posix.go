@@ -48,6 +48,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	}
 
 	parser := syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
+	parsedSource := source
 	file, err := parser.Parse(strings.NewReader(source), "")
 	if err != nil {
 		normalized, valid := normalizePOSIXNullAggregateRedirects(source)
@@ -55,6 +56,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			out.markInvalid(IssueInvalidSyntax)
 			return out
 		}
+		parsedSource = normalized
 		parser = syntax.NewParser(syntax.Variant(syntax.LangPOSIX))
 		file, err = parser.Parse(strings.NewReader(normalized), "")
 		if err != nil {
@@ -120,6 +122,11 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
 	if len(out.commands) == 0 && out.status == StatusComplete {
 		out.markUnsupported(IssueUnsupportedConstruct)
+	}
+	if wrapperDepth == 0 {
+		out.redirectTargets.source = parsedSource
+	} else {
+		out.redirectTargets = redirectTargetCapture{}
 	}
 	return out
 }
@@ -726,6 +733,7 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 		if target.Expands {
 			command.ArgvComplete = false
 			out.markPartial(IssueDynamicWord)
+			out.redirectTargets.record(redirection.Word)
 		}
 	}
 }
@@ -1161,7 +1169,9 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 						if terminalPOSIXShellArgv(argv[i+1:]) {
 							return nil, false, false
 						}
-						return nil, false, true
+						if !staticPOSIXShellCommandArgv(argv[i+1:]) {
+							return nil, false, true
+						}
 					}
 					return cloneSlice(argv[i+1:]), true, false
 				}
@@ -1215,7 +1225,9 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				if terminalPOSIXShellArgv(argv[i:]) {
 					return nil, false, false
 				}
-				return nil, false, true
+				if !staticPOSIXShellCommandArgv(argv[i:]) {
+					return nil, false, true
+				}
 			}
 			return cloneSlice(argv[i:]), true, false
 		}
@@ -1266,6 +1278,18 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 		return nil, false, true
 	}
 	return nil, false, false
+}
+
+func staticPOSIXShellCommandArgv(argv []string) bool {
+	program := commandProgram(argv[0])
+	if program != "sh" && program != "bash" {
+		return false
+	}
+	invocation := parsePOSIXShellInvocation(program, argv)
+	return invocation.valid && !invocation.noExec &&
+		invocation.mode == posixShellModeCommand &&
+		invocation.commandIndex < len(argv) &&
+		strings.TrimSpace(argv[invocation.commandIndex]) != ""
 }
 
 func posixExecLoginOption(arg string) bool {

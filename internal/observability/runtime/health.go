@@ -51,6 +51,9 @@ type DestinationHealthSnapshot struct {
 	Generation   uint64
 	PlanDigest   string
 	Destinations []DestinationHealth
+	// LocalWriteLossJournal reports whether failed local writes are kept in
+	// the loss journal or in memory only (GAP-1129).
+	LocalWriteLossJournal LocalWriteLossJournalHealth
 }
 
 // DestinationHealthSnapshot acquires one graph lease, joins the complete
@@ -99,6 +102,12 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			// was initialized and activated for this generation.
 			row.State = delivery.HealthHealthy
 			row.Reason = string(delivery.HealthReasonActivated)
+			// A failed SQLite append counts as dropped here, so a record the
+			// optional destinations received but local history lacks is not
+			// silent (GAP-1100). Secure Client keeps main's zero row (#1092).
+			if !runtime.secureClient {
+				row.Counters = local.writes.snapshot()
+			}
 		}
 		byName[destination.Name] = len(rows)
 		rows = append(rows, row)
@@ -159,6 +168,11 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			source.Queue = &queue
 			mergeQueue(row, queue)
 		}
+		// Records an earlier gateway process abandoned at shutdown count as
+		// dropped once, in the generation they were carried into (GAP-1096).
+		source.Counters.Dropped = addUint64(
+			source.Counters.Dropped, runtime.carriedDropped(graph.Generation(), source.Destination, source.Signal),
+		)
 		row.Sources = append(row.Sources, source)
 		row.Counters = addCounters(row.Counters, source.Counters)
 		if healthStateRank(source.State) > healthStateRank(row.State) {
@@ -204,6 +218,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		}
 	}
 	for index := range rows {
+		settleInitializingRoute(&rows[index])
 		switch rows[index].CircuitState {
 		case delivery.CircuitOpen:
 			rows[index].State = delivery.HealthFailing
@@ -218,7 +233,22 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 
 	return DestinationHealthSnapshot{
 		Generation: graph.Generation(), PlanDigest: graph.Digest(), Destinations: rows,
+		LocalWriteLossJournal: runtime.localWriteLosses.health(),
 	}, nil
+}
+
+// settleInitializingRoute reports a route healthy once it has delivered.
+// Each signal starts initializing and leaves that state on its first export,
+// so with light traffic (no spans yet) one idle signal kept the whole route
+// "initializing" although its logs were delivered (GAP-1332). Any degraded or
+// failing signal still outranks initializing and is left as it is.
+func settleInitializingRoute(row *DestinationHealth) {
+	if row.State != delivery.HealthInitializing || row.LastSuccess.IsZero() ||
+		row.LastFailure.After(row.LastSuccess) {
+		return
+	}
+	row.State = delivery.HealthHealthy
+	row.Reason = string(delivery.HealthReasonActivated)
 }
 
 func validDeliveryHealthReason(reason string) bool {
