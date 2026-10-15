@@ -71,7 +71,7 @@ call through unchecked because the gateway is down.
 | Gateway returns 4xx, malformed JSON, or no action | Allow, warn, and record the response failure. | Block with the connector's response shape and record the failure. |
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
-| Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
+| Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. | Block with the connector's block response, an audit row with result `panic`, and telemetry. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
 Fail mode applies only to a hook the agent can start. A hook script that is
@@ -98,10 +98,14 @@ place as root with mode 0755). `enterprise linux repair` does the same at
 once. On Windows the standalone guardian puts a missing, empty or different
 `defenseclaw-hook.exe` back from its protected copy within seconds.
 
-The final row is intentional and important. Hook fail mode governs delivery,
-authentication, parsing, and response availability. It does not fabricate a
-policy denial after an internal evaluator panic. Treat that condition as a
-degraded security incident and inspect gateway health.
+A recovered internal evaluator error follows the effective fail mode, like any
+other failure to reach a verdict: `closed` blocks the call, `open` allows it and
+says so with `would_block` and an audit row, and a connector in observe mode
+(effective mode `open`) never enforces. The block is a fail-closed answer, not a
+policy finding, and its reason says the hook could not complete its check. Treat
+the condition as a degraded security incident: alert on the
+`defenseclaw.panics.total` counter and on audit rows with result `panic`, and
+inspect gateway health.
 
 Ordered chains follow the same non-weakening rule. A SQLite timeout, closed
 store, missing canonical session, or integrity conflict can prevent a new
