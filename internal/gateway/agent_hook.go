@@ -2271,6 +2271,14 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 				actionTool, trustedArgs, toolCWD = "shell", args, dir
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "hermes") && actionTool == fallbackTool {
+			// Hermes' native file writes (patch in both modes, write_file)
+			// are judged as the reviewed write contracts they implement, so
+			// their targets reach the file-write rules (GAP-0667).
+			if tool, args, ok := connector.HermesTrustedWriteArgs(req.ToolName, req.ToolArgs); ok {
+				actionTool, trustedArgs = tool, args
+			}
+		}
 		// A sandbox shell call is also judged on its command alone when its
 		// other arguments leave the parse partial.
 		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
@@ -2293,6 +2301,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:            req.ConnectorName,
 			EnforcementCapable:   enforcementCapable,
 			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
+			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			record:               toolChainRecorder(req.toolChain),
 		}, command, commandTool)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
