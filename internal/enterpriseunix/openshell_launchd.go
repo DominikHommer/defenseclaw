@@ -71,6 +71,10 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loaded
 			if strings.Contains(message, "Could not find domain") || strings.Contains(message, "No such process") || launchdNotLoaded(err) {
 				continue
 			}
+			if strings.HasPrefix(domain, "gui/") && guiDomainUnsupported(domainResult, message) && !e.ownsConsole(a.UID) {
+				// No GUI session: launchd sets the jobs up at the next login.
+				continue
+			}
 			return nil, fmt.Errorf("inspect LaunchAgent domain %s of %s: %w", domain, a.Name, err)
 		}
 		if !strings.Contains(string(domainResult.Stdout), domain+" = {") {
@@ -99,6 +103,20 @@ func (e *Env) loadedMacOSAgents(ctx context.Context, a SandboxAccount) ([]loaded
 		}
 	}
 	return out, nil
+}
+
+// guiDomainUnsupported matches launchd's answer for the gui domain of an
+// account without a GUI session on macOS 15: exit 125 with "Domain does not
+// support specified action" rather than "Could not find domain" (GAP-0639).
+func guiDomainUnsupported(res CommandResult, message string) bool {
+	return res.ExitCode == 125 && strings.Contains(message, "Domain does not support specified action")
+}
+
+// ownsConsole reports whether uid owns /dev/console, the GUI login session. An
+// unreadable console counts as owned, so the launchctl failure stays an error.
+func (e *Env) ownsConsole(uid int) bool {
+	owner, _, err := e.OwnerOf(e.P("/dev/console"))
+	return err != nil || owner == uid
 }
 
 // reloadMacOSAgent uses the same bootout/bootstrap sequence that recovered the
@@ -170,6 +188,16 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 				}
 			}
 			l.result.AddWarning(codeSandboxUserState, err.Error())
+			continue
+		}
+		if len(jobs) == 0 {
+			// No DefenseClaw job is loaded in either domain (a logged-out
+			// account): launchd loads the current program at the next login,
+			// so a reload recorded earlier has nothing left to do.
+			key := strconv.Itoa(a.UID)
+			if old, waiting := state.Pending[key]; waiting && old.Kind == "launchd" {
+				delete(state.Pending, key)
+			}
 			continue
 		}
 		var status SandboxStatus
