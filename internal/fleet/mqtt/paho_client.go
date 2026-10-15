@@ -220,7 +220,7 @@ func (c *PahoClient) Connect(ctx context.Context) error {
 
 // onPublishReceived hands every inbound PUBLISH to the handler of the first
 // matching subscription filter (what the deprecated
-// paho.NewSingleHandlerRouter did). It reports the message handled.
+// paho.NewSingleHandlerRouter did). It reports whether a handler took it.
 func (c *PahoClient) onPublishReceived(pr paho.PublishReceived) (bool, error) {
 	p := pr.Packet
 	if p == nil {
@@ -241,9 +241,10 @@ func (c *PahoClient) onPublishReceived(pr paho.PublishReceived) (bool, error) {
 	}
 	c.mu.RUnlock()
 
-	if handler != nil {
-		handler(msg)
+	if handler == nil {
+		return false, nil
 	}
+	handler(msg)
 	return true, nil
 }
 

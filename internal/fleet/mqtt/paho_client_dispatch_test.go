@@ -25,7 +25,8 @@ import (
 
 // The client routes inbound PUBLISH packets through OnPublishReceived (the
 // replacement of the deprecated NewSingleHandlerRouter): a matching filter
-// gets the message, an unmatched topic reaches no handler.
+// gets the message, an unmatched topic reaches no handler and is reported
+// not handled, so a later callback still sees AlreadyHandled=false.
 func TestPahoClientOnPublishReceivedDispatchesToMatchingSubscription(t *testing.T) {
 	c := NewPahoClient("mqtt://127.0.0.1:1883", "test")
 	var got []Message
@@ -42,8 +43,8 @@ func TestPahoClientOnPublishReceivedDispatchesToMatchingSubscription(t *testing.
 		t.Fatalf("dispatched %+v", got)
 	}
 
-	if _, err := c.onPublishReceived(paho.PublishReceived{Packet: &paho.Publish{Topic: "other/topic"}}); err != nil {
-		t.Fatal(err)
+	if handled, err := c.onPublishReceived(paho.PublishReceived{Packet: &paho.Publish{Topic: "other/topic"}}); err != nil || handled {
+		t.Fatalf("unmatched topic: handled=%v err=%v", handled, err)
 	}
 	if handled, _ := c.onPublishReceived(paho.PublishReceived{}); handled {
 		t.Fatal("a nil packet must not count as handled")
