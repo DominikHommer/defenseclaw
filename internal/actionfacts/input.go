@@ -544,8 +544,7 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 						// OpenCode's multiedit items repeat the edit tool's
 						// arguments, filePath included, but it applies every
 						// item to the call's own filePath, which is the write
-						// target judged here. The item's copy is metadata, so
-						// a different name in it cannot hide that target.
+						// target judged here. The item's copy is metadata.
 						text, ok := value.(string)
 						if edit != camelCaseEditKeys || !ok || validateScalar(text, maxScalarBytes) != "" {
 							return false

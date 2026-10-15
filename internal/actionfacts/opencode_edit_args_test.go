@@ -10,10 +10,8 @@ import (
 
 // OpenCode's native edit and multiedit tools take Claude Code's edit
 // arguments in camelCase, and the Copilot CLI edit and create tools take
-// path with old_str/new_str or file_text. Parsed with the generic projection
-// those were unknown keys, so the call stayed partial and named no complete
-// write target: an edit of ~/.ssh/authorized_keys reached no persistence
-// rule (GAP-0655).
+// path with old_str/new_str or file_text. Each dialect parses as a complete
+// write call with one target, like Claude Code's (GAP-0655).
 func TestExtractOpenCodeEditArgs(t *testing.T) {
 	const keys = "/sandbox/.ssh/authorized_keys"
 	for _, test := range []struct {
@@ -29,6 +27,8 @@ func TestExtractOpenCodeEditArgs(t *testing.T) {
 		{name: "copilot edit", tool: "edit", raw: `{"path":"` + keys + `","old_str":"# a","new_str":"k"}`, want: StatusComplete, path: keys},
 		{name: "copilot create", tool: "create", raw: `{"path":"` + keys + `","file_text":"k"}`, want: StatusComplete, path: keys},
 		{name: "copilot edit replace all", tool: "edit", raw: `{"path":"` + keys + `","old_str":"# a","new_str":"k","replace_all":true}`, want: StatusPartial},
+		// An argument outside the schema keeps the call partial; its target
+		// is judged by UnknownKeyWriteTargetViews.
 		{name: "create unknown field", tool: "create", raw: `{"path":"` + keys + `","file_text":"k","mode":"0600"}`, want: StatusPartial},
 		{name: "snake edit unchanged", tool: "Edit", raw: `{"file_path":"` + keys + `","old_string":"# a","new_string":"k"}`, want: StatusComplete, path: keys},
 		{name: "mixed dialect", tool: "edit", raw: `{"filePath":"` + keys + `","old_string":"# a","newString":"k"}`, want: StatusPartial},
