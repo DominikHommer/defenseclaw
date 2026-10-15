@@ -187,6 +187,9 @@ func dispatchTrustedAction(
 	// subsetView is set when semanticFacts keeps only the action's static,
 	// certain commands; as on a redirect-target view, only a match counts.
 	subsetView := false
+	// overLimitView is set when semanticFacts is the over-limit view of a
+	// write tool call, the only facts that name the targets of that call.
+	overLimitView := false
 	// powerShellView keeps the independently parsed commands of exact
 	// pwsh -Command / -EncodedCommand bodies next to the action's static
 	// top-level commands. The original action remains partial. The view
@@ -198,7 +201,12 @@ func dispatchTrustedAction(
 		if view, ok := actionfacts.PowerShellCommandSubsetReduction(request.Input, facts); ok {
 			powerShellView = &view
 		}
-		if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
+		if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+			// A write tool call whose arguments are limit-exceeded, judged on
+			// the same call with its large text left out: it names the same
+			// targets, so a match counts (GAP-0674).
+			semanticFacts, subsetView, overLimitView = view, true, true
+		} else if view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts); ok {
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
@@ -433,56 +441,7 @@ func dispatchTrustedAction(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
 	) ([]RuleFinding, trustedActionTelemetry) {
-		legacyFindings = appendTrustedFIFOListenerBindShellFinding(
-			legacyFindings,
-			generation,
-			request.Input,
-			facts,
-		)
-		legacyFindings = appendTrustedBoundedExactFallbackFindings(
-			legacyFindings,
-			generation,
-			request.Input,
-			facts,
-		)
-		legacyFindings = appendTrustedWindowsPathFactFindings(
-			legacyFindings,
-			facts,
-			request.Input.Tool,
-			options,
-		)
-		legacyFindings = appendTrustedEmbeddedCommandFindings(
-			legacyFindings,
-			generation,
-			request.Input.Tool,
-			facts,
-			options,
-		)
-		legacyFindings, laneTelemetry := appendTrustedBashFallbackFindings(
-			legacyFindings,
-			generation,
-			request.Input,
-			request.Input.Tool,
-			facts,
-			options,
-			request.EnforcementCapable,
-			request.DowngradeReadOnlyDataArgs,
-		)
-		legacyFindings = filterTrustedLegacyActionContext(
-			generation,
-			legacyFindings,
-			request.Input,
-			request.Input.Tool,
-			facts,
-			request.DowngradeReadOnlyDataArgs,
-		)
-		legacyFindings = filterExactFallbackFindings(
-			legacyFindings,
-			request.Input,
-			facts,
-			request.EnforcementCapable,
-		)
-		return legacyFindings, laneTelemetry
+		return trustedFallbackLanes(generation, request, options, legacyFindings, facts)
 	}
 	legacyFindings, fallbackTelemetry := fallbackLanes(
 		append([]RuleFinding(nil), scanned...),
@@ -498,9 +457,17 @@ func dispatchTrustedAction(
 		sequenceFindings, _ := fallbackLanes(scanned, semanticFacts)
 		legacyFindings = withSequenceProvenFindings(legacyFindings, sequenceFindings)
 	}
+	// A write tool call over the argument limit names its targets only on
+	// its over-limit view, so a path finding of the recovery lanes is proven
+	// and judged there; only a finding proven on the view is added (GAP-0674).
+	if overLimitView {
+		contextFacts = semanticFacts
+		viewFindings, _ := fallbackLanes(scanned, semanticFacts)
+		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
+	}
 	findings = append(semanticFindings, legacyFindings...)
 	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	finalized = appendTrustedHomeResolvedSSHKeyWriteFinding(finalized, generation, request, facts)
+	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -2132,6 +2099,11 @@ func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	return true
 }
 
+// dispatchTrustedFallback judges a call with the legacy scan and the
+// recovery lanes only. A write tool call over the argument limit whose
+// over-limit view cannot be projected, or one judged by a generation with no
+// semantic rules, gets here with that view: as in dispatchTrustedAction, the
+// lanes and the context checks also judge it on the view.
 func dispatchTrustedFallback(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
@@ -2143,12 +2115,39 @@ func dispatchTrustedFallback(
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
 	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
-	findings := scanRuleGeneration(
+	scanned := scanRuleGeneration(
 		generation,
 		legacyText,
 		request.Input.Tool,
 		options,
 	)
+	findings, fallbackTelemetry := trustedFallbackLanes(
+		generation,
+		request,
+		options,
+		append([]RuleFinding(nil), scanned...),
+		facts,
+	)
+	contextFacts := facts
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		contextFacts = view
+		viewFindings, _ := trustedFallbackLanes(generation, request, options, scanned, view)
+		findings = withSequenceProvenFindings(findings, viewFindings)
+	}
+	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+}
+
+// trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
+// of the call, on facts, then the checks that decide on those facts whether a
+// fallback, content or path finding may block.
+func trustedFallbackLanes(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	options ruleScanOptions,
+	findings []RuleFinding,
+	facts actionfacts.Facts,
+) ([]RuleFinding, trustedActionTelemetry) {
 	findings = appendTrustedFIFOListenerBindShellFinding(
 		findings,
 		generation,
@@ -2174,8 +2173,7 @@ func dispatchTrustedFallback(
 		facts,
 		options,
 	)
-	var fallbackTelemetry trustedActionTelemetry
-	findings, fallbackTelemetry = appendTrustedBashFallbackFindings(
+	findings, laneTelemetry := appendTrustedBashFallbackFindings(
 		findings,
 		generation,
 		request.Input,
@@ -2199,8 +2197,7 @@ func dispatchTrustedFallback(
 		facts,
 		request.EnforcementCapable,
 	)
-	findings = finalizeTrustedActionFindings(generation, request, facts, findings)
-	return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts), fallbackTelemetry
+	return findings, laneTelemetry
 }
 
 // neutralizeTrustedSecretStoreValue keeps credential detectors focused on
