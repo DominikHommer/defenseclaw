@@ -161,7 +161,7 @@ func kiroAliasedEditView(fields map[string]json.RawMessage, path string) (string
 	_, camelOld := fields["oldStr"]
 	_, camelNew := fields["newStr"]
 	if (snakeOld || snakeNew) && (camelOld || camelNew) &&
-		!(snakeOld && snakeNew && camelOld && camelNew) {
+		(!snakeOld || !snakeNew || !camelOld || !camelNew) {
 		return "", nil, false
 	}
 	oldText, oldOK := kiroAliasedString(fields, "old_str", "oldStr")
