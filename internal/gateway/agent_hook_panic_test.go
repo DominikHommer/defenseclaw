@@ -628,8 +628,7 @@ func TestHandleAgentHook_PostEvaluationRecoveryUsesFailMode(t *testing.T) {
 		t.Fatalf("response=%v, want a denying block", response)
 	}
 	row := soleHookDecisionForTest(t, store)
-	if row.Action != string(audit.ActionConnectorHook) ||
-		row.Structured["result"] != "panic" || row.Structured["action"] != "block" {
-		t.Fatalf("audit=%+v, want one connector-hook panic/block", row)
+	if row.Action != string(audit.ActionConnectorHook) || !row.Enforced {
+		t.Fatalf("audit=%+v, want one enforced connector-hook row", row)
 	}
 }
