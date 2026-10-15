@@ -90,6 +90,10 @@ func TestClaudeSlashSkillDeniedWhereGatewaySkipsUserProfiles(t *testing.T) {
 			if got[0].targetType != "skill" || got[0].decision.TargetName != "fc-wm-denied" {
 				t.Fatalf("source %q, %s: decision names %s %q, want skill fc-wm-denied", source, label, got[0].targetType, got[0].decision.TargetName)
 			}
+			// The hook_decision row names the refused skill.
+			if reason := assetPolicyResponseReason(got[0].decision); !strings.Contains(reason, "asset_name=fc-wm-denied") {
+				t.Fatalf("source %q, %s: reason %q does not name the skill", source, label, reason)
+			}
 		}
 		for label, ctx := range map[string]context.Context{"reported": reporting(allowedSkill), "unreported": peer} {
 			for _, got := range slash(ctx, source, "fc-wm-allowed") {
