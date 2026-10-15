@@ -1666,7 +1666,7 @@ func integrityStructuredFileMutator(
 		"writefile", "write_file", "write-file",
 		"fswrite", "fs_write", "fs-write", "fs.write", "fs.write_file",
 		"filewrite", "file_write", "file-write",
-		"createfile", "create_file", "create-file",
+		"create", "createfile", "create_file", "create-file",
 		"editfile", "edit_file", "edit-file",
 		"applypatch", "apply_patch", "apply-patch",
 		"appendfile", "append_file", "append-file",
