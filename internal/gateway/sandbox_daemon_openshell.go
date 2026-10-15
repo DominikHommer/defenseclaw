@@ -300,8 +300,8 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 
 // commandDrift compares the command line of the gateway on the account's
 // gateway port with the one the managed unit's exec shim execs: the install
-// mode's openshell-gateway, --config and the rendered file (on Linux also
-// the rendered docker fallback). A listener that is not openshell-gateway
+// mode's openshell-gateway, --config and one of the rendered files
+// (managedConfigs). A listener that is not openshell-gateway
 // itself, or one whose command cannot be read, is not judged.
 func (o *accountOpenShell) commandDrift(ctx context.Context, s sandboxrelay.DaemonSettings) []openshell.SettingDrift {
 	if o.portPID == nil || o.procArgs == nil {
@@ -324,16 +324,25 @@ func (o *accountOpenShell) commandDrift(ctx context.Context, s sandboxrelay.Daem
 	if binary == "" || cfg == "" {
 		return nil
 	}
-	allowed := []string{cfg}
-	if o.goos == "linux" {
-		allowed = append(allowed, filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile))
-	}
-	for _, path := range allowed {
+	for _, path := range o.managedConfigs(cfg) {
 		if strings.Join(words, " ") == binary+" --config "+path {
 			return nil
 		}
 	}
 	return []openshell.SettingDrift{{Field: "gateway command", Want: binary + " --config " + cfg, Have: strings.Join(words, " ")}}
+}
+
+// managedConfigs are the rendered files the managed unit's exec shim starts
+// the account's gateway on: the rendered gateway.toml cfg and, on Linux, the
+// docker fallback's and the 1.0.1 upgrade bridge's docker configuration
+// (openshell.GatewayDefaultNamespaceTOMLFile, GAP-0587; remove that one
+// with the bridge when 1.0.1 is out of support).
+func (o *accountOpenShell) managedConfigs(cfg string) []string {
+	if o.goos != "linux" {
+		return []string{cfg}
+	}
+	dir := filepath.Dir(cfg)
+	return []string{cfg, filepath.Join(dir, openshell.GatewayFallbackTOMLFile), filepath.Join(dir, openshell.GatewayDefaultNamespaceTOMLFile)}
 }
 
 // gatewayBinary is the openshell-gateway the managed unit's exec shim runs
@@ -375,9 +384,9 @@ func (o *accountOpenShell) OtherGateways(ctx context.Context, s sandboxrelay.Dae
 	if binary == "" || cfg == "" {
 		return nil
 	}
-	managedCommand := map[string]bool{binary + " --config " + cfg: true}
-	if o.goos == "linux" {
-		managedCommand[binary+" --config "+filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile)] = true
+	managedCommand := map[string]bool{}
+	for _, path := range o.managedConfigs(cfg) {
+		managedCommand[binary+" --config "+path] = true
 	}
 	out, err := o.accountProcs(ctx)
 	if err != nil {
@@ -461,14 +470,16 @@ func (o *accountOpenShell) Prepare(ctx context.Context, s sandboxrelay.DaemonSet
 // account's runs ends that account's sandboxes. The one managed port keeps
 // them apart while both use it, but an account whose gateway_port switch
 // waits for its sandboxes to stop still runs its gateway on the old port
-// while the new one is free (GAP-0566).
+// while the new one is free (GAP-0566). The gateways of the 1.0.1 upgrade
+// bridge share OpenShell's default namespace the same way, so they count
+// too (managedConfigs).
 func (o *accountOpenShell) otherAccountManagedGateway(ctx context.Context, cfg string) bool {
 	if o.hostProcs == nil || cfg == "" {
 		return false
 	}
-	configs := map[string]bool{cfg: true}
-	if o.goos == "linux" {
-		configs[filepath.Join(filepath.Dir(cfg), openshell.GatewayFallbackTOMLFile)] = true
+	configs := map[string]bool{}
+	for _, path := range o.managedConfigs(cfg) {
+		configs[path] = true
 	}
 	out, err := o.hostProcs(ctx)
 	if err != nil {

@@ -70,6 +70,11 @@ type RenderedGateway struct {
 	// TelemetryEnabled lets OpenShell send its own anonymous usage
 	// telemetry; off unless the organization's sandbox floor allows it.
 	TelemetryEnabled bool
+	// DefaultDockerNamespaceBridge renders a docker driver without a
+	// sandbox_label, the 1.0.1 render: its sandboxes live in OpenShell's
+	// default namespace (GatewayDefaultNamespaceTOMLFile). 1.0.1 upgrade
+	// bridge, remove when 1.0.1 is out of support.
+	DefaultDockerNamespaceBridge bool
 }
 
 // renderedHeader marks the files the lifecycle owns.
@@ -102,6 +107,20 @@ const (
 	// lifecycle renders.
 	ManagedDockerNamespace = "defenseclaw-managed"
 )
+
+// GatewayDefaultNamespaceTOMLFile is the rendered docker configuration of
+// the 1.0.1 upgrade bridge (GAP-0587): the docker driver as 1.0.1 rendered
+// it, with no sandbox_label, so in OpenShell's default namespace. 1.0.1's
+// managed gateways kept their sandboxes there, and a gateway lists only its
+// own namespace's: on the managed one they could not start, OpenShell
+// dropped them and their unpulled work was lost. The lifecycle renders the
+// file on a host upgraded from a 1.0.1 docker record, and the exec shim
+// starts an account's docker gateway on it while that account still keeps a
+// sandbox in the default namespace (DockerNamespaceInUse) and none in the
+// managed one; an account without one, or once its last one is deleted,
+// moves to ManagedDockerNamespace at its next gateway start. 1.0.1 upgrade
+// bridge, remove when 1.0.1 is out of support.
+const GatewayDefaultNamespaceTOMLFile = "gateway-docker-default-namespace.toml"
 
 // Validate refuses a configuration the lifecycle must not render.
 func (r RenderedGateway) Validate() error {
@@ -157,7 +176,7 @@ type renderedVMDriver struct {
 type renderedDockerDriver struct {
 	AllowDriverConfig bool   `toml:"allow_driver_config"`
 	EnableBindMounts  bool   `toml:"enable_bind_mounts"`
-	SandboxLabel      string `toml:"sandbox_label"`
+	SandboxLabel      string `toml:"sandbox_label,omitempty"`
 	ResourceAdmission struct {
 		Enabled bool `toml:"enabled"`
 	} `toml:"resource_admission"`
@@ -176,7 +195,11 @@ func (r RenderedGateway) TOML() ([]byte, error) {
 	case DriverVM:
 		doc.OpenShell.Drivers = &renderedDrivers{VM: &renderedVMDriver{DriverDir: r.DriverDir, SandboxUID: r.VMSandboxUID, SandboxGID: r.VMSandboxGID}}
 	case DriverDocker:
-		doc.OpenShell.Drivers = &renderedDrivers{Docker: &renderedDockerDriver{AllowDriverConfig: true, EnableBindMounts: true, SandboxLabel: ManagedDockerNamespace}}
+		label := ManagedDockerNamespace
+		if r.DefaultDockerNamespaceBridge {
+			label = "" // OpenShell's default namespace, as 1.0.1 rendered it
+		}
+		doc.OpenShell.Drivers = &renderedDrivers{Docker: &renderedDockerDriver{AllowDriverConfig: true, EnableBindMounts: true, SandboxLabel: label}}
 	}
 	body, err := toml.Marshal(doc)
 	if err != nil {

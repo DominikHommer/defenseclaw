@@ -41,6 +41,8 @@ func TestManagedGatewayStartWaitsForAnotherAccountsManagedGatewayOnAnyPort(t *te
 	}{
 		{"another account's managed gateway on the old port", "5002 4242 /usr/bin/openshell-gateway --config " + cfg + "\n5001 77 /bin/bash\n", true},
 		{"another account's managed docker fallback (setup mode binary)", "5003 4243 /home/b/.local/bin/openshell-gateway --config /etc/defenseclaw/openshell/gateway-docker.toml\n", true},
+		// The 1.0.1 upgrade bridge's gateways share OpenShell's default namespace (GAP-0587).
+		{"another account's gateway on the 1.0.1 upgrade bridge", "5004 4246 /usr/bin/openshell-gateway --config /etc/defenseclaw/openshell/gateway-docker-default-namespace.toml\n", true},
 		{"another account's own gateway (not the managed configuration)", "5002 4244 /usr/bin/openshell-gateway --config /home/b/.config/openshell/gateway.toml\n", false},
 		{"this account's own managed gateway", "5001 4245 /usr/bin/openshell-gateway --config " + cfg + "\n", false},
 		{"no other gateway", "1 1 /sbin/init\n", false},

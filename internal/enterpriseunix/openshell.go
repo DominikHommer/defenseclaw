@@ -213,6 +213,9 @@ func (e *Env) renderedTOMLPath() string {
 func (e *Env) renderedFallbackTOMLPath() string {
 	return filepath.Join(e.openshellDir(), openshell.GatewayFallbackTOMLFile)
 }
+func (e *Env) renderedBridgeTOMLPath() string {
+	return filepath.Join(e.openshellDir(), openshell.GatewayDefaultNamespaceTOMLFile)
+}
 func (e *Env) renderedEnvPath() string {
 	return filepath.Join(e.openshellDir(), openshell.GatewayEnvFile)
 }
@@ -333,6 +336,10 @@ type openshellPlan struct {
 	// daemonInputs identifies what a running daemon was started on: the unit
 	// definitions, the gateway binary and the rendered configuration.
 	daemonInputs string
+	// defaultNamespaceBridge renders the 1.0.1 upgrade bridge
+	// (openshell.GatewayDefaultNamespaceTOMLFile, dockerBridgeHolds). 1.0.1
+	// upgrade bridge, remove when 1.0.1 is out of support.
+	defaultNamespaceBridge bool
 }
 
 // planOpenShell adds the sandbox subsystem to the plan: its files, folders
@@ -343,6 +350,7 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
 	p.openshell = op
 	l.osPlan = op
 
@@ -598,8 +606,14 @@ type openshellApplied struct {
 	// docker fallback of the MicroVM driver; "" when the render has none. A
 	// record written before the render named one (1.0.1, the 1.0.2 release
 	// candidates) has none either: its docker gateways ran in OpenShell's
-	// default namespace (dockerNamespace).
+	// default namespace, so the upgrade from it keeps the 1.0.1 upgrade
+	// bridge (dockerBridgeHolds).
 	DockerNamespace string `json:"docker_namespace,omitempty"`
+	// DefaultNamespaceBridge records that the render carries the 1.0.1
+	// upgrade bridge (openshell.GatewayDefaultNamespaceTOMLFile), so it
+	// stays on the next runs. 1.0.1 upgrade bridge, remove when 1.0.1 is out
+	// of support.
+	DefaultNamespaceBridge bool `json:"default_namespace_bridge,omitempty"`
 }
 
 func appliedOf(op *openshellPlan) *openshellApplied {
@@ -608,7 +622,8 @@ func appliedOf(op *openshellPlan) *openshellApplied {
 	}
 	s := op.settings
 	a := &openshellApplied{Enabled: s.Enabled, Install: s.Install, Driver: s.Driver, Fallback: s.Fallback, Version: s.Version,
-		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir}
+		GatewayPort: s.GatewayPort, Rendered: op.digest, DaemonInputs: op.daemonInputs, E2fsprogsDir: s.E2fsprogsDir,
+		DefaultNamespaceBridge: op.defaultNamespaceBridge}
 	if a.usesDocker() {
 		a.DockerNamespace = openshell.ManagedDockerNamespace
 	}
@@ -621,20 +636,29 @@ func (a *openshellApplied) usesDocker() bool {
 	return a.Driver == config.EnterpriseOpenShellDriverDocker || a.Fallback == config.EnterpriseOpenShellFallbackDocker
 }
 
-// dockerNamespace is the sandbox namespace the applied setup's docker
-// gateways keep their containers and volumes in, "" when it starts none.
-// OpenShell's docker gateway lists only the sandboxes of its own namespace,
-// so a change strands the sandboxes made under the previous one as a driver
-// switch does (GAP-0587): 1.0.1 rendered no sandbox_label, so the sandboxes
-// its managed gateways kept are in OpenShell's default namespace.
-func (a *openshellApplied) dockerNamespace() string {
-	switch {
-	case a == nil || !a.usesDocker():
-		return ""
-	case a.DockerNamespace != "":
-		return a.DockerNamespace
+// dockerBridgeHolds reports whether a render on settings s, after the
+// applied record prev, carries the 1.0.1 upgrade bridge (GAP-0587): prev is
+// a docker record of 1.0.1 (or of the 1.0.2 release candidates 1 to 3),
+// which names no docker namespace, or already carries the bridge, and s
+// still starts docker gateways on Linux. 1.0.1's managed docker gateways had
+// no sandbox_label, so the sandboxes their accounts kept are in OpenShell's
+// default namespace, which the managed namespace's gateway does not list.
+// Moving such an account was a switch that stranded them (their unpulled
+// work was lost); with the bridge its gateway stays in the default namespace
+// until it keeps no sandbox there (the exec shim decides per account, at
+// each gateway start), so nothing is switched and the namespace is no part
+// of switchKey. Sandboxes turned off keep the bridge for when they are
+// turned on again; a setup without docker gateways ends it (a driver switch
+// says what it does to the sandboxes made before). 1.0.1 upgrade bridge,
+// remove when 1.0.1 is out of support.
+func dockerBridgeHolds(goos string, s openshellSettings, prev *openshellApplied) bool {
+	if goos != "linux" || prev == nil {
+		return false
 	}
-	return openshell.DefaultDockerNamespace
+	if bridged := prev.DefaultNamespaceBridge || (prev.usesDocker() && prev.DockerNamespace == ""); !bridged {
+		return false
+	}
+	return !s.Enabled || s.Driver == config.EnterpriseOpenShellDriverDocker || s.dockerFallback()
 }
 
 // switchKey changes when the account's OpenShell has to be replaced rather
@@ -655,11 +679,6 @@ func (a *openshellApplied) switchKey() string {
 		// A changed fallback changes which rendered file a user's
 		// gateway starts with.
 		key += "|" + a.Fallback
-	}
-	if ns := a.dockerNamespace(); ns != "" {
-		// A changed docker sandbox namespace hides the sandboxes made under
-		// the previous one from the account's gateway (GAP-0587).
-		key += "|namespace=" + ns
 	}
 	return key
 }
