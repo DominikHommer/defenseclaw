@@ -3,7 +3,7 @@
 
 // The sandbox ingress fixture is POSIX-only, and the host table uses POSIX
 // homes; the Hermes write projection itself is platform-neutral and is
-// pinned on every OS by connector.TestHermesTrustedWriteArgs.
+// pinned on every OS by connector.TestHermesTrustedWriteViews.
 
 //go:build !windows
 
@@ -160,8 +160,8 @@ func hermesPatchHome(t *testing.T) (home, project string) {
 // native write form naming the active user's ~/.ssh/authorized_keys (by
 // absolute path, by ~ and relative to the working directory) is blocked by
 // the SSH persistence rule, and that the same form on a project file stays
-// allowed. The patch tool was judged as an unknown tool, so its write target
-// reached no file-write rule and the call was allowed (GAP-0667).
+// allowed. Each form is judged as the reviewed write contract it implements,
+// so its target reaches the same file-write rules as write_file (GAP-0667).
 func TestHermesNativeWritesOfAuthorizedKeysAreBlocked(t *testing.T) {
 	home, project := hermesPatchHome(t)
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
