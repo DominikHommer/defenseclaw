@@ -129,6 +129,10 @@ func dispatchTrustedAction(
 
 	facts = actionfacts.Analyze(request.Input)
 	analyzed = true
+	if conflict, ok := conflictingToolArgumentKeys(request.Input, facts); ok {
+		// Two argument keys name one field: judge each candidate (GAP-0678).
+		return dispatchConflictingToolArguments(parent, request, conflict)
+	}
 	ctx := parent
 
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
