@@ -165,6 +165,7 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 	settings := openShellExecSettings(ctx)
 	if goos == "linux" {
 		configPath = openShellExecConfigFor(configPath, home, settings.DriverFallback)
+		configPath = openShellExecBridgeFor(configPath, home)
 	}
 	install := settings.Install
 	if install == "" {
@@ -361,6 +362,37 @@ func openShellExecConfigFor(configPath, home, fallback string) string {
 		return configPath
 	}
 	return fallbackPath
+}
+
+// openShellExecBridgeFor is the 1.0.1 upgrade bridge (GAP-0587): the docker
+// configuration without a sandbox_label (gateway-docker-default-namespace.toml,
+// which the lifecycle renders only on a host upgraded from a 1.0.1 docker
+// record) when configPath starts a docker gateway and the account still
+// keeps a sandbox in OpenShell's default namespace, where 1.0.1's managed
+// gateway made them, and none in the managed one. Its kept sandboxes then
+// list, start, connect and pull as before; an account without one, or once
+// it deleted the last one (or a purge did), starts in the managed namespace.
+// The gateway's own state folder is ~/.local/state (the shim passes HOME and
+// no XDG_STATE_HOME). 1.0.1 upgrade bridge, remove when 1.0.1 is out of
+// support.
+func openShellExecBridgeFor(configPath, home string) string {
+	bridgePath := filepath.Join(filepath.Dir(configPath), openshell.GatewayDefaultNamespaceTOMLFile)
+	if _, err := os.Lstat(bridgePath); err != nil || openShellExecTrustedFile(bridgePath, "OpenShell docker configuration of the 1.0.1 upgrade bridge") != nil {
+		return configPath
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return configPath
+	}
+	if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil || rendered.ComputeDriver != openshell.DriverDocker {
+		return configPath
+	}
+	stateHome := filepath.Join(home, ".local", "state")
+	if !openshell.DockerNamespaceInUse(stateHome, openshell.DefaultDockerNamespace) ||
+		openshell.DockerNamespaceInUse(stateHome, openshell.ManagedDockerNamespace) {
+		return configPath
+	}
+	return bridgePath
 }
 
 // sandboxOpenShellVMProbe is the account's MicroVM probe as the user: CPU

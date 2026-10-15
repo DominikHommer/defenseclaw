@@ -1327,13 +1327,24 @@ running sandbox counts again within the next minute.
   docker gateways now keep their containers and volumes in an OpenShell sandbox
   namespace of their own, `defenseclaw-managed`, so one gateway's start no longer
   removes another account's sandboxes. The sandboxes users kept under 1.0.1 are
-  in OpenShell's `default` namespace, which the upgraded gateway does not list.
-  For every user who ran sandboxes, `ensure` treats the change as a switch: it
-  waits while one of that user's sandboxes runs ("pending switch"), and after it
-  those sandboxes cannot start, and OpenShell drops them a few minutes later. Ask
-  users to bring back their work with `defenseclaw sandbox pull NAME` before the
-  upgrade. Their containers and volumes stay in Docker, labelled
-  `openshell.ai/sandbox-namespace=default`, until you remove them.
+  in OpenShell's `default` namespace, so the upgrade keeps them working with a
+  compatibility bridge: `ensure` also renders the 1.0.1 docker configuration
+  (`gateway-docker-default-namespace.toml`, next to `gateway.toml`), and a
+  user's gateway keeps starting on it, in the `default` namespace, while that
+  user still keeps a sandbox there. The user's kept sandboxes list, start,
+  connect and pull as before, running or stopped, and the upgrade is a plain
+  restart ("pending restart" while a sandbox runs), not a switch. A user who
+  never ran sandboxes moves straight to `defenseclaw-managed`, and so does a
+  user at the gateway's next start once their last 1.0.1 sandbox is deleted
+  (`defenseclaw sandbox delete NAME`, after `defenseclaw sandbox pull NAME
+  --apply` for work to keep) or purged. One account runs sandboxes at a time
+  either way. The bridge lives in the setup's applied record, which an uninstall
+  removes, so it does not come back with a later install: before an uninstall,
+  pull the work you want to keep from the sandboxes kept under 1.0.1
+  (`defenseclaw sandbox pull NAME --apply`), because after the install their
+  gateway starts in `defenseclaw-managed` and no longer lists them (a known
+  limit). This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of
+  support.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
