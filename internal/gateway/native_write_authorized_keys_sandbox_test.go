@@ -27,7 +27,7 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedInASandbox(t *testing.T) {
 		"copilot":    {"1.0.40", "copilot-hooks-v1", "/api/v1/copilot/hook"},
 	}
 	keys := sandboxauth.SandboxHome + "/.ssh/authorized_keys"
-	for i, call := range nativeWriteCalls() {
+	for i, call := range nativeWriteTableCalls() {
 		v := versions[call.connector]
 		var headers []string
 		switch call.connector {
