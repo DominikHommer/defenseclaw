@@ -1312,6 +1312,27 @@ def test_linux_postremove_keeps_the_vendor_policies_while_the_deployment_stays(t
     assert (pack / "pack.yaml").is_file() is deployment_kept
 
 
+# GAP-0706: the Fleet compiler ships under share/fleet, so a Fleet-off
+# package removal left share/fleet, share and the install root behind.
+def test_linux_postremove_drops_the_empty_install_tree(tmp_path: Path) -> None:
+    host = _Host(tmp_path)
+    opt = tmp_path / "opt"
+    for sub in ("share/fleet", "share/opencode", "bin"):
+        (opt / sub).mkdir(parents=True)
+    script = _rooted(
+        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
+        {
+            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
+            "/opt/defenseclaw": str(opt),
+            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
+            "/run/systemd/system": str(host.run_systemd),
+        },
+    )
+    result = host.run(script, "remove")
+    assert result.returncode == 0, result.stderr
+    assert not opt.exists()
+
+
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored
 # --secret-name, so a config that references the credential never applied,
 # and the store then failed busy against the apply its own config change
