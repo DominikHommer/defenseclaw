@@ -370,7 +370,11 @@ func newEnterpriseHookCleanupUnverifiedError(changed *enterpriseHookTargetHomeCh
 		dataDir: dataDir, home: home, path: path, configPath: configPath, reason: reason}
 }
 
-func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult, home string, requireClean bool) (string, string) {
+// enterpriseHookCleanupReportProblem names why a worker's report does not
+// prove its home clean: no path report, a path outside that home, or a
+// DefenseClaw entry still there. Both the current and the recorded home of a
+// re-homed row must pass it, since the agent can load either (GAP-0625).
+func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult, home string) (string, string) {
 	if !report.PathsReported {
 		reason := "the worker did not report the paths it found"
 		if report.Unverified != "" {
@@ -383,7 +387,7 @@ func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult,
 			return path, "the worker reported a path outside the home it cleaned"
 		}
 	}
-	if requireClean && report.Remaining != "" {
+	if report.Remaining != "" {
 		path := home
 		if len(report.CleanedPaths) != 0 {
 			path = report.CleanedPaths[0]
@@ -394,7 +398,7 @@ func enterpriseHookCleanupReportProblem(report enterpriseHookWorkerTargetResult,
 }
 
 func enterpriseHookCleanupFailurePath(report enterpriseHookWorkerTargetResult, home string) string {
-	if path, _ := enterpriseHookCleanupReportProblem(report, home, false); path != "" {
+	if path, _ := enterpriseHookCleanupReportProblem(report, home); path != "" {
 		return path
 	}
 	if len(report.CleanedPaths) != 0 {
@@ -510,7 +514,7 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 		return outcome, err
 	}
 	if homeChanged != nil {
-		path, reason := enterpriseHookCleanupReportProblem(report, account.Home, true)
+		path, reason := enterpriseHookCleanupReportProblem(report, account.Home)
 		if reason != "" && report.PathsReported {
 			// A copied receipt may have just been consumed in the other home.
 			// The next pass must use the current home's own config path.
@@ -525,7 +529,7 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 				return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
 					account.Home, dataDir, path, reason, report)
 			}
-			path, reason = enterpriseHookCleanupReportProblem(report, account.Home, true)
+			path, reason = enterpriseHookCleanupReportProblem(report, account.Home)
 		}
 		if reason != "" {
 			return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
@@ -553,7 +557,7 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 				}
 				return outcome, err
 			}
-			path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home, false)
+			path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home)
 			if reason != "" && report.PathsReported {
 				outcome, report, err = runEnterpriseHookStandaloneCleanupWorker(ctx, entry, recordedAccount, recordedDataDir)
 				if outcome != enterpriseHookUserCleanupDone {
@@ -566,7 +570,7 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 					return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,
 						recordedAccount.Home, recordedDataDir, path, reason, report)
 				}
-				path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home, false)
+				path, reason = enterpriseHookCleanupReportProblem(report, recordedAccount.Home)
 			}
 			if reason != "" {
 				return enterpriseHookUserCleanupFailed, newEnterpriseHookCleanupUnverifiedError(homeChanged, entry,

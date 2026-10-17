@@ -277,7 +277,7 @@ func TestTypedRehomeLongUnverifiedReceiptKeepsRemedy(t *testing.T) {
 	if err := validateEnterpriseHookWorkerRemoveReport(report); err != nil {
 		t.Fatalf("worker reason is invalid: %v", err)
 	}
-	path, problem := enterpriseHookCleanupReportProblem(report, currentHome, true)
+	path, problem := enterpriseHookCleanupReportProblem(report, currentHome)
 	changed := &enterpriseHookTargetHomeChangedError{name: "sample-user", home: oldHome, directoryHome: currentHome}
 	err := newEnterpriseHookCleanupUnverifiedError(changed,
 		enterpriseHookUserCleanup{Connector: "opencode", User: "sample-user"}, currentHome,

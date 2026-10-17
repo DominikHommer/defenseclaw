@@ -556,7 +556,11 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			return enterpriseHookWorkerResponse{Targets: results}
 		}
 	}
-	removalFailed := false
+	// purgeBlocked names why a purge in this job must keep the account's
+	// state: a Remove before it failed, left a DefenseClaw entry the agent
+	// still loads, or could not be checked. The purge deletes the backups and
+	// receipts a later cleanup needs to restore those files (GAP-0632).
+	purgeBlocked := ""
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -596,27 +600,16 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			if setupErr != nil {
 				outcome.Unverified = enterpriseHookWorkerUnverifiedReason(setupErr)
-				break
 			}
 			if !outcome.PathsReported {
+				purgeBlocked = firstNonEmpty(purgeBlocked, "the removal of its "+opts.ConnectorName+
+					" entries could not be checked ("+outcome.Unverified+"); fix that, then rerun the purge")
 				break
 			}
-			verifyErr := connector.WithUserHomeDir(opts.UserHome, func() error {
-				return conn.VerifyClean(setupOpts)
-			})
-			if verifyErr != nil {
-				path := opts.UserHome
-				for _, candidate := range outcome.CleanedPaths {
-					if enterpriseHookWorkerPathWithin(opts.UserHome, candidate) {
-						path = candidate
-						break
-					}
-				}
-				outcome.Remaining = boundedString(strings.Join(strings.Fields(path+": "+verifyErr.Error()), " "), 1000)
-			} else {
-				// Some connectors validate only references to this data dir.
-				// A copied config can still name the former home's hook path.
-				outcome.Remaining = enterpriseHookWorkerRemainingConfigReference(opts.UserHome, setupOpts.DataDir, outcome.CleanedPaths)
+			outcome.Remaining = enterpriseHookWorkerRemainingAfterRemove(opts, conn, setupOpts, outcome.CleanedPaths)
+			if outcome.Remaining != "" {
+				purgeBlocked = firstNonEmpty(purgeBlocked, "DefenseClaw entries remain after the removal ("+outcome.Remaining+
+					"); remove them from that agent's config, then rerun the purge")
 			}
 		case enterpriseHookWorkerModeRemoveLeftover:
 			var leftover bool
@@ -628,8 +621,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
-			if removalFailed {
-				err = errors.New("a DefenseClaw hook registration of this account was not removed")
+			if purgeBlocked != "" {
+				err = errors.New("kept the per-user state for its backups: " + purgeBlocked)
 				break
 			}
 			var stopped bool
@@ -651,7 +644,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if !outcome.Pending {
 				outcome.Error = err.Error()
 			}
-			removalFailed = removalFailed || target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover
+			if target.Mode == enterpriseHookWorkerModeRemove || target.Mode == enterpriseHookWorkerModeRemoveLeftover {
+				purgeBlocked = firstNonEmpty(purgeBlocked, "a DefenseClaw hook registration of this account was not removed")
+			}
 		} else {
 			outcome.OK = true
 			if target.Mode != enterpriseHookWorkerModeRemove && target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModePurge {
@@ -754,6 +749,28 @@ func enterpriseHookWorkerRemovePaths(opts enterprisehooks.InstallOptions, conn c
 		return nil, err
 	}
 	return paths, nil
+}
+
+// enterpriseHookWorkerRemainingAfterRemove names the first DefenseClaw entry
+// the agent still loads after a teardown: one VerifyClean reports, or a
+// reference in a config path the worker resolved. Empty means checked clean.
+func enterpriseHookWorkerRemainingAfterRemove(opts enterprisehooks.InstallOptions, conn connector.Connector, setupOpts connector.SetupOpts, paths []string) string {
+	verifyErr := connector.WithUserHomeDir(opts.UserHome, func() error {
+		return conn.VerifyClean(setupOpts)
+	})
+	if verifyErr != nil {
+		path := opts.UserHome
+		for _, candidate := range paths {
+			if enterpriseHookWorkerPathWithin(opts.UserHome, candidate) {
+				path = candidate
+				break
+			}
+		}
+		return boundedString(strings.Join(strings.Fields(path+": "+verifyErr.Error()), " "), 1000)
+	}
+	// Some connectors validate only references to this data dir. A copied
+	// config can still name the former home's hook path.
+	return enterpriseHookWorkerRemainingConfigReference(opts.UserHome, setupOpts.DataDir, paths)
 }
 
 func enterpriseHookWorkerUnverifiedReason(err error) string {

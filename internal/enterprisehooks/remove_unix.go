@@ -101,24 +101,6 @@ func removeUserHooksAs(ctx context.Context, conn connector.Connector, setupOpts 
 	return nil
 }
 
-// PurgeUserState removes one account's DefenseClaw per-user state for the
-// standalone Unix uninstall --purge, in the per-user worker with the
-// account's credentials, after RemoveUserHooks ran for its manifest
-// targets. A connector that still keeps DefenseClaw's backups (one set up by
-// an earlier route, or disabled before the uninstall) is torn down first, so
-// the files DefenseClaw changed get their content back before the backups
-// go; if any teardown fails, the state stays for a rerun. Then all of
-// ~/.defenseclaw goes, including the hook scripts and the account's own
-// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
-// and so do the binaries and launcher links the per-user install put in
-// ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
-// account's uv cache (see RemoveUserUVCacheEntries). The caller stops the account's
-// per-user gateway first. A home that no longer exists is not an error.
-func PurgeUserState(ctx context.Context, opts InstallOptions) error {
-	_, err := PurgeUserStateSummary(ctx, opts)
-	return err
-}
-
 // PurgeSummary is what PurgeUserStateSummary found and removed, so the
 // uninstall names only that for each account (GAP-1444).
 type PurgeSummary struct {
@@ -142,7 +124,21 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 	return errors.Join(binErr, cacheErr)
 }
 
-// PurgeUserStateSummary is PurgeUserState that also reports what it removed.
+// PurgeUserStateSummary removes one account's DefenseClaw per-user state for the
+// standalone Unix uninstall --purge, in the per-user worker with the
+// account's credentials, after RemoveUserHooks ran for its manifest
+// targets. A connector that still keeps DefenseClaw's backups (one set up by
+// an earlier route, or disabled before the uninstall) is torn down first, so
+// the files DefenseClaw changed get their content back before the backups
+// go; if any teardown fails, the state stays for a rerun. Then all of
+// ~/.defenseclaw goes, including the hook scripts and the account's own
+// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
+// and so do the binaries and launcher links the per-user install put in
+// ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
+// account's uv cache (see RemoveUserUVCacheEntries). The caller stops the account's
+// per-user gateway first. A home that no longer exists is not an error.
+// It reports what it removed. The per-user worker runs it only after every
+// Remove of the same job was checked clean (GAP-0632).
 func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSummary, error) {
 	var summary PurgeSummary
 	if err := refuseStandaloneRootInProcess("purge"); err != nil {
