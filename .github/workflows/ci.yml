@@ -912,7 +912,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -926,15 +926,19 @@ jobs:
           go-version-file: go.mod
       - name: Go tests of the standalone lifecycle packages
         shell: bash
-        run: >-
-          go test -count=1 -timeout 20m
-          ./internal/enterpriseunix/...
-          ./internal/unixidentity/...
-          ./internal/peercred/...
-          ./internal/managed/...
-          ./internal/enterprisehooks/...
-          ./internal/enterprisepolicy/...
-          ./internal/ipc/...
+        run: |
+          set -euo pipefail
+          # Keep the longest suite separate and name each test in the log.
+          # A stalled hosted runner then shows the test or compile phase,
+          # rather than silently cancelling the whole job at 30 minutes.
+          go test -count=1 -timeout 20m -p 2 -v ./internal/enterpriseunix/...
+          go test -count=1 -timeout 20m -p 2 \
+            ./internal/unixidentity/... \
+            ./internal/peercred/... \
+            ./internal/managed/... \
+            ./internal/enterprisehooks/... \
+            ./internal/enterprisepolicy/... \
+            ./internal/ipc/...
       - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
         # The go-test jobs run these packages on Linux only. On macOS this runs
         # the kern.proc agent-process lookup, the gethostuuid machine id behind
