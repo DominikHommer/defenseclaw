@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,12 +52,15 @@ var enterpriseHookIdentitySpoolState struct {
 }
 
 // The directory's return after an outage (enterprisehooks.DirectoryCachesStale):
-// while the system's directory caches list an enrolled Active Directory
-// account without its domain groups, the guardian asks every
-// enterpriseHookDirectoryReturnPoll whether a domain controller of that
-// domain answers, and flushes the caches when one does, so the accounts get
-// their groups at the gateway's next lookup (#1197). A flush that did not
-// clear them is repeated after enterpriseHookDirectoryFlushGap, doubling to
+// while the system's directory caches list enrolled Active Directory
+// accounts without their domain groups, the guardian asks every
+// enterpriseHookDirectoryReturnPoll whether a domain controller of each of
+// those accounts' domains answers, and flushes the caches when one does, so
+// the accounts get their groups at the gateway's next lookup (#1197). Each
+// domain is asked and backed off on its own: a domain still away does not
+// hold up one that is back, and one domain's flush does not delay another's.
+// A flush that did not clear a domain's accounts is repeated for it after
+// enterpriseHookDirectoryFlushGap, doubling to
 // enterpriseHookDirectoryFlushGapMax. A watch ends once the caches list the
 // groups again, or after enterpriseHookDirectoryWatchLimit; the next
 // reconcile tick starts another with the accounts enrolled then.
@@ -70,7 +74,7 @@ const (
 // enterpriseHookDirectoryReturnDeps are the watch's lookups, flush and
 // clock; tests replace them.
 type enterpriseHookDirectoryReturnDeps struct {
-	stale   func(dir string, accounts []enterprisehooks.IdentitySpoolAccount) (string, bool)
+	stale   func(dir string, accounts []enterprisehooks.IdentitySpoolAccount) []string
 	answers func(ctx context.Context, domain string) bool
 	flush   func(ctx context.Context) error
 	now     func() time.Time
@@ -96,9 +100,18 @@ var enterpriseHookDirectoryReturn = enterpriseHookDirectoryReturnDeps{
 
 var enterpriseHookDirectoryReturnState struct {
 	sync.Mutex
-	watching  bool
-	lastFlush time.Time
-	gap       time.Duration
+	watching bool
+	// flushed holds, for each domain whose return flushed the caches while
+	// they still listed one of its accounts without its groups, when it did
+	// and the gap before its next flush. A domain is dropped once none of
+	// its accounts is listed so.
+	flushed map[string]enterpriseHookDirectoryFlush
+}
+
+// enterpriseHookDirectoryFlush is one domain's flush backoff.
+type enterpriseHookDirectoryFlush struct {
+	at  time.Time
+	gap time.Duration
 }
 
 // enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
@@ -247,33 +260,68 @@ func enterpriseHookWatchDirectoryReturn(ctx context.Context, stderr io.Writer, d
 	state := &enterpriseHookDirectoryReturnState
 	until := deps.now().Add(enterpriseHookDirectoryWatchLimit)
 	for {
-		domain, stale := deps.stale(dir, accounts)
-		if !stale {
-			state.Lock()
-			state.gap = 0
-			state.Unlock()
+		domains := deps.stale(dir, accounts)
+		now := deps.now()
+		var due []string
+		state.Lock()
+		for domain := range state.flushed {
+			if !slices.Contains(domains, domain) {
+				delete(state.flushed, domain)
+			}
+		}
+		for _, domain := range domains {
+			if last, ok := state.flushed[domain]; !ok || now.Sub(last.at) >= last.gap {
+				due = append(due, domain)
+			}
+		}
+		state.Unlock()
+		if len(domains) == 0 {
 			return
 		}
-		state.Lock()
-		due := state.lastFlush.IsZero() || deps.now().Sub(state.lastFlush) >= state.gap
-		state.Unlock()
-		if due && deps.answers(ctx, domain) {
+		if back := enterpriseHookDomainsAnswering(ctx, deps.answers, due); len(back) > 0 {
 			err := deps.flush(ctx)
+			at := deps.now()
 			state.Lock()
-			state.lastFlush = deps.now()
-			state.gap = min(max(2*state.gap, enterpriseHookDirectoryFlushGap), enterpriseHookDirectoryFlushGapMax)
+			if state.flushed == nil {
+				state.flushed = map[string]enterpriseHookDirectoryFlush{}
+			}
+			for _, domain := range back {
+				gap := min(max(2*state.flushed[domain].gap, enterpriseHookDirectoryFlushGap), enterpriseHookDirectoryFlushGapMax)
+				state.flushed[domain] = enterpriseHookDirectoryFlush{at: at, gap: gap}
+			}
 			state.Unlock()
+			names := strings.Join(back, ", ")
 			if err != nil {
 				fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again, but the directory caches "+
-					"were not flushed: %v\n", domain, err)
+					"were not flushed: %v\n", names, err)
 			} else {
 				fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again while the directory caches "+
 					"still list an account without its domain groups; flushed the caches, so accounts get their groups at "+
-					"their next lookup\n", domain)
+					"their next lookup\n", names)
 			}
 		}
 		if !deps.now().Before(until) || !deps.sleep(ctx, enterpriseHookDirectoryReturnPoll) {
 			return
 		}
 	}
+}
+
+// enterpriseHookDomainsAnswering asks each domain at once whether one of its
+// domain controllers answers (each probe is bounded on its own), so a domain
+// that is away, whose probe runs to its deadline, does not delay the others,
+// and returns the domains that answer, in their order.
+func enterpriseHookDomainsAnswering(ctx context.Context, answers func(ctx context.Context, domain string) bool, domains []string) []string {
+	ok := make([]bool, len(domains))
+	var wg sync.WaitGroup
+	for i, domain := range domains {
+		wg.Go(func() { ok[i] = answers(ctx, domain) })
+	}
+	wg.Wait()
+	var back []string
+	for i, domain := range domains {
+		if ok[i] {
+			back = append(back, domain)
+		}
+	}
+	return back
 }

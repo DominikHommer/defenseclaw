@@ -475,9 +475,11 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   whether a domain controller of the account's domain accepts a connection on
   the LDAP port (TCP 389, to the domain controllers its `_ldap._tcp.dc._msdcs`
   SRV records name), and flushes the caches (`dscacheutil -flushcache`,
-  `dsmemberutil flushcache`) as soon as one does; it never flushes while the
-  domain controller is away. The group profile then comes back within about a
-  minute of the domain controller's return, without a manual flush. Where the
+  `dsmemberutil flushcache`) as soon as one does; it never flushes while no
+  domain controller of those domains answers. With accounts in more than one
+  domain, each domain is checked on its own, so a domain that is still away
+  does not hold up one that is back. The group profile then comes back within
+  about a minute of the domain controller's return, without a manual flush. Where the
   Mac cannot reach TCP 389 on the domain controllers, flush the caches by
   hand.
 - **Some facts need the enterprise profile.** The UPN on

@@ -26,14 +26,19 @@ import (
 )
 
 // #1197: only an enrolled Active Directory account that the system lists
-// without its groups makes the caches stale, and the domain probed is that
-// account's own.
-func TestDirectoryCachesStaleNamesTheADAccountsDomain(t *testing.T) {
+// without its groups makes the caches stale, and the domains probed are
+// those accounts' own: every one of them, not only the first, so a Mac with
+// accounts in two domains asks each.
+func TestDirectoryCachesStaleNamesTheADAccountsDomains(t *testing.T) {
 	dir := t.TempDir()
 	for _, record := range []IdentitySpoolRecord{
 		{Key: "501", User: "admin", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}},
 		{Key: "94401103", User: "ent-bob", Facts: useridentity.DirectoryFacts{
 			Directory: useridentity.DirectoryActiveDirectory, Domain: "DCLab.Test"}},
+		{Key: "94401105", User: "emea-eve", Facts: useridentity.DirectoryFacts{
+			Directory: useridentity.DirectoryActiveDirectory, Domain: "emea.dclab.test"}},
+		{Key: "94401106", User: "ent-ann", Facts: useridentity.DirectoryFacts{
+			Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test"}},
 		{Key: "94401104", User: "ent-ldap", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLDAP, Domain: "ldap.example.com"}},
 	} {
 		data, err := MarshalIdentitySpoolRecord(record)
@@ -44,16 +49,21 @@ func TestDirectoryCachesStaleNamesTheADAccountsDomain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	accounts := []IdentitySpoolAccount{{UID: 501}, {UID: 94401104}, {UID: 94401103}, {UID: 94401199}}
+	accounts := []IdentitySpoolAccount{{UID: 501}, {UID: 94401105}, {UID: 94401104}, {UID: 94401103}, {UID: 94401106}, {UID: 94401199}}
 	listed := map[int]bool{}
 	lookup := func(uid int) bool { return listed[uid] }
-	// Nothing names any account: only the AD one counts.
-	if domain, stale := directoryCachesStale(dir, accounts, lookup); !stale || domain != "dclab.test" {
-		t.Fatalf("stale = %v %q, want the AD account's domain", stale, domain)
+	// Nothing names any account: only the AD ones count, each domain once.
+	if domains := directoryCachesStale(dir, accounts, lookup); !slices.Equal(domains, []string{"dclab.test", "emea.dclab.test"}) {
+		t.Fatalf("stale domains %v, want both AD domains", domains)
 	}
-	listed[94401103] = true
-	if domain, stale := directoryCachesStale(dir, accounts, lookup); stale {
-		t.Fatalf("stale with the AD account listed (domain %q): local, LDAP and unrecorded accounts do not count", domain)
+	// The first domain's accounts are listed again, the second's are not.
+	listed[94401103], listed[94401106] = true, true
+	if domains := directoryCachesStale(dir, accounts, lookup); !slices.Equal(domains, []string{"emea.dclab.test"}) {
+		t.Fatalf("stale domains %v, want only the domain still unlisted", domains)
+	}
+	listed[94401105] = true
+	if domains := directoryCachesStale(dir, accounts, lookup); len(domains) != 0 {
+		t.Fatalf("stale domains %v with every AD account listed: local, LDAP and unrecorded accounts do not count", domains)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"context"
 	"net"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -38,9 +39,10 @@ import (
 // the outage, and never after it). The guardian therefore asks the domain
 // controller itself, and only while Open Directory lists an enrolled Active
 // Directory account without its groups: DirectoryCachesStale names the
-// account's domain, DomainControllerAnswers says whether one of its domain
-// controllers accepts a connection, and only then are the caches flushed
-// (FlushDirectoryCaches). During the outage nothing is flushed, so the answers
+// domains of those accounts, DomainControllerAnswers says whether one of a
+// domain's controllers accepts a connection, and only then are the caches
+// flushed (FlushDirectoryCaches). Each domain is asked on its own, so a
+// domain that is still away does not hold up another that is back. During the outage nothing is flushed, so the answers
 // Open Directory still holds are kept.
 
 // directoryLDAPPort is the port a domain controller's LDAP service listens on.
@@ -124,14 +126,15 @@ func validDirectoryDomain(domain string) bool {
 	return true
 }
 
-// DirectoryCachesStale reports whether the operating system's directory
-// caches list an enrolled Active Directory account without its domain groups
-// now, and the account's domain. Only a Mac answers so (a Linux host's SSSD
-// refreshes what it served offline by itself); dir is the identity spool,
-// whose records say which accounts are Active Directory ones.
-func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) (string, bool) {
+// DirectoryCachesStale returns the domains of the enrolled Active Directory
+// accounts the operating system's directory caches list without their domain
+// groups now, each once and sorted; none when the caches list every
+// account's groups. Only a Mac answers so (a Linux host's SSSD refreshes what
+// it served offline by itself); dir is the identity spool, whose records say
+// which accounts are Active Directory ones.
+func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) []string {
 	if !directoryCachesHoldOutageAnswers {
-		return "", false
+		return nil
 	}
 	return directoryCachesStale(dir, accounts, accountGroupsListed)
 }
@@ -139,7 +142,8 @@ func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) (string, 
 // directoryCachesStale is DirectoryCachesStale with the account lookup
 // listed, which reports whether the system names the account uid and its
 // primary group.
-func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed func(uid int) bool) (string, bool) {
+func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed func(uid int) bool) []string {
+	var domains []string
 	for _, account := range accounts {
 		if account.UID <= 0 {
 			continue
@@ -149,14 +153,15 @@ func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed fu
 			continue
 		}
 		domain := strings.ToLower(strings.TrimSpace(record.Facts.Domain))
-		if !validDirectoryDomain(domain) {
+		if !validDirectoryDomain(domain) || slices.Contains(domains, domain) {
 			continue
 		}
 		if !listed(account.UID) {
-			return domain, true
+			domains = append(domains, domain)
 		}
 	}
-	return "", false
+	slices.Sort(domains)
+	return domains
 }
 
 // accountGroupsListed reports whether the system names the account uid and
