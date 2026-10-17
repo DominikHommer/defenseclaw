@@ -8669,10 +8669,10 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         return
     for path in present:
         registered = _file_references_marker(path, markers)
-        if connector in ("cursor", "kiro") and locked_paths:
-            from defenseclaw.hook_integrity import hook_registration_problems
+        if not registered and connector in ("cursor", "kiro") and locked_paths:
+            from defenseclaw.hook_integrity import _registers_defenseclaw_hooks
 
-            registered = not hook_registration_problems(cfg, connector)
+            registered = _registers_defenseclaw_hooks(cfg, connector, Path(path), strict=False)
         if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(

@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from defenseclaw import bootstrap, hook_integrity
+from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config
 
@@ -62,6 +62,11 @@ _JSON_POSIX = [case for case in _POSIX if all(f["path"].endswith(".json") for f 
 _WINDOWS_STATUS_CONNECTORS = {"amp", "cursor", "kiro", "opencode"}
 _WINDOWS_STATUS_CASES = [
     case for case in _POSIX if case["connector"] in _WINDOWS_STATUS_CONNECTORS and case["scope"] == "user"
+]
+_WINDOWS_STATUS_MODES = [
+    pytest.param(case, mode, id=f"{case['connector']}-{case['scope']}-{case['os']}-{mode}")
+    for case in _WINDOWS_STATUS_CASES
+    for mode in (["local", "managed_enterprise"] if case["connector"] in {"cursor", "kiro"} else ["local"])
 ]
 
 # The doctor rows that say a hook file does not register DefenseClaw.
@@ -224,19 +229,37 @@ def _windows_status_case(case: dict[str, Any]) -> dict[str, Any]:
     return rendered
 
 
-@pytest.mark.parametrize("case", _WINDOWS_STATUS_CASES, ids=_case_id)
-def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_path, monkeypatch, case):
+@pytest.mark.parametrize("case, mode", _WINDOWS_STATUS_MODES)
+def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_path, monkeypatch, case, mode):
     # Amp and OpenCode load the same plugin on Windows. Cursor and Kiro write
     # JSON hook entries with the native launcher inside a PowerShell command.
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     rendered = _windows_status_case(case)
     connector = rendered["connector"]
     cfg, paths = _install(tmp_path, monkeypatch, rendered)
+    cfg.deployment_mode = mode
     assert hook_integrity.hook_registration_problems(cfg, connector) == []
     assert _status_problem(cfg, connector) == ""
     assert _quickstart_problem(cfg, connector) == ""
     assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch)) == []
+    if mode == "managed_enterprise":
+        monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_args: ("open", None))
+        monkeypatch.setattr(
+            fail_mode,
+            "connector_fail_mode_report",
+            lambda *_args, **_kwargs: {"configured": "open", "desired": "open", "effective": "open"},
+        )
+        monkeypatch.setattr(cmd_doctor, "_doctor_effective_guardrail_mode", lambda *_args: "observe")
+        monkeypatch.setattr(
+            cmd_doctor,
+            "_check_hook_contract_lock",
+            lambda _cfg, _name, result: cmd_doctor._emit("pass", "Hook contract", "registered", r=result),
+        )
+        assert cmd_doctor.connector_setup_readiness(cfg, connector).ready
 
     Path(paths[0]).write_text("{}" if paths[0].endswith(".json") else "// unrelated plugin", encoding="utf-8")
-    assert "DEGRADED" in _status_problem(cfg, connector)
+    if mode == "local":
+        assert "DEGRADED" in _status_problem(cfg, connector)
     assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch))
+    if mode == "managed_enterprise":
+        assert not cmd_doctor.connector_setup_readiness(cfg, connector).ready
