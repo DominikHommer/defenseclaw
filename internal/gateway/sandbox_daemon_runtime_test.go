@@ -218,6 +218,18 @@ func TestSandboxRelayForwarding(t *testing.T) {
 		t.Fatalf("generation = %d of %v", generation.Load(), of)
 	}
 
+	// A 200 block caused by failed evaluation also counts as a hook failure.
+	mu.Lock()
+	decision.FailedClosed = true
+	mu.Unlock()
+	rec = f.do(t, http.MethodPost, path, f.claudeTok, body)
+	if decisions, failures := obs.take(); rec.Code != http.StatusOK || len(decisions) != 1 || len(failures) != 1 || failures[0].Status != http.StatusInternalServerError {
+		t.Fatalf("failed-closed relay: status %d decisions %v failures %v", rec.Code, decisions, failures)
+	}
+	mu.Lock()
+	decision.FailedClosed = false
+	mu.Unlock()
+
 	// A 2xx without a trailer records nothing.
 	rec = f.do(t, http.MethodPost, path, f.claudeTok, `{"hook_event_name":"Stop"}`)
 	if decisions, _ := obs.take(); rec.Code != http.StatusOK || len(decisions) != 0 {

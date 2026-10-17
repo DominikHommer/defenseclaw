@@ -467,7 +467,9 @@ type HookDecision struct {
 	// Action is allow, block, alert or confirm.
 	Action     string `json:"action"`
 	WouldBlock bool   `json:"would_block,omitempty"`
-	Severity   string `json:"severity,omitempty"`
+	// FailedClosed reports a block caused by a hook evaluation failure.
+	FailedClosed bool   `json:"failed_closed,omitempty"`
+	Severity     string `json:"severity,omitempty"`
 	// Reason is rule metadata only, as SandboxHookDecision.Reason.
 	Reason      string `json:"reason,omitempty"`
 	ModelError  string `json:"model_error,omitempty"`

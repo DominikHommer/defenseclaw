@@ -1149,6 +1149,9 @@ func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler 
 		}
 		w.WriteHeader(resp.Status)
 		_, _ = w.Write(resp.Body)
+		if resp.Decision != nil && resp.Decision.FailedClosed {
+			markSandboxHookFailedClosed(r.Context())
+		}
 		if resp.Status < 200 || resp.Status > 299 || resp.Decision == nil || st.onHookDecision == nil {
 			return
 		}

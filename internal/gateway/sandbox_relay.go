@@ -46,6 +46,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel/propagation"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -311,6 +313,12 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			return
 		}
 		ctx, binding, state := sandboxRelayContext(ctx, reg, route.class)
+		// The hook socket has admitted the peer and registration. The daemon
+		// forwards trace context for this authenticated call; extract it here,
+		// after auth, rather than in the outer middleware.
+		if route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify {
+			ctx = hookTraceV6Propagator.Extract(ctx, propagation.HeaderCarrier(r.Header))
+		}
 		if route.class == sandboxauth.RouteHook {
 			// Read before the scrub drops every sandbox relay header.
 			state.egressRefusals = sandboxRelayEgressRefusals(r.Header)
@@ -351,6 +359,9 @@ func (a *APIServer) serveSandboxRelayCall(w http.ResponseWriter, r *http.Request
 	route.handler(rw, r)
 	if status := rw.finalStatus(); status < 200 || status > 299 {
 		return
+	}
+	if outcome, ok := r.Context().Value(sandboxHookOutcomeKey{}).(*sandboxHookOutcome); ok && outcome.failedClosed.Load() {
+		state.sink.markFailedClosed()
 	}
 	if value, ok := state.sink.trailer(); ok {
 		h.Set(sandboxrelay.DecisionTrailer, value)
@@ -399,10 +410,17 @@ func (w *sandboxRelayResponseWriter) finalStatus() int {
 // sandboxRelayDecisionSink receives the verdict observeSandboxHookDecision
 // hands a local sandbox manager. The relay returns it in the trailer.
 type sandboxRelayDecisionSink struct {
-	mu       sync.Mutex
-	decision *sandboxrelay.HookDecision
+	mu           sync.Mutex
+	decision     *sandboxrelay.HookDecision
+	failedClosed bool
 	// egressTold: the answer told the agent of the call's refusals.
 	egressTold bool
+}
+
+func (s *sandboxRelayDecisionSink) markFailedClosed() {
+	s.mu.Lock()
+	s.failedClosed = true
+	s.mu.Unlock()
 }
 
 func (s *sandboxRelayDecisionSink) markEgressTold() {
@@ -446,13 +464,14 @@ func (s *sandboxRelayDecisionSink) put(d SandboxHookDecision) {
 // handler recorded none.
 func (s *sandboxRelayDecisionSink) trailer() (string, bool) {
 	s.mu.Lock()
-	d, told := s.decision, s.egressTold
+	d, told, failedClosed := s.decision, s.egressTold, s.failedClosed
 	s.mu.Unlock()
 	if d == nil {
 		return "", false
 	}
 	out := *d
 	out.EgressTold = told
+	out.FailedClosed = failedClosed
 	return encodeSandboxRelayDecision(out)
 }
 

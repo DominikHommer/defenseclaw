@@ -38,6 +38,8 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -55,6 +57,29 @@ import (
 )
 
 var relayTestPeer = managedHookPeer{UID: 1000, Name: "dev"}
+
+func TestSandboxRelayUsesAuthenticatedTraceParent(t *testing.T) {
+	const path = "/api/v1/sandbox-relay/hook/claudecode"
+	var seen string
+	routes := map[string]sandboxRelayRoute{path: {
+		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			seen = trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
+			w.WriteHeader(http.StatusOK)
+		},
+	}}
+	f := newRelayFixtureWith(t, routes)
+	reg := f.register(t, "trace", "claudecode", relayTestBindingID(401))
+	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent)
+	if resp.StatusCode != http.StatusOK || seen != "0af7651916cd43dd8448eb211c80319c" {
+		t.Fatalf("authenticated trace: status %d trace %q", resp.StatusCode, seen)
+	}
+	seen = ""
+	resp, _ = f.post(t, path, "unknown", `{}`, "Traceparent", wellFormedTraceparent)
+	if resp.StatusCode == http.StatusOK || seen != "" {
+		t.Fatalf("unregistered trace reached handler: status %d trace %q", resp.StatusCode, seen)
+	}
+}
 
 // relayTestKey is the sandbox authority key of the relay tests.
 var relayTestKey = bytes.Repeat([]byte{7}, 32)
@@ -865,6 +890,7 @@ func TestSandboxRelayDecisionTrailerBounds(t *testing.T) {
 		Event: long, Tool: long, ToolUseID: long, SessionID: long, CallRef: long, ResultStatus: long,
 		Action: "block", Severity: long, Reason: strings.Repeat("é", 400), ModelError: long, ModelStatus: 401,
 	})
+	sink.markFailedClosed()
 	raw, ok := sink.trailer()
 	if !ok || len(raw) > sandboxrelay.MaxHookDecisionBytes || strings.ContainsAny(raw, "\r\n\x00") {
 		t.Fatalf("trailer %d bytes ok=%v: %q", len(raw), ok, raw)
@@ -873,7 +899,7 @@ func TestSandboxRelayDecisionTrailerBounds(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		t.Fatal(err)
 	}
-	if d.V != 1 || d.Action != "block" || d.ModelStatus != 401 || len(d.Reason) > sandboxrelay.MaxHookDecisionReasonBytes ||
+	if d.V != 1 || d.Action != "block" || !d.FailedClosed || d.ModelStatus != 401 || len(d.Reason) > sandboxrelay.MaxHookDecisionReasonBytes ||
 		len(d.Tool) > sandboxrelay.MaxHookDecisionStringBytes || !strings.HasPrefix(d.Reason, "é") || d.CallRef != "" {
 		t.Fatalf("decision = %+v", d)
 	}
