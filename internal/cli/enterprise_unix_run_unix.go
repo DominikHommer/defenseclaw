@@ -109,6 +109,9 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		ProductVersion:     opts.productVersion,
 		Reason:             opts.reason,
 	})
+	if lifecycleResultHasError(result, "not_root") {
+		reportManagedCommandRefusal("enterprise "+platform+" "+action, "not_root")
+	}
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}

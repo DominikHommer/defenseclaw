@@ -93,6 +93,7 @@ type managedRefusalRequest struct {
 	Action  string `json:"action"`
 	Target  string `json:"target"`
 	Details string `json:"details,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // handleManagedRefusalAudit records, in the managed audit store, a policy
@@ -122,6 +123,7 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 	err := decoder.Decode(&request)
 	field, fieldOK := managedRefusalField(request.Details)
 	if err != nil || !fieldOK || !managedRefusalActions[request.Action] ||
+		(request.Reason != "" && request.Reason != "not_root") ||
 		strings.TrimSpace(request.Target) == "" || len(request.Target) > managedRefusalMaxTargetBytes ||
 		len(request.Details) > managedRefusalMaxDetailsBytes ||
 		!utf8.ValidString(request.Target) || !utf8.ValidString(request.Details) {
@@ -132,7 +134,11 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 		http.Error(w, "{\"error\":\"too many refusal records\"}", http.StatusTooManyRequests)
 		return
 	}
-	details := fmt.Sprintf("outcome=refused reason=managed_device actor=uid:%d", peer.UID)
+	reason := "managed_device"
+	if request.Reason != "" {
+		reason = request.Reason
+	}
+	details := fmt.Sprintf("outcome=refused reason=%s actor=uid:%d", reason, peer.UID)
 	if name := strings.TrimSpace(stripLogInjectionRunes(peer.Name)); name != "" {
 		details += " user=" + strings.ReplaceAll(name, " ", "_")
 	}

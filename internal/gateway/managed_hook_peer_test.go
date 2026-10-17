@@ -227,11 +227,15 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 	if code := send(`{"action":"skill-block","target":"p0-test-skill","details":"type=skill"}`); code != http.StatusNoContent {
 		t.Fatalf("refusal report: status %d", code)
 	}
+	if code := send(`{"action":"action","target":"enterprise linux ensure","details":"command=enterprise linux ensure","reason":"not_root"}`); code != http.StatusNoContent {
+		t.Fatalf("not_root refusal report: status %d", code)
+	}
 	for _, body := range []string{
 		`{"action":"scan","target":"x"}`,
 		`{"action":"skill-block","target":""}`,
 		`{"action":"skill-block","target":"x","actor":"root"}`,
 		`{"action":"skill-block","target":"x","details":"type=skill outcome=applied"}`,
+		`{"action":"action","target":"x","reason":"allowed"}`,
 	} {
 		if code := send(body); code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", body, code)
