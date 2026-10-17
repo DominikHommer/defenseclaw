@@ -923,7 +923,7 @@ func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
 }
 
 func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T) {
-	for _, header := range []string{"Authorization: example-sensitive-value", "X-Route: Bearer example-sensitive-value"} {
+	for _, header := range []string{"Authorization: example-sensitive-value", "X-Route: Bearer example-sensitive-value", `X-Route: "Basic\texample-sensitive-value"`} {
 		raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
 			"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
 			"    endpoint: https://example.test/events\n    headers:\n      " + header + "\n")

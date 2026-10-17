@@ -1378,8 +1378,8 @@ func managedCredentialHeader(name, value string) bool {
 			return true
 		}
 	}
-	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.HasPrefix(value, "bearer ") || strings.HasPrefix(value, "basic ")
+	parts := strings.Fields(value)
+	return len(parts) > 1 && (strings.EqualFold(parts[0], "bearer") || strings.EqualFold(parts[0], "basic"))
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
