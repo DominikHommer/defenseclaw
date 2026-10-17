@@ -29,6 +29,12 @@ func TestEnterpriseUninstallKeepStateHelpNamesKeptSandboxException(t *testing.T)
 					t.Errorf("--keep-state help omits %q: %s", phrase, flag.Usage)
 				}
 			}
+			// --keep-state does not keep the deployment record, the snapshots or
+			// the pending intent, so the help does not promise lifecycle state
+			// (GAP-0643).
+			if strings.Contains(flag.Usage, "lifecycle state") || !strings.Contains(flag.Usage, "the deployment record goes either way") {
+				t.Errorf("--keep-state help misstates the lifecycle state it keeps: %s", flag.Usage)
+			}
 			if strings.Contains(flag.Usage, "removes all of it") {
 				t.Errorf("--keep-state help promises total removal: %s", flag.Usage)
 			}
