@@ -32,23 +32,6 @@ import (
 
 const managementContractDir = "../../packaging/mdm/contract"
 
-// pendingContractItems are contract items whose command change is not in
-// this tree yet; a check that needs one skips. Delete an entry when its
-// change lands, and this map and requireContractItem with the last one.
-var pendingContractItems = map[string]string{
-	"management_contract":    "management_contract in --version-json",
-	"bundle_status_sessions": "a refused bundle status reports sessions_restart_required as state unknown",
-	"anchors_install":        "enterprise bundle anchors install on Linux and macOS",
-	"windows_secret_json":    "Windows secret set and remove print one JSON document on every outcome",
-}
-
-func requireContractItem(t *testing.T, item string) {
-	t.Helper()
-	if what, pending := pendingContractItems[item]; pending {
-		t.Skipf("contract item %s is not in this tree yet (%s)", item, what)
-	}
-}
-
 type contractSchemas map[string]*jsonschema.Schema
 
 // compileManagementContract compiles every schema of the contract folder
@@ -139,12 +122,9 @@ func TestManagementContractVersionJSON(t *testing.T) {
 		t.Fatalf("--version-json must print one line: %q", out.String())
 	}
 	doc := schemas.validate(t, "version.schema.json", out.Bytes())
-	t.Run("management_contract", func(t *testing.T) {
-		requireContractItem(t, "management_contract")
-		if doc["management_contract"] != json.Number("1") {
-			t.Fatalf("management_contract = %v, want 1", doc["management_contract"])
-		}
-	})
+	if doc["management_contract"] != json.Number("1") {
+		t.Fatalf("management_contract = %v, want 1", doc["management_contract"])
+	}
 }
 
 func TestManagementContractBundleVerify(t *testing.T) {
@@ -277,7 +257,6 @@ func TestManagementContractBundleStatus(t *testing.T) {
 		schemas.validate(t, "bundle-refused.schema.json", []byte(out))
 	})
 	t.Run("refused before the session scan", func(t *testing.T) {
-		requireContractItem(t, "bundle_status_sessions")
 		for name, setup := range map[string]func(){
 			"not managed":   func() { bundleManagedDevice = func() bool { return false } },
 			"secure client": func() { bundleSecureClient = func() bool { return true } },

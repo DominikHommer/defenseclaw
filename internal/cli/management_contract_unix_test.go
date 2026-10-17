@@ -10,9 +10,11 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -99,7 +101,6 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 // TestManagementContractAnchorsInstallRefusals validates the refusals of
 // `enterprise bundle anchors install` before it reads the source.
 func TestManagementContractAnchorsInstallRefusals(t *testing.T) {
-	requireContractItem(t, "anchors_install")
 	schemas := compileManagementContract(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
@@ -115,5 +116,86 @@ func TestManagementContractAnchorsInstallRefusals(t *testing.T) {
 			doc := schemas.validate(t, "anchors-install.schema.json", []byte(out))
 			requireExit(t, doc, code, bundleFailureExitCode())
 		})
+	}
+}
+
+// TestManagementContractAnchorsInstallResults validates every result of
+// `enterprise bundle anchors install` on a managed device: installed,
+// unchanged, replaced, and the refusals an agent acts on (insecure or
+// invalid source, usage, busy, not root).
+func TestManagementContractAnchorsInstallResults(t *testing.T) {
+	schemas := compileManagementContract(t)
+	root, layout, euid := anchorsInstallDevice(t)
+	install := func(want int, args ...string) map[string]any {
+		t.Helper()
+		out, code := runBundle(t, append([]string{"anchors", "install"}, args...)...)
+		doc := schemas.validate(t, "anchors-install.schema.json", []byte(out))
+		requireExit(t, doc, code, want)
+		return doc
+	}
+	errorCode := func(doc map[string]any) any {
+		errs, _ := doc["errors"].([]any)
+		if len(errs) == 0 {
+			return nil
+		}
+		return errs[0].(map[string]any)["code"]
+	}
+	first := testAnchorsFile(t, "active", "retired")
+	if doc := install(0, "--file", first, "--json"); doc["result"] != "installed" {
+		t.Fatalf("first install: %v", doc)
+	}
+	if doc := install(0, "--file", first, "--json"); doc["result"] != "unchanged" {
+		t.Fatalf("same file again: %v", doc)
+	}
+	if doc := install(0, "--file", testAnchorsFile(t, "active", "revoked"), "--json"); doc["result"] != "replaced" || doc["previous_sha256"] == nil {
+		t.Fatalf("other file: %v", doc)
+	}
+
+	invalid := filepath.Join(t.TempDir(), "bundle-anchors.json")
+	if err := os.WriteFile(invalid, []byte(`{"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if doc := install(1, "--file", invalid, "--json"); errorCode(doc) != "anchor_invalid" {
+		t.Fatalf("invalid source: %v", doc)
+	}
+
+	insecure := testAnchorsFile(t, "active")
+	trusting := newUnixLifecycleEnv
+	t.Cleanup(func() { newUnixLifecycleEnv = trusting })
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		env, err := trusting(goos)
+		if err == nil {
+			env.Trust = func(path string, _ enterpriseunix.TrustKind) error {
+				if path == insecure {
+					return errors.New("the file is writable by group staff")
+				}
+				return nil
+			}
+		}
+		return env, err
+	}
+	if doc := install(1, "--file", insecure, "--json"); errorCode(doc) != "anchor_insecure" {
+		t.Fatalf("insecure source: %v", doc)
+	}
+	newUnixLifecycleEnv = trusting
+
+	install(2, "--json")
+	install(2, "--file", first, "--lock-wait", "1h", "--json")
+
+	lock, err := os.OpenFile(filepath.Join(root, layout.LifecycleDir, "lifecycle.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if doc := install(75, "--file", first, "--lock-wait", "1s", "--json"); errorCode(doc) != "lifecycle_busy" {
+		t.Fatalf("busy: %v", doc)
+	}
+	_ = lock.Close()
+
+	*euid = 1000
+	if doc := install(1, "--file", first, "--json"); errorCode(doc) != "not_root" {
+		t.Fatalf("not root: %v", doc)
 	}
 }

@@ -11,6 +11,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // TestManagementContractWindowsSecret validates what Windows
@@ -47,20 +49,34 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	schemas.validate(t, "secret-result.schema.json", []byte(out))
 
 	t.Run("failures print one document", func(t *testing.T) {
-		requireContractItem(t, "windows_secret_json")
+		opts := enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}
+		notElevated := func(managedHost bool) func() {
+			return func() {
+				windowsSecretIsElevated = func() bool { return false }
+				managedHostWindowsStandalone = func() (string, bool) {
+					if managedHost {
+						return `HKLM\` + WindowsEnterpriseMarkerKey, true
+					}
+					return "", false
+				}
+			}
+		}
 		cases := map[string]struct {
 			setup func()
 			opts  enterpriseSecretOptions
 			exit  int
 		}{
-			"not elevated":  {func() { windowsSecretIsElevated = func() bool { return false } }, enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, 5},
-			"bad name":      {func() {}, enterpriseSecretOptions{name: "BAD", fromStdin: true, json: true}, 1639},
-			"not installed": {func() { windowsSecretDeploymentInstalled = func() (bool, error) { return false, nil } }, enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, 1603},
+			"not elevated, managed":   {notElevated(true), opts, enterprisestatus.WindowsExitAccessDenied},
+			"not elevated, unmanaged": {notElevated(false), opts, windowsSecretExitFailure},
+			"bad name":                {func() {}, enterpriseSecretOptions{name: "BAD", fromStdin: true, json: true}, windowsSecretExitInvalid},
+			"not installed":           {func() { windowsSecretDeploymentInstalled = func() (bool, error) { return false, nil } }, opts, windowsSecretExitFailure},
 		}
 		for name, tc := range cases {
 			t.Run(name, func(t *testing.T) {
-				savedElevated, savedInstalled := windowsSecretIsElevated, windowsSecretDeploymentInstalled
-				t.Cleanup(func() { windowsSecretIsElevated, windowsSecretDeploymentInstalled = savedElevated, savedInstalled })
+				savedElevated, savedInstalled, savedManaged := windowsSecretIsElevated, windowsSecretDeploymentInstalled, managedHostWindowsStandalone
+				t.Cleanup(func() {
+					windowsSecretIsElevated, windowsSecretDeploymentInstalled, managedHostWindowsStandalone = savedElevated, savedInstalled, savedManaged
+				})
 				tc.setup()
 				out, err := runWindowsSecretCommand(t, "set", tc.opts, value+"\r\n")
 				doc := schemas.validate(t, "secret-result.schema.json", []byte(out))

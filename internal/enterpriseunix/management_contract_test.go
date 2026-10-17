@@ -36,19 +36,6 @@ import (
 
 const managementContractDir = "../../packaging/mdm/contract"
 
-// pendingContractItems are contract items whose code is not in this tree
-// yet; a check that needs one skips. Delete an entry when its change lands.
-var pendingContractItems = map[string]string{
-	"receipt_id": "bundle.receipt_id in the apply and status results",
-}
-
-func requireContractItem(t *testing.T, item string) {
-	t.Helper()
-	if what, pending := pendingContractItems[item]; pending {
-		t.Skipf("contract item %s is not in this tree yet (%s)", item, what)
-	}
-}
-
 type contractSchemas map[string]*jsonschema.Schema
 
 // compileManagementContract compiles every schema of the contract folder
@@ -166,7 +153,6 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 				}
 			}
 			t.Run("receipt_id of a fresh apply", func(t *testing.T) {
-				requireContractItem(t, "receipt_id")
 				if got := doc["bundle"].(map[string]any)["receipt_id"]; got != receiptID {
 					t.Fatalf("bundle.receipt_id = %v, want the receipt written, %s", got, receiptID)
 				}
@@ -181,7 +167,6 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 				t.Fatalf("repeated delivery: noop=%v reason=%q", again.Noop, again.NoopReason)
 			}
 			t.Run("receipt_id of already_applied", func(t *testing.T) {
-				requireContractItem(t, "receipt_id")
 				if got := doc["bundle"].(map[string]any)["receipt_id"]; got != receiptID {
 					t.Fatalf("bundle.receipt_id = %v, want the current confirmed receipt, %s", got, receiptID)
 				}
@@ -193,6 +178,16 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 			schemas.validateResult(t, "lifecycle-result.schema.json", refused)
 			if refused.ExitCode != enterprisestatus.UnixExitFailure {
 				t.Fatalf("refusal exit %d", refused.ExitCode)
+			}
+
+			// A refusal before the bundle was received writes no receipt,
+			// so the result has no bundle block and no receipt_id.
+			unmanaged := newTestHost(t, goos)
+			early := unmanaged.run(Options{Action: ActionEnsure, Bundle: path})
+			requireError(t, early, codeNotInstalled)
+			doc = schemas.validateResult(t, "lifecycle-result.schema.json", early)
+			if _, present := doc["bundle"]; present {
+				t.Fatalf("refusal before the receipt has a bundle block: %v", doc["bundle"])
 			}
 
 			status := b.run(Options{Action: ActionStatus})
