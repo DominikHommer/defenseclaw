@@ -1110,6 +1110,21 @@ The next uninstall removes one that an earlier build left and says so in a
 make that uninstall fail with "managed-hook teardown journal does not match
 the protected deployment".
 
+A lifecycle also removes the old hook runtime copies it published for each
+account. When it cannot verify or apply the permissions of an account's
+`%USERPROFILE%\.defenseclaw` folder or its `hooks` folder (a stale or
+foreign profile, for example one whose folder denies even Administrators),
+it changes nothing in that folder, leaves that account's old copies there
+(they are inert: the protected selector names the copy in force), finishes
+the run for every other account, and names the account and the folder in a
+`user_runtime_folder_untrusted` warning. Such a folder used to roll the whole
+upgrade back with `1603`. An upgrade from 1.0.2, whose installed release
+stops at that folder before the new one runs, reports it in a
+`stale_lifecycle_journal_removed` warning instead. To remove the old copies,
+inspect the folder, reset its permissions or remove it if the account no
+longer uses DefenseClaw, then run Setup `/ensure` again. With a pending
+transaction the run still fails with `1603` and names the same remedy.
+
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
 starting. `status` and `verify` both fail and name the folder and the
@@ -1426,6 +1441,17 @@ lists removals that failed, including a registration that a connector's
 removal left in the user's agent configuration (the message names the file).
 An uninstall that did not run as LocalSystem attempts no removal, so it
 reports only `user_registrations_pending`.
+
+Claude Code's DefenseClaw hooks are machine policy, but an older install
+registered a per-user hook in `%USERPROFILE%\.claude\settings.json`. The
+uninstall removes that exact hook (the command that runs the account's own
+`%USERPROFILE%\.local\bin\defenseclaw-hook.exe`) and keeps the account's
+other hooks, its owner and its permissions. `changes` lists each settings
+file it edited and how many commands it removed. A command that still names
+a DefenseClaw launcher in another shape (written by hand, or wrapped in a
+script) is kept, and a `claude_settings_hook_left` warning names the file,
+the hook event and the command, so the administrator can remove it as that
+user: Claude Code would otherwise keep running a launcher that is gone.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
