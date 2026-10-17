@@ -222,6 +222,14 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 func shellCallExtraWriteOperands(
 	call *syntax.CallExpr, cwd, home string, vars shellVariables, poison shellVariablePoison,
 ) []ExtraWriteOperand {
+	if len(call.Args) == 3 {
+		program, programOK := staticShellWordWithVars(call.Args[0], home, vars, poison)
+		dest, destOK := staticShellWordWithVars(call.Args[2], home, vars, poison)
+		if programOK && slices.Contains(copyPrograms, programBase(program)) &&
+			quotedDynamicCopySource(call.Args[1]) && destOK && dest != "" && !strings.HasPrefix(dest, "-") {
+			return []ExtraWriteOperand{{Path: OperandPath(dest, cwd), OwnCopy: true}}
+		}
+	}
 	words := make([]string, len(call.Args))
 	for i, arg := range call.Args {
 		var static bool
@@ -297,6 +305,26 @@ func shellCallExtraWriteOperands(
 		add(OperandPath(destination, cmdCWD))
 	}
 	return operands
+}
+
+// With exactly one quoted source and one fixed destination, a dynamic cp
+// source cannot become a successful link-creating option: an option would
+// leave cp without both a source and destination. The source still cannot
+// hide a second argv word because double quotes preserve it as one word.
+func quotedDynamicCopySource(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	if !ok {
+		return false
+	}
+	_, ok = shellDynamicParamName(param, "")
+	return ok
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.
@@ -1865,6 +1893,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
+			if len(args) == 3 && !static[1] && static[2] &&
+				quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], cwd))
+				return true
+			}
 			destination := cpDestination(words[1:], static[1:], cwd)
 			if destination != "" {
 				links.copyDestinations = append(links.copyDestinations, destination)
@@ -2313,7 +2346,7 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'f', 'H', 'i', 'L', 'l', 'n', 'p', 's', 'T', 'u', 'v', 'x':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'l', 'n', 'N', 'p', 's', 'T', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return nil, "", true, false
 			}
@@ -2757,7 +2790,10 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{"directory", "dir", "cd", "one-top-level"})
+			option, unique := longOption(name, []string{
+				"directory", "dir", "cd", "one-top-level", "file", "strip-components",
+				"exclude", "zstd", "absolute-names", "get", "extract", "list", "create",
+			})
 			if !unique {
 				return "", false
 			}
@@ -2775,6 +2811,17 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
+					return "", false
+				}
+			case "file", "strip-components", "exclude":
+				if !joined {
+					i++
+					if i >= len(args) || !static[i] || args[i] == "" {
+						return "", false
+					}
+				}
+			case "zstd", "absolute-names", "get", "extract", "list", "create":
+				if joined {
 					return "", false
 				}
 			default:
@@ -2815,7 +2862,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
 			default:
 				// Unknown short options may consume a path.
 				return "", false

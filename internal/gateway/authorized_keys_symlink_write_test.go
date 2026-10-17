@@ -205,6 +205,59 @@ func TestR103B07ProcCWDAliasRowA10238(t *testing.T) {
 	}
 }
 
+func TestR103B07FalsePositiveRows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command rows")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "build"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "report.txt"), []byte("report\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"FP-0001", "tar -xzf pkg.tgz --strip-components=1 -C build; echo hi > report.txt"},
+		{"FP-0002", "tar -xzf pkg.tgz --exclude=docs -C build; echo hi > report.txt"},
+		{"FP-0003", "tar -a -xf pkg.tar -C build; echo hi > report.txt"},
+		{"FP-0004", `for f in *.txt; do cp "$f" build/; done; echo ok > report.txt`},
+		{"FP-0005", `cp "$F" out.txt && echo done > report.txt`},
+		{"FP-0006", "cp -c report.txt r2.txt"},
+		{"FP-0007", "cp -X report.txt r2.txt"},
+		{"FP-0008", "cp -N report.txt r2.txt"},
+		{"FP-0009", "cp -Z report.txt r2.txt"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			request := trustedActionRequest{Input: input}
+			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatalf("%s classified as an SSH-key write", tc.command)
+			}
+		})
+	}
+	for _, command := range []string{`cp "$F" disklink`, `for f in *.txt; do cp "$f" disklink; done`} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+		request := trustedActionRequest{Input: input}
+		if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+			t.Fatalf("dynamic copy to protected link allowed: %s", command)
+		}
+	}
+}
+
 func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook write targets")
