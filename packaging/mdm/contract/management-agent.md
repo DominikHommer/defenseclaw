@@ -349,7 +349,10 @@ Exit 0.
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
   written. `noop_reason` is `already_applied` only when ensure also changed
-  nothing else. A lower or equal version with other bytes is
+  nothing else; a repeat that also repaired drift (a credential, a file
+  mode, a stopped service) has `noop: false` and no `noop_reason`. The
+  success test below does not read `noop_reason`. A lower or equal version
+  with other bytes is
   `version_not_newer` (final). A retry after 75 / 1618 is safe.
 - stdout: `lifecycle-result.schema.json` (schema_version 2, `action:
   "ensure"`) with the `bundle` block (and `last_refusal` for a refusal before

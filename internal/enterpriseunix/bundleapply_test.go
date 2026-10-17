@@ -509,6 +509,33 @@ func TestBundleApplyRepeatAfterANewerFailureNamesTheConfirmedReceipt(t *testing.
 	}
 }
 
+// A repeat of the current bundle that also repairs drift (here a new
+// credential to apply) has no noop_reason, and still passes the contract's
+// success test: exit 0, ok, bundle.bundle_id the submitted bundle and
+// bundle.state confirmed, also after a newer delivery failed after staging.
+func TestBundleApplyRepeatThatRepairsDriftPassesTheSuccessTest(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+	if err := b.env.WriteSecret(context.Background(), "ai-defense-api-key", []byte("drift-value")); err != nil {
+		t.Fatal(err)
+	}
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Noop || r.NoopReason != "" {
+		t.Fatalf("repeat with drift: noop %v, reason %q; want the drift repaired", r.Noop, r.NoopReason)
+	}
+	if r.ExitCode != 0 || r.Bundle == nil || r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed ||
+		r.Bundle.ReceiptID != confirmed.ReceiptID {
+		t.Fatalf("repeat with drift: exit %d, bundle block = %+v; want confirmed %s", r.ExitCode, r.Bundle, bundleID(1))
+	}
+}
+
 func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
 	b := newBundleHost(t)
 	stagePackage(t, b.testHost, "1.0.0")
