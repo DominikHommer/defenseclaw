@@ -40,10 +40,7 @@ func TestManagedCommandRefusalUsesHookSocket(t *testing.T) {
 	})}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
-	previous := managedRefusalSocket
-	managedRefusalSocket = func() string { return path }
-	t.Cleanup(func() { managedRefusalSocket = previous })
-	reportManagedCommandRefusal("enterprise linux ensure", "not_root")
+	postManagedCommandRefusal(path, "enterprise linux ensure", "not_root")
 	select {
 	case got := <-received:
 		if got != (record{Action: "action", Target: "enterprise linux ensure", Details: "command=enterprise linux ensure", Reason: "not_root"}) {

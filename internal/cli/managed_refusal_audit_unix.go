@@ -16,7 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-var managedRefusalSocket = func() string {
+func managedRefusalSocket() string {
 	descriptor, err := managed.LoadRuntimeDescriptor(managedHostDescriptorPath())
 	if err != nil || descriptor.HookSocket == "" {
 		return ""
@@ -32,6 +32,10 @@ var reportManagedCommandRefusal = func(command, reason string) {
 	if socket == "" {
 		return
 	}
+	postManagedCommandRefusal(socket, command, reason)
+}
+
+func postManagedCommandRefusal(socket, command, reason string) {
 	request, err := json.Marshal(struct {
 		Action  string `json:"action"`
 		Target  string `json:"target"`
