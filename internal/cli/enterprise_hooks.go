@@ -2079,7 +2079,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		started := time.Now()
 		run, err := runEnterpriseHookReconcileOnceStandaloneUnix(ctx)
 		if err == nil {
-			recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run)
+			// A restore that is not recorded is not named by status: report
+			// it and retry with the repair backoff (GAP-0626).
+			if restoreErr := recordEnterpriseHookStandaloneUnixRestores(os.Stderr, cfg.DataDir, started, run); restoreErr != nil && run.StateErr == nil {
+				run.StateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
+			}
 		}
 		return run, err
 	}
@@ -2289,7 +2293,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		rows = append(rows, row)
 	}
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
-	recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
+	// A restore that is not recorded is not named by status, so the pass
+	// reports it and retries instead of waiting for the interval (GAP-0626).
+	restoreErr := recordEnterpriseHookGuardianRestores(os.Stderr, cfg.DataDir, rows, restored)
 	if runtime.GOOS == "windows" && enterpriseHookGuardianRestoresEnabled() {
 		// The standalone Windows guardian; Linux and macOS record theirs
 		// in their own reconcile, and Secure Client records none.
@@ -2326,6 +2332,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			"publish exact protected enrollment set: %w",
 			enrollmentErr,
 		)
+	}
+	if stateErr == nil && restoreErr != nil {
+		stateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
 	}
 	enterpriseHookStandalonePlatformFinish(ctx, os.Stderr, rows, time.Now())
 	run.Rows = rows

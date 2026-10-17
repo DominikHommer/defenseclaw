@@ -75,6 +75,66 @@ func TestStatusNamesSessionsStartedBeforeAGuardianRestore(t *testing.T) {
 	}
 }
 
+// GAP-0624: a restore record that could not be read, or whose content is
+// invalid, made the restart-required warning vanish while status read
+// complete. Status and verify now name the account's sessions whose restart
+// status is unknown and report security_complete false, as on Windows; a
+// record that reads again clears it.
+func TestStatusReportsUnknownRestartStatusForAnUnreadableRestoreRecord(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	record, err := h.env.loadDeployment()
+	if err != nil || record == nil {
+		t.Fatalf("no deployment: %v", err)
+	}
+	activationTime := record.ActivatedAt
+	if activationTime == "" {
+		activationTime = record.InstalledAt
+	}
+	activated, err := time.Parse(time.RFC3339Nano, activationTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, "/proc/stat", fmt.Sprintf("cpu 0 0 0 0\nbtime %d\n", activated.Unix()))
+	agent := func(pid, cmdline string, ticks int64) {
+		writeHostFile(t, h, "/proc/"+pid+"/cmdline", cmdline)
+		writeHostFile(t, h, "/proc/"+pid+"/stat", fmt.Sprintf("%s (agent) S 1 %s %s%d 0 0", pid, pid, strings.Repeat("0 ", 16), ticks))
+	}
+	h.env.Now = func() time.Time { return activated.Add(30 * time.Minute) }
+	agent("6101", "/home/u/.hermes/tools/python/bin/python3\x00-I\x00-c\x00import os\nfrom hermes_cli.main import main\x00", 2*60*100)
+	agent("6102", "codex\x00", 2*60*100) // Codex reads the requirements per turn
+	path := filepath.Join(h.env.Layout.DataDir, guardianRestoresFile)
+	for name, body := range map[string]string{
+		"invalid JSON": "not json",
+		"version 2":    `{"version":2,"targets":[]}`,
+	} {
+		writeHostFile(t, h, path, body)
+		for _, action := range []string{ActionStatus, ActionVerify} {
+			result := h.run(Options{Action: action})
+			got := messagesOf(result.Warnings, codeAgentSessionsRestart)
+			if !strings.Contains(got, "restart status unknown") || !strings.Contains(got, "hermes (pid 6101)") || strings.Contains(got, "6102") {
+				t.Fatalf("%s, %s: warnings %q, want the Hermes session named with an unknown restart status", name, action, got)
+			}
+			if result.SecurityComplete {
+				t.Fatalf("%s, %s: security_complete with an unreadable restore record", name, action)
+			}
+		}
+	}
+	// No session to name: the unknown status is still reported.
+	if err := os.RemoveAll(h.env.P("/proc/6101")); err != nil {
+		t.Fatal(err)
+	}
+	result := h.run(Options{Action: ActionStatus})
+	if got := messagesOf(result.Warnings, codeAgentSessionsRestart); !strings.Contains(got, "restart status unknown") || result.SecurityComplete {
+		t.Fatalf("without sessions: warnings %q, security_complete %v", got, result.SecurityComplete)
+	}
+	// The record reads again: nothing is named.
+	writeHostFile(t, h, path, `{"version":1,"targets":[]}`)
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeAgentSessionsRestart); got != "" {
+		t.Fatalf("a readable record still names sessions: %q", got)
+	}
+}
+
 // GAP-0499 (verify r1 F1): the guardian writes its restore record root:root
 // 0600 in the data folder, as it writes its repair record. Without a rule of
 // its own the record fell under the service account's rule: after the first
