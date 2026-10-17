@@ -89,17 +89,33 @@ from the start:
   user can pre-create the agent's folder and own it. Create the folder
   yourself, as SYSTEM, before the first download, with a protected DACL (no
   inherited entries; full control for SYSTEM and Administrators only), and
-  refuse to use it if it already exists with another owner or other writers:
+  refuse to use it if it already exists with another owner, an unprotected
+  DACL or a write right for any other account. Compare SIDs, not names
+  (account names are localized):
 
 ```powershell
 $dir = 'C:\ProgramData\<Vendor>'
-if (Test-Path -LiteralPath $dir) {
+$sid = [System.Security.Principal.SecurityIdentifier]
+$trusted = @('S-1-5-18', 'S-1-5-32-544')   # SYSTEM, Administrators
+# Write data, append data, write attributes and extended attributes, delete,
+# delete child, change permissions, take ownership, generic write, generic all.
+$writeRights = 0x500D0156
+$created = -not (Test-Path -LiteralPath $dir)
+if ($created) {
+  # Stops when the folder appeared since Test-Path (someone else created it).
+  New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null
+} else {
   $acl = Get-Acl -LiteralPath $dir
-  if ($acl.Owner -notin @('NT AUTHORITY\SYSTEM','BUILTIN\Administrators') -or -not $acl.AreAccessRulesProtected) { throw "untrusted $dir" }
-} else { New-Item -ItemType Directory -Path $dir | Out-Null }
+  $writers = @($acl.GetAccessRules($true, $true, $sid) | Where-Object {
+    $_.AccessControlType -eq 'Allow' -and ([int64]$_.FileSystemRights -band $writeRights) -and $_.IdentityReference.Value -notin $trusted })
+  if ($acl.GetOwner($sid).Value -notin $trusted -or -not $acl.AreAccessRulesProtected -or $writers.Count) { throw "untrusted $dir" }
+}
 $sd = New-Object System.Security.AccessControl.DirectorySecurity
 $sd.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
 Set-Acl -LiteralPath $dir -AclObject $sd
+# Until Set-Acl the new folder inherited C:\ProgramData's entries, which let
+# users add files: a folder this script created must still be empty.
+if ($created -and (Get-ChildItem -LiteralPath $dir -Force | Select-Object -First 1)) { throw "untrusted $dir" }
 ```
 
 Otherwise an account that can write the download folder could swap the trust
@@ -411,6 +427,22 @@ Exit 0.
   delivery's: do not add it to the list. A repeat has `noop_reason`
   `already_applied`, or a `bundle.confirmed_at` earlier than the time the
   agent started the apply.
+- **Across an agent restart**: a running apply outlives the agent's stop
+  (2.4), and the receipt it writes is still the agent's. So before it starts
+  the child, the agent durably records the delivery: the `--delivery-id`, the
+  submitted bundle id and the start time. After a restart, once 5.1 step 2
+  ran, it settles each recorded delivery: the receipt whose `delivery_id` is
+  the recorded id, in a `receipt-events/` file (4.9) or in the `bundle`,
+  `last_receipt` or `last_refusal` block of `bundle status` (4.5), is its
+  own: add its `receipt_id` to the list and forward it. No such receipt means
+  the apply was refused before the bundle was received, or its receipt file
+  was not written (best effort, 4.9) and a newer receipt has replaced it in
+  `bundle status`; the delivery stays unsettled, and the resubmit of 5.1 step
+  3 gives the own receipt id by the rules above. Drop the record once it is
+  settled or that resubmit ended. On a build without `management_contract`
+  (no `--delivery-id`, section 3), settle by the recorded bundle id and a
+  `finished_at` after the recorded start time (4.9). Use ids unique to the
+  agent: `delivery_id` is not authenticated (2.6).
 - **`delivery_id`**: `bundle.delivery_id` (or `last_refusal.delivery_id`) is
   the `--delivery-id` of the delivery that block reports. It equals the id
   passed exactly when the block is this apply's receipt by the rules above. A
@@ -581,13 +613,19 @@ Exit 0.
   in every case. A Windows build without `management_contract` reports `ok`
   from gateway readiness alone, which does not prove the key.
 
+The agent holds the value in its own memory and writes it to the child's
+stdin; the examples stand that in with a variable of the agent process
+(`key`, `$key`), never an environment variable, which the child would
+inherit (2.5, section 1).
+
 ```sh
-# The agent writes the value to the child's stdin and closes it; printf stands in for that here.
-printf '%s' "$AI_DEFENSE_KEY" | "$GW" enterprise secret set --name ai-defense-api-key --from-stdin --lock-wait 10m --json
+# The agent writes the value to the child's stdin and closes it; printf of an unexported variable stands in for that here.
+printf '%s' "$key" | "$GW" enterprise secret set --name ai-defense-api-key --from-stdin --lock-wait 10m --json
 ```
 ```powershell
+# The agent writes the value to the child's stdin and closes it; $key (a variable, not $env:) stands in for that here.
 # On a build without management_contract, drop --lock-wait.
-$env:AI_DEFENSE_KEY | & $GW enterprise secret set --name ai-defense-api-key --from-stdin --lock-wait 10m --json
+$key | & $GW enterprise secret set --name ai-defense-api-key --from-stdin --lock-wait 10m --json
 ```
 
 ### 4.8 Trust anchors
@@ -644,14 +682,32 @@ is still the one owner.
 
 On a Linux or macOS build without `management_contract`, run the recipe the
 MDM kit falls back to on such a build, as root. It does not check the source
-folder; check it yourself first:
+folder; check it yourself first. It keeps the previous file in the agent's
+own root-only folder, so a failed check can put it back:
 
 ```sh
 ETC=/etc/defenseclaw            # macOS: /opt/cisco/defenseclaw/etc
+SRC=/var/lib/<vendor>/trust     # the agent's root-only folder (section 1)
 install -d -o 0 -g 0 -m 0755 "$ETC/trust"
-install -o 0 -g 0 -m 0644 /var/lib/<vendor>/trust/bundle-anchors.json "$ETC/trust/.bundle-anchors.json.new"
+rm -f "$SRC/bundle-anchors.previous.json"
+if [ -f "$ETC/trust/bundle-anchors.json" ]; then
+  cp -p "$ETC/trust/bundle-anchors.json" "$SRC/bundle-anchors.previous.json" || exit 1
+fi
+install -o 0 -g 0 -m 0644 "$SRC/bundle-anchors.json" "$ETC/trust/.bundle-anchors.json.new"
 mv -f "$ETC/trust/.bundle-anchors.json.new" "$ETC/trust/bundle-anchors.json"
-"$GW" enterprise bundle status --json     # anchor_insecure or anchor_invalid here: put the previous file back
+"$GW" enterprise bundle status --json
+```
+
+When that result has `errors[].code` `anchor_insecure` or `anchor_invalid`,
+put the previous file back, or remove the new one when there was none:
+
+```sh
+if [ -f "$SRC/bundle-anchors.previous.json" ]; then
+  install -o 0 -g 0 -m 0644 "$SRC/bundle-anchors.previous.json" "$ETC/trust/.bundle-anchors.json.new"
+  mv -f "$ETC/trust/.bundle-anchors.json.new" "$ETC/trust/bundle-anchors.json"
+else
+  rm -f "$ETC/trust/bundle-anchors.json"
+fi
 ```
 
 **Windows: `enterprise windows ensure --profile standalone --trust-anchors F
@@ -691,8 +747,11 @@ enforcing.
 - Deduplicate by `receipt_id`; every delivery has its own id (the first
   delivery of a bundle uses the bundle id, later deliveries `r-<ULID>`).
   Receipts whose id is not in the agent's own list (4.3) came from MDM or an
-  administrator. On a build without `management_contract`,
-  match on `bundle_id` with `finished_at` after the apply started.
+  administrator; settle the deliveries recorded before an agent restart
+  first (4.3), so that the receipt of an apply that finished while the agent
+  was stopped is not counted as theirs. On a build without
+  `management_contract`, match on `bundle_id` with `finished_at` after the
+  apply started.
 - `delivery_id` is present when the apply had `--delivery-id` (2.6). The
   `config.bundle.receipt` audit event and OTel do not carry it; only these
   files, the command results and `bundle status` do.
@@ -783,8 +842,9 @@ Later bundles go through 5.2.
    1618 with backoff. After an unknown outcome of `bundle anchors install`,
    run the same install again: `unchanged` with the same `sha256` means the
    file is in place.
-3. Only then resubmit the desired bundle; the same bytes give the no-op
-   success or a fresh apply.
+3. Settle the deliveries the agent recorded before it stopped (4.3,
+   across an agent restart). Only then resubmit the desired bundle; the same
+   bytes give the no-op success or a fresh apply.
 
 ### 5.2 Deliver a bundle
 
@@ -795,7 +855,8 @@ Later bundles go through 5.2.
    first.
 3. Run 4.2 verify. `already_applied`: done. `refused`: report
    `errors[0].code` and stop (final).
-4. Run 4.3 apply on a worker thread, with a new `--delivery-id` and
+4. Record the delivery (4.3, across an agent restart), then run 4.3 apply on
+   a worker thread, with that new `--delivery-id` and
    `--refuse-capability-loss` (every apply after the first bundle). Apply the success test of 4.3 and the retry
    classes of section 2.2. Record the agent's own receipt id (4.3).
 5. Forward the receipt (4.9). Report anchor and credential changes yourself
