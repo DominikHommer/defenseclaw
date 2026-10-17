@@ -52,27 +52,14 @@ func TestAgentHookStatementPrefixRecovery(t *testing.T) {
 					response := postDecisionForTest(t, api, "claudecode", "PreToolUse", prefix.text+target.command)
 					wantAction := "allow"
 					wantResult := "ok"
-					if prefix.text != "" {
-						wantResult = "panic" // rel/1.0.2 evaluator recovery
-						if mode.decisionMode == "action" && mode.failMode == "closed" {
-							wantAction = "block"
-						}
-					} else if target.protected && mode.decisionMode == "action" {
+					if target.protected && prefix.text == "" && mode.decisionMode == "action" {
 						wantAction = "block"
 					}
 					if response["action"] != wantAction || response["mode"] != mode.decisionMode {
 						t.Fatalf("action/mode=%v/%v, want %s/%s", response["action"], response["mode"], wantAction, mode.decisionMode)
 					}
-					if prefix.text != "" && wantAction == "allow" && response["would_block"] != true {
-						t.Fatalf("recovered allow would_block=%v, want true", response["would_block"])
-					}
 					if got := decisionIsDenied(response["claude_code_output"]); got != (wantAction == "block") {
 						t.Fatalf("harness denial=%v, want %v, output=%v", got, wantAction == "block", response["claude_code_output"])
-					}
-					if prefix.text != "" && mode.decisionMode == "action" && mode.failMode == "closed" && !target.protected {
-						if reason, _ := response["reason"].(string); !strings.Contains(reason, "internal evaluator error") {
-							t.Fatalf("benign recovery reason=%q, want internal error", reason)
-						}
 					}
 					row := soleHookDecisionForTest(t, store)
 					if row.Structured["result"] != wantResult {
@@ -87,5 +74,44 @@ func TestAgentHookStatementPrefixRecovery(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// GAP-0651: each form executes a protected command despite a preceding or
+// trailing shell construct. The hook must evaluate the executed command.
+func TestR103B07GAP0651ProtectedCommandGroups(t *testing.T) {
+	forms := []struct{ name, command string }{
+		{"colon_spaced", ": ; cat ~/.ssh/id_ed25519"},
+		{"colon_tight", ":;cat ~/.ssh/id_ed25519"},
+		{"colon_redirect", ": >marker; cat ~/.ssh/id_ed25519"},
+		{"brace_group", "{ :; }; cat ~/.ssh/id_ed25519"},
+		{"subshell_group", "(:); cat ~/.ssh/id_ed25519"},
+		{"colon_and", ": && cat ~/.ssh/id_ed25519"},
+		{"preceding_newline", ":\ncat ~/.ssh/id_ed25519"},
+		{"trailing_colon_redirect", "cat ~/.ssh/id_ed25519; : >marker"},
+		{"colon_root_delete", ":; rm -rf /"},
+		{"brace_root_delete", "{ :; }; rm -rf /"},
+		{"subshell_root_delete", "(:); rm -rf /"},
+		{"newline_root_delete", ":\nrm -rf /"},
+		{"trailing_colon_root_delete", "rm -rf /; : >marker"},
+	}
+	for _, form := range forms {
+		t.Run(form.name, func(t *testing.T) {
+			store, logger := testStoreAndLogger(t)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.HookFailMode = "closed"
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			response := postDecisionForTest(t, api, "claudecode", "PreToolUse", form.command)
+			if response["action"] != "block" || !decisionIsDenied(response["claude_code_output"]) {
+				t.Fatalf("command=%q action=%v output=%v", form.command, response["action"], response["claude_code_output"])
+			}
+			row := soleHookDecisionForTest(t, store)
+			if row.Structured["result"] != "ok" {
+				t.Fatalf("audit result=%v", row.Structured["result"])
+			}
+		})
 	}
 }

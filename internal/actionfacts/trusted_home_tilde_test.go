@@ -30,21 +30,61 @@ func TestTrustedHomeTildeOperandsMakeALoneCommandExact(t *testing.T) {
 	}
 }
 
+func TestR103B07TrustedHomeInertListRead(t *testing.T) {
+	for _, command := range []string{
+		": ; cat ~/.ssh/id_ed25519",
+		":;cat ~/.ssh/id_ed25519",
+		": >marker; cat ~/.ssh/id_ed25519",
+		"{ :; }; cat ~/.ssh/id_ed25519",
+		"(:); cat ~/.ssh/id_ed25519",
+		": && cat ~/.ssh/id_ed25519",
+		":\ncat ~/.ssh/id_ed25519",
+		"cat ~/.ssh/id_ed25519; : >marker",
+	} {
+		t.Run(command, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work/app", ActiveHome: "/sandbox", DialectHint: DialectPOSIX})
+			if !facts.Authoritative() || !facts.EnforcementEligible() {
+				t.Fatalf("%q parse=%+v commands=%+v", command, facts.Parse, facts.Commands)
+			}
+			found := false
+			for _, path := range facts.Paths {
+				if path.Access == PathAccessRead && path.Resolved == "/sandbox/.ssh/id_ed25519" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%q paths=%+v", command, facts.Paths)
+			}
+		})
+	}
+}
+
+func TestR103B07ColonRootDeleteFacts(t *testing.T) {
+	for _, command := range []string{":; rm -rf /", "{ :; }; rm -rf /", "(:); rm -rf /", ":\nrm -rf /", "rm -rf /; : >marker"} {
+		facts := Analyze(Input{Tool: "Bash", Command: command, CWD: "/work/app", ActiveHome: "/sandbox", DialectHint: DialectPOSIX})
+		if !facts.Authoritative() || !facts.EnforcementEligible() {
+			t.Errorf("%q parse=%+v commands=%+v", command, facts.Parse, facts.Commands)
+		}
+	}
+}
+
 func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 	for _, tc := range []struct {
 		name, command, home string
 	}{
 		{"no active home", "cat ~/.ssh/id_rsa", ""},
 		{"home that is not a plain word", "cat ~/.ssh/id_rsa", "/home/a b"},
-		{"earlier command", "true; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"earlier command", "echo x; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"home changed first", "HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon then home change", ":; HOME=/tmp; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"colon dynamic redirect", ": >$TARGET; cat ~/.ssh/id_rsa", "/sandbox"},
+		{"noninert group", "{ echo x; }; cat ~/.ssh/id_rsa", "/sandbox"},
 		{"prefix assignment", "HOME=/tmp cat ~/.ssh/id_rsa", "/sandbox"},
 		{"other user", "cat ~alice/.ssh/id_rsa", "/sandbox"},
 		{"glob", "cat ~/.ssh/id_*", "/sandbox"},
 		{"other expansion", "cat ~/.ssh/id_rsa $EXTRA", "/sandbox"},
 		{"tilde command name", "~/bin/tool --flag", "/sandbox"},
 		{"background", "cat ~/.ssh/id_rsa &", "/sandbox"},
-		{"redirect after a list", "true; echo x >> ~/.ssh/id_rsa", "/sandbox"},
 		{"redirect to another user", "echo x >> ~alice/.ssh/id_rsa", "/sandbox"},
 		{"redirect with a prefix assignment", "HOME=/tmp echo x >> ~/.ssh/id_rsa", "/sandbox"},
 	} {

@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"bytes"
 	"regexp"
 	"sort"
 	"strings"
@@ -45,10 +46,22 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).
 		Parse(strings.NewReader(source), "")
-	if err != nil || len(file.Stmts) != 1 {
+	if err != nil || len(file.Stmts) == 0 {
 		return trustedPOSIXHomeRewrite{}, false
 	}
-	stmt := file.Stmts[0]
+	binary, isBinary := file.Stmts[0].Cmd.(*syntax.BinaryCmd)
+	colonAnd := isBinary && binary.Op == syntax.AndStmt
+	if len(file.Stmts) != 1 || trustedHomeInertGroup(file.Stmts[0]) || colonAnd {
+		var ok bool
+		source, ok = normalizeTrustedHomeInertList(file)
+		if !ok {
+			return trustedPOSIXHomeRewrite{}, false
+		}
+		file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+		if err != nil {
+			return trustedPOSIXHomeRewrite{}, false
+		}
+	}
 	var words []*syntax.Word
 	var collect func(*syntax.Stmt, bool) bool
 	collect = func(stmt *syntax.Stmt, compound bool) bool {
@@ -87,7 +100,17 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			return false
 		}
 	}
-	if !collect(stmt, false) {
+	targets := 0
+	for _, stmt := range file.Stmts {
+		if trustedHomeInertColon(stmt) {
+			continue
+		}
+		if !collect(stmt, false) {
+			return trustedPOSIXHomeRewrite{}, false
+		}
+		targets++
+	}
+	if targets != 1 {
 		return trustedPOSIXHomeRewrite{}, false
 	}
 	sort.Slice(words, func(i, j int) bool { return words[i].Pos().Offset() < words[j].Pos().Offset() })
@@ -133,6 +156,97 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 	}
 	rewrite.source = out.String()
 	return rewrite, true
+}
+
+// Only a colon with no arguments can be discarded as an inert list member.
+// Static redirects remain in the normalized source so their writes are still
+// analyzed. Dynamic redirects cannot be proven safe by this rewrite.
+func trustedHomeInertColon(stmt *syntax.Stmt) bool {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 1 {
+		return false
+	}
+	program := projectPOSIXWord(call.Args[0])
+	if program.Expands || program.Value != ":" && program.Value != "true" {
+		return false
+	}
+	for _, redirect := range stmt.Redirs {
+		if target := projectPOSIXWord(redirect.Word); target.Expands {
+			return false
+		}
+	}
+	return true
+}
+
+func trustedHomeInertGroup(stmt *syntax.Stmt) bool {
+	if stmt == nil || len(stmt.Redirs) != 0 || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return false
+	}
+	switch group := stmt.Cmd.(type) {
+	case *syntax.Block:
+		return len(group.Stmts) == 1 && trustedHomeInertColon(group.Stmts[0]) && len(group.Stmts[0].Redirs) == 0
+	case *syntax.Subshell:
+		return len(group.Stmts) == 1 && trustedHomeInertColon(group.Stmts[0]) && len(group.Stmts[0].Redirs) == 0
+	default:
+		return false
+	}
+}
+
+// A colon succeeds unconditionally, so a colon AND target executes exactly
+// like a list. Braces and subshells containing only a colon have no state to
+// carry into the target command. Keep every other construct out of this proof.
+func normalizeTrustedHomeInertList(file *syntax.File) (string, bool) {
+	var parts []string
+	targets := 0
+	printStmt := func(stmt *syntax.Stmt) (string, bool) {
+		var buf bytes.Buffer
+		if err := syntax.NewPrinter().Print(&buf, stmt); err != nil {
+			return "", false
+		}
+		return buf.String(), true
+	}
+	for _, stmt := range file.Stmts {
+		if trustedHomeInertGroup(stmt) {
+			parts = append(parts, "true")
+			continue
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok &&
+			binary.Op == syntax.AndStmt && len(stmt.Redirs) == 0 &&
+			trustedHomeInertColon(binary.X) && len(binary.X.Redirs) == 0 {
+			stmt = binary.Y
+			parts = append(parts, "true")
+		}
+		if !trustedHomeInertColon(stmt) {
+			if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok ||
+				stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+				return "", false
+			}
+			targets++
+		}
+		segment, ok := printStmt(stmt)
+		if !ok {
+			return "", false
+		}
+		if trustedHomeInertColon(stmt) && strings.HasPrefix(segment, ":") {
+			segment = "true" + segment[1:]
+		}
+		parts = append(parts, segment)
+	}
+	if targets != 1 {
+		return "", false
+	}
+	return strings.Join(parts, "; "), true
+}
+
+func normalizeTrustedHomeInertListSource(source string) (string, bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+	if err != nil || file == nil || len(file.Stmts) == 0 {
+		return "", false
+	}
+	return normalizeTrustedHomeInertList(file)
 }
 
 func staticHomeRewriteWord(word *syntax.Word) bool {
