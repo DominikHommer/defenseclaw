@@ -438,7 +438,7 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `enterprise.openshell` key | Meaning |
 | --- | --- |
 | `install` | `prerequisite` (default) or `setup`. |
-| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. `auto` is the MicroVM driver where the user's KVM probe passes when a sandbox starts, and `docker` where it does not (Linux; macOS runs the MicroVM driver only, so `auto` is `vm` there). `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
+| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` setting uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux is judged by `ensure`: it needs the driver binary, and the stock OpenShell rpm has none (see [Recipe: prerequisite mode](#recipe-prerequisite-mode)). |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.3"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
