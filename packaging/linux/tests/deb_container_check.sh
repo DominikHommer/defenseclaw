@@ -12,6 +12,9 @@
 #
 #   docker run --rm -v "$PWD:/src:ro" debian:bookworm sh /src/packaging/linux/tests/deb_container_check.sh
 #
+# A removal whose user manager does not answer fails and keeps the package,
+# and the next removal goes on once it answers.
+#
 # On a host without docker (dc-build-1), unpack a Debian rootfs into a
 # scratch folder and run it there as root in a private mount and pid
 # namespace, with DC_CONTAINER_CHECK=1:
@@ -33,7 +36,14 @@ mkdir -p /usr/local/bin /run/systemd/system
 cat >/usr/local/bin/systemctl <<STUB
 #!/bin/sh
 echo "\$(id -un) systemctl \$*" >>$log
-case "\$*" in *is-active*) exit 1 ;; esac
+# A user manager answers every unit's state; is-active exits 3 when none
+# is active. With /run/dc-check-no-answer the user manager does not answer.
+case "\$*" in
+    "--user stop "* | "--user is-active "*)
+        [ -e /run/dc-check-no-answer ] && { echo "Failed to connect to bus" >&2; exit 1; }
+        case "\$*" in *is-active*) printf 'inactive\\ninactive\\ninactive\\n'; exit 3 ;; esac ;;
+    *is-active*) exit 1 ;;
+esac
 exit 0
 STUB
 chmod 755 /usr/local/bin/systemctl
@@ -74,6 +84,14 @@ if grep -q "systemctl --user\|systemctl --global" "$log"; then
     cat "$log"; fail "an upgrade touched the user units"
 fi
 echo "ok: an upgrade leaves the user units alone"
+
+: >/run/dc-check-no-answer
+if dpkg -r defenseclaw-enterprise >/dev/null 2>&1; then
+    fail "dpkg -r went on while a user manager did not answer"
+fi
+dpkg -s defenseclaw-enterprise 2>/dev/null | grep -q "^Status: install ok installed" || fail "the package was not kept"
+rm -f /run/dc-check-no-answer
+echo "ok: a user manager that does not answer keeps the package"
 
 : >"$log"
 dpkg -r defenseclaw-enterprise

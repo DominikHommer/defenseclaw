@@ -1726,9 +1726,26 @@ def _user_manager(host: _Host, uid: int) -> Path:
     return runtime
 
 
+# What the account's user manager answers, as `case` branches of a runuser or
+# setpriv stub: is-active exits 3 when no unit is active, with each unit's
+# state; a manager that does not answer exits 1 with no state.
+_USER_MANAGER_ANSWERS = {
+    # Every unit stopped (a failed daemon is not running either).
+    "stopped": "*is-active*) printf 'inactive\\ninactive\\nfailed\\n'; exit 3 ;;",
+    # A unit keeps running after every stop.
+    "still_active": "*is-active*) printf 'active\\ninactive\\ninactive\\n'; exit 0 ;;",
+    # The socket is still deactivating: exit 3, but not established stopped.
+    "deactivating": "*is-active*) printf 'deactivating\\ninactive\\ninactive\\n'; exit 3 ;;",
+    # Neither stop nor is-active reaches the manager.
+    "no_answer": "*) echo 'Failed to connect to bus' >&2; exit 1 ;;",
+    # The account signed out during the stop: its manager exited.
+    "signed_out": "*' stop '*) rm -f \"$XDG_RUNTIME_DIR/systemd/private\"; exit 1 ;; *) exit 1 ;;",
+}
+
+
 @pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
-@pytest.mark.parametrize("still_active", [False, True])
-def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, still_active: bool) -> None:
+@pytest.mark.parametrize("answer", sorted(_USER_MANAGER_ANSWERS))
+def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, answer: str) -> None:
     host = _Host(tmp_path)
     uid = os.getuid()
     runtime = _user_manager(host, uid)
@@ -1738,18 +1755,63 @@ def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_
     (host.tmp / "run-user" / "abc" / "systemd").mkdir(parents=True)
     (host.tmp / "run-user" / str(uid + 2)).mkdir()
     _write_stub(host.bin, "getent", f"""[ "$2" = {uid} ] && echo "sample-user:x:{uid}:{uid}::/home/sample-user:/bin/sh" """)
+    # The stub runs the env the script passes, so the manager's runtime
+    # directory is known to it.
     _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'
-case "$*" in *is-active*) exit {0 if still_active else 1} ;; esac""")
+while [ "$1" != env ]; do shift; done
+shift
+export "$1"
+case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
     result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
-    assert result.returncode == 0, result.stderr
+    stopped = answer in ("stopped", "signed_out")
     calls = host.calls()
     env = f"env XDG_RUNTIME_DIR={runtime} DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"
     units = " ".join(_preremove_units("user_units"))
     stop = f"runuser -u sample-user -- {env} systemctl --user stop {units}"
-    assert [c for c in calls if c.startswith("runuser ") and " stop " in c] == [stop], calls
+    stops = [c for c in calls if c.startswith("runuser ") and " stop " in c]
+    # A unit that keeps running, or a manager that does not say, is stopped
+    # three times; then the removal fails and the package keeps its files.
+    assert stops == [stop] * (1 if stopped else 3), calls
     system_stop = next(c for c in calls if c.startswith("systemctl stop "))
     assert calls.index(system_stop) < calls.index(stop) < calls.index("systemctl --global disable defenseclaw-sandbox.socket")
-    assert ("could not stop the sandbox units of sample-user" in result.stderr) is still_active
+    if stopped:
+        assert result.returncode == 0, result.stderr
+        assert "sandbox user units" not in result.stderr
+    else:
+        assert result.returncode == 1
+        assert "could not stop, or confirm stopped, the sandbox user units of sample-user; package files were kept" in result.stderr
+
+
+# An account lookup that does not answer (a directory service outage) does
+# not skip a live user manager: its units stop as the uid and gid that own
+# its runtime directory, and a manager that then does not answer keeps the
+# package.
+@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.parametrize("answer", ["stopped", "no_answer"])
+def test_linux_preremove_stops_the_user_units_of_an_account_the_lookup_does_not_name(tmp_path: Path, answer: str) -> None:
+    host = _Host(tmp_path)
+    uid, gid = os.getuid(), os.getgid()
+    runtime = _user_manager(host, uid)
+    _write_stub(host.bin, "getent", "exit 2")
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'; exit 1""")
+    _write_stub(host.bin, "setpriv", f"""echo "setpriv $*" >>'{host.log}'
+case "$*" in {_USER_MANAGER_ANSWERS[answer]} esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
+    calls = host.calls()
+    units = " ".join(_preremove_units("user_units"))
+    stop = (
+        f"setpriv --reuid={uid} --regid={gid} --clear-groups env XDG_RUNTIME_DIR={runtime} "
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus systemctl --user stop {units}"
+    )
+    assert not [c for c in calls if c.startswith("runuser ")], calls
+    if answer == "stopped":
+        assert result.returncode == 0, result.stderr
+        assert [c for c in calls if c.startswith("setpriv ") and " stop " in c] == [stop], calls
+    else:
+        assert result.returncode == 1
+        assert [c for c in calls if c.startswith("setpriv ") and " stop " in c] == [stop] * 3, calls
+        assert f"the sandbox user units of uid {uid}; package files were kept" in result.stderr
+    assert "systemctl --global disable defenseclaw-sandbox.socket" in calls
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")

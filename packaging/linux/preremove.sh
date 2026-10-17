@@ -13,7 +13,10 @@
 #     hook registrations or vendor machine policy still name them
 #     (uninstall_incomplete): it started the services again (GAP-1519).
 # Removing the files then would leave machine policy or per-user hooks
-# naming a deleted binary. Other lifecycle problems are reported without
+# naming a deleted binary. After the uninstall, the removal also fails when
+# an account's user service manager still runs a sandbox user unit, or does
+# not answer whether it does (#1210): deleting the unit files and the binary
+# would leave a loaded socket that starts a deleted daemon. Other lifecycle problems are reported without
 # stopping the package transaction. When the run it waited for was an
 # uninstall (an MDM purge, say) that removed the deployment and its lock, the
 # uninstall is a no-op and exits 0, and the removal goes on (GAP-0112).
@@ -78,6 +81,52 @@ user_units="defenseclaw-sandbox.socket defenseclaw-sandbox.service defenseclaw-o
 # Where each account's user service manager keeps its runtime directory.
 user_runtime=/run/user
 
+# user_systemctl DIR UID GID NAME ARG...: `systemctl --user ARG...` in the
+# user service manager that runs in DIR, as its account: by name, or, when
+# the account lookup gave no name (a directory service outage, say), by the
+# uid and gid that own DIR. Without a way to switch to the account it fails.
+user_systemctl() {
+    us_dir=$1 us_uid=$2 us_gid=$3 us_name=$4
+    shift 4
+    if [ -n "$us_name" ]; then
+        runuser -u "$us_name" -- env XDG_RUNTIME_DIR="$us_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$us_dir/bus" \
+            systemctl --user "$@"
+    elif command -v setpriv >/dev/null 2>&1; then
+        setpriv --reuid="$us_uid" --regid="$us_gid" --clear-groups \
+            env XDG_RUNTIME_DIR="$us_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$us_dir/bus" systemctl --user "$@"
+    else
+        return 1
+    fi
+}
+
+# user_units_stopped DIR UID GID NAME succeeds only when it is established
+# that no user unit of the package runs in that manager: the manager answers
+# a state for every unit and each is inactive or failed (is-active exits 3
+# for any other state too, activating and deactivating included), or the
+# manager has exited (its private socket is gone). A manager that does not
+# answer, or a state it does not establish, is not "stopped".
+user_units_stopped() {
+    # shellcheck disable=SC2086 # unit names have no spaces or globs
+    states=$(user_systemctl "$@" is-active $user_units 2>/dev/null)
+    rc=$?
+    if [ "$rc" = 3 ]; then
+        want=0
+        for unit in $user_units; do want=$((want + 1)); done
+        got=0
+        for unit_state in $states; do
+            case "$unit_state" in
+                inactive | failed) got=$((got + 1)) ;;
+                *)
+                    got=-1
+                    break
+                    ;;
+            esac
+        done
+        [ "$got" = "$want" ] && return 0
+    fi
+    [ ! -S "$1/systemd/private" ]
+}
+
 # stop_user_units stops the package's user units in the user service manager
 # of every account that runs one, as that account, so no sandbox daemon or
 # OpenShell gateway keeps running from a unit file the removal deletes (a
@@ -86,8 +135,11 @@ user_runtime=/run/user
 # ExecStop, which stops the account's sandboxes first. The uninstall above
 # stopped the units of the accounts it knows; this also covers an account it
 # did not know and a removal whose uninstall did not run. Then the global
-# enable link of the socket goes, so no later sign-in starts it.
+# enable link of the socket goes, so no later sign-in starts it. It fails,
+# naming the accounts, when a manager still runs a unit after three tries or
+# does not establish that none runs; the package then keeps its files.
 stop_user_units() {
+    left=""
     for dir in "$user_runtime"/*; do
         uid=${dir##*/}
         case "$uid" in '' | *[!0-9]*) continue ;; esac
@@ -98,18 +150,26 @@ stop_user_units() {
             continue
         fi
         [ "$(stat -c %u "$dir" 2>/dev/null)" = "$uid" ] || continue
-        name=$(getent passwd "$uid" | cut -d: -f1)
-        [ -n "$name" ] || continue
-        # shellcheck disable=SC2086 # unit names have no spaces or globs
-        runuser -u "$name" -- env XDG_RUNTIME_DIR="$dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$dir/bus" \
-            systemctl --user stop $user_units >/dev/null 2>&1
-        # shellcheck disable=SC2086
-        if runuser -u "$name" -- env XDG_RUNTIME_DIR="$dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$dir/bus" \
-            systemctl --user is-active --quiet $user_units >/dev/null 2>&1; then
-            echo "defenseclaw-enterprise: could not stop the sandbox units of $name; stop them as that user with \`systemctl --user stop $user_units\`" >&2
-        fi
+        gid=$(stat -c %g "$dir" 2>/dev/null)
+        name=$(getent passwd "$uid" 2>/dev/null | cut -d: -f1)
+        tries=0
+        while :; do
+            # shellcheck disable=SC2086 # unit names have no spaces or globs
+            user_systemctl "$dir" "$uid" "$gid" "$name" stop $user_units >/dev/null 2>&1
+            if user_units_stopped "$dir" "$uid" "$gid" "$name"; then
+                break
+            fi
+            tries=$((tries + 1))
+            if [ "$tries" -ge 3 ]; then
+                left="$left, ${name:-uid $uid}"
+                break
+            fi
+        done
     done
     systemctl --global disable defenseclaw-sandbox.socket >/dev/null 2>&1 || true
+    [ -n "$left" ] || return 0
+    echo "defenseclaw-enterprise: could not stop, or confirm stopped, the sandbox user units of ${left#, }; package files were kept. As each user run \`systemctl --user stop $user_units\` (or sign the user out), then retry the removal." >&2
+    return 1
 }
 
 # recorded_policies prints the DefenseClaw policy names the sensor helper
@@ -264,6 +324,6 @@ if [ -d /run/systemd/system ]; then
     if [ -n "$running" ]; then
         echo "defenseclaw-enterprise: could not stop$running; stop them with \`systemctl stop$running\` after the removal" >&2
     fi
-    stop_user_units
+    stop_user_units || exit 1
 fi
 exit 0
