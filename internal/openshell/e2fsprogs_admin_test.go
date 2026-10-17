@@ -5,12 +5,58 @@
 package openshell
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestManagedE2fsprogsPackageFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS tool selection")
+	}
+	root := t.TempDir()
+	packageDir := filepath.Join(root, "package")
+	packageTools := filepath.Join(packageDir, "sbin")
+	home := filepath.Join(root, "home")
+	writeTools := func(dir string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range AdminE2fsprogsTools {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("tool"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeTools(packageTools)
+	trust := func(string, bool) error { return nil }
+	choose := func(admin string, check func(string, bool) error) (string, string) {
+		return managedE2fsprogsToolDir(admin, packageDir, home, os.Getuid(), check)
+	}
+	if dir, problem := choose("", trust); dir != packageTools || problem != "" {
+		t.Fatalf("package fallback = %q, %q", dir, problem)
+	}
+	badTrust := func(string, bool) error { return errors.New("untrusted") }
+	if dir, problem := choose("", badTrust); dir != "" || !strings.Contains(problem, "not trusted") {
+		t.Fatalf("untrusted package = %q, %q", dir, problem)
+	}
+	admin := filepath.Join(root, "admin")
+	writeTools(filepath.Join(admin, "sbin"))
+	if dir, problem := choose(admin, trust); dir != filepath.Join(admin, "sbin") || problem != "" {
+		t.Fatalf("explicit administrator directory = %q, %q", dir, problem)
+	}
+	if dir, problem := choose(filepath.Join(root, "missing"), trust); dir != "" || !strings.Contains(problem, "missing") {
+		t.Fatalf("broken explicit directory fell back: %q, %q", dir, problem)
+	}
+	writeTools(filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin"))
+	if dir, problem := choose("", trust); dir != filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin") || problem != "" {
+		t.Fatalf("account build priority = %q, %q", dir, problem)
+	}
+}
 
 // The administrator's e2fsprogs_dir may be the install prefix (tools in its
 // sbin or bin) or the folder that holds the tools; the folder returned holds

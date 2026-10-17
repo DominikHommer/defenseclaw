@@ -145,7 +145,7 @@ func (m *MicroVMHost) Problems() []string {
 	if m.E2fsprogs == "" {
 		problem := "e2fsprogs is not installed where the MicroVM driver looks for it"
 		if m.managed {
-			problem += ": a managed computer uses the administrator's enterprise.openshell.e2fsprogs_dir or your own ~/.local/opt/e2fsprogs/sbin build"
+			problem += ": a managed computer uses the administrator's enterprise.openshell.e2fsprogs_dir, your own ~/.local/opt/e2fsprogs/sbin build, or the package fallback"
 		} else {
 			problem += ", Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
 				"the driver formats every MicroVM's disks with its mke2fs and debugfs"
@@ -418,7 +418,7 @@ func (d *Doctor) ManagedE2fsprogsCheck() Check {
 		return c
 	}
 	c.Detail = problem
-	fix := "ask your administrator to install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools; or use an account build in ~/.local/opt/e2fsprogs/sbin when e2fsprogs_dir is unset"
+	fix := "ask your administrator to repair the package's e2fsprogs or install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir; an account build in ~/.local/opt/e2fsprogs/sbin also works when the setting is unset"
 	if strings.Contains(problem, "not trusted") {
 		fix = "ask your administrator to make the e2fsprogs directory and both tools root-owned, without symlinks or group/other write access; enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
 	} else if strings.Contains(problem, "cannot be traversed") || strings.Contains(problem, "cannot be executed") {
@@ -493,7 +493,7 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 func ManagedMicroVMFix(m *MicroVMHost, unsigned bool) string {
 	switch {
 	case m.E2fsprogs == "":
-		return "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir (or build it yourself into ~/.local/opt/e2fsprogs)"
+		return "ask your administrator to repair the managed package's e2fsprogs or set enterprise.openshell.e2fsprogs_dir (or build it yourself into ~/.local/opt/e2fsprogs)"
 	case unsigned:
 		return "ask your administrator for an OpenShell whose MicroVM driver is signed for Apple's Hypervisor (OpenShell 0.1.3 ships it signed), or for enterprise.openshell.install: setup"
 	}
