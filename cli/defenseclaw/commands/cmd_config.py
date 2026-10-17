@@ -678,6 +678,13 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
 
     path = str(config_module.config_path())
     key = ", ".join(getattr(change, "path", "") for change in changes)
+    if any(getattr(change, "path", "") == "gateway.token_env" for change in changes):
+        from defenseclaw.logger import keep_running_gateway_token
+
+        if app.cfg is not None:
+            keep_running_gateway_token(
+                getattr(app, "logger", None), app.cfg.data_dir, app.cfg.gateway.resolved_token(), ""
+            )
     try:
         result = config_writer.apply(
             changes,
@@ -731,14 +738,13 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
-    logger = getattr(app, "logger", None)
-    if logger is not None:
-        try:
-            logger.log_config_change(
-                f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
-            )
-        except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
-            pass
+    from defenseclaw.commands._audit_notice import saved_change_audit
+    from defenseclaw.logger import Logger
+
+    logger = getattr(app, "logger", None) or Logger.from_config(cfg)
+    saved_change_audit(logger).log_config_change(
+        f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+    )
     return True
 
 

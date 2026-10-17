@@ -123,6 +123,20 @@ def _gateway_token_names(cfg) -> set[str]:
     return names
 
 
+def _gateway_token_name(cfg, name: str) -> str | None:
+    """Return the configured spelling of a gateway token environment name."""
+    from defenseclaw import platform_support
+
+    names = _gateway_token_names(cfg)
+    if platform_support.host_os() != "windows":
+        return name if name in names else None
+    configured = str(getattr(getattr(cfg, "gateway", None), "token_env", "") or "").strip()
+    for candidate in (configured, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if candidate and candidate.casefold() == name.casefold():
+            return candidate
+    return None
+
+
 def required_removal_warning(cfg, env_name: str) -> str:
     """The line that says removing ``env_name`` breaks a feature in use (GAP-2254).
 
@@ -231,8 +245,14 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
 
+    gateway_name = _gateway_token_name(app.cfg, env_name)
+    if gateway_name:
+        env_name = gateway_name
+
     spec = lookup(env_name, app.cfg)
-    if spec is None:
+    if gateway_name:
+        click.echo("  DefenseClaw gateway authentication token (managed by DefenseClaw).")
+    elif spec is None:
         ux.warn(f"{env_name} is not in the DefenseClaw registry.")
         ux.subhead(
             "Saving anyway — it will be available via os.environ for custom setups.",
@@ -267,7 +287,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         except OSError:
             had = False
 
-    if env_name in _gateway_token_names(app.cfg):
+    if gateway_name:
         from defenseclaw.logger import keep_running_gateway_token
 
         # The running gateway accepts only the token it loaded until it
@@ -324,12 +344,13 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
+    env_name = _gateway_token_name(app.cfg, env_name) or env_name
 
     dotenv_path = os.path.join(app.cfg.data_dir, ".env")
     if env_name not in _dotenv_names(dotenv_path):
         ux.warn(f"{env_name} is not stored in {dotenv_path} — nothing removed.")
         return
-    if env_name in _gateway_token_names(app.cfg):
+    if _gateway_token_name(app.cfg, env_name):
         raise click.ClickException(
             f"{env_name} is DefenseClaw's own gateway auth token; removing it would cut the hooks, "
             "the CLI and the TUI off from the gateway. It is not removed. "

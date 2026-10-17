@@ -129,6 +129,12 @@ the command warns that the audit event was not recorded. `keys remove` works
 for any name stored in `.env`, including names outside the registry, and leaves
 a value exported in your shell alone.
 
+`keys set DEFENSECLAW_GATEWAY_TOKEN` reports that it manages gateway
+authentication. On Windows, the token name is case insensitive. A running
+gateway continues accepting CLI commands across multiple saved token changes;
+run `defenseclaw-gateway restart` to apply the latest value. For a coordinated
+gateway and connector rotation, use `defenseclaw setup rotate-token --yes`.
+
 ## Requirement classification
 
 A credential is one of three states **given the current config**:

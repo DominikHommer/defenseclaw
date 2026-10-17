@@ -6,6 +6,8 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -40,5 +42,32 @@ func TestMissingObservabilitySecretErrorNamesTheVariable(t *testing.T) {
 		if got := missingObservabilitySecretError("start", other); got != nil {
 			t.Errorf("missingObservabilitySecretError(%v) = %v, want nil", other, got)
 		}
+	}
+}
+
+func TestShutdownConfigLoadsListenerWhenDestinationSecretIsUnset(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	const source = `config_version: 9
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18987
+observability:
+  destinations:
+    - name: archive
+      kind: splunk_hec
+      endpoint: https://collector.example.test/services/collector/event
+      token_env: DC_SHUTDOWN_TEST_UNSET
+`
+	t.Setenv("DC_SHUTDOWN_TEST_UNSET", "")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadShutdownConfigWithoutDestinations(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Gateway.APIPort != 18987 || got.Gateway.APIBind != "127.0.0.1" {
+		t.Fatalf("shutdown listener = %s:%d", got.Gateway.APIBind, got.Gateway.APIPort)
 	}
 }
