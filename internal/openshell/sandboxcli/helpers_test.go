@@ -315,7 +315,7 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			fail(sandboxapi.CodeInvalid, "start a sandbox first")
 			return
 		}
-		reply(sandboxapi.PolicyDecisionResponse{Sandbox: req.Sandbox, Host: req.Host, Kind: req.Kind})
+		reply(sandboxapi.PolicyDecisionResponse(req))
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
 		events := d.events
