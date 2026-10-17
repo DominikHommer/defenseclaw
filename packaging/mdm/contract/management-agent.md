@@ -401,7 +401,14 @@ Exit 0.
   against the running gateway's digest, and recorded in a receipt. A failure
   or an interruption keeps or puts back the last good bundle. A gateway
   restart or crash during the apply is handled by the child: the confirm step
-  fails and the run rolls back (`not_confirmed` / `apply_failed`).
+  fails and the run rolls back (`not_confirmed` / `apply_failed`). On
+  Windows most bundles apply in the running gateway (a key the gateway reads
+  only at start restarts the gateway alone). A bundle that turns Codex on or
+  off runs the full lifecycle transaction instead (a repair with the bundle
+  config), because only that transaction installs and removes Codex's
+  machine policy: every DefenseClaw service restarts, managed hooks fail
+  closed meanwhile (usually one to three minutes), and the receipt records
+  `restart: true`.
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
   written. `noop_reason` is `already_applied` only when ensure also changed

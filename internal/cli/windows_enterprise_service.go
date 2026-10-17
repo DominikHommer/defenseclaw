@@ -132,6 +132,11 @@ type windowsEnterpriseLifecycleOptions struct {
 	// internal ensure that puts the last good config back.
 	bundle         *windowsBundleRun
 	bundleRollback bool
+	// codexTargetTransaction is set by the config apply path when the
+	// supplied config turns Codex protection on or off. The lifecycle
+	// transaction owns Codex's machine policy, so the change, a signed
+	// bundle's included, goes to that transaction (GAP-0033).
+	codexTargetTransaction bool
 	// ignoredDeploymentRecords lists deployment records profile resolution
 	// found but ignored because an administrator did not write them. Only
 	// the standalone result reports them.
