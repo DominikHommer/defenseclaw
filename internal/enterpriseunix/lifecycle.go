@@ -258,6 +258,9 @@ type plannedInputs struct {
 // ExitCode is set.
 func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 	env.fillDefaults()
+	if env.Yield != nil {
+		env.Yield()
+	}
 	l := &lifecycle{
 		env:    env,
 		opts:   opts,
