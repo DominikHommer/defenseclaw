@@ -32,7 +32,7 @@ func RefuseDeviceKeyMove(current, candidate []byte, platform string, layout *Dev
 			value = node.Value
 		}
 		value = path.Clean(strings.ReplaceAll(value, `\`, "/"))
-		if !strings.HasPrefix(value, "/") && !(platform == PlatformWindows && strings.Contains(value, ":")) {
+		if !strings.HasPrefix(value, "/") && (platform != PlatformWindows || !strings.Contains(value, ":")) {
 			value = path.Join(strings.ReplaceAll(layout.DataDir, `\`, "/"), value)
 		}
 		if platform == PlatformWindows {
