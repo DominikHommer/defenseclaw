@@ -1371,6 +1371,11 @@ func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
 	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
 		t.Fatalf("stored decisions = %+v", got)
 	}
+	off := false
+	auth.gatewayOnly.Store(&config.OpenShellAdminConfig{AllowUnblock: &off})
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "another.example.org", Kind: "allow"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(auth.decisions()) != 2 {
+		t.Fatalf("an allow outside the gateway floor was saved: %v, %+v", err, auth.decisions())
+	}
 	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "*.example.org", Kind: "block"}); err == nil {
 		t.Fatal("wildcard decision was accepted")
 	}
