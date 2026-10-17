@@ -142,14 +142,10 @@ fail_unreachable() {
   defenseclaw_log_hook_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-{{if .SecureClient}}
-    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
-{{else if .Managed}}
-    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Ask your administrator to check its status."}\n'
-{{else}}
-    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Run defenseclaw-gateway status."}\n'
-{{end}}
-    exit 2
+{{if .SecureClient}}    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
+{{else if .Managed}}    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Ask your administrator to check its status."}\n'
+{{else}}    printf '{"action":"block","message":"DefenseClaw gateway is unavailable. Run defenseclaw-gateway status."}\n'
+{{end}}    exit 2
   fi
   exit 0
 }

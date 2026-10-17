@@ -58,6 +58,9 @@ func TestHermesOutageBlockExplainsRecoveryByProfile(t *testing.T) {
 			if !strings.Contains(block, tc.want) || strings.Contains(block, tc.omit) {
 				t.Fatalf("outage block for %s has wrong recovery text: %s", tc.name, block)
 			}
+			if tc.name == "secure-client" && !strings.Contains(block, "if defenseclaw_should_fail_closed_on_unreachable; then\n    printf '{\"action\":\"block\",\"message\":\"DefenseClaw hook failed closed\"}\\n'\n    exit 2\n") {
+				t.Fatal("Secure Client outage block changed its rendered bytes")
+			}
 		})
 	}
 }
