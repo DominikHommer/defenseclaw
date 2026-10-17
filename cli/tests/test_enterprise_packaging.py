@@ -940,6 +940,39 @@ def test_linux_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp_pat
 
 
 
+# GAP-0662: a package ensure that failed on a full disk named only the failed
+# step (the services not active); the disk_full entry after it is shown too.
+def test_linux_postinstall_names_a_full_disk_after_the_failed_step(tmp_path: Path) -> None:
+    document = {
+        "schema_version": 2,
+        "ok": False,
+        "action": "ensure",
+        "installed": True,
+        "installed_version": "1.0.2",
+        "errors": [
+            {"code": "verify_failed", "message": "defenseclaw-hook-guardian.service is not active"},
+            {
+                "code": "disk_full",
+                "message": "the filesystem holding /var/lib/defenseclaw has 456 KiB free of 64.0 MiB: "
+                "free space on it and run ensure again",
+            },
+        ],
+        "warnings": [{"code": "rolled_back", "message": "the previous deployment was restored"}],
+    }
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert result.returncode == 0
+    assert "verify_failed: defenseclaw-hook-guardian.service is not active" in result.stderr
+    assert "disk_full: the filesystem holding /var/lib/defenseclaw has 456 KiB free of 64.0 MiB" in result.stderr
+    assert result.stderr.index("verify_failed:") < result.stderr.index("disk_full:")
+
+
+def test_linux_postinstall_names_no_full_disk_without_one(tmp_path: Path) -> None:
+    document = {"schema_version": 2, "ok": False, "errors": [{"code": "verify_failed", "message": "not active"}]}
+    host = _Host(tmp_path, gateway_rc=1, gateway_out=json.dumps(document, indent=2))
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "configure")
+    assert "disk_full" not in result.stderr
+
 # GAP-0268: MDM writes config.yaml and then installs the package. The config
 # write started the apply unit, whose ensure ran the old binary while the
 # package replaced the files under it; it rolled back and marked the config

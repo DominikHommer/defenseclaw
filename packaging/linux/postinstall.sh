@@ -140,6 +140,11 @@ case "$status" in
         if [ -n "$cause" ]; then
             echo "  $cause" >&2
         fi
+        # A full disk follows the failed step's error; name it too (GAP-0662).
+        disk=$(message_of disk_full)
+        if [ -n "$disk" ]; then
+            echo "  disk_full: $disk" >&2
+        fi
         echo "  Fix that, then $finish: sudo $gateway enterprise linux ensure --from-package$downgrade" >&2
         echo "  The full result is in $state/last-package-result.json." >&2
         ;;
