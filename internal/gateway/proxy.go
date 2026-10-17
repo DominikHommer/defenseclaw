@@ -610,12 +610,8 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 
 // profileModeFor applies the request's identity-based guardrail profile to
 // the proxy's mode and block message. It changes them only for a request
-// with a verified user-scoped identity (profileProxyOverride) and never for
-// a disabled ("passthrough") guardrail.
+// with a verified user-scoped identity (profileProxyOverride).
 func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage string) (string, string) {
-	if mode == "passthrough" {
-		return mode, blockMessage
-	}
 	profileMode, profileMessage, ok := profileProxyOverride(ctx, p.servedConnector())
 	if !ok {
 		return mode, blockMessage
@@ -2886,14 +2882,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	p.rtMu.RUnlock()
 	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
-	// Hot-disabled: guardrail was turned off without sidecar restart.
-	// Return 503 so the fetch interceptor stops routing through the proxy.
-	if mode == "passthrough" {
-		http.Error(w, `{"error":{"message":"DefenseClaw guardrail is disabled","code":"guardrail_disabled"}}`,
-			http.StatusServiceUnavailable)
-		return
-	}
-
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
 	// See launderInboundHistory in handlePassthrough for the full
@@ -4519,79 +4507,6 @@ func deriveMasterKey(dataDir string) string {
 	// recover only the published `sk-dc-…` string.
 	dk := pbkdf2.Key(data, []byte("defenseclaw-proxy-master-key"), 100_000, 32, sha256.New)
 	return "sk-dc-" + fmt.Sprintf("%x", dk)
-}
-
-// ---------------------------------------------------------------------------
-// Runtime config apply helpers
-// ---------------------------------------------------------------------------
-
-// runtimeString extracts a string value from the heterogeneous runtime
-// cache and reports whether the caller should treat it as set. We
-// intentionally treat absent keys, non-string values, and empty
-// strings as "not provided" so the caller's `_, ok := cfg["x"]; if ok`
-// logic keeps working even when a future schema bump adds a new key
-// type that isn't representable as a string.
-func runtimeString(cfg map[string]any, key string) (string, bool) {
-	raw, ok := cfg[key]
-	if !ok {
-		return "", false
-	}
-	s, ok := raw.(string)
-	if !ok || s == "" {
-		return "", false
-	}
-	return s, true
-}
-
-// runtimeBool extracts a bool value from the runtime cache. JSON's bool
-// can't decode into a string, so we accept either a real bool or the
-// canonical string forms ("true"/"false") for forward compatibility
-// with future serializers. Anything else is treated as absent so a
-// malformed value can't accidentally flip a sensitive toggle.
-func runtimeBool(cfg map[string]any, key string) (bool, bool) {
-	raw, ok := cfg[key]
-	if !ok {
-		return false, false
-	}
-	switch v := raw.(type) {
-	case bool:
-		return v, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(v)) {
-		case "true":
-			return true, true
-		case "false":
-			return false, true
-		}
-	}
-	return false, false
-}
-
-func (p *GuardrailProxy) applyRuntime(cfg map[string]any) {
-	p.rtMu.Lock()
-	defer p.rtMu.Unlock()
-
-	if m, ok := runtimeString(cfg, "mode"); ok && (m == "observe" || m == "action") {
-		p.mode = m
-	}
-	if sm, ok := runtimeString(cfg, "scanner_mode"); ok && (sm == "local" || sm == "remote" || sm == "both") {
-		p.inspector.SetScannerMode(sm)
-	}
-	if bm, ok := runtimeString(cfg, "block_message"); ok {
-		p.blockMessage = bm
-	}
-	if newName, ok := runtimeString(cfg, "connector"); ok {
-		p.switchConnectorLocked(newName)
-	}
-
-	// Legacy map-based apply path retained for focused proxy tests and older
-	// in-process callers. The file-backed runtime overlay has been removed;
-	// production reloads now call ApplyGuardrailConfig with a validated
-	// config.yaml snapshot.
-	if enabled, ok := runtimeBool(cfg, "hilt_enabled"); ok {
-		minSev, _ := runtimeString(cfg, "hilt_min_severity")
-		p.inspector.SetHILTConfig(enabled, minSev)
-	}
 }
 
 // switchConnectorLocked tears down the current connector and sets up the
