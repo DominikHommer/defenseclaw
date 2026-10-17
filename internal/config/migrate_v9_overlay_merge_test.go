@@ -142,3 +142,54 @@ func TestMigrateV9MergesSameNameOverlayProviders(t *testing.T) {
 		})
 	}
 }
+
+// #1099: every field a legacy overlay entry can set reaches the migrated
+// llm_providers.custom entry when the overlay names the provider twice; the
+// migrated config reads back field by field.
+func TestMigrateV9SameNameOverlayKeepsEveryField(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := `{"providers":[
+  {"name":"acme","domains":["llm.acme.internal"],"profile_id":"acme-team","env_keys":["ACME_KEY"],
+   "base_provider_type":"openai","base_url":"https://llm.acme.internal/v1","allowed_requests":["chat"],
+   "available_models":["acme-small"],"request_path_overrides":{"chat":"/v1/chat"},"extra_headers":{"X-Team":"sec"},
+   "bedrock":{"region":"us-east-1","auth_mode":"iam_credentials","access_key_env":"AK","secret_key_env":"SK","session_token_env":"ST",
+     "profile_name":"lab","inference_profile":"us","deployment_aliases":{"small":"model-small"}}},
+  {"name":"ACME","env_keys":["ACME_EU_KEY"],"available_models":["acme-large"],"extra_headers":{"X-Route":"eu"},
+   "tls":{"insecure_skip_verify":true},
+   "vertex":{"project_id":"lab-project","region":"us-central1","auth_mode":"adc","service_account_json_env":"SA_JSON"},
+   "azure":{"endpoint":"https://acme.openai.azure.example","api_version":"2026-01-01","auth_mode":"api_key",
+     "deployment_aliases":{"gpt":"acme-gpt"}}}
+ ]}`
+	if err := os.WriteFile(filepath.Join(dir, ProvidersOverlayFile), []byte(overlay), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	cfg, err := LoadRuntimeV8FromBytes(configPath, result.Migrated)
+	if err != nil {
+		t.Fatalf("load the migrated config: %v\n%s", err, result.Migrated)
+	}
+	want := []LLMCustomProvider{{
+		Name: "acme", Domains: []string{"llm.acme.internal"}, ProfileID: "acme-team", EnvKeys: []string{"ACME_KEY", "ACME_EU_KEY"},
+		BaseProviderType: "openai", BaseURL: "https://llm.acme.internal/v1", AllowedRequests: []string{"chat"},
+		AvailableModels: []string{"acme-small", "acme-large"}, RequestPathOverrides: map[string]string{"chat": "/v1/chat"},
+		TLS: &LLMCustomProviderTLS{InsecureSkipVerify: true},
+		Bedrock: &BedrockKeyConfig{Region: "us-east-1", AuthMode: "iam_credentials", AccessKeyEnv: "AK", SecretKeyEnv: "SK", SessionTokenEnv: "ST",
+			ProfileName: "lab", InferenceProfile: "us", DeploymentAliases: map[string]string{"small": "model-small"}},
+		Vertex: &VertexKeyConfig{ProjectID: "lab-project", Region: "us-central1", AuthMode: "adc", ServiceAccountJSONEnv: "SA_JSON"},
+		Azure: &AzureKeyConfig{Endpoint: "https://acme.openai.azure.example", APIVersion: "2026-01-01", AuthMode: "api_key",
+			DeploymentAliases: map[string]string{"gpt": "acme-gpt"}},
+		ExtraHeaders: map[string]string{"X-Team": "sec", "X-Route": "eu"},
+	}}
+	if got := cfg.LLMProviders.Custom; !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated llm_providers.custom =\n  %+v\nwant\n  %+v\n%s", got, want, result.Migrated)
+	}
+}

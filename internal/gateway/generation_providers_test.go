@@ -56,12 +56,15 @@ llm_providers:
     available_models: [team-small]
     request_path_overrides: {chat: /team/chat}
     tls: {ca_cert_file: ` + ca + `}
-    bedrock: {region: us-east-1, auth_mode: iam, access_key_env: AK, secret_key_env: SK, session_token_env: ST, profile_name: lab, inference_profile: us, deployment_aliases: {small: model-small}}
+    bedrock: {region: us-east-1, auth_mode: iam_credentials, access_key_env: AK, secret_key_env: SK, session_token_env: ST, profile_name: lab, inference_profile: us, deployment_aliases: {small: model-small}}
     vertex: {project_id: lab-project, region: us-central1, auth_mode: adc, service_account_json_env: SA_JSON}
     azure: {endpoint: https://team.openai.azure.example, api_version: 2026-01-01, auth_mode: api_key, deployment_aliases: {gpt: team-gpt}}
     extra_headers: {X-Team: sec, llm-model: team-small}
 observability: {}
 `)
+	if err := config.ValidateV8SchemaBytes("config.yaml", raw); err != nil {
+		t.Fatalf("the 1.0.2-shaped config does not validate: %v", err)
+	}
 	cfg, err := config.LoadRuntimeV8FromBytes(filepath.Join(dir, "config.yaml"), raw)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +80,7 @@ observability: {}
 		AllowedRequests: []string{"chat", "responses"}, AvailableModels: []string{"team-small"},
 		RequestPathOverrides: map[string]string{"chat": "/team/chat"},
 		TLS:                  &config.LLMCustomProviderTLS{CACertFile: ca},
-		Bedrock: &config.BedrockKeyConfig{Region: "us-east-1", AuthMode: "iam", AccessKeyEnv: "AK", SecretKeyEnv: "SK",
+		Bedrock: &config.BedrockKeyConfig{Region: "us-east-1", AuthMode: "iam_credentials", AccessKeyEnv: "AK", SecretKeyEnv: "SK",
 			SessionTokenEnv: "ST", ProfileName: "lab", InferenceProfile: "us", DeploymentAliases: map[string]string{"small": "model-small"}},
 		Vertex: &config.VertexKeyConfig{ProjectID: "lab-project", Region: "us-central1", AuthMode: "adc", ServiceAccountJSONEnv: "SA_JSON"},
 		Azure: &config.AzureKeyConfig{Endpoint: "https://team.openai.azure.example", APIVersion: "2026-01-01", AuthMode: "api_key",
@@ -133,7 +136,7 @@ observability: {}
 		}
 	}
 	want.TLS = &configs.ProviderTLS{CACertPEM: "test certificate\n"}
-	want.Bedrock = &configs.ProviderBedrock{Region: "us-east-1", AuthMode: "iam", AccessKeyEnv: "AK", SecretKeyEnv: "SK",
+	want.Bedrock = &configs.ProviderBedrock{Region: "us-east-1", AuthMode: "iam_credentials", AccessKeyEnv: "AK", SecretKeyEnv: "SK",
 		SessionTokenEnv: "ST", ProfileName: "lab", InferenceProfile: "us", DeploymentAliases: map[string]string{"small": "model-small"}}
 	want.Vertex = &configs.ProviderVertex{ProjectID: "lab-project", Region: "us-central1", AuthMode: "adc", ServiceAccountJSONEnv: "SA_JSON"}
 	want.Azure = &configs.ProviderAzure{Endpoint: "https://team.openai.azure.example", APIVersion: "2026-01-01", AuthMode: "api_key",
