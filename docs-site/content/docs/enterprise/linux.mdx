@@ -212,6 +212,12 @@ Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
+For a custom rule pack, follow [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs)
+before applying the config. Create and copy its folders with `umask 022` so
+the gateway can read them; a folder made under a restrictive umask may be
+unreadable even when root can validate its files. Run `rulepack validate` to
+obtain the `custom_packs` pin, then apply the config.
+
 AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
 skill, MCP and AI component records it feeds) is off unless the config sets
 it. A config you write is read as written, so add this block to turn it on:

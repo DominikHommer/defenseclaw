@@ -562,8 +562,8 @@ and `bearer_env` do not work in this profile.
 | `token_credential` (`splunk_hec`) | `NAME` | `token_env` |
 | `bearer_credential` (`http_jsonl`) | `NAME` | `bearer_env` |
 
-`NAME` follows the credential name rules of the AI Defense key: lowercase
-letters, digits and dashes, starting with a letter or digit. A destination
+`NAME` is 1 to 63 lowercase letters, digits or dashes, starting with a
+letter or digit. A destination
 sets either the credential field or the environment field, not both.
 
 1. **Store the credential**, the same way as the AI Defense key (see
@@ -575,6 +575,10 @@ sets either the credential field or the environment field, not both.
    printf '%s' "$GALILEO_API_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name galileo-api-key --from-stdin
    unset GALILEO_API_KEY
    ```
+
+   With `--json`, a refused source file, empty or oversized value, or invalid
+   name returns a result with `ok: false` and an `errors` entry. The value is
+   never printed.
 
    `enterprise secret set` needs an installed deployment. On a new host,
    install with a config that does not reference the credential yet, or
