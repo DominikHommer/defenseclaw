@@ -237,6 +237,9 @@
         "actor": {
           "type": "string"
         },
+        "delivery_id": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId"
+        },
         "change_summary": {
           "type": "string"
         },

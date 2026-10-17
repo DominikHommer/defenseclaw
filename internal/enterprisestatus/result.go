@@ -252,7 +252,11 @@ type BundleState struct {
 	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
 	// management agent forwards. A repeated delivery of the current bundle
 	// discards its own receipt, so the block names the confirmed one.
-	ReceiptID        string   `json:"receipt_id,omitempty"`
+	ReceiptID string `json:"receipt_id,omitempty"`
+	// DeliveryID is the --delivery-id of the delivery that receipt records
+	// (absent without it); a repeat names the confirmed receipt, so it is
+	// that delivery id, not the repeat one.
+	DeliveryID       string   `json:"delivery_id,omitempty"`
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 	WarningCodes     []string `json:"warning_codes,omitempty"`

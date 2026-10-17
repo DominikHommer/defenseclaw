@@ -133,6 +133,13 @@ func TestManagementContractBundleApplyArgumentErrorsPrintNoJSON(t *testing.T) {
 		"unknown flag":          {"apply", "--bundle", bundle, "--bogus", "--json"},
 		"stray argument":        {"apply", "--bundle", bundle, "extra", "--json"},
 		"malformed --lock-wait": {"apply", "--bundle", bundle, "--lock-wait", "soon", "--json"},
+		// F10: --delivery-id is 1 to 128 of A-Z a-z 0-9 . _ : -.
+		"empty --delivery-id":            {"apply", "--bundle", bundle, "--delivery-id", "", "--json"},
+		"--delivery-id over 128 bytes":   {"apply", "--bundle", bundle, "--delivery-id", strings.Repeat("a", 129), "--json"},
+		"--delivery-id with a space":     {"apply", "--bundle", bundle, "--delivery-id", "agent 7", "--json"},
+		"--delivery-id with a control":   {"apply", "--bundle", bundle, "--delivery-id", "agent\x1b7", "--json"},
+		"--delivery-id with a slash":     {"apply", "--bundle", bundle, "--delivery-id", "agent/7", "--json"},
+		"--delivery-id with a non-ASCII": {"apply", "--bundle", bundle, "--delivery-id", "agent\u00e97", "--json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out, code := runBundle(t, args...)
@@ -246,5 +253,27 @@ func TestManagementContractAnchorsInstallResults(t *testing.T) {
 	*euid = 1000
 	if doc := install(1, "--file", first, "--json"); errorCode(doc) != "not_root" {
 		t.Fatalf("not root: %v", doc)
+	}
+}
+
+// TestBundleApplyForwardsDeliveryID pins F10 on Linux and macOS: apply takes
+// --delivery-id (empty by default) and hands it to the ensure run that
+// writes the receipt.
+func TestBundleApplyForwardsDeliveryID(t *testing.T) {
+	cmd := newEnterpriseBundleApplyCommand()
+	if got, err := cmd.Flags().GetString("delivery-id"); err != nil || got != "" {
+		t.Fatalf("--delivery-id default %q, %v", got, err)
+	}
+	if err := cmd.Flags().Parse([]string{"--bundle", "/x.dcbundle", "--delivery-id", "agent-7:d.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := cmd.Flags().GetString("delivery-id"); got != "agent-7:d.1" {
+		t.Fatalf("--delivery-id parsed as %q", got)
+	}
+	for _, want := range []string{"", "agent-7:d.1"} {
+		opts := unixBundleApplyOptions(&bundleApplyOptions{inbox: true, reason: "management", deliveryID: want}, "")
+		if opts.DeliveryID != want || !opts.BundleInbox || opts.Reason != "management" || opts.Action != enterpriseunix.ActionEnsure {
+			t.Fatalf("options %+v, want delivery id %q", opts, want)
+		}
 	}
 }

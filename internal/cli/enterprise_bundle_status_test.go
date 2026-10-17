@@ -146,7 +146,7 @@ func TestBundleStatusWarnsOfAnUntrustedSignerAfterTheReceiptWasPruned(t *testing
 	store := bundleDevice(t, e)
 	const id = "b-01JA0000000000000000000041"
 	digest := "sha256:" + strings.Repeat("4", 64)
-	r, err := store.Receive(id, 4)
+	r, err := store.Receive(id, 4, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 
 func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
 	t.Helper()
-	r, err := store.Receive(id, version)
+	r, err := store.Receive(id, version, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestEnterpriseBundleStatusReportsTheEnforcingBundle(t *testing.T) {
 	const goodID, badID = "b-01JA0000000000000000000007", "b-01JA0000000000000000000006"
 	digest := "sha256:" + strings.Repeat("1", 64)
 	confirmBundle(t, store, goodID, 7, digest)
-	bad, err := store.Receive(badID, 6)
+	bad, err := store.Receive(badID, 6, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +568,7 @@ func TestEnterpriseBundleStatusLayoutUnverifiableIsNotDigestDiffers(t *testing.T
 			}
 			device := "sha256:" + strings.Repeat("8", 64)
 			store := bundleDevice(t, e)
-			r, err := store.Receive(manifest.BundleID, manifest.Version)
+			r, err := store.Receive(manifest.BundleID, manifest.Version, "")
 			if err != nil {
 				t.Fatal(err)
 			}

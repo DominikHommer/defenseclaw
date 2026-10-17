@@ -210,7 +210,7 @@ func TestManagementContractBundleStatus(t *testing.T) {
 	store := bundleDevice(t, e)
 	digest := "sha256:" + strings.Repeat("1", 64)
 	confirmBundle(t, store, "b-01JA0000000000000000000007", 7, digest)
-	bad, err := store.Receive("b-01JA0000000000000000000008", 8)
+	bad, err := store.Receive("b-01JA0000000000000000000008", 8, "")
 	if err != nil {
 		t.Fatal(err)
 	}

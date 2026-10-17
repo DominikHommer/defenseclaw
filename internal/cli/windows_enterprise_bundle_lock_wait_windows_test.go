@@ -104,3 +104,48 @@ func TestWindowsBundleApplyForwardsLockWaitOnly(t *testing.T) {
 		t.Fatalf("--lock-wait 16m: %v (exit %d)", err, commandExitCode(err))
 	}
 }
+
+// F10: apply forwards --delivery-id to the Windows ensure, and refuses an
+// empty, too long or out-of-charset one with 1639 before anything runs.
+func TestWindowsBundleApplyForwardsDeliveryID(t *testing.T) {
+	parsed := func(t *testing.T, id string) *cobra.Command {
+		t.Helper()
+		cmd := newEnterpriseBundleApplyCommand()
+		if err := cmd.Flags().Parse([]string{"--bundle", `C:\x.dcbundle`, "--delivery-id", id}); err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+	lifecycle, err := windowsBundleApplyLifecycleOptions(parsed(t, "agent-7:d.1"), &bundleApplyOptions{bundle: `C:\x.dcbundle`, deliveryID: "agent-7:d.1"})
+	if err != nil || lifecycle.bundleDeliveryID != "agent-7:d.1" {
+		t.Fatalf("options %+v, %v", lifecycle, err)
+	}
+	for _, bad := range []string{"", "agent 7", strings.Repeat("a", 129), "agent\x1b7", `agent\7`} {
+		_, err := windowsBundleApplyLifecycleOptions(parsed(t, bad), &bundleApplyOptions{bundle: `C:\x.dcbundle`, deliveryID: bad})
+		if commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(err.Error(), "--delivery-id") {
+			t.Fatalf("--delivery-id %q: %v (exit %d)", bad, err, commandExitCode(err))
+		}
+	}
+}
+
+// F10: the Windows prepare records the delivery id on the receipt it starts.
+func TestWindowsBundlePrepareRecordsDeliveryID(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, out)
+	}
+	stubWindowsBundleHost(t)
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true, bundleDeliveryID: "agent-7:d.1"}
+	done, err := prepareWindowsEnterpriseBundle(context.Background(), cmd, "ensure", opts)
+	cleanupPreparedWindowsBundle(t, opts)
+	if done || err != nil || opts.bundle == nil || opts.bundle.prepared == nil || opts.bundle.prepared.Receipt == nil {
+		t.Fatalf("prepare: done=%v err=%v out=%s", done, err, out.String())
+	}
+	if got := opts.bundle.prepared.Receipt.DeliveryID; got != "agent-7:d.1" {
+		t.Fatalf("receipt delivery id = %q", got)
+	}
+}

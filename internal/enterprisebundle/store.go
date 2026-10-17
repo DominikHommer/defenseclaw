@@ -179,6 +179,10 @@ type Receipt struct {
 	Principal     string `json:"principal,omitempty"`
 	// Actor is the local OS account that received this bundle.
 	Actor string `json:"actor,omitempty"`
+	// DeliveryID is the opaque id the caller of `enterprise bundle apply
+	// --delivery-id` gave this delivery, or "". It names the delivery, not
+	// who delivered it: any root or administrator caller can set it.
+	DeliveryID string `json:"delivery_id,omitempty"`
 	// ChangeSummary is the manifest change_summary, set at verified.
 	ChangeSummary  string       `json:"change_summary,omitempty"`
 	ManifestSHA256 string       `json:"manifest_sha256,omitempty"`
@@ -257,7 +261,7 @@ func (r *Receipt) Refusal() *enterprisestatus.BundleRefusal {
 	if !r.IsRefusal() || len(r.Transitions) == 0 {
 		return nil
 	}
-	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, BundleID: r.BundleID,
+	return &enterprisestatus.BundleRefusal{ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, BundleID: r.BundleID,
 		Version: r.Version, ErrorCode: string(r.ErrorCode), Time: r.Transitions[len(r.Transitions)-1].At,
 		WarningCodes: append([]string(nil), r.WarningCodes...), DisabledByBundle: append([]string(nil), r.DisabledByBundle...)}
 }
@@ -276,7 +280,7 @@ func DigestWarningCode(expected, enforcing string, comparable bool) string {
 // the confirmed receipt of the bundle that enforces.
 func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 	out := &enterprisestatus.BundleState{
-		ReceiptID: r.ReceiptID, BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
+		ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID, BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		Restart: r.Restart, RestartRequired: r.RestartRequired,
@@ -503,7 +507,7 @@ func (s *Store) PublicReceiptEventsDir() string {
 // quote loader detail), the manifest hash and the version directory.
 func (s *Store) writePublicReceipt(r *Receipt) error {
 	out := enterprisestatus.PublicReceipt{
-		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
+		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID, DeliveryID: r.DeliveryID,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
 		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
@@ -635,11 +639,17 @@ func GenerationOptions(r *Receipt) (opt configwrite.Options, ok bool) {
 
 // Receive starts the receipt of a bundle in state received. bundleID and
 // version are what the still unverified manifest claims ("" and 0 when it
-// could not be read).
-func (s *Store) Receive(bundleID string, version uint64) (*Receipt, error) {
+// could not be read); deliveryID is the caller-supplied --delivery-id ("" for
+// none), refused unless enterprisestatus.CheckDeliveryID accepts it.
+func (s *Store) Receive(bundleID string, version uint64, deliveryID string) (*Receipt, error) {
+	if deliveryID != "" {
+		if err := enterprisestatus.CheckDeliveryID(deliveryID); err != nil {
+			return nil, err
+		}
+	}
 	at := s.now()
 	r := &Receipt{SchemaVersion: ReceiptSchemaVersion, State: StateReceived, Actor: configwrite.CurrentOSActor(),
-		Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
+		DeliveryID: deliveryID, Transitions: []Transition{{State: StateReceived, At: stamp(at)}}}
 	if ValidBundleID(bundleID) && s.receiptReusable(bundleID) {
 		r.ReceiptID, r.BundleID, r.Version = bundleID, bundleID, version
 	} else {
