@@ -83,7 +83,8 @@ func TestSandboxDaemonUsesTheGatewaysRequiredPack(t *testing.T) {
 		t.Fatalf("resolve under the required pack: %v", err)
 	}
 
-	// A restarted daemon: the pack comes from the registrations file.
+	// A restarted daemon does not install a pack from its user-owned file.
+	// The complete current policy must carry the gateway's copy again.
 	resp, file = requiredPackAnswer(t, t.TempDir(), "vendors")
 	floor, err = managedResolveFloor(resp)
 	if err != nil {
@@ -103,13 +104,45 @@ func TestSandboxDaemonUsesTheGatewaysRequiredPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := regs.put(daemonRegistration{ID: "reg-vendors", Sandbox: "dc-claude-v", Floor: floor, RequiredPack: wire.Pack}); err != nil {
+	if err := regs.put(daemonRegistration{ID: "reg-vendors", Sandbox: "dc-claude-v", Floor: floor}); err != nil {
+		t.Fatal(err)
+	}
+	// This field was persisted by older daemons and may be edited by the
+	// account. A current daemon ignores it even when it names a pinned pack.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	entries := document["registrations"].([]any)
+	entries[0].(map[string]any)["required_pack"] = wire.Pack
+	data, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadDaemonRegistrations(path); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := packs.Resolve(f.d.configWithFloor(floor), packs.Flags{}); err == nil {
+		t.Fatal("loaded the account's cached required pack")
+	}
+	if err := useCurrentPack(sandboxrelay.CurrentPolicy{Floor: &floor}); err == nil {
+		t.Fatal("confirmed a custom pack without gateway content")
+	}
+	trusted, err := json.Marshal(wire.Pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := useCurrentPack(sandboxrelay.CurrentPolicy{Floor: &floor, RequiredPack: trusted}); err != nil {
+		t.Fatal(err)
+	}
 	if eff, _, err := packs.Resolve(f.d.configWithFloor(floor), packs.Flags{}); err != nil || eff.Pack.Name != "vendors" || eff.Pack.Source != file {
-		t.Fatalf("resolve after a restart: %v", err)
+		t.Fatalf("resolve after gateway confirmation: %v", err)
 	}
 }

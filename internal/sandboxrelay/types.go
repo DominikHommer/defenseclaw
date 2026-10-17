@@ -512,6 +512,9 @@ type CurrentPolicy struct {
 	// Floor is the complete gateway-owned policy floor. A managed daemon
 	// adopts it after confirmation instead of its user-writable cache.
 	Floor *config.OpenShellAdminConfig `json:"floor,omitempty"`
+	// RequiredPack is the gateway-owned content of Floor.RequiredPack when
+	// that pack is custom. A daemon must never install its user-owned cache.
+	RequiredPack json.RawMessage `json:"required_pack,omitempty"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
 	// Profile is the guardrail profile of the same match as Digest: after

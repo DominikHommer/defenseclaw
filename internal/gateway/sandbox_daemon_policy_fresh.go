@@ -308,6 +308,9 @@ func (d *SandboxDaemon) askPolicy(ctx context.Context, r daemonRegistration, rep
 		ans.err = errors.New("managed gateway omitted the complete sandbox policy floor")
 		return ans
 	}
+	if ans.err = useCurrentPack(cp); ans.err != nil {
+		return ans
+	}
 	ans.moved = cp.Generation != 0 && cp.Generation != r.Generation
 	ans.changed = d.regs.applyOrdered(r, seq, cp)
 	return ans

@@ -796,6 +796,18 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
 		Floor: &floor, Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
+	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
+		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
+		if err != nil || eff.RequiredPackContent() == nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+		current.RequiredPack, err = json.Marshal(eff.RequiredPackContent())
+		if err != nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
 	}

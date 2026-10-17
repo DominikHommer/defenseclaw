@@ -482,6 +482,20 @@ func useAuthorityPack(resp sandboxrelay.ResolveResponse, floor config.OpenShellA
 	return pack, err
 }
 
+// useCurrentPack installs only content delivered with a confirmed gateway
+// policy answer. A registrations.json pack is a user claim, including when
+// its declared digest appears to match the floor.
+func useCurrentPack(cp sandboxrelay.CurrentPolicy) error {
+	if cp.Floor == nil {
+		return errors.New("managed gateway omitted the complete sandbox policy floor")
+	}
+	pack, err := packs.AuthorityPack(nil, cp.RequiredPack, *cp.Floor)
+	if err != nil {
+		return err
+	}
+	return packs.UseAuthorityPack(*cp.Floor, pack)
+}
+
 // managedResolveFloor reads the organization floor F of a resolve answer:
 // the "floor" member of its packs.Effective wire form, in openshell.admin's
 // key names. An answer without one cannot be applied (fail closed).
@@ -1366,7 +1380,7 @@ func (d *SandboxDaemon) floorConflicts(ctx context.Context, floor config.OpenShe
 			continue
 		}
 		r, ok := d.regs.get(sb.Name)
-		if !ok || !reflect.DeepEqual(r.Floor, floor) {
+		if !ok || !r.Confirmed || !reflect.DeepEqual(r.Floor, floor) {
 			return true
 		}
 	}
@@ -1942,9 +1956,8 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		}
 	}
 	floor, err := managedResolveFloor(resp)
-	var requiredPack *packs.Pack
 	if err == nil {
-		requiredPack, err = useAuthorityPack(resp, floor)
+		_, err = useAuthorityPack(resp, floor)
 	}
 	if err != nil {
 		d.logf("the managed gateway's policy answer can't be applied: %v", err)
@@ -1982,7 +1995,7 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 	if err == nil {
 		err = d.regs.put(daemonRegistration{
 			ID: reg, Sandbox: sb.Name, Profile: resp.Banner.Profile, Provisional: resp.Banner.Provisional,
-			Digest: resp.Banner.PolicyDigest, Generation: resp.Generation, Floor: floor, RequiredPack: requiredPack, UpdatedAt: time.Now().UTC(),
+			Digest: resp.Banner.PolicyDigest, Generation: resp.Generation, Floor: floor, UpdatedAt: time.Now().UTC(),
 			Driver: string(choice.Driver), DriverReason: choice.Reason, Confirmed: true,
 		})
 	}
@@ -2049,6 +2062,9 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 	}
 	if cp.Floor == nil {
 		return nil, managedPolicyUnloadable(errors.New("managed gateway omitted the complete sandbox policy floor"))
+	}
+	if err := useCurrentPack(cp); err != nil {
+		return nil, managedPolicyUnloadable(err)
 	}
 	d.regs.applyOrdered(r, seq, cp)
 	r, _ = d.regs.get(name)
@@ -2453,10 +2469,6 @@ type daemonRegistration struct {
 	Digest      string                      `json:"digest,omitempty"`
 	Generation  uint64                      `json:"generation,omitempty"`
 	Floor       config.OpenShellAdminConfig `json:"floor"`
-	// RequiredPack is the floor's required pack as the managed gateway's
-	// answer carried it, which a restarted daemon installs again
-	// (packs.UseAuthorityPack): the account cannot read the pack's file.
-	RequiredPack *packs.Pack `json:"required_pack,omitempty"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
 	Driver        string    `json:"driver,omitempty"`
@@ -2504,10 +2516,10 @@ func loadDaemonRegistrations(path string) (*daemonRegistrations, error) {
 	}
 	for _, reg := range doc.Registrations {
 		if reg.ID != "" && reg.Sandbox != "" {
+			// The file belongs to the account. Keep only the registration
+			// identity until policy/current confirms its complete floor.
+			reg.Floor = config.OpenShellAdminConfig{}
 			r.byName[reg.Sandbox] = reg
-			// A pack off the floor's pin is not installed: the resolve then
-			// fails closed.
-			_ = packs.UseAuthorityPack(reg.Floor, reg.RequiredPack)
 		}
 	}
 	return r, nil
