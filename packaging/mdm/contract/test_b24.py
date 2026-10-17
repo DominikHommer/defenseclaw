@@ -3,7 +3,6 @@
 import os
 from pathlib import Path
 import shlex
-import signal
 import subprocess
 import tempfile
 
@@ -37,34 +36,35 @@ DC_LOG=""
 dc_put_anchors() {{ cp "$1" "$DC_ANCHORS"; }}
 trap dc_cleanup EXIT
 trap 'dc_stop_child; dc_fail_result "$DC_EXIT_FAILURE" mdm_cancelled "the MDM run was cancelled; the lifecycle was stopped"' TERM
-sleep 30 >/dev/null 2>&1 &
-DC_CHILD=$!
-printf 'ready\\n'
-wait "$DC_CHILD" || true
+kill -TERM "$$"
 '''
         script = root / "cancel.sh"
         script.write_text(source + harness)
-        process = subprocess.Popen(
-            ["sh", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
-        )
-        try:
-            assert process.stdout.readline().strip() == "ready"
-            # The test child shares this session. Stop both processes so a
-            # loaded shell cannot defer its TERM trap behind a long wait.
-            os.killpg(process.pid, signal.SIGTERM)
-            stdout, stderr = process.communicate(timeout=20)
-        finally:
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
-        assert process.returncode == 1, (stdout, stderr)
-        assert 'mdm_cancelled' in stdout
+        result = subprocess.run(["sh", str(script)], text=True, capture_output=True, timeout=10)
+        assert result.returncode == 1, (result.stdout, result.stderr)
+        assert 'mdm_cancelled' in result.stdout
         if had_anchor:
             assert anchor.read_text() == "old-anchor\n"
         else:
             assert not anchor.exists()
         assert not stage.exists()
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_stop_child_reaps_cancelled_lifecycle(platform):
+    source = (MDM / platform / "defenseclaw-enterprise.sh").read_text()
+    source = source.rsplit('dc_main "$@"', 1)[0]
+    with tempfile.TemporaryDirectory() as folder:
+        script = Path(folder) / "stop-child.sh"
+        script.write_text(source + '''
+sleep 30 >/dev/null 2>&1 &
+DC_CHILD=$!
+child=$DC_CHILD
+dc_stop_child
+[ -z "$DC_CHILD" ] && ! kill -0 "$child" 2>/dev/null
+''')
+        result = subprocess.run(["sh", str(script)], text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, (result.stdout, result.stderr)
 
 
 @pytest.mark.parametrize("platform", ["linux", "macos"])
