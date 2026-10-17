@@ -244,6 +244,33 @@ func TestStoreBindRevokeAndTombstones(t *testing.T) {
 	}
 }
 
+func TestStoreBindReservesClaimedIDsAcrossAccountsAndRestart(t *testing.T) {
+	s, _, dir := newTestStore(t)
+	first := pending(t)
+	if err := s.Create(1001, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, first.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	second := pending(t)
+	if err := s.Create(1002, second); err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range []sandboxrelay.BindRequest{
+		{BindingID: bind(1).BindingID, SandboxID: bind(2).SandboxID, SandboxName: bind(2).SandboxName},
+		{BindingID: bind(2).BindingID, SandboxID: bind(1).SandboxID, SandboxName: bind(2).SandboxName},
+	} {
+		if _, err := s.Bind(1002, second.ID, claim); !errors.Is(err, ErrInUse) {
+			t.Fatalf("cross-account ID reuse = %v, want ErrInUse", err)
+		}
+	}
+	restarted := NewFileStore(dir)
+	if _, err := restarted.Bind(1002, second.ID, bind(1)); !errors.Is(err, ErrInUse) {
+		t.Fatalf("ID reuse after restart = %v, want ErrInUse", err)
+	}
+}
+
 // Deleted drops a pending entry, turns a live one into the user's own
 // tombstone (or a policy_changed one while a stop is pending) and drops a
 // tombstone; only the user's own tombstone frees its sandbox ids.
