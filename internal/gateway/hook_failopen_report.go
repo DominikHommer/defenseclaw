@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,8 +31,11 @@ import (
 const (
 	hookFailuresFile         = "hook-failures.jsonl"
 	hookFailuresReportedFile = "hook-failures.reported"
-	// hookFailOpenReportMaxBytes bounds what one start reads.
+	// hookFailOpenReportMaxBytes bounds what one start reads. With more
+	// unread, the report reads the newest lines (readHookFailOpenCalls).
 	hookFailOpenReportMaxBytes = 16 << 20
+	// hookFailuresHeadBytes bounds the first line the report fingerprints.
+	hookFailuresHeadBytes = 4096
 	// hookFailOpenReportMaxAge leaves out calls older than the default
 	// audit retention, so the first start of an upgraded gateway does not
 	// report a months-old file.
@@ -57,8 +62,18 @@ type hookFailOpenSummary struct {
 	LastReason  string
 }
 
+// hookFailuresReported is the report's position in hook-failures.jsonl.
 type hookFailuresReported struct {
 	Offset int64 `json:"offset"`
+	// Head fingerprints the file's first line at Offset: a file replaced by
+	// another one, even a longer one, is read again from its start instead
+	// of from the middle of a line (rel-1-0-2 GAP-0446). Empty in a state
+	// an older gateway wrote.
+	Head string `json:"head,omitempty"`
+	// Done holds, per connector, the end of the lines already recorded
+	// when a later connector's audit write failed, so the next report,
+	// which reads from Offset again, does not record them twice.
+	Done map[string]int64 `json:"done,omitempty"`
 }
 
 // reportHookFailOpenCalls records the fail-open hook calls written to
@@ -81,47 +96,79 @@ func (s *Sidecar) reportHookFailOpenCalls() {
 func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Time) error {
 	hookFailOpenReportMu.Lock()
 	defer hookFailOpenReportMu.Unlock()
-	summaries, next, err := readHookFailOpenCalls(logDir, now)
+	summaries, read, err := readHookFailOpenCalls(logDir, now)
 	if err != nil {
 		return err
 	}
 	for _, sum := range summaries {
 		if err := logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), sum.Connector,
 			describeHookFailOpenCalls(sum), "HIGH", sum.Connector); err != nil {
-			// Keep the offset: the next start reports these calls again.
+			// Keep the offset, so the next report reads these lines again,
+			// but not the connectors recorded before this one.
+			_ = writeHookFailuresReported(logDir, read.start)
 			return fmt.Errorf("record %s fail-open calls: %w", sum.Connector, err)
 		}
+		if read.start.Done == nil {
+			read.start.Done = map[string]int64{}
+		}
+		read.start.Done[sum.Connector] = read.next
 	}
-	return writeHookFailuresReported(logDir, next)
+	return writeHookFailuresReported(logDir, hookFailuresReported{Offset: read.next, Head: read.start.Head})
+}
+
+// hookFailOpenRead is where one report read: the state it started from
+// (the offset it read at, the file's head and the connectors already
+// recorded) and the offset after its last complete line.
+type hookFailOpenRead struct {
+	start hookFailuresReported
+	next  int64
 }
 
 // readHookFailOpenCalls returns the fail-open calls after the reported
-// offset, grouped by connector, and the offset to store once they are
-// recorded. A file shorter than the offset was replaced and is read again
-// from the start.
-func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary, int64, error) {
-	offset := readHookFailuresReported(logDir)
+// offset, grouped by connector, and where it read. A file shorter than the
+// offset, or whose first line changed, was replaced and is read again from
+// the start. With more than hookFailOpenReportMaxBytes unread (a first start
+// after an upgrade with a large file), it reads the newest lines, from the
+// first line that starts in the last hookFailOpenReportMaxBytes.
+func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary, hookFailOpenRead, error) {
+	state := readHookFailuresReported(logDir)
+	read := hookFailOpenRead{start: state, next: state.Offset}
 	f, err := os.Open(filepath.Join(logDir, hookFailuresFile))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, 0, nil
+		return nil, hookFailOpenRead{}, nil
 	}
 	if err != nil {
-		return nil, offset, err
+		return nil, read, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return nil, offset, err
+		return nil, read, err
 	}
-	if offset > info.Size() || offset < 0 {
-		offset = 0
+	head := hookFailuresHead(f)
+	offset := state.Offset
+	if offset > info.Size() || offset < 0 || (state.Head != "" && state.Head != head) {
+		offset, state.Done = 0, nil
+	}
+	skipPartial := false
+	if info.Size()-offset > hookFailOpenReportMaxBytes {
+		offset, skipPartial = info.Size()-hookFailOpenReportMaxBytes, true
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, offset, err
+		return nil, read, err
 	}
 	byConnector := map[string]*hookFailOpenSummary{}
 	reader := bufio.NewReader(io.LimitReader(f, hookFailOpenReportMaxBytes))
 	next := offset
+	if skipPartial && offset > 0 {
+		// The window starts inside a line unless the byte before it ends one.
+		previous := make([]byte, 1)
+		if _, err := f.ReadAt(previous, offset-1); err == nil && previous[0] != '\n' {
+			partial, _ := reader.ReadBytes('\n')
+			next += int64(len(partial))
+		}
+	}
+	read.start = hookFailuresReported{Offset: next, Head: head, Done: state.Done}
 	for {
 		line, _ := reader.ReadBytes('\n')
 		if len(line) == 0 || line[len(line)-1] != '\n' {
@@ -135,7 +182,8 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))
 		connectorName := strings.ToLower(strings.TrimSpace(entry.Connector))
-		if perr != nil || connectorName == "" || now.Sub(at) > hookFailOpenReportMaxAge {
+		if perr != nil || connectorName == "" || now.Sub(at) > hookFailOpenReportMaxAge ||
+			next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]
@@ -157,7 +205,21 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		out = append(out, *sum)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Connector < out[j].Connector })
-	return out, next, nil
+	read.next = next
+	return out, read, nil
+}
+
+// hookFailuresHead fingerprints the first line of the hook-failure log (at
+// most hookFailuresHeadBytes of it).
+func hookFailuresHead(f *os.File) string {
+	buf := make([]byte, hookFailuresHeadBytes)
+	n, _ := f.ReadAt(buf, 0)
+	line := buf[:n]
+	if i := strings.IndexByte(string(line), '\n'); i >= 0 {
+		line = line[:i+1]
+	}
+	sum := sha256.Sum256(line)
+	return hex.EncodeToString(sum[:])
 }
 
 // describeHookFailOpenCalls is the alert text, for example "2 hermes hook
@@ -183,23 +245,23 @@ func describeHookFailOpenCalls(sum hookFailOpenSummary) string {
 		reason, hookFailuresFile)
 }
 
-func readHookFailuresReported(logDir string) int64 {
+func readHookFailuresReported(logDir string) hookFailuresReported {
 	raw, err := os.ReadFile(filepath.Join(logDir, hookFailuresReportedFile))
 	if err != nil {
-		return 0
+		return hookFailuresReported{}
 	}
 	var state hookFailuresReported
 	if json.Unmarshal(raw, &state) != nil {
-		return 0
+		return hookFailuresReported{}
 	}
-	return state.Offset
+	return state
 }
 
-func writeHookFailuresReported(logDir string, offset int64) error {
+func writeHookFailuresReported(logDir string, state hookFailuresReported) error {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return err
 	}
-	raw, _ := json.Marshal(hookFailuresReported{Offset: offset})
+	raw, _ := json.Marshal(state)
 	tmp, err := os.CreateTemp(logDir, hookFailuresReportedFile+".*")
 	if err != nil {
 		return err
