@@ -251,7 +251,7 @@ func TestSandboxDaemonEgressAdoptsAChangeAppliedElsewhere(t *testing.T) {
 	// Sandboxes that can't be listed leave the change out of force: refused.
 	f.d.opts.listPhases = func(context.Context) (map[string]string, bool) { return nil, false }
 	f.d.regs.applyLive("dc-b", sandboxrelay.CurrentPolicy{V: 1, Generation: 5, Digest: "sha256:v3", UpdatedAt: time.Now(),
-		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"github.com"}}})
+		Floor: &config.OpenShellAdminConfig{EgressBlock: []string{"gitlab.com"}}})
 	if _, off := f.confirm(); off == nil || off.Reason != sandboxEgressPolicyChanging {
 		t.Fatalf("unlisted: off %+v", off)
 	}

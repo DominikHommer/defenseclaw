@@ -852,7 +852,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	if admin := f.d.config().OpenShell.Admin; admin.RequiredPack != "" || admin.MinProfile != "balanced" {
 		t.Fatalf("the poll adopted the stopped sandbox's floor: %+v", admin)
 	}
-	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.RequiredPack != stale.RequiredPack {
+	if floor := f.d.regs.newestFloor(func(name string) bool { return name == "dc-old" }); floor == nil || floor.DeleteStoppedAfter != "14d" || floor.RequiredPack != "" {
 		t.Fatalf("a running sandbox's floor = %+v", floor)
 	}
 	if floor := f.d.regs.newestFloor(func(string) bool { return false }); floor != nil {

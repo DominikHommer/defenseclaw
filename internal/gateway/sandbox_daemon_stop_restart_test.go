@@ -259,7 +259,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	// The managed gateway answers: the same status shows the
 	// organization's policy at once.
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &floor}, nil
 	}
 	sb, err = ctl.Get(ctx, "dc-a")
 	if err != nil {
@@ -378,7 +378,7 @@ func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		switch c.relay.Load() {
 		case relayAnswers:
-			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: &closedFloorRegFloor}, nil
 		case relayRevokes:
 			return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: "profile removed"}, nil
 		}
