@@ -117,6 +117,9 @@ A sandbox run goes through five steps.
    running for five minutes, admits no relayed hook until the sandbox starts
    again. A registration bound to a sandbox the daemon reports as foreign is
    revoked.
+   Each sandbox keeps the floor of its own confirmed registration. One person
+   can run Claude Code and Codex sandboxes with different profile floors at
+   the same time; a change to either profile is applied to that sandbox.
 4. Every hook the agent sends inside the sandbox goes from the sandbox to the
    user's daemon, and from there, unchanged, to the managed gateway, which
    judges it under the person's verified identity and profile. A broken relay
@@ -166,9 +169,11 @@ MicroVM user and group) are rendered by `ensure` into a root-owned
 user's OpenShell gateway is DefenseClaw's own user unit
 (`defenseclaw-openshell-gateway.service`, or the LaunchAgent on macOS), which
 runs the OpenShell gateway binary on that rendered file. The user's daemon
-starts the unit and registers the gateway when a run needs it, and stops it
-about a minute after the user's last sandbox stops, so the one gateway port is
-free for the next account. A stop, delete or list of a kept sandbox starts it
+starts the unit and registers the gateway when a run needs it. A successful
+stop or delete of the user's last running sandbox releases the one gateway
+port before the command returns, so the next account can start. A gateway
+started for preflight remains available briefly for the following create.
+A stop, delete or list of a kept sandbox starts it
 again when it needs it. In `prerequisite` mode the unit runs the binary you installed
 (`/usr/bin`, or `/usr/local/bin` on macOS); in `setup` mode it runs the user's
 `~/.local/bin` copy. NVIDIA's [upstream user unit](https://github.com/NVIDIA/OpenShell/blob/main/deploy/deb/openshell-gateway.service)

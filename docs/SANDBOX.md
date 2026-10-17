@@ -2774,6 +2774,11 @@ section is the same type: `openshell.admin` is the floor, the profile can only
 tighten it (`config.TightenOpenShellAdmin`, `Config.SandboxFloor`). See
 [Managed hosts](#managed-hosts).
 
+The managed daemon re-resolves each kept sandbox against the floor of its own
+confirmed registration. Concurrent sandboxes can therefore use different
+profile floors. A missing or revoked registration cannot inherit the floor
+of another sandbox.
+
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
 harness.

@@ -241,6 +241,10 @@ var adminKeyNote = regexp.MustCompile(`\s*\(openshell\.admin\.[a-z_]+\)`)
 // whether it is a refusal ManagedError words; m is the caller's own
 // profile and contact.
 func managedErrorText(e *sandboxapi.Error, m *sandboxapi.ManagedStatus) (string, bool) {
+	if (e.Code == sandboxapi.CodeUpstream || e.Code == sandboxapi.CodeUnavailable) &&
+		gatewayTransportText(e.Detail) != e.Detail {
+		return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the command", true
+	}
 	if sandboxapi.IsPolicyRefusal(e.Message) {
 		// A refusal the daemon passed on complete (sandboxapi.AccessRefusedWhy
 		// and the other policy refusals) keeps its words: it already names
