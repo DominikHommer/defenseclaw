@@ -110,7 +110,7 @@ func TestSandboxConfigPersisterRefusals(t *testing.T) {
 		return &config.Config{DeploymentMode: "managed_enterprise", DataDir: cfg.DataDir}
 	})
 	path := configFilePathForSnapshot(api.runtimeConfigSnapshot())
-	before := []byte("config_version: 9\ndeployment_mode: managed_enterprise\n")
+	before := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
 	if err := os.WriteFile(path, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
