@@ -888,7 +888,7 @@
     {
       "type": "table",
       "title": "Kernel denials by control, connector, user and process",
-      "description": "Who hit DefenseClaw's kernel controls: the control, the connector of the agent, the kernel uid and the process. The file is in each record's kernel.target, relative to the user's home, and leaves the host only where the destination's redaction profile allows content.",
+      "description": "Who hit DefenseClaw's kernel controls: the control, the connector of the agent, the resolved account name (when available), kernel uid and process. The file is in each record's kernel.target, relative to the user's home, and leaves the host only where the destination's redaction profile allows content.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -901,7 +901,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (control, connector, user, process) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", user=\"{{.body_user_id}}\", process=\"{{.body_defenseclaw_ai_runtime_process}}\")[$__range]))",
+          "expr": "sum by (control, connector, user, process) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"enforcement.block.applied\" | body_defenseclaw_enforcement_initiator=\"kernel\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\", user=\"{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}} ({{.body_user_id}}){{else}}{{.body_user_id}}{{end}}\", process=\"{{.body_defenseclaw_ai_runtime_process}}\")[$__range]))",
           "refId": "DENIALS",
           "datasource": {
             "type": "loki",
@@ -928,7 +928,7 @@
             "renameByName": {
               "control": "Control",
               "connector": "Connector",
-              "user": "User (uid)",
+              "user": "User (name and uid)",
               "process": "Process",
               "DENIALS": "Denials"
             }

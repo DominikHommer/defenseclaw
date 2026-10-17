@@ -34,6 +34,15 @@ def _panel(dashboard: dict, title: str) -> dict:
     return next(panel for panel in dashboard["panels"] if panel.get("title") == title)
 
 
+def test_kernel_denials_table_shows_verified_name_with_uid_fallback() -> None:
+    dashboard = _dashboard("defenseclaw-blocked-events.json")
+    panel = _panel(dashboard, "Kernel denials by control, connector, user and process")
+    query = panel["targets"][0]["expr"]
+    assert 'body_defenseclaw_user_name=~' in query
+    assert 'user="{{if .body_defenseclaw_user_name}}{{.body_defenseclaw_user_name}} ({{.body_user_id}}){{else}}{{.body_user_id}}{{end}}"' in query
+    assert panel["transformations"][1]["options"]["renameByName"]["user"] == "User (name and uid)"
+
+
 def test_grafana_dashboard_catalog_contract() -> None:
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts/check_grafana_dashboards.py")],

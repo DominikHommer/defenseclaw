@@ -83,6 +83,7 @@ def test_doctor_never_opens_the_tetragon_socket(tmp_path: Path) -> None:
     with (
         patch("socket.socket", side_effect=AssertionError("doctor opened a socket")),
         patch("subprocess.run", side_effect=AssertionError("doctor ran a binary")),
+        patch.object(cmd_doctor, "_http_probe", side_effect=AssertionError("doctor read admin-only /health")),
     ):
         row = _only(_row(tmp_path, info=_UNIX_INFO))
     assert row["status"] == "skip"

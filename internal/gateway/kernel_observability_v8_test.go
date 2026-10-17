@@ -6,6 +6,8 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"os"
+	osuser "os/user"
 	"strings"
 	"sync"
 	"testing"
@@ -74,6 +76,37 @@ func recordsNamed(records []observability.Record, name string) []observability.R
 		}
 	}
 	return out
+}
+
+func TestKernelDenialResolvesMissingUserNameFromUID(t *testing.T) {
+	account, err := osuser.Current()
+	if err != nil {
+		t.Skipf("current account unavailable: %v", err)
+	}
+	uid := os.Getuid()
+	if uid < 0 {
+		t.Skip("numeric UID unavailable")
+	}
+	event := kernelBlockedEvent()
+	event.UID = &uid
+	event.User = ""
+	adapter, emitter := newKernelTestAdapter(router.AdmissionOrdinary)
+	if err := adapter.EmitSnapshot(t.Context(), sensor.Snapshot{
+		KernelEvents: []sensor.KernelEvent{event}, Kernel: kernelTestStatus(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := recordsNamed(emitter.records, "enforcement.block.applied")
+	if len(records) != 1 {
+		t.Fatalf("got %d denial records, want 1", len(records))
+	}
+	if got := kernelRecordBody(t, records[0])["defenseclaw.user.name"]; got != account.Username {
+		t.Errorf("resolved name = %v, want %q", got, account.Username)
+	}
+	unknown := -1
+	if got := kernelBlockUserName(sensor.KernelEvent{UID: &unknown}); got != "" {
+		t.Errorf("unknown UID resolved to %q", got)
+	}
 }
 
 func TestPlaneHealthCarriesMechanismBackendLossAndContainerEvents(t *testing.T) {

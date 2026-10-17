@@ -800,8 +800,8 @@ func kernelOrphans(state *sensor.KernelState, now time.Time) []string {
 
 // policyHealthBody is the /health "policy" object: the live generation's
 // PolicyHealth, with the sensor helper's kernel-policy state as "kernel"
-// when it reports one (doctor reads policy.kernel and compares its
-// kernel_policy with policy.components.kernel_policy).
+// when it reports one. This policy body is administrator-only; the per-user
+// doctor reads the local Tetragon info file and does not depend on it.
 func (a *APIServer) policyHealthBody(policy PolicyHealth) interface{} {
 	service, release := a.leaseAIRuntime()
 	var kernel *sensor.KernelState
