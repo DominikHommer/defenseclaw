@@ -178,8 +178,11 @@ output, auth failure, or gateway outage cannot create Hermes enforcement and
 remains fail-open. Such a call is recorded in
 `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports it as a
 `guardrail-degraded` alert when it starts again. On a managed standalone host
-the administrator-owned Hermes hook is stricter: it blocks `pre_tool_call`
-while the gateway service is not running.
+(Linux, macOS and Windows) the administrator-owned Hermes hook is stricter: it
+blocks a `pre_tool_call` DefenseClaw cannot check (the gateway service is not
+running, its answer cannot be used, or the call is too large to inspect), and
+Hermes shows why, for example "DefenseClaw blocked this tool call: the
+DefenseClaw gateway service is not running on this computer".
 
 </Tab>
 
