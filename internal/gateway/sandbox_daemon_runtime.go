@@ -1747,7 +1747,9 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 			return sb, nil
 		}
 	}
-	ready := c.d.openShellForKept(ctx, true)
+	if err := c.d.openShellForKept(ctx, true); err != nil {
+		return nil, err
+	}
 	sb, err := c.Manager.Stop(ctx, name)
 	if err != nil {
 		// The wait for the stop may have lost the gateway (a deferred
@@ -1762,9 +1764,6 @@ func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sand
 				c.d.handoverOpenShell(ctx)
 				return stopped, nil
 			}
-		}
-		if ready != nil {
-			return sb, ready
 		}
 		return sb, err
 	}

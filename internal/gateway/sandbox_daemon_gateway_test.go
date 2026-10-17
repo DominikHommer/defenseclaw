@@ -104,6 +104,9 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "one account at a time") || f.os.prepared.Load() != 2 {
 		t.Fatalf("delete while another account holds the port: %v", err)
 	}
+	if _, err := c.Stop(ctx, "kept1"); err == nil || !strings.Contains(err.Error(), "one account at a time") {
+		t.Fatalf("stop while another account holds the port: %v", err)
+	}
 	st, err := c.Status(ctx)
 	if err != nil || st.Available || st.GatewayElsewhere != "another account" || st.Reason != sandboxAccountBusyMessage ||
 		st.IngressAddr != "" || st.EgressAddr != "" {
