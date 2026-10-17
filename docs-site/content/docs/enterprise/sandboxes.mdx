@@ -1006,8 +1006,14 @@ connection picks the change up on its next poll.
 | Kind of field | What happens |
 | --- | --- |
 | Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
-| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. Only after a verified match, never on a failed lookup. |
+| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. The agent's session ends with it, `sandbox activity` shows it, and `sandbox status NAME` repeats it on a `Stopped` row. Only after a verified match, never on a failed lookup. |
 | Looser create-time fields | Apply at the next run |
+
+`sandbox status NAME` shows the organization profile the sandbox's
+registration matches now on its `Your policy` row, with the digest of that
+same match, as `sandbox policy explain` names them. After a regroup that keeps
+the sandbox running it names the new profile at once; the `Policy` row above
+it keeps naming the policy pack and network profile the sandbox runs under.
 
 A person whose group changes to one that no longer allows sandboxes sees this
 when the sandbox stops under them. The session summary says where the work is,

@@ -34,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -1047,8 +1048,8 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		// one's registration authorizes no relayed call (GAP-0505).
 		ans := d.askPolicy(ctx, r, report, running)
 		if ans.gone {
-			d.regs.markRevoked(r.Sandbox, ans.reason)
-			r.Revoked, r.RevokedReason = true, ans.reason
+			d.regs.markRevokedText(r.Sandbox, ans.reason, ans.stopText)
+			r.Revoked, r.RevokedReason, r.StopText = true, ans.reason, ans.stopText
 			revoked = append(revoked, r)
 			continue
 		}
@@ -1183,7 +1184,7 @@ func (d *SandboxDaemon) reportStopped(ctx context.Context, name string) {
 		return
 	}
 	if cp.Revoked {
-		d.regs.markRevoked(name, cp.RevokedReason)
+		d.regs.markRevokedText(name, cp.RevokedReason, cp.RevokedReason)
 	}
 }
 
@@ -1319,6 +1320,56 @@ func (c *managedSandboxController) confirmingView(v *sandboxapi.Sandbox) {
 	}
 }
 
+// managedStopReason is the managed gateway's words for a revoke as the
+// user's views show them: display-safe and bounded.
+func managedStopReason(text string) string {
+	text = strings.TrimSpace(sandboxapi.DisplayText(text))
+	const limit = 512
+	if len(text) > limit {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
+	}
+	return text
+}
+
+// registrationView adds to v what the daemon's registration of the sandbox
+// says: the profile and digest of its current match, which a regroup moves
+// (the manager's view has the pack and network profile it was resolved
+// with), or, once the registration was revoked, the organization's words
+// for the stop (#1199).
+func (c *managedSandboxController) registrationView(v *sandboxapi.Sandbox) {
+	if v == nil {
+		return
+	}
+	r, ok := c.d.regs.get(v.Name)
+	if !ok {
+		return
+	}
+	if r.Revoked {
+		v.StopReason = managedStopReason(r.StopText)
+		return
+	}
+	v.OrganizationProfile, v.PolicyDigest, v.Provisional = sandboxapi.DisplayText(r.Profile), sandboxapi.DisplayText(r.Digest), r.Provisional
+}
+
+// notePolicyStop says in the activity feed why the organization's policy
+// stopped r's sandbox, in the managed gateway's words, when it gave them:
+// the feed said only that a hook call failed (403) and that the sandbox
+// stopped (#1199).
+func (d *SandboxDaemon) notePolicyStop(r daemonRegistration) {
+	if text := managedStopReason(r.StopText); text != "" {
+		d.rt.manager.Feed().Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: r.Sandbox,
+			Reason: sandboxPolicyStopReason, Message: text})
+	}
+}
+
+// sandboxPolicyStopReason is the feed reason of a stop the organization's
+// policy made.
+const sandboxPolicyStopReason = "policy_stop"
+
 // stopRevoked stops a sandbox whose registration the managed gateway
 // revoked; it never starts again from this registration.
 func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
@@ -1327,6 +1378,7 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 		return
 	}
 	d.logf("stopped %s: its managed registration was revoked (%s)", r.Sandbox, r.RevokedReason)
+	d.notePolicyStop(r)
 	// A stop a re-match asked for (allowed false, a harness no longer
 	// allowed) ends the registration at the gateway only when it hears the
 	// sandbox stopped; the poll no longer reports a registration this daemon
@@ -1811,6 +1863,7 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 	}
 	for i := range list {
 		c.confirmingView(&list[i])
+		c.registrationView(&list[i])
 	}
 	return list, err
 }
@@ -1824,6 +1877,7 @@ func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandb
 	}
 	if err == nil {
 		c.confirmingView(sb)
+		c.registrationView(sb)
 	}
 	return sb, err
 }
@@ -2046,7 +2100,7 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, managedRelayError(err)
 	}
 	if cp.Revoked {
-		d.regs.markRevoked(name, cp.RevokedReason)
+		d.regs.markRevokedText(name, cp.RevokedReason, cp.RevokedReason)
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
@@ -2459,11 +2513,15 @@ type daemonRegistration struct {
 	RequiredPack *packs.Pack `json:"required_pack,omitempty"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
-	Driver        string    `json:"driver,omitempty"`
-	DriverReason  string    `json:"driver_reason,omitempty"`
-	Revoked       bool      `json:"revoked,omitempty"`
-	RevokedReason string    `json:"revoked_reason,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Driver        string `json:"driver,omitempty"`
+	DriverReason  string `json:"driver_reason,omitempty"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
+	// StopText is the managed gateway's words for the revoke, when its
+	// policy answer said them (CurrentPolicy.RevokedReason): the user's
+	// views and the activity feed give them (#1199).
+	StopText  string    `json:"stop_text,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// Confirmed is never persisted: the managed gateway answered for the
 	// registration in this daemon's lifetime (a create, or policy/current),
 	// so its floor may be adopted.
@@ -2599,14 +2657,18 @@ func (r *daemonRegistrations) drop(name string) error {
 	return r.saveLocked()
 }
 
-func (r *daemonRegistrations) markRevoked(name, reason string) {
+func (r *daemonRegistrations) markRevoked(name, reason string) { r.markRevokedText(name, reason, "") }
+
+// markRevokedText is markRevoked with the managed gateway's words for the
+// revoke (daemonRegistration.StopText), "" when it gave none.
+func (r *daemonRegistrations) markRevokedText(name, reason, text string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	reg, ok := r.byName[name]
 	if !ok || reg.Revoked {
 		return
 	}
-	reg.Revoked, reg.RevokedReason, reg.UpdatedAt = true, reason, time.Now().UTC()
+	reg.Revoked, reg.RevokedReason, reg.StopText, reg.UpdatedAt = true, reason, text, time.Now().UTC()
 	r.byName[name] = reg
 	_ = r.saveLocked()
 }

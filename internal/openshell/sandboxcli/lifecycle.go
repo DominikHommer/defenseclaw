@@ -340,6 +340,14 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	} else {
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
+	// On a managed computer: the organization profile the sandbox's
+	// registration matches now, with the digest of the same match, so a
+	// regroup shows here as in `policy explain` (#1199); and the
+	// organization's words for a stop its policy made.
+	if sb.OrganizationProfile != "" {
+		row("Your policy", organizationPolicyText(sb.OrganizationProfile, sb.Provisional, sb.PolicyDigest)+" — "+CommandName+" policy explain")
+	}
+	row("Stopped", sb.StopReason)
 	// What it was created with beyond the policy, which a resume keeps.
 	for _, c := range grantTexts(sb.Credentials) {
 		row("Secret", c)

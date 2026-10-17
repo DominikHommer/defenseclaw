@@ -361,6 +361,22 @@ type Sandbox struct {
 	// NestedRepos are the git repositories the nested-repository guard
 	// found in a mounted project during the current session.
 	NestedRepos []NestedRepo `json:"nested_repos,omitempty"`
+	// OrganizationProfile is, on a managed computer, the guardrail profile
+	// the sandbox's registration matches now (a regroup re-matches it), and
+	// PolicyDigest the digest of its effective policy under that same match:
+	// what `sandbox policy explain` names. Pack and Profile above are the
+	// sandbox policy pack and network profile it runs under, not this
+	// profile (#1199). Provisional marks a match made while the directory
+	// could not be reached. Empty outside managed mode.
+	OrganizationProfile string `json:"organization_profile,omitempty"`
+	PolicyDigest        string `json:"policy_digest,omitempty"`
+	Provisional         bool   `json:"provisional,omitempty"`
+	// StopReason is why the organization's policy stopped the sandbox, in
+	// the managed gateway's words (the stop text of the re-match that
+	// revoked its registration, such as "your profile no longer allows host
+	// ports"), when it did; the session's end and status say it instead of
+	// "stopped from outside this session" (#1199).
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 // NestedRepo is one repository that appeared inside a mounted project while

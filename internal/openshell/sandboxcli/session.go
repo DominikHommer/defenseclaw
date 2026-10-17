@@ -975,7 +975,14 @@ func (s *session) end(ctx context.Context) error {
 			s.driver = firstNonEmpty(s.driver, st.Managed.Driver)
 			s.otherGateways = slices.Clone(st.Managed.OtherGateways)
 			if after.Phase != "ready" {
-				s.policyStop = s.managedStopText(ctx)
+				// The managed gateway's words for the stop that revoked the
+				// sandbox's registration (a re-match: a host port, settings
+				// or a harness the profile no longer allows), else what the
+				// caller's policy says now (#1199, GAP-0486).
+				s.policyStop = after.StopReason
+				if s.policyStop == "" {
+					s.policyStop = s.managedStopText(ctx)
+				}
 			}
 		}
 		if st.Gateway != nil {

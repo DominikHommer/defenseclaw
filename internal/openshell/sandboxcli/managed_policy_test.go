@@ -262,6 +262,31 @@ func TestOwnedPolicyViewsDistinguishProfiles(t *testing.T) {
 	has(t, ta.output(), "Your policy", "organization profile engineering")
 }
 
+// #1199 (rel GAP-0168, GAP-0607): `sandbox status NAME` named the pack
+// alone, so after a regroup nothing said which organization profile the
+// sandbox now runs under; and a stop the organization's policy made had no
+// reason there.
+func TestSandboxStatusNamesTheCurrentProfileAndThePolicyStop(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := &sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "contractors", Profile: "balanced",
+		NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "engineering",
+		PolicyDigest: "sha256:41a7a6cf0123456789abcdef"}
+	ta.printSandbox(sb)
+	out := ta.output()
+	has(t, out, "Your policy", "organization profile engineering", "(yours)", "policy explain", "pack contractors")
+	if strings.Contains(out, "Stopped") {
+		t.Fatalf("a running sandbox shows a stop:\n%s", out)
+	}
+	ta.fresh()
+	sb.Phase, sb.OrganizationProfile, sb.PolicyDigest = "stopped", "", ""
+	sb.StopReason = sandboxapi.ProfileStop("host ports", "claudecode", "it-help@example.com")
+	ta.printSandbox(sb)
+	has(t, ta.output(), "Stopped", "your profile no longer allows host ports")
+	if strings.Contains(ta.output(), "Your policy") {
+		t.Fatalf("a revoked sandbox names a current profile:\n%s", ta.output())
+	}
+}
+
 func TestBannerShowsTheManagedPolicyLine(t *testing.T) {
 	for _, tc := range []struct {
 		name string
