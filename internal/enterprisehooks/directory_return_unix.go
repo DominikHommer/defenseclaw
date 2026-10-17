@@ -46,11 +46,15 @@ import (
 // directoryLDAPPort is the port a domain controller's LDAP service listens on.
 const directoryLDAPPort = "389"
 
-// domainControllerDialTimeout bounds one connection attempt, and
-// domainControllerProbeTargets how many domain controllers are tried.
+// domainControllerDialTimeout bounds one connection attempt,
+// domainControllerProbeTargets how many domain controllers are tried, and
+// domainControllerProbeTimeout the whole probe, the SRV lookup included: a
+// resolver that does not answer during the outage must not hold the
+// guardian's 15 second poll for longer.
 const (
 	domainControllerDialTimeout  = 3 * time.Second
 	domainControllerProbeTargets = 3
+	domainControllerProbeTimeout = 10 * time.Second
 )
 
 // Tests replace the resolver and the dialer.
@@ -78,6 +82,8 @@ func DomainControllerAnswers(ctx context.Context, domain string) bool {
 	if !validDirectoryDomain(domain) {
 		return false
 	}
+	ctx, cancel := context.WithTimeout(ctx, domainControllerProbeTimeout)
+	defer cancel()
 	var hosts []string
 	if records, err := domainControllerSRV(ctx, domain); err == nil {
 		for _, record := range records {

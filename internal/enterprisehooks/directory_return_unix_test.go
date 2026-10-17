@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -100,5 +101,37 @@ func TestDomainControllerAnswers(t *testing.T) {
 	}
 	if len(dialed) != 0 {
 		t.Fatalf("dialed %v for names that are not DNS domains", dialed)
+	}
+}
+
+// The whole probe is bounded: the SRV lookup and every dial share one
+// deadline of domainControllerProbeTimeout, even when the guardian context
+// has none, so a resolver that hangs during the outage ends the probe as
+// "no answer" before the next 15 second poll is long overdue.
+func TestDomainControllerAnswersIsBounded(t *testing.T) {
+	prevSRV, prevDial := domainControllerSRV, domainControllerDial
+	t.Cleanup(func() { domainControllerSRV, domainControllerDial = prevSRV, prevDial })
+	start := time.Now()
+	var deadlines []time.Time
+	domainControllerSRV = func(ctx context.Context, _ string) ([]*net.SRV, error) {
+		d, _ := ctx.Deadline()
+		deadlines = append(deadlines, d)
+		return nil, errors.New("i/o timeout")
+	}
+	domainControllerDial = func(ctx context.Context, _ string) error {
+		d, _ := ctx.Deadline()
+		deadlines = append(deadlines, d)
+		return errors.New("i/o timeout")
+	}
+	if DomainControllerAnswers(context.Background(), "dclab.test") {
+		t.Fatal("answers with every lookup timing out")
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("lookups %d, want the SRV lookup and one dial", len(deadlines))
+	}
+	for _, d := range deadlines {
+		if d.IsZero() || d.Sub(start) > domainControllerProbeTimeout+time.Second || d != deadlines[0] {
+			t.Fatalf("deadlines %v (start %v), want one shared deadline %v after the start", deadlines, start, domainControllerProbeTimeout)
+		}
 	}
 }
