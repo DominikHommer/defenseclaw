@@ -182,10 +182,11 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 }
 
 // TestManagementContractBundleApplyDeliveryID pins F10 (guide section 4.3):
-// --delivery-id reaches the result bundle block, the public receipt files
-// and the refusal summary; a repeat of the current bundle reports the
-// confirmed receipt (and its delivery id), not its own; an invalid id or one
-// without a bundle is invalid_arguments, exit 2, before any receipt.
+// --delivery-id reaches the result bundle block, the public receipt files,
+// the refusal summary and the state records `bundle status` prints as
+// current and last_good (GAP-0001); a repeat of the current bundle reports
+// the confirmed receipt (and its delivery id), not its own; an invalid id or
+// one without a bundle is invalid_arguments, exit 2, before any receipt.
 func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 	schemas := contracttest.Compile(t)
 	for _, goos := range []string{"linux", "darwin"} {
@@ -216,6 +217,12 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 					t.Fatalf("%s: %s", file, raw)
 				}
 			}
+			// bundle status prints the state record and the receipt as they are.
+			if current := b.state().Current; current == nil || current.DeliveryID != "agent-7:d.1" {
+				t.Fatalf("state current = %+v, want delivery id agent-7:d.1", current)
+			}
+			schemas.ValidateValue(t, "bundle-status.schema.json#/$defs/ref", b.state().Current)
+			schemas.ValidateValue(t, "bundle-status.schema.json#/$defs/receipt", b.receipt(bundleID(1)))
 
 			again := b.run(Options{Action: ActionEnsure, Bundle: path, DeliveryID: "agent-7:d.2"})
 			requireOK(t, again)
@@ -251,6 +258,28 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 			}
 			if after, _ := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json")); len(after) != len(events) {
 				t.Fatalf("an invalid delivery id wrote a receipt: %v -> %v", events, after)
+			}
+
+			// A newer bundle with its own id: current and last_good each keep
+			// the delivery id that confirmed them.
+			b.mapPromotedBundleOwners(2)
+			next := b.run(Options{Action: ActionEnsure, Bundle: b.dir(2, v2), DeliveryID: "agent-7:d.5"})
+			requireOK(t, next)
+			if got := deliveryOf(schemas.ValidateValue(t, "lifecycle-result.schema.json", next), "bundle"); got != "agent-7:d.5" {
+				t.Fatalf("v2 bundle.delivery_id = %v, want agent-7:d.5", got)
+			}
+			st := b.state()
+			if st.Current == nil || st.Current.DeliveryID != "agent-7:d.5" || st.LastGood == nil || st.LastGood.DeliveryID != "agent-7:d.1" {
+				t.Fatalf("state current %+v, last_good %+v; want delivery ids agent-7:d.5 and agent-7:d.1", st.Current, st.LastGood)
+			}
+			for _, ref := range []*enterprisebundle.Ref{st.Current, st.LastGood} {
+				schemas.ValidateValue(t, "bundle-status.schema.json#/$defs/ref", ref)
+			}
+			schemas.ValidateValue(t, "bundle-status.schema.json#/$defs/receipt", b.receipt(bundleID(2)))
+			status := b.run(Options{Action: ActionStatus})
+			requireOK(t, status)
+			if got := deliveryOf(schemas.ValidateValue(t, "lifecycle-result.schema.json", status), "bundle"); got != "agent-7:d.5" {
+				t.Fatalf("status bundle.delivery_id = %v, want agent-7:d.5", got)
 			}
 		})
 	}

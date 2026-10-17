@@ -149,7 +149,7 @@
     "ref": {
       "type": "object",
       "additionalProperties": false,
-      "description": "enterprisebundle.Ref (internal/enterprisebundle/store.go).",
+      "description": "enterprisebundle.Ref (internal/enterprisebundle/store.go): a bundle record of bundle-state.json, printed unchanged as current and last_good.",
       "required": [
         "bundle_id",
         "version",
@@ -191,6 +191,10 @@
         },
         "restart_required": {
           "const": true
+        },
+        "delivery_id": {
+          "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/deliveryId",
+          "description": "The --delivery-id of the apply that confirmed this bundle (guide section 2.6), absent when it had none. The state keeps it, so it outlives that receipt being pruned."
         }
       }
     },
@@ -386,7 +390,8 @@
         "signer_key_id": "acme-2026a",
         "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
         "config_generation": 41,
-        "confirmed_at": "2026-10-16T21:05:09.874Z"
+        "confirmed_at": "2026-10-16T21:05:09.874Z",
+        "delivery_id": "acme-agent:d-000913"
       },
       "last_good": null,
       "floor": 13,
@@ -400,6 +405,7 @@
         "signer_key_id": "acme-2026a",
         "principal": "control-plane:acme/alice",
         "actor": "os:uid:0:root",
+        "delivery_id": "acme-agent:d-000913",
         "manifest_sha256": "9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
         "state": "confirmed",
         "transitions": [
@@ -432,6 +438,7 @@
       },
       "bundle": {
         "receipt_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
+        "delivery_id": "acme-agent:d-000913",
         "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
         "version": 13,
         "state": "confirmed",

@@ -140,6 +140,11 @@ A management agent that runs the `enterprise` commands itself
   arguments, unknown flags included. Builds that do not report
   `management_contract` in `--version-json` exit `1` for a flag error on
   Windows and print no JSON for failures.
+- `enterprise secret status`: Linux and macOS as above. Windows `0`; `5` /
+  `1603` `elevation_required` as for `set`; `1603` `state_invalid` when the
+  store cannot be read; `1639` invalid arguments. With `--json` and
+  `management_contract` 1 every Windows failure prints the failure document
+  of `secret-result.schema.json` with `action: "status"`.
 
 ## Retries, downgrades and rollback
 

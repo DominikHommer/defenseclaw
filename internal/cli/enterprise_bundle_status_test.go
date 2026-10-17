@@ -218,7 +218,19 @@ func confirmBundle(t *testing.T, store *enterprisebundle.Store, id string, versi
 
 func confirmBundleWithExpected(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, disabled ...string) {
 	t.Helper()
-	r, err := store.Receive(id, version, "")
+	confirmBundleReceipt(t, store, id, version, digest, expected, comparable, "", disabled)
+}
+
+// confirmBundleDelivery confirms id/version as `bundle apply --delivery-id
+// deliveryID` does: the receipt and the state record carry the id.
+func confirmBundleDelivery(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, deliveryID string) {
+	t.Helper()
+	confirmBundleReceipt(t, store, id, version, digest, digest, true, deliveryID, nil)
+}
+
+func confirmBundleReceipt(t *testing.T, store *enterprisebundle.Store, id string, version uint64, digest, expected string, comparable bool, deliveryID string, disabled []string) {
+	t.Helper()
+	r, err := store.Receive(id, version, deliveryID)
 	if err != nil {
 		t.Fatal(err)
 	}
