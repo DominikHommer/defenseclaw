@@ -581,6 +581,10 @@ is still the one owner.
   Warnings, checked against the new file: `key_unknown` (the confirmed
   bundle's signer is not in it), `key_revoked` (it is revoked there),
   `anchor_unreadable`. The current bundle keeps enforcing either way.
+  There is no version or replay check on the anchor file itself (as with the
+  MDM kit and Windows `--trust-anchors`): any valid root-owned file is
+  installed, an older one included, so the agent tracks which anchor file
+  it last installed. The confirmed bundle version floor still applies.
 - stdout: `anchors-install.schema.json` (`sha256`, `previous_sha256` and
   `key_ids` for the agent's own report; no audit event records the change).
   Exit: 0; 1; 2; 75.
@@ -723,7 +727,9 @@ Later bundles go through 5.2.
    device up (5.0). If `transaction_pending` is true, or the last apply the
    agent started has no terminal receipt (`bundle.state` not `confirmed` or
    `failed` for that bundle id), run 4.6 ensure, then status again. Retry 75 /
-   1618 with backoff.
+   1618 with backoff. After an unknown outcome of `bundle anchors install`,
+   run the same install again: `unchanged` with the same `sha256` means the
+   file is in place.
 3. Only then resubmit the desired bundle; the same bytes give the no-op
    success or a fresh apply.
 
