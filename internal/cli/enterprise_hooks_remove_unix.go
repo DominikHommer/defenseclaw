@@ -622,10 +622,13 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 	if len(raw) <= maxBytes {
 		return raw
 	}
-	// The clearing instruction precedes "current home check". Only the
-	// trailing reason may be clipped after all paths have been shortened.
-	const reasonSeparator = "; current home check: "
-	if index := strings.Index(raw, reasonSeparator); index >= 0 && index+len(reasonSeparator) < maxBytes {
+	// In the home-check form (enterpriseHookRehomedCleanupError) the
+	// clearing instruction precedes "current home check". Only the trailing
+	// reason may be clipped after all paths have been shortened. The other
+	// forms carry a worker reason that can hold the same words before their
+	// remedy, so they never clip here (GAP-0634).
+	const reasonSeparator = "then rerun; current home check: "
+	if index := strings.Index(raw, reasonSeparator); oldKept == nil && unverified == nil && index >= 0 && index+len(reasonSeparator) < maxBytes {
 		end := maxBytes - 3
 		for end > 0 && !utf8.RuneStart(raw[end]) {
 			end--

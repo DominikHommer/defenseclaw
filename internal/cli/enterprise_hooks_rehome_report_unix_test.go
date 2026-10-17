@@ -174,3 +174,25 @@ func TestRemoveAllRehomeReportKeepsTheFullRemedyWithLongHomes(t *testing.T) {
 		})
 	}
 }
+
+// A worker reason can carry the words of the home-check separator. The
+// formatter then keeps the remedy of the unverified form instead of
+// clipping it as the trailing reason (GAP-0634). Config paths up to 180
+// bytes stay whole, so the ledger text runs past its bound.
+func TestRehomeFailureTextKeepsRemedyWhenReasonHoldsTheSeparator(t *testing.T) {
+	for size := 40; size <= 240; size += 10 {
+		oldHome := "/home/old" + strings.Repeat("x", size)
+		currentHome := "/home/cur" + strings.Repeat("x", size)
+		changed := &enterpriseHookTargetHomeChangedError{name: "sample-user", home: oldHome, directoryHome: currentHome}
+		plugin := currentHome + "/.config/opencode/plugins/defenseclaw.js"
+		for _, reason := range []string{"DefenseClaw entries remain: x", "DefenseClaw entries remain: a; current home check: b", "a then rerun; current home check: b"} {
+			err := &enterpriseHookCleanupUnverifiedError{changed: changed, connector: "opencode", dataDir: currentHome + "/.defenseclaw",
+				home: currentHome, path: plugin, configPath: plugin, reason: reason}
+			for name, text := range map[string]string{"ledger": enterpriseHookUserCleanupFailureText(err), "report": enterpriseHookRehomedReportReason(err)} {
+				if !strings.HasSuffix(text, "and rerun") || !strings.Contains(text, "stale copied receipt") {
+					t.Errorf("home size %d, %s text for reason %q lost the remedy: %q", size, name, reason, text)
+				}
+			}
+		}
+	}
+}
