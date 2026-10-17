@@ -82,15 +82,25 @@ submits the block as the next prompt, so an agent whose stop hook failed
 closed tried to stop again on every model turn, each costing a model call,
 until the user interrupted it.
 
-When a hook would fail closed on one of these events (the gateway is down or
-answers 5xx, its answer is unusable, the payload is too large, or the hook
-token or the DefenseClaw home is missing), it gives the agent's neutral allow
-instead, says on stderr that it is not blocking the event, and records the
-failure in `hook-failures.jsonl` with fail mode `open`. The agent ends the
-turn, and the next prompt or tool call is blocked as before until DefenseClaw
-is available. This holds for per-user hooks, the OpenShell sandbox hooks and
-the standalone managed hooks on Linux, macOS and Windows. Secure Client hooks
-keep their results.
+When a hook would fail closed on one of these events because the gateway is
+down or answers 5xx, its answer is unusable or the hook token is missing, it
+gives the agent's neutral allow instead, says on stderr that it is not blocking
+the event, and records the failure in `hook-failures.jsonl` with fail mode
+`open`. The agent ends the turn, and the next prompt or tool call is blocked as
+before until DefenseClaw is available. This holds for per-user hooks, the
+OpenShell sandbox hooks and the standalone managed hooks on Linux, macOS and
+Windows. Secure Client hooks keep their results.
+
+The hook has to know the event first. Codex and GitHub Copilot name it in the
+registered hook command; the other connectors read it from the payload's
+`hook_event_name` or `event` field. So these cases still block:
+
+- A payload that is too large to read, or a DefenseClaw home that is
+  unavailable, for connectors that read the event from the payload.
+- A missing hook token for the Devin and Kiro hooks on Linux and macOS, which
+  check the token before they read the payload, and in the OpenShell sandbox.
+- A payload whose event fields are not strings or name different events, and
+  a Codex payload that does not match the event of its registered command.
 
 | Connector | Stop and session-end events |
 | --- | --- |
