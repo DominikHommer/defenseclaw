@@ -765,7 +765,11 @@ dc_install_package() {
             command -v rpm >/dev/null 2>&1 || dc_fail_result "$DC_EXIT_FAILURE" mdm_package_manager_missing "rpm is not installed; use the .deb or the payload archive"
             package=$(rpm -qp --qf '%{NAME}' "$file" 2>/dev/null || true)
             version=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$file" 2>/dev/null || true)
+            arch=$(rpm -qp --qf '%{ARCH}' "$file" 2>/dev/null || true)
+            host_arch=$(rpm --eval '%{_arch}' 2>/dev/null || true)
             [ "$package" = "$DC_LINUX_PACKAGE" ] || dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_package "the .rpm is '$package', not $DC_LINUX_PACKAGE"
+            [ -n "$host_arch" ] && [ "$arch" = "$host_arch" ] ||
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_wrong_architecture "the .rpm is for $arch; this host needs $host_arch"
             dc_require_product_version "$(dc_package_release_version "$version")"
             # An interrupted upgrade can leave multiple installed versions.
             # Use the newest one for the repair decision and result metadata.
