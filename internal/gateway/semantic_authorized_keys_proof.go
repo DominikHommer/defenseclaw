@@ -761,10 +761,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
 		// /proc/<pid>/cwd is resolved in the process that opens the file.
-		// The gateway and hook helper are different processes, so a local
-		// resolution here cannot prove where such an operand lands.
+		// The hook resolves /proc/self/cwd against the event cwd; the gateway
+		// can do so locally only when it can inspect that filesystem.
 		if procCWDWriteOperand(target) {
-			return true
+			if !strings.HasPrefix(target, "/proc/self/cwd/") {
+				return true
+			}
+			if resolved, present := request.ResolvedWriteTargets[target]; present {
+				return resolved == "" || isProtected(resolved)
+			}
+			if cannotResolveLocally {
+				return true
+			}
+			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
+			if !ok {
+				return true
+			}
+			target = mapped
 		}
 		if isProtected(target) {
 			return true
@@ -866,6 +879,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// write-operand facts, just as redirect operands already do.
 	if filepath.IsAbs(clientCWD) && !filepath.IsAbs(facts.CWD) {
 		facts = actionfacts.Analyze(input)
+	}
+	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
+		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

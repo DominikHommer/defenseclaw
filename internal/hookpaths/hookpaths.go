@@ -1627,6 +1627,21 @@ func ResolveWriteTarget(path string) (string, bool) {
 	return resolveWritePath(path, 0)
 }
 
+// ResolveProcSelfCWDTarget interprets /proc/self/cwd in the command process,
+// using the event cwd rather than the hook or gateway process cwd. Resolving
+// the whole suffix preserves link traversal before any dot-dot component.
+func ResolveProcSelfCWDTarget(path, cwd string) (string, bool) {
+	const prefix = "/proc/self/cwd/"
+	if !strings.HasPrefix(path, prefix) || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	physicalCWD, ok := ResolveWriteTarget(cwd)
+	if !ok {
+		return "", false
+	}
+	return ResolveWriteTarget(physicalCWD + "/" + strings.TrimPrefix(path, prefix))
+}
+
 // protectedFile is the identity of one of the user's authorized-keys files. A
 // hard link elsewhere names the same file under another path, so a target is
 // compared by file identity (device and inode on Unix, volume serial and file
@@ -1824,14 +1839,19 @@ func Resolve(payload []byte) string {
 			return
 		}
 		resolved, ok := "", false
-		if links.known {
-			resolved, ok = links.resolve(path, protected)
-		} else if safeRedirect {
-			if direct, directOK := resolveWritePath(path, 0); directOK {
+		resolutionPath := path
+		aliasKnown := true
+		if strings.HasPrefix(path, "/proc/self/cwd/") {
+			resolutionPath, aliasKnown = ResolveProcSelfCWDTarget(path, cwd)
+		}
+		if aliasKnown && links.known {
+			resolved, ok = links.resolve(resolutionPath, protected)
+		} else if aliasKnown && safeRedirect {
+			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if links.opaque && (!links.opaqueTarget(path) || !links.opaqueTargetExceptCopy(path, path) && slices.Contains(links.copyDestinations, path)) {
-			resolved, ok = links.resolve(path, protected)
+		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
+			resolved, ok = links.resolve(resolutionPath, protected)
 		}
 		if !ok {
 			resolved = ""
@@ -2902,6 +2922,44 @@ func CopyDestination(argv []string, cwd string) string {
 		return ""
 	}
 	return cpDestination(argv[1:], makeStatic(len(argv)-1), cwd)
+}
+
+// DynamicCopyProtectedBasename reports a copy whose expanded source argument
+// could instead be -t/--target-directory, moving an authorized-keys basename
+// into a protected directory despite an ordinary spelled destination.
+func DynamicCopyProtectedBasename(command, home string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 || found {
+			return !found
+		}
+		program, static := staticShellWord(call.Args[0], env, home != "", nil, shellVariablePoison{})
+		if !static || !slices.Contains(copyPrograms, programBase(program)) {
+			return true
+		}
+		last, static := staticShellWord(call.Args[len(call.Args)-1], env, home != "", nil, shellVariablePoison{})
+		if !static {
+			return true
+		}
+		base := filepath.Base(last)
+		if base != "authorized_keys" && base != "authorized_keys2" {
+			return true
+		}
+		for _, arg := range call.Args[1 : len(call.Args)-1] {
+			if _, static := staticShellWord(arg, env, home != "", nil, shellVariablePoison{}); !static {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
 }
 
 func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {

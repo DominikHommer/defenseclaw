@@ -205,6 +205,56 @@ func TestR103B07ProcCWDAliasRowA10238(t *testing.T) {
 	}
 }
 
+func TestR103B07ProcSelfCWDBenignRows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/proc is a POSIX operand")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{"proj/out", ".ssh"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"FG3-A4-P-001-N", "printf x >> /proc/self/cwd/out/log"},
+		{"FG3-A4-P-004-N", "printf x >> /proc/self/cwd/./out/log"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok || targets[filepath.Clean(strings.TrimPrefix(tc.command, "printf x >> "))] != filepath.Join(cwd, "out", "log") {
+				t.Fatalf("proc cwd target proof=%v ok=%v", targets, ok)
+			}
+			input := actionfacts.Input{Tool: "Bash", Args: args, Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			for _, mode := range []string{"per-user", "managed"} {
+				t.Run(mode, func(t *testing.T) {
+					request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+					if mode == "managed" {
+						request.ResolvedWriteTargets = targets
+					}
+					if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+						t.Fatal("ordinary proc cwd redirect classified as SSH-key write")
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestR103B07FalsePositiveRows(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command rows")
@@ -255,6 +305,48 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 		if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
 			t.Fatalf("dynamic copy to protected link allowed: %s", command)
 		}
+	}
+}
+
+func TestR103B07FG3CPB001DynamicCopyOption(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	command := `read X <<< "--target-directory=$HOME/.ssh"; printf payload > authorized_keys; cp "$X" authorized_keys; echo done > report.txt`
+	args, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := actionfacts.Input{Tool: "Bash", Args: args, Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	facts := actionfacts.Analyze(input)
+	if !hookpaths.DynamicCopyProtectedBasename(command, home) {
+		t.Fatal("dynamic copy option before authorized_keys was missed")
+	}
+	for _, mode := range []string{"per-user", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+			if mode == "managed" {
+				payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+					"tool_input": map[string]string{"command": command}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.ResolvedWriteTargets, _ = hookpaths.Decode(hookpaths.Resolve(payload))
+			}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, facts) {
+				t.Fatal("copy option can select the protected SSH directory")
+			}
+		})
 	}
 }
 

@@ -86,6 +86,22 @@ func TestR103B07EnvNullRowsDoNotLaunchUtility(t *testing.T) {
 	}
 }
 
+func TestR103B07FG3CPB001DynamicCopyOption(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    bool
+	}{
+		{`read X <<< "--target-directory=$HOME/.ssh"; cp "$X" authorized_keys`, true},
+		{`cp "$F" out.txt`, false},
+		{`for f in *.txt; do cp "$f" build/; done`, false},
+		{`cp source authorized_keys`, false},
+	} {
+		if got := DynamicCopyProtectedBasename(tc.command, "/home/test"); got != tc.want {
+			t.Fatalf("command=%q got=%v want=%v", tc.command, got, tc.want)
+		}
+	}
+}
+
 func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("POSIX link traversal")
