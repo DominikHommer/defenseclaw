@@ -875,8 +875,9 @@ func TestSessionSummary(t *testing.T) {
 		}, want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"},
 			not: []string{"hooks are not reaching", "continue this conversation"}},
 		{name: "the OpenCode launcher refused the run", opts: RunOptions{Harness: "opencode"}, exit: harness.LauncherRefusedExitCode,
-			setup: noChanges, want: []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
-			not: []string{"the harness itself failed", "hooks are not reaching"}},
+			setup: func(ta *testApp) { noChanges(ta); ta.term.hooks, ta.term.code = nil, harness.LauncherRefusedExitCode },
+			want:  []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
+			not:   []string{"the harness itself failed", "hooks are not reaching"}},
 		// AG-MAC-F3: a harness that failed at start because localhost does
 		// not resolve is told apart, with what to do; the pull of a copy
 		// still runs, without its progress line.
