@@ -173,6 +173,16 @@ func (l *lifecycle) reportDiskFull(cause error) {
 		l.opts.Action+" again")
 }
 
+// reportNoSpace adds codeDiskFull to a run refused before its transaction
+// started (the lifecycle directory, the lock or the plan) only when the
+// write failed for lack of space: a refusal of the config is not blamed on
+// a nearly full disk.
+func (l *lifecycle) reportNoSpace(err error) {
+	if noSpace(err) {
+		l.reportDiskFull(err)
+	}
+}
+
 // formatDiskBytes prints a free-space figure in KiB below 1 MiB, in MiB
 // below 1 GiB and in GiB above.
 func formatDiskBytes(n uint64) string {

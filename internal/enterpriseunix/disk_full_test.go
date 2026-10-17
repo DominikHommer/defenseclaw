@@ -114,3 +114,28 @@ func TestFormatDiskBytes(t *testing.T) {
 		}
 	}
 }
+
+// A run that fails for lack of space before its transaction starts (here
+// the lifecycle directory) names the full filesystem too.
+func TestRefusedBeforeTheTransactionNamesTheFullFilesystem(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	lifecycleDir := h.env.P(h.env.Layout.LifecycleDir)
+	h.env.DiskSpace = fullFilesystem(lifecycleDir, 0)
+	chown := h.env.Lchown
+	h.env.Lchown = func(path string, uid, gid int) error {
+		if path == lifecycleDir {
+			return &fs.PathError{Op: "lchown", Path: path, Err: syscall.ENOSPC}
+		}
+		return chown(path, uid, gid)
+	}
+	failed := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")})
+	requireError(t, failed, codeState)
+	got := messagesOf(failed.Errors, codeDiskFull)
+	if want := "no space left on the filesystem holding " + h.env.Layout.LifecycleDir; !strings.Contains(got, want) {
+		t.Fatalf("disk_full = %q, want it to contain %q", got, want)
+	}
+	if failed.Errors[0].Code != codeState {
+		t.Fatalf("the refusal's code is no longer first: %+v", failed.Errors)
+	}
+}
