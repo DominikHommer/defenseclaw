@@ -97,6 +97,15 @@ func (c contractSchemas) validate(t *testing.T, name string, document []byte) ma
 	return object
 }
 
+// runExit is the exit status a command run ends with: 0 for success, else
+// the code its failure asked for (commandExitCode only labels failures).
+func runExit(err error) int {
+	if err == nil {
+		return 0
+	}
+	return commandExitCode(err)
+}
+
 // requireExit checks the process exit code and, when the document carries
 // one, that exit_code agrees with it.
 func requireExit(t *testing.T, doc map[string]any, got, want int) {

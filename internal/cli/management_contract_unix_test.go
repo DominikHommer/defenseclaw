@@ -10,6 +10,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -23,8 +24,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// contractHostCommands answers `systemctl --version` as a supported systemd
+// host does and runs no other host command.
+type contractHostCommands struct{ noHostCommands }
+
+func (c contractHostCommands) Run(ctx context.Context, name string, args ...string) (enterpriseunix.CommandResult, error) {
+	if name == "systemctl" && len(args) == 1 && args[0] == "--version" {
+		return enterpriseunix.CommandResult{Stdout: []byte("systemd 252 (252-46.el9)\n")}, nil
+	}
+	return c.noHostCommands.Run(ctx, name, args...)
+}
+
 // contractUnixEnv points the Linux and macOS lifecycle at an empty device
-// tree that a root caller runs against, with no host commands.
+// tree that a root caller runs against. On Linux the tree and the host
+// commands show systemd as the running init system, as on a supported host,
+// so both platforms report the same device that is not installed yet.
 func contractUnixEnv(t *testing.T) (root string, layout managed.StandaloneLayout) {
 	t.Helper()
 	goos := enterpriseunix.CurrentGOOS()
@@ -33,9 +47,14 @@ func contractUnixEnv(t *testing.T) (root string, layout managed.StandaloneLayout
 		t.Skip(err)
 	}
 	root = t.TempDir()
+	if goos == "linux" {
+		if err := os.MkdirAll(filepath.Join(root, "run", "systemd", "system"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	previous := newUnixLifecycleEnv
 	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: noHostCommands{}}, nil
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: contractHostCommands{}}, nil
 	}
 	t.Cleanup(func() { newUnixLifecycleEnv = previous })
 	return root, layout
@@ -61,8 +80,8 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 	cmd.SetOut(&out)
 	err := runUnixLifecycle(cmd, contractUnixPlatform(), "status", &unixLifecycleOptions{json: true})
 	doc := schemas.validate(t, "lifecycle-result.schema.json", out.Bytes())
-	requireExit(t, doc, commandExitCode(err), commandExitCode(err))
-	if doc["installed"] != false {
+	requireExit(t, doc, runExit(err), 0)
+	if doc["ok"] != true || doc["installed"] != false {
 		t.Fatalf("status of an empty device = %s", out.String())
 	}
 
@@ -77,7 +96,7 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 		t.Fatalf("the credential value was printed: %s", out.String())
 	}
 	doc = schemas.validate(t, "secret-result.schema.json", out.Bytes())
-	requireExit(t, doc, commandExitCode(err), commandExitCode(err))
+	requireExit(t, doc, runExit(err), runExit(err))
 
 	secrets := root + layout.SecretsDir
 	if err := os.MkdirAll(secrets, 0o700); err != nil {
