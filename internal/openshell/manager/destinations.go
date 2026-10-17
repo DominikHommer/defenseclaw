@@ -178,9 +178,9 @@ type destRow struct {
 	Category string   `json:"category,omitempty"`
 	Refusal  string   `json:"refusal,omitempty"`
 	Binaries []string `json:"binaries,omitempty"`
-	// ActorAt is when the last of Binaries was last seen connecting: the
-	// row's lineage is that of the process of it that started shortly
-	// before (PIDOf, GAP-0174).
+	// ActorAt is when the last of Binaries was last seen connecting. The
+	// row's lineage is the one process of that program at this time, when
+	// the tree can identify it (GAP-0174, GAP-0119).
 	ActorAt time.Time `json:"actor_at,omitzero"`
 	PID     int       `json:"pid,omitempty"`
 	Proxy   counts    `json:"proxy,omitzero"`
