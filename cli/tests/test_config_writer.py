@@ -714,6 +714,91 @@ def test_derived_provider_keeps_yaml_12_name_after_unrelated_write(tmp_path, mon
     assert overlay["providers"][0]["name"] == "on"
 
 
+def test_severity_override_takes_block_at_words_in_any_case(tmp_path, monkeypatch):
+    """GAP-0760 (#1099): the schema listed INFO for severity_overrides, which
+    the rule composer refuses, and refused the lower case block_at takes."""
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    config_writer.apply([Change("guardrail.rules.severity_overrides", {"SEC-AWS-SECRET": "high"})], "cli:test", "t", path=path)
+    with pytest.raises(Exception, match="use one of CRITICAL, HIGH, MEDIUM, LOW in any case"):
+        config_writer.apply(
+            [Change("guardrail.rules.severity_overrides", {"SEC-AWS-SECRET": "INFO"})], "cli:test", "t", path=path
+        )
+
+
+_SAME_NAME_PROVIDERS = """llm_providers:
+  custom:
+    - name: OpenAI
+      domains: [llm.team.internal]
+      profile_id: team
+      env_keys: [TEAM_OPENAI_KEY]
+      base_provider_type: openai
+      base_url: https://llm.team.internal/v1
+      allowed_requests: [chat, responses]
+      available_models: [team-small]
+      request_path_overrides: {chat: /team/chat}
+      tls: {insecure_skip_verify: true}
+      extra_headers: {X-Team: sec, llm-model: team-small}
+    - name: bedrock
+      domains: [bedrock.team.internal]
+      env_keys: [TEAM_BEDROCK_KEY]
+      bedrock: {region: us-east-1, inference_profile: us, deployment_aliases: {small: model-small}}
+      extra_headers: {X-Team: sec}
+    - name: azure
+      azure: {endpoint: https://team.openai.azure.example, deployment_aliases: {gpt: team-gpt}}
+    - name: vertex
+      vertex: {project_id: lab-project, region: us-central1}
+  ollama_ports: [11500]
+"""
+
+
+def test_same_name_providers_survive_a_write_field_by_field(tmp_path, monkeypatch):
+    """GAP-0361 (#1099): a config_version 9 config written by 1.0.1 or 1.0.2
+    with llm_providers.custom entries named like built-in providers reads
+    back field by field after an unrelated write, and the derived
+    custom-providers.json carries every field, extra_headers included."""
+    import json
+
+    from defenseclaw import config as config_module
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = _config(tmp_path, _SAME_NAME_PROVIDERS)
+    before = yaml.safe_load(open(path, encoding="utf-8"))["llm_providers"]
+
+    config_writer.apply([Change("update.check", False)], "cli:test", "t", path=path)
+
+    assert yaml.safe_load(open(path, encoding="utf-8"))["llm_providers"] == before
+    cfg = config_module.load(data_dir=str(tmp_path))
+    openai, bedrock, azure, vertex = cfg.llm_providers.custom
+    assert (openai.name, openai.domains, openai.profile_id, openai.env_keys) == (
+        "OpenAI",
+        ["llm.team.internal"],
+        "team",
+        ["TEAM_OPENAI_KEY"],
+    )
+    assert (openai.base_provider_type, openai.base_url) == ("openai", "https://llm.team.internal/v1")
+    assert (openai.allowed_requests, openai.available_models) == (["chat", "responses"], ["team-small"])
+    assert openai.request_path_overrides == {"chat": "/team/chat"}
+    assert openai.tls is not None and openai.tls.insecure_skip_verify is True
+    assert openai.extra_headers == {"X-Team": "sec", "llm-model": "team-small"}
+    assert bedrock.bedrock is not None and bedrock.bedrock.deployment_aliases == {"small": "model-small"}
+    assert (bedrock.bedrock.region, bedrock.bedrock.inference_profile) == ("us-east-1", "us")
+    assert bedrock.extra_headers == {"X-Team": "sec"}
+    assert azure.azure is not None and azure.azure.deployment_aliases == {"gpt": "team-gpt"}
+    assert vertex.vertex is not None and vertex.vertex.project_id == "lab-project"
+    assert cfg.llm_providers.ollama_ports == [11500]
+
+    overlay = json.loads((tmp_path / "custom-providers.json").read_text(encoding="utf-8"))
+    rendered = {entry["name"]: entry for entry in overlay["providers"]}
+    assert rendered["OpenAI"]["extra_headers"] == {"X-Team": "sec", "llm-model": "team-small"}
+    assert rendered["OpenAI"]["request_path_overrides"] == {"chat": "/team/chat"}
+    assert rendered["OpenAI"]["tls"] == {"insecure_skip_verify": True}
+    assert rendered["bedrock"]["extra_headers"] == {"X-Team": "sec"}
+    assert rendered["bedrock"]["bedrock"]["deployment_aliases"] == {"small": "model-small"}
+    assert overlay["ollama_ports"] == [11500]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership")
 def test_durable_replacement_preserves_existing_owner_and_group(tmp_path, monkeypatch):
     path = tmp_path / "config.yaml"

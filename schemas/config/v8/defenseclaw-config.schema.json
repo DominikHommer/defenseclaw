@@ -5202,6 +5202,11 @@
         }
       }
     },
+    "ruleSeverity": {
+      "type": "string",
+      "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+      "description": "A rule severity: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Rules have no INFO severity."
+    },
     "severityName": {
       "type": "string",
       "enum": [
@@ -5465,7 +5470,7 @@
             "$ref": "#/$defs/ruleId"
           },
           "additionalProperties": {
-            "$ref": "#/$defs/severityName"
+            "$ref": "#/$defs/ruleSeverity"
           }
         },
         "suppressions": {
