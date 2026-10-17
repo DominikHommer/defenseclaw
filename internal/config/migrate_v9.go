@@ -961,8 +961,11 @@ func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
 // config (generation +1), the record, the data.json rename (not on a
-// managed host), the inline key move and finally the audit.db rows.
-func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]string, error) {
+// managed host), the inline key move and finally the audit.db rows. A
+// failure before the config commit puts the .env back as it was, so the
+// moved scanner key is not left behind while the command reports that
+// nothing was migrated (GAP-0808).
+func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (written []string, err error) {
 	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
 	if err != nil {
 		return nil, err
@@ -986,7 +989,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		defer auditDB.Close()
 		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
 	}
-	var written []string
+	committed := false
 	// The documented rollback path must hold the v8 source of this run.
 	// Keep an older backup as a timestamped sibling before refreshing it.
 	backup := m.configPath + ConfigV8BackupSuffix
@@ -1027,10 +1030,23 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
-		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
-			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, err)
+		undo, appendErr := appendDotEnvKey(envPath, m.envKey, m.envValue)
+		if appendErr != nil {
+			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, appendErr)
 		}
 		written = append(written, envPath)
+		if undo != nil {
+			defer func() {
+				if committed || err == nil {
+					return
+				}
+				if undoErr := undo(); undoErr != nil {
+					err = fmt.Errorf("%w; %s still holds the moved scanner key: %v", err, envPath, undoErr)
+					return
+				}
+				written = slices.DeleteFunc(written, func(path string) bool { return path == envPath })
+			}()
+		}
 	}
 	// Provider CA files and the evidence record must exist before the
 	// committed config can reference them. An obstructed record path then
@@ -1078,6 +1094,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	if _, err := txn.Commit(current, migrated, exists, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration"}); err != nil {
 		return written, err
 	}
+	committed = true
 	written = append(written, m.configPath)
 	// On a managed host the admin owns policy_dir (as planRegoRefresh
 	// reports): its data.json stays, so a rollback to the v8 config finds it.
@@ -1201,17 +1218,30 @@ func migrationDataDir(configPath string, root *yaml.Node) string {
 }
 
 // appendDotEnvKey adds key=value to a private .env unless the key is already
-// defined there.
-func appendDotEnvKey(path, key, value string) error {
+// defined there. When it changed the file, undo puts back the previous bytes,
+// or removes the file it created.
+func appendDotEnvKey(path, key, value string) (undo func() error, err error) {
 	existing, err := os.ReadFile(path)
+	existed := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	updated, changed := DotEnvWithKey(existing, key, value)
 	if !changed {
-		return nil
+		return nil, nil
 	}
-	return cfgtxn.WriteFileDurable(path, updated, 0o600)
+	if err := cfgtxn.WriteFileDurable(path, updated, 0o600); err != nil {
+		return nil, err
+	}
+	return func() error {
+		if !existed {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			return nil
+		}
+		return cfgtxn.WriteFileDurable(path, existing, 0o600)
+	}, nil
 }
 
 // DotEnvWithKey returns the .env bytes with a usable key. An existing
