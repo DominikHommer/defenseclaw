@@ -235,8 +235,8 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 	wg.Wait()
 
 	var ok, unreachable, intercepted, untrusted []string
-	issuers := map[string]bool{}
-	var issuerList []string
+	// Issuers per classification, so each message names only its own.
+	var interceptedBy, untrustedBy issuerSet
 	for _, p := range probes {
 		if p.err != nil {
 			unreachable = append(unreachable, p.host)
@@ -247,28 +247,33 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 			continue
 		}
 		issuer := chainIssuer(p.chain)
-		if !issuers[issuer] {
-			issuers[issuer] = true
-			issuerList = append(issuerList, fmt.Sprintf("%q", issuer))
-		}
 		if verifyChain(p.host, p.chain, hostRoots, now) == nil {
 			intercepted = append(intercepted, p.host)
+			interceptedBy.add(issuer)
 		} else {
 			untrusted = append(untrusted, p.host)
+			untrustedBy.add(issuer)
 		}
+	}
+	untrustedDetail := func() string {
+		return fmt.Sprintf("%s present a certificate from %s, which neither this computer nor sandboxes trust "+
+			"(a TLS-inspecting proxy whose root CA is not installed here either?)", strings.Join(untrusted, ", "), untrustedBy.String())
 	}
 	switch {
 	case len(intercepted) > 0:
 		c.Status = openshell.StatusFail
 		setFix()
-		return finish(fmt.Sprintf("TLS inspection: %s present a certificate from %s, which this computer trusts but sandboxes do not, "+
+		detail := fmt.Sprintf("TLS inspection: %s present a certificate from %s, which this computer trusts but sandboxes do not, "+
 			"so agents in a sandbox fail with \"unable to get local issuer certificate\"",
-			strings.Join(intercepted, ", "), strings.Join(issuerList, ", ")))
+			strings.Join(intercepted, ", "), interceptedBy.String())
+		if len(untrusted) > 0 {
+			detail += "; " + untrustedDetail()
+		}
+		return finish(detail)
 	case len(untrusted) > 0:
 		c.Status = openshell.StatusWarn
 		setFix()
-		return finish(fmt.Sprintf("%s present a certificate from %s, which neither this computer nor sandboxes trust "+
-			"(a TLS-inspecting proxy whose root CA is not installed here either?)", strings.Join(untrusted, ", "), strings.Join(issuerList, ", ")))
+		return finish(untrustedDetail())
 	case len(ok) == 0:
 		if c.Status == openshell.StatusPass {
 			c.Status = openshell.StatusSkip
@@ -281,3 +286,23 @@ func (a *App) runTLSTrustCheck(ctx context.Context, managed bool) openshell.Chec
 	}
 	return finish(detail)
 }
+
+// issuerSet is the distinct issuers of a classification, quoted, in first
+// seen order.
+type issuerSet struct {
+	seen map[string]bool
+	list []string
+}
+
+func (s *issuerSet) add(issuer string) {
+	if s.seen[issuer] {
+		return
+	}
+	if s.seen == nil {
+		s.seen = map[string]bool{}
+	}
+	s.seen[issuer] = true
+	s.list = append(s.list, fmt.Sprintf("%q", issuer))
+}
+
+func (s issuerSet) String() string { return strings.Join(s.list, ", ") }

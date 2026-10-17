@@ -144,6 +144,26 @@ func TestTLSTrustCheck(t *testing.T) {
 	if c = a.tlsTrustCheck(ctx, false); c.Status != openshell.StatusSkip || !strings.Contains(c.Detail, "not checked") {
 		t.Fatalf("no roots: %+v", c)
 	}
+
+	// One provider intercepted by the trusted corporate CA, another re-signed
+	// by a CA nobody trusts: each part of the message names its own issuer.
+	mixedLab := newTLSLab(t)
+	mixedLab.intercepted = map[string]bool{"api.anthropic.com": true}
+	rogue := openshelltest.NewCA(t, "Unknown Root CA")
+	mixed := tlsApp(t, mixedLab, "")
+	chain := mixed.TLSTrust.Chain
+	mixed.TLSTrust.Chain = func(ctx context.Context, host string) ([]*x509.Certificate, error) {
+		if host == "api.openai.com" {
+			return []*x509.Certificate{openshelltest.NewLeafCert(t, rogue, host)}, nil
+		}
+		return chain(ctx, host)
+	}
+	c = mixed.tlsTrustCheck(ctx, false)
+	want := `TLS inspection: api.anthropic.com present a certificate from "Corp Inspection Root CA", which this computer trusts but sandboxes do not`
+	also := `; api.openai.com present a certificate from "Unknown Root CA", which neither this computer nor sandboxes trust`
+	if c.Status != openshell.StatusFail || !strings.Contains(c.Detail, want) || !strings.Contains(c.Detail, also) {
+		t.Fatalf("mixed: %+v", c)
+	}
 }
 
 // On a managed computer the CAs are the administrator's, as the daemon got
