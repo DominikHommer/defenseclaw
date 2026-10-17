@@ -1124,10 +1124,15 @@ func retainedPhase(p audit.SandboxPhase) bool {
 func (m *Manager) retention(b *box) time.Duration {
 	m.mu.Lock()
 	eff := b.eff
+	name := b.rec.Name
 	m.mu.Unlock()
 	f, ok := effectiveFloor(eff)
 	if !ok {
-		f = m.config().OpenShell.Admin
+		cfg := m.configForSandbox(name)
+		if cfg == nil {
+			return 0
+		}
+		f = cfg.OpenShell.Admin
 	}
 	if f.DeleteStoppedAfter == "" {
 		return 0

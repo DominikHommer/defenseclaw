@@ -894,6 +894,16 @@ func (m *Manager) config() *config.Config {
 	return cfg
 }
 
+// configForSandbox keeps fallback policy checks under the same floor as
+// normal resolution. A managed sandbox without a confirmed policy has no
+// configuration to borrow from another sandbox.
+func (m *Manager) configForSandbox(name string) *config.Config {
+	if m.opts.ConfigForSandbox != nil {
+		return m.opts.ConfigForSandbox(name)
+	}
+	return m.config()
+}
+
 // keepIgnored is what a mounted project's undo point keeps a copy of
 // (openshell.workdir.undo_ignored): the directory names and the cap on the
 // copies, or nothing while the key is off.

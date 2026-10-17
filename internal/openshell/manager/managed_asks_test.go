@@ -223,11 +223,12 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 // Re-resolving one sandbox must use its registration's floor, even while a
 // second sandbox in the same account has a different floor in force.
 func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
-	e, _ := managedEnv(t, nil)
+	e, auth := managedEnv(t, nil)
 	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
 	e.live(sandboxapi.CreateRequest{Name: "codexbox", Copy: true})
 	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
 	blocked := map[string]string{"claudebox": "pypi.org", "codexbox": "api.github.com"}
+	retention := map[string]string{"claudebox": "2h", "codexbox": "3h"}
 	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
 		profile, ok := floors[name]
 		if !ok {
@@ -236,6 +237,7 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		cfg := *e.config()
 		cfg.OpenShell.Admin.MinProfile = profile
 		cfg.OpenShell.Admin.EgressBlock = []string{blocked[name]}
+		cfg.OpenShell.Admin.DeleteStoppedAfter = retention[name]
 		return &cfg
 	}
 	for name, want := range floors {
@@ -256,12 +258,34 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		if got := eff.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
 			t.Fatalf("%s inherited %s's block: %+v", name, other, got)
 		}
+		org, err := e.m.orgPolicy(b)
+		must(t, err)
+		if got := org.DecideEgress(blocked[name], 443); got.Rule != packs.RuleAdminBlock {
+			t.Fatalf("%s fallback missed its own block: %+v", name, got)
+		}
+		if got := org.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
+			t.Fatalf("%s fallback inherited %s's block: %+v", name, other, got)
+		}
+	}
+	auth.noFloor.Store(true)
+	for name, want := range map[string]time.Duration{"claudebox": 2 * time.Hour, "codexbox": 3 * time.Hour} {
+		b, err := e.m.box(name)
+		must(t, err)
+		if got := e.m.retention(b); got != want {
+			t.Fatalf("%s fallback retention = %s, want %s", name, got, want)
+		}
 	}
 	delete(floors, "claudebox")
 	b, err := e.m.box("claudebox")
 	must(t, err)
 	if _, err := e.m.resolveBox(b); err == nil {
 		t.Fatal("unconfirmed sandbox inherited another sandbox's floor")
+	}
+	if _, err := e.m.orgPolicy(b); err == nil {
+		t.Fatal("unconfirmed sandbox's fallback policy inherited another floor")
+	}
+	if got := e.m.retention(b); got != 0 {
+		t.Fatalf("unconfirmed sandbox inherited another floor's retention: %s", got)
 	}
 }
 
