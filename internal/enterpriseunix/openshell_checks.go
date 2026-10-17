@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
 // The install-mode verify rows. They answer one question for the
@@ -550,10 +551,6 @@ func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
 		return E2fsprogsCheckResult{Problem: fmt.Sprintf("%s is not an administrator-controlled directory (%v), so it is refused", dir, err),
 			Fix: "make the directory tree root-owned and closed to other writers (chown -R root:wheel; chmod -R go-w)"}
 	}
-	if problem := openshell.AdminE2fsprogsCandidateAccessProblem(dir, func(path string) (os.FileInfo, error) { return os.Stat(e.P(path)) }); problem != "" {
-		return E2fsprogsCheckResult{Problem: problem,
-			Fix: "make the administrator's e2fsprogs directory and its ancestors traversable by sandbox accounts (chmod o+x)"}
-	}
 	// The folder the gateway's exec shim puts first on the driver's PATH,
 	// found by the same rule (GAP-0506): ensure used to accept the tools in
 	// any of sbin, bin or the folder itself while the shim took only sbin,
@@ -582,7 +579,7 @@ func (e *Env) checkKVM() prereqRow {
 	if info.Mode().Perm()&0o006 == 0o006 {
 		return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " is readable and writable by every user"}
 	}
-	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " is limited to its group (users need the kvm group)"}
+	return prereqRow{Name: "kvm", OK: true, Detail: kvmDevice + " needs the kvm group or a read-write user ACL"}
 }
 
 func (e *Env) checkDocker() prereqRow {
@@ -601,7 +598,7 @@ func (e *Env) checkDocker() prereqRow {
 // needs the docker group: the docker driver runs in Docker, and the MicroVM
 // driver (and its docker fallback) boots the agent images DefenseClaw builds
 // in Docker for each account (GAP-0511). The MicroVM driver also needs the
-// kvm group where /dev/kvm is not open to everyone. The accounts are those
+// kvm group or a named user ACL where /dev/kvm is not open to everyone. The accounts are those
 // that used sandboxes (a registration or decision record, or sandbox state of
 // their own in the home), never every enrolled one: administrators and
 // service accounts that never run a sandbox do not belong in the
@@ -636,7 +633,7 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 	if len(accounts) == 0 {
 		need := "docker"
 		if needKVM {
-			need = "kvm and docker"
+			need = "kvm (or a /dev/kvm user ACL) and docker"
 		}
 		return []prereqRow{{Name: "groups", OK: true, Detail: fmt.Sprintf("no account has used sandboxes yet; each account that runs them needs the %s group", need)}}, advisory
 	}
@@ -646,7 +643,15 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 		if !ok {
 			continue
 		}
-		if needKVM && !contains(groups, "kvm") {
+		hasKVM := contains(groups, "kvm")
+		if needKVM {
+			if acl, err := posixacl.ReadAccessXattr(e.P(kvmDevice)); err == nil {
+				if found, allowed := acl.NamedUserAllows(a.UID, 0o6); found {
+					hasKVM = allowed
+				}
+			}
+		}
+		if needKVM && !hasKVM {
 			noKVM = append(noKVM, a.Name)
 		}
 		if !contains(groups, "docker") {
@@ -655,10 +660,10 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 	}
 	n := len(accounts)
 	if needKVM {
-		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) is in the kvm group", n)}
+		row := prereqRow{Name: "groups kvm", OK: true, Detail: fmt.Sprintf("every account that used sandboxes (%d) can use /dev/kvm through the kvm group or a user ACL", n)}
 		if len(noKVM) > 0 {
 			row = prereqRow{Name: "groups kvm", Fix: groupFix("kvm"),
-				Detail: fmt.Sprintf("%d of %d accounts that used sandboxes are not in the kvm group (%s), so no MicroVM starts for them", len(noKVM), n, strings.Join(noKVM, ", "))}
+				Detail: fmt.Sprintf("%d of %d accounts that used sandboxes lack /dev/kvm read-write access (%s), so no MicroVM starts for them", len(noKVM), n, strings.Join(noKVM, ", "))}
 			if s.dockerFallback() {
 				row.Detail += "; they get the docker fallback"
 			}

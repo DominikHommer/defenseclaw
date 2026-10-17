@@ -58,6 +58,12 @@ func TestManagedMacDoctorUsesTheGatewaysE2fsprogsSetting(t *testing.T) {
 			t.Fatalf("managed setting %q: %+v", form, got)
 		}
 	}
+	ta.daemon.status.Managed.Driver = "docker"
+	admin = filepath.Join(root, "missing")
+	if got := row(); got != nil {
+		t.Fatalf("Docker driver unexpectedly checks MicroVM e2fsprogs: %+v", got)
+	}
+	ta.daemon.status.Managed.Driver = "vm"
 	admin = filepath.Join(root, "bad")
 	if got := row(); got == nil || got.Status != openshell.StatusFail || got.Fix == nil || !strings.Contains(got.Fix.Summary, "install prefix or the folder") {
 		t.Fatalf("bad administrator directory: %+v", got)

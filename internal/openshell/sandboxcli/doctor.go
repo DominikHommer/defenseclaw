@@ -195,7 +195,9 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 	}
 	if managed && a.GOOS == "darwin" {
-		rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		if st.managed == nil || st.managed.Driver != "docker" {
+			rep.Checks = append(rep.Checks, d.ManagedE2fsprogsCheck())
+		}
 		// The per-user job is outside the root gateway's readiness report.
 		// Read only this account's gui domain through the host doctor's runner.
 		d.GOOS, d.Geteuid = a.GOOS, a.Geteuid

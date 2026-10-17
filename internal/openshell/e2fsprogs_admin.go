@@ -79,9 +79,6 @@ func ManagedE2fsprogsToolDir(adminDir, home string, uid int, trustedAdmin func(p
 
 func managedE2fsprogsToolDir(adminDir, packageDir, home string, uid int, trustedAdmin func(path string, file bool) error) (dir, problem string) {
 	if adminDir != "" {
-		if problem := AdminE2fsprogsCandidateAccessProblem(adminDir, os.Stat); problem != "" {
-			return "", problem
-		}
 		tools := AdminE2fsprogsToolDir(adminDir, RegularFile)
 		if tools == "" {
 			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir)
@@ -127,25 +124,6 @@ func managedE2fsprogsToolDir(adminDir, packageDir, home string, uid int, trusted
 		return tools, ""
 	}
 	return "", "MicroVM sandboxes need mke2fs and debugfs in the administrator's enterprise.openshell.e2fsprogs_dir, your own ~/.local/opt/e2fsprogs/sbin, or the managed package; a Homebrew keg is not used on a managed computer"
-}
-
-// AdminE2fsprogsCandidateAccessProblem refuses an inaccessible candidate
-// before selecting another one. Root can see tools in a private sbin that
-// an account cannot see, so skipping it could give ensure and the gateway
-// different answers for the same install prefix.
-func AdminE2fsprogsCandidateAccessProblem(adminDir string, stat func(string) (os.FileInfo, error)) string {
-	for _, candidate := range []string{filepath.Join(adminDir, "sbin"), filepath.Join(adminDir, "bin"), adminDir} {
-		info, err := stat(candidate)
-		if err != nil && !os.IsNotExist(err) {
-			return candidate + " cannot be traversed by every account: " + err.Error()
-		}
-		if err == nil && info.IsDir() {
-			if problem := e2fsprogsDirectoryAccessProblem(candidate, stat); problem != "" {
-				return problem
-			}
-		}
-	}
-	return ""
 }
 
 // E2fsprogsAccessProblem is the account-access check shared by ensure,
