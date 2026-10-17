@@ -396,7 +396,7 @@
         "device_group": "eng-laptops",
         "signer_key_id": "acme-2026a",
         "principal": "control-plane:acme/alice",
-        "actor": "root",
+        "actor": "os:uid:0:root",
         "manifest_sha256": "9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
         "state": "confirmed",
         "transitions": [

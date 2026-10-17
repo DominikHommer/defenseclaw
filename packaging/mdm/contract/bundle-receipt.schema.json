@@ -38,7 +38,7 @@
     },
     "actor": {
       "type": "string",
-      "description": "The local OS account that ran the apply (root, SYSTEM)."
+      "description": "The local OS account that ran the apply, as configwrite.CurrentOSActor spells it: os:uid:<uid>:<name> on Linux and macOS (os:uid:0:root for root), os:sid:<sid>:<name> on Windows (os:sid:S-1-5-18:NT_AUTHORITY/SYSTEM for LocalSystem; a backslash in the name becomes /, other characters outside [A-Za-z0-9._:/-] become _), os:unknown when the account cannot be read. MDM and a management agent running as root or SYSTEM record the same actor."
     },
     "change_summary": {
       "type": "string"
@@ -147,7 +147,7 @@
       "version": 13,
       "signer_key_id": "acme-2026a",
       "principal": "control-plane:acme/alice",
-      "actor": "root",
+      "actor": "os:uid:0:root",
       "change_summary": "Block HIGH for eng",
       "state": "confirmed",
       "effective_policy_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
@@ -167,7 +167,7 @@
       "version": 14,
       "signer_key_id": "acme-2026a",
       "principal": "control-plane:acme/alice",
-      "actor": "root",
+      "actor": "os:uid:0:root",
       "state": "failed",
       "error_code": "secret_ref_missing",
       "sessions_restart_required": 0,

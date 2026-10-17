@@ -221,8 +221,9 @@ with the old one: resubmit even when the prefix matches.
 ### 2.6 `--reason`
 
 `--reason` is not recorded anywhere a caller can read: the result has no
-reason field, and receipts carry only `actor`, which is `root` (or SYSTEM) for
-MDM and agent alike. On Linux and macOS some values switch modes: `path` takes
+reason field, and receipts carry only `actor`, the OS account that ran the
+apply (`os:uid:0:root` on Linux and macOS, `os:sid:S-1-5-18:<name>` for
+LocalSystem on Windows), which is the same for MDM and agent alike. On Linux and macOS some values switch modes: `path` takes
 a bundle from the inbox and runs the path unit's logic, and `package` runs the
 package and tamper handling. The agent passes `--reason management` or no
 `--reason`; `path`, `package`, `secret` and `mdm` are reserved for
