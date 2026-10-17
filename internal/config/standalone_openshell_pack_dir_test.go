@@ -174,4 +174,8 @@ func TestOfflineSandboxPackDefaultIgnoresSignerFolder(t *testing.T) {
 	if copy.OpenShellPackDirForDigest() != want {
 		t.Fatalf("copy lost legacy digest path: %q", copy.OpenShellPackDirForDigest())
 	}
+	copy.OpenShell.PackDir = "/administrator/sandbox-packs"
+	if copy.OpenShellPackDirForDigest() != copy.OpenShell.PackDir || copy.OpenShellPackDirAdvisory() != "" {
+		t.Fatalf("an explicit change must clear the legacy digest and advisory: %q, %q", copy.OpenShellPackDirForDigest(), copy.OpenShellPackDirAdvisory())
+	}
 }

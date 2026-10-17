@@ -1154,7 +1154,7 @@ func (c *Config) OpenShellPackDirForDigest() string {
 	if c == nil {
 		return ""
 	}
-	if c.legacyOpenShellPackDir != "" {
+	if c.legacyOpenShellPackDir != "" && c.OpenShell.PackDir == c.legacyOpenShellPackDir {
 		return joinPathForPlatform(runtime.GOOS, c.PolicyDir, DefaultOpenShellPackDirName)
 	}
 	return c.OpenShell.PackDir
@@ -1164,7 +1164,7 @@ func (c *Config) OpenShellPackDirForDigest() string {
 // standalone host that still reads its sandbox packs from the folder releases
 // before 1.0.2 used (standaloneOpenShellPackDirDefault), or "".
 func (c *Config) OpenShellPackDirAdvisory() string {
-	if c == nil || c.legacyOpenShellPackDir == "" {
+	if c == nil || c.legacyOpenShellPackDir == "" || c.OpenShell.PackDir != c.legacyOpenShellPackDir {
 		return ""
 	}
 	packDir := filepath.Join(c.PolicyDir, DefaultOpenShellPackDirName)
