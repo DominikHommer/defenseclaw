@@ -936,6 +936,19 @@ func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T
 	}
 }
 
+func TestManagedStandaloneAcceptsDestinationHeaderReference(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: {env: TEST_DESTINATION_AUTH}\n")
+	_, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), raw,
+		ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir(), Secrets: ObservabilityV8SecretResolverFunc(func(name string) (string, bool) {
+			return "provided by secret store", name == "TEST_DESTINATION_AUTH"
+		})})
+	if err != nil {
+		t.Fatalf("managed header reference refused: %v", err)
+	}
+}
+
 func TestPerUserLiteralHeadersKeepTheirExistingValidation(t *testing.T) {
 	raw := []byte("config_version: 9\nllm:\n  extra_headers:\n    Authorization: example-sensitive-value\n" +
 		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: false\n" +
