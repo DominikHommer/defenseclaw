@@ -66,7 +66,27 @@ type Readiness struct {
 // Inspection reports who decides verdicts.
 type Inspection struct {
 	Local     string `json:"local"`      // active, disabled
-	AIDefense string `json:"ai_defense"` // disabled, ok, unavailable:<code>
+	AIDefense string `json:"ai_defense"` // disabled, ok, unknown, unavailable:<code>
+}
+
+// CodeAIDefenseUnavailable warns that enabled Cisco AI Defense inspection is
+// failing, for example with a rejected key (unavailable:auth_failed).
+const CodeAIDefenseUnavailable = "ai_defense_unavailable"
+
+// AddAIDefenseWarning warns when Inspection.AIDefense is unavailable:<code>.
+// Not an error: the local policy engine keeps deciding, but the cloud
+// inspection the administrator enabled is not running.
+func (r *Result) AddAIDefenseWarning() {
+	if !strings.HasPrefix(r.Inspection.AIDefense, "unavailable") {
+		return
+	}
+	fix := "Check the enterprise.inspection.ai_defense credential and network access"
+	if r.Inspection.AIDefense == "unavailable:auth_failed" {
+		fix = "Cisco AI Defense rejected the stored API key (HTTP 401 or 403): store a valid key under the " +
+			"credential enterprise.inspection.ai_defense.credential names, with `enterprise secret set`"
+	}
+	r.AddWarning(CodeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
+		r.Inspection.AIDefense+"; the local policy engine keeps deciding. "+fix)
 }
 
 // MachinePolicyState is the per-connector machine policy report.
