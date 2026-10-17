@@ -86,10 +86,13 @@ fi
 echo "ok: an upgrade leaves the user units alone"
 
 : >/run/dc-check-no-answer
-if dpkg -r defenseclaw-enterprise >/dev/null 2>&1; then
-    fail "dpkg -r went on while a user manager did not answer"
+if dpkg -r defenseclaw-enterprise >/tmp/dc-check-refused.log 2>&1; then
+    cat /tmp/dc-check-refused.log; fail "dpkg -r went on while a user manager did not answer"
 fi
-dpkg -s defenseclaw-enterprise 2>/dev/null | grep -q "^Status: install ok installed" || fail "the package was not kept"
+grep -q "could not stop, or confirm stopped, the sandbox user units of sample-user; package files were kept" /tmp/dc-check-refused.log ||
+    { cat /tmp/dc-check-refused.log; fail "the refusal does not name the account"; }
+# dpkg -r marks the package for removal (deinstall) whether or not it goes.
+[ "$(dpkg-query -W -f="\${db:Status-Status}" defenseclaw-enterprise 2>/dev/null)" = installed ] || fail "the package was not kept"
 rm -f /run/dc-check-no-answer
 echo "ok: a user manager that does not answer keeps the package"
 
