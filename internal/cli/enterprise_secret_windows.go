@@ -95,10 +95,9 @@ var (
 )
 
 func init() {
+	// Every verb prints its --json failure document for a flag error,
+	// status too (mgmt-agent-api GAP-0029).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
-		if action == "status" {
-			return err
-		}
 		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || windowsArgsRequestJSON(windowsSecretRawArgs()))
 	}
 }
@@ -125,9 +124,9 @@ type windowsSecretState struct {
 	ModifiedAt   string `json:"modified_at,omitempty"`
 }
 
-// windowsSecretFailureResult is what `secret set|remove --json` prints when
-// it fails: the Windows failure branch of secret-result.schema.json. The
-// value never appears in it.
+// windowsSecretFailureResult is what `secret set|remove|status --json`
+// prints when it fails: the Windows failure branch of
+// secret-result.schema.json. The value never appears in it.
 type windowsSecretFailureResult struct {
 	SchemaVersion    int                        `json:"schema_version"`
 	OK               bool                       `json:"ok"`
@@ -202,7 +201,13 @@ func windowsArgsRequestJSON(args []string) bool {
 // runEnterpriseSecret implements `enterprise secret` on Windows.
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
 	if action == "status" {
-		return runWindowsSecretStatus(cmd, opts)
+		// A status failure prints the failure document too: a standard
+		// account's elevation_required printed only its sentence on stderr
+		// (mgmt-agent-api GAP-0029).
+		if err := runWindowsSecretStatus(cmd, opts); err != nil {
+			return reportWindowsSecretFailure(cmd, action, opts, err, opts.json)
+		}
+		return nil
 	}
 	restarted, err := changeWindowsSecret(cmd, action, opts)
 	if err != nil {
@@ -242,11 +247,11 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return withExitCode(err, windowsSecretExitFailure)
+		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	states, err := windowsSecretStatus(layout.SecretsDir)
 	if err != nil {
-		return withExitCode(err, windowsSecretExitFailure)
+		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if opts.json {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})

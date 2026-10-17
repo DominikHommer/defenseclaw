@@ -293,7 +293,8 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	// An unknown flag, a malformed value, a stray argument or a missing
 	// --name is invalid arguments: exit 2 (Windows 1639) with the usage line
 	// and the --help pointer, as on enterprise linux|macos (GAP-2095).
-	// Windows set and remove also print their --json failure document.
+	// Windows set, remove and status also print their --json failure
+	// document.
 	flagError := func(c *cobra.Command, err error) error {
 		err = lifecycleFlagError(c, err)
 		if enterpriseSecretArgumentRefusal != nil {
@@ -320,8 +321,8 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 // windowsSecretLockWaitUsage is --lock-wait of Windows `secret set|remove`.
 const windowsSecretLockWaitUsage = "wait up to this long for a policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618; the installer's lifecycle.lock is waited for up to 30s either way"
 
-// enterpriseSecretArgumentRefusal reports an argument error of `secret set`
-// or `remove` the way the platform documents it: Windows prints the --json
+// enterpriseSecretArgumentRefusal reports an argument error of `enterprise
+// secret` the way the platform documents it: Windows prints the --json
 // failure document (enterprise_secret_windows.go); nil elsewhere.
 var enterpriseSecretArgumentRefusal func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error
 

@@ -180,13 +180,13 @@ stderr, and the exit code is the only signal.
 | Linux and macOS `secret set` / `remove` not run as root | 1 |
 | Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
-| Windows `secret set` / `remove` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
+| Windows `secret set` / `remove` / `status` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` on set or remove (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
 
 `bundle verify` and `bundle anchors install` print JSON for their own
 argument errors (`errors[0].code` `invalid_arguments`, exit 2 / 1639);
 `bundle apply` does not (the rows above). With
-`management_contract` 1, Windows `secret set` / `remove` print a JSON document
-on every outcome (section 4.7).
+`management_contract` 1, Windows `secret set`, `remove` and `status` print a
+JSON document on every outcome (section 4.7).
 
 ### 2.4 Child process rules
 
@@ -622,7 +622,11 @@ Exit 0.
   name, gateway_restarted: false, errors[], exit_code}` on every failure,
   including elevation (5), argument and flag errors (1639), busy (1618) and
   the 1603 cases. `status` prints `{schema_version: 1, secrets: [{name,
-  present, sha256_prefix, modified_at[, mode]}]}` on every OS.
+  present, sha256_prefix, modified_at[, mode]}]}` on every OS. A Windows
+  `status` failure prints the same failure document with `action: "status"`
+  and no `name`: `elevation_required` (5 / 1603, as above),
+  `invalid_arguments` (1639, a flag error) or `state_invalid` (1603, the
+  store cannot be read).
 - Exit: 0; 1 (Linux and macOS failure, including `change_failed` in the
   document; not root, no JSON); 2 (Linux and macOS argument or value error, no
   JSON); 75 busy; Windows 5 / 1603 / 1618 / 1639 (with JSON).
