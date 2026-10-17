@@ -14,10 +14,10 @@
 #                   installed (and new enough / healthy); otherwise exit 1 and
 #                   explain on stderr. For detection rules and compliance
 #                   scripts that read the exit code.
-#   value           always exit 0; print the installed version, or
+#   value           exit 0 (except sessions failure); print the installed version, or
 #                   "not-installed" / "outdated" / "unhealthy". For Intune
 #                   custom attributes and inventory scripts.
-#   jamf            always exit 0; print <result>...</result> with the same
+#   jamf            exit 0 (except sessions failure); print <result>...</result> with the same
 #                   values. For Jamf Pro extension attributes.
 #
 # --require-tetragon MODE (Linux only; consume, observe or enforce) also
@@ -456,7 +456,12 @@ dc_trusted_path "$gateway" || dc_report 0 not-installed "$gateway is missing or 
 [ -s "$gateway" ] || dc_report 0 not-installed "$gateway is empty, likely from a power loss during a package upgrade; reinstall the package"
 [ "$DC_BUNDLE_STATUS" = 0 ] || dc_bundle_status "$gateway"
 
-status=$("$gateway" enterprise "$group" status --json 2>/dev/null </dev/null || true)
+if status=$("$gateway" enterprise "$group" status --json 2>/dev/null </dev/null); then
+    status_code=0
+else
+    status_code=$?
+fi
+[ "$status_code" != 75 ] && ! printf '%s' "$status" | grep -Eq '"code"[[:space:]]*:[[:space:]]*"lifecycle_busy"' || dc_report 0 busy "lifecycle is busy"
 dc_json_true "$status" installed || dc_report 0 not-installed "the managed deployment is not installed"
 version=$(dc_json_field "$status" installed_version)
 [ -n "$version" ] || version=$(dc_json_field "$status" product_version)
@@ -464,16 +469,20 @@ version=$(dc_json_field "$status" installed_version)
 if [ -n "$DC_MIN_VERSION" ] && ! dc_version_ge "$version" "$DC_MIN_VERSION"; then
     dc_report 0 outdated "installed version $version is older than $DC_MIN_VERSION"
 fi
-if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
-    package_problem=$(dc_package_interrupted)
-    [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
+if [ "$DC_REQUIRE_HEALTHY" = 1 ] || [ "$DC_FORMAT" = exit ]; then
+    if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
+        package_problem=$(dc_package_interrupted)
+        [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
+    fi
     if verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null); then
         verify_status=0
     else
         verify_status=$?
     fi
     [ "$verify_status" != 75 ] && [ "$(printf '%s' "$verify" | grep -c '"code": "lifecycle_busy"' || true)" = 0 ] || dc_report 0 busy "lifecycle is busy"
-    dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
+    if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
+        dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
+    fi
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 [ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"

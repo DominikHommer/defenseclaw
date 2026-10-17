@@ -98,9 +98,9 @@ option (exit 2).
 
 | Format | Exit | Output |
 | --- | --- | --- |
-| `exit` (default) | 0 detected, 1 not, 75 busy | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR; a held lifecycle lock exits 75 for retry |
-| `value` | always 0 | The installed version, or one of the states below |
-| `jamf` | always 0 | The same values inside `<result>...</result>` |
+| `exit` (default) | 0 detected, 1 not, 75 busy | `DefenseClaw Enterprise <version>` on STDOUT, or the reason on STDERR; a held lifecycle lock exits 75 for retry even without `--require-healthy` |
+| `value` | 0, except 1 for `--require-sessions-protected` failures | The installed version, or one of the states below |
+| `jamf` | 0, except 1 for `--require-sessions-protected` failures | The same values inside `<result>...</result>` |
 
 | Value state | Meaning for the MDM |
 | --- | --- |
@@ -113,6 +113,8 @@ option (exit 2).
 | `sessions-need-restart` | With `--require-sessions-protected`: running agent sessions predate their managed hook settings and need a restart. Exits 1 in every format, as does an unknown session scan. |
 | `tetragon-not-ready:<check>` | The host is not ready for the requested Tetragon mode. |
 | `busy` | A lifecycle run holds the lock. Retry later; this is neither healthy nor unhealthy. In `exit` format the script exits 75. |
+
+In `exit` format, detection checks for a held lifecycle lock even when health was not requested; other verify failures do not change version detection. In `value` and `jamf` formats, use `--require-healthy` to request a busy check.
 
 In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.
