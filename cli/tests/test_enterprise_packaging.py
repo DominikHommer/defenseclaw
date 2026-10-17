@@ -1153,8 +1153,8 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
         (LINUX / "apt-downgrade-guard.sh").read_text(encoding="utf-8"),
         {
             "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
-            "config=/etc/defenseclaw/config.yaml": f"config={config}",
             "previous_config=/etc/defenseclaw/config.yaml.v8.bak": f"previous_config={previous_config}",
+            "config=/etc/defenseclaw/config.yaml": f"config={config}",
         },
     )
     path = tmp_path / "guard.sh"
