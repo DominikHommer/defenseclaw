@@ -230,6 +230,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 		result.AddWarning("rule_pack_readable_by_users", problem)
 	}
 	result.AddSandboxPolicyWarnings(cfg, "windows")
+	result.AddFailModePolicyWarnings(cfg)
 }
 
 // windowsEnterpriseStandaloneTransactionPending reports a lifecycle

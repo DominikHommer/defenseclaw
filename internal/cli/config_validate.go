@@ -69,6 +69,7 @@ var configValidateCmd = &cobra.Command{
 			return fmt.Errorf("%s is not valid at %s: %s", configValidateShownPath(path), failure.Path, failure.Reason)
 		}
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
+		warnings = append(warnings, loaded.runtime.ManagedFailOpenWarnings()...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)

@@ -377,7 +377,7 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 }
 
 func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
-	if c == nil {
+	if c == nil || c.ManagedHooksFailClosed() {
 		return "closed"
 	}
 	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
@@ -403,20 +403,62 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecis
 			configured = c.Guardrail.EffectiveHookFailModeFor(connector)
 		}
 	}
-	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
+	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured)
 }
 
-// effectiveManagedEnterpriseHookFailMode keeps the protected deployment
-// contract and every runtime consumer on the same fail-closed value. Native
-// Codex and Claude hooks are enforcement boundaries in managed enterprise
-// deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation. In
-// the standalone profile Devin runs the administrator-owned
-// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
-// config, the hook-contract lock and status report the same value.
-func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
+// ManagedHooksFailClosed reports a managed deployment outside the Secure
+// Client profile (the standalone profile). There every DefenseClaw hook, in
+// every guardrail mode and for every connector, fails closed: a tool call or
+// prompt DefenseClaw cannot check is blocked, and no hook_fail_mode or ACP
+// fail_mode can turn that off (owner rule 2026-10-14: only Secure Client
+// fails open). Every fail-mode resolver, renderer and status report reads it,
+// so the hooks, the hook-contract lock and status agree. The open values it
+// ignores are reported by ManagedFailOpenWarnings.
+func (c *Config) ManagedHooksFailClosed() bool {
+	return c != nil && managed.IsManagedEnterprise(c.DeploymentMode) && !c.SecureClientIntegration()
+}
+
+// ManagedFailOpenWarnings names each fail-open setting that a managed
+// deployment outside Secure Client ignores (ManagedHooksFailClosed), in a
+// stable order, so ensure, status, verify and config validate say why the
+// hooks report closed although the config says open. It is nil everywhere
+// else.
+func (c *Config) ManagedFailOpenWarnings() []string {
+	if !c.ManagedHooksFailClosed() {
+		return nil
+	}
+	const hookWhy = "open is ignored on this managed computer: outside Secure Client every DefenseClaw hook fails closed, so a call DefenseClaw cannot check is blocked"
+	var warnings []string
+	add := func(path, value, why string) {
+		if strings.EqualFold(strings.TrimSpace(value), "open") {
+			warnings = append(warnings, path+": "+why)
+		}
+	}
+	add("guardrail.hook_fail_mode", c.Guardrail.HookFailMode, hookWhy)
+	for _, name := range sortedACPKeys(c.Guardrail.Connectors) {
+		add("guardrail.connectors."+name+".hook_fail_mode", c.Guardrail.Connectors[name].HookFailMode, hookWhy)
+	}
+	add("application_protection.guardrail.hook_fail_mode", c.ApplicationProtection.Guardrail.HookFailMode, hookWhy)
+	for _, name := range sortedACPKeys(c.ApplicationProtection.Connectors) {
+		add("application_protection.connectors."+name+".guardrail.hook_fail_mode",
+			c.ApplicationProtection.Connectors[name].Guardrail.HookFailMode, hookWhy)
+	}
+	for _, name := range sortedACPKeys(c.ACP.Profiles) {
+		add("acp.profiles."+name+".fail_mode", c.ACP.Profiles[name].FailMode,
+			"open is ignored on this managed computer: outside Secure Client the ACP guard refuses a step DefenseClaw cannot check, in observe mode too")
+	}
+	return warnings
+}
+
+// effectiveManagedEnterpriseHookFailMode keeps the Secure Client profile's
+// native Codex and Claude Code hooks closed: they are enforcement boundaries
+// in every managed deployment, and an observe-mode or legacy fail-open source
+// config must not weaken their delivery and response behavior after
+// installation. Every other managed profile is closed for every connector
+// already (ManagedHooksFailClosed).
+func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string) string {
 	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
+	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode") {
 		return "closed"
 	}
 	if strings.EqualFold(strings.TrimSpace(configured), "open") {

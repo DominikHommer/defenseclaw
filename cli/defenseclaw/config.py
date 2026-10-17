@@ -2628,12 +2628,19 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Explicit connector posture > observe compatibility > global.
+        """Managed outside Secure Client > explicit connector posture > observe compatibility > global.
 
-        Cursor always follows its guardrail mode: action is closed and
-        observe is open. Other connector-scoped values remain explicit
-        runtime response-integrity choices in observe mode.
+        A managed deployment outside Secure Client is always closed. Otherwise
+        Cursor follows its guardrail mode: action is closed and observe is
+        open. Other connector-scoped values remain explicit runtime
+        response-integrity choices in observe mode.
         """
+        # A managed deployment outside Secure Client fails closed for every
+        # connector and mode (Go Config.ManagedHooksFailClosed).
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is not None and getattr(cfg, "guardrail", None) is self and cfg.managed_hooks_fail_closed():
+            return "closed"
         # Cursor's native hook registration follows policy mode. A stored
         # fail mode from an older setup cannot override that contract.
         if str(connector).strip().lower() == "cursor":
@@ -3813,6 +3820,27 @@ class Config:
     enterprise_openshell: EnterpriseOpenShellConfig = field(
         default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
     )
+    # enterprise.profile as loaded ("" when unset). Load only, like
+    # enterprise_openshell; managed_hooks_fail_closed reads it.
+    enterprise_profile: str = field(default="", repr=False, compare=False)
+
+    def managed_hooks_fail_closed(self) -> bool:
+        """Whether this is a managed deployment outside Secure Client.
+
+        Mirrors Go ``Config.ManagedHooksFailClosed``: there every DefenseClaw
+        hook fails closed for every connector and guardrail mode, whatever
+        ``hook_fail_mode`` says (only Secure Client fails open).
+        """
+        from defenseclaw import config_writer
+
+        if not (
+            _is_managed_enterprise_mode(self.deployment_mode)
+            or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+        ):
+            return False
+        if config_writer.machine_managed_standalone():
+            return True
+        return config_writer._standalone_profile({"enterprise": {"profile": self.enterprise_profile}})
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -7098,6 +7126,9 @@ def load(
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
         enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
+        enterprise_profile=str((raw.get("enterprise") or {}).get("profile") or "")
+        if isinstance(raw.get("enterprise"), dict)
+        else "",
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(

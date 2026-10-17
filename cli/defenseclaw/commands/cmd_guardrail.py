@@ -67,13 +67,13 @@ from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
-    _UPSTREAM_FAIL_OPEN_CONNECTORS,
     FileSnapshot,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
     resolve_connector_fail_mode,
     restore_fail_mode_transaction,
     snapshot_fail_mode_transaction,
+    upstream_fail_open,
 )
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -864,7 +864,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
             if runtime_state.drift and enforcing:
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
-        elif normalize_connector(name) in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        elif upstream_fail_open(app.cfg, name):
             # Copilot CLI, Antigravity and Hermes fail open upstream whatever
             # is configured; `defenseclaw status` reports the same.
             cfm = "open"
@@ -908,9 +908,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif (cmode or "") == "action" and cfm == "open" and normalize_connector(name) not in (
-                _UPSTREAM_FAIL_OPEN_CONNECTORS
-            ):
+            elif (cmode or "") == "action" and cfm == "open" and not upstream_fail_open(app.cfg, name):
                 # An upgrade keeps the fail mode an older setup chose, while a
                 # new setup gives an action connector closed (GAP-0415).
                 scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
@@ -1793,7 +1791,7 @@ def fail_mode_cmd(
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
-            elif normalize_connector(_name) == "hermes":
+            elif normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name):
                 _eff = f"open (Hermes upstream; configured provenance: {_eff})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
@@ -4863,7 +4861,7 @@ def mode_cmd(
         (
             f"Hook failures for {_connector_label(c)} remain fail-open (upstream limitation): "
             "the action can go ahead if the hook cannot reach the gateway."
-            if normalize_connector(c) in _UPSTREAM_FAIL_OPEN_CONNECTORS
+            if upstream_fail_open(app.cfg, c)
             else f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
         )
         for c, fm in fail_flips.items()

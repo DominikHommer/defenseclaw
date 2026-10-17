@@ -51,6 +51,22 @@ _EXPECTED_CONTRACTS = {
     "devin": frozenset({"devin-hooks-v1"}),
 }
 _UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
+
+
+def upstream_fail_open(cfg: Any, connector: str) -> bool:
+    """Whether *connector*'s hooks fail open whatever is configured.
+
+    Copilot CLI, Antigravity and Hermes have no fail-closed hook contract of
+    their own, so per-user and Secure Client hooks for them fail open. A
+    managed deployment outside Secure Client blocks their tool calls through
+    the connector's native deny instead (Config.managed_hooks_fail_closed).
+    """
+    if normalize(connector) not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        return False
+    managed_closed = getattr(cfg, "managed_hooks_fail_closed", None)
+    return not (callable(managed_closed) and managed_closed())
+
+
 _SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
 _WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(
@@ -253,7 +269,7 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
-    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+    if upstream_fail_open(cfg, name):
         return {
             "effective": "open",
             "provenance": f"{name}-upstream-fail-open",
