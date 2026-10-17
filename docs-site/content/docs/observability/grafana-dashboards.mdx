@@ -66,7 +66,7 @@ The tables are read from the plane C `plane_health` records, the
 | Runtime Planes, first row | **Fleet: kernel controls per host** | Which computers run which Tetragon version and mode, whether `enforce_ack` approves their build, how many users are enforced, in burn-in or reset, who is paused, and which digest each runs. Stats count stale approvals, computers on fallback and paused computers |
 | Runtime Planes | **Kernel controls (Linux)** | Would-block and denial counts per cycle (complete, even when an event has no attributed record), the burn-in table with covered and needed hours, and the attributed series |
 | Runtime Planes | **Your Tetragon policies: events from AI agents** | Agent events and blocks by your policies, by policy, with the policy, the agent, the action, the outcome and the hook join |
-| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, user and process; blocks by your own policies |
+| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, resolved account name with uid, and process; blocks by your own policies. When account resolution fails, the table shows the uid alone. |
 
 The runtime dashboard has `host`, `user` and `connector` variables like the
 other boards. The local observability stack also ships five Prometheus rules
