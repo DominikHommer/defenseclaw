@@ -657,6 +657,29 @@ func HookScriptRenderDrift(conn Connector, opts SetupOpts) (string, error) {
 	return "", nil
 }
 
+// HookRuntimeTokenFile returns the connector-scoped token file the hook
+// scripts of conn read after a managed setup with opts, and the credential
+// that setup writes in it; "" when the render keeps no scoped token file (a
+// plugin-only connector, a proxy connector or no data directory). The
+// standalone guardian verifies it (GAP-0424).
+func HookRuntimeTokenFile(opts SetupOpts, conn Connector) (path, token string, err error) {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
+		return "", "", nil
+	}
+	if _, ok := conn.(HookScriptOwner); !ok || len(ManagedPluginArtifacts(conn, opts)) > 0 {
+		return "", "", nil
+	}
+	render := resolveConnectorHookRender(opts, conn)
+	if !render.scopedToken || strings.TrimSpace(render.token) == "" {
+		return "", "", nil
+	}
+	path, err = HookTokenFilePath(filepath.Join(opts.DataDir, "hooks"), conn.Name())
+	if err != nil {
+		return "", "", err
+	}
+	return path, render.token, nil
+}
+
 // renderedHookRuntimeFiles renders the files HookScriptRenderDrift compares,
 // as a managed install writes them.
 func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRuntimeFile, error) {

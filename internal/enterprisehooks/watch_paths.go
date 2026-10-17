@@ -365,6 +365,11 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 			}
 			addExclusive(p)
 		}
+		// The connector's flat runtime record (.hookcfg.<connector>), which
+		// its hook script reads, is DefenseClaw-only and connector-scoped
+		// too: a user who moved it aside waited for the interval pass
+		// (GAP-0671).
+		addExclusive(filepath.Join(dataDir, "hooks", ".hookcfg."+conn.Name()))
 		return nil
 	})
 	if err != nil {
