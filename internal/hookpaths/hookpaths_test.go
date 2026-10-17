@@ -65,6 +65,30 @@ func TestEnvOptionLiteralWriteTargets(t *testing.T) {
 	}
 }
 
+func TestRedirectOnlyStatementsDoNotPanic(t *testing.T) {
+	for _, tc := range []struct{ id, command string }{
+		{"PAN-0001", "> proj/out/build.log"},
+		{"PAN-0002", "> proj/out/build.log && echo done"},
+		{"PAN-0003", "> /tmp/x.log"},
+		{"PAN-0004", ": > proj/out/build.log"},
+		{"PAN-0005", "true && > proj/out/build.log"},
+		{"PAN-0006", "  >> proj/out/build.log"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": "/home/test",
+				"tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := Decode(Resolve(payload)); !ok {
+				t.Fatal("resolver returned no decodable proof")
+			}
+		})
+	}
+}
+
 // A hard link is compared by file identity (inode, or volume serial and file
 // index on Windows), not by its own pathname.
 func TestResolveHardLinkToAuthorizedKeys(t *testing.T) {

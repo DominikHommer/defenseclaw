@@ -760,6 +760,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
+		// /proc/<pid>/cwd is resolved in the process that opens the file.
+		// The gateway and hook helper are different processes, so a local
+		// resolution here cannot prove where such an operand lands.
+		if procCWDWriteOperand(target) {
+			return true
+		}
 		if isProtected(target) {
 			return true
 		}
@@ -979,6 +985,28 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	return false
+}
+
+func procCWDWriteOperand(path string) bool {
+	if !strings.HasPrefix(path, "/proc/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/proc/"), "/")
+	if len(parts) < 2 || parts[1] != "cwd" {
+		return false
+	}
+	if parts[0] == "self" {
+		return true
+	}
+	if parts[0] == "" {
+		return false
+	}
+	for _, ch := range parts[0] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func trustedBase64ShellAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {

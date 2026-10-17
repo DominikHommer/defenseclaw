@@ -174,6 +174,37 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	}
 }
 
+func TestR103B07ProcCWDAliasRowA10238(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/proc aliases are POSIX operands")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	command := "printf dccert-block-marker >> /proc/self/cwd/../.ssh/authorized_keys"
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	for _, mode := range []string{"per-user", "managed"} {
+		t.Run("A1-0238/"+mode, func(t *testing.T) {
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("/proc/self/cwd alias was treated as a proven ordinary write")
+			}
+		})
+	}
+	for _, path := range []string{
+		"/proc/123/cwd/../.ssh/authorized_keys", "/proc/self/cwd/file",
+	} {
+		if !procCWDWriteOperand(path) {
+			t.Fatalf("missed %q", path)
+		}
+	}
+	for _, path := range []string{"/proc/not-a-pid/cwd/file", "/proc/self/environ", "/tmp/report.txt"} {
+		if procCWDWriteOperand(path) {
+			t.Fatalf("ordinary path %q classified as cwd alias", path)
+		}
+	}
+}
+
 func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook write targets")
