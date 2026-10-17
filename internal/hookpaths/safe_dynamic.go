@@ -65,7 +65,7 @@ func safeDynamicRedirect(command, cwd, home string, verifyFS bool) bool {
 	var output *syntax.Word
 	for _, redir := range writer.Redirs {
 		switch redir.Op {
-		case syntax.RdrOut, syntax.AppOut, syntax.ClbOut:
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob:
 			if output != nil || redir.Word == nil {
 				return false
 			}

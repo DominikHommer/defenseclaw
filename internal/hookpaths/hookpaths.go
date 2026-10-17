@@ -190,7 +190,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			return true
 		}
 		switch redirect.Op {
-		case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
 		default:
 			return true
 		}
