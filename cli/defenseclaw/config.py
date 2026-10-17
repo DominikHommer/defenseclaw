@@ -2815,17 +2815,18 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
 # the raw document so an explicit empty list stays apart from an unset key.
 #
 # Python reports the first refusal where Go joins every refusal of a section;
-# the corpus checks that Go's text contains Python's. Only the Go loader (which
-# the gateway, ensure and verify run, so no such config takes effect) checks:
-# the older openshell.admin keys (required_pack_digest, min_profile, egress
-# patterns, require_copy_for, max_resources, locked) in openshell.admin and in
-# profile sandbox sections, the managed required_pack location rule, the pack
-# strictness hook, and enterprise.openshell (the lifecycle owns that block and
-# Python never writes it).
+# the corpus checks that Go's text contains Python's. The managed pack location
+# and strictness checks need the gateway's installed policy directory and are
+# performed by the Go loader before a managed config takes effect.
 
 _SANDBOX_INTERSECT_LISTS = ("required_for", "allowed_credentials", "allowed_harnesses", "egress_allow_only")
 _SANDBOX_CREDENTIAL_RE = re.compile(r"^(none|[a-z0-9][a-z0-9_-]{0,63})$")
 _SANDBOX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SANDBOX_PACK_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_SANDBOX_HOST_LABEL_RE = re.compile(r"^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$")
+_SANDBOX_LOCKABLE_KEYS = (
+    "mcp.host_ports", "mcp.import", "pack", "profile", "resources", "workdir.mode", "workdir.unmask", "yolo"
+)
 _SANDBOX_DAYS_RE = re.compile(r"^([0-9]{1,6})d$")
 _GO_DURATION_RE = re.compile(r"^(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$")
 _GO_DURATION_PART_RE = re.compile(r"([0-9]*(?:\.[0-9]*)?)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)")
@@ -2886,8 +2887,66 @@ def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | Non
 
 
 def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | None:
-    """The first refusal of one floor section's managed keys (Go
-    validateManagedFloor), or None."""
+    """The first refusal of a floor section (Go validateAs), or None."""
+    pin = section.get("required_pack_digest") or ""
+    if pin:
+        if not _SANDBOX_PACK_DIGEST_RE.fullmatch(str(pin)):
+            return f"{prefix}.required_pack_digest {_go_quote(pin)} must be sha256:<64 lowercase hex digits>"
+        if not str(section.get("required_pack") or "").strip():
+            return f"{prefix}.required_pack_digest needs {prefix}.required_pack"
+    error = _sandbox_enum_error(f"{prefix}.min_profile", section.get("min_profile"), "open", "balanced", "strict")
+    if error:
+        return error
+    for index, name in enumerate(section.get("allowed_harnesses") or []):
+        if not _SANDBOX_NAME_RE.fullmatch(str(name).strip()):
+            return f"{prefix}.allowed_harnesses[{index}]: invalid name {_go_quote(name)}"
+    for key in ("egress_block", "egress_allow_only"):
+        for index, pattern in enumerate(section.get(key) or []):
+            error = _sandbox_egress_pattern_error(str(pattern))
+            if error:
+                return f"{prefix}.{key}[{index}]: {error}"
+    for index, pattern in enumerate(section.get("require_copy_for") or []):
+        p = str(pattern).strip()
+        if not p:
+            return f"{prefix}.require_copy_for[{index}]: pattern is empty"
+        if "\x00" in p:
+            return f"{prefix}.require_copy_for[{index}]: pattern contains a NUL byte"
+        if not (
+            p.startswith("/") or p == "~" or p.startswith("~/") or p == "**" or p.startswith("**/")
+            or re.match(r"^[A-Za-z]:[/\\]", p)
+        ):
+            return (
+                f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} must be an absolute path glob "
+                'or start with "~/"; a relative pattern would never match'
+            )
+        for segment in p.split("/"):
+            if segment.count("[") != segment.count("]"):
+                return f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} has a malformed glob segment {_go_quote(segment)}"
+    resources = section.get("max_resources") or {}
+    if isinstance(resources, Mapping):
+        cpu = str(resources.get("cpu") or "").strip()
+        if cpu:
+            if not re.fullmatch(r"(?:[0-9]{1,6}(?:\.[0-9]{1,3})?|[0-9]{1,9}m)", cpu):
+                return f'{prefix}.max_resources.cpu { _go_quote(cpu) } must be cores ("2", "1.5") or millicores ("500m")'
+            if not any(ch in "123456789" for ch in cpu):
+                return f"{prefix}.max_resources.cpu {_go_quote(cpu)} must be positive"
+        memory = str(resources.get("memory") or "").strip()
+        if memory:
+            match = re.fullmatch(r"([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?", memory)
+            if match is None:
+                return f"{prefix}.max_resources.memory {_go_quote(memory)} must be bytes with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix"
+            if int(match.group(1)) == 0:
+                return f"{prefix}.max_resources.memory {_go_quote(memory)} must be positive"
+            multiplier = {"": 1, "k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
+                          "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}[match.group(2) or ""]
+            if int(match.group(1)) > (2**63 - 1) // multiplier:
+                return f"{prefix}.max_resources.memory {_go_quote(memory)} is out of range"
+    for index, key in enumerate(section.get("locked") or []):
+        if str(key).strip() not in _SANDBOX_LOCKABLE_KEYS:
+            return (
+                f"{prefix}.locked[{index}]: {_go_quote(key)} is not a lockable key "
+                f"(want one of {', '.join(_SANDBOX_LOCKABLE_KEYS)})"
+            )
     for key in _SANDBOX_INTERSECT_LISTS:
         if isinstance(section.get(key), list) and not section[key]:
             return f"{prefix}.{key}: an empty list is refused; leave the key out for no constraint"
@@ -2948,6 +3007,53 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
                 f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
             )
+    return None
+
+
+def _sandbox_egress_pattern_error(pattern: str) -> str | None:
+    """Mirror ParseOpenShellEgressPattern's refusal of an invalid host pattern."""
+    import ipaddress
+
+    p = pattern.strip().lower()
+    if not p:
+        return "egress pattern is empty"
+    if p == "*":
+        return 'egress pattern "*" matches every host; choose the profile instead (open allows by default, strict turns the web off)'
+    invalid = f'egress pattern {_go_quote(pattern)} must be a host name, "*.<host>", an IP address or a CIDR prefix'
+    wildcard = p.startswith("*.")
+    if wildcard:
+        p = p[2:]
+    elif "*" in p:
+        return invalid
+    if not wildcard and "/" in p:
+        address, sep, bits = p.partition("/")
+        if not sep or not re.fullmatch(r"(?:0|[1-9][0-9]{0,2})", bits) or address.startswith("["):
+            return invalid
+        try:
+            addr = ipaddress.ip_address(address)
+            if "%" in address or int(bits) > addr.max_prefixlen:
+                return invalid
+            if getattr(addr, "ipv4_mapped", None) is not None and int(bits) < 96:
+                return f"egress pattern {_go_quote(pattern)}: an IPv4-mapped prefix must be at least /96"
+            ipaddress.ip_network(p, strict=False)
+            return None
+        except ValueError:
+            return invalid
+    if not wildcard:
+        try:
+            address = p[1:-1] if p.startswith("[") and p.endswith("]") else p
+            ipaddress.ip_address(address)
+            if "%" in address:
+                return f"egress pattern {_go_quote(pattern)}: zoned IPv6 addresses are not destinations"
+            return None
+        except ValueError:
+            pass
+    host = p.removesuffix(".")
+    labels = host.split(".")
+    if len(host) > 253 or not all(_SANDBOX_HOST_LABEL_RE.fullmatch(label) for label in labels):
+        return invalid
+    if not ("a" <= labels[-1][0] <= "z"):
+        return invalid
     return None
 
 
