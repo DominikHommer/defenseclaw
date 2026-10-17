@@ -162,6 +162,13 @@ response, so the events do not all have the same effect:
 | `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
 | `SessionEnd` (0.145+) | Advisory observation only. Output cannot steer Codex or keep the thread open, and the hook has a three-second host maximum. |
 
+When a hook fails closed because DefenseClaw cannot decide (the gateway is
+stopped or answers something unusable), `Stop`, `SubagentStop` and
+`SessionEnd` are not blocked: a blocked stop would only make Codex continue
+the turn and try to stop again. Codex ends the turn, and the next prompt or
+tool call is blocked until the gateway is back. See
+[Stop and session-end events](/docs/reference/fail-modes#stop-and-session-end-events).
+
 Codex loads a skill without a hook event of its own. DefenseClaw refuses a
 skill on `asset_policy.skill.denied` when it is selected as `$name` and when a
 tool call reads its folder, which is how Codex follows a skill asked for in

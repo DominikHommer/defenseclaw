@@ -74,6 +74,37 @@ call through unchecked because the gateway is down.
 | Internal policy evaluator error (a recovered panic) | Allow with `would_block`, a warning, an audit row with result `panic`, and telemetry. A standalone managed host blocks instead, as for `closed`. | Block when the event supports a block response; otherwise allow with `would_block`. Record an audit row with result `panic` and telemetry either way. Secure Client allows and audits recovered errors. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
+### Stop and session-end events
+
+A block on a stop or session-end event denies nothing. Codex, Claude Code,
+Devin and GitHub Copilot continue the turn when a stop hook blocks, and Cursor
+submits the block as the next prompt, so an agent whose stop hook failed
+closed tried to stop again on every model turn, each costing a model call,
+until the user interrupted it.
+
+When a hook would fail closed on one of these events (the gateway is down or
+answers 5xx, its answer is unusable, the payload is too large, or the hook
+token or the DefenseClaw home is missing), it gives the agent's neutral allow
+instead, says on stderr that it is not blocking the event, and records the
+failure in `hook-failures.jsonl` with fail mode `open`. The agent ends the
+turn, and the next prompt or tool call is blocked as before until DefenseClaw
+is available. This holds for per-user hooks, the OpenShell sandbox hooks and
+the standalone managed hooks on Linux, macOS and Windows. Secure Client hooks
+keep their results.
+
+| Connector | Stop and session-end events |
+| --- | --- |
+| Claude Code | `Stop`, `SubagentStop`, `TeammateIdle`, `StopFailure`, `SessionEnd` |
+| Codex | `Stop`, `SubagentStop`, `SessionEnd` |
+| Cursor | `stop`, `subagentStop`, `sessionEnd` |
+| Devin | `Stop`, `SessionEnd` |
+| GitHub Copilot | `agentStop`, `subagentStop`, `sessionEnd` |
+| Kiro | `Stop` |
+| OpenCode (managed plugin) | `session.created`, `session.updated`, `session.status`, `session.idle`, `session.compacted`, `session.error`, `session.deleted` |
+
+A gateway verdict on these events is unchanged: fail mode does not apply to a
+valid answer.
+
 Fail mode applies only to a hook the agent can start. A hook script that is
 missing, cannot be read or is not executable (an antivirus quarantine, a
 restored backup with the wrong mode, an account rename or home move that left
