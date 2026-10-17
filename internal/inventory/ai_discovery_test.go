@@ -1268,6 +1268,7 @@ func TestScanUserHomeKeepsFixedSystemBinaryOutsideHome(t *testing.T) {
 	}
 	for _, path := range []string{
 		filepath.Join(systemBin, "cursor-agent"),
+		filepath.Join(otherBin, "cursor-agent"),
 		filepath.Join(otherBin, "other-cli"),
 	} {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o700); err != nil {
