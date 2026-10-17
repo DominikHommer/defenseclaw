@@ -255,8 +255,8 @@ func TestCounterPendingFlow(t *testing.T) {
 	if !f.open() {
 		t.Error("the first open is not reported as first contact")
 	}
-	if f.open() {
-		t.Error("repeated open was reported as first contact")
+	if !f.open() {
+		t.Error("repeated open lost the binding first-contact result")
 	}
 	f.addDown(7)
 	if v := f.addUp(10, false); v.cut || v.total != 10 {
