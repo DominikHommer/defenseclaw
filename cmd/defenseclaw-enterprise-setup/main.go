@@ -68,6 +68,15 @@ const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.
 // enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
 var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
 
+// standalonePayloadBinding is the setuppayload.PayloadBinding of the payload
+// this Setup image was built with. packaging/windows/standalone/build-setup.sh
+// links it in (-X main.standalonePayloadBinding=<hex>), so it lives in the
+// running image, which no other process can change. The Setup stages a
+// trailer payload only when it produces this value, whatever file the
+// trailer was read from (#1281). Empty in an image no standalone build
+// stamped: the Secure Client Setup and test binaries.
+var standalonePayloadBinding string
+
 // enterpriseSetupInvalidArguments marks a command-line error without changing
 // its text. The standalone Setup reports it as 1639 so an MDM does not retry
 // a command line that can never succeed; the Secure Client Setup never
@@ -285,6 +294,10 @@ var enterpriseSetupStandaloneFlavor = embeddedEnterpriseSetupStandalone
 // appended at assemble time as a deterministic trailer and read off
 // the running EXE here.
 func embeddedEnterpriseSetupStandalone() bool {
+	if standalonePayloadBinding != "" {
+		// Only the standalone build stamps a payload binding into the image.
+		return true
+	}
 	exePath, err := os.Executable()
 	if err != nil {
 		return false
@@ -706,7 +719,45 @@ func loadEmbeddedEnterprisePayload() (enterprisePayload, error) {
 		}
 		return enterprisePayload{}, fmt.Errorf("read enterprise payload trailer: %w", err)
 	}
-	return loadEnterprisePayload(result.AsPayloadFS())
+	return loadBoundEnterprisePayload(result, standalonePayloadBinding)
+}
+
+// loadBoundEnterprisePayload validates a trailer read off the Setup image and
+// requires its payload to match binding, the payload binding linked into
+// the running image.
+func loadBoundEnterprisePayload(result setuppayload.ReadResult, binding string) (enterprisePayload, error) {
+	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	if err != nil {
+		return enterprisePayload{}, err
+	}
+	if err := requireEnterprisePayloadBinding(payload, binding); err != nil {
+		return enterprisePayload{}, err
+	}
+	return payload, nil
+}
+
+// requireEnterprisePayloadBinding refuses a payload this Setup image was not
+// built with. A stamped image (the standalone build) takes only the payload
+// whose flavor and file digests produce its binding, of any flavor. An image
+// with no binding takes no standalone payload, since only the standalone
+// build produces one; the Secure Client flavors keep their own checks.
+func requireEnterprisePayloadBinding(payload enterprisePayload, binding string) error {
+	if binding == "" {
+		if payload.Standalone() {
+			return errors.New("this Setup image has no payload binding, so it cannot vouch for its standalone payload; " +
+				"build the standalone Setup with packaging/windows/standalone/build-setup.sh")
+		}
+		return nil
+	}
+	digests := make(map[string]string, len(payload.Files))
+	for name, file := range payload.Files {
+		digests[name] = file.SHA256
+	}
+	if !strings.EqualFold(setuppayload.PayloadBinding(payload.Manifest.DistributionFlavor, digests), binding) {
+		return errors.New("the payload this Setup read is not the payload its image was built with, so nothing was staged; " +
+			"copy the Setup file your MDM delivered to a folder only administrators can change and run it again")
+	}
+	return nil
 }
 
 func loadEnterprisePayload(payloadFS fs.FS) (enterprisePayload, error) {

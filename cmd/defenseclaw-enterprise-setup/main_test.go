@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
 func TestParseEnterpriseSetupInstallContract(t *testing.T) {
@@ -147,6 +148,90 @@ func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
 	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
+	}
+}
+
+// #1281: the Setup stages only the payload its own image was built with. A
+// trailer read from a different file (any flavor) is refused before
+// anything is staged, and an image with no binding takes no standalone
+// payload.
+func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
+	trailer := func(t *testing.T, payloadFS fstest.MapFS) setuppayload.ReadResult {
+		t.Helper()
+		result := setuppayload.ReadResult{Manifest: payloadFS["payload/manifest.json"].Data}
+		for name, file := range payloadFS {
+			if name != "payload/manifest.json" {
+				result.Entries = append(result.Entries, setuppayload.Entry{Name: strings.TrimPrefix(name, "payload/"), Contents: file.Data})
+			}
+		}
+		return result
+	}
+	binding := func(manifest enterprisePayloadManifest) string {
+		digests := map[string]string{}
+		for _, file := range manifest.Files {
+			digests[file.Name] = file.SHA256
+		}
+		return setuppayload.PayloadBinding(manifest.DistributionFlavor, digests)
+	}
+	built, builtManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	stamp := binding(builtManifest)
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), stamp); err != nil {
+		t.Fatalf("the image's own payload was refused: %v", err)
+	}
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), strings.ToUpper(stamp)); err != nil {
+		t.Fatalf("an upper-case binding was refused: %v", err)
+	}
+
+	// A different payload: one file swapped for other bytes.
+	swapped, swappedManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	marker := []byte("swapped-file marker")
+	digest := sha256.Sum256(marker)
+	swapped["payload/defenseclaw.exe"] = &fstest.MapFile{Data: marker, Mode: 0o444}
+	for index, file := range swappedManifest.Files {
+		if file.Name == "defenseclaw.exe" {
+			swappedManifest.Files[index].SHA256, swappedManifest.Files[index].Size = hex.EncodeToString(digest[:]), int64(len(marker))
+		}
+	}
+	writeEnterprisePayloadManifest(t, swapped, swappedManifest)
+	if _, err := loadEnterprisePayload(swapped); err != nil {
+		t.Fatalf("fixture: the swapped payload is not otherwise valid: %v", err)
+	}
+	for name, other := range map[string]fstest.MapFS{
+		"swapped file": swapped,
+		"signed flavor": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+			return payloadFS
+		}(),
+		"Secure Client": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+			return payloadFS
+		}(),
+		"Secure Client u": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, true, false)
+			return payloadFS
+		}(),
+	} {
+		if _, err := loadBoundEnterprisePayload(trailer(t, other), stamp); err == nil || !strings.Contains(err.Error(), "nothing was staged") {
+			t.Errorf("%s: a payload the image was not built with was accepted (err %v)", name, err)
+		}
+	}
+
+	// No binding: no standalone payload, the Secure Client flavors as before.
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), ""); err == nil || !strings.Contains(err.Error(), "no payload binding") {
+		t.Fatalf("an unstamped image took a standalone payload (err %v)", err)
+	}
+	secureClient, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+	if _, err := loadBoundEnterprisePayload(trailer(t, secureClient), ""); err != nil {
+		t.Fatalf("an unstamped image refused the Secure Client payload: %v", err)
+	}
+}
+
+func TestStampedSetupImageIsTheStandaloneSetup(t *testing.T) {
+	previous := standalonePayloadBinding
+	t.Cleanup(func() { standalonePayloadBinding = previous })
+	standalonePayloadBinding = strings.Repeat("ab", 32)
+	if !embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a stamped image must parse its command line as the standalone Setup")
 	}
 }
 

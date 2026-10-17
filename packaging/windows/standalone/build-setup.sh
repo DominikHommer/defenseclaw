@@ -43,6 +43,10 @@
 #   signed channels need a Windows build host (Git Bash or MSYS2); the
 #   default unsigned channel builds anywhere.
 #
+#   Every channel links the payload binding (the flavor and the SHA-256 of
+#   each payload file) into the outer Setup, which then stages only that
+#   payload.
+#
 # Usage:
 #   packaging/windows/standalone/build-setup.sh --version 1.4.0 \
 #       [--out-dir dist/windows-standalone-1.4.0]
@@ -58,7 +62,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '4,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,57p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -123,19 +127,18 @@ PAYLOAD_FILES=(
 )
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-standalone-windows.XXXXXX")"
-EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-enterprise-setup/payload"
+# defenseclaw-scanners.exe embeds its runtime from this directory. It is
+# git-ignored except its .gitkeep; leave it as the checkout had it so a later
+# build cannot embed a stale runtime.
 SCANNERS_EMBED_DIR="${REPO_ROOT}/cmd/defenseclaw-scanners/payload"
 cleanup() {
     rm -rf "${STAGE_DIR:?}"
-    # The embed directories are git-ignored except their .gitkeep; leave
-    # them as the checkout had them so a later build cannot embed a stale
-    # payload.
-    find "${EMBED_DIR}" "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
+    find "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
 }
 trap cleanup EXIT
 
-if [ -n "$(find "${EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit)" ]; then
-    die "${EMBED_DIR} already holds a payload; remove it before building"
+if [ -n "$(find "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit)" ]; then
+    die "${SCANNERS_EMBED_DIR} already holds a runtime; remove it before building"
 fi
 
 if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
@@ -217,21 +220,22 @@ echo "==> emitting the ${FLAVOR} payload manifest"
     --source-commit "${SOURCE_COMMIT}" \
     --payload-dir "${PAYLOAD_ONLY}" \
     --distribution-flavor "${FLAVOR}" \
-    --out "${EMBED_DIR}/manifest.json" \
+    --out "${STAGE_DIR}/payload-manifest.json" \
     ${UNSIGNED_FLAG[@]+"${UNSIGNED_FLAG[@]}"}
-for name in "${PAYLOAD_FILES[@]}"; do
-    cp -f "${PAYLOAD_ONLY}/${name}" "${EMBED_DIR}/${name}"
-done
+# The outer Setup stages only the payload whose flavor and file digests
+# produce this binding, so the binding is linked into the image itself.
+PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}")"
+[[ "${PAYLOAD_BINDING}" =~ ^[0-9a-f]{64}$ ]] || die "cannot compute the payload binding"
 
 SETUP="${OUT_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.exe"
 SETUP_UNSIGNED="${STAGE_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.unsigned.exe"
 echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
     go build -trimpath -buildvcs=false \
-    -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT}" \
+    -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT} -X main.standalonePayloadBinding=${PAYLOAD_BINDING}" \
     -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
 
-# Spec 003: the payload is no longer carried via //go:embed. Append the
+# Spec 003: the payload is not carried via //go:embed. Append the
 # [archive][manifest][footer] trailer to the just-built outer EXE so
 # runtime loadEmbeddedEnterprisePayload can read it off the tail of the
 # running image. windows-avc-assembler runs on the host (so we unset
@@ -272,7 +276,7 @@ if command -v sha256sum >/dev/null 2>&1; then
 else
     ( cd "${OUT_DIR}" && shasum -a 256 "${SETUP##*/}" > "${SETUP##*/}.sha256" )
 fi
-cp -f "${EMBED_DIR}/manifest.json" "${OUT_DIR}/payload-manifest.json"
+cp -f "${STAGE_DIR}/payload-manifest.json" "${OUT_DIR}/payload-manifest.json"
 echo "==> done: ${SETUP}"
 echo "    flavor=${FLAVOR} version=${VERSION} commit=${SOURCE_COMMIT:0:12}"
 echo "    sha256: $(cut -d' ' -f1 "${SETUP}.sha256")"

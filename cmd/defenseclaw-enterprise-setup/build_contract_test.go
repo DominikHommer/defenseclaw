@@ -67,6 +67,26 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 	}
 }
 
+// #1281: the standalone build links the payload binding of the payload it
+// appends into the outer Setup, computed by the same Go code the Setup runs
+// (windows-repro-manifest payload-binding), and no longer copies the
+// payload into the retired //go:embed directory.
+func TestStandaloneBuildLinksThePayloadBinding(t *testing.T) {
+	script := readEnterpriseSetupContractFile(t, "packaging/windows/standalone/build-setup.sh")
+	for _, required := range []string{
+		`PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}")"`,
+		`-X main.standalonePayloadBinding=${PAYLOAD_BINDING}`,
+		`-PayloadDir "${PAYLOAD_ONLY}"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("build-setup.sh is missing %q", required)
+		}
+	}
+	if strings.Contains(script, "cmd/defenseclaw-enterprise-setup/payload") {
+		t.Error("build-setup.sh still writes the retired enterprise Setup embed directory")
+	}
+}
+
 func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T) {
 	contains := func(files []string, name string) bool {
 		for _, file := range files {

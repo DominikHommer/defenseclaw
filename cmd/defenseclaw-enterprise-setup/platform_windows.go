@@ -33,10 +33,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// Keep the running Setup image open without write/delete sharing while the
-// trailer is decoded and its Authenticode signature is verified. The Python
-// compiler cannot be individually Authenticode signed; the signed outer
-// image and its digest manifest authenticate those bytes as one unit.
+// Keep the Setup image file open without write/delete sharing while the
+// trailer is decoded and its Authenticode signature is verified, and stage
+// only the payload whose digests match the payload binding linked into the
+// running image (loadBoundEnterprisePayload): the file at the launch path is
+// not necessarily the image that is running. The Python compiler cannot be
+// individually Authenticode signed; the signed outer image and its digest
+// manifest authenticate those bytes as one unit.
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	path, err := os.Executable()
 	if err != nil {
@@ -72,7 +75,7 @@ func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	if err != nil {
 		return enterprisePayload{}, fmt.Errorf("read enterprise Setup image trailer: %w", err)
 	}
-	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	payload, err := loadBoundEnterprisePayload(result, standalonePayloadBinding)
 	if err != nil {
 		return enterprisePayload{}, err
 	}
