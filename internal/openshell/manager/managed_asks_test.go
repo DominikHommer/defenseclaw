@@ -227,6 +227,7 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
 	e.live(sandboxapi.CreateRequest{Name: "codexbox", Copy: true})
 	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
+	blocked := map[string]string{"claudebox": "pypi.org", "codexbox": "api.github.com"}
 	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
 		profile, ok := floors[name]
 		if !ok {
@@ -234,6 +235,7 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		}
 		cfg := *e.config()
 		cfg.OpenShell.Admin.MinProfile = profile
+		cfg.OpenShell.Admin.EgressBlock = []string{blocked[name]}
 		return &cfg
 	}
 	for name, want := range floors {
@@ -243,6 +245,16 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		must(t, err)
 		if got := eff.Floor().MinProfile; got != want {
 			t.Fatalf("%s floor = %q, want %q", name, got, want)
+		}
+		if got := eff.DecideEgress(blocked[name], 443); got.Rule != packs.RuleAdminBlock {
+			t.Fatalf("%s did not apply its own block: %+v", name, got)
+		}
+		other := "claudebox"
+		if name == other {
+			other = "codexbox"
+		}
+		if got := eff.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
+			t.Fatalf("%s inherited %s's block: %+v", name, other, got)
 		}
 	}
 	delete(floors, "claudebox")
