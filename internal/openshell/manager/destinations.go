@@ -66,8 +66,9 @@ import (
 // and a contact later raise both).
 
 const (
-	destinationsFile      = "destinations.json"
-	destinationsMaxBytes  = 4 << 20
+	destinationsFile = "destinations.json"
+	// 512 kept hosts can each carry a bounded, 32-process lineage.
+	destinationsMaxBytes  = 32 << 20
 	destinationFlushEvery = time.Minute
 	maxDestinationPorts   = 8
 	maxDestinationBins    = 4
@@ -133,6 +134,16 @@ func destinationLineage(refs []ProcessRef) []sandboxapi.DestinationProcess {
 	return out
 }
 
+func (m *Manager) actorLineage(sandbox, binary string, pid int, at time.Time) []sandboxapi.DestinationProcess {
+	if binary == "" || m.procs == nil {
+		return nil
+	}
+	if pid > 0 {
+		return m.lineage(sandbox, pid, binary)
+	}
+	return destinationLineage(m.procs.LineageAt(sandbox, binary, at))
+}
+
 // destTable is one sandbox's destinations. Manager.destMu guards it.
 type destTable struct {
 	rows   map[string]*destRow
@@ -178,12 +189,11 @@ type destRow struct {
 	Category string   `json:"category,omitempty"`
 	Refusal  string   `json:"refusal,omitempty"`
 	Binaries []string `json:"binaries,omitempty"`
-	// ActorAt is when the last of Binaries was last seen connecting. The
-	// row's lineage is the one process of that program at this time, when
-	// the tree can identify it (GAP-0174, GAP-0119).
-	ActorAt time.Time `json:"actor_at,omitzero"`
-	PID     int       `json:"pid,omitempty"`
-	Proxy   counts    `json:"proxy,omitzero"`
+	PID      int      `json:"pid,omitempty"`
+	// Lineage is resolved when the actor is recorded. The process tree can
+	// later discard an exited image without changing this row's attribution.
+	Lineage []sandboxapi.DestinationProcess `json:"lineage,omitempty"`
+	Proxy   counts                          `json:"proxy,omitzero"`
 
 	live counts
 	// proxyAt are the proxy's requests to the host that no program is
@@ -376,8 +386,8 @@ func (r *destRow) lookup(c *catalog.Catalog) {
 	}
 }
 
-// note folds a sighting into the row.
-func (r *destRow) note(s destinationSighting) {
+// note folds a sighting into the row and reports whether it selected an actor.
+func (r *destRow) note(s destinationSighting) bool {
 	if s.at.After(r.LastSeen) {
 		r.LastSeen = s.at
 	}
@@ -425,7 +435,7 @@ func (r *destRow) note(s destinationSighting) {
 			}
 		}
 	}
-	r.addActor(s.binary, s.pid, s.denied, s.at)
+	return r.addActor(s.binary, s.pid, s.denied)
 }
 
 // addActor records the program (and its pid, 0 when unknown) that reached
@@ -433,8 +443,9 @@ func (r *destRow) note(s destinationSighting) {
 // one a view shows for the row: the latest whose traffic got through, once
 // one did. A refusal does not move a binary up, and one only ever refused a
 // host the sandbox reached goes first (the first to go when the list is
-// full).
-func (r *destRow) addActor(binary string, pid int, denied bool, at time.Time) {
+// full). It reports whether this actor is the row's displayed actor.
+func (r *destRow) addActor(binary string, pid int, denied bool) bool {
+	selected := false
 	if binary != "" {
 		bin := truncate(binary, maxDestinationText)
 		switch listed := slices.Contains(r.Binaries, bin); {
@@ -449,21 +460,23 @@ func (r *destRow) addActor(binary string, pid int, denied bool, at time.Time) {
 			r.Binaries = r.Binaries[len(r.Binaries)-maxDestinationBins:]
 		}
 		if r.Binaries[len(r.Binaries)-1] == bin {
-			r.ActorAt = at
+			selected = true
 		}
 	}
 	if pid > 0 {
 		r.PID = pid
 	}
+	return selected
 }
 
 // proxyOpen is OpenShell's record of a connection to the egress proxy: the
 // program that opened it, as the workload reports it, and when the record
 // came.
 type proxyOpen struct {
-	binary string
-	pid    int
-	at     time.Time
+	binary  string
+	pid     int
+	at      time.Time
+	lineage []sandboxapi.DestinationProcess
 }
 
 // proxyRequest is a request of the egress proxy to a row's host that no
@@ -488,21 +501,24 @@ const (
 // that came at `at` rode on: the one program OpenShell's records of proxy
 // connections around then name. Records of two programs then leave it
 // unknown rather than guessed.
-func proxyActor(opens []proxyOpen, at time.Time) (binary string, pid int, ok bool) {
+func proxyActor(opens []proxyOpen, at time.Time) (binary string, pid int, lineage []sandboxapi.DestinationProcess, ok bool) {
 	for _, o := range opens {
 		if o.at.Before(at.Add(-proxyOpenWindow)) || o.at.After(at.Add(proxyOpenWindow)) {
 			continue
 		}
 		switch {
 		case binary == "":
-			binary, pid = o.binary, o.pid
+			binary, pid, lineage = o.binary, o.pid, o.lineage
 		case o.binary != binary:
-			return "", 0, false
+			return "", 0, nil, false
 		case o.pid != pid:
 			pid = 0
+			lineage = nil
+		case !slices.Equal(lineage, o.lineage):
+			lineage = nil
 		}
 	}
-	return binary, pid, binary != ""
+	return binary, pid, lineage, binary != ""
 }
 
 // attributeProxied names the program of each of the row's proxied
@@ -517,8 +533,10 @@ func (r *destRow) attributeProxied(opens []proxyOpen, now time.Time) bool {
 			kept = append(kept, q)
 			continue
 		}
-		if bin, pid, ok := proxyActor(opens, q.at); ok {
-			r.addActor(bin, pid, q.denied, q.at)
+		if bin, pid, lineage, ok := proxyActor(opens, q.at); ok {
+			if r.addActor(bin, pid, q.denied) {
+				r.Lineage = lineage
+			}
 			named = true
 		}
 	}
@@ -615,6 +633,7 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 	if info.gone {
 		return
 	}
+	lineage := m.actorLineage(info.name, s.binary, s.pid, s.at)
 	s.credential = slices.Contains(info.credentialHosts, host)
 	m.destMu.Lock()
 	t := m.tableLocked(info.name)
@@ -626,7 +645,9 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 		m.destMu.Unlock()
 		return
 	}
-	r.note(s)
+	if r.note(s) {
+		r.Lineage = lineage
+	}
 	if s.proxy && s.binary == "" {
 		r.proxyAt = append(r.proxyAt, proxyRequest{at: m.now(), denied: s.denied})
 		if n := len(r.proxyAt); n > maxProxyRequests {
@@ -869,13 +890,6 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	if t == nil && len(live) > 0 {
 		t = m.tableLocked(info.name)
 	}
-	// actors are each row's program and when it was seen connecting, in
-	// out.Destinations' order, for its lineage.
-	type actor struct {
-		binary string
-		at     time.Time
-	}
-	var actors []actor
 	if t != nil {
 		m.mergeLiveLocked(t, live, info.harness)
 		for _, r := range t.rows {
@@ -883,7 +897,6 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 				t.dirty = true
 			}
 			out.Destinations = append(out.Destinations, r.view(info))
-			actors = append(actors, actor{r.lastBinary(), r.ActorAt})
 		}
 		for _, u := range t.models {
 			out.Models = append(out.Models, *u)
@@ -891,17 +904,6 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		out.Dropped = t.dropped
 	}
 	m.destMu.Unlock()
-	for i := range out.Destinations {
-		d := &out.Destinations[i]
-		if d.PID <= 0 && m.procs != nil && actors[i].binary != "" {
-			// OpenShell names no pid for a connection (its NET records
-			// say 0 on both drivers). Resolve against the process image
-			// running at the connection, before its pid can be reused.
-			d.Lineage = destinationLineage(m.procs.LineageAt(info.name, actors[i].binary, actors[i].at))
-			continue
-		}
-		d.Lineage = m.lineage(info.name, d.PID, actors[i].binary)
-	}
 	slices.SortFunc(out.Destinations, func(a, b sandboxapi.DestinationRow) int {
 		return cmp.Or(cmp.Compare(destinationRank(a.Kind), destinationRank(b.Kind)), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.Host, b.Host))
 	})
@@ -939,7 +941,7 @@ func (r *destRow) view(info destinationInfo) sandboxapi.DestinationRow {
 		Vendor: sandboxapi.DisplayText(vendor), Category: firstNonEmpty(r.Category, r.Refusal), Rule: sandboxapi.DisplayText(r.Rule),
 		Sources: slices.Clone(r.Sources), Connections: r.Connections, Tunnels: total.Tunnels, Refused: r.Refused, Blocked: total.Blocked,
 		Failed: r.Failed, ModelTurns: r.ModelTurns, BytesUp: total.BytesUp, BytesDown: total.BytesDown, PID: r.PID,
-		FirstSeen: r.FirstSeen, LastSeen: r.LastSeen,
+		FirstSeen: r.FirstSeen, LastSeen: r.LastSeen, Lineage: slices.Clone(r.Lineage),
 	}
 	if v.Sources == nil {
 		v.Sources = []string{}
@@ -1114,6 +1116,13 @@ func (m *Manager) loadDestinations(name string) *destTable {
 			continue
 		}
 		r.Host = host
+		if len(r.Lineage) > maxLineageDepth {
+			r.Lineage = nil
+		}
+		for j := range r.Lineage {
+			r.Lineage[j].Exe = sandboxapi.DisplayText(truncate(r.Lineage[j].Exe, maxDestinationText))
+			r.Lineage[j].Comm = sandboxapi.DisplayText(truncate(r.Lineage[j].Comm, maxDestinationText))
+		}
 		r.lookup(c)
 		t.rows[host] = &r
 	}

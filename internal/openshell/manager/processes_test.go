@@ -215,8 +215,12 @@ func TestDestinationLineageByProgram(t *testing.T) {
 	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
 		t.Fatal("no sample")
 	}
+	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 4 {
+		t.Fatalf("a later process changed the recorded lineage: %+v", d.Destinations[0].Lineage)
+	}
+	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> pypi.org:443/tcp [policy:allow_pypi engine:opa]", time.Now())
 	if d, _ = e.m.Destinations(context.Background(), "linbox"); len(d.Destinations[0].Lineage) != 0 {
-		t.Fatalf("two copies of the program ran: lineage %+v", d.Destinations[0].Lineage)
+		t.Fatalf("two copies at the new connection gave lineage %+v", d.Destinations[0].Lineage)
 	}
 }
 
@@ -294,14 +298,22 @@ func TestKernelDestinationLineageForPythonAliasesAndLateRefusal(t *testing.T) {
 			if len(row.Lineage) < 3 || row.Lineage[0].PID != 43 || row.Lineage[1].Comm != tc.parent || row.Lineage[len(row.Lineage)-1].Comm != "claude" {
 				t.Fatalf("late refused destination lineage = %+v", row.Lineage)
 			}
-			// Another possible interpreter keeps attribution undecided.
+			// Another possible interpreter does not change the recorded row.
 			e.m.observeKernelFrame(ctx, b, execFrame(id, "other-python", "bash", 9704, 44, "/sandbox/other/bin/python3", "/sandbox/other/bin/python3 other.py", start.Add(4*time.Second)))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) < 3 {
+				t.Fatalf("later interpreter changed recorded lineage = %+v", got)
+			}
+			e.ocsf("aliasbox", "NET:OPEN [MED] DENIED "+resolved+"(0) -> dynamodb.us-east-1.amazonaws.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at.Add(time.Second))
 			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) != 0 {
-				t.Fatalf("ambiguous interpreter lineage = %+v", got)
+				t.Fatalf("ambiguous new connection lineage = %+v", got)
 			}
 			e.m.observeKernelFrame(ctx, b, exitFrame(id, "other-python", 9704, 0, at.Add(-time.Second)))
+			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) != 0 {
+				t.Fatalf("later exit changed undecided lineage = %+v", got)
+			}
+			e.ocsf("aliasbox", "NET:OPEN [MED] DENIED "+resolved+"(0) -> dynamodb.us-east-1.amazonaws.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", at.Add(2*time.Second))
 			if got := destinationKinds(t, e, "aliasbox")["dynamodb.us-east-1.amazonaws.com"].Lineage; len(got) < 3 {
-				t.Fatalf("exited interpreter hid lineage = %+v", got)
+				t.Fatalf("unambiguous new connection lineage = %+v", got)
 			}
 		})
 	}

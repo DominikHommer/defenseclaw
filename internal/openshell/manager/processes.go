@@ -802,7 +802,7 @@ func (m *Manager) LineageFor(sandboxName string, pid int, exe string) []ProcessR
 
 // LineageAt resolves a pid-less destination against the process image that
 // was running when it connected. The candidate and its ancestry are read
-// under one tree lock, so a later reuse of its pid cannot change the row.
+// under one tree lock; callers keep the result with the destination record.
 func (m *Manager) LineageAt(sandboxName, exe string, at time.Time) []ProcessRef {
 	m.mu.Lock()
 	b := m.boxes[sandboxName]
@@ -838,11 +838,19 @@ func (t *procTree) lineageLocked(node *procNode) []ProcessRef {
 // establishes its lifetime and ambiguity still leaves the row unattributed.
 func (t *procTree) candidatesAtLocked(exe string, at time.Time) []*procNode {
 	var candidates []*procNode
-	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
+	// PID-less feed images live only in byExec until they exit. Exited images
+	// are read from exited to avoid counting one image twice.
+	var pidless []*procNode
+	for _, n := range t.byExec {
+		if n.PID <= 0 && n.ExitedAt.IsZero() {
+			pidless = append(pidless, n)
+		}
+	}
+	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), pidless, t.exited} {
 		for _, n := range nodes {
 			start := n.startedAt()
 			matches := n.runs(exe) || n.ExecID != "" && pythonInterpreterAlias(n.Exe, exe)
-			if !matches || n.PID <= 0 ||
+			if !matches || (n.PID <= 0 && n.ExecID == "") ||
 				(n.ExecID == "" && start.Before(at.Add(-lineageStartWindow))) || start.After(at.Add(lineageClockSlack)) ||
 				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) {
 				continue

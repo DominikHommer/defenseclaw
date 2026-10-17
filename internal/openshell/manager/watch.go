@@ -808,8 +808,13 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
 		if r.Allowed() && r.Binary != "" {
+			pid := ocsfPID(r)
 			m.mu.Lock()
-			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			name := b.rec.Name
+			m.mu.Unlock()
+			lineage := m.actorLineage(name, r.Binary, pid, at)
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: pid, at: m.now(), lineage: lineage})
 			if n := len(b.proxyOpens); n > maxProxyOpens {
 				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
 			}
