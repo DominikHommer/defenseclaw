@@ -23,7 +23,6 @@ from time import monotonic
 from typing import Any
 
 import requests
-from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.measure import Measurement
