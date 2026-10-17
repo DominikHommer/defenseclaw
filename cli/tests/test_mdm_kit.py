@@ -216,6 +216,51 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     assert "Never put credentials here" in text
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("", 'credential is empty (check "value" < 1)'),
+        ("gateway unavailable", "gateway unavailable"),
+    ],
+)
+def test_unix_wrapper_secret_refusal_carries_gateway_reason(
+    tmp_path: Path, os_dir: str, stderr: str, expected: str
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_store_secret",
+    ))
+    gateway = tmp_path / "gateway"
+    gateway.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$DC_TEST_DOCUMENT"\n'
+        'if [ -n "$DC_TEST_STDERR" ]; then printf "%s\\n" "$DC_TEST_STDERR" >&2; fi\n'
+        'exit 2\n',
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    document = {"errors": [{"code": "secret_value_invalid", "message": 'credential is empty (check "value" < 1)'}]}
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        'DC_SECRET_NAME=test-key secret_data=placeholder\n'
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(
+        ["sh", "-c", script],
+        env={"PATH": os.environ["PATH"], "DC_TEST_DOCUMENT": json.dumps(document).replace("<", "\\u003c"), "DC_TEST_STDERR": stderr},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 2, result.stderr
+    output = json.loads(result.stdout)
+    assert output["errors"] == [{
+        "code": "mdm_secret_failed",
+        "message": f"storing credential 'test-key' failed, so the config was not applied: {expected}",
+    }]
+
+
 def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, input=stdin, capture_output=True, text=True, env={}, timeout=60)
 
