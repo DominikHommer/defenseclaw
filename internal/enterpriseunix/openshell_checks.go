@@ -612,6 +612,11 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 	}
 	kvm, kvmErr := os.Stat(e.P(kvmDevice))
 	needKVM := vm && kvmErr == nil && kvm.Mode().Perm()&0o006 != 0o006
+	var kvmACL posixacl.View
+	var kvmACLErr error
+	if needKVM {
+		kvmACL, kvmACLErr = posixacl.ReadAccessXattr(e.P(kvmDevice))
+	}
 	ops := e.sandboxOps()
 	var accounts []SandboxAccount
 	var enrolled, members int
@@ -643,12 +648,10 @@ func (e *Env) groupRows(ctx context.Context, s openshellSettings) (rows []prereq
 		if !ok {
 			continue
 		}
-		hasKVM := contains(groups, "kvm")
+		hasKVM := contains(groups, "kvm") && kvmACLErr == nil
 		if needKVM {
-			if acl, err := posixacl.ReadAccessXattr(e.P(kvmDevice)); err == nil {
-				if found, allowed := acl.NamedUserAllows(a.UID, 0o6); found {
-					hasKVM = allowed
-				}
+			if found, allowed := kvmACL.NamedUserAllows(a.UID, 0o6); found {
+				hasKVM = allowed
 			}
 		}
 		if needKVM && !hasKVM {
