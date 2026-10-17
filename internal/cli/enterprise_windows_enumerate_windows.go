@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
@@ -456,6 +458,12 @@ func runEnterpriseWindowsEnumerateInterval(
 	opts *enterpriseWindowsEnumerateOptions,
 	manifestPath string,
 ) error {
+	// The gateway's MCP admission scan starts an enrolled user's server
+	// as that user through this service (#1164).
+	serveCtx, stopServe := context.WithCancel(ctx)
+	defer stopServe()
+	go serveEnterpriseWindowsMCPAsUser(serveCtx, stderr, manifestPath)
+
 	// Initial cycle after the configurable delay. REQ-13 default 30 s
 	// so gateway + guardian publish their startup lines first.
 	initial := time.NewTimer(opts.initialDelay)
@@ -530,6 +538,55 @@ func runEnterpriseWindowsEnumerateInterval(
 					fmt.Fprintf(stderr, "[hook-enumerator] cycle failed: %v\n", err)
 				}
 			}
+		}
+	}
+}
+
+// enterpriseWindowsMCPAsUserRetry is how long the as-user scan server waits
+// before it serves again after its pipe failed.
+var enterpriseWindowsMCPAsUserRetry = 30 * time.Second
+
+// enterpriseWindowsMCPAsUserServe is the pipe server seam.
+var enterpriseWindowsMCPAsUserServe = mcpasuser.Serve
+
+// serveEnterpriseWindowsMCPAsUser serves the gateway's as-user MCP scans
+// (#1164) until ctx ends: the standalone profile only (the Secure Client
+// profile gateway has no enrolled-user watcher), for the gateway service the
+// service environment names. The starter reads the enrollment and the
+// published records again for every request.
+func serveEnterpriseWindowsMCPAsUser(ctx context.Context, stderr io.Writer, manifestPath string) {
+	if !managed.IsStandaloneProfile(managed.NormalizeEnterpriseProfile(os.Getenv(managed.EnterpriseProfileEnv))) {
+		return
+	}
+	gatewayService := strings.TrimSpace(os.Getenv(mcpasuser.GatewayServiceEnv))
+	if gatewayService == "" {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s is not set; MCP servers in user profiles cannot be scanned as their users\n", mcpasuser.GatewayServiceEnv)
+		return
+	}
+	starter := enterprisehooks.WindowsMCPAsUserStarter{
+		Manifest: func() (enterprisehooks.Manifest, error) { return enterprisehooks.LoadManifest(manifestPath) },
+		AuthorizationDir: func() (string, error) {
+			cfg, err := enterpriseWindowsEnumerateConfigLoader()
+			if err != nil {
+				return "", fmt.Errorf("load config: %w", err)
+			}
+			if !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
+				return "", errors.New("this deployment does not scan enrolled users' MCP servers")
+			}
+			return managed.HookGuardianAuthorizationDir(cfg.DataDir), nil
+		},
+	}
+	logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
+	for {
+		err := enterpriseWindowsMCPAsUserServe(ctx, gatewayService, starter.Start, logf)
+		if ctx.Err() != nil {
+			return
+		}
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN MCP as-user scan server stopped: %v; retrying in %s\n", err, enterpriseWindowsMCPAsUserRetry)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(enterpriseWindowsMCPAsUserRetry):
 		}
 	}
 }
