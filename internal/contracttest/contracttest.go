@@ -13,6 +13,8 @@ package contracttest
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -107,8 +109,13 @@ func (s Schemas) Validate(t testing.TB, name string, document []byte) map[string
 	if err := decoder.Decode(&value); err != nil {
 		t.Fatalf("%s: not JSON: %v\n%s", name, err, document)
 	}
-	if decoder.More() {
+	// Decoder.More misses a stray "]" or "}" after a top-level value, so
+	// require the end of the input instead.
+	switch err := decoder.Decode(new(any)); {
+	case err == nil:
 		t.Fatalf("%s: more than one JSON document:\n%s", name, document)
+	case !errors.Is(err, io.EOF):
+		t.Fatalf("%s: data after the JSON document: %v\n%s", name, err, document)
 	}
 	if err := schema.Validate(value); err != nil {
 		t.Fatalf("%s rejects a real document: %v\n%s", name, err, document)

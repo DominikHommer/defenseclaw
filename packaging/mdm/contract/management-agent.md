@@ -525,11 +525,17 @@ Exit 0.
   the recorded id, in a `receipt-events/` file (4.9) or in the `bundle`,
   `last_receipt` or `last_refusal` block of `bundle status` (4.5), is its
   own: add its `receipt_id` to the list and forward it. No such receipt means
-  the apply was refused before the bundle was received, or its receipt file
-  was not written (best effort, 4.9) and a newer receipt has replaced it in
-  `bundle status`; the delivery stays unsettled, and the resubmit of 5.1 step
-  3 gives the own receipt id by the rules above. Drop the record once it is
-  settled or that resubmit ended. On a build without `management_contract`
+  the apply was refused before the bundle was received (it has no receipt),
+  or its receipt file was not written (best effort, 4.9) and a newer receipt
+  has replaced it in `bundle status`. The resubmit of 5.1 step 3 is a new
+  delivery with a receipt of its own and does not recover the missing one
+  (once a later bundle is confirmed, a resubmit of the recorded bundle is
+  refused `version_not_newer`). The state keeps the `delivery_id` of the
+  apply that confirmed a bundle (2.6): `current` or `last_good` of
+  `bundle status` with the recorded id means that apply confirmed that
+  bundle, so report it upstream as confirmed, without a receipt id. With
+  neither, report the delivery's outcome as unknown. Then drop the record.
+  On a build without `management_contract`
   (no `--delivery-id`, section 3), settle by the recorded bundle id and a
   `finished_at` after the recorded start time (4.9). Use ids unique to the
   agent: `delivery_id` is not authenticated (2.6).
@@ -806,8 +812,11 @@ folder; check it yourself first. It keeps the previous file in the agent's
 own root-only folder, so a failed check can put it back:
 
 ```sh
-ETC=/etc/defenseclaw            # macOS: /opt/cisco/defenseclaw/etc
-SRC=/var/lib/<vendor>/trust     # the agent's root-only folder (section 1)
+# SRC is the agent's root-only folder (section 1).
+case "$(uname -s)" in
+  Darwin) ETC=/opt/cisco/defenseclaw/etc; SRC="/Library/Application Support/<vendor>/trust" ;;
+  *) ETC=/etc/defenseclaw; SRC=/var/lib/<vendor>/trust ;;
+esac
 install -d -o 0 -g 0 -m 0755 "$ETC/trust"
 rm -f "$SRC/bundle-anchors.previous.json"
 if [ -f "$ETC/trust/bundle-anchors.json" ]; then
@@ -815,11 +824,17 @@ if [ -f "$ETC/trust/bundle-anchors.json" ]; then
 fi
 install -o 0 -g 0 -m 0644 "$SRC/bundle-anchors.json" "$ETC/trust/.bundle-anchors.json.new"
 mv -f "$ETC/trust/.bundle-anchors.json.new" "$ETC/trust/bundle-anchors.json"
-"$GW" enterprise bundle status --json
+"$GW" enterprise bundle verify --bundle <bundle> --json
 ```
 
-When that result has `errors[].code` `anchor_insecure` or `anchor_invalid`,
-put the previous file back, or remove the new one when there was none:
+`bundle status` of such a build does not check the anchor file (1.0.2 does
+not read it; later builds warn `anchor_unreadable` only while a bundle is
+confirmed). 4.2 verify does: on a device it reads the installed anchor file
+the way apply does, right after it reads the bundle. Pass a bundle file the
+agent holds, such as the one it delivers next; a bundle verify cannot read
+(`archive_invalid`) leaves the anchors unchecked. When the result has
+`errors[].code` `anchor_insecure`, `anchor_invalid` or `anchor_missing`, put
+the previous file back, or remove the new one when there was none:
 
 ```sh
 if [ -f "$SRC/bundle-anchors.previous.json" ]; then
