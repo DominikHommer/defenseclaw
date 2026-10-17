@@ -775,6 +775,10 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     assert f"sqlite3 {moved} .recover" not in notice["detail"]
     assert "any -journal files to a new folder" in notice["remediation"]
     assert f"sqlite3 {moved} .recover" not in notice["remediation"]
+    # GAP-0647: a zeroed header is repaired on the copy; GAP-0614: the archived sidecars are named.
+    assert "write the SQLite header back on the copy" in notice["detail"]
+    assert "zeroed SQLite header back on the copy" in notice["remediation"]
+    assert f"Older audit records stay in {moved} together with its -wal file (" in notice["detail"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
 
@@ -813,6 +817,25 @@ def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
     assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
     assert "Copy the archive together with its -wal, -shm and any -journal files to a new folder" in notice["detail"]
     assert "sqlite3 <copy> .recover" in notice["detail"] and f"sqlite3 {moved} .recover" not in notice["detail"]
+    assert "write the SQLite header back on the copy" in notice["detail"]
+
+
+def test_archive_header_repair_names_a_command_for_the_platform(monkeypatch) -> None:
+    # GAP-0647: the recovery hint repairs a zeroed header on the copy, with a command the host has.
+    assert "dd of=<copy> bs=16 count=1 conv=notrunc" in cmd_doctor._archive_header_repair()
+    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    windows = cmd_doctor._archive_header_repair()
+    assert "PowerShell" in windows and "[IO.File]::OpenWrite('<copy>')" in windows and "dd of=" not in windows
+
+
+def test_archived_sidecars_are_named(tmp_path) -> None:
+    # GAP-0614: doctor lists the -wal, -shm and -journal files archived with a moved store.
+    archive = tmp_path / "audit.db.corrupt-20261014T214026Z"
+    archive.write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == ""
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(str(archive) + suffix).write_bytes(b"x")
+    assert cmd_doctor._archived_sidecars(archive) == " together with its -wal, -shm and -journal files"
 
 
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
