@@ -376,6 +376,21 @@ var sandboxFilterMCP = func(ctx context.Context, a *APIServer, peer managedHookP
 	return kept, skipped
 }
 
+// sandboxRunMCPJudge records the actual run's MCP decision. A pack that
+// disables import leaves every claimed server out before the gateway's
+// server-level policy is relevant.
+func sandboxRunMCPJudge(ctx context.Context, a *APIServer, peer managedHookPeer, connectorName string,
+	claims []sandboxrelay.MCPServerClaim, importMCP bool) ([]string, []sandboxrelay.MCPSkip) {
+	if importMCP {
+		return sandboxFilterMCP(ctx, a, peer, connectorName, claims)
+	}
+	skipped := make([]sandboxrelay.MCPSkip, 0, len(claims))
+	for _, claim := range claims {
+		skipped = append(skipped, sandboxrelay.MCPSkip{Name: claim.Name, Reason: sandboxrelay.MCPSkipOrganizationBlock})
+	}
+	return nil, skipped
+}
+
 // validateSandboxResolve bounds every claim of a resolve; the text is the
 // refusal's.
 func validateSandboxResolve(req *sandboxrelay.ResolveRequest) string {
@@ -572,7 +587,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		refuse(sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable, access)
 		return
 	}
-	kept, skipped := sandboxFilterMCP(r.Context(), a, peer, req.Connector, req.MCP)
+	kept, skipped := sandboxRunMCPJudge(r.Context(), a, peer, req.Connector, req.MCP, eff.MCP.Import)
 	id, err := sandboxreg.NewID()
 	if err != nil {
 		refuse(sandboxrelay.ReasonUnavailable, sandboxTextUnavailable, access)
@@ -994,12 +1009,8 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		for _, s := range scope.reg.MCPSkipped {
 			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
 		}
-	} else if len(req.MCP) > 0 && !importMCP {
-		for _, claim := range req.MCP {
-			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: claim.Name, Reason: sandboxrelay.MCPSkipOrganizationBlock})
-		}
 	} else if len(req.MCP) > 0 {
-		kept, skipped := sandboxFilterMCP(r.Context(), a, peer, scope.connector, req.MCP)
+		kept, skipped := sandboxRunMCPJudge(r.Context(), a, peer, scope.connector, req.MCP, importMCP)
 		out.MCPIncluded = kept
 		for _, s := range skipped {
 			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
