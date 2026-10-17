@@ -117,6 +117,36 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 	schemas.validate(t, "secret-result.schema.json", out.Bytes())
 }
 
+// TestManagementContractBundleApplyArgumentErrorsPrintNoJSON pins guide
+// section 2.3: on a managed device, `bundle apply` argument errors print
+// nothing on stdout and exit 2, so the agent classifies them by the exit
+// code alone (bundle verify and anchors install print invalid_arguments).
+func TestManagementContractBundleApplyArgumentErrorsPrintNoJSON(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	bundleDevice(t, e)
+	bundle := filepath.Join(e.dir, "policy.dcbundle")
+	for name, args := range map[string][]string{
+		"no --bundle":           {"apply", "--json"},
+		"--bundle and --inbox":  {"apply", "--bundle", bundle, "--inbox", "--json"},
+		"--lock-wait over 15m":  {"apply", "--bundle", bundle, "--lock-wait", "16m", "--json"},
+		"negative --lock-wait":  {"apply", "--bundle", bundle, "--lock-wait", "-1s", "--json"},
+		"unknown flag":          {"apply", "--bundle", bundle, "--bogus", "--json"},
+		"stray argument":        {"apply", "--bundle", bundle, "extra", "--json"},
+		"malformed --lock-wait": {"apply", "--bundle", bundle, "--lock-wait", "soon", "--json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, code := runBundle(t, args...)
+			if out != "" || code != 2 {
+				t.Fatalf("apply %v: exit %d, stdout %q; want exit 2 and no stdout", args, code, out)
+			}
+		})
+	}
+	out, code := runBundle(t, "verify", "--json")
+	if code != 2 || !strings.Contains(out, `"invalid_arguments"`) {
+		t.Fatalf("verify without --bundle: exit %d, stdout %q; want a JSON invalid_arguments document", code, out)
+	}
+}
+
 // TestManagementContractAnchorsInstallRefusals validates the refusals of
 // `enterprise bundle anchors install` before it reads the source.
 func TestManagementContractAnchorsInstallRefusals(t *testing.T) {

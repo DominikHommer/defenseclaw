@@ -150,14 +150,16 @@ stderr, and the exit code is the only signal.
 | Case | Exit |
 |---|---|
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
+| `bundle apply` without `--bundle`; with both `--bundle` and `--inbox` (Linux, macOS); with `--inbox` (Windows) | 2 / 1639 |
 | `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
 | Linux and macOS `secret set` / `remove` not run as root | 1 |
 | Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
 | Windows `secret set` / `remove` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
 
-`bundle verify` and `bundle apply` print JSON for their own argument errors
-(`errors[0].code` `invalid_arguments`, exit 2 / 1639). With
+`bundle verify` and `bundle anchors install` print JSON for their own
+argument errors (`errors[0].code` `invalid_arguments`, exit 2 / 1639);
+`bundle apply` does not (the rows above). With
 `management_contract` 1, Windows `secret set` / `remove` print a JSON document
 on every outcome (section 4.7).
 
@@ -380,7 +382,7 @@ Exit 0.
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
   `lifecycle_busy` (Windows also `bundle_apply_failed` and the codes in
-  section 2.2: retry); 2 / 1639 `invalid_arguments`.
+  section 2.2: retry); 2 / 1639 invalid arguments (no JSON, section 2.3).
 
 ```sh
 "$GW" enterprise bundle apply --bundle /var/lib/<vendor>/inbox/v13.dcbundle \
