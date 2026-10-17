@@ -476,6 +476,26 @@ leaves no destination once the floor is applied, `allowed_credentials: [none]`
 together with other providers, an unknown `required_for` connector, or a pack
 outside `<policy_dir>/sandbox/` or looser than the floor's.
 
+### Behind a TLS-inspecting proxy
+
+When your network decrypts TLS, sandboxes need the proxy's root CA. Put it in
+an administrator-owned PEM file (root-owned, not writable by group or others,
+with root-owned parent folders) and name it in the admin `config.yaml`:
+
+```yaml
+openshell:
+  trusted_ca_bundle: /etc/defenseclaw/proxy-root-ca.pem   # /Library/... on macOS
+```
+
+The managed gateway reads the file and hands its certificates to each
+user's sandbox daemon, which builds every harness image with them in its
+system store. A user cannot add a CA of their own: their own configuration
+is not read. A file that fails the ownership check, or holds anything but
+CA certificates, stops image builds for everyone, and each user's
+`defenseclaw sandbox doctor` shows the reason in the Sandbox TLS trust row.
+The row also fails, by name, when it sees a provider certificate that the
+computer trusts but sandboxes do not.
+
 ### The docker fallback
 
 On Linux, `driver: vm` or `driver: auto` wants OpenShell's MicroVM driver. When

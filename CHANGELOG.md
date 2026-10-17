@@ -10,6 +10,10 @@ for current behavior.
 
 ## [Unreleased] — 1.0.2: managed sandbox telemetry
 
+### Added
+
+- **Sandboxes behind a TLS-inspecting proxy (#1296).** `openshell.trusted_ca_bundle` names a PEM file of CA certificates (a corporate proxy's root) that sandboxes trust besides the image's public roots: every harness image built while it is set carries them in its system store, so OpenShell's sandbox bundle holds them, and Node and Deno read that bundle too. On a managed computer the administrator sets it in the admin `config.yaml` (an administrator-owned file) and the managed gateway hands the certificates to each user's sandbox daemon; a user cannot add one. Nothing is imported from the computer's own store. A file that cannot be used stops image builds. A new `sandbox doctor` row, Sandbox TLS trust, fails by name when a provider's certificate verifies on the computer but not in a sandbox, and `sandbox setup` shows it.
+
 ### Fixed
 
 - **A recovered hook evaluation error fails closed on a standalone managed device.** Before this fix an internal evaluator error followed the configured guardrail mode and fail mode, so on a standalone managed device a tool or prompt call was allowed in observe mode, or with `hook_fail_mode: open` (guardrail or `application_protection`) for every agent except Codex, Claude Code and Devin. It now gets the agent's native deny there in every guardrail mode and whatever `hook_fail_mode` says, as when the gateway gives no verdict; a stop or session-end event keeps its neutral allow. Per-user installs and the Secure Client profile are unchanged.

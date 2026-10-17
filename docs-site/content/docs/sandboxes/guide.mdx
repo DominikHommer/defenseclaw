@@ -1829,12 +1829,41 @@ on Linux (the login session on a Mac),
 the OpenShell service, CLI, ssh connection sharing, registration, mTLS
 files, version and driver, gateway-global policy, bind mounts, telemetry,
 the sandbox ports, the DefenseClaw daemon, the sandbox hooks, the harness
-images, the shell wrappers and your organization's policy. Every failed
-check names its fix.
+images, the shell wrappers, your organization's policy and sandbox TLS trust.
+Every failed check names its fix.
 `--fix` applies the fixes that need only your user (such as starting or
 restarting the gateway, or turning bind mounts on), after asking, and reports
 each one by the check's name, as its question does. It does not install
 OpenShell. The situations where `--fix` cannot help are below.
+
+### Behind a TLS-inspecting proxy
+
+On a network whose proxy decrypts TLS (a secure web gateway such as Cisco
+Secure Access, Umbrella or Zscaler), the proxy re-signs provider
+certificates with your organization's root CA. Your computer trusts that CA;
+a sandbox does not, so agents fail with `unable to get local issuer
+certificate`. The Sandbox TLS trust row of `defenseclaw sandbox doctor`
+connects to `api.anthropic.com`, `api.openai.com` and
+`api.githubcopilot.com` and fails by name when a certificate verifies on your
+computer but not with the roots a sandbox trusts:
+
+```text
+  ✗ Sandbox TLS trust          TLS inspection: api.anthropic.com, api.openai.com present a certificate from "Corp Root CA", which this computer trusts but sandboxes do not, …
+    → save the TLS-inspecting proxy's root CA certificate as a PEM file (your IT department has it) and name it in openshell.trusted_ca_bundle; …: defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem
+```
+
+Get the root CA from your IT department (or export it from your keychain as
+PEM), then name it:
+
+```bash
+defenseclaw config set openshell.trusted_ca_bundle ~/certs/proxy-root-ca.pem
+defenseclaw sandbox doctor        # Sandbox TLS trust now passes
+```
+
+The next run rebuilds the harness image with the CA in its system store.
+Only the CAs in that file are added: DefenseClaw never imports your
+computer's whole trust store. On a managed computer your administrator sets
+the key in the managed configuration.
 
 ### No gateway service installed
 

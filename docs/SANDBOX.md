@@ -1693,6 +1693,30 @@ The builder renders a deterministic context (a Dockerfile plus files whose
 modes and owners are set in the tar headers) and streams it to
 `docker build --pull=false -t <tag> -`. The Dockerfile:
 
+0. With trusted CAs (`openshell.trusted_ca_bundle`, `BuildSpec.TrustedCAs`,
+   #1296), first, right after `USER root`: one root-owned 0644 file per
+   certificate in `/usr/local/share/ca-certificates/defenseclaw`
+   (`trusted-ca/defenseclaw-trusted-ca-NN.crt` in the context), then
+   `update-ca-certificates`, and a check that each one reached
+   `/etc/ssl/certs/ca-certificates.crt`. OpenShell's supervisor makes the
+   workload's combined bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`) and its upstream TLS from that file,
+   so a TLS-inspecting proxy's certificates verify; the build's own
+   downloads trust them too. `NODE_EXTRA_CA_CERTS` and `DENO_CERT` name only
+   OpenShell's CA, so the launchers, the login-shell profile and the
+   `sandbox exec` wrapper point them at the combined bundle when the CA
+   directory exists (`trustedCAScript` in `harness/shellenv.go`). The
+   bundle is parsed and normalized (`openshell.ParseTrustedCAs`: CA
+   certificates only), its files are build-context files (so the content
+   hash and tag cover them, and an image without trusted CAs is unchanged),
+   the record keeps the PEM (`Record.TrustedCAs`) and the image carries the
+   `io.defenseclaw.trusted-cas` digest label. A file that cannot be used
+   fails closed: no image is built or selected (`image.TrustedCAsFor`). On a
+   managed computer the managed gateway reads the administrator's file
+   (`managed.ValidateTrustedFilePath`) and relays the PEM in the daemon
+   settings (`OperationalSettings.TrustedCAs`); the account's own
+   configuration names none. The `tls-trust` doctor row (`doctor.sandbox.tls-trust`) compares
+   provider chains with the host's trust and the distribution's public roots.
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
    (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
    (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after
