@@ -89,3 +89,41 @@ func TestUninstallBootsTheSandboxAgentsOutOfEverySignedInAccount(t *testing.T) {
 		t.Fatalf("the job that could not be unloaded is not named: %q", got)
 	}
 }
+
+// The macOS pkg installs both LaunchAgents with the sandbox subsystem off,
+// so a package that never turned sandboxes on has no sandbox state, yet
+// launchd loads the agents for every account that signs in. Its uninstall
+// boots them out too, before their plists go.
+func TestUninstallBootsTheAgentsOfAPackageWithSandboxesOffOut(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	agents := writeMacOSPackageFiles(t, h)
+	requireOK(t, ensureFromMacOSPackage(t, h, sandboxConfig(t, "darwin", false, nil)))
+	if state := h.env.loadOpenShellState(); state.Applied != nil || len(state.Pending) != 0 {
+		t.Fatalf("a package with sandboxes off recorded sandbox state %+v", state)
+	}
+	var calls []string
+	runner := bootoutRunner{
+		Runner: h.env.Runner,
+		ps:     "  0\n 501\n",
+		mu:     &sync.Mutex{},
+		loaded: map[string]bool{
+			"gui/501/" + labelSandbox:          true,
+			"gui/501/" + labelOpenShellGateway: true,
+		},
+		calls: &calls,
+	}
+	h.env.Runner = runner
+	r := h.run(Options{Action: ActionUninstall})
+	requireOK(t, r)
+	if len(runner.loaded) != 0 {
+		t.Fatalf("still loaded: %v (calls %v)", runner.loaded, calls)
+	}
+	if !containsLine(r.Changes, "unloaded the DefenseClaw sandbox LaunchAgents of the signed-in accounts (gui/501/"+labelSandbox+", gui/501/"+labelOpenShellGateway+")") {
+		t.Fatalf("changes = %v", r.Changes)
+	}
+	for _, path := range agents {
+		if h.exists(path) {
+			t.Errorf("%s stays after uninstall", path)
+		}
+	}
+}

@@ -1080,7 +1080,11 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 	env, r := l.env, l.result
 	state := env.loadOpenShellState()
 	if state.Applied == nil && len(state.Pending) == 0 {
-		// The sandbox subsystem was never on: no account has anything of it.
+		// The sandbox subsystem was never on: no account has anything of
+		// it. The macOS pkg still installs both LaunchAgents with it off
+		// (planPackagedMacOSSandbox), and launchd loads them at every
+		// sign-in, so they are unloaded all the same.
+		l.bootOutMacOSAgents(ctx)
 		return
 	}
 	applied := state.Applied
