@@ -350,7 +350,7 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 	env := l.env
 	settings := openshellSettingsOf(env.GOOS, p.config.Loaded)
 	op := &openshellPlan{settings: settings}
-	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, env.loadOpenShellState().Applied)
+	op.defaultNamespaceBridge = dockerBridgeHolds(env.GOOS, settings, l.openShellAppliedForPlan())
 	p.openshell = op
 	l.osPlan = op
 

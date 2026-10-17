@@ -105,6 +105,23 @@ func (e *Env) loadKeptOpenShellState() *openshellState {
 	return &state
 }
 
+// openShellAppliedForPlan is the applied setup the plan compares with: the
+// one settleOpenShell adopts (openShellStateForSettle). After a non-purge
+// uninstall that kept sandboxes only the kept record holds it, and a plan that
+// read the active state alone rendered no 1.0.1 upgrade bridge on the
+// reinstall, so the kept default-namespace sandboxes of 1.0.1 were stranded
+// (GAP-0666).
+func (l *lifecycle) openShellAppliedForPlan() *openshellApplied {
+	state := l.env.loadOpenShellState()
+	if state.Applied != nil || len(state.Pending) != 0 {
+		return state.Applied
+	}
+	if kept := l.env.keptOpenShellSetup(); kept != nil {
+		return kept.Applied
+	}
+	return nil
+}
+
 // openShellStateForSettle adopts the kept record only when the active state
 // has no applied or pending change. A populated active state makes it stale.
 func (l *lifecycle) openShellStateForSettle() (*openshellState, bool) {
