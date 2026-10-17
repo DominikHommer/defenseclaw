@@ -1365,7 +1365,6 @@ func standaloneInlineSecrets(cfg *Config) []string {
 	if len(cfg.LLM.ExtraHeaders) > 0 {
 		inline = append(inline, "llm.extra_headers")
 	}
-	slices.Sort(inline)
 	return inline
 }
 
