@@ -7,9 +7,61 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 )
+
+func TestEnvCommandWordsOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		words []string
+		cwd   string
+		want  []string
+	}{
+		{"ignore short", []string{"env", "-i", "python3", "-c", "code"}, "/work", []string{"python3", "-c", "code"}},
+		{"ignore long", []string{"env", "--ignore-environment", "python3"}, "/work", []string{"python3"}},
+		{"unset short", []string{"env", "-u", "UNUSED", "python3"}, "/work", []string{"python3"}},
+		{"unset attached", []string{"env", "-uUNUSED", "python3"}, "/work", []string{"python3"}},
+		{"unset long", []string{"env", "--unset=UNUSED", "python3"}, "/work", []string{"python3"}},
+		{"verbose short", []string{"env", "-v", "python3"}, "/work", []string{"python3"}},
+		{"verbose long", []string{"env", "--debug", "python3"}, "/work", []string{"python3"}},
+		{"chdir short", []string{"env", "-C", "sub", "python3"}, "/work/sub", []string{"python3"}},
+		{"chdir long", []string{"env", "--chdir=sub", "python3"}, "/work/sub", []string{"python3"}},
+		{"split short", []string{"env", "-S", `python3 -c "open(\"disklink\",\"a\")"`}, "/work", []string{"python3", "-c", `open("disklink","a")`}},
+		{"split long", []string{"env", `--split-string=python3 -c "open(\"disklink\",\"a\")"`}, "/work", []string{"python3", "-c", `open("disklink","a")`}},
+		{"combined and assignment", []string{"env", "-i", "-u", "UNUSED", "A=B", "--", "python3"}, "/work", []string{"python3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cwd, got, ok := envCommandWords(tc.words, "/work")
+			if !ok || cwd != tc.cwd || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("cwd=%q words=%q ok=%v; want cwd=%q words=%q", cwd, got, ok, tc.cwd, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnvOptionLiteralWriteTargets(t *testing.T) {
+	const program = `python3 -c 'open("disklink","a").write("x")'`
+	for _, tc := range []struct{ name, command string }{
+		{"ignore", "env -i " + program},
+		{"ignore long", "env --ignore-environment " + program},
+		{"unset", "env -u UNUSED " + program},
+		{"unset long", "env --unset=UNUSED " + program},
+		{"verbose", "env -v " + program},
+		{"chdir", "env -C . " + program},
+		{"split", `env -S 'python3 -c "open(\"disklink\",\"a\").write(\"x\")"'`},
+		{"split long", `env --split-string='python3 -c "open(\"disklink\",\"a\").write(\"x\")"'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := LiteralWriteOperands(tc.command, "/work", "/home/test")
+			if want := []string{"/work/disklink"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("operands=%q; want %q", got, want)
+			}
+		})
+	}
+}
 
 // A hard link is compared by file identity (inode, or volume serial and file
 // index on Windows), not by its own pathname.
@@ -194,8 +246,108 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 	}
 }
 
+func TestShellExtraWriteOperandsTarMembers(t *testing.T) {
+	cwd := "/work"
+	if runtime.GOOS == "windows" {
+		cwd = `C:\work`
+	}
+	got := ShellExtraWriteOperands("tar -C dirlink -xf keys.tar authorized_keys", cwd, "")
+	want := filepath.Join(cwd, "dirlink", "authorized_keys")
+	if len(got) != 1 || got[0].Path != want {
+		t.Fatalf("tar member operands = %v, want [%s]", got, want)
+	}
+	if got := ShellExtraWriteOperands("tar -C dirlink -xf keys.tar notes.txt", cwd, ""); len(got) != 0 {
+		t.Fatalf("ordinary tar member operands = %v, want none", got)
+	}
+}
+
+func TestShellWriteOperandsNestedAndPoisonedVariables(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell paths")
+	}
+	cwd, home := "/p", "/h"
+	disk := filepath.Join(cwd, "disklink")
+	a := filepath.Join(cwd, "a")
+	for _, tc := range []struct {
+		name         string
+		command      string
+		wantOperands []string
+		wantDynamic  bool
+		wantExtra    []string
+	}{
+		{"if body redirect", `if true; then echo k >> disklink; fi`, []string{disk}, false, nil},
+		{"for body redirect", `for i in 1 2; do echo k >> disklink; done`, []string{disk}, false, nil},
+		{"while body redirect", `while true; do echo k >> disklink; done`, []string{disk}, false, nil},
+		{"case body redirect", `case x in x) echo k >> disklink;; esac`, []string{disk}, false, nil},
+		{"function body redirect", `f() { echo k >> disklink; }; f`, []string{disk}, false, nil},
+		{"command substitution redirect", `echo $(echo k >> disklink)`, []string{disk}, false, nil},
+		{"process substitution redirect", `cat <(echo k >> disklink)`, []string{disk}, false, nil},
+		{"nested extra writer", `if true; then ln -f x disklink; fi`, nil, false, []string{disk}},
+		{"nested extra writer with variable", `f=disklink; if true; then ln -f x "$f"; fi`, nil, false, []string{disk}},
+		{"plain variable", `f=disklink; echo k >> "$f"`, []string{disk}, false, nil},
+		{"default keeps set value", `x=a; echo k >> ${x:-disklink}`, []string{a}, false, nil},
+		{"default uses empty value", `x=; echo k >> ${x:-disklink}`, []string{disk}, false, nil},
+		{"unset default", `echo k >> ${x:-disklink}`, []string{disk}, false, nil},
+		{"if assignment poisons", `f=other; if true; then f=disklink; fi; echo k >> "$f"`, nil, true, nil},
+		{"for assignment poisons final", `f=other; for f in disklink; do :; done; echo k >> "$f"`, nil, true, nil},
+		{"select assignment poisons body", `f=other; select f in disklink; do echo k >> "$f"; done`, nil, true, nil},
+		{"export assignment poisons", `f=other; export f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"declare assignment poisons", `f=other; declare f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"typeset assignment poisons", `f=other; typeset f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"local assignment poisons", `f=other; local f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"readonly assignment poisons", `f=other; readonly f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"append assignment poisons", `f=dirlink/; f+=authorized_keys; echo k >> "$f"`, nil, true, nil},
+		{"eval poisons", `f=other; eval f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"source poisons", `f=other; source x.sh; echo k >> "$f"`, nil, true, nil},
+		{"dot poisons", `f=other; . x.sh; echo k >> "$f"`, nil, true, nil},
+		{"printf variable poisons", `f=other; printf -v f disklink; echo k >> "$f"`, nil, true, nil},
+		{"arithmetic poisons", `f=other; (( f = 1 )); echo k >> "$f"`, nil, true, nil},
+		{"let poisons", `f=other; let f=1; echo k >> "$f"`, nil, true, nil},
+		{"getopts poisons", `f=other; getopts a f; echo k >> "$f"`, nil, true, nil},
+		{"mapfile poisons", `f=other; mapfile f; echo k >> "$f"`, nil, true, nil},
+		{"readarray poisons", `f=other; readarray f; echo k >> "$f"`, nil, true, nil},
+		{"read poisons", `f=other; read f; echo k >> "$f"`, nil, true, nil},
+		{"function assignment poisons", `f=other; g() { f=disklink; }; g; echo k >> "$f"`, nil, true, nil},
+		{"pipeline assignment poisons", `f=other; echo | f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"background assignment poisons", `f=other; f=disklink & echo k >> "$f"`, nil, true, nil},
+		{"and assignment poisons", `f=other; true && f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"or assignment poisons", `f=other; false || f=disklink; echo k >> "$f"`, nil, true, nil},
+		{"subshell assignment poisons", `f=other; (f=disklink); echo k >> "$f"`, nil, true, nil},
+		{"command prefix assignment poisons", `f=other; f=disklink cmd; echo k >> "$f"`, nil, true, nil},
+		{"command substitution assignment poisons", `f=other; echo "$(f=disklink)"; echo k >> "$f"`, nil, true, nil},
+		{"alternate expansion stays dynamic", `x=a; echo k >> ${x:+disklink}`, nil, true, nil},
+		{"pattern expansion stays dynamic", `x=disklink; echo k >> ${x#d}`, nil, true, nil},
+		{"array expansion stays dynamic", `a=(disklink); echo k >> ${a[0]}`, nil, true, nil},
+		{"positional expansion stays dynamic", `echo k >> $@`, nil, true, nil},
+		{"random expansion stays dynamic", `echo k >> $RANDOM`, nil, true, nil},
+		{"seconds expansion stays dynamic", `echo k >> $SECONDS`, nil, true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operands, ok, dynamic := ShellWriteOperands(tc.command, cwd, home)
+			if !ok {
+				t.Fatalf("ShellWriteOperands did not parse %q", tc.command)
+			}
+			if !slices.Equal(operands, tc.wantOperands) || dynamic != tc.wantDynamic {
+				t.Fatalf("ShellWriteOperands = %v dynamic=%v, want %v dynamic=%v",
+					operands, dynamic, tc.wantOperands, tc.wantDynamic)
+			}
+			if tc.wantExtra != nil {
+				extra := ShellExtraWriteOperands(tc.command, cwd, home)
+				paths := make([]string, 0, len(extra))
+				for _, operand := range extra {
+					paths = append(paths, operand.Path)
+				}
+				if !slices.Equal(paths, tc.wantExtra) {
+					t.Fatalf("ShellExtraWriteOperands = %v, want %v", paths, tc.wantExtra)
+				}
+			}
+		})
+	}
+}
+
 // A ".." in a link target must be interpreted after the preceding component
-// has been inspected. A linked or unreadable component makes that path unknown.
+// has been inspected. A readable link resolves physically; a missing
+// component remains unknown.
 func TestRelativeLinkTargetDotDot(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -203,7 +355,7 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 	}
 	for _, dir := range []string{
 		filepath.Join(home, ".ssh", "d"), filepath.Join(home, "a"),
-		filepath.Join(home, "a2"), filepath.Join(home, "unpack", "q", "r"),
+		filepath.Join(home, "a2"), filepath.Join(home, "c", "real"), filepath.Join(home, "unpack", "q", "r"),
 		filepath.Join(home, "ordinary"), filepath.Join(home, "shared"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -215,6 +367,8 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		{filepath.Join(home, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
 		{filepath.Join(home, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
 		{filepath.Join(home, "a2", "l"), filepath.FromSlash("b/../t")},
+		{filepath.Join(home, "c", "b2"), filepath.Join(home, "c", "real")},
+		{filepath.Join(home, "c", "l2"), filepath.FromSlash("b2/../ok.txt")},
 		{filepath.Join(home, "ordinary", "lib"), filepath.FromSlash("../shared")},
 	} {
 		if err := os.Symlink(link.target, link.name); err != nil {
@@ -225,8 +379,9 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		name, path, want string
 		known            bool
 	}{
-		{"keys hop", filepath.Join(home, "a", "l"), "", false},
-		{"extractor hop", filepath.Join(home, "a2", "l"), "", false},
+		{"keys hop", filepath.Join(home, "a", "l"), filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"extractor hop", filepath.Join(home, "a2", "l"), filepath.Join(home, "unpack", "q", "t"), true},
+		{"benign link hop", filepath.Join(home, "c", "l2"), filepath.Join(home, "c", "ok.txt"), true},
 		{"unknown hop", filepath.Join(home, "a", "missing") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", "", false},
 		{"ordinary dot dot", filepath.Join(home, "ordinary") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", filepath.Join(home, "out"), true},
 		{"ordinary link", filepath.Join(home, "ordinary", "lib", "x"), filepath.Join(home, "shared", "x"), true},
