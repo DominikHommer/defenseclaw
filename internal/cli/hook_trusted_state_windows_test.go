@@ -376,6 +376,43 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 	}
 }
 
+// GAP-0759: a standalone hook whose account's DefenseClaw folder is gone
+// refuses with enterprise_managed_runtime_home_missing; a folder that is
+// there, a failure that is not a missing file, and Secure Client keep
+// enterprise_managed_runtime_state_invalid. Every case fails closed.
+func TestWindowsManagedHookNamesAMissingRuntimeHome(t *testing.T) {
+	previousStandalone := standaloneEnterpriseHookCheck
+	t.Cleanup(func() { standaloneEnterpriseHookCheck = previousStandalone })
+	present := t.TempDir()
+	missing := filepath.Join(t.TempDir(), ".defenseclaw")
+	for _, tc := range []struct {
+		name       string
+		standalone bool
+		home       string
+		err        error
+		want       string
+	}{
+		{"missing folder", true, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_home_missing"},
+		{"folder present", true, present, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
+		{"other failure", true, missing, errors.New("bundle hash mismatch"), "enterprise_managed_runtime_state_invalid"},
+		{"Secure Client", false, missing, fmt.Errorf("load bundle: %w", os.ErrNotExist), "enterprise_managed_runtime_state_invalid"},
+	} {
+		standalone := tc.standalone
+		standaloneEnterpriseHookCheck = func(string) bool { return standalone }
+		home, failure := tc.home, tc.err
+		stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+			return enterprisehooks.WindowsManagedHookRuntime{Connector: "claudecode", PolicyActive: true, DataDir: home}, failure
+		})
+		if prepareEnterpriseManagedHookRuntime("claudecode") {
+			t.Fatalf("%s: a failed runtime was treated as a no-op", tc.name)
+		}
+		opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+		if opts.ManagedRuntimeFailure != tc.want || opts.FailMode != "closed" {
+			t.Fatalf("%s: runtime failure %q fail mode %q, want %q closed", tc.name, opts.ManagedRuntimeFailure, opts.FailMode, tc.want)
+		}
+	}
+}
+
 func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "closed")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {

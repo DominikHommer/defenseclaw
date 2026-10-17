@@ -1971,6 +1971,10 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 	return 0
 }
 
+// managedRuntimeHomeMissingReason is the refusal of a managed hook whose
+// account has no DefenseClaw folder (troubleshooting.mdx).
+const managedRuntimeHomeMissingReason = "enterprise_managed_runtime_home_missing"
+
 // managedStandaloneFailClosedText is what a standalone managed hook (Unix or
 // Windows, managedPlainFailClosed) says when it fails closed: that DefenseClaw blocked the prompt or tool
 // call, why in plain words and what to do, e.g. "DefenseClaw blocked this
@@ -2005,6 +2009,12 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
+	case reason == managedRuntimeHomeMissingReason:
+		// It said only "not set up correctly" (GAP-0759); the guardian
+		// normally puts the folder back on its own.
+		cause, advice = "your DefenseClaw folder (.defenseclaw in your user profile) is missing",
+			"DefenseClaw normally puts it back on its own; try again in a minute. If this continues, contact your administrator."
+		code = reason
 	case strings.HasPrefix(reason, "enterprise_managed_runtime") ||
 		reason == "enterprise_managed_hook_socket_missing" ||
 		reason == "enterprise_machine_policy_summary_untrusted":

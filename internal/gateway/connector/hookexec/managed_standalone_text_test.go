@@ -93,6 +93,19 @@ func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) 
 	}
 }
 
+// GAP-0759: a missing DefenseClaw folder names that cause and its code
+// instead of "not set up correctly"; any other runtime refusal keeps it.
+func TestManagedRuntimeHomeMissingTextNamesTheFolder(t *testing.T) {
+	text := managedStandaloneFailClosedText("PreToolUse", "transport", managedRuntimeHomeMissingReason)
+	if !strings.Contains(text, "DefenseClaw folder") || strings.Contains(text, "not set up correctly") ||
+		!strings.HasSuffix(text, " ("+managedRuntimeHomeMissingReason+")") || !strings.HasPrefix(text, "DefenseClaw blocked this tool call: ") {
+		t.Fatalf("text = %q", text)
+	}
+	if other := managedStandaloneFailClosedText("PreToolUse", "transport", "enterprise_managed_runtime_state_invalid"); !strings.Contains(other, "not set up correctly") {
+		t.Fatalf("state invalid text = %q", other)
+	}
+}
+
 func TestHookEventSubject(t *testing.T) {
 	for event, want := range map[string]string{
 		"beforeSubmitPrompt":  "prompt",
