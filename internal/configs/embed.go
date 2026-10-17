@@ -330,14 +330,17 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 					base.Providers[idx].AvailableModels, op.AvailableModels,
 				)
 			}
-			if len(op.RequestPathOverrides) > 0 {
-				if base.Providers[idx].RequestPathOverrides == nil {
-					base.Providers[idx].RequestPathOverrides = make(map[string]string, len(op.RequestPathOverrides))
-				}
-				for k, v := range op.RequestPathOverrides {
-					base.Providers[idx].RequestPathOverrides[k] = v
-				}
-			}
+			// The string maps take the overlay's keys. A same-name entry
+			// (an llm_providers.custom provider named like a built-in, or a
+			// provider named twice) kept its path overrides but lost its
+			// extra headers (GAP-0361). Both maps are rebuilt, so the merge
+			// never writes into a map the overlay or an earlier entry owns.
+			base.Providers[idx].RequestPathOverrides = mergeStringMaps(
+				base.Providers[idx].RequestPathOverrides, op.RequestPathOverrides,
+			)
+			base.Providers[idx].ExtraHeaders = mergeStringMaps(
+				base.Providers[idx].ExtraHeaders, op.ExtraHeaders,
+			)
 			if op.TLS != nil {
 				base.Providers[idx].TLS = op.TLS
 			}
@@ -403,6 +406,22 @@ func lower(s string) string {
 		b[i] = c
 	}
 	return string(b)
+}
+
+// mergeStringMaps is a new map with the keys of a, then those of b (b wins).
+// It returns a unchanged when b adds nothing.
+func mergeStringMaps(a, b map[string]string) map[string]string {
+	if len(b) == 0 {
+		return a
+	}
+	out := make(map[string]string, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 func unionStrings(a, b []string) []string {
