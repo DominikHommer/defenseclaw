@@ -117,12 +117,14 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
+  defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" transport
   defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
   echo "defenseclaw: sandbox ingress unreachable, blocking kiro tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
+  defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: kiro hook error, blocking kiro tool (sandbox hooks fail closed): $1" >&2
   exit 2
@@ -154,6 +156,9 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
   defenseclaw_log_hook_failure kiro kiro-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "kiro hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
@@ -163,6 +168,8 @@ fail_unreachable() {
 }
 
 fail_response() {
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event kiro kiro-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure kiro kiro-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: kiro hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then

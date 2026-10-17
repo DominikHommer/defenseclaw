@@ -978,6 +978,62 @@ defenseclaw_should_fail_closed_on_unreachable() {
   esac
 }
 
+# defenseclaw_failed_stop_event CONNECTOR EVENT [PAYLOAD] returns 0 (true)
+# for a stop or session-end event, the exact set of the native hook runner
+# (hookexec.NeutralLifecycleEvent in lifecycle.go). Failing such an event
+# closed denies nothing: it keeps the agent running (Codex, Claude Code,
+# Devin and Copilot continue the turn when a stop hook blocks, Cursor submits
+# the block as the next prompt), every later turn fails closed and stops
+# again, and the agent loops on model turns until DefenseClaw is back
+# (#1140). EVENT is the event the registered command binds (Codex,
+# Copilot). When it is empty the event comes from the payload's
+# hook_event_name (or event); a payload whose two event fields disagree, or
+# that cannot be read, names no event. The Secure Client profile keeps its
+# results.
+defenseclaw_failed_stop_event() {
+  local connector="${1:-}" event="${2:-}" payload="${3:-}" named="" other=""
+  [ "${_DC_SECURE_CLIENT_HOOK:-0}" != "1" ] || return 1
+  if [ -z "$event" ]; then
+    [ -n "$payload" ] || return 1
+    named="$(printf '%s' "$payload" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+    other="$(printf '%s' "$payload" | _dc_jq -r '.event // empty' 2>/dev/null)" || return 1
+    if [ -n "$named" ] && [ -n "$other" ] && [ "$named" != "$other" ]; then
+      return 1
+    fi
+    event="${named:-$other}"
+  fi
+  case "${connector}:${event}" in
+    claudecode:Stop|claudecode:SubagentStop|claudecode:TeammateIdle|claudecode:StopFailure|claudecode:SessionEnd) return 0 ;;
+    codex:Stop|codex:SubagentStop|codex:SessionEnd) return 0 ;;
+    copilot:agentStop|copilot:subagentStop|copilot:sessionEnd|copilot:Stop|copilot:SubagentStop) return 0 ;;
+    devin:Stop|devin:SessionEnd) return 0 ;;
+    kiro:Stop) return 0 ;;
+    cursor:[Ss][Tt][Oo][Pp]|cursor:[Ss][Uu][Bb][Aa][Gg][Ee][Nn][Tt][Ss][Tt][Oo][Pp]|cursor:[Ss][Ee][Ss][Ss][Ii][Oo][Nn][Ee][Nn][Dd]) return 0 ;;
+  esac
+  return 1
+}
+
+# defenseclaw_allow_failed_stop_event CONNECTOR HOOK_NAME EVENT PAYLOAD
+# REASON CATEGORY is called on a path that is about to fail closed. For a
+# stop or session-end event (defenseclaw_failed_stop_event) it answers the
+# connector's neutral allow (Cursor's is {}) and exits 0; the failure is
+# still logged, as fail mode open, like the native hook runner
+# (allowFailClosedStop). For any other event it returns 0 and the caller
+# fails closed as before.
+defenseclaw_allow_failed_stop_event() {
+  local connector="${1:-unknown}" hook_name="${2:-unknown}" event="${3:-}" payload="${4:-}"
+  local reason="${5:-unknown}" category="${6:-transport}" shown=""
+  defenseclaw_failed_stop_event "$connector" "$event" "$payload" || return 0
+  shown="$event"
+  if [ -z "$shown" ]; then
+    shown="$(printf '%s' "$payload" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || shown=""
+  fi
+  defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" "$category" open
+  echo "DefenseClaw is not blocking the ${shown:-stop} event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (${reason})" >&2
+  [ "$connector" != "cursor" ] || printf '{}\n'
+  exit 0
+}
+
 # defenseclaw_emit_unreachable_stderr writes a single stderr line whose
 # verb (allowing/blocking) ACTUALLY matches what the hook is about to
 # do on its next exit. The previous design unconditionally printed
@@ -1112,10 +1168,11 @@ defenseclaw_own_gateway_alive() {
 # missed inspection.
 #
 # Usage:
-#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE]
+#   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT [TOKEN_FILE [EVENT PAYLOAD]]
 #
 # TOKEN_FILE is the token file the hook looked for; the message names it so
-# the user can find it (GAP-1425).
+# the user can find it (GAP-1425). EVENT and PAYLOAD, when the hook already
+# knows them, let a stop event through (defenseclaw_allow_failed_stop_event).
 #
 # Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
@@ -1125,6 +1182,9 @@ defenseclaw_handle_missing_token() {
   local token_file="${4:-}"
   local reason="missing gateway token file"
   [ -z "$token_file" ] || reason="missing gateway token: ${token_file} not found"
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event "$connector" "$hook_name" "${5:-}" "${6:-}" "$reason" transport
+  fi
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)$(defenseclaw_missing_token_next_step "$connector")" >&2

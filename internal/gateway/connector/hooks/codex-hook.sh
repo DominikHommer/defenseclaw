@@ -137,10 +137,12 @@ DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token codex codex-hook "codex tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}"
+  defenseclaw_handle_missing_token codex codex-hook "codex tool" "${HOOK_DIR}/{{.TokenFile}}" "$BOUND_EVENT" ""
 fi{{end}}
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  [ "$FAIL_MODE" != "closed" ] ||
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -185,6 +187,10 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
+  # A blocked Stop only keeps Codex running the turn (#1140).
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
+  fi
   defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Codex shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
@@ -213,6 +219,8 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$reason" response
   defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then

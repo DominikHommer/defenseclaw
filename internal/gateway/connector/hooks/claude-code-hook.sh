@@ -135,7 +135,7 @@ fi
 unset CURSOR_ORIGIN_VERSION CURSOR_HOOK_MARKER _CURSOR_HOOK_LINE
 
 {{if .Sandbox}}defenseclaw_sandbox_require_token claudecode claude-code-hook "claude-code tool"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}"
+  defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool" "${HOOK_DIR}/{{.TokenFile}}" "" "$PAYLOAD"
 fi{{end}}
 
 API_ADDR="{{.APIAddr}}"
@@ -196,6 +196,10 @@ claude_fail_closed_decision() {
 }
 
 {{end}}fail_unreachable() {
+  # A blocked stop event only keeps Claude Code running (#1140).
+  if defenseclaw_should_fail_closed_on_unreachable; then
+    defenseclaw_allow_failed_stop_event claudecode claude-code-hook "" "${PAYLOAD:-}" "$1" transport
+  fi
   defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
@@ -228,6 +232,8 @@ claude_fail_closed_decision() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
+  [ "$FAIL_MODE" = "open" ] ||
+    defenseclaw_allow_failed_stop_event claudecode claude-code-hook "" "${PAYLOAD:-}" "$reason" response
   defenseclaw_log_hook_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: claude-code hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
