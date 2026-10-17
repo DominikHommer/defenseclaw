@@ -914,7 +914,8 @@ func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
 			cfg := base
 			tc.set(&cfg)
 			err := validateEnterpriseConfig(&cfg)
-			if err == nil || !strings.Contains(err.Error(), tc.path) || strings.Contains(err.Error(), "example-sensitive-value") ||
+			if err == nil || !strings.Contains(err.Error(), tc.path) ||
+				strings.Contains(err.Error(), "example-sensitive-value") || strings.Contains(err.Error(), "https://example.test/hook") ||
 				!strings.Contains(err.Error(), "{credential: NAME}") {
 				t.Fatalf("validation = %v, want redacted %s refusal with credential guidance", err, tc.path)
 			}
