@@ -800,28 +800,6 @@ func (m *Manager) LineageFor(sandboxName string, pid int, exe string) []ProcessR
 	return t.lineageLocked(t.byPIDLocked(pid, exe))
 }
 
-// PIDOf is the pid of the one process of sandbox sandboxName that runs exe
-// (runs) at the connection time, from the sandbox's process tree; 0 while
-// the tree is off or attribution is ambiguous. Sampled processes retain the
-// short start window because a second, short-lived copy can go unsampled.
-// Kernel-fed processes have exact exec and exit times. It implements
-// ProcessLookup for callers without the atomic LineageAt method.
-func (m *Manager) PIDOf(sandboxName, exe string, at time.Time) int {
-	m.mu.Lock()
-	b := m.boxes[sandboxName]
-	var t *procTree
-	if b != nil {
-		t = b.procs
-	}
-	m.mu.Unlock()
-	if t == nil || exe == "" || at.IsZero() {
-		return 0
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return onePID(t.candidatesAtLocked(exe, at))
-}
-
 // LineageAt resolves a pid-less destination against the process image that
 // was running when it connected. The candidate and its ancestry are read
 // under one tree lock, so a later reuse of its pid cannot change the row.
@@ -871,7 +849,7 @@ func (t *procTree) candidatesAtLocked(exe string, at time.Time) []*procNode {
 			candidates = append(candidates, n)
 		}
 	}
-	if len(candidates) < 2 || onePID(candidates) != 0 {
+	if len(candidates) < 2 {
 		return candidates
 	}
 	// Several copies. The slack allows for a sample's coarse start, so a
@@ -916,20 +894,6 @@ func pythonInterpreterAlias(processExe, recordExe string) bool {
 	processVersion, processOK := pythonVersion(path.Base(processExe))
 	recordVersion, recordOK := pythonVersion(path.Base(recordExe))
 	return processOK && recordOK && (processVersion == "" || recordVersion == "" || processVersion == recordVersion)
-}
-
-// onePID is the pid the nodes share, or 0 for none or several.
-func onePID(nodes []*procNode) int {
-	pid := 0
-	for _, n := range nodes {
-		switch {
-		case pid == 0:
-			pid = n.PID
-		case n.PID != pid:
-			return 0
-		}
-	}
-	return pid
 }
 
 // runs reports whether the process runs program exe. A sample seldom has a

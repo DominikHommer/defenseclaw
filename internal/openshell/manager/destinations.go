@@ -88,10 +88,9 @@ const (
 // tree is off has destinations without lineage.
 type ProcessLookup interface {
 	Lineage(sandboxName string, pid int) []ProcessRef
-	// PIDOf is the pid of the one process of the sandbox that runs exe and
-	// started shortly before at, when the program was seen connecting; 0
-	// for none or several.
-	PIDOf(sandboxName, exe string, at time.Time) int
+	// LineageAt resolves a pid-less connection against the process image
+	// running at that time; nil when the image is unknown or ambiguous.
+	LineageAt(sandboxName, exe string, at time.Time) []ProcessRef
 }
 
 // ProcessRef is one process of a lineage, as the process index saw it in
@@ -894,20 +893,14 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 	m.destMu.Unlock()
 	for i := range out.Destinations {
 		d := &out.Destinations[i]
-		pid := d.PID
-		if pid <= 0 && m.procs != nil && actors[i].binary != "" {
+		if d.PID <= 0 && m.procs != nil && actors[i].binary != "" {
 			// OpenShell names no pid for a connection (its NET records
 			// say 0 on both drivers). Resolve against the process image
 			// running at the connection, before its pid can be reused.
-			if timed, ok := m.procs.(interface {
-				LineageAt(sandboxName, exe string, at time.Time) []ProcessRef
-			}); ok {
-				d.Lineage = destinationLineage(timed.LineageAt(info.name, actors[i].binary, actors[i].at))
-				continue
-			}
-			pid = m.procs.PIDOf(info.name, actors[i].binary, actors[i].at)
+			d.Lineage = destinationLineage(m.procs.LineageAt(info.name, actors[i].binary, actors[i].at))
+			continue
 		}
-		d.Lineage = m.lineage(info.name, pid, actors[i].binary)
+		d.Lineage = m.lineage(info.name, d.PID, actors[i].binary)
 	}
 	slices.SortFunc(out.Destinations, func(a, b sandboxapi.DestinationRow) int {
 		return cmp.Or(cmp.Compare(destinationRank(a.Kind), destinationRank(b.Kind)), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.Host, b.Host))
