@@ -419,7 +419,9 @@ func (d *Doctor) ManagedE2fsprogsCheck() Check {
 	}
 	c.Detail = problem
 	fix := "ask your administrator to repair the package's e2fsprogs or install mke2fs and debugfs side by side and set enterprise.openshell.e2fsprogs_dir; an account build in ~/.local/opt/e2fsprogs/sbin also works when the setting is unset"
-	if strings.Contains(problem, "not trusted") {
+	if strings.Contains(problem, "holds no mke2fs and debugfs") {
+		fix = "ask your administrator to install e2fsprogs into the configured install prefix or the folder that holds both tools"
+	} else if strings.Contains(problem, "not trusted") {
 		fix = "ask your administrator to make the e2fsprogs directory and both tools root-owned, without symlinks or group/other write access; enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
 	} else if strings.Contains(problem, "cannot be traversed") || strings.Contains(problem, "cannot be executed") {
 		fix = "ask your administrator to make the e2fsprogs directory and its ancestors traversable and both tools executable by sandbox accounts (chmod o+x); enterprise.openshell.e2fsprogs_dir may name the install prefix or the folder that holds both tools"
