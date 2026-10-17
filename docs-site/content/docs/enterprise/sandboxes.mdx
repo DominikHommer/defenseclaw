@@ -327,8 +327,8 @@ and do nothing per account. The steps, as root:
    `ensure` renders `driver_dir` from the first of `/usr/libexec/openshell`,
    `/usr/lib/openshell` and `/usr/local/libexec/openshell` (macOS:
    `/opt/homebrew/libexec/openshell`, `/usr/local/libexec/openshell`) that holds
-   `openshell-driver-vm`. Also install `e2fsprogs` 1.43 or newer, and keep
-   Docker for the image builds.
+   `openshell-driver-vm`. On Linux also install `e2fsprogs` 1.43 or newer.
+   The macOS pkg supplies its fallback. Keep Docker for the image builds.
 3. **Run `ensure`** with the config (see [Turn it on](#turn-it-on)). It expects
    the policies folder to be `root:defenseclaw` mode 0750 and the rule pack
    folders to be owned by root.
@@ -357,8 +357,9 @@ that person, with no sudo. The steps, as root:
    install. NVIDIA publishes no tarballs for Intel Macs, so `setup` is refused
    there too.
 2. **Prepare what OpenShell needs and DefenseClaw does not bring.** Docker for the
-   agent images, the `docker` and `kvm` groups for the people who need them
-   (Linux), and `e2fsprogs` for the MicroVM driver ([the MicroVM driver](#the-microvm-driver)).
+   agent images, and the `docker` and `kvm` groups plus `e2fsprogs` for the
+   people who need them on Linux ([the MicroVM driver](#the-microvm-driver)).
+   The macOS pkg supplies `e2fsprogs` when no account build is present.
    `ensure` checks the driver prerequisites in this mode too.
 3. **Allow the download.** The daemon downloads NVIDIA's release tarballs, checks
    NVIDIA's SHA-256 file and a digest pinned in DefenseClaw, and uses the proxy
