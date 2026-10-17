@@ -79,7 +79,7 @@ hermes_sandbox_block() {
   echo "defenseclaw: hermes hook: $1, blocking (sandbox hooks fail closed)" >&2
   printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "DefenseClaw blocked this tool call because its policy check failed: $1")"
   exit 2
-}{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+}{{else}}FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"{{end}}
 
 # Bail early on missing token via the shared helper so the bypass is
 # logged to hook-failures.jsonl AND honors strict availability — the
@@ -113,9 +113,48 @@ fail_response() {
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool" "${HOOK_DIR}/{{.TokenFile}}"
 fi
 
+# hermes_block_message is the message of a block this hook makes itself.
+# Hermes shows it as the reason the tool call did not run, so it says why
+# in plain words: a gateway that is not running and the next step, as the
+# native hook does (managedStandaloneFailClosedText). A managed hook keeps
+# its internal reasons in the hook-failures log; the Secure Client profile
+# keeps its text.
+hermes_block_message() {
+  local layer="$1" reason="$2" next=""
+  if defenseclaw_secure_client_hook; then
+    printf '%s' "DefenseClaw hook failed closed"
+    return 0
+  fi
+  case "$layer" in
+    oversized) reason="it is too large for DefenseClaw to inspect. Make it smaller and try again." ;;
+    response)
+      case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+        1) reason="the DefenseClaw gateway returned an answer DefenseClaw could not use. Try again; if this continues, contact your administrator." ;;
+      esac
+      ;;
+    *)
+      [ "$reason" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"
+      if [ -n "$next" ]; then
+        reason="$next"
+      elif [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+        case "$reason" in
+          "the DefenseClaw "*) ;;
+          *) reason="the DefenseClaw gateway is not available. Try again in a moment; if this continues, contact your administrator." ;;
+        esac
+      fi
+      ;;
+  esac
+  printf 'DefenseClaw blocked this tool call: %s' "$reason"
+}
+
+hermes_block() {
+  printf '{"action":"block","message":"%s"}\n' "$(defenseclaw_json_escape "$(hermes_block_message "$1" "$2")")"
+}
+
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
+    hermes_block oversized "stdin body exceeded cap"
     exit 2
   fi
   exit 0
@@ -142,7 +181,7 @@ fail_unreachable() {
   defenseclaw_log_hook_failure hermes hermes-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "hermes tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
+    hermes_block transport "$1"
     exit 2
   fi
   exit 0
@@ -154,7 +193,7 @@ fail_response() {
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0
   fi
-  printf '{"action":"block","message":"DefenseClaw hook failed closed"}\n'
+  hermes_block response "$1"
   exit 0
 }
 {{end}}

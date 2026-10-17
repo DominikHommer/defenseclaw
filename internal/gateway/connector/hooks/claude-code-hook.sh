@@ -85,7 +85,7 @@ defenseclaw_harden_env
 # 429, an unversioned placeholder a relay 500), so no failed, refused or
 # unparseable reply may ever turn into an allow.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
+readonly FAIL_MODE{{else}}FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.

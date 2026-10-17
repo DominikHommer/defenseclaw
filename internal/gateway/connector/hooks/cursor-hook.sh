@@ -128,7 +128,9 @@ readonly FAIL_MODE
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+# A managed hook takes only its rendered fail mode, never one from the
+# environment (the shared inspect hooks do the same).
+FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
