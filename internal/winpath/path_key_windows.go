@@ -8,6 +8,7 @@ package winpath
 import (
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -36,6 +37,13 @@ func ComparisonKey(path string) string {
 	}
 	return strings.ToLower(filepath.Clean(path))
 }
+
+// longNameLookupBudget bounds how long ComparisonKey waits for the 8.3 long
+// name of one spelling. The lookup touches the file system, and a stalled
+// redirected or network profile can hold it for good; ComparisonKey runs
+// before the WinGet scan's own deadline starts and while the guardian holds
+// its restore lock; unbounded, it held the whole reconcile (B-21 review).
+const longNameLookupBudget = 200 * time.Millisecond
 
 // longNames bounds the long-name lookups of ComparisonKey; tests replace it
 // and getLongPathName to model storage that does not answer.

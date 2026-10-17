@@ -8,13 +8,6 @@ import (
 	"time"
 )
 
-// longNameLookupBudget bounds how long ComparisonKey waits for the 8.3 long
-// name of one spelling. The lookup touches the file system, and a stalled
-// redirected or network profile can hold it for good; ComparisonKey runs
-// before the WinGet scan's own deadline starts and while the guardian holds
-// its restore lock, so an unbounded lookup held the whole reconcile.
-const longNameLookupBudget = 200 * time.Millisecond
-
 // longNameCacheMax bounds the spellings longNameLookups remembers.
 const longNameCacheMax = 256
 
