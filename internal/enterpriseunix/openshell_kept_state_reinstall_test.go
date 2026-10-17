@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
@@ -117,5 +118,25 @@ func TestKeptOpenShellSetupRetryAfterRolledBackEnsure(t *testing.T) {
 				t.Error("the committed retry kept the retained-state record")
 			}
 		})
+	}
+}
+
+// The kept record names the inode of the gateway binary the uninstall
+// removed. Its adoption forgets it, so the reinstalled binary reloads the
+// kept accounts' LaunchAgents even when it reuses that inode.
+func TestKeptOpenShellSetupAdoptionForgetsTheGatewayIdentity(t *testing.T) {
+	h := keptDockerHost(t, "darwin", true)
+	state := h.env.loadOpenShellState()
+	state.GatewayIdentity = "sample-inode-of-the-removed-gateway"
+	if err := h.env.saveOpenShellState(state); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if kept := h.env.loadKeptOpenShellState(); kept == nil || kept.GatewayIdentity == "" {
+		t.Fatalf("the kept record = %+v, want the identity as the uninstall left it", kept)
+	}
+	adopted, ok := (&lifecycle{env: h.env, result: &enterprisestatus.Result{}}).openShellStateForSettle()
+	if !ok || adopted.Applied == nil || adopted.GatewayIdentity != "" {
+		t.Fatalf("adopted %+v (kept %t), want the applied setup without the old gateway identity", adopted, ok)
 	}
 }

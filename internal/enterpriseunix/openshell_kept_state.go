@@ -137,6 +137,10 @@ func (l *lifecycle) openShellStateForSettle() (*openshellState, bool) {
 		return state, false
 	}
 	if kept := env.loadKeptOpenShellState(); kept != nil {
+		// The gateway binary the record saw is gone with the uninstall. A
+		// reinstalled binary can reuse its inode, and the LaunchAgents of the
+		// kept accounts would then not be reloaded onto it.
+		kept.GatewayIdentity = ""
 		return kept, true
 	}
 	// An unreadable or malformed record is ignored. A successful save of the
