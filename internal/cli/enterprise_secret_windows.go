@@ -279,12 +279,8 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if !managed.ValidCredentialName(opts.name) {
 		return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
 	}
-	installed, err := windowsSecretDeploymentInstalled()
-	if err != nil {
-		return false, windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
-	}
-	if !installed {
-		return false, windowsSecretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+	if err := requireWindowsSecretDeployment(); err != nil {
+		return false, err
 	}
 	var value []byte
 	switch action {
@@ -316,6 +312,11 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return false, err
 	}
 	defer release()
+	// An uninstall holds lifecycle.lock, so one can finish while this run
+	// waits for it; check again under both locks before anything is written.
+	if err := requireWindowsSecretDeployment(); err != nil {
+		return false, err
+	}
 	if action == "set" {
 		if err := writeWindowsSecret(layout.SecretsDir, opts.name, value); err != nil {
 			return false, windowsSecretFailed("change_failed", windowsSecretExitFailure, err)
@@ -330,6 +331,19 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, windowsSecretChanged(action), err))
 	}
 	return restarted, nil
+}
+
+// requireWindowsSecretDeployment refuses not_installed (1603) unless a
+// standalone managed deployment is installed.
+func requireWindowsSecretDeployment() error {
+	installed, err := windowsSecretDeploymentInstalled()
+	if err != nil {
+		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+	}
+	if !installed {
+		return windowsSecretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+	}
+	return nil
 }
 
 // removeWindowsSecret deletes the credential unless the installed config

@@ -467,6 +467,35 @@ func TestWindowsSecretChangesUnderBothLocks(t *testing.T) {
 	}
 }
 
+// An uninstall that finishes while the change waits for lifecycle.lock
+// leaves no deployment: the change refuses not_installed (1603) under both
+// locks, writes nothing and restarts nothing.
+func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	host := stubWindowsSecretHost(t, managed.StandaloneLayout{GOOS: "windows", SecretsDir: dir, LifecycleDir: filepath.Join(filepath.Dir(dir), "install")})
+	for _, action := range []string{"set", "remove"} {
+		t.Run(action, func(t *testing.T) {
+			host.events = nil
+			windowsSecretDeploymentInstalled = func() (bool, error) { return true, nil }
+			windowsSecretLifecycleLock = func(string) (func(), error) {
+				// The uninstall held lifecycle.lock and finished.
+				windowsSecretDeploymentInstalled = func() (bool, error) { return false, nil }
+				host.events = append(host.events, "lock lifecycle")
+				return func() { host.events = append(host.events, "unlock lifecycle") }, nil
+			}
+			opts := enterpriseSecretOptions{name: "ai-defense-api-key", json: true, fromStdin: action == "set"}
+			out, err := runWindowsSecretCommand(t, action, opts, "late-value")
+			windowsSecretFailureDoc(t, out, err, action, "not_installed")
+			if _, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key")); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("stored after the deployment was removed: %v", statErr)
+			}
+			if want := "lock bundle,lock lifecycle,unlock lifecycle,unlock bundle"; strings.Join(host.events, ",") != want {
+				t.Fatalf("events %v, want %s (no restart)", host.events, want)
+			}
+		})
+	}
+}
+
 // A5: bundle.lock held by another bundle run (a second handle in this
 // process) is lifecycle_busy 1618 without --lock-wait, and waits with it.
 func TestWindowsSecretWaitsForTheRealBundleLock(t *testing.T) {
