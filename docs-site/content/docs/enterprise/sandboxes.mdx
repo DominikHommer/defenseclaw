@@ -219,13 +219,12 @@ contact.
 | | Linux, Docker driver | Linux, MicroVM driver (optional) | macOS, MicroVM driver |
 | --- | --- | --- | --- |
 | Hardware | Any supported host | KVM. On EC2, a nested-virtualization type (for example m8i) or a `.metal` size. Graviton needs metal. | Apple silicon |
-| Group membership | The user is in `docker` | The user is in `kvm` (and `/dev/kvm` is readable and writable for them) and in `docker`, because the agent images are built in Docker for each user | None |
+| Group membership | The user is in `docker` | The user has read-write access to `/dev/kvm` through the `kvm` group or a named user ACL, and is in `docker` because the agent images are built in Docker for each user | None |
 | Also needed | Docker Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
 | Service settings | Rendered `gateway.toml`, run by DefenseClaw's user unit | Rendered `gateway.toml`, run by DefenseClaw's user unit (it sets the umask the driver needs) | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 
-`ensure` never adds anyone to a group. Adding people to `docker` or `kvm` is
-your decision, and `ensure` and `verify` only report a doctor row when a user
-who needs a group lacks it.
+`ensure` never changes group membership or device ACLs. Granting access is
+your decision; `ensure` and `verify` report accounts that lack it.
 
 ```bash
 sudo usermod -aG docker alice
@@ -296,6 +295,9 @@ Set `e2fsprogs_dir` to an absolute root-owned install prefix to override the
 fallback with a host tool. A broken explicit setting is refused with
 `openshell_prerequisite_missing`; it never silently selects the package.
 Another account's Homebrew keg is not a managed gateway source.
+When a managed Mac uses the Docker compute driver, the gateway does not need
+`e2fsprogs`; `ensure`, the gateway exec shim and `sandbox doctor` skip this
+MicroVM prerequisite and identify the Docker driver.
 
 ### Recipe: prerequisite mode
 
@@ -521,8 +523,8 @@ default (`driver_fallback: docker`).
   `fallback ...` rows for the fallback's own prerequisites. A MicroVM
   prerequisite the host lacks while the fallback is ready is the warning
   `openshell_driver_fallback`, not `openshell_prerequisite_missing`: users still
-  get sandboxes. The groups row asks for both `kvm` (where `/dev/kvm` is not
-  open to everyone) and `docker`.
+  get sandboxes. The groups row asks for `/dev/kvm` access through the `kvm`
+  group or a named user ACL, plus `docker`.
 
 This is the launch banner of a person on a Linux computer where the CPU shows no
 hardware virtualization, with the default fallback:
