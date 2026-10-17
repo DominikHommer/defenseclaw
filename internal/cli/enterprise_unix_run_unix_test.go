@@ -382,6 +382,10 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 // A refused secret source or value must still give an MDM --json caller one
 // structured result. The value and the CLI usage are never in that document.
 func TestEnterpriseSecretJSONRefusals(t *testing.T) {
+	nameFlag := newEnterpriseSecretCommand("set", "").Flags().Lookup("name")
+	if legacy := nameFlag.Annotations[secureClientUsageAnnotation]; len(legacy) != 1 || legacy[0] != "credential name (lowercase letters, digits and dashes)" {
+		t.Fatalf("Secure Client name help changed: %v", legacy)
+	}
 	goos := enterpriseunix.CurrentGOOS()
 	layout, err := managed.StandaloneLayoutFor(goos)
 	if err != nil {

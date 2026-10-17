@@ -344,7 +344,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitFailure)
 		}
-		if opts.json {
+		if opts.json && !secureClientHost() {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
 		}
 		if len(states) == 0 {
@@ -359,7 +359,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
-		if opts.json {
+		if opts.json && !secureClientHost() {
 			message := "--name must contain 1 to 63 lowercase letters, digits or dashes and start with a letter or digit"
 			return enterpriseSecretRefusal(cmd, action, "invalid_arguments", message, enterprisestatus.UnixExitInvalidArgs)
 		}
@@ -378,14 +378,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
-				if opts.json {
+				if opts.json && !secureClientHost() {
 					return enterpriseSecretRefusal(cmd, action, "secret_source_unreadable", err.Error(), enterprisestatus.UnixExitInvalidArgs)
 				}
 				return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				if opts.json {
+				if opts.json && !secureClientHost() {
 					return enterpriseSecretRefusal(cmd, action, "secret_source_unreadable", err.Error(), enterprisestatus.UnixExitFailure)
 				}
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
@@ -395,7 +395,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		value, err := enterpriseunix.ReadSecretValue(source)
 		if err != nil {
-			if opts.json {
+			if opts.json && !secureClientHost() {
 				return enterpriseSecretRefusal(cmd, action, "secret_value_invalid", err.Error(), enterprisestatus.UnixExitInvalidArgs)
 			}
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
