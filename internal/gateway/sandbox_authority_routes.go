@@ -765,6 +765,25 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	cfg := a.liveBaseConfig(r.Context())
+	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
+	if err != nil {
+		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+		return
+	}
+	var requiredPack json.RawMessage
+	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
+		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
+		if err != nil || eff.RequiredPackContent() == nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+		requiredPack, err = json.Marshal(eff.RequiredPackContent())
+		if err != nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+	}
 	// Every live registration's daemon polls once a minute: the fleet's
 	// active-sandbox gauge is exported again on them, so a sandbox that runs
 	// quietly does not go stale on the Sandboxes board (#1241).
@@ -786,27 +805,10 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	// A running sandbox counts again on its daemon's first poll after a
 	// gateway restart, not only at its next phase change (#1241).
 	a.trackManagedSandboxActive(r.Context(), auth, peer.UID, reg)
-	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
-	if err != nil {
-		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
-		return
-	}
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Floor: &floor, Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
-	}
-	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
-		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
-		if err != nil || eff.RequiredPackContent() == nil {
-			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
-			return
-		}
-		current.RequiredPack, err = json.Marshal(eff.RequiredPackContent())
-		if err != nil {
-			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
-			return
-		}
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: reg.Profile,
+		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
