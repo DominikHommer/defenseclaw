@@ -1119,7 +1119,7 @@ func retainedPhase(p audit.SandboxPhase) bool {
 
 // retention is how long b may stay stopped: its floor's
 // delete_stopped_after (the sandbox's resolved policy, else
-// openshell.admin, which on a managed daemon is the person's floor); 0
+// openshell.admin, which on a managed daemon is this sandbox's floor); 0
 // keeps it.
 func (m *Manager) retention(b *box) time.Duration {
 	m.mu.Lock()

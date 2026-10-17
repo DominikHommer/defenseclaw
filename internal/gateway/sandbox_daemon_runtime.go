@@ -1734,7 +1734,7 @@ func (d *SandboxDaemon) neutralGatewayStatus(st *sandboxapi.Status) {
 // Stop stops a sandbox, with the account's gateway started for it when the
 // daemon had stopped it (GAP-0492); a sandbox the daemon knows is stopped
 // while no gateway runs is answered as it is. The account's last running
-// sandbox may have stopped: its gateway goes soon, not at the next tick
+// sandbox may have stopped: its gateway goes before the stop returns
 // (GAP-0465). A stopped sandbox is reported stopped, so its registration
 // authorizes no relayed call until it starts again (GAP-0505).
 func (c *managedSandboxController) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
