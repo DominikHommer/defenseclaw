@@ -86,6 +86,9 @@ const (
 	// every policy poll, 60 s). A registration whose daemon stopped
 	// reporting counts as stopped.
 	LiveLease = 5 * time.Minute
+	// RevokedTelemetryWindow keeps a policy-revoked registration available
+	// for the daemon's final lifecycle records after it reports deletion.
+	RevokedTelemetryWindow = 10 * time.Minute
 	// MaxEntriesPerUID caps one uid's registrations; the oldest tombstones
 	// are evicted first, never a live entry.
 	MaxEntriesPerUID = 1024

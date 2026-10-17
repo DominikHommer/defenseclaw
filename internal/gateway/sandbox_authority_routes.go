@@ -1500,6 +1500,10 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	now := auth.clock()
+	if auth.eventReplay.duplicate(peer.UID, batch, now) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	refused, lifecycle := 0, false
 	for i, ev := range batch.Events {
 		if unreadable[i] {

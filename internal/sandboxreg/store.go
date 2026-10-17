@@ -499,7 +499,10 @@ func (s *FileStore) evict(u *uidRecords) []Registration {
 	for _, evictable := range []func(Registration) bool{
 		func(r Registration) bool { return r.State == StateRevoked && r.RevokedReason == ReasonDeleted },
 		func(r Registration) bool { return PendingExpired(r, now) },
-		func(r Registration) bool { return r.State == StateRevoked },
+		func(r Registration) bool {
+			return r.State == StateRevoked && (r.RevokedReason != ReasonPolicyChanged ||
+				!now.Before(r.RevokedAt.Add(RevokedTelemetryWindow)))
+		},
 	} {
 		for len(u.regs) >= limit {
 			oldest := -1
@@ -792,8 +795,10 @@ func (s *FileStore) Deleted(uid int, id string) error {
 			r.State, r.RevokedReason, r.RevokedAt = StateRevoked, ReasonDeleted, s.now()
 			next.regs[i] = r
 		case StateRevoked:
-			s.retire(next, r)
-			next.regs = slices.Delete(next.regs, i, i+1)
+			if r.RevokedReason != ReasonPolicyChanged || !s.now().Before(r.RevokedAt.Add(RevokedTelemetryWindow)) {
+				s.retire(next, r)
+				next.regs = slices.Delete(next.regs, i, i+1)
+			}
 		default:
 			next.regs = slices.Delete(next.regs, i, i+1)
 		}

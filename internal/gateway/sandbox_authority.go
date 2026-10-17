@@ -105,6 +105,7 @@ type sandboxAuthority struct {
 	// records is each account's sandbox telemetry records budget, and
 	// eventRecords the budget of the records of its daemon's other events.
 	records, eventRecords sandboxRecordBudget
+	eventReplay           sandboxEventReplay
 	guestSignals          sandboxGuestSignals
 }
 

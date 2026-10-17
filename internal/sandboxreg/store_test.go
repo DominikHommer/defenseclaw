@@ -319,6 +319,33 @@ func TestStoreDeleted(t *testing.T) {
 	}
 }
 
+func TestStorePolicyRevocationKeepsFinalLifecycleWindow(t *testing.T) {
+	s, clock, _ := newTestStore(t)
+	r := pending(t)
+	if err := s.Create(1001, r); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bind(1001, r.ID, bind(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(1001, r.ID, ReasonPolicyChanged); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := s.Get(1001, r.ID); err != nil || !ok || got.State != StateRevoked {
+		t.Fatalf("final lifecycle window lost: %+v %t %v", got, ok, err)
+	}
+	clock.t = clock.t.Add(RevokedTelemetryWindow + time.Second)
+	if err := s.Deleted(1001, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := s.Get(1001, r.ID); ok {
+		t.Fatal("expired lifecycle tombstone remained")
+	}
+}
+
 // Run records survive a restart, are per uid and bounded, and go with
 // their registration.
 func TestStoreRunRecords(t *testing.T) {
