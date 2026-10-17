@@ -8620,7 +8620,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     could not tell from doctor whether their hooks were installed (D4).
     Resolves the hook file from ``hook_contract_lock.json`` first (what the
     gateway actually wrote), then the static fallback map, and
-    raw-substring-checks it for a DefenseClaw marker. (The Connectors section's
+    checks it for a DefenseClaw registration. Cursor and Kiro use the parsed
+    registration check when the lock records their paths, because Windows
+    encodes the native hook command in PowerShell. (The Connectors section's
     ``_check_hook_contract_lock`` validates contract/version drift — a
     different concern from "does the hook file exist and reference us".)
     """
@@ -8631,7 +8633,8 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
     label = _HOOK_HEALTH_LABELS.get(connector, f"{connector} hooks")
     home = os.path.expanduser("~")
     # Prefer the lock-file's recorded paths; fall back to the static map.
-    candidates = _hook_health_paths_from_lock(cfg, connector)
+    locked_paths = _hook_health_paths_from_lock(cfg, connector)
+    candidates = locked_paths
     if not candidates:
         if connector == "hermes":
             candidates = [hermes_config_path()]
@@ -8665,7 +8668,12 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("fail", label, edited, r=r, remediation=edited.repair)
         return
     for path in present:
-        if _file_references_marker(path, markers):
+        registered = _file_references_marker(path, markers)
+        if connector in ("cursor", "kiro") and locked_paths:
+            from defenseclaw.hook_integrity import hook_registration_problems
+
+            registered = not hook_registration_problems(cfg, connector)
+        if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
