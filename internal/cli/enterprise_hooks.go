@@ -2227,6 +2227,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					sharedFiles[f] = struct{}{}
 				}
 			}
+			platformDirs, platformFiles := enterpriseHookPlatformWatchFiles(target.Connector, resolved.home)
+			for _, dir := range platformDirs {
+				watchDirs[dir] = struct{}{}
+			}
+			for _, f := range platformFiles {
+				exclusiveFiles[f] = struct{}{}
+			}
 			if err == nil {
 				var result enterprisehooks.InstallResult
 				var repaired bool

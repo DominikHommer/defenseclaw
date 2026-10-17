@@ -366,11 +366,19 @@ func (r *Result) AddWarning(code, message string) {
 // Finish sets OK from the error list and the exit code for goos, then
 // returns the code. failureCode overrides the generic failure code when a
 // more specific one applies (busy, invalid arguments).
+//
+// A result with an error is never security_complete: Windows verify
+// reported security_complete:true next to the error that the guardian could
+// not verify an enrolled target's hooks, so a script that read the flag
+// was told the host was protected (GAP-0664).
 func (r *Result) Finish(goos string, failureCode int) int {
 	if r.Bundle != nil && r.Bundle.SessionsRestartRequired != nil && r.Bundle.SessionsRestartRequired.Count > 0 {
 		r.CoverageComplete, r.SecurityComplete = false, false
 	}
 	r.OK = len(r.Errors) == 0
+	if !r.OK {
+		r.SecurityComplete = false
+	}
 	switch {
 	case r.OK:
 		r.ExitCode = ExitOK
