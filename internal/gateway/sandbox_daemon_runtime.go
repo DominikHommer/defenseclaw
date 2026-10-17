@@ -2048,6 +2048,9 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
+	if cp.Floor == nil {
+		return nil, managedPolicyUnloadable(errors.New("managed gateway omitted the complete sandbox policy floor"))
+	}
 	d.regs.applyOrdered(r, seq, cp)
 	r, _ = d.regs.get(name)
 	if d.floorConflicts(ctx, r.Floor, name) {

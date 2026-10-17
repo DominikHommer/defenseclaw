@@ -502,8 +502,8 @@ type BindRequest struct {
 	Driver string `json:"driver,omitempty"`
 }
 
-// CurrentPolicy answers GET policy/current: the registration's live fields
-// now.
+// CurrentPolicy answers GET policy/current: the registration's complete
+// policy floor and live fields now.
 type CurrentPolicy struct {
 	V             int        `json:"v"`
 	Generation    uint64     `json:"generation"`
