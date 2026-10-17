@@ -8,7 +8,13 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
-## [Unreleased] — 1.0.2: managed sandbox telemetry
+## [Unreleased] — 1.0.3
+
+### Fixed
+
+- Inventory Summary now scrolls by keyboard at 80×24, Overview notices show their full action, and managed `sandbox policy explain` repeats the profile, match and agent after long settings tables.
+
+## [1.0.2] — managed sandbox telemetry
 
 ### Fixed
 
