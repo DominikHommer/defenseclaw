@@ -638,13 +638,15 @@ extend them. After that, the default profile applies with match reason
 `default_lookup_failed` (sandboxes start provisional), also when Open
 Directory has stopped naming the account's primary group (Domain Users), which
 is how an unreachable domain shows on a Mac whose `odutil show nodenames`
-still lists the node `Online`. Failed lookups retry every 15 seconds. When the
-domain controller answers again, the guardian's next identity pass (it retries
-every minute while the directory does not answer) flushes the Open Directory
-caches, and for five minutes after the Active Directory account was last seen
-without its groups successful answers also refresh every 15 seconds, so the
-group profile returns within about a minute and a half without a manual
-flush. Open Directory's own timing can add a few minutes to these intervals.
+still lists the node `Online`. Failed lookups retry every 15 seconds. While
+Open Directory lists an Active Directory account without its groups, the
+guardian checks every 15 seconds whether a domain controller accepts a
+connection on the LDAP port (TCP 389), and flushes the Open Directory caches
+as soon as one does. For five minutes after the account was last seen without
+its groups, successful answers also refresh every 15 seconds, so the group
+profile returns within about a minute of the domain controller's return
+without a manual flush. Open Directory's own timing can add a few minutes to
+these intervals.
 
 ## IDE plugin inventory
 

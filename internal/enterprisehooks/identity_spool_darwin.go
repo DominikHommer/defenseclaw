@@ -59,15 +59,19 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	}, nil
 }
 
+// directoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
+// it gave while the domain controller was away (DirectoryCachesStale).
+const directoryCachesHoldOutageAnswers = true
+
 // FlushDirectoryCaches empties Open Directory's caches (dscacheutil
 // -flushcache, dsmemberutil flushcache), which only root can do. The
-// guardian calls it when its pass resolves accounts again after one that
-// resolved none: once the domain controller answers again, Open Directory
-// kept answering from the caches it filled during the outage, an account
-// without its domain groups, for about 11 more minutes, and the accounts
-// stayed on the default profile until an administrator flushed them by hand
-// (GAP-0680, GAP-0517). The gateway's next lookup of an account then gets its
-// groups from the directory.
+// guardian calls it when a domain controller answers again while Open
+// Directory still lists an Active Directory account without its domain
+// groups: it kept answering from the caches it filled during the outage for
+// 11 to 19 more minutes, and the accounts stayed on the default profile until
+// an administrator flushed them by hand (#1197, GAP-0680, GAP-0517). The
+// gateway's next lookup of an account then gets its groups from the
+// directory.
 func FlushDirectoryCaches(ctx context.Context) error {
 	var errs []error
 	for _, step := range [][]string{{"/usr/bin/dscacheutil", "-flushcache"}, {"/usr/bin/dsmemberutil", "flushcache"}} {

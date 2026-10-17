@@ -48,13 +48,58 @@ var enterpriseHookIdentitySpoolState struct {
 	last        time.Time
 	fingerprint string
 	failed      bool
-	// unreachable is set after a pass that listed accounts and resolved
-	// none: the directory does not answer the guardian.
-	unreachable bool
 }
 
-// enterpriseHookFlushDirectoryCaches is replaceable in tests.
-var enterpriseHookFlushDirectoryCaches = enterprisehooks.FlushDirectoryCaches
+// The directory's return after an outage (enterprisehooks.DirectoryCachesStale):
+// while the system's directory caches list an enrolled Active Directory
+// account without its domain groups, the guardian asks every
+// enterpriseHookDirectoryReturnPoll whether a domain controller of that
+// domain answers, and flushes the caches when one does, so the accounts get
+// their groups at the gateway's next lookup (#1197). A flush that did not
+// clear them is repeated after enterpriseHookDirectoryFlushGap, doubling to
+// enterpriseHookDirectoryFlushGapMax. A watch ends once the caches list the
+// groups again, or after enterpriseHookDirectoryWatchLimit; the next
+// reconcile tick starts another with the accounts enrolled then.
+const (
+	enterpriseHookDirectoryReturnPoll  = 15 * time.Second
+	enterpriseHookDirectoryFlushGap    = 2 * time.Minute
+	enterpriseHookDirectoryFlushGapMax = 15 * time.Minute
+	enterpriseHookDirectoryWatchLimit  = 10 * time.Minute
+)
+
+// enterpriseHookDirectoryReturnDeps are the watch's lookups, flush and
+// clock; tests replace them.
+type enterpriseHookDirectoryReturnDeps struct {
+	stale   func(dir string, accounts []enterprisehooks.IdentitySpoolAccount) (string, bool)
+	answers func(ctx context.Context, domain string) bool
+	flush   func(ctx context.Context) error
+	now     func() time.Time
+	sleep   func(ctx context.Context, d time.Duration) bool
+}
+
+var enterpriseHookDirectoryReturn = enterpriseHookDirectoryReturnDeps{
+	stale:   enterprisehooks.DirectoryCachesStale,
+	answers: enterprisehooks.DomainControllerAnswers,
+	flush:   enterprisehooks.FlushDirectoryCaches,
+	now:     time.Now,
+	sleep: func(ctx context.Context, d time.Duration) bool {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+			return true
+		}
+	},
+}
+
+var enterpriseHookDirectoryReturnState struct {
+	sync.Mutex
+	watching  bool
+	lastFlush time.Time
+	gap       time.Duration
+}
 
 // enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
 // identity facts for, and the keys that tell whether they changed.
@@ -125,6 +170,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	// gateway does on reload (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
+	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, accounts)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()
@@ -142,7 +188,6 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	if due {
 		state.running = true
 	}
-	unreachable := state.unreachable
 	state.Unlock()
 	if !due {
 		return
@@ -155,7 +200,6 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			state.last = time.Now()
 			state.fingerprint = fingerprint
 			state.failed = passErr != nil
-			state.unreachable = unreachable
 			state.Unlock()
 		}()
 		if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)); err != nil {
@@ -164,28 +208,72 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		var resolved int
-		resolved, passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
+		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
 		if passErr != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}
-		unreachable = enterpriseHookIdentityPassDone(ctx, stderr, unreachable, len(accounts), resolved)
 	}()
 }
 
-// enterpriseHookIdentityPassDone flushes the directory caches when a pass
-// resolves accounts after one that resolved none: the directory answers
-// again, and the operating system's own caches may still hold the answers of
-// the outage (enterprisehooks.FlushDirectoryCaches). It reports whether the
-// directory still does not answer the guardian.
-func enterpriseHookIdentityPassDone(ctx context.Context, stderr io.Writer, unreachable bool, accounts, resolved int) bool {
-	if unreachable && resolved > 0 {
-		if err := enterpriseHookFlushDirectoryCaches(ctx); err != nil {
-			fmt.Fprintf(stderr, "[hook-guardian] identity spool: the directory answers again, but its caches were not flushed: %v\n", err)
-		} else {
-			fmt.Fprintf(stderr, "[hook-guardian] identity spool: the directory answers again; flushed the directory caches so "+
-				"accounts get their groups at their next lookup\n")
+// startEnterpriseHookDirectoryReturnWatch starts the watch for the
+// directory's return (enterpriseHookWatchDirectoryReturn) unless one runs.
+func startEnterpriseHookDirectoryReturnWatch(ctx context.Context, stderr io.Writer, dir string,
+	accounts []enterprisehooks.IdentitySpoolAccount) {
+	state := &enterpriseHookDirectoryReturnState
+	state.Lock()
+	if state.watching || len(accounts) == 0 {
+		state.Unlock()
+		return
+	}
+	state.watching = true
+	state.Unlock()
+	go func() {
+		defer func() {
+			state.Lock()
+			state.watching = false
+			state.Unlock()
+		}()
+		enterpriseHookWatchDirectoryReturn(ctx, stderr, enterpriseHookDirectoryReturn, dir, accounts)
+	}()
+}
+
+// enterpriseHookWatchDirectoryReturn flushes the directory caches once the
+// domain controller answers again while they still list an Active Directory
+// account without its domain groups, and never while it does not answer:
+// those caches are then all the Mac has. It returns once the caches list the
+// groups (or never lacked them), at the watch limit, or when ctx ends.
+func enterpriseHookWatchDirectoryReturn(ctx context.Context, stderr io.Writer, deps enterpriseHookDirectoryReturnDeps, dir string,
+	accounts []enterprisehooks.IdentitySpoolAccount) {
+	state := &enterpriseHookDirectoryReturnState
+	until := deps.now().Add(enterpriseHookDirectoryWatchLimit)
+	for {
+		domain, stale := deps.stale(dir, accounts)
+		if !stale {
+			state.Lock()
+			state.gap = 0
+			state.Unlock()
+			return
+		}
+		state.Lock()
+		due := state.lastFlush.IsZero() || deps.now().Sub(state.lastFlush) >= state.gap
+		state.Unlock()
+		if due && deps.answers(ctx, domain) {
+			err := deps.flush(ctx)
+			state.Lock()
+			state.lastFlush = deps.now()
+			state.gap = min(max(2*state.gap, enterpriseHookDirectoryFlushGap), enterpriseHookDirectoryFlushGapMax)
+			state.Unlock()
+			if err != nil {
+				fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again, but the directory caches "+
+					"were not flushed: %v\n", domain, err)
+			} else {
+				fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again while the directory caches "+
+					"still list an account without its domain groups; flushed the caches, so accounts get their groups at "+
+					"their next lookup\n", domain)
+			}
+		}
+		if !deps.now().Before(until) || !deps.sleep(ctx, enterpriseHookDirectoryReturnPoll) {
+			return
 		}
 	}
-	return accounts > 0 && resolved == 0
 }

@@ -62,14 +62,14 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401107, User: "erin"}}, nil, nil); err == nil {
+	if err := WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401107, User: "erin"}}, nil, nil); err == nil {
 		t.Fatal("the canceled lookup did not fail the pass")
 	}
 	if !exists("94401103") || !exists("94401106") || exists("94401104") {
 		t.Fatalf("after a failed pass: directory %v, local %v, expired %v; want the young records kept and the expired one gone",
 			exists("94401103"), exists("94401106"), exists("94401104"))
 	}
-	if _, err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil); err != nil {
+	if err := WriteIdentitySpool(context.Background(), dir, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !exists("94401103") {
@@ -91,7 +91,7 @@ func TestIdentitySpoolKeepsRecordsOfAccountsAPassDidNotList(t *testing.T) {
 	}
 	// The canceled lookup fails and the pass reports it; the record of the
 	// previous owner must be gone either way.
-	_, _ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
+	_ = WriteIdentitySpool(canceled, dir, []IdentitySpoolAccount{{UID: 94401105, User: "bob"}}, nil, nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("reassigned uid kept previous account record: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForADay(t *testing.T) {
 // A lookup failure must reach the guardian so its next pass uses the short
 // retry interval rather than treating partial directory facts as refreshed.
 func TestIdentitySpoolReportsFailedAccount(t *testing.T) {
-	_, err := WriteIdentitySpool(context.Background(), t.TempDir(),
+	err := WriteIdentitySpool(context.Background(), t.TempDir(),
 		[]IdentitySpoolAccount{{UID: 999999999, User: ""}}, nil, nil)
 	if err == nil {
 		t.Fatal("failed account lookup was reported as a successful spool pass")

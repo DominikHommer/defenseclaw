@@ -470,11 +470,16 @@ Windows, name an Entra user to `guardrail profile explain --user` by SID, as
   looks the account up again every 15 seconds, so the group profile comes back
   within 15 seconds of Open Directory listing the groups again. Open Directory
   can keep listing an account without its groups for more than ten minutes
-  after the domain controller is back, so the root guardian flushes its caches
-  (`dscacheutil -flushcache`, `dsmemberutil flushcache`) at its first identity
-  pass that reaches the directory again; it retries every minute while it
-  cannot, so the group profile comes back within about a minute and a half of
-  the domain controller's return, without a manual flush.
+  after the domain controller is back. While it lists an enrolled
+  Active Directory account that way, the root guardian checks every 15 seconds
+  whether a domain controller of the account's domain accepts a connection on
+  the LDAP port (TCP 389, to the domain controllers its `_ldap._tcp.dc._msdcs`
+  SRV records name), and flushes the caches (`dscacheutil -flushcache`,
+  `dsmemberutil flushcache`) as soon as one does; it never flushes while the
+  domain controller is away. The group profile then comes back within about a
+  minute of the domain controller's return, without a manual flush. Where the
+  Mac cannot reach TCP 389 on the domain controllers, flush the caches by
+  hand.
 - **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install
