@@ -1155,6 +1155,46 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 	}
 }
 
+// #1279, #1302: a hot reload of the observability graph returns at once
+// while an agent's trace still holds the previous graph, and records keep
+// flowing meanwhile. It waited for that graph for the 30 s drain timeout, so
+// the policy swap behind it lagged and the lifecycle restarted the gateway.
+func TestHotReloadDoesNotWaitForAUserOfThePreviousGraph(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, fixture.raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	fixture.sidecar.observabilityV8Mu.Lock()
+	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	fixture.sidecar.observabilityV8Mu.Unlock()
+	held, err := owner.BeginInboundImportBatch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadRaw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nobservability:\n  local:\n    retention_days: 30\n",
+		fixture.dataDir,
+	))
+	started := time.Now()
+	result, reloadErr := fixture.sidecar.ReloadObservabilityRuntime(t.Context(), fixture.configPath, reloadRaw)
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("reload took %s while the previous graph was in use", elapsed)
+	}
+	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied || owner.runtime.Active().RetentionDays() != 30 {
+		t.Fatalf("reload=%s error=%v", result.Status(), reloadErr)
+	}
+	next, err := owner.BeginInboundImportBatch(t.Context())
+	if err != nil {
+		t.Fatalf("the new graph is not usable while the old one is held: %v", err)
+	}
+	next.Close()
+	held.Close()
+	if err := fixture.sidecar.closeOwnedObservabilityV8Runtime(); err != nil {
+		t.Fatalf("shutdown after the previous graph was released: %v", err)
+	}
+}
+
 func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
 	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
 		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
