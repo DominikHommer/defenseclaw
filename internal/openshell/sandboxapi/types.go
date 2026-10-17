@@ -605,8 +605,8 @@ type DestinationRow struct {
 	// the workload claims.
 	Binaries []string `json:"binaries,omitempty"`
 	PID      int      `json:"pid,omitempty"`
-	// Lineage is PID's process and its parents, from the opt-in process
-	// tree (observe.process_tree), when it knows the process.
+	// Lineage is the recorded actor and its parents, from the opt-in
+	// process tree (observe.process_tree), when it knew the process.
 	Lineage   []DestinationProcess `json:"lineage,omitempty"`
 	FirstSeen time.Time            `json:"first_seen"`
 	LastSeen  time.Time            `json:"last_seen"`
