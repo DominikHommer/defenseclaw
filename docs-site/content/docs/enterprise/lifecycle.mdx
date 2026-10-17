@@ -746,7 +746,14 @@ to keep the machine state for a reinstall instead.
   and OpenShell gateway of each account. On Linux, `apt remove`, `dnf remove`
   and `rpm -e` also stop the sandbox user units in the user manager of every
   signed-in account before the package's files go, and remove the socket's
-  global enable link, so no daemon keeps running from a deleted unit. On
+  global enable link, so no daemon keeps running from a deleted unit. When a
+  user manager still runs one of those units after three stops, or does not
+  answer whether it does, the removal fails and keeps the package files; the
+  message names the accounts. Stop the units as each named user
+  (`systemctl --user stop defenseclaw-sandbox.socket defenseclaw-sandbox.service defenseclaw-openshell-gateway.service`)
+  or sign the user out, then run the removal again. The macOS pkg installs
+  both LaunchAgents also with sandboxes off, so the macOS uninstall unloads
+  them whatever the sandbox setting was. On
   macOS the uninstall unloads both sandbox LaunchAgents from the `gui` and
   `user` launchd domains of every signed-in account, and removes the
   `defenseclaw` launcher link and both plists from `/Library/LaunchAgents`.
