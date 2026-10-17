@@ -879,7 +879,21 @@ func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
 			t.Fatalf("%s floor = %+v", tc.name, cfg)
 		}
 	}
-	if cfg := f.d.configForSandbox("unregistered"); cfg != nil {
-		t.Fatalf("unregistered sandbox inherited a floor: %+v", cfg.OpenShell.Admin)
+	closed := f.d.configForSandbox("unregistered").OpenShell.Admin
+	if closed.MinProfile != "strict" || closed.Allowed == nil || *closed.Allowed {
+		t.Fatalf("unregistered sandbox did not receive the closed floor: %+v", closed)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-pending", Sandbox: "dc-pending",
+		Floor: config.OpenShellAdminConfig{MinProfile: "open"}, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-pending", "dc-claude"} {
+		if name == "dc-claude" {
+			f.d.regs.markRevoked(name, "profile removed")
+		}
+		cfg := f.d.configForSandbox(name)
+		if cfg.OpenShell.Admin.Allowed == nil || *cfg.OpenShell.Admin.Allowed {
+			t.Fatalf("%s borrowed a floor: %+v", name, cfg.OpenShell.Admin)
+		}
 	}
 }

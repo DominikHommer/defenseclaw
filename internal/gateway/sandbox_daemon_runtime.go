@@ -415,11 +415,12 @@ func (d *SandboxDaemon) configWithFloor(floor config.OpenShellAdminConfig) *conf
 }
 
 // configForSandbox resolves a kept sandbox against its own confirmed floor.
-// A missing or revoked registration cannot borrow another run's policy.
+// A missing, unconfirmed or revoked registration uses the closed floor, so
+// its status still names the deny and it cannot borrow another run's policy.
 func (d *SandboxDaemon) configForSandbox(name string) *config.Config {
 	r, ok := d.regs.get(name)
 	if !ok || !r.Confirmed || r.Revoked {
-		return nil
+		return d.buildConfigWith(nil)
 	}
 	return d.configWithFloor(r.Floor)
 }
