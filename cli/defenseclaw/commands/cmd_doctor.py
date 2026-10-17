@@ -2527,7 +2527,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         "; ".join(
             part for part in (
                 "private files are unsafe: " + ", ".join(exposed) if exposed else "",
-                "could not verify private file ACLs: " + ", ".join(unverified) if unverified else "",
+                "could not inspect private files: " + ", ".join(unverified) if unverified else "",
             ) if part
         ),
         r=r,
