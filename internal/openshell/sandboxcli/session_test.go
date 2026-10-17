@@ -1511,7 +1511,7 @@ func TestStatusSaysTheDetachedRunFinished(t *testing.T) {
 	runAnswers(ta, "run_started=1790000000\nrun=exited\nrun_exit=0\n", "")
 	ta.ok(t, ta.Status(bg, "bg1", OutputText))
 	has(t, ta.output(), "its detached run (started "+ta.clock(time.Unix(1790000000, 0))+") finished (exit status 0); `defenseclaw sandbox logs bg1` shows it.",
-		"bg1 keeps running until you stop it: `defenseclaw sandbox stop bg1`", "connect without --continue to start a new one")
+		"bg1 keeps running until you stop it: `defenseclaw sandbox stop bg1`", "connect normally to start a new one")
 	ta.out.Reset()
 	runAnswers(ta, "run_started=1790000000\nrun=running\n", "")
 	ta.ok(t, ta.Status(bg, "bg1", OutputText))

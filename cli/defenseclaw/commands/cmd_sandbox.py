@@ -618,15 +618,27 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("policy", "allow"),
-        "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
+        "Allow a destination under your sandbox policy",
         args=(_Arg("hosts", many=True),),
-        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.allow instead"),),
+        flags=(
+            _Flag("remove", "bool", "remove the hosts from openshell.egress.allow instead"),
+            _Flag(
+                "sandbox", "string", "on a managed computer, use this sandbox's policy to check the decision",
+                metavar="NAME",
+            ),
+        ),
     ),
     _Cmd(
         ("policy", "block"),
-        "Add hosts to openshell.egress.block",
+        "Block a destination under your sandbox policy",
         args=(_Arg("hosts", many=True),),
-        flags=(_Flag("remove", "bool", "remove the hosts from openshell.egress.block instead"),),
+        flags=(
+            _Flag("remove", "bool", "remove the hosts from openshell.egress.block instead"),
+            _Flag(
+                "sandbox", "string", "on a managed computer, use this sandbox's policy to check the decision",
+                metavar="NAME",
+            ),
+        ),
     ),
     _Cmd(("pack",), "Inspect sandbox policy packs"),
     _Cmd(("pack", "list"), "List the built-in and custom packs with their sha256 digests", flags=(_OUTPUT, _JSON)),

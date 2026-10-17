@@ -242,7 +242,7 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 			exit = " (exit status " + run.Exit + ")"
 		}
 		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
-			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it). A detached run may leave no conversation to continue; connect without --continue to start a new one")
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it). A detached run may leave no conversation to continue; connect normally to start a new one")
 	}
 }
 

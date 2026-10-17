@@ -1858,7 +1858,7 @@ defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--remove` | switch |  | Remove the hosts from openshell.egress.allow instead. |
-| `--sandbox` | text |  | On a managed computer, check the decision against this sandbox's policy. |
+| `--sandbox` | text |  | On a managed computer, use this sandbox's policy to check the decision. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox policy block`
@@ -1883,7 +1883,7 @@ defenseclaw sandbox policy block --remove files.example.net
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--remove` | switch |  | Remove the hosts from openshell.egress.block instead. |
-| `--sandbox` | text |  | On a managed computer, check the decision against this sandbox's policy. |
+| `--sandbox` | text |  | On a managed computer, use this sandbox's policy to check the decision. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 On a per-user computer, both commands check each pattern and refuse a change

@@ -443,24 +443,32 @@
   {
     "path": "sandbox policy allow",
     "use": "allow \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.allow (used by the balanced and strict profiles)",
+    "short": "Allow a destination under your sandbox policy",
     "flags": [
       {
         "name": "remove",
         "type": "bool",
         "default": "false"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
       }
     ]
   },
   {
     "path": "sandbox policy block",
     "use": "block \u003chost\u003e...",
-    "short": "Add hosts to openshell.egress.block",
+    "short": "Block a destination under your sandbox policy",
     "flags": [
       {
         "name": "remove",
         "type": "bool",
         "default": "false"
+      },
+      {
+        "name": "sandbox",
+        "type": "string"
       }
     ]
   },
