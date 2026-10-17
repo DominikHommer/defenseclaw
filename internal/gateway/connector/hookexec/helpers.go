@@ -104,11 +104,14 @@ func isTracestateChar(c byte) bool {
 
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
 // mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
-// a read-only home or full disk never changes the hook's decision.
+// a read-only home or full disk never changes the hook's decision. A
+// connector without a fail-closed contract logs what the call got
+// (loggedFailMode), so the fail-open report finds the calls that ran.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 	if opts.Home == "" {
 		return
 	}
+	failMode = loggedFailMode(opts, sp, failMode)
 	logDir := filepath.Join(opts.Home, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return

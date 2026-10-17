@@ -1234,6 +1234,10 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 	}
 	rawOutput, present := fields[sp.outputField]
 	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
+		if action == "block" && managedHermesBlocks(opts, sp) {
+			// A managed block without its directive would let the call run.
+			return failResponse(opts, sp, "closed", "Hermes gateway block without a hook_output directive")
+		}
 		return 0
 	}
 	var output map[string]json.RawMessage
@@ -1353,6 +1357,9 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", "stdin body exceeded cap")
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	if code, handled := managedHermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
+		return code
+	}
 	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
 		return code
 	}
@@ -1675,6 +1682,9 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	if code, handled := managedHermesFailClosed(opts, sp, "response", reason); handled {
+		return code
+	}
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1700,7 +1710,14 @@ func responseFailureReason(reason string) string {
 // hooks fail open; a managed hook still owns Copilot's native structured
 // deny for preToolUse and permissionRequest and uses it. Other events cannot
 // block and keep the fail-open result.
+//
+// The same transport failure paths give a managed Hermes tool call its block
+// (managedHermesFailClosed): Hermes too has no fail-closed hook contract and
+// blocks only through its native directive.
 func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
+	if sp.connector == "hermes" {
+		return managedHermesFailClosed(opts, sp, "transport", reason)
+	}
 	if !opts.ManagedEnterprise || sp.connector != "copilot" {
 		return 0, false
 	}
@@ -2041,7 +2058,7 @@ func hookEventSubject(event string) string {
 	case "userpromptsubmit", "beforesubmitprompt", "userpromptsubmitted", "userprompttransformed":
 		return "prompt"
 	case "pretooluse", "permissionrequest", "beforeshellexecution", "beforemcpexecution",
-		"beforereadfile", "beforetabfileread", "tool.execute.before":
+		"beforereadfile", "beforetabfileread", "tool.execute.before", "pre_tool_call":
 		return "tool call"
 	case "posttooluse", "posttoolusefailure", "aftershellexecution", "aftermcpexecution",
 		"afterfileedit", "tool.execute.after":
