@@ -288,6 +288,15 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 	if err != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
 	}
+	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleSignerWarning is key_unknown or key_revoked when anchors no longer
+// trust the confirmed bundle signer ("" for none); nil otherwise.
+func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) *enterprisebundle.Warning {
+	if anchors == nil || signerKeyID == "" {
+		return nil
+	}
 	key := anchors.Key(signerKeyID)
 	if key == nil {
 		return &enterprisebundle.Warning{Code: string(enterprisebundle.CodeKeyUnknown), Message: fmt.Sprintf("the confirmed bundle signer %s is absent from the installed trust anchors", signerKeyID)}
