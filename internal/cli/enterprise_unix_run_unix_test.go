@@ -400,6 +400,9 @@ func TestEnterpriseSecretJSONRefusals(t *testing.T) {
 	if err := os.WriteFile(untrusted, []byte("placeholder"), 0o660); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(untrusted, 0o660); err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name, action, input, code string
 		opts                      enterpriseSecretOptions
