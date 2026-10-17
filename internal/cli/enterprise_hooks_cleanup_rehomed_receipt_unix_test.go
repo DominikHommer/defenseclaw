@@ -292,6 +292,59 @@ func TestRemoveAllCopiedOpenCodeChangedMarkerKeepsRow(t *testing.T) {
 	}
 }
 
+// A manifest row that still names the re-homed account in its current home
+// does not hide the pending cleanup of its recorded home: the cleanup runs
+// and keeps the row while the copied home still loads a changed plugin
+// (GAP-0632).
+func TestRemoveAllRunsRehomedCleanupDespiteAManifestRow(t *testing.T) {
+	c := setupRehomedOpenCodeCase(t, false, false)
+	edited := alterCopiedPluginFirstLine(t, c.newPlugin)
+	if err := saveEnterpriseHookUserCleanups(c.fixture.dataDir, []enterpriseHookUserCleanup{c.entry}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job := newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: c.entry.UID, GID: os.Getgid(), User: c.entry.User, Home: c.currentHome})
+	job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Mode: enterpriseHookWorkerModeRemove,
+		Options: enterpriseHookWorkerOptions{ConnectorName: "opencode"}})
+	if enterpriseHookPendingCleanupCoveredByJob(job, "opencode", c.entry, c.resolver) {
+		t.Fatal("a manifest row in the current home covered the cleanup of the recorded home")
+	}
+	same := c.entry
+	same.UserHome = c.currentHome
+	if !enterpriseHookPendingCleanupCoveredByJob(job, "opencode", same, c.resolver) {
+		t.Fatal("a manifest row did not cover the cleanup of the same home")
+	}
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	report := enterpriseHooksRemoveAllReport{}
+	runEnterpriseHookPendingCleanupsWith(cmd, &report, map[int]*enterpriseHookWorkerJob{c.entry.UID: job}, c.resolver)
+	if report.Removed != 0 || len(report.Failed) != 1 || !strings.Contains(report.Failed[0], c.newPlugin) {
+		t.Fatalf("remove-all skipped the re-homed cleanup: %+v", report)
+	}
+	if data, err := os.ReadFile(c.newPlugin); err != nil || !bytes.Equal(data, edited) {
+		t.Fatalf("remove-all changed the current plugin: %v", err)
+	}
+}
+
+// A manifest row's removal that leaves a DefenseClaw entry the agent still
+// loads is not counted removed (GAP-0632).
+func TestRemoveAllReportsRemainingEntries(t *testing.T) {
+	job := newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "sample-user", Home: "/home/sample-user"})
+	for i, name := range []string{"opencode", "codex"} {
+		job.Request.Targets = append(job.Request.Targets, enterpriseHookWorkerTarget{Index: i, Mode: enterpriseHookWorkerModeRemove,
+			Options: enterpriseHookWorkerOptions{ConnectorName: name}})
+	}
+	run := enterpriseHookWorkerOutcome{Job: *job, Response: enterpriseHookWorkerResponse{Targets: []enterpriseHookWorkerTargetResult{
+		{Index: 0, OK: true, PathsReported: true, Remaining: "/home/sample-user/.config/opencode/plugins/defenseclaw.js:1: DefenseClaw connector marker remains in agent config"},
+		{Index: 1, OK: true, PathsReported: true},
+	}}}
+	report := enterpriseHooksRemoveAllReport{}
+	addEnterpriseHookRemoveRuns(&report, []enterpriseHookWorkerOutcome{run})
+	if report.Removed != 1 || len(report.Failed) != 1 || !strings.HasPrefix(report.Failed[0], "sample-user/opencode: DefenseClaw entries remain") ||
+		!strings.Contains(report.Failed[0], "defenseclaw.js:1") || !strings.HasSuffix(report.Failed[0], "and rerun") {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
 func TestStandaloneCleanupCopiedCodexReceiptUsesCurrentConfig(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("the per-user worker requires a non-root test account")

@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // The standalone Unix uninstall removes DefenseClaw's own per-user hook
@@ -172,6 +173,24 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, purgeSkip)...)
 	}
 	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
+	addEnterpriseHookRemoveRuns(&report, runs)
+	sort.Strings(report.Pending)
+	sort.Strings(report.Failed)
+	sort.Strings(report.Purged)
+	sort.Strings(report.StateFailed)
+	report.OK = len(report.Failed) == 0
+	if report.OK && len(report.Pending) == 0 && recordErr == nil {
+		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
+			report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(err.Error(), 256))
+			report.OK = false
+		}
+	}
+	return report, nil
+}
+
+// addEnterpriseHookRemoveRuns adds the per-user workers' answers of a
+// remove-all to its report.
+func addEnterpriseHookRemoveRuns(report *enterpriseHooksRemoveAllReport, runs []enterpriseHookWorkerOutcome) {
 	for _, run := range runs {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
 		for _, result := range run.Response.Targets {
@@ -212,6 +231,11 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				report.Failed = append(report.Failed, label+": "+boundedWorkerError(result.Error))
 			case target.Mode == enterpriseHookWorkerModeRemoveLeftover && !result.Removed:
 				// Nothing of DefenseClaw's was registered there.
+			case target.Mode == enterpriseHookWorkerModeRemove && result.Remaining != "":
+				// The teardown ran, but the agent still loads a DefenseClaw
+				// entry (a copied home's plugin, say): not removed (GAP-0632).
+				report.Failed = append(report.Failed, label+": DefenseClaw entries remain after the removal ("+boundedWorkerError(result.Remaining)+
+					"); remove them from that agent's config and rerun")
 			default:
 				report.Removed++
 			}
@@ -225,18 +249,6 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 			report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(run.Err.Error()))
 		}
 	}
-	sort.Strings(report.Pending)
-	sort.Strings(report.Failed)
-	sort.Strings(report.Purged)
-	sort.Strings(report.StateFailed)
-	report.OK = len(report.Failed) == 0
-	if report.OK && len(report.Pending) == 0 && recordErr == nil {
-		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
-			report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(err.Error(), 256))
-			report.OK = false
-		}
-	}
-	return report, nil
 }
 
 // newEnterpriseHookRemoveJob is one account's worker job; its targets are
@@ -452,6 +464,10 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 // removed account is reported pending as "user/connector: reason", so the
 // uninstall warns and goes on.
 func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]string {
+	return runEnterpriseHookPendingCleanupsWith(cmd, report, jobs, enterprisehooks.StandaloneResolver())
+}
+
+func runEnterpriseHookPendingCleanupsWith(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob, resolver unixidentity.Resolver) map[int]string {
 	skip := map[int]string{}
 	if cfg == nil {
 		return skip
@@ -464,11 +480,10 @@ func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHook
 		}
 		return skip
 	}
-	resolver := enterprisehooks.StandaloneResolver()
 	for _, entry := range pending {
 		name := strings.ToLower(strings.TrimSpace(entry.Connector))
-		if job := jobs[entry.UID]; job != nil && enterpriseHookJobRemoves(job, name) {
-			continue // a manifest row still names it
+		if enterpriseHookPendingCleanupCoveredByJob(jobs[entry.UID], name, entry, resolver) {
+			continue // a manifest row still names it, in the same home
 		}
 		label := strings.TrimSpace(entry.User) + "/" + name
 		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
@@ -696,6 +711,24 @@ func shortEnterpriseHookReportPath(path string) string {
 		base = base[:head] + "..." + base[tail:]
 	}
 	return filepath.Join(string(filepath.Separator), "...", base)
+}
+
+// enterpriseHookPendingCleanupCoveredByJob reports whether a manifest row's
+// removal covers a pending cleanup: the same connector, and the recorded home
+// of the cleanup is the home both the row and the directory give the
+// account. A re-homed account runs its own cleanup, which checks both homes;
+// skipped, a copied home kept loading the plugin while remove-all counted the
+// row removed (GAP-0632).
+func enterpriseHookPendingCleanupCoveredByJob(job *enterpriseHookWorkerJob, connector string, entry enterpriseHookUserCleanup, resolver unixidentity.Resolver) bool {
+	if job == nil || !enterpriseHookJobRemoves(job, connector) {
+		return false
+	}
+	home := filepath.Clean(strings.TrimSpace(entry.UserHome))
+	if filepath.Clean(job.Account.Home) != home {
+		return false
+	}
+	account, err := resolver.LookupUID(entry.UID)
+	return err == nil && filepath.Clean(strings.TrimSpace(account.Home)) == home
 }
 
 // enterpriseHookJobRemoves reports whether job already removes connector.
