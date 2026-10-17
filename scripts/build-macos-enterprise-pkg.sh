@@ -17,6 +17,9 @@
 # Fleet-enabled configs also need a protected Python.org 3.10-3.14 framework
 # interpreter with PyYAML; the lifecycle checks that exact runtime before it
 # activates Fleet. The compiler source itself is carried by this package.
+# A pinned e2fsprogs build is carried under share/e2fsprogs with its GPL
+# notice and source. The managed MicroVM uses it only when neither an explicit
+# administrator directory nor a user's own build supplies the tools.
 #
 # Called by the `packaging-macos-enterprise` Make target.
 #
@@ -122,6 +125,12 @@ if [ ! -f "$compiler_src" ] || [ -L "$compiler_src" ]; then
 fi
 install -d -m 0755 "$ROOT/opt/cisco/defenseclaw/share" "$ROOT/opt/cisco/defenseclaw/share/fleet"
 install -m 0644 "$compiler_src" "$ROOT/$BUNDLED_COMPILER"
+
+# The standard account cannot install Homebrew or Xcode tools. Build these on
+# the packaging Mac and carry the complete corresponding source and notice.
+# They stay under a root-owned package path and are selected only as fallback.
+e2fs_root="$ROOT/opt/cisco/defenseclaw/share/e2fsprogs"
+"$REPO_ROOT/scripts/build-macos-e2fsprogs.sh" "$e2fs_root"
 
 # The standard user's sandbox launcher: the gateway under the name defenseclaw
 # (internal/cli/launcher.go). A package-owned symlink, so only an installer or

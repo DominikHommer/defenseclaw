@@ -288,11 +288,14 @@ and follow it with `sandbox logs NAME -f`; detached runs do not depend on the
 launching terminal, but still depend on those services. Linux linger keeps
 the services available after logout.
 
-**macOS `e2fsprogs`.** DefenseClaw ships none. The MicroVM driver finds it only
-in `enterprise.openshell.e2fsprogs_dir` (an absolute directory whose whole
-chain is owned by root) or in the user's own `~/.local/opt/e2fsprogs`.
-Anything else, such as a Homebrew keg owned by another account, is refused
-with `openshell_prerequisite_missing` and a message for the administrator.
+**macOS `e2fsprogs`.** The managed package includes `mke2fs`, `debugfs` and
+`e2fsck` with their GPL notice and source. When
+`enterprise.openshell.e2fsprogs_dir` is unset, the gateway uses an account's
+own `~/.local/opt/e2fsprogs/sbin` build if present, then the package tools.
+Set `e2fsprogs_dir` to an absolute root-owned install prefix to override the
+fallback with a host tool. A broken explicit setting is refused with
+`openshell_prerequisite_missing`; it never silently selects the package.
+Another account's Homebrew keg is not a managed gateway source.
 
 ### Recipe: prerequisite mode
 
@@ -436,7 +439,7 @@ changes. See [Change the config](/docs/enterprise/lifecycle#change-the-config).
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. See [The docker fallback](#the-docker-fallback). |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.3"`; `prerequisite` also accepts a range inside `>=0.1.1 <0.2.0`. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. |
-| `e2fsprogs_dir` | macOS only. An absolute directory whose chain is owned by root: the e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses one without both tools. |
+| `e2fsprogs_dir` | macOS only. Optional override: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. `ensure` names the folder the gateway uses and refuses a broken explicit value. When unset, an account build or the package tools are used. |
 
 These keys are lifecycle settings: changing one is applied by `ensure` and
 needs a restart of the user daemons, which waits for running sandboxes. The
@@ -544,7 +547,7 @@ the lifecycle checks for it.
 | Hardware | `/dev/kvm` exists and the CPU shows `vmx` or `svm`. On a cloud VM that takes nested virtualization or a bare-metal size. | Apple silicon. An Intel Mac is refused (`os_unsupported`). |
 | Access | `/dev/kvm` is readable and writable for the person, directly or through the `kvm` group | Nothing to arrange |
 | Driver binary | `openshell-driver-vm` at the OpenShell release you run. In `prerequisite` mode you extract NVIDIA's tarball ([the recipe](#recipe-prerequisite-mode)); in `setup` mode each person's daemon downloads it. | The same, from NVIDIA's macOS build |
-| `e2fsprogs` | 1.43 or newer on the host (`mke2fs`) | In `e2fsprogs_dir` (a root-owned directory) or the person's `~/.local/opt/e2fsprogs`. Another account's Homebrew keg is refused. |
+| `e2fsprogs` | 1.43 or newer on the host (`mke2fs`) | The root-owned `e2fsprogs_dir` override, the person's `~/.local/opt/e2fsprogs`, or the package fallback. Another account's Homebrew keg is refused. |
 | Docker | Needed for the agent images, and for the fallback | Docker Desktop running for the person: the agent images are built there |
 | Gateway settings | Rendered `gateway.toml`, run by DefenseClaw's user unit, which sets the umask the driver needs | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 | When it can't run | The Docker fallback (default) or a refusal with `driver_fallback: none` | No fallback: the sandbox is refused with the reason |

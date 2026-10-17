@@ -82,6 +82,16 @@ make packaging-macos-enterprise VERSION=1.2.3
   `MACOS_INSTALLER_SIGN_IDENTITY` (Developer ID Installer, signs the product
   archive) are set; `MACOS_SIGN_KEYCHAIN` names the keychain holding them.
   Notarize a signed package separately.
+- The builder downloads the pinned e2fsprogs 1.47.3 source archive from
+  kernel.org, checks its SHA-256, builds `mke2fs`, `debugfs` and `e2fsck`
+  without non-system runtime libraries, and places them under
+  `/opt/cisco/defenseclaw/share/e2fsprogs/sbin`. The package also carries
+  the upstream GPL notice and complete corresponding source under
+  `share/e2fsprogs/licenses`. The managed gateway selects these tools only
+  when `enterprise.openshell.e2fsprogs_dir` is unset and the account has no
+  build in `~/.local/opt/e2fsprogs/sbin`. An explicit administrator directory
+  remains authoritative. The Mac running the package builder needs network
+  access to kernel.org; the Mac receiving the package does not.
 - `scripts/test-enterprise-unix-install.sh` installs, converges, verifies
   and removes the package on a disposable Mac; see
   [docs/TESTING.md](../../docs/TESTING.md#enterprise-install-lanes).
