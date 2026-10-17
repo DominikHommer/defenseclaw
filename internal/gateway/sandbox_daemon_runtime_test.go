@@ -271,10 +271,13 @@ type fakeRelay struct {
 	settings func() (sandboxrelay.DaemonSettings, error)
 	resolve  func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
 	current  func(string) (sandboxrelay.CurrentPolicy, error)
-	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
-	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
-	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
-	deleted  atomic.Int64
+	// rawCurrent lets a test exercise an incomplete wire answer. Ordinary
+	// fake answers model the complete floor sent by the current gateway.
+	rawCurrent bool
+	explain    func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	test       func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
+	packs      func(registration, connector, name string) ([]sandboxrelay.PackView, error)
+	deleted    atomic.Int64
 
 	eventsMu sync.Mutex
 	events   []sandboxrelay.EventBatch
@@ -303,10 +306,34 @@ func (f *fakeRelay) Bind(context.Context, string, sandboxrelay.BindRequest) (san
 }
 func (f *fakeRelay) Deleted(context.Context, string) error { f.deleted.Add(1); return nil }
 func (f *fakeRelay) Current(_ context.Context, id string) (sandboxrelay.CurrentPolicy, error) {
+	var cp sandboxrelay.CurrentPolicy
+	var err error
 	if f.current != nil {
-		return f.current(id)
+		cp, err = f.current(id)
 	}
-	return sandboxrelay.CurrentPolicy{}, nil
+	if err == nil && !cp.Revoked && cp.Floor == nil && !f.rawCurrent {
+		cp.Floor = &config.OpenShellAdminConfig{}
+	}
+	return cp, err
+}
+
+func TestSandboxDaemonRefusesIncompletePolicyAnswer(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	r := daemonRegistration{ID: "reg-1", Sandbox: "dc-a"}
+	if err := f.d.regs.put(r); err != nil {
+		t.Fatal(err)
+	}
+	f.relay.rawCurrent = true
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: sandboxrelay.WireVersion}, nil
+	}
+	ans := f.d.askPolicy(context.Background(), r, false, false)
+	if ans.err == nil {
+		t.Fatal("incomplete policy answer was accepted")
+	}
+	if got, _ := f.d.regs.get(r.Sandbox); got.Confirmed {
+		t.Fatal("incomplete policy answer confirmed a cached floor")
+	}
 }
 
 // Report records the state report and answers like Current.
