@@ -45,6 +45,18 @@ Material modifications made by Cisco Systems, Inc.:
 
 This NOTICE preserves the attribution required by Apache License 2.0 section 4.
 
+BUNDLED MACOS E2FSPROGS
+
+The standalone managed macOS package carries e2fsprogs 1.47.3 tools as a
+fallback for OpenShell MicroVM disks. The package includes the upstream NOTICE
+(including GPL version 2 terms and the library license notices) and the
+complete corresponding source archive under
+/opt/cisco/defenseclaw/share/e2fsprogs/licenses/. The source is fetched from
+https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.3/
+and verified with SHA-256
+857e6ef800feaa2bb4578fbc810214be5d3c88b072ea53c5384733a965737329.
+The tools are built without changes to their source.
+
 VENDORED SOURCE: TETRAGON API
 
 third_party/tetragon/ carries the gRPC API definitions of Tetragon, which the
