@@ -45,6 +45,7 @@ import pytest
 from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config
+from defenseclaw.cursor_contract import CursorRegistrationValidation
 
 _GOLDEN = json.loads(
     (
@@ -238,10 +239,23 @@ def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_pa
     connector = rendered["connector"]
     cfg, paths = _install(tmp_path, monkeypatch, rendered)
     cfg.deployment_mode = "" if mode == "per_user" else mode
+    if mode == "managed_enterprise" and connector == "cursor":
+        # Cursor's full schema contract is exercised separately; this row
+        # isolates the per-file registration check for encoded commands.
+        monkeypatch.setattr(
+            cmd_doctor,
+            "validate_cursor_registration",
+            lambda *_args, **_kwargs: CursorRegistrationValidation(
+                True, "registered", runtime_path=paths[0], entry_count=21
+            ),
+        )
     assert hook_integrity.hook_registration_problems(cfg, connector) == []
     assert _status_problem(cfg, connector) == ""
     assert _quickstart_problem(cfg, connector) == ""
-    assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch)) == []
+    doctor_rows = _doctor_rows(cfg, connector, monkeypatch)
+    assert _doctor_unregistered(doctor_rows) == []
+    if mode == "managed_enterprise":
+        assert any(row["label"] == f"{connector.title()} hooks" and row["status"] == "pass" for row in doctor_rows)
     if mode == "managed_enterprise":
         monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_args: ("open", None))
         monkeypatch.setattr(
