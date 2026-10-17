@@ -2045,7 +2045,7 @@ func (a *App) promptsKept(sb *sandboxapi.Sandbox) string {
 			return "harness prompts kept by your organization's policy"
 		}
 	}
-	if !(a.ManagedHost() || a.managedSeen != nil) {
+	if !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil) {
 		if ad := packs.BaseFloor(a.Cfg); ad.AllowYolo != nil && !*ad.AllowYolo {
 			return orgOff
 		}

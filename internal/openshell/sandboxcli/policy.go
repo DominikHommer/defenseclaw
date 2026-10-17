@@ -420,11 +420,13 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	}
 	// On a managed computer the organization's constraints are the managed
 	// section above: the local configuration is not the user's to read.
-	if lines := a.adminConstraints(); len(lines) > 0 && !managedHost {
-		a.println()
-		a.line(a.bold("Organization constraints") + " (openshell.admin)")
-		for _, l := range lines {
-			a.line("  " + l)
+	if !managedHost {
+		if lines := a.adminConstraints(); len(lines) > 0 {
+			a.println()
+			a.line(a.bold("Organization constraints") + " (openshell.admin)")
+			for _, l := range lines {
+				a.line("  " + l)
+			}
 		}
 	}
 	for _, v := range ex.Violations {
@@ -494,6 +496,9 @@ func (a *App) adminConstraints() []string {
 
 // PolicyEdit adds hosts to openshell.egress.allow or openshell.egress.block.
 func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error {
+	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
+		return managedConfigRefusal()
+	}
 	if len(hosts) == 0 {
 		return errors.New("name at least one host")
 	}
