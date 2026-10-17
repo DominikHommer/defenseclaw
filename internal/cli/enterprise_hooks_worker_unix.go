@@ -813,10 +813,25 @@ func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []
 		if err != nil {
 			return path + ": cannot inspect agent config"
 		}
+		target := path
+		if info.Mode()&os.ModeSymlink != 0 {
+			// A dotfile manager links the agent config to a file elsewhere
+			// in the home (~/.codex/config.toml -> ~/dotfiles/codex.toml).
+			// The worker runs as the user and checks that file; a link out
+			// of the home stays unverified (GAP-0642).
+			resolved, problem := enterpriseHookWorkerConfigLinkTarget(home, path)
+			if problem != "" {
+				return path + ": " + problem
+			}
+			target = resolved
+			if info, err = os.Lstat(target); err != nil {
+				return path + ": cannot inspect the file the agent config links to"
+			}
+		}
 		if !info.Mode().IsRegular() {
 			return path + ": agent config is not a regular file"
 		}
-		file, err := os.Open(path)
+		file, err := os.Open(target)
 		if err != nil {
 			return path + ": cannot read agent config"
 		}
@@ -830,6 +845,25 @@ func enterpriseHookWorkerRemainingConfigReference(home, dataDir string, paths []
 		}
 	}
 	return ""
+}
+
+// enterpriseHookWorkerConfigLinkTarget resolves a symlinked agent config.
+// It returns the target when it is inside the cleaned home (both resolved,
+// so a home under a linked folder compares the same), else why it is not
+// checked.
+func enterpriseHookWorkerConfigLinkTarget(home, path string) (string, string) {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", "agent config is a symlink that cannot be resolved; remove DefenseClaw's entries from the file it names, or replace the link with that file"
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		resolvedHome = home
+	}
+	if !enterpriseHookWorkerPathWithin(resolvedHome, target) {
+		return "", "agent config is a symlink to a file outside the home, which is not checked; remove DefenseClaw's entries from the file it names, or replace the link with that file"
+	}
+	return target, ""
 }
 
 // enterpriseHookWorkerConfigReferenceLine matches only connector-owned

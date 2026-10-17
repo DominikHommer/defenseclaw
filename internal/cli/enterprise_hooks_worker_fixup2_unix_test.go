@@ -169,8 +169,8 @@ func TestEnterpriseHookWorkerConfigScanKeepsReadLimits(t *testing.T) {
 	if err := os.Symlink(outside, path); err != nil {
 		t.Fatal(err)
 	}
-	if got := enterpriseHookWorkerRemainingConfigReference(home, filepath.Join(home, ".defenseclaw"), []string{path}); !strings.Contains(got, "not a regular file") {
-		t.Fatalf("symlink was treated as clean: %s", got)
+	if got := enterpriseHookWorkerRemainingConfigReference(home, filepath.Join(home, ".defenseclaw"), []string{path}); !strings.Contains(got, "symlink to a file outside the home") {
+		t.Fatalf("a symlink out of the home was treated as clean: %s", got)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -338,5 +338,41 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 				t.Fatalf("matcher kept removed %s entries: %s", name, remaining)
 			}
 		})
+	}
+}
+
+// A dotfile manager links the agent config to a file in the same home. The
+// check reads that file: clean, the row ends; with an entry left, it stays
+// (GAP-0642).
+func TestEnterpriseHookWorkerConfigScanFollowsLinksInsideTheHome(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	dotfile := filepath.Join(home, "dotfiles", "codex.toml")
+	path := filepath.Join(home, ".codex", "config.toml")
+	for _, dir := range []string{filepath.Dir(dotfile), filepath.Dir(path)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(dotfile, []byte("model = 'sample'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dotfile, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); got != "" {
+		t.Fatalf("a clean linked config stayed unverified: %s", got)
+	}
+	if err := os.WriteFile(dotfile, []byte("model = 'sample'\nnotify = ['"+filepath.Join(dataDir, "hooks", "codex-hook.sh")+"']\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); !strings.Contains(got, path+":2: DefenseClaw data-dir path remains") {
+		t.Fatalf("an entry in the linked config was not reported: %q", got)
+	}
+	if err := os.Remove(dotfile); err != nil {
+		t.Fatal(err)
+	}
+	if got := enterpriseHookWorkerRemainingConfigReference(home, dataDir, []string{path}); !strings.Contains(got, "cannot be resolved") {
+		t.Fatalf("a dangling link was treated as clean: %q", got)
 	}
 }
