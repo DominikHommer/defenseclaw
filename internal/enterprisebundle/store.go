@@ -276,7 +276,7 @@ func DigestWarningCode(expected, enforcing string, comparable bool) string {
 // the confirmed receipt of the bundle that enforces.
 func (r *Receipt) Status(current *Ref) *enterprisestatus.BundleState {
 	out := &enterprisestatus.BundleState{
-		BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
+		ReceiptID: r.ReceiptID, BundleID: r.BundleID, Version: r.Version, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
 		AppliedAt: r.AppliedAt, ConfirmedAt: r.ConfirmedAt,
 		Restart: r.Restart, RestartRequired: r.RestartRequired,
@@ -304,6 +304,16 @@ func VersionDirName(version uint64, bundleID string) string {
 // named by the installed config, even when the earlier receipt was failed.
 func VersionDirNameForReceipt(version uint64, bundleID, receiptID string) string {
 	return VersionDirName(version, bundleID) + "-" + receiptID
+}
+
+// receiptIDOfVersionDir is the receipt id a receipt-specific version
+// directory name of bundle id at version ends in; "" for a legacy name.
+func receiptIDOfVersionDir(name string, version uint64, bundleID string) string {
+	id, ok := strings.CutPrefix(name, VersionDirName(version, bundleID)+"-")
+	if !ok || !receiptIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
 }
 
 // IsVersionDirName accepts current receipt-specific and legacy version
@@ -1026,7 +1036,10 @@ func (s *Store) Summary() (*enterprisestatus.BundleState, error) {
 		return last.Status(st.Current), nil
 	}
 	if c := st.Current; c != nil {
-		return &enterprisestatus.BundleState{BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
+		// The receipt that promoted the current bundle named its version
+		// directory, so its id survives the receipt being pruned.
+		return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID),
+			BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
 			EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt}, nil
 	}
 	return nil, nil

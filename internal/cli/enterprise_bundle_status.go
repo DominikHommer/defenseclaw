@@ -76,7 +76,11 @@ Run it as root or an administrator.`,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			res := &bundleStatusResult{SchemaVersion: bundleOutputSchemaVersion, Command: "status",
-				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
+				Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{},
+				// Replaced by the live scan; a status refused before it reports
+				// the scan as unknown rather than the zero value.
+				SessionsRestartRequired: enterprisestatus.SessionRestartStatus{State: "unknown", Entries: []enterprisestatus.SessionEntry{},
+					Reason: "not scanned: bundle status was refused before the session scan"}}
 			err := bundleStatus(bundleContext(cmd), res)
 			if err != nil {
 				res.Errors, err = bundleRefusal(err)
@@ -283,6 +287,15 @@ func bundleCurrentSignerWarning(anchorsPath, signerKeyID string) *enterprisebund
 	anchors, err := enterprisebundle.LoadAnchors(anchorsPath, bundleAnchorTrust)
 	if err != nil {
 		return &enterprisebundle.Warning{Code: "anchor_unreadable", Message: "the installed trust anchors could not be checked for the confirmed bundle signer"}
+	}
+	return bundleSignerWarning(anchors, signerKeyID)
+}
+
+// bundleSignerWarning is key_unknown or key_revoked when anchors no longer
+// trust the confirmed bundle signer ("" for none); nil otherwise.
+func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) *enterprisebundle.Warning {
+	if anchors == nil || signerKeyID == "" {
+		return nil
 	}
 	key := anchors.Key(signerKeyID)
 	if key == nil {

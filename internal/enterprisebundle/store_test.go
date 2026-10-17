@@ -575,6 +575,37 @@ func TestReceiptStatusFieldsMatchTheResultBlock(t *testing.T) {
 	}
 }
 
+// The bundle block names the receipt it reports (receipt_id): the file name
+// of the public receipt a management agent forwards.
+func TestReceiptStatusNamesItsReceipt(t *testing.T) {
+	r := &Receipt{ReceiptID: "r-01JA0000000000000000000009", BundleID: testBundleID(2), Version: 3, State: StateConfirmed}
+	if got := r.Status(nil); got.ReceiptID != r.ReceiptID {
+		t.Fatalf("receipt_id = %q, want %q", got.ReceiptID, r.ReceiptID)
+	}
+}
+
+// With no receipt left (pruned), the summary of the current bundle names
+// the receipt that promoted it, from its version directory name. A legacy
+// directory name carries no receipt id, so none is reported.
+func TestSummaryOfTheCurrentBundleNamesItsConfirmedReceipt(t *testing.T) {
+	id := testBundleID(4)
+	for name, tc := range map[string]struct{ dir, want string }{
+		"receipt directory": {VersionDirNameForReceipt(4, id, "r-01JA0000000000000000000004"), "r-01JA0000000000000000000004"},
+		"legacy directory":  {VersionDirName(4, id), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := testStore(t)
+			if err := s.saveState(State{Current: &Ref{BundleID: id, Version: 4, ManifestSHA256: digestOf(id), Dir: tc.dir}, Floor: 4}); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Summary()
+			if err != nil || got == nil || got.ReceiptID != tc.want || got.State != StateConfirmed {
+				t.Fatalf("summary = %+v, %v; want receipt_id %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // A process killed while it rewrites bundle-state.json leaves either the old
 // or the new state, never a torn or empty one; settle removes the temp file.
 func TestBundleStateSurvivesAKillDuringTheWrite(t *testing.T) {

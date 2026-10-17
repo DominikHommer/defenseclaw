@@ -67,6 +67,47 @@ func TestBundleStatusPrivilegeRefusalDoesNotClaimUnmanagedState(t *testing.T) {
 	}
 }
 
+// A status refused before the live session scan (not managed, Secure
+// Client, unreadable state) reports the scan as unknown with an empty
+// entry list, never the Go zero value {"state":"","entries":null} that the
+// published session schema does not allow.
+func TestBundleStatusRefusalReportsTheSessionScanAsUnknown(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	store := bundleDevice(t, e)
+	for name, refuse := range map[string]func(){
+		"not managed":   func() { bundleManagedDevice = func() bool { return false } },
+		"Secure Client": func() { bundleSecureClient = func() bool { return true } },
+		"state invalid": func() {
+			if err := os.MkdirAll(filepath.Dir(store.StatePath()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(store.StatePath(), []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			savedDevice, savedSC := bundleManagedDevice, bundleSecureClient
+			t.Cleanup(func() {
+				bundleManagedDevice, bundleSecureClient = savedDevice, savedSC
+				_ = os.Remove(store.StatePath())
+			})
+			refuse()
+			out, code := runBundle(t, "status", "--json")
+			var res struct {
+				OK       bool                                   `json:"ok"`
+				Sessions *enterprisestatus.SessionRestartStatus `json:"sessions_restart_required"`
+			}
+			if err := json.Unmarshal([]byte(out), &res); err != nil || code != bundleFailureExitCode() || res.OK {
+				t.Fatalf("exit %d, %v:\n%s", code, err, out)
+			}
+			if s := res.Sessions; s == nil || s.State != "unknown" || s.Count != 0 || s.Entries == nil || len(s.Entries) != 0 || s.Reason == "" {
+				t.Fatalf("sessions_restart_required = %+v:\n%s", s, out)
+			}
+		})
+	}
+}
+
 // A Windows receipt that recorded an unfinished session scan must not be
 // reported as a digest mismatch (GAP-0104).
 func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {

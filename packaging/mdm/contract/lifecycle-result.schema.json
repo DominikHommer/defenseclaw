@@ -222,6 +222,7 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json. Absent on builds without management_contract and when no receipt was kept (a refusal before the receipt was written). A repeated delivery of the current bundle (already_applied no-op) discards its own receipt and reports the current bundle's confirmed receipt_id." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },

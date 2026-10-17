@@ -248,6 +248,11 @@ const (
 // generation of config.generation.json, not the gateway policy generation
 // that restarts at 1 with the gateway.
 type BundleState struct {
+	// ReceiptID names the receipt this block reports: the file name of its
+	// public receipt (<etc>/bundles/receipt-events/<receipt_id>.json) that a
+	// management agent forwards. A repeated delivery of the current bundle
+	// discards its own receipt, so the block names the confirmed one.
+	ReceiptID        string   `json:"receipt_id,omitempty"`
 	BundleID         string   `json:"bundle_id"`
 	DisabledByBundle []string `json:"disabled_by_bundle,omitempty"`
 	WarningCodes     []string `json:"warning_codes,omitempty"`
