@@ -111,11 +111,13 @@ def test_untouched_baseline_refreshes_without_false_conflict(
     assert destination.joinpath("README.md").read_bytes().endswith(b"new target release\n")
 
 
+@pytest.mark.parametrize("explicit_off", [False, True])
 def test_fleet_off_upgrade_removes_only_shipped_templates(
-    installed_bundle: tuple[Path, Path, Path], tmp_path: Path,
+    installed_bundle: tuple[Path, Path, Path], tmp_path: Path, explicit_off: bool,
 ) -> None:
     source, data_dir, destination = installed_bundle
-    (data_dir / "config.yaml").write_text("fleet:\n  enabled: false\n", encoding="utf-8")
+    if explicit_off:
+        (data_dir / "config.yaml").write_text("fleet:\n  enabled: false\n", encoding="utf-8")
     for relative in FLEET_TEMPLATES:
         (source / relative).unlink()
     custom = destination / "grafana/dashboards/operator-fleet.json"
