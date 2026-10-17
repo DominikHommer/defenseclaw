@@ -575,8 +575,93 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         return [f"no DefenseClaw hooks are registered in {unregistered[0]}"]
     if registered:
         commands = [] if windows else hook_command_problems(cfg, connector)
-        return commands or agent_hook_switch_problems(cfg, connector)
+        return commands or missing_tool_inspection_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
     return agent_hook_switch_problems(cfg, connector)
+
+
+# The hook events whose DefenseClaw handler must be registered for an
+# agent's tool calls to be inspected. A Claude Code settings file that kept
+# every other DefenseClaw hook but lost PreToolUse left doctor passing
+# ("28 DefenseClaw hook(s) registered") and status showing the connector
+# running in action mode while no tool call reached DefenseClaw (GAP-0645).
+TOOL_INSPECTION_EVENTS: dict[str, tuple[str, ...]] = {
+    "claudecode": ("PreToolUse",),
+}
+
+
+def _tool_inspection_strict(cfg: Any) -> bool:
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    return not _is_windows() and not managed and bool(str(getattr(cfg, "data_dir", "") or ""))
+
+
+def _tool_inspection_state(cfg: Any, connector: str, document: Any) -> tuple[bool, list[str]]:
+    """Whether *document* registers DefenseClaw hooks, and the tool-inspection events it registers none for."""
+
+    events = TOOL_INSPECTION_EVENTS.get(connector, ())
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not events or not isinstance(hooks, dict):
+        return False, []
+    strict = _tool_inspection_strict(cfg)
+
+    def registers(value: Any) -> bool:
+        return any(
+            _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+            for command in _hook_command_lines(value, connector)
+        )
+
+    if not any(registers(value) for key, value in hooks.items() if key != "state"):
+        return False, []
+    return True, [event for event in events if not registers(hooks.get(event))]
+
+
+def missing_tool_inspection_events(cfg: Any, connector: str, document: Any) -> list[str]:
+    """The tool-inspection events of *connector* the decoded agent config *document* registers no DefenseClaw hook for.
+
+    A document that registers no DefenseClaw hook at all returns nothing:
+    the unregistered-file check reports it.
+    """
+
+    return _tool_inspection_state(cfg, connector, document)[1]
+
+
+def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
+    """Report recorded agent config files that lost a tool-inspection hook (GAP-0645).
+
+    Every recorded file that registers DefenseClaw hooks must register the
+    connector's tool-inspection events too; on a managed install, whose
+    hooks may sit in one machine layer, one file is enough. Per-user
+    Windows doctor already checks the full Claude Code hook matrix.
+    """
+
+    if not TOOL_INSPECTION_EVENTS.get(connector) or _is_windows():
+        return []
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    gaps: list[tuple[Path, str]] = []
+    covered = False
+    for path in _hook_config_paths(cfg, connector):
+        try:
+            if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+                continue
+            document = _load_agent_document(path)
+        except (OSError, ValueError, ImportError):
+            continue
+        registered, missing = _tool_inspection_state(cfg, connector, document)
+        gaps.extend((path, event) for event in missing)
+        covered = covered or (registered and not missing)
+    if not gaps or (managed and covered):
+        return []
+    path, event = gaps[0]
+    return [tool_inspection_hook_problem(connector, event, str(path))]
+
+
+def tool_inspection_hook_problem(connector: str, event: str, where: str) -> HookProblem:
+    """The problem sentence for a tool-inspection event without its DefenseClaw hook."""
+
+    label = "Claude Code" if connector == "claudecode" else connector
+    return HookProblem(
+        f"the DefenseClaw {event} hook is not registered in {where}, so {label} tool calls are not inspected",
+        f"run `{setup_command(connector)} --yes`; it registers the missing hook",
+    )
 
 
 def _read_agent_config(path: Path) -> Any:

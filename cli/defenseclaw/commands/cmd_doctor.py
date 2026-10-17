@@ -5925,7 +5925,18 @@ def _check_claudecode_hooks(
                     dc_hooks += 1
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
-    if switched_off:
+    uninspected = _missing_tool_inspection_hook(cfg, "claudecode", settings, settings_path) if dc_hooks > 0 else ""
+    if uninspected:
+        # Counting hooks kept a settings file without PreToolUse passing
+        # while no tool call was inspected (GAP-0645).
+        _emit(
+            "fail",
+            "Claude Code hooks",
+            f"{dc_hooks} DefenseClaw hook(s) registered, but {uninspected}",
+            r=r,
+            remediation=uninspected.repair,
+        )
+    elif switched_off:
         _emit(
             "fail",
             "Claude Code hooks",
@@ -17296,6 +17307,14 @@ def _fix_hook_script_modes(
         except OSError as exc:
             return ("fail", f"could not verify or restore hook script {script}: {exc}")
     return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
+
+
+def _missing_tool_inspection_hook(cfg, connector: str, document, where: str):
+    """The tool-inspection event *document* registers no DefenseClaw hook for, as a problem, or "" (GAP-0645)."""
+    from defenseclaw.hook_integrity import missing_tool_inspection_events, tool_inspection_hook_problem
+
+    missing = missing_tool_inspection_events(cfg, connector, document)
+    return tool_inspection_hook_problem(connector, missing[0], where) if missing else ""
 
 
 def _edited_hook_problem(cfg, connector: str):
