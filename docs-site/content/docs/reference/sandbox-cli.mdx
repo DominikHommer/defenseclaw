@@ -147,10 +147,11 @@ commands change in these ways. Everything else on this page works as written.
   OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
   release into `~/.local` at your first sandbox. The first-use progress line is
   "Installing OpenShell 0.1.3 for your account and starting it (first run only)…".
-- **`sandbox policy allow` and `block`** change `config.yaml`, so they are
-  refused. Asks you may answer are decided by the managed gateway against your
-  profile; an answer past your profile is refused with the request-access
-  contact, and "always" is stored only when your profile allows it.
+- **`sandbox policy allow` and `block`** save one host decision at a time in
+  the managed gateway. Start a sandbox first; if you have several, use
+  `--sandbox NAME` to select the policy that checks the decision. The gateway
+  checks your profile before saving it. `--remove` is unavailable on managed
+  computers. Asks you answer follow the same profile limits.
 - **The banner** shows `Policy` and `Driver`: your own profile and its
   description, and the selected compute driver with a fallback reason when
   one applies. A project's `.defenseclaw/sandbox.yaml` then shows as
@@ -727,6 +728,10 @@ OpenHands and OmniGent are deprecated and are omitted from the resume examples.
 A plain `connect` starts a new conversation. To resume a particular
 conversation, pass the harness's own flag and ID after `--`:
 `defenseclaw sandbox connect myapp-7f3a -- --resume <id>`.
+
+A finished detached Claude Code run may leave no saved conversation. If
+`--continue` says there is none, run `defenseclaw sandbox connect myapp-7f3a`
+to start a new conversation in the same sandbox.
 
 The resume line the harness itself prints as it exits (`claude --resume
 <id>`, `codex resume <id>`, `opencode -s <id>`, `copilot --resume=<id>`,
@@ -1649,8 +1654,8 @@ defenseclaw sandbox policy show
 {/* AUTOGEN-BEGIN: sandbox-flags policy */}
 | Subcommand | Purpose |
 | --- | --- |
-| [`sandbox policy allow`](#sandbox-policy-allow) | Add hosts to openshell.egress.allow (used by the balanced and strict profiles). |
-| [`sandbox policy block`](#sandbox-policy-block) | Add hosts to openshell.egress.block. |
+| [`sandbox policy allow`](#sandbox-policy-allow) | Allow a destination under your sandbox policy. |
+| [`sandbox policy block`](#sandbox-policy-block) | Block a destination under your sandbox policy. |
 | [`sandbox policy explain`](#sandbox-policy-explain) | Show every resolved setting and where it comes from (pack, config, flag, organization). |
 | [`sandbox policy show`](#sandbox-policy-show) | Show the effective sandbox policy. |
 | [`sandbox policy suggest`](#sandbox-policy-suggest) | Suggest a pack (balanced plus what sandboxes reached) from their recorded destinations. |
@@ -1827,6 +1832,13 @@ defenseclaw sandbox policy test --pack ~/.defenseclaw/policies/sandbox/myapp/pac
 
 ### `sandbox policy allow`
 
+On a managed computer, saves one host as an always allow through the managed
+gateway. The decision must fit the selected sandbox's policy. Use
+`--sandbox NAME` when you have several sandboxes. Wildcard patterns and
+`--remove` are unavailable in managed mode.
+
+On a per-user computer, this command behaves as follows.
+
 Adds host patterns to `openshell.egress.allow` in `config.yaml`, and refuses
 patterns that cover every host or a whole top-level domain. Allow entries
 matter under the `balanced` profile, which reaches only allowed hosts. Under
@@ -1846,9 +1858,16 @@ defenseclaw sandbox policy allow artifacts.example.com "*.docs.example.com"
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--remove` | switch |  | Remove the hosts from openshell.egress.allow instead. |
+| `--sandbox` | text |  | On a managed computer, check the decision against this sandbox's policy. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox policy block`
+
+On a managed computer, saves one host as an always block through the managed
+gateway. Use `--sandbox NAME` when you have several sandboxes. Wildcard
+patterns and `--remove` are unavailable in managed mode.
+
+On a per-user computer, this command behaves as follows.
 
 Adds host patterns to `openshell.egress.block` in `config.yaml`. A host on the
 block list can't be unblocked; remove the entry to reach it again with
@@ -1864,11 +1883,11 @@ defenseclaw sandbox policy block --remove files.example.net
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--remove` | switch |  | Remove the hosts from openshell.egress.block instead. |
+| `--sandbox` | text |  | On a managed computer, check the decision against this sandbox's policy. |
 {/* AUTOGEN-END: sandbox-flags */}
 
-Both commands check each pattern and refuse a change that would make
-`config.yaml` invalid. On a managed computer they are refused, because the
-administrator owns `config.yaml`.
+On a per-user computer, both commands check each pattern and refuse a change
+that would make `config.yaml` invalid.
 
 ### `sandbox pack`
 
