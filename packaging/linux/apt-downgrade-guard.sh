@@ -46,5 +46,6 @@ echo "  For a deliberate rollback create the marker first: sudo touch $marker" >
 if [ -f "$previous_config" ]; then
     config=$previous_config
 fi
-echo "  Then install the older package; its postinstall applies it. If it refuses the config, finish with: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config" >&2
+echo "  Then install the older package; its postinstall applies it." >&2
+echo "  If it refuses the config, run: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config" >&2
 exit 1
