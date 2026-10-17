@@ -150,7 +150,7 @@ stderr, and the exit code is the only signal.
 | Case | Exit |
 |---|---|
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
-| `--lock-wait` outside 0 to 15m (Linux, macOS; `bundle anchors install` prints a JSON `invalid_arguments` document) | 2 |
+| `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
 | Linux and macOS `secret set` / `remove` not run as root | 1 |
 | Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
