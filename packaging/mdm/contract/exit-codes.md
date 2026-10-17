@@ -138,7 +138,11 @@ A management agent that runs the `enterprise` commands itself
 - `enterprise secret set` and `remove`: Linux and macOS `0`, `1`, `2` and
   `75`, as above; with `--json` every failure prints one JSON document (a
   failure before the lifecycle ran: `invalid_arguments` `2`, `not_root`,
-  `change_failed` or `state_invalid` `1`). Windows `0`; `5` not elevated on a managed computer
+  `change_failed` or `state_invalid` `1`). A `change_failed` before the
+  lifecycle ran means the agent exited or stopped before it sent the whole
+  value on stdin (or sent nothing for 60 s): nothing was stored, and the agent
+  resubmits the same call once it runs again. An empty, multi-line or
+  oversized value it sent in full is `invalid_arguments` `2`. Windows `0`; `5` not elevated on a managed computer
   (`1603` with the same `elevation_required` code on a computer without the
   standalone deployment marker); `1603` not installed,
   `credential_in_use`, `change_failed` or `restart_failed`; `1618` when
@@ -156,7 +160,11 @@ A management agent that runs the `enterprise` commands itself
 ## Retries, downgrades and rollback
 
 Retry only `1618` and `75`. Every other failure repeats until you change the
-artifact, the config or the host.
+artifact, the config or the host. Two exceptions are for a management agent:
+Windows `secret set` / `remove` with `restart_failed` (`1603`), and Linux and
+macOS `secret set` with a `change_failed` before the lifecycle ran (`1`, the
+agent stopped before it sent the value); resubmit the same call
+(`management-agent.md` section 2.2).
 
 Windows `ensure` refuses an artifact older than the installed version
 (`downgrade_refused`, `1603`), and `rpm -U` refuses an older rpm, so an MDM

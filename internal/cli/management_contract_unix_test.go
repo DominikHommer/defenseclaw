@@ -167,6 +167,31 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 		t.Cleanup(func() { _ = r.Close() })
 		return r
 	}
+	// openPipe is a stdin whose sender keeps its end open and sends
+	// nothing: a stopped (SIGSTOP) agent, or a process the agent started
+	// that still holds the pipe.
+	openPipe := func(t *testing.T) io.Reader {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = w.Close(); _ = r.Close() })
+		return r
+	}
+	// partValue is a stdin that ends after part of a value, without a
+	// newline: the agent exited while it sent it.
+	partValue := func(t *testing.T) io.Reader {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(value[:4])); err != nil {
+			t.Fatal(err)
+		}
+		_ = w.Close()
+		t.Cleanup(func() { _ = r.Close() })
+		return r
+	}
 	// callerStops makes the parent exit once this command started: the
 	// first lookup is the agent, every later one init.
 	callerStops := func() {
@@ -178,6 +203,25 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 			return 1
 		}
 	}
+	// callerExitsLate is a parent exit as macOS shows it: the agent's end
+	// of the pipe closes first and init becomes the parent only later, so
+	// the end of stdin arrives while the agent still looks alive
+	// (mgmt-agent-api GAP-0040).
+	callerExitsLate := func() {
+		var exited time.Time
+		secretCallerPID = func() int {
+			if exited.IsZero() {
+				exited = time.Now().Add(150 * time.Millisecond)
+			}
+			if time.Now().Before(exited) {
+				return 4242
+			}
+			return 1
+		}
+	}
+	// senderStops makes stdin wait short: the agent stopped without
+	// sending or closing stdin.
+	senderStops := func() { secretStdinWait = 200 * time.Millisecond }
 	envFails := func() {
 		newUnixLifecycleEnv = func(string) (*enterpriseunix.Env, error) { return nil, errors.New("the layout cannot be resolved") }
 	}
@@ -207,6 +251,16 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 	}{
 		{name: "closed pipe after the agent stopped", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
 			stdin: closedPipe, setup: callerStops, code: "change_failed", exit: 1},
+		{name: "closed pipe before the agent's exit shows", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
+			stdin: closedPipe, setup: callerExitsLate, code: "change_failed", exit: 1},
+		{name: "part of a value, then the agent exited", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
+			stdin: partValue, setup: callerExitsLate, code: "change_failed", exit: 1},
+		{name: "agent exited, another process holds stdin open", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
+			stdin: openPipe, setup: callerExitsLate, code: "change_failed", exit: 1},
+		{name: "agent stopped without sending or closing stdin", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
+			stdin: openPipe, setup: senderStops, code: "change_failed", exit: 1},
+		{name: "unterminated blank value", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
+			stdin: func(*testing.T) io.Reader { return strings.NewReader("  ") }, code: "invalid_arguments", exit: 2},
 		{name: "closed pipe, empty value", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
 			stdin: closedPipe, code: "invalid_arguments", exit: 2},
 		{name: "blank line", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true},
@@ -236,8 +290,13 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			savedEnv, savedCaller := newUnixLifecycleEnv, secretCallerPID
-			t.Cleanup(func() { newUnixLifecycleEnv, secretCallerPID = savedEnv, savedCaller })
+			savedWait, savedSettle := secretStdinWait, secretCallerSettle
+			t.Cleanup(func() {
+				newUnixLifecycleEnv, secretCallerPID = savedEnv, savedCaller
+				secretStdinWait, secretCallerSettle = savedWait, savedSettle
+			})
 			secretCallerPID = func() int { return 4242 }
+			secretStdinWait, secretCallerSettle = 10*time.Second, 500*time.Millisecond
 			if tc.setup != nil {
 				tc.setup()
 			}
@@ -252,7 +311,11 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 			cmd.SetIn(stdin)
 			opts := tc.opts
 			opts.json = true
+			started := time.Now()
 			err := runEnterpriseSecret(cmd, tc.action, &opts)
+			if took := time.Since(started); took > 5*time.Second {
+				t.Fatalf("the failure took %s; a sender that stopped or exited must not hold secret set", took)
+			}
 			if strings.Contains(out.String(), value) || (err != nil && strings.Contains(err.Error(), value)) {
 				t.Fatalf("the credential value was printed: %s", out.String())
 			}
@@ -278,6 +341,56 @@ func TestManagementContractUnixSecretFailuresPrintOneDocument(t *testing.T) {
 			}
 			if _, statErr := os.Stat(filepath.Join(root+layout.SecretsDir, "ok-name")); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("a failed %s stored the credential: %v", tc.action, statErr)
+			}
+		})
+	}
+}
+
+// A value that ends without a newline (printf '%s' "$key" |) while the
+// agent is still there is stored whole, also when the agent sends it in two
+// writes; secret set waits for its parent only after such a value
+// (mgmt-agent-api GAP-0040).
+func TestManagementContractUnixSecretSetStoresAnUnterminatedValue(t *testing.T) {
+	schemas := contracttest.Compile(t)
+	root, layout := contractUnixEnv(t)
+	const value = "s3cr3t-value-never-printed"
+	savedCaller, savedSettle := secretCallerPID, secretCallerSettle
+	t.Cleanup(func() { secretCallerPID, secretCallerSettle = savedCaller, savedSettle })
+	secretCallerPID = func() int { return 4242 }
+	secretCallerSettle = 100 * time.Millisecond
+	for _, tc := range []struct {
+		name  string
+		stdin func(*testing.T) io.Reader
+	}{
+		{name: "one write", stdin: func(*testing.T) io.Reader { return strings.NewReader(value) }},
+		{name: "two writes with a pause", stdin: func(t *testing.T) io.Reader {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = r.Close() })
+			go func() {
+				defer w.Close()
+				_, _ = w.Write([]byte(value[:4]))
+				time.Sleep(100 * time.Millisecond)
+				_, _ = w.Write([]byte(value[4:]))
+			}()
+			return r
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "unterminated-" + strings.ReplaceAll(tc.name, " ", "-")
+			cmd := newEnterpriseSecretCommand("set", "")
+			cmd.SetContext(t.Context())
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetIn(tc.stdin(t))
+			err := runEnterpriseSecret(cmd, "set", &enterpriseSecretOptions{name: name, fromStdin: true, json: true})
+			doc := schemas.Validate(t, "secret-result.schema.json", out.Bytes())
+			requireExit(t, doc, runExit(err), 0)
+			stored, readErr := os.ReadFile(filepath.Join(root+layout.SecretsDir, name))
+			if readErr != nil || string(stored) != value {
+				t.Fatalf("stored %d bytes (%v), want the whole value", len(stored), readErr)
 			}
 		})
 	}
