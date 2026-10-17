@@ -50,7 +50,9 @@ wait "$DC_CHILD" || true
         )
         try:
             assert process.stdout.readline().strip() == "ready"
-            process.send_signal(signal.SIGTERM)
+            # The test child shares this session. Stop both processes so a
+            # loaded shell cannot defer its TERM trap behind a long wait.
+            os.killpg(process.pid, signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=20)
         finally:
             if process.poll() is None:
