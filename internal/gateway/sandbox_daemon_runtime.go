@@ -2613,9 +2613,9 @@ func (r *daemonRegistrations) markRevoked(name, reason string) {
 }
 
 // applyLive replaces the floor from a policy/current answer, marks the
-// registration confirmed, and
-// reports whether anything changed (a first confirmation included). The
-// registration's UpdatedAt becomes the answer's policy time, so the status
+// registration confirmed, and reports whether anything changed (a first
+// confirmation included). The registration's UpdatedAt becomes the answer's
+// policy time, so the status
 // shows when the policy last changed, also for a change of a field that is
 // not live (GAP-0690); that alone is not a change the floor adopts.
 func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPolicy) bool {
