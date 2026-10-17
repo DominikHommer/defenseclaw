@@ -883,9 +883,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok || !integrityCommandMutatesPath(command, candidate) ||
-			!(integrityExplicitCommandMutator(command, candidate) ||
-				command.Program == "dd" && command.ArgvComplete ||
-				integrityStructuredFileMutator(facts, command)) {
+			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(facts, command))) {
 			continue
 		}
 		target := candidate.Resolved

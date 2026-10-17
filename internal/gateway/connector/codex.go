@@ -136,7 +136,7 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	snapshot.hookDir = hookDir
 	if info, err := os.Lstat(hookDir); err == nil {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return snapshot, fmt.Errorf("Codex hook runtime path is not an ordinary directory: %s", hookDir)
+			return snapshot, fmt.Errorf("Codex hook runtime path is not an ordinary directory: %s", hookDir) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		snapshot.hookDirExisted = true
 	} else if !os.IsNotExist(err) {
@@ -200,11 +200,11 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 			return snapshot, fmt.Errorf("inspect Codex setup runtime artifact %s: %w", path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return snapshot, fmt.Errorf("Codex setup runtime artifact is not a regular file: %s", path)
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is not a regular file: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		data, ok := readStableNativeWindowsFile(path, nativeCodeGuardFileMaxBytes)
 		if !ok {
-			return snapshot, fmt.Errorf("Codex setup runtime artifact is unsafe or changing: %s", path)
+			return snapshot, fmt.Errorf("Codex setup runtime artifact is unsafe or changing: %s", path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		fileSnapshot.existed = true
 		fileSnapshot.data = data
@@ -1334,7 +1334,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 						// The user turned Codex hooks off. Setup must not override
 						// that, so say it at once instead of attempting a repair
 						// that can only fail (GAP-1094).
-						return false, fmt.Errorf(
+						return false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 							"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks",
 							userConfigPath, key,
 						)
@@ -1486,7 +1486,7 @@ func codexHookContractForSetup(opts SetupOpts) (HookContract, error) {
 		resolution := ResolveHookContract("codex", opts.AgentVersion)
 		contract = resolution.Contract
 		if contract.ContractID == "" {
-			return HookContract{}, fmt.Errorf(
+			return HookContract{}, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex version %q does not resolve to a supported hook contract",
 				strings.TrimSpace(opts.AgentVersion),
 			)
@@ -1509,7 +1509,7 @@ func codexHookGroupsForSetup(opts SetupOpts) ([]codexHookGroup, error) {
 	for _, eventType := range contract.Events {
 		group, ok := registry[eventType]
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex hook contract %s contains unregistered event %s",
 				contract.ContractID,
 				eventType,
@@ -1664,7 +1664,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		// subprocess sandbox policy.
 		hooks, hooksExist := cfg["hooks"].(map[string]interface{})
 		if _, exists := cfg["hooks"]; exists && !hooksExist {
-			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"])
+			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"]) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if !hooksExist {
 			hooks = map[string]interface{}{}
@@ -1682,10 +1682,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			features = map[string]interface{}{}
 		}
 		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector")
+			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
-			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector")
+			return fmt.Errorf("Codex hooks are disabled by deprecated [features].codex_hooks; enable hooks before installing the Codex connector") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		// Remove the retired alias when it is enabled. Current Codex accepts the
 		// [features].hooks key (and enables hooks by default) and warns on the old
@@ -3097,7 +3097,7 @@ func mergeOwnedCodexHooks(
 			continue
 		}
 		if _, ok := value.([]interface{}); !ok {
-			return fmt.Errorf("Codex hooks.%s has unsupported type %T; refusing to replace it", eventType, value)
+			return fmt.Errorf("Codex hooks.%s has unsupported type %T; refusing to replace it", eventType, value) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if _, generated := generatedHooks[eventType]; generated {
 			continue
@@ -4266,7 +4266,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	}
 	if _, exists := current["environment"]; !exists && original != nil {
 		if saved, hadSaved := original["environment"]; hadSaved &&
-			!(originalLooksManaged && saved == managedEnvironment) {
+			(!(originalLooksManaged) || saved != managedEnvironment) {
 			current["environment"] = saved
 		}
 	}

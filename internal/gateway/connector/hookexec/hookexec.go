@@ -2294,14 +2294,14 @@ func validateCodexInvocationBinding(
 		return "", errors.New("Codex hook stdin is missing hook_event_name") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	if stdinEvent != event {
-		return "", fmt.Errorf(
+		return "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex hook stdin event %q does not match installer-bound event %q",
 			stdinEvent,
 			event,
 		)
 	}
 	if !codexContractAllowsEvent(contractID, event) {
-		return "", fmt.Errorf(
+		return "", fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex hook event %q is not registered by installer-bound contract %q",
 			event,
 			contractID,

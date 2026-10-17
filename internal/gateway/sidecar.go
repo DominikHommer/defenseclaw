@@ -4007,7 +4007,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	// A per-user connector can have only MCP servers (Kiro has no asset
 	// directories). Its discovery poll still needs a running watcher.
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
-		!(watcherUsesConnectorDirs(s.currentConfig()) && !s.currentConfig().SecureClientIntegration()) {
+		(!(watcherUsesConnectorDirs(s.currentConfig())) || s.currentConfig().SecureClientIntegration()) {
 		s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 			"skill_dirs":  0,
 			"plugin_dirs": 0,
@@ -6912,7 +6912,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// Like OpenClaw, skip the loopback fleet address on a machine where
 		// discovery found no ZeptoClaw: it would dial ws://127.0.0.1:18789
 		// every 15 s for ever (GAP-0185).
-		return !(isLoopbackGatewayHost(cfg.Gateway.Host) && connector.CachedAgentNotFound(cfg.DataDir, "zeptoclaw"))
+		return (!(isLoopbackGatewayHost(cfg.Gateway.Host)) || !(connector.CachedAgentNotFound(cfg.DataDir, "zeptoclaw")))
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
 	default:

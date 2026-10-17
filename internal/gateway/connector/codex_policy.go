@@ -114,7 +114,7 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 
 func refuseCodexManagedHooksOnly(opts SetupOpts, policy codexEffectivePolicy) error {
 	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly {
-		return fmt.Errorf(
+		return fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,
 		)
@@ -184,13 +184,13 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 
 	if runtime.GOOS == "windows" && !opts.ManagedEnterprise {
 		if _, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
-			return codexEffectivePolicy{}, errors.New(
+			return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
 			)
 		}
 		if path := filepath.Join(opts.DataDir, agentSelectionFile); strings.TrimSpace(opts.DataDir) != "" {
 			if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
-				return codexEffectivePolicy{}, errors.New(
+				return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 					"Codex setup selection receipt is invalid or expired; rerun fresh trusted setup discovery",
 				)
 			}
@@ -201,7 +201,7 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		// contract. Falling back to a generic system-requirements read here would
 		// let Setup publish a lock with no executable evidence, which the next
 		// reconcile must correctly reject. Refuse before any registration mutation.
-		return codexEffectivePolicy{}, errors.New(
+		return codexEffectivePolicy{}, errors.New( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Codex policy inspection requires a fresh setup-selected native executable; rerun trusted connector setup or repair",
 		)
 	}
@@ -238,7 +238,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 	expectedDigest := ""
 	if entry, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
 		if !validCodexAgentExecutableEvidence(entry) {
-			return "", errors.New("Codex hook contract has invalid setup-selected executable evidence")
+			return "", errors.New("Codex hook contract has invalid setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		expectedPath = entry.AgentExecutable
 		expectedVersion = entry.RawAgentVersion
@@ -248,7 +248,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 		expectedVersion = selection.RawVersion
 		expectedDigest = selection.SHA256
 	} else {
-		return "", errors.New("Codex policy inspection requires protected setup-selected executable evidence")
+		return "", errors.New("Codex policy inspection requires protected setup-selected executable evidence") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if !sameCodexExecutablePath(executable, expectedPath) {
 		return "", fmt.Errorf("selected Codex executable does not match protected evidence: %s", executable)

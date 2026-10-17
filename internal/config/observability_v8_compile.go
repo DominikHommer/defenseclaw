@@ -1475,10 +1475,7 @@ func observabilityV8ValidHeaderName(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
+		if (((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character))) {
 			return false
 		}
 	}
@@ -1498,8 +1495,7 @@ func observabilityV8ForbiddenTransportHeader(normalized string) bool {
 func observabilityV8ValidGRPCMetadataName(normalized string) bool {
 	for index := 0; index < len(normalized); index++ {
 		character := normalized[index]
-		if !((character >= 'a' && character <= 'z') ||
-			(character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.') {
+		if ((((character < 'a' || character > 'z') && (character < '0' || character > '9')) && character != '-') && character != '_') && character != '.' {
 			return false
 		}
 	}

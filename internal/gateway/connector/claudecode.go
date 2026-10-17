@@ -1243,14 +1243,14 @@ func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string,
 // cannot safely be placed in a machine-wide policy document.
 func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) {
 	if !opts.ManagedEnterprise {
-		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup")
+		return nil, fmt.Errorf("Claude Code managed hook policy requires managed enterprise setup") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if err := validateClaudeCodeManagedFileDestination(); err != nil {
 		return nil, err
 	}
 	hookExecutable := strings.TrimSpace(opts.HookExecutable)
 	if runtime.GOOS == "windows" && (hookExecutable == "" || !filepath.IsAbs(hookExecutable)) {
-		return nil, fmt.Errorf("Claude Code managed hook policy requires an absolute native hook executable")
+		return nil, fmt.Errorf("Claude Code managed hook policy requires an absolute native hook executable") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	hookCommand, hookArgs := claudeCodeManagedHookInvocation(
 		opts,
@@ -1279,7 +1279,7 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 	}
 	hooks, ok := settings["hooks"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("Claude Code managed hook policy hooks have unsupported type %T", settings["hooks"])
+		return fmt.Errorf("Claude Code managed hook policy hooks have unsupported type %T", settings["hooks"]) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	hookCommand, hookArgs := claudeCodeManagedHookInvocation(
 		opts,
@@ -1306,9 +1306,9 @@ func (c *ClaudeCodeConnector) VerifyManagedHookPolicy(data []byte, opts SetupOpt
 	}
 	if !bytes.Equal(actualCanonical, expectedCanonical) {
 		if lock, _ := settings["allowManagedHooksOnly"].(bool); opts.ClaudeAllowManagedHooksOnly && !lock {
-			return fmt.Errorf("Claude Code managed hook policy does not set allowManagedHooksOnly: true, so user and project hooks can rewrite tool input after inspection")
+			return fmt.Errorf("Claude Code managed hook policy does not set allowManagedHooksOnly: true, so user and project hooks can rewrite tool input after inspection") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
-		return fmt.Errorf("Claude Code managed hook policy differs from the canonical DefenseClaw policy")
+		return fmt.Errorf("Claude Code managed hook policy differs from the canonical DefenseClaw policy") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
 }
@@ -1380,7 +1380,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		// Refuse a link the gateway cannot inspect before any hook is
 		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
 		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
-			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	}
 
@@ -1445,7 +1445,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 				if envRaw, present := settings["env"]; present {
 					envMap, ok := envRaw.(map[string]interface{})
 					if !ok {
-						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 					}
 					raw, err := json.Marshal(envMap)
 					if err != nil {
@@ -1462,7 +1462,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 				var ok bool
 				hooks, ok = rawHooks.(map[string]interface{})
 				if !ok {
-					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks)
+					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				}
 			}
 			hooksDir := filepath.Join(opts.DataDir, "hooks")
@@ -1666,7 +1666,7 @@ func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
 		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("Claude Code native OTLP settings are missing")
+		return nil, fmt.Errorf("Claude Code native OTLP settings are missing") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	settings, err := decodeClaudeCodeSettings(data, "native OTLP settings")
 	if err != nil {
@@ -1674,29 +1674,29 @@ func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
 	}
 	env, ok := settings["env"].(map[string]interface{})
 	if !ok {
-		return nil, fmt.Errorf("Claude Code native OTLP env is missing or invalid")
+		return nil, fmt.Errorf("Claude Code native OTLP env is missing or invalid") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if claudeCodeOTLPEnvString(env, "CLAUDE_CODE_ENABLE_TELEMETRY") != "1" {
-		return nil, fmt.Errorf("Claude Code native telemetry is not enabled")
+		return nil, fmt.Errorf("Claude Code native telemetry is not enabled") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	probes := make([]ClaudeCodeNativeOTLPProbe, 0, 2)
 	for _, signal := range []NativeOTLPSignal{NativeOTLPSignalLogs, NativeOTLPSignalMetrics} {
 		upperSignal := strings.ToUpper(string(signal))
 		if claudeCodeOTLPEnvString(env, "OTEL_"+upperSignal+"_EXPORTER") != "otlp" {
-			return nil, fmt.Errorf("Claude Code native %s exporter is not configured for OTLP", signal)
+			return nil, fmt.Errorf("Claude Code native %s exporter is not configured for OTLP", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		prefix := "OTEL_EXPORTER_OTLP_" + upperSignal
 		if claudeCodeOTLPEnvString(env, prefix+"_PROTOCOL") != "http/json" {
-			return nil, fmt.Errorf("Claude Code native %s OTLP protocol is not http/json", signal)
+			return nil, fmt.Errorf("Claude Code native %s OTLP protocol is not http/json", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		endpoint := claudeCodeOTLPEnvString(env, prefix+"_ENDPOINT")
 		if endpoint == "" {
-			return nil, fmt.Errorf("Claude Code native %s OTLP endpoint is missing", signal)
+			return nil, fmt.Errorf("Claude Code native %s OTLP endpoint is missing", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		headers, parseErr := parseClaudeCodeLiteralOTLPHeaders(claudeCodeOTLPEnvString(env, prefix+"_HEADERS"))
 		if parseErr != nil {
-			return nil, fmt.Errorf("Claude Code native %s OTLP headers are invalid: %w", signal, parseErr)
+			return nil, fmt.Errorf("Claude Code native %s OTLP headers are invalid: %w", signal, parseErr) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		probes = append(probes, ClaudeCodeNativeOTLPProbe{
 			Signal:   signal,
@@ -1811,7 +1811,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				var ok bool
 				existing, ok = envRaw.(map[string]interface{})
 				if !ok {
-					return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+					return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				}
 			}
 
@@ -1824,7 +1824,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				if envRaw, present := settings["env"]; present {
 					envMap, ok := envRaw.(map[string]interface{})
 					if !ok {
-						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw)
+						return atomicTransformResult{}, fmt.Errorf("Claude settings env has unsupported type %T", envRaw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 					}
 					pristine := map[string]interface{}{}
 					for k, v := range envMap {
@@ -2263,7 +2263,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if rawHooks, present := settings["hooks"]; present {
 				hooks, ok := rawHooks.(map[string]interface{})
 				if !ok {
-					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks)
+					return atomicTransformResult{}, fmt.Errorf("Claude settings hooks have unsupported type %T", rawHooks) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 				}
 				hooksDir := filepath.Join(opts.DataDir, "hooks")
 				managedCommands := append([]string(nil), backup.ManagedHookCommands...)
@@ -2376,7 +2376,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 					if original, existed := originalEnv[key]; existed && !orphanBlock &&
 						!claudeCodeOtelValueLooksManaged(key, original, written) &&
-						!(predecessorSnapshot && claudeCodeOtelValueWrittenByDefenseClaw(key, original, written)) &&
+						(!(predecessorSnapshot) || !(claudeCodeOtelValueWrittenByDefenseClaw(key, original, written))) &&
 						!claudeCodeEnvValueIsOrphanedEarlierRelease(originalEnv, key) {
 						envMap[key] = original
 					} else {

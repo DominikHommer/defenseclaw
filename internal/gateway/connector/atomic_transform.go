@@ -1167,8 +1167,7 @@ func atomicTransformIntentCandidateBase(name string) (string, bool) {
 		return "", false
 	}
 	for _, char := range digest {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') ||
-			(runtime.GOOS == "windows" && char >= 'A' && char <= 'F')) {
+		if ((char < '0' || char > '9') && (char < 'a' || char > 'f')) && ((runtime.GOOS != "windows" || char < 'A') || char > 'F') {
 			return "", false
 		}
 	}
