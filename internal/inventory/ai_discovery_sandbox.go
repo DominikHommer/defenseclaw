@@ -543,7 +543,33 @@ func (s *ContinuousDiscoveryService) lookPath(name string) (string, error) {
 		}
 		return "", exec.ErrNotFound
 	}
-	return exec.LookPath(name)
+	if found, err := exec.LookPath(name); err == nil || runtime.GOOS != "darwin" {
+		return found, err
+	}
+	// launchd services inherit a sparse PATH. Probe the conventional macOS
+	// install locations and the scanned user's bins without changing PATH or
+	// executing the candidate. The sandbox branch above stays isolated.
+	return lookPathInDirs(name, macOSDiscoveryBinaryDirs(s.opts.HomeDir))
+}
+
+func macOSDiscoveryBinaryDirs(home string) []string {
+	dirs := []string{"/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/opt/dc-agents/bin"}
+	if home != "" {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"))
+	}
+	return dirs
+}
+
+func lookPathInDirs(name string, dirs []string) (string, error) {
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return "", exec.ErrNotFound
+	}
+	for _, dir := range dirs {
+		if found, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return found, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 
 // environment is the process environment as KEY=VALUE pairs; a sandbox

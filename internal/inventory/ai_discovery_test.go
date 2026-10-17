@@ -1201,7 +1201,7 @@ func TestDetectLocalEndpoints_SkipsPathsOutsideAllowList(t *testing.T) {
 	}
 }
 
-func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
+func TestProcessNameMatchesDistinctExecutableParts(t *testing.T) {
 	if processNameMatches("quicklookd", "q") {
 		t.Fatal("short process name matched by substring")
 	}
@@ -1209,7 +1209,64 @@ func TestProcessNameMatchesShortNamesExactly(t *testing.T) {
 		t.Fatal("short process name did not match exactly")
 	}
 	if !processNameMatches("helper-claude", "claude") {
-		t.Fatal("long process name should allow substring matching")
+		t.Fatal("delimited process name part did not match")
+	}
+	for _, name := range []string{"CursorUIViewService", "precursor", "cursorhelper"} {
+		if processNameMatches(name, "cursor") {
+			t.Errorf("unrelated process %q matched Cursor", name)
+		}
+	}
+	for _, name := range []string{"cursor-agent", "Cursor Helper", "cursor.app"} {
+		if !processNameMatches(name, "cursor") {
+			t.Errorf("Cursor process %q was missed", name)
+		}
+	}
+}
+
+func TestMacOSDiscoveryBinaryFallback(t *testing.T) {
+	home := t.TempDir()
+	dirs := macOSDiscoveryBinaryDirs(home)
+	for _, want := range []string{"/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/opt/dc-agents/bin", filepath.Join(home, ".local", "bin")} {
+		if !slices.Contains(dirs, want) {
+			t.Fatalf("macOS binary directories %v omit %q", dirs, want)
+		}
+	}
+	first := filepath.Join(home, "first")
+	second := filepath.Join(home, "second")
+	if err := os.MkdirAll(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(second, "cursor-agent")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := lookPathInDirs("cursor-agent", []string{first, second}); err != nil || got != bin {
+		t.Fatalf("lookPathInDirs = %q, %v; want %q", got, err, bin)
+	}
+	for _, name := range []string{"missing", "../cursor-agent", "."} {
+		if got, err := lookPathInDirs(name, []string{second}); err == nil || got != "" {
+			t.Errorf("lookPathInDirs(%q) = %q, %v; want not found", name, got, err)
+		}
+	}
+}
+
+func TestDetectProcessesIgnoresCursorUIViewService(t *testing.T) {
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		DataDir: t.TempDir(), HomeDir: t.TempDir(),
+	}, []AISignature{{ID: "cursor", Name: "Cursor", Category: "supported_connector", ProcessNames: []string{"cursor"}}})
+	cleanupPreparedDiscoveryService(t, svc)
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: 1, Comm: "CursorUIViewService"},
+			{PID: 2, Comm: "cursor-agent"},
+		}, nil
+	})
+	signals, err := svc.detectProcesses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 1 || signals[0].Runtime == nil || signals[0].Runtime.Comm != "cursor-agent" {
+		t.Fatalf("process signals = %+v; want only cursor-agent", signals)
 	}
 }
 

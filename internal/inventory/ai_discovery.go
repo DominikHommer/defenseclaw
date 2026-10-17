@@ -4868,9 +4868,7 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 
 // processCommExactlyEquals reports whether `have` is byte-for-byte
 // equal (after path-stripping and case-folding) to `want`. The
-// confidence engine uses this to distinguish "exact" matches (which
-// get full Quality=1.0) from substring matches that succeed via the
-// fall-through in processNameMatches.
+// confidence engine uses this to distinguish exact from name-part matches.
 func processCommExactlyEquals(have, want string) bool {
 	have = strings.ToLower(strings.TrimSpace(filepath.Base(have)))
 	want = strings.ToLower(strings.TrimSpace(filepath.Base(want)))
@@ -4890,11 +4888,30 @@ func processNameMatches(have, want string) bool {
 		return true
 	}
 	// Short process names such as Amazon Q's `q` are far too noisy for
-	// substring matching (`quicklook`, `qemu`, etc.). Require exact matches.
+	// name-part matching (`quicklook`, `qemu`, etc.). Require exact matches.
 	if len(want) <= 3 {
 		return false
 	}
-	return strings.Contains(have, want)
+	// Accept a distinct executable-name part (cursor-agent, helper-claude),
+	// but not an unrelated compound name such as CursorUIViewService.
+	for at := 0; at < len(have); {
+		i := strings.Index(have[at:], want)
+		if i < 0 {
+			return false
+		}
+		i += at
+		end := i + len(want)
+		if (i == 0 || isProcessNameSeparator(have[i-1])) &&
+			(end == len(have) || isProcessNameSeparator(have[end])) {
+			return true
+		}
+		at = i + 1
+	}
+	return false
+}
+
+func isProcessNameSeparator(c byte) bool {
+	return c == '-' || c == '_' || c == '.' || c == ' '
 }
 
 func installedApplicationNames(home string) []string {
