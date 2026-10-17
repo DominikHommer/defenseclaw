@@ -109,6 +109,7 @@ def test_untouched_baseline_refreshes_without_false_conflict(
     assert "README.md" in second.changed_paths
     assert second.conflict_paths == ()
     assert destination.joinpath("README.md").read_bytes().endswith(b"new target release\n")
+    assert (tmp_path / "backup-2/local-observability-stack/managed/README.md").read_bytes() == old
 
 
 @pytest.mark.parametrize("explicit_off", [False, True])
@@ -141,7 +142,6 @@ def test_fleet_enabled_upgrade_keeps_optional_templates(
     _upgrade(source, data_dir, tmp_path / "backup")
 
     assert all((destination / relative).is_file() for relative in FLEET_TEMPLATES)
-    assert (tmp_path / "backup-2/local-observability-stack/managed/README.md").read_bytes() == old
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows flush semantics")
