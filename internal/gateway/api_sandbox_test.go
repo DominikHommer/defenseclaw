@@ -148,6 +148,10 @@ func (f *fakeSandboxController) Unblock(_ context.Context, req sandboxapi.Unbloc
 	return answer(f, "unblock", &sandboxapi.UnblockResponse{Host: req.Host, Scope: "sandbox"}, func() { f.unblock = req })
 }
 
+func (f *fakeSandboxController) PolicyDecision(_ context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	return answer(f, "policy decision", &sandboxapi.PolicyDecisionResponse{Sandbox: req.Sandbox, Host: req.Host, Kind: req.Kind})
+}
+
 func (f *fakeSandboxController) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
 	return answer(f, "explain", &sandboxapi.Explain{Pack: "open", Profile: "open"}, func() { f.explain = req })
 }

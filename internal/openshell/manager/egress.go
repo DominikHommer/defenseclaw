@@ -471,7 +471,7 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 		// The managed gateway keeps an "always" for the person, and
 		// learns who that is from one of their sandboxes: the one they
 		// run, else the one they name with --sandbox (GAP-0609).
-		name, err := m.personSandbox()
+		name, err := m.personSandbox("unblock")
 		if err != nil {
 			return nil, err
 		}
@@ -599,10 +599,10 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 }
 
 // personSandbox names the sandbox through which the managed gateway keeps
-// an "always" unblock made without --sandbox: the person's one sandbox.
+// a lasting decision made without --sandbox: the person's one sandbox.
 // Their sandboxes may match different profiles, whose floors check it, so
 // with several they name one.
-func (m *Manager) personSandbox() (string, error) {
+func (m *Manager) personSandbox(action string) (string, error) {
 	var names []string
 	for _, b := range m.liveBoxes() {
 		m.mu.Lock()
@@ -615,14 +615,60 @@ func (m *Manager) personSandbox() (string, error) {
 	switch len(names) {
 	case 0:
 		return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-			"on a managed computer, your organization's DefenseClaw gateway keeps an unblock for every sandbox through one of your sandboxes, "+
-				"and none is running; start one with `defenseclaw sandbox run`, then unblock again")
+			"start a sandbox with `defenseclaw sandbox run`, then %s again", action)
 	case 1:
 		return names[0], nil
 	}
+	hint := "--sandbox NAME"
+	if action == "unblock" {
+		hint += " --always"
+	}
 	return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
-		"you have several sandboxes (%s), whose profiles may differ: name the one whose policy checks the unblock, with --sandbox NAME --always",
-		strings.Join(names, ", "))
+		"you have several sandboxes (%s), whose profiles may differ: name one with %s",
+		strings.Join(names, ", "), hint)
+}
+
+// PolicyDecision records an always allow or block through the managed
+// gateway. Its registration selects the caller's own floor; the gateway
+// rechecks and records the decision before the daemon refreshes egress.
+func (m *Manager) PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	if m.authority() == nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "this command is for a managed computer")
+	}
+	host := triage.NormalizeHost(req.Host)
+	if host == "" || strings.ContainsAny(host, "*/ \t") || config.ValidateOpenShellEgressPattern(host) != nil {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name one destination host or IP address")
+	}
+	if req.Kind != "allow" && req.Kind != "block" {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "choose allow or block")
+	}
+	name := req.Sandbox
+	if name == "" {
+		var err error
+		name, err = m.personSandbox("record this decision")
+		if err != nil {
+			return nil, err
+		}
+	}
+	b, err := m.box(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
+	kind := sandboxrelay.DecisionEgressAllow
+	if req.Kind == "block" {
+		kind = sandboxrelay.DecisionEgressBlock
+	}
+	stored, err := m.keepDecision(ctx, b, kind, host, sandboxrelay.DecisionScopeAlways, "")
+	if err != nil {
+		return nil, err
+	}
+	if !stored {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the decision was not saved; try again")
+	}
+	return &sandboxapi.PolicyDecisionResponse{Sandbox: name, Host: host, Kind: req.Kind}, nil
 }
 
 // decisionViolation is violationErrorFor for a decision about host in

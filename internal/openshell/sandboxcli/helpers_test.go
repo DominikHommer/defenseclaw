@@ -295,6 +295,27 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			msg = "unblocked " + req.Host + " for every sandbox of yours (kept by your organization's DefenseClaw gateway)"
 		}
 		reply(sandboxapi.UnblockResponse{Host: req.Host, Sandbox: req.Sandbox, Scope: scope, Message: msg})
+	case path == sandboxapi.PathPolicyDecision:
+		var req sandboxapi.PolicyDecisionRequest
+		_ = json.Unmarshal(body, &req)
+		if !d.managed {
+			fail(sandboxapi.CodeInvalid, "this command is for a managed computer")
+			return
+		}
+		if req.Sandbox == "" {
+			for name := range d.sandboxes {
+				if req.Sandbox != "" {
+					fail(sandboxapi.CodeInvalid, "name one sandbox with --sandbox NAME")
+					return
+				}
+				req.Sandbox = name
+			}
+		}
+		if req.Sandbox == "" {
+			fail(sandboxapi.CodeInvalid, "start a sandbox first")
+			return
+		}
+		reply(sandboxapi.PolicyDecisionResponse{Sandbox: req.Sandbox, Host: req.Host, Kind: req.Kind})
 	case path == sandboxapi.PathActivity:
 		var out []sandboxapi.ActivityEvent
 		events := d.events

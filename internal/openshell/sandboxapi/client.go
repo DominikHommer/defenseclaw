@@ -489,6 +489,15 @@ func (c *Client) Unblock(ctx context.Context, req UnblockRequest) (*UnblockRespo
 	return &out, nil
 }
 
+// PolicyDecision records an allow or block in the managed decisions store.
+func (c *Client) PolicyDecision(ctx context.Context, req PolicyDecisionRequest) (*PolicyDecisionResponse, error) {
+	var out PolicyDecisionResponse
+	if err := c.do(ctx, http.MethodPost, PathPolicyDecision, nil, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // PolicyTest judges destinations with a sandbox's egress policy.
 func (c *Client) PolicyTest(ctx context.Context, req PolicyTestRequest) (*PolicyTestResult, error) {
 	var out PolicyTestResult

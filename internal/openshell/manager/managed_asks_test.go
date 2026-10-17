@@ -1324,7 +1324,7 @@ func TestManagedDecisionsOfAGoneRegistration(t *testing.T) {
 func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	e, auth := managedEnv(t, nil)
 	always := sandboxapi.UnblockRequest{Host: "webhook.site", Always: true}
-	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "none is running") {
+	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
 		t.Fatalf("always unblock without a sandbox = %v", err)
 	}
 	e.live(sandboxapi.CreateRequest{Name: "onebox"})
@@ -1344,5 +1344,34 @@ func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	}
 	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "pastebin.com", Sandbox: "twobox", Always: true}); err != nil {
 		t.Fatalf("always unblock naming the sandbox = %v", err)
+	}
+}
+
+func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	request := sandboxapi.PolicyDecisionRequest{Host: "example.org", Kind: "block"}
+	if _, err := e.m.PolicyDecision(t.Context(), request); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
+		t.Fatalf("decision without a sandbox = %v", err)
+	}
+	e.live(sandboxapi.CreateRequest{Name: "onebox"})
+	reg := e.register("onebox")
+	res, err := e.m.PolicyDecision(t.Context(), request)
+	if err != nil || res.Sandbox != "onebox" || res.Kind != "block" {
+		t.Fatalf("block = %+v, %v", res, err)
+	}
+	got := auth.decisions()
+	if len(got) != 1 || got[0].Registration != reg || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Scope != sandboxrelay.DecisionScopeAlways {
+		t.Fatalf("stored blocks = %+v", got)
+	}
+	request.Host, request.Kind = "api.example.org", "allow"
+	if _, err := e.m.PolicyDecision(t.Context(), request); err != nil {
+		t.Fatalf("allow = %v", err)
+	}
+	got = auth.decisions()
+	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
+		t.Fatalf("stored decisions = %+v", got)
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "*.example.org", Kind: "block"}); err == nil {
+		t.Fatal("wildcard decision was accepted")
 	}
 }

@@ -1548,6 +1548,18 @@ func TestPolicyEdit(t *testing.T) {
 	}
 }
 
+func TestManagedPolicyDecisionUsesDaemon(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("onebox"))
+	ta.daemon.managed = true
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "block", []string{"Example.ORG"}, "onebox"))
+	has(t, ta.output(), "blocked example.org for your sandboxes")
+	ta.out.Reset()
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "allow", []string{"api.example.org"}, ""))
+	has(t, ta.output(), "allowed api.example.org for your sandboxes")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "allow", []string{"*.example.org"}, ""), "name one destination host")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "block", []string{"one.example", "two.example"}, ""), "one destination host at a time")
+}
+
 // The daemon saves its "always" decisions to the same egress lists while a
 // command runs. An edit builds its list from config.yaml and writes it only
 // if the file is still the one it read, so a host saved after the command

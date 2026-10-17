@@ -533,6 +533,28 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	return nil
 }
 
+// ManagedPolicyDecision records one host decision through the caller's
+// sandbox daemon. The managed gateway owns both the decision and its floor.
+func (a *App) ManagedPolicyDecision(ctx context.Context, list string, hosts []string, sandbox string) error {
+	if len(hosts) != 1 {
+		return errors.New("name one destination host at a time")
+	}
+	host := config.NormalizeOpenShellEgressPattern(hosts[0])
+	if host == "" || strings.ContainsAny(host, "*/ \t") || config.ValidateOpenShellEgressPattern(host) != nil {
+		return errors.New("name one destination host or IP address")
+	}
+	api, err := a.api()
+	if err != nil {
+		return err
+	}
+	res, err := api.PolicyDecision(ctx, sandboxapi.PolicyDecisionRequest{Sandbox: sandbox, Host: host, Kind: list})
+	if err != nil {
+		return apiError(err)
+	}
+	a.ok(res.Kind + "ed " + res.Host + " for your sandboxes (saved by your organization's DefenseClaw gateway)")
+	return nil
+}
+
 // PolicyRemove removes hosts from openshell.egress.allow or
 // openshell.egress.block (`sandbox policy allow|block --remove`), entries
 // matched as written, letter case aside: before it, only `config unset`

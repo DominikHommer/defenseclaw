@@ -62,6 +62,7 @@ type SandboxController interface {
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
+	PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
 	// PolicyTest judges destinations with a sandbox's egress policy.
 	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
@@ -216,6 +217,13 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			return nil, err
 		}
 		return c.Unblock(ctx, req)
+	}))
+	mux.HandleFunc("POST "+sandboxapi.PathPolicyDecision, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		var req sandboxapi.PolicyDecisionRequest
+		if err := decodeSandboxBody(r, &req, false); err != nil {
+			return nil, err
+		}
+		return c.PolicyDecision(ctx, req)
 	}))
 	mux.HandleFunc("GET "+sandboxapi.PathPolicyExplain, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Explain(ctx, sandboxapi.ParseExplainQuery(r.URL.Query()))
