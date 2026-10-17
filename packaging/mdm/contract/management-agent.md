@@ -433,7 +433,14 @@ Exit 0.
   bundle still current. Resubmit the same bundle (2.2): that run confirms it
   once the gateway reports its policy (the warning
   `bundle_confirmed_after_interrupt`, then the success test passes), or fails
-  it and puts the last good bundle back. Windows reads the gateway's policy
+  it and puts the last good bundle back. When another lifecycle run confirmed
+  it first (the path-triggered `ensure` that the bundle's config write
+  starts, or an MDM `ensure`), the resubmit is a repeat of the current bundle
+  (`already_applied`) and still carries the warning: the confirmed receipt
+  lists `bundle_confirmed_after_interrupt` in `warning_codes`. The warning
+  is only about the submitted bundle; a different bundle submitted after a
+  `not_confirmed` one does not carry it, even when that run confirms the
+  earlier bundle (its receipt records it). Windows reads the gateway's policy
   when it confirms and fails a receipt it does not report (`not_confirmed`,
   rolled back).
   On Windows most bundles apply in the running gateway (a key the gateway
