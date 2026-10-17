@@ -111,7 +111,7 @@
     },
     {
       "if": { "properties": { "platform": { "const": "windows" } } },
-      "then": { "properties": { "exit_code": { "enum": [0, 1603, 1618, 1639, 3010] } } },
+      "then": { "properties": { "exit_code": { "enum": [0, 5, 1603, 1618, 1639, 3010] } } },
       "else": { "properties": { "exit_code": { "enum": [0, 1, 2, 75] } } }
     },
     {
@@ -222,6 +222,7 @@
       "additionalProperties": false,
       "required": ["bundle_id", "version", "state"],
       "properties": {
+        "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json (management_contract 1). Absent on older builds and when no receipt was kept (a refusal before the bundle was received). A repeated delivery of the current bundle (already_applied) writes no receipt and reports the current confirmed receipt's id." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },
