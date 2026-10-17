@@ -16,12 +16,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+var managedRefusalSocket = func() string {
+	descriptor, err := managed.LoadRuntimeDescriptor(managedHostDescriptorPath())
+	if err != nil || descriptor.HookSocket == "" {
+		return ""
+	}
+	return descriptor.HookSocket
+}
+
 // reportManagedCommandRefusal is best effort: the gateway owns the audit store
 // and attributes this request using the hook socket's kernel peer credentials.
 // Only fixed command names reach the record; CLI arguments can contain secrets.
 var reportManagedCommandRefusal = func(command, reason string) {
-	descriptor, err := managed.LoadRuntimeDescriptor(managedHostDescriptorPath())
-	if err != nil || descriptor.HookSocket == "" {
+	socket := managedRefusalSocket()
+	if socket == "" {
 		return
 	}
 	request, err := json.Marshal(struct {
@@ -34,7 +42,7 @@ var reportManagedCommandRefusal = func(command, reason string) {
 		return
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", descriptor.HookSocket)
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
