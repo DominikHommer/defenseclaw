@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -241,7 +242,7 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 			exit = " (exit status " + run.Exit + ")"
 		}
 		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
-			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it). A detached run may leave no conversation to continue; connect without --continue to start a new one")
 	}
 }
 
@@ -554,8 +555,15 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
+	continueAfterDetached := false
+	if spec.Name == "claudecode" && slices.Contains(o.Args, "--continue") {
+		if prior, priorErr := a.detachedRun(ctx, cli, sb); priorErr == nil && prior.State == sandboxapi.RunExited {
+			continueAfterDetached = true
+		}
+	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
-		passArgs: len(o.Args) > 0}
+		continueAfterDetached: continueAfterDetached,
+		passArgs:              len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {

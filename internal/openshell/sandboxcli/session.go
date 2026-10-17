@@ -130,6 +130,9 @@ type session struct {
 	// passArgs is set when the command was given arguments for the harness
 	// (after --), which it may answer without a session (--version).
 	passArgs bool
+	// continueAfterDetached marks a Claude Code --continue after a completed
+	// detached run, whose conversation may not have been saved.
+	continueAfterDetached bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time

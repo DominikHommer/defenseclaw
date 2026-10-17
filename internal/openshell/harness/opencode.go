@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -231,6 +232,10 @@ func jsonStringArray(values []string) string {
 // nested inside the sandbox skips it, as it skips the --pure refusal, and so
 // do directories OpenCode opens later (a server's per-request directory) and
 // code added while it runs; so the tier stays user.
+// LauncherRefusedExitCode distinguishes an OpenCode launcher refusal from a
+// harness exit before hooks reached the gateway.
+const LauncherRefusedExitCode = 78
+
 var openCodeLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v1
 # DefenseClaw OpenCode launcher (OpenShell sandbox images, root-owned).
@@ -244,7 +249,7 @@ set -u
   case "$arg" in
     --pure|--pure=*)
       echo "defenseclaw: opencode --pure runs without the DefenseClaw policy plugin; refusing" >&2
-      exit 2
+      exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
       ;;
   esac
 done
@@ -267,7 +272,7 @@ refuse() {
     fix="Remove it and start OpenCode again. From your machine: defenseclaw sandbox start $dc_sandbox && defenseclaw sandbox exec $dc_sandbox -- rm $file, then defenseclaw sandbox connect $dc_sandbox."
   fi
   echo "defenseclaw: refusing to start OpenCode: $1 $2. OpenCode loads plugins, custom tools and provider SDKs into the process that runs the DefenseClaw policy plugin, where they could switch it off. $fix" >&2
-  exit 2
+  exit ` + strconv.Itoa(LauncherRefusedExitCode) + `
 }
 bundled='` + jsonStringArray(openCodeBundledProviderSDKs) + `'
 # config_verdict reads config text on stdin and prints ok, plugin, npm,
