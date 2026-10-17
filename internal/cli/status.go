@@ -517,24 +517,24 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
 		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s%s (since %s); %s",
 			newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
-		Subhead(movedAuditStoreRecoveryHint(newest.Path))
+		printMovedAuditStoreRecoveryHint(newest.Path)
 		Subhead("Delete the archive and its -wal, -shm and -journal files when you no longer need them.")
 		return
 	}
 	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s%s on %s; %s",
 		newest.Path, newest.SidecarDescription(), newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
-	Subhead(movedAuditStoreRecoveryHint(newest.Path))
+	printMovedAuditStoreRecoveryHint(newest.Path)
 	Subhead("Delete the moved file and its -wal, -shm and -journal files when they are no longer needed.")
 }
 
-// movedAuditStoreRecoveryHint says to recover from a copy of the archived set,
-// never from the archive itself (rel-1-0-2:GAP-0647).
-func movedAuditStoreRecoveryHint(archive string) string {
-	hint := audit.ArchiveRecoveryHint(archive)
+// printMovedAuditStoreRecoveryHint says to recover from a copy of the
+// archived set, never from the archive itself (rel-1-0-2:GAP-0647). The hint
+// ends with a command, so the sqlite3 note goes on its own line first.
+func printMovedAuditStoreRecoveryHint(archive string) {
 	if _, err := exec.LookPath("sqlite3"); err != nil {
-		hint += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
+		Subhead("sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html")
 	}
-	return hint
+	Subhead(audit.ArchiveRecoveryHint(archive))
 }
 
 // lastGatewayExitError returns the error a per-user gateway printed as the
