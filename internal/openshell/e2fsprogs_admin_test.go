@@ -17,7 +17,11 @@ func TestManagedE2fsprogsPackageFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("macOS tool selection")
 	}
-	root := t.TempDir()
+	root, err := os.MkdirTemp(os.TempDir(), "e2fs-package-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	// Package tools must be traversable by every sandbox account.
 	if err := os.Chmod(root, 0o755); err != nil {
 		t.Fatal(err)
