@@ -18,6 +18,10 @@ func TestManagedE2fsprogsPackageFallback(t *testing.T) {
 		t.Skip("macOS tool selection")
 	}
 	root := t.TempDir()
+	// Package tools must be traversable by every sandbox account.
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	packageDir := filepath.Join(root, "package")
 	packageTools := filepath.Join(packageDir, "sbin")
 	home := filepath.Join(root, "home")
