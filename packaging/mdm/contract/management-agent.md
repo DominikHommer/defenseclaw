@@ -254,8 +254,10 @@ one delivery: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`
 section 2.3). It is written as `delivery_id` on the receipt and appears in
 `receipt-events/<receipt_id>.json` and `receipt.json` (also in their
 `last_refusal`), in the result `bundle` and `last_refusal` blocks, and in
-`bundle status` (`last_receipt`, `bundle`, `last_refusal`). Without the flag
-no `delivery_id` member is written and every output is unchanged. Use an id
+`bundle status` (`current`, `last_good`, `last_receipt`, `bundle`,
+`last_refusal`; `current` and `last_good` keep the id of the apply that
+confirmed them after its receipt is pruned). Without the flag no
+`delivery_id` member is written and every output is unchanged. Use an id
 unique to the delivery, such as the agent's own delivery or job id.
 
 There is no delivery channel field. The MDM kits and a management agent both
@@ -505,6 +507,8 @@ Exit 0.
 - stdout: `bundle-status.schema.json`: `current`, `last_good`, `floor`,
   `last_receipt` (the root-only receipt, with `transitions` and
   `error_message`), `last_refusal`, `bundle`, `gateway_digest`, `applied`.
+  `current` and `last_good` carry the `delivery_id` of the apply that
+  confirmed them, when it had one (2.6).
   `applied` is true when the running gateway enforces the current bundle's
   digest with no rejected reload. A refused status (`not_managed`,
   `not_root`, `state_invalid`) did not scan sessions and reports
