@@ -26,6 +26,42 @@ import (
 
 const hermesGuardTestBinary = "/opt/cisco/defenseclaw/bin/defenseclaw-hook"
 
+func TestHermesOutageBlockExplainsRecoveryByProfile(t *testing.T) {
+	asset, err := hookFS.ReadFile("hooks/hermes-hook.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		data templateData
+		want string
+		omit string
+	}{
+		{"per-user", templateData{}, "Run defenseclaw-gateway status.", "Ask your administrator"},
+		{"managed", templateData{Managed: true}, "Ask your administrator to check its status.", "Run defenseclaw-gateway status."},
+		{"secure-client", templateData{Managed: true, SecureClient: true}, "DefenseClaw hook failed closed", "gateway is unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook, err := renderTemplate(string(asset), tc.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := strings.Index(hook, "fail_unreachable() {")
+			if start < 0 {
+				t.Fatal("rendered Hermes outage handler missing")
+			}
+			end := strings.Index(hook[start:], "fail_response() {")
+			if end < 0 {
+				t.Fatal("rendered Hermes outage handler missing")
+			}
+			block := hook[start : start+end]
+			if !strings.Contains(block, tc.want) || strings.Contains(block, tc.omit) {
+				t.Fatalf("outage block for %s has wrong recovery text: %s", tc.name, block)
+			}
+		})
+	}
+}
+
 // The foreign-hook guard directives in hermes-hook.sh render to nothing when
 // the guard is off, so every Hermes hook other than the Linux and macOS
 // standalone one (per-user, Secure Client, Windows) keeps its exact bytes.
