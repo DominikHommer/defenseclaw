@@ -252,7 +252,8 @@ class HintEngine:
         if state.panel_view == "detail":
             return "KEYS  PgUp/PgDn scroll detail | Esc close | j/k move | h/l sub-tab | r scan."
         return (
-            "KEYS  h/l sub-tab | j/k move Summary/rows | PgDn/End jump | Enter detail | 1-4 filter (Skills/Plugins only) | "
+            "KEYS  h/l sub-tab | j/k move Summary/rows | PgDn/End jump | Enter detail | "
+            "1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
         )
 
