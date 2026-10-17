@@ -689,12 +689,8 @@ func TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	select {
-	case outcome := <-reloadDone:
-		t.Fatalf("reload returned before model Finish released generation %d: status=%s err=%v", generation, outcome.result.Status(), outcome.err)
-	default:
-	}
-
+	// The reload returns once the next generation is published (#1302); the
+	// live model span keeps its generation until Finish.
 	trace.Finish(proxyV8TraceResult{
 		Outcome:          observability.OutcomeCompleted,
 		ResponseID:       "chatcmpl-reload",
@@ -712,7 +708,12 @@ func TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload(t *testing.T) {
 		t.Fatal("reload did not finish after model Finish released its generation")
 	}
 
+	// The retired generation exports the span as it drains, in the background.
 	models := proxyGeneratedSpansForFamily(capture.snapshot(), observability.TelemetryFamilyModelChat)
+	for spanDeadline := time.Now().Add(5 * time.Second); len(models) == 0 && time.Now().Before(spanDeadline); {
+		time.Sleep(5 * time.Millisecond)
+		models = proxyGeneratedSpansForFamily(capture.snapshot(), observability.TelemetryFamilyModelChat)
+	}
 	if len(models) != 1 {
 		t.Fatalf("generated model spans=%d", len(models))
 	}

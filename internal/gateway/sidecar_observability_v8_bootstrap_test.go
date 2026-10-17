@@ -1155,7 +1155,7 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 	}
 }
 
-// #1279, #1302: a hot reload of the observability graph returns at once
+// #1279, #1302: a hot reload of the observability graph returns promptly
 // while an agent's trace still holds the previous graph, and records keep
 // flowing meanwhile. It waited for that graph for the 30 s drain timeout, so
 // the policy swap behind it lagged and the lifecycle restarted the gateway.
@@ -1178,7 +1178,9 @@ func TestHotReloadDoesNotWaitForAUserOfThePreviousGraph(t *testing.T) {
 	))
 	started := time.Now()
 	result, reloadErr := fixture.sidecar.ReloadObservabilityRuntime(t.Context(), fixture.configPath, reloadRaw)
-	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+	// It waited for the 30 s drain timeout; building the new graph takes well
+	// under a second, also race-enabled on a loaded runner.
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("reload took %s while the previous graph was in use", elapsed)
 	}
 	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied || owner.runtime.Active().RetentionDays() != 30 {
