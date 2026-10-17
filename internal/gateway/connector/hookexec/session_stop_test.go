@@ -275,6 +275,10 @@ func TestPerUserFailClosedStopEventsAllowWhileOtherEventsStayBlocked(t *testing.
 		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"PreToolUse"}`}, ""},
 		// A payload whose two event fields disagree names no event.
 		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":"PreToolUse"}`}, ""},
+		// An event field that is not a string names no event (the shell
+		// hooks match, TestShellFailedStopEventMatchesTheNativeStopSet).
+		{sessionStopEvent{connector: "devin", payload: `{"hook_event_name":"Stop","event":false}`}, ""},
+		{sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":false,"event":"Stop"}`}, ""},
 	}
 	runEvent := func(profile failClosedStopProfile, cause int, ev sessionStopEvent) (runResult, string) {
 		var home string

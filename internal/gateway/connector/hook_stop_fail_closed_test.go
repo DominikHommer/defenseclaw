@@ -44,7 +44,10 @@ func TestShellFailedStopEventMatchesTheNativeStopSet(t *testing.T) {
 			others = append(others, probe{connector: connector, event: event, env: "_DC_SECURE_CLIENT_HOOK=1"})
 		}
 	}
-	stops = append(stops, probe{connector: "cursor", event: "SESSIONEND"}, probe{connector: "devin", payload: `{"event":"Stop"}`})
+	stops = append(stops, probe{connector: "cursor", event: "SESSIONEND"}, probe{connector: "devin", payload: `{"event":"Stop"}`},
+		// A null event field is absent, as for the native runner.
+		probe{connector: "claudecode", payload: `{"hook_event_name":"Stop","event":null}`},
+		probe{connector: "devin", payload: `{"hook_event_name":null,"event":"Stop"}`})
 	others = append(others,
 		probe{connector: "codex", event: "PreToolUse"}, probe{connector: "codex", event: "stop"},
 		probe{connector: "claudecode", event: "UserPromptSubmit"}, probe{connector: "kiro", event: "PostToolUse"},
@@ -54,6 +57,9 @@ func TestShellFailedStopEventMatchesTheNativeStopSet(t *testing.T) {
 		probe{connector: "claudecode", payload: `{}`}, probe{connector: "claudecode", payload: `not json`},
 		probe{connector: "devin", payload: `{"hook_event_name":"Stop","event":"PreToolUse"}`},
 	)
+	for _, m := range malformedStopEventProbes() {
+		others = append(others, probe(m))
+	}
 	check := func(p probe, want bool) {
 		t.Helper()
 		cmd := exec.Command("bash", "-c", `set -euo pipefail; . "$1"; defenseclaw_failed_stop_event "$2" "$3" "$4"`,
@@ -69,6 +75,78 @@ func TestShellFailedStopEventMatchesTheNativeStopSet(t *testing.T) {
 	}
 	for _, p := range others {
 		check(p, false)
+	}
+}
+
+// malformedStopEventProbes are payloads that name no stop event: an event
+// field that is not a string (the native runner fails to decode it), two
+// stop events that disagree, more than one JSON value or not an object.
+func malformedStopEventProbes() []struct{ connector, event, payload, env string } {
+	var out []struct{ connector, event, payload, env string }
+	for _, payload := range []string{
+		`{"hook_event_name":"Stop","event":false}`,
+		`{"hook_event_name":false,"event":"Stop"}`,
+		`{"hook_event_name":"Stop","event":true}`,
+		`{"hook_event_name":"Stop","event":0}`,
+		`{"hook_event_name":"Stop","event":{}}`,
+		`{"hook_event_name":"Stop","event":["Stop"]}`,
+		`{"hook_event_name":["Stop"]}`,
+		`{"hook_event_name":"SubagentStop","event":"Stop"}`,
+		`{"hook_event_name":"Stop"} {}`,
+		`[{"hook_event_name":"Stop"}]`,
+		`"Stop"`,
+	} {
+		out = append(out, struct{ connector, event, payload, env string }{connector: "claudecode", payload: payload})
+		out = append(out, struct{ connector, event, payload, env string }{connector: "devin", payload: payload})
+	}
+	return out
+}
+
+// The stop exception reads the payload's event fields the same way with jq,
+// with python3 only and with neither (the string scanner): a malformed event
+// identity never names a stop event (#1140 review).
+func TestShellFailedStopEventFieldTypesWithoutJQ(t *testing.T) {
+	tools := func(names ...string) string {
+		dir := t.TempDir()
+		for _, name := range names {
+			path, err := exec.LookPath(name)
+			if err != nil {
+				t.Skipf("%s not found: %v", name, err)
+			}
+			if err := os.Symlink(path, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	backends := map[string]string{
+		"python3": tools("python3", "awk", "sed", "tr", "cat", "uname"),
+		"scanner": tools("awk", "sed", "tr", "cat", "uname"),
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip(err)
+	}
+	hardening, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for backend, path := range backends {
+		check := func(connector, payload string, want bool) {
+			t.Helper()
+			cmd := exec.Command(bash, "-c", `set -euo pipefail; . "$1"; defenseclaw_failed_stop_event "$2" "" "$3"`,
+				"probe", hardening, connector, payload)
+			cmd.Env = append(sanitizedTestEnv(), "PATH="+path)
+			err := cmd.Run()
+			if got := err == nil; got != want {
+				t.Errorf("%s backend, %s %s: stop event = %v, want %v (%v)", backend, connector, payload, got, want, err)
+			}
+		}
+		check("claudecode", `{"hook_event_name":"Stop"}`, true)
+		check("devin", `{"event":"Stop"}`, true)
+		for _, p := range malformedStopEventProbes() {
+			check(p.connector, p.payload, false)
+		}
 	}
 }
 
@@ -178,14 +256,50 @@ func TestPerUserShellHooksLetAFailedStopEventThrough(t *testing.T) {
 	if codexPrompt.code != 2 {
 		t.Errorf("codex UserPromptSubmit: exit %d stderr=%q, want the fail-closed block", codexPrompt.code, codexPrompt.stderr)
 	}
+	// A per-user Claude Code hook blocks a tool call with its own JSON deny
+	// and exit 0 (GAP-1074).
 	claudeTool := runPerUserHookForStop(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, claudePreToolUse, "exit:7", "DEFENSECLAW_FAIL_MODE=closed")
-	if !strings.Contains(claudeTool.stdout, `"permissionDecision":"deny"`) && claudeTool.code != 2 {
-		t.Errorf("claude PreToolUse: exit %d stdout=%q, want the fail-closed deny", claudeTool.code, claudeTool.stdout)
+	if claudeTool.code != 0 || !strings.Contains(claudeTool.stdout, `"permissionDecision":"deny"`) || strings.Contains(claudeTool.stderr, stopEventNotBlockedLead) {
+		t.Errorf("claude PreToolUse: exit %d stdout=%q stderr=%q, want the fail-closed JSON deny", claudeTool.code, claudeTool.stdout, claudeTool.stderr)
 	}
 	// A payload whose two event fields disagree names no stop event.
 	devinMixed := runPerUserHookForStop(t, NewDevinConnector(), "devin-hook.sh", nil, `{"hook_event_name":"Stop","event":"PreToolUse"}`, "exit:7", "DEFENSECLAW_FAIL_MODE=closed")
 	if devinMixed.code != 2 {
 		t.Errorf("devin mixed events: exit %d stderr=%q, want the fail-closed block", devinMixed.code, devinMixed.stderr)
+	}
+	// An event field that is not a string names no stop event either, on
+	// a gateway outage and on an unusable answer.
+	for _, reply := range []string{"exit:7", `200|not json`} {
+		for _, tc := range []struct {
+			c      Connector
+			script string
+			stdin  string
+		}{
+			{NewClaudeCodeConnector(), "claude-code-hook.sh", `{"hook_event_name":"Stop","event":false}`},
+			{NewClaudeCodeConnector(), "claude-code-hook.sh", `{"hook_event_name":false,"event":"Stop"}`},
+			{NewDevinConnector(), "devin-hook.sh", `{"hook_event_name":"Stop","event":false}`},
+			{NewDevinConnector(), "devin-hook.sh", `{"hook_event_name":0,"event":"Stop"}`},
+			{NewCursorConnector(), "cursor-hook.sh", `{"hook_event_name":"stop","event":false}`},
+			{NewKiroConnector(), "kiro-hook.sh", `{"hook_event_name":"Stop","event":{}}`},
+		} {
+			run := runPerUserHookForStop(t, tc.c, tc.script, nil, tc.stdin, reply, "DEFENSECLAW_FAIL_MODE=closed")
+			if strings.Contains(run.stderr, stopEventNotBlockedLead) || strings.Contains(run.log, `"fail_mode":"open"`) {
+				t.Errorf("%s %s, reply %s: a malformed event got the stop exception: exit %d stdout=%q stderr=%q", tc.script, tc.stdin, reply, run.code, run.stdout, run.stderr)
+			}
+			// Cursor has no deny shape for a stop event, so the failure log
+			// row, not stdout, shows that the hook took its fail-closed path.
+			if !strings.Contains(run.log, `"fail_mode":"closed"`) {
+				t.Errorf("%s %s, reply %s: want the fail-closed path logged, got exit %d stdout=%q log=%s", tc.script, tc.stdin, reply, run.code, run.stdout, run.log)
+			}
+		}
+	}
+	// The Codex missing-token check runs after the binding check, as in the
+	// native runner: a bound Stop whose stdin is not that Stop fails closed.
+	for _, stdin := range []string{`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`, `{"hook_event_name":false}`, `not json`, ``} {
+		run := runPerUserHookForStop(t, NewCodexConnector(), "codex-hook.sh", codexArgs("Stop"), stdin, `200|{"action":"allow"}`, "DEFENSECLAW_FAIL_MODE=closed", "DC_TEST_NO_TOKEN=1")
+		if run.code != 2 || strings.Contains(run.stderr, stopEventNotBlockedLead) || !strings.Contains(run.stderr, "binding error") {
+			t.Errorf("codex Stop, missing token, stdin %q: exit %d stderr=%q, want the fail-closed binding error", stdin, run.code, run.stderr)
+		}
 	}
 }
 
