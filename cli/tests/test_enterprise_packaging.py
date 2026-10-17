@@ -1623,7 +1623,7 @@ def test_unix_wrapper_stores_the_credential_before_it_applies_the_config(tmp_pat
     wrapper = (MDM / os_dir / "defenseclaw-enterprise.sh").read_text(encoding="utf-8")
     functions = "\n".join(
         _shell_function(wrapper, name)
-        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_main")
+        for name in ("dc_run_lifecycle", "dc_run_lifecycle_retry", "dc_secret_json_error", "dc_store_secret", "dc_main")
     )
     log = tmp_path / "calls.log"
     gateway = tmp_path / "defenseclaw-gateway"
