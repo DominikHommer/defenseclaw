@@ -991,7 +991,7 @@ func sandboxDaemonRestartNeeded(prev, next sandboxrelay.DaemonSettings) bool {
 
 // pollLoop polls policy/current for every live registration: a revoked
 // one stops its sandbox, a newer generation refreshes the settings, and
-// the live fields switch at once.
+// the confirmed floor is applied at once.
 func (d *SandboxDaemon) pollLoop(ctx context.Context) {
 	t := time.NewTicker(d.opts.PollInterval)
 	defer t.Stop()
@@ -1014,7 +1014,7 @@ func (d *SandboxDaemon) pollOnce(ctx context.Context) {
 // pollRegistrations asks policy/current for every live registration. A
 // registration the gateway no longer knows, revoked or expired, or whose
 // subject changed, is marked revoked and returned (its sandbox is to be
-// stopped); one it answers is confirmed and takes the live fields, each in
+// stopped); one it answers is confirmed and takes the complete floor, each in
 // the registration's turn (askPolicy), and with adopt the floor of the
 // sandboxes that run becomes the manager's (adoptRunningFloor). A generation
 // that moved reads the managed settings again and re-resolves the policies.
@@ -1082,11 +1082,10 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 // adoptRunningFloor makes the floor of the registrations of the sandboxes
 // that run now (phases, from the manager's list) the one the manager
 // resolves against, when it differs from the current one. Only a running
-// sandbox's floor is adopted. A stopped sandbox's registration keeps the
-// floor it was created under (an earlier profile's required pack, say)
-// while its live fields follow every configuration change; adopting it on
-// such a change put a sandbox created since under the stopped one's pack
-// and approvals (GAP-0693). A stopped sandbox's floor becomes the manager's
+// sandbox's floor is adopted. A stopped sandbox's registration takes its
+// current floor, but adopting that floor while stopped could put a sandbox
+// created under another profile under the stopped sandbox's pack and
+// approvals (GAP-0693). A stopped sandbox's floor becomes the manager's
 // when it starts again (Start); floorConflicts keeps the floors of the
 // running sandboxes the same.
 //
@@ -2681,7 +2680,7 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	if moved {
 		reg.UpdatedAt = policyAt
 	}
-	// The generation the live fields are now of, which a relayed answer's is
+	// The generation the confirmed floor is now of, which a relayed answer's is
 	// compared with (observeGeneration).
 	if cp.Generation != 0 && cp.Generation != reg.Generation {
 		reg.Generation, moved = cp.Generation, true
