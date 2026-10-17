@@ -66,7 +66,7 @@ _WINDOWS_STATUS_CASES = [
 _WINDOWS_STATUS_MODES = [
     pytest.param(case, mode, id=f"{case['connector']}-{case['scope']}-{case['os']}-{mode}")
     for case in _WINDOWS_STATUS_CASES
-    for mode in (["local", "managed_enterprise"] if case["connector"] in {"cursor", "kiro"} else ["local"])
+    for mode in (["per_user", "managed_enterprise"] if case["connector"] in {"cursor", "kiro"} else ["per_user"])
 ]
 
 # The doctor rows that say a hook file does not register DefenseClaw.
@@ -237,7 +237,7 @@ def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_pa
     rendered = _windows_status_case(case)
     connector = rendered["connector"]
     cfg, paths = _install(tmp_path, monkeypatch, rendered)
-    cfg.deployment_mode = mode
+    cfg.deployment_mode = "" if mode == "per_user" else mode
     assert hook_integrity.hook_registration_problems(cfg, connector) == []
     assert _status_problem(cfg, connector) == ""
     assert _quickstart_problem(cfg, connector) == ""
@@ -258,7 +258,7 @@ def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_pa
         assert cmd_doctor.connector_setup_readiness(cfg, connector).ready
 
     Path(paths[0]).write_text("{}" if paths[0].endswith(".json") else "// unrelated plugin", encoding="utf-8")
-    if mode == "local":
+    if mode == "per_user":
         assert "DEGRADED" in _status_problem(cfg, connector)
     assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch))
     if mode == "managed_enterprise":
