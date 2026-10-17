@@ -4989,7 +4989,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ],
             "inventory": [
                 ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
-                ("j/k or Up/Down", "Navigate items"),
+                ("j/k or Up/Down", "Navigate items and Summary metrics"),
+                ("PgUp/PgDn or Home/End", "Jump through Summary metrics or a list"),
                 ("Enter / Esc", "Open / close the detail pane"),
                 ("PgUp / PgDn", "Scroll the open detail"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
