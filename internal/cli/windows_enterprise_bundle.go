@@ -641,7 +641,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if !opts.installedBeforeRun {
 		return refuse(string(enterprisebundle.CodeNotManaged), "DefenseClaw enterprise is not installed: install it first with /ensure CONFIG=<config.yaml>, then deliver policy bundles with /ensure BUNDLE=<file> TRUSTANCHORS=<bundle-anchors.json>")
 	}
-	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
+	unlock, err := lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
 	if err != nil {
 		return refuse("lifecycle_busy", err.Error())
 	}
@@ -1233,6 +1233,18 @@ func lockWindowsBundleStore(lifecycleDir string) (func(), error) {
 		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 		_ = windows.CloseHandle(handle)
 	}, nil
+}
+
+// lockWindowsBundleStoreWithin takes the bundle store lock, waiting up to
+// wait for another bundle run to release it (`enterprise bundle apply
+// --lock-wait`); a wait of 0 returns at once, as lockWindowsBundleStore does.
+func lockWindowsBundleStoreWithin(ctx context.Context, lifecycleDir string, wait time.Duration) (func(), error) {
+	unlock, err := acquireWindowsLockWithin(ctx, wait, func() (func(), error) { return lockWindowsBundleStore(lifecycleDir) },
+		func(err error) bool { return errors.Is(err, errWindowsBundleStoreBusy) })
+	if err != nil && wait > 0 && errors.Is(err, errWindowsBundleStoreBusy) {
+		return nil, fmt.Errorf("%w (still held after --lock-wait %s)", err, formatWindowsLockWait(wait))
+	}
+	return unlock, err
 }
 
 // writeWindowsBundleMarker publishes the confirmed bundle on the standalone
