@@ -275,6 +275,8 @@ func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt)
 		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
 	case enterprisebundle.WarnDigestLayoutUnverifiable:
 		return "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
+	case enterprisebundle.WarnConfirmedAfterInterrupt:
+		return "the run that applied this bundle ended before the gateway confirmed it; a later lifecycle run confirmed it once the gateway reported its policy"
 	case "capability_disabled":
 		if receipt == nil {
 			return "the bundle disabled a capability"

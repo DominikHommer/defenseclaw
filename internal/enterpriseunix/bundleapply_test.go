@@ -1233,6 +1233,75 @@ func TestBundleApplyGatewayKilledBeforeConfirmIsNotConfirmed(t *testing.T) {
 	}
 }
 
+// GAP-0042: on macOS the apply LaunchDaemon watches config.yaml, so the
+// path-triggered ensure that the bundle's own config write queued ran as soon
+// as the not_confirmed apply released the lock, and confirmed the receipt
+// late. The agent's resubmit of the same bytes was then a repeat of the
+// current bundle (already_applied) without bundle_confirmed_after_interrupt,
+// so the agent could not tell the late confirm from a first one. The
+// resubmit reports it; a different bundle submitted after a not_confirmed
+// one, and a repeat of a bundle its own run confirmed, do not.
+func TestBundleConfirmedLateByAnotherRunWarnsOnResubmit(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, v3 := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			notConfirmed := func(path string) {
+				t.Helper()
+				b.env.bundleFault = func(phase string) error {
+					if phase == enterprisebundle.StateApplied {
+						b.healthy = false
+					}
+					return nil
+				}
+				r := b.apply(path)
+				b.env.bundleFault, b.healthy = nil, true
+				requireError(t, r, codeBundleNotConfirmed)
+				if r.ExitCode != enterprisestatus.UnixExitBusy || hasWarning(r, codeBundleConfirmedLate) {
+					t.Fatalf("not_confirmed apply: exit=%d warnings=%+v", r.ExitCode, r.Warnings)
+				}
+			}
+
+			path2 := b.dir(2, v2)
+			notConfirmed(path2)
+			// The path-triggered ensure confirms it before the agent resubmits.
+			trigger := b.run(Options{Action: ActionEnsure, Reason: "path"})
+			requireOK(t, trigger)
+			if st := b.state(); !hasWarning(trigger, codeBundleConfirmedLate) || st.Current == nil || st.Current.BundleID != bundleID(2) {
+				t.Fatalf("path ensure: warnings=%+v current=%+v", trigger.Warnings, st.Current)
+			}
+			again := b.apply(path2)
+			requireOK(t, again)
+			if again.Bundle == nil || again.Bundle.BundleID != bundleID(2) || again.Bundle.State != enterprisestatus.BundleConfirmed ||
+				!hasWarning(again, codeBundleConfirmedLate) || again.Policy == nil || !again.Policy.Applied {
+				t.Fatalf("resubmit after a late confirm: bundle=%+v policy=%+v warnings=%+v", again.Bundle, again.Policy, again.Warnings)
+			}
+
+			// Bundle 3 is not confirmed and the agent submits bundle 4 (other
+			// bytes, another digest): this run's settle confirms bundle 3 late,
+			// which its receipt records, but the result reports bundle 4.
+			notConfirmed(b.dir(3, v3))
+			path4 := b.dir(4, v2)
+			other := b.apply(path4)
+			requireOK(t, other)
+			if other.Bundle == nil || other.Bundle.BundleID != bundleID(4) || other.Bundle.State != enterprisestatus.BundleConfirmed ||
+				hasWarning(other, codeBundleConfirmedLate) {
+				t.Fatalf("other bundle after not_confirmed: bundle=%+v warnings=%+v", other.Bundle, other.Warnings)
+			}
+			if rc := b.receipt(bundleID(3)); rc.State != enterprisebundle.StateConfirmed || !slices.Contains(rc.WarningCodes, codeBundleConfirmedLate) {
+				t.Fatalf("bundle 3 receipt = %+v, want confirmed late", rc)
+			}
+			// A repeat of a bundle its own run confirmed is no late confirm.
+			repeat := b.apply(path4)
+			requireOK(t, repeat)
+			if repeat.Bundle == nil || repeat.Bundle.BundleID != bundleID(4) || hasWarning(repeat, codeBundleConfirmedLate) {
+				t.Fatalf("repeat of a first-confirmed bundle: bundle=%+v warnings=%+v", repeat.Bundle, repeat.Warnings)
+			}
+		})
+	}
+}
+
 func TestBundleConfirmRejectsGatewayConfigErrorAndRestoresLastGood(t *testing.T) {
 	b := newBundleHost(t, "darwin")
 	v1, v2, _ := bundleConfigs(b.testHost)

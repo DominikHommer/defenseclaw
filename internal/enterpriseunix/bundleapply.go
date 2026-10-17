@@ -63,7 +63,7 @@ const (
 	codeBundleRequired      = string(enterprisebundle.CodeBundleRequired)
 	codeBundleNotConfirmed  = string(enterprisebundle.CodeNotConfirmed)
 	codeBundleInbox         = "bundle_inbox_refused"
-	codeBundleConfirmedLate = "bundle_confirmed_after_interrupt"
+	codeBundleConfirmedLate = enterprisebundle.WarnConfirmedAfterInterrupt
 	codeBundleNotCurrent    = "bundle_not_current"
 
 	// bundleConfigFileName is the rendered config of the bundle a run
@@ -360,12 +360,14 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		store = env.bundleStoreForGroup(record.ServiceGID)
 	}
 	b, readErr := readBundleInput(l.opts.Bundle)
-	id, version := "", uint64(0)
+	id, version, manifestSHA := "", uint64(0), ""
 	if readErr == nil {
 		if m, err := enterprisebundle.DecodeManifest(b.Manifest); err == nil {
-			id, version = m.BundleID, m.Version
+			id, version, manifestSHA = m.BundleID, m.Version, sha256Bytes(b.Manifest)
 		}
 	}
+	repeat := false
+	defer func() { l.scopeLateConfirmWarning(id, version, manifestSHA, repeat) }()
 	receipt, err := store.Receive(id, version, l.opts.DeliveryID)
 	if err != nil {
 		r.AddError(codeBundleStateUnreadable, "cannot write the policy bundle receipt, so the bundle is not applied: "+err.Error())
@@ -432,6 +434,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		// A retry of the bundle that is current: its confirmed receipt stays
 		// the one status reports, and ensure re-applies its config (a no-op
 		// on a healthy host).
+		repeat = true
 		if err := store.Discard(receipt); err != nil {
 			r.AddWarning(codeBundleStateUnreadable, "could not remove the receipt of the repeated delivery: "+err.Error())
 		}
@@ -499,6 +502,34 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		code = enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	return code
+}
+
+// lateConfirmMessage is the bundle_confirmed_after_interrupt warning.
+func lateConfirmMessage(id string, version uint64) string {
+	return fmt.Sprintf("policy bundle %s version %d, applied by a run that ended before the bundle was confirmed, is confirmed now", id, version)
+}
+
+// scopeLateConfirmWarning keeps bundle_confirmed_after_interrupt in the
+// result of a bundle apply for the submitted bundle only: the agent reads it
+// to tell a late confirm of the bundle it resubmitted from a first confirm.
+// It is reported when this run's settle confirmed the submitted bundle, or
+// when the submitted bundle is the current one and an earlier run confirmed
+// it late (its receipt records the code). On macOS the apply LaunchDaemon
+// watches config.yaml, so the path-triggered ensure that the bundle's own
+// config write queued settles the receipt as soon as the not_confirmed apply
+// ends, and the agent's resubmit is a repeat (already_applied) that reported
+// no warning (GAP-0042). A late confirm of another bundle that this run's
+// settle confirmed stays in that bundle's receipt.
+func (l *lifecycle) scopeLateConfirmWarning(id string, version uint64, manifestSHA string, repeat bool) {
+	r := l.result
+	late := manifestSHA != "" && l.confirmedLate[manifestSHA]
+	if !late && repeat && r.Bundle != nil && r.Bundle.BundleID == id && r.Bundle.Version == version {
+		late = slices.Contains(r.Bundle.WarningCodes, codeBundleConfirmedLate)
+	}
+	r.Warnings = slices.DeleteFunc(r.Warnings, func(w enterprisestatus.Message) bool { return w.Code == codeBundleConfirmedLate })
+	if late {
+		r.AddWarning(codeBundleConfirmedLate, lateConfirmMessage(id, version))
+	}
 }
 
 // applyBundleTransaction is the ensure transaction of a bundle, then the
@@ -884,11 +915,20 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 	}
 	if err == nil && digest == rc.EffectivePolicyDigest {
 		rc.SessionsRestartRequired = l.env.UnprotectedSessions(ctx).Count
+		// The receipt records the late confirm: a resubmit of the same bundle
+		// that finds it current (another run settled it first) reports it.
+		if !slices.Contains(rc.WarningCodes, codeBundleConfirmedLate) {
+			rc.WarningCodes = append(rc.WarningCodes, codeBundleConfirmedLate)
+		}
 		if _, err := store.Confirm(rc); err != nil {
 			r.AddWarning(codeBundleNotCurrent, "could not record the applied policy bundle as current: "+err.Error())
 			return
 		}
-		r.AddWarning(codeBundleConfirmedLate, fmt.Sprintf("policy bundle %s version %d, applied by a run that ended before it recorded the bundle, is confirmed now", rc.BundleID, rc.Version))
+		if l.confirmedLate == nil {
+			l.confirmedLate = map[string]bool{}
+		}
+		l.confirmedLate[rc.ManifestSHA256] = true
+		r.AddWarning(codeBundleConfirmedLate, lateConfirmMessage(rc.BundleID, rc.Version))
 		return
 	}
 	st, _ := store.LoadState()

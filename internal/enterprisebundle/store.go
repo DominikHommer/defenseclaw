@@ -176,6 +176,11 @@ type Transition struct {
 	At    string `json:"at"`
 }
 
+// WarnConfirmedAfterInterrupt is the receipt warning code of a bundle that
+// a later lifecycle run confirmed: the run that applied it ended before the
+// gateway confirmed it (not_confirmed, or the run stopped after the commit).
+const WarnConfirmedAfterInterrupt = "bundle_confirmed_after_interrupt"
+
 // Receipt is receipts/<receipt id>.json: how far one bundle got. The
 // receipt id is the bundle id, or r-<ULID> for a bundle whose manifest could
 // not be read. BundleID and Version are what the manifest claims until the
