@@ -11,6 +11,15 @@
 # runuser, getent, stat and dpkg are the distribution's own.
 #
 #   docker run --rm -v "$PWD:/src:ro" debian:bookworm sh /src/packaging/linux/tests/deb_container_check.sh
+#
+# On a host without docker (dc-build-1), unpack a Debian rootfs into a
+# scratch folder and run it there as root in a private mount and pid
+# namespace, with DC_CONTAINER_CHECK=1:
+#   sudo unshare --mount --pid --fork --propagation private sh -c \
+#     "mount --rbind /dev ROOT/dev && mount -t proc proc ROOT/proc && \
+#      mount -t tmpfs tmpfs ROOT/run && mount -t tmpfs tmpfs ROOT/tmp && \
+#      chroot ROOT /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin DC_CONTAINER_CHECK=1 \
+#      sh /src/packaging/linux/tests/deb_container_check.sh"
 set -eu
 src=${1:-/src}
 fail() { echo "FAIL: $*" >&2; exit 1; }
