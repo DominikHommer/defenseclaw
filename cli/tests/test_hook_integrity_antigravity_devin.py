@@ -109,6 +109,7 @@ def test_the_windows_file_setup_writes_is_registered(tmp_path, monkeypatch, name
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
     cfg, _, connector = _install(tmp_path, name, "healthy")
     assert hook_registration_problems(cfg, connector) == []
+    assert _status_and_quickstart(cfg, connector) == ("", None)
 
 
 @pytest.mark.parametrize("name", [*_POSIX, *_WINDOWS])
@@ -121,10 +122,9 @@ def test_teardown_leaves_only_the_users_hooks_and_status_says_unregistered(tmp_p
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: windows)
     cfg, config, connector = _install(tmp_path, name, "removed")
     assert hook_registration_problems(cfg, connector) == _unregistered(config)
-    if not windows:
-        suffix, step = _status_and_quickstart(cfg, connector)
-        assert "DEGRADED" in suffix
-        assert step is not None and step.status == "warn" and "is not guarded" in step.detail
+    suffix, step = _status_and_quickstart(cfg, connector)
+    assert "DEGRADED" in suffix
+    assert step is not None and step.status == "warn" and "is not guarded" in step.detail
 
 
 @pytest.mark.parametrize("name", [*_POSIX, *_WINDOWS])

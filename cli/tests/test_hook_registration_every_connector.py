@@ -32,6 +32,8 @@ the hooks are gone.
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import os
 import re
@@ -57,6 +59,10 @@ _GOLDEN = json.loads(
 _CASES = _GOLDEN["cases"]
 _POSIX = [case for case in _CASES if case["os"] == "posix"]
 _JSON_POSIX = [case for case in _POSIX if all(f["path"].endswith(".json") for f in case["files"])]
+_WINDOWS_STATUS_CONNECTORS = {"amp", "cursor", "kiro", "opencode"}
+_WINDOWS_STATUS_CASES = [
+    case for case in _POSIX if case["connector"] in _WINDOWS_STATUS_CONNECTORS and case["scope"] == "user"
+]
 
 # The doctor rows that say a hook file does not register DefenseClaw.
 _DOCTOR_UNREGISTERED = re.compile(
@@ -192,3 +198,45 @@ def test_the_windows_render_is_registered_until_its_entries_are_removed(tmp_path
         f"no DefenseClaw hooks are registered in {paths[0]}"
     ]
     assert os.path.getsize(paths[0]) < 16
+
+
+def _windows_status_case(case: dict[str, Any]) -> dict[str, Any]:
+    """Use the platform-neutral plugin or a Windows encoded hook command."""
+
+    rendered = copy.deepcopy(case)
+    rendered["os"] = "windows"
+    connector = case["connector"]
+    if connector not in {"cursor", "kiro"}:
+        return rendered
+    script = f"& 'C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe' hook --connector {connector}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -EncodedCommand {encoded}"
+
+    def replace_commands(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: command if key == "command" else replace_commands(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace_commands(item) for item in value]
+        return value
+
+    for file in rendered["files"]:
+        file["content"] = json.dumps(replace_commands(json.loads(file["content"])))
+    return rendered
+
+
+@pytest.mark.parametrize("case", _WINDOWS_STATUS_CASES, ids=_case_id)
+def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_path, monkeypatch, case):
+    # Amp and OpenCode load the same plugin on Windows. Cursor and Kiro write
+    # JSON hook entries with the native launcher inside a PowerShell command.
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    rendered = _windows_status_case(case)
+    connector = rendered["connector"]
+    cfg, paths = _install(tmp_path, monkeypatch, rendered)
+    assert hook_integrity.hook_registration_problems(cfg, connector) == []
+    assert _status_problem(cfg, connector) == ""
+    assert _quickstart_problem(cfg, connector) == ""
+    assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch)) == []
+
+    Path(paths[0]).write_text("{}" if paths[0].endswith(".json") else "// unrelated plugin", encoding="utf-8")
+    assert "DEGRADED" in _status_problem(cfg, connector)
+    assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch))
