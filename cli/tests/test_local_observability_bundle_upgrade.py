@@ -45,6 +45,11 @@ from defenseclaw.observability.local_stack import (
 
 ROOT = Path(__file__).resolve().parents[2]
 REAL_BUNDLE = ROOT / "bundles" / "local_observability_stack"
+FLEET_TEMPLATES = (
+    "docker-compose.fleet.yml",
+    "prometheus/examples/fleet.yml",
+    "grafana/dashboards/defenseclaw-fleet.json",
+)
 
 
 @pytest.fixture()
@@ -104,6 +109,36 @@ def test_untouched_baseline_refreshes_without_false_conflict(
     assert "README.md" in second.changed_paths
     assert second.conflict_paths == ()
     assert destination.joinpath("README.md").read_bytes().endswith(b"new target release\n")
+
+
+def test_fleet_off_upgrade_removes_only_shipped_templates(
+    installed_bundle: tuple[Path, Path, Path], tmp_path: Path,
+) -> None:
+    source, data_dir, destination = installed_bundle
+    (data_dir / "config.yaml").write_text("fleet:\n  enabled: false\n", encoding="utf-8")
+    for relative in FLEET_TEMPLATES:
+        (source / relative).unlink()
+    custom = destination / "grafana/dashboards/operator-fleet.json"
+    custom.write_text("operator dashboard", encoding="utf-8")
+
+    result = _upgrade(source, data_dir, tmp_path / "backup")
+
+    assert result.refreshed is True
+    assert all(not (destination / relative).exists() for relative in FLEET_TEMPLATES)
+    assert custom.read_text(encoding="utf-8") == "operator dashboard"
+
+
+def test_fleet_enabled_upgrade_keeps_optional_templates(
+    installed_bundle: tuple[Path, Path, Path], tmp_path: Path,
+) -> None:
+    source, data_dir, destination = installed_bundle
+    (data_dir / "config.yaml").write_text("fleet:\n  enabled: true\n", encoding="utf-8")
+    for relative in FLEET_TEMPLATES:
+        (source / relative).unlink()
+
+    _upgrade(source, data_dir, tmp_path / "backup")
+
+    assert all((destination / relative).is_file() for relative in FLEET_TEMPLATES)
     assert (tmp_path / "backup-2/local-observability-stack/managed/README.md").read_bytes() == old
 
 

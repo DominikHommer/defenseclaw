@@ -37,17 +37,18 @@ from defenseclaw.context import pass_ctx
 from defenseclaw.dotenv_utils import persist_env_var as _persist_env_var
 
 
-def _find_edge_connector_source() -> Path | None:
-    """Locate a trusted source tree from this checkout or the installed wheel."""
+def _find_edge_connector_source(source_dir: Path | None = None) -> Path | None:
+    """Locate Edge sources from a checkout or an explicit Fleet asset directory."""
     cli_pkg = Path(__file__).resolve().parent.parent
     candidates = []
+    if source_dir is not None:
+        candidates.append(source_dir / "edge-connector")
+        candidates.append(source_dir)
     # Editable source checkout: its CLI package must be directly below cli/.
-    if cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
+    if source_dir is None and cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
         candidates.append(cli_pkg.parent.parent / "edge-connector")
-    # Published wheels bundle precisely the C sources used for this release.
-    candidates.append(cli_pkg / "_data" / "edge-connector")
     for candidate in candidates:
-        if (candidate / "CMakeLists.txt").is_file() and (candidate / "src" / "main.c").is_file():
+        if (candidate / "CMakeLists.txt").is_file() and (candidate / "src" / "main.c").is_file() and not candidate.is_symlink():
             return candidate
     return None
 
@@ -578,6 +579,8 @@ def _build_local(source: Path, profile: str) -> bool:
 
 @click.command("install")
 @click.option("--target", default=None, help="IP or hostname of the remote device (SSH).")
+@click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
+              help="Extracted Fleet assets or source checkout (required for wheel installs).")
 @click.option("--user", default="root", help="SSH user for the remote device.")
 @click.option(
     "--profile", default="STANDARD",
@@ -595,6 +598,7 @@ def _build_local(source: Path, profile: str) -> bool:
 def edge_install(
     app,
     target: str | None,
+    source_dir: Path | None,
     user: str,
     profile: str,
     tenant_id: str,
@@ -608,11 +612,11 @@ def edge_install(
     With ``--target <ip>``, copies the source to the device via SSH,
     builds remotely, configures env vars, and starts the daemon.
     """
-    source = _find_edge_connector_source()
+    source = _find_edge_connector_source(source_dir) if source_dir is not None else _find_edge_connector_source()
     if source is None:
         ux.err(
             "Could not locate edge-connector/ source directory.\n"
-            "  Install a CLI wheel built with 'make dist-cli', or run from\n"
+            "  Pass --source-dir with the extracted Fleet assets, or run from\n"
             "  a complete DefenseClaw source checkout."
         )
         raise SystemExit(1)

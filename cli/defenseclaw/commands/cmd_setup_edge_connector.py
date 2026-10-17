@@ -111,15 +111,15 @@ def _hmac_key(env_path: Path, name: str) -> str:
     return value
 
 
-def _install_fleet_compiler(data_dir: str) -> Path:
-    """Install the bundled compiler only when the operator enables Fleet."""
+def _install_fleet_compiler(data_dir: str, source_dir: Path | None = None) -> Path:
+    """Install the separately supplied compiler only when the operator enables Fleet."""
     from defenseclaw.commands.cmd_edge_install import _find_edge_connector_source
     from defenseclaw.file_permissions import make_private_directory, set_file_mode
 
-    source_root = _find_edge_connector_source()
+    source_root = _find_edge_connector_source(source_dir) if source_dir is not None else _find_edge_connector_source()
     source = source_root / "tools" / "policy_compiler.py" if source_root else None
     if source is None or source.is_symlink() or not source.is_file():
-        raise click.ClickException("This release has no Fleet policy compiler")
+        raise click.ClickException("Fleet policy compiler missing; pass --source-dir with extracted Fleet assets")
     if source.stat().st_size > 1 << 20:
         raise click.ClickException("The Fleet policy compiler is unexpectedly large")
 
@@ -224,6 +224,8 @@ iot_extensions:
     is_flag=True,
     help="Print a sample fleet policy YAML and exit.",
 )
+@click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
+              help="Extracted Fleet assets or source checkout (required for wheel installs).")
 @click.option(
     "--non-interactive",
     is_flag=True,
@@ -235,6 +237,7 @@ def edge_connector(
     token: str | None,
     endpoint: str | None,
     emit_policy: bool,
+    source_dir: Path | None,
     non_interactive: bool,
 ) -> None:
     """Configure the Edge Connector fleet management API.
@@ -265,7 +268,7 @@ def edge_connector(
         ux.echo(
             "Optional Edge Connector Engine (C, Linux device):\n"
             "\n"
-            "  cd edge-connector\n"
+            "  cd /path/to/extracted-assets/edge-connector\n"
             "  mkdir build && cd build\n"
             "  cmake .. -DDCLAW_PROFILE=STANDARD -DDCLAW_DEV_MODE=OFF -DDCLAW_ALLOW_HMAC_OTA=ON\n"
             "  make -j$(nproc)\n"
@@ -317,7 +320,10 @@ def edge_connector(
     emergency_key = _hmac_key(env_path, "DCLAW_EMERGENCY_KEY")
     # Fleet remains disabled if credential provisioning fails. The compiler
     # copy is inert until the validated Fleet config is committed below.
-    _install_fleet_compiler(ctx.obj.cfg.data_dir)
+    if source_dir is None:
+        _install_fleet_compiler(ctx.obj.cfg.data_dir)
+    else:
+        _install_fleet_compiler(ctx.obj.cfg.data_dir, source_dir)
     try:
         for name, value in (
             (_TOKEN_ENV, token),

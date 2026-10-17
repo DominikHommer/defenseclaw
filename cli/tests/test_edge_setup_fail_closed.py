@@ -201,9 +201,21 @@ def test_fleet_compiler_rejects_symlink_without_mutating_destination(tmp_path, m
     monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: source_root)
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
-    with pytest.raises(click.ClickException, match="no Fleet policy compiler"):
+    with pytest.raises(click.ClickException, match="Fleet policy compiler missing"):
         cmd_setup_edge_connector._install_fleet_compiler(str(home))
     assert not (home / "installer").exists()
+
+
+def test_explicit_fleet_assets_are_required_for_wheel_style_setup(tmp_path) -> None:
+    assets = tmp_path / "fleet-assets"
+    source = assets / "edge-connector"
+    (source / "src").mkdir(parents=True)
+    (source / "tools").mkdir()
+    (source / "CMakeLists.txt").write_text("project(edge)\n", encoding="utf-8")
+    (source / "src/main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    (source / "tools/policy_compiler.py").write_text("# compiler\n", encoding="utf-8")
+    assert cmd_edge_install._find_edge_connector_source(assets) == source
+    assert cmd_setup_edge_connector._install_fleet_compiler(str(tmp_path), assets).is_file()
 
 
 def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> None:

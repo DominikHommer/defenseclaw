@@ -21,6 +21,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = REPO_ROOT / "bundles" / "local_observability_stack"
+FLEET_TEMPLATES = {
+    "docker-compose.fleet.yml",
+    "prometheus/examples/fleet.yml",
+    "grafana/dashboards/defenseclaw-fleet.json",
+}
 
 
 def _is_generated_grafana_credential(relative_path: str) -> bool:
@@ -150,11 +155,14 @@ def test_wheel_resolves_complete_stack_outside_source_checkout(tmp_path: Path) -
         path.relative_to(BUNDLE).as_posix()
         for path in BUNDLE.rglob("*")
         if path.is_file() and not _is_generated_grafana_credential(path.relative_to(BUNDLE).as_posix())
+        and path.relative_to(BUNDLE).as_posix() not in FLEET_TEMPLATES
     }
     prefix = "defenseclaw/_data/local_observability_stack/"
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
         packaged_assets = {name.removeprefix(prefix) for name in names if name.startswith(prefix)}
+        assert FLEET_TEMPLATES.isdisjoint(packaged_assets)
+        assert not any(name.startswith("defenseclaw/_data/edge-connector/") for name in names)
         assert not any(_is_generated_grafana_credential(name) for name in packaged_assets)
         assert expected_assets <= packaged_assets
         for relative_path in expected_assets:

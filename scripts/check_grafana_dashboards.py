@@ -845,7 +845,7 @@ def static_audit(
         errors.append(f"CLI packaged Grafana dashboard directory is missing: {PACKAGED_DIR}")
     elif PACKAGED_DIR.is_dir():
         packaged = load_dashboards(PACKAGED_DIR)
-        source_by_name = {path.name: dashboard for path, dashboard in dashboards}
+        source_by_name = {path.name: dashboard for path, dashboard in dashboards if path.name != "defenseclaw-fleet.json"}
         packaged_by_name = {path.name: dashboard for path, dashboard in packaged}
         if source_by_name != packaged_by_name:
             errors.append("CLI packaged Grafana dashboards do not match bundle sources")
