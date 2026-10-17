@@ -63,6 +63,13 @@ func TestParseTrustedCAsNormalizesAndDedupes(t *testing.T) {
 
 func TestParseTrustedCAsRefuses(t *testing.T) {
 	leaf := openshelltest.NewLeaf(t, openshelltest.NewCA(t, "Corp Root CA"), "proxy.corp.example")
+	good := openshelltest.NewCA(t, "Corp Root CA").PEM
+	second := openshelltest.NewCA(t, "Corp Issuing CA").PEM
+	cat := func(parts ...[]byte) []byte { return bytes.Join(parts, nil) }
+	truncated := second[:len(second)/2] // a copy cut off mid-certificate: no END line
+	badBase64 := []byte("-----BEGIN CERTIFICATE-----\n!!!!not base64!!!!\n-----END CERTIFICATE-----\n")
+	brokenKey := []byte("-----BEGIN PRIVATE KEY-----\nAAAA\n") // no END line
+	const damaged = "truncated or damaged"
 	for name, tc := range map[string]struct {
 		in   []byte
 		want string
@@ -73,6 +80,14 @@ func TestParseTrustedCAsRefuses(t *testing.T) {
 		"bad der":     {[]byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), "does not parse"},
 		"leaf":        {leaf, "not a CA certificate"},
 		"too large":   {bytes.Repeat([]byte(" "), openshell.MaxTrustedCABytes+1), "larger than"},
+		// A valid CA followed (or surrounded) by a block that does not
+		// decode refuses the whole file, not just the damaged block.
+		"valid then truncated cert":     {cat(good, truncated), damaged},
+		"valid then bad base64 cert":    {cat(good, badBase64), damaged},
+		"valid then broken private key": {cat(good, brokenKey), damaged},
+		"damaged between two valid":     {cat(good, badBase64, second), damaged},
+		"truncated only":                {truncated, damaged},
+		"stray END line":                {cat(good, []byte("-----END CERTIFICATE-----\n")), damaged},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := openshell.ParseTrustedCAs(tc.in)
@@ -109,6 +124,15 @@ func TestLoadTrustedCAs(t *testing.T) {
 	}
 	if _, err := openshell.LoadTrustedCAs(home, false); err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory: %v", err)
+	}
+	// A valid CA then a damaged one: the file is refused, not half loaded.
+	partial := filepath.Join(home, "partial.pem")
+	next := openshelltest.NewCA(t, "Corp Issuing CA").PEM
+	if err := os.WriteFile(partial, append(append([]byte(nil), ca.PEM...), next[:len(next)/2]...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cas, err := openshell.LoadTrustedCAs(partial, false); !errors.As(err, &te) || !strings.Contains(err.Error(), "truncated or damaged") || !cas.Empty() {
+		t.Fatalf("valid then truncated: %v %v", cas.Subjects(), err)
 	}
 	// An administrator's file: absolute, and through the managed trust check.
 	if _, err := openshell.LoadTrustedCAs("~/corp-root.pem", true); err == nil || !strings.Contains(err.Error(), "absolute path") {

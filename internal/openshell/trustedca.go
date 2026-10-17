@@ -17,6 +17,7 @@
 package openshell
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -124,8 +125,9 @@ func CertName(c *x509.Certificate) string {
 // ParseTrustedCAs parses a trusted CA bundle: PEM CERTIFICATE blocks, each
 // a CA certificate (basic constraints CA:TRUE), at most MaxTrustedCAs. Text
 // around the blocks (comments, `openssl x509 -text` output) is ignored. Any
-// other block (a private key above all) or a certificate that does not
-// parse refuses the whole file: a bundle that only half loads would leave
+// other block (a private key above all), a certificate that does not parse
+// or a PEM block that does not decode (truncated, no END line, bad base64)
+// refuses the whole file: a bundle that only half loads would leave
 // sandboxes failing TLS with no word why.
 func ParseTrustedCAs(data []byte) (TrustedCAs, error) {
 	if len(data) > MaxTrustedCABytes {
@@ -134,12 +136,14 @@ func ParseTrustedCAs(data []byte) (TrustedCAs, error) {
 	var out TrustedCAs
 	seen := map[[32]byte]bool{}
 	rest := data
+	blocks := 0
 	for n := 1; ; n++ {
 		var block *pem.Block
 		block, rest = pem.Decode(rest)
 		if block == nil {
 			break
 		}
+		blocks++
 		if block.Type != "CERTIFICATE" {
 			return TrustedCAs{}, fmt.Errorf("block %d is a %q, not a CERTIFICATE (the file must hold CA certificates only)", n, block.Type)
 		}
@@ -164,11 +168,25 @@ func ParseTrustedCAs(data []byte) (TrustedCAs, error) {
 		out.Certs = append(out.Certs, cert)
 		out.PEM = append(out.PEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
 	}
+	// pem.Decode skips a block it cannot decode and goes on to the next one,
+	// so a damaged certificate (or key) would otherwise vanish without a
+	// word and the image would carry only the blocks around it. Every BEGIN
+	// and END line must belong to a block that decoded.
+	if begins, ends := bytes.Count(data, pemBegin), bytes.Count(data, pemEnd); begins != blocks || ends != blocks {
+		return TrustedCAs{}, fmt.Errorf("it has %d PEM BEGIN and %d END lines but only %d well-formed blocks: a block is truncated or damaged", begins, ends, blocks)
+	}
 	if out.Empty() {
 		return TrustedCAs{}, errors.New("it holds no PEM certificate (convert a DER file with `openssl x509 -inform der -in FILE -out FILE.pem`)")
 	}
 	return out, nil
 }
+
+// pemBegin and pemEnd mark PEM block boundaries; a well-formed block holds
+// one of each, and its base64 body holds neither.
+var (
+	pemBegin = []byte("-----BEGIN")
+	pemEnd   = []byte("-----END")
+)
 
 // TrustedCAFileCheck is the managed trust check of an administrator's CA
 // file (owner, modes and every ancestor); tests replace it.
