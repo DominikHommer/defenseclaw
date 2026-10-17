@@ -220,6 +220,39 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 	return e, auth
 }
 
+// Re-resolving one sandbox must use its registration's floor, even while a
+// second sandbox in the same account has a different floor in force.
+func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "claudebox"})
+	e.live(sandboxapi.CreateRequest{Name: "codexbox"})
+	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
+	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
+		profile, ok := floors[name]
+		if !ok {
+			return nil
+		}
+		cfg := *e.config()
+		cfg.OpenShell.Admin.MinProfile = profile
+		return &cfg
+	}
+	for name, want := range floors {
+		b, err := e.m.box(name)
+		must(t, err)
+		eff, err := e.m.resolveBox(b)
+		must(t, err)
+		if got := eff.Floor().MinProfile; got != want {
+			t.Fatalf("%s floor = %q, want %q", name, got, want)
+		}
+	}
+	delete(floors, "claudebox")
+	b, err := e.m.box("claudebox")
+	must(t, err)
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("unconfirmed sandbox inherited another sandbox's floor")
+	}
+}
+
 // register gives a sandbox its managed gateway registration (the daemon's
 // create does, L4) and rebuilds its decider.
 func (e *harnessEnv) register(name string) string {

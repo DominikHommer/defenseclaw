@@ -60,6 +60,26 @@ func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
 	}
 }
 
+// A completed stop or delete hands the shared port to the next account
+// before returning, even if the last preflight was less than a minute ago.
+func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.run(t)
+	f.os.holder.Store(int64(os.Getuid()))
+	f.d.openShellUsed.Store(time.Now().UnixNano())
+	f.d.stops.Store(1)
+	f.running.Store(1)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 0 {
+		t.Fatalf("stopped under a running sandbox: %d", n)
+	}
+	f.running.Store(0)
+	f.d.handoverOpenShell(context.Background())
+	if n := f.os.stopped.Load(); n != 1 {
+		t.Fatalf("idle gateway was not handed over: %d", n)
+	}
+}
+
 // A stop or delete of a kept sandbox starts the account's gateway the daemon
 // stopped; one that listens is used as it is; another account's is refused
 // with the one-account-at-a-time text (GAP-0492). Status says that text too,

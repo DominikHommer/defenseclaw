@@ -863,14 +863,23 @@ func TestSandboxDaemonConfigIsCopyOnlyAndClosed(t *testing.T) {
 	}
 }
 
-// TestFloorConflictMessageNamesTheProvisionalPolicy pins GAP-0496: a run
-// refused because the directory did not answer (a provisional floor that
-// differs from the running sandboxes') says so, not that the policy changed.
-func TestFloorConflictMessageNamesTheProvisionalPolicy(t *testing.T) {
-	if got := floorConflictMessage(true); !strings.Contains(got, "directory couldn't be reached") || !strings.Contains(got, "provisional") {
-		t.Fatalf("provisional refusal = %q", got)
+// Two concurrent managed sandboxes keep their own confirmed floors. A
+// missing registration cannot inherit whichever floor was adopted last.
+func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		if err := f.d.regs.put(daemonRegistration{ID: "reg-" + tc.name, Sandbox: tc.name,
+			Floor: config.OpenShellAdminConfig{MinProfile: tc.profile}, Confirmed: true, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := floorConflictMessage(false); strings.Contains(got, "provisional") || !strings.Contains(got, "differs from the policy") {
-		t.Fatalf("changed-policy refusal = %q", got)
+	for _, tc := range []struct{ name, profile string }{{"dc-claude", "balanced"}, {"dc-codex", "strict"}} {
+		cfg := f.d.configForSandbox(tc.name)
+		if cfg == nil || cfg.OpenShell.Admin.MinProfile != tc.profile {
+			t.Fatalf("%s floor = %+v", tc.name, cfg)
+		}
+	}
+	if cfg := f.d.configForSandbox("unregistered"); cfg != nil {
+		t.Fatalf("unregistered sandbox inherited a floor: %+v", cfg.OpenShell.Admin)
 	}
 }

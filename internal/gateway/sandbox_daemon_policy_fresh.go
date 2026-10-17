@@ -340,7 +340,7 @@ func (d *SandboxDaemon) adoptApplied(ctx context.Context, refresh bool) (changed
 func (d *SandboxDaemon) adoptLocked(phases map[string]string, listed, refresh bool) bool {
 	target := d.regs.changeCount()
 	changed := d.adoptRunningFloor(phases)
-	if refresh && !changed {
+	if (refresh || (listed && target > d.adopted.Load())) && !changed {
 		d.rt.manager.RefreshPolicies()
 		changed = true
 	}

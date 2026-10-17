@@ -111,6 +111,10 @@ type Options struct {
 	Owner string
 	// Config returns the current configuration snapshot. Required.
 	Config func() *config.Config
+	// ConfigForSandbox returns the policy snapshot for an existing sandbox.
+	// Managed daemons use its confirmed registration's floor. A nil result
+	// fails closed instead of applying another sandbox's floor.
+	ConfigForSandbox func(name string) *config.Config
 	// Connect opens the OpenShell gateway connection. Required.
 	Connect Connector
 	// Bindings is the ingress binding store. Required.

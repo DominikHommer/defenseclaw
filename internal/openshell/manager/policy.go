@@ -79,6 +79,14 @@ func (m *Manager) resolveBoxViolations(b *box) (*packs.Effective, []packs.Violat
 		return nil, nil, err
 	}
 	cfg := m.config()
+	if m.opts.ConfigForSandbox != nil {
+		cfg = m.opts.ConfigForSandbox(rec.Name)
+		if cfg == nil {
+			err := sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the managed policy for sandbox %s is not confirmed", rec.Name)
+			m.policyUnresolved(b, err)
+			return nil, nil, err
+		}
+	}
 	eff, violations, err := m.resolve(cfg, rec.Flags.packs(rec.Harness, rec.Project, m.recordFacts(rec)))
 	if err == nil {
 		err = m.checkPolicySources(rec.WorkdirMode, rec.Project, eff)

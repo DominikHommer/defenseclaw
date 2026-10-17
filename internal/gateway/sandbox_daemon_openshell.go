@@ -1099,6 +1099,31 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 	}
 }
 
+// handoverOpenShell releases the shared gateway port before a successful
+// stop or delete returns. A preflight still gets its linger; completed
+// lifecycle work does not keep the previous account's idle gateway alive.
+func (d *SandboxDaemon) handoverOpenShell(ctx context.Context) {
+	if d.stops.Load() != 1 {
+		d.openShellUsed.Store(0)
+		return // another stop or delete still uses the gateway
+	}
+	check, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignSweepTimeout+15*time.Second)
+	defer cancel()
+	if err := d.lockLifecycle(check); err != nil {
+		d.openShellUsed.Store(0)
+		d.scheduleCheck(time.Second)
+		return
+	}
+	defer d.unlockLifecycle()
+	n, err := d.runningSandboxes(check)
+	if err != nil || n != 0 {
+		return
+	}
+	d.releaseListeners()
+	d.openShellUsed.Store(0)
+	d.stopIdleOpenShellLocked(check)
+}
+
 // foreignSweepTimeout bounds the foreign-sandbox sweep before an idle
 // gateway stops.
 const foreignSweepTimeout = 30 * time.Second
