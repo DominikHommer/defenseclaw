@@ -118,6 +118,10 @@ func (m *Manager) lineage(sandbox string, pid int, exe string) []sandboxapi.Dest
 	} else {
 		refs = m.procs.Lineage(sandbox, pid)
 	}
+	return destinationLineage(refs)
+}
+
+func destinationLineage(refs []ProcessRef) []sandboxapi.DestinationProcess {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -893,9 +897,14 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 		pid := d.PID
 		if pid <= 0 && m.procs != nil && actors[i].binary != "" {
 			// OpenShell names no pid for a connection (its NET records
-			// say 0 on both drivers): the program the row names finds its
-			// process in the tree when exactly one copy of it started
-			// shortly before it was seen connecting (GAP-0139, GAP-0174).
+			// say 0 on both drivers). Resolve against the process image
+			// running at the connection, before its pid can be reused.
+			if timed, ok := m.procs.(interface {
+				LineageAt(sandboxName, exe string, at time.Time) []ProcessRef
+			}); ok {
+				d.Lineage = destinationLineage(timed.LineageAt(info.name, actors[i].binary, actors[i].at))
+				continue
+			}
 			pid = m.procs.PIDOf(info.name, actors[i].binary, actors[i].at)
 		}
 		d.Lineage = m.lineage(info.name, pid, actors[i].binary)
