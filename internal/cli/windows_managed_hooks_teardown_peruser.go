@@ -69,19 +69,8 @@ var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings
 // The current Claude enrollment uses machine policy. An older per-user hook
 // warrants a pending warning only when its exact launcher is still present.
 func windowsManagedClaudeRegistrationPresent(home, sid string) (bool, error) {
-	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	path := filepath.Join(home, ".claude", "settings.json")
-	// Match the connector's 32 MiB atomic settings limit.
-	raw, err := safefile.ReadRegularFileBounded(path, 32<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
+	raw, err := readWindowsManagedClaudeUserSettings(home, sid)
+	if err != nil || raw == nil {
 		return false, err
 	}
 	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
@@ -101,6 +90,17 @@ var windowsManagedClaudeRegistrationProbe = windowsManagedClaudeRegistrationPres
 // file has none. It runs only where the removal ran (LocalSystem, or the
 // administrator's own profile).
 func windowsManagedClaudeLeftoverHooks(home, sid string) ([]string, error) {
+	raw, err := readWindowsManagedClaudeUserSettings(home, sid)
+	if err != nil || raw == nil {
+		return nil, err
+	}
+	return windowsClaudeCommandsNamingDefenseClaw(raw), nil
+}
+
+// readWindowsManagedClaudeUserSettings reads the account's Claude Code user
+// settings after checking the profile against the recorded SID; nil, with no
+// error, when the profile or the file is absent.
+func readWindowsManagedClaudeUserSettings(home, sid string) ([]byte, error) {
 	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -112,10 +112,7 @@ func windowsManagedClaudeLeftoverHooks(home, sid string) ([]string, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return windowsClaudeCommandsNamingDefenseClaw(raw), nil
+	return raw, err
 }
 
 var windowsManagedClaudeLeftoverHookProbe = windowsManagedClaudeLeftoverHooks
