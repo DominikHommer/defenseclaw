@@ -364,7 +364,13 @@ func TestLauncherJobControl(t *testing.T) {
 	}
 
 	t.Run("Ctrl-C reaches the harness", func(t *testing.T) {
-		r, _ := run(t, "trap 'echo stub-got-INT; exit 9' INT; echo stub-up; for i in $(seq 1 100); do sleep 0.1; done; exit 0\n")
+		// The launcher gives the harness the PTY foreground group after
+		// starting it. Printing before that handoff only proves the stub is
+		// running; an echoed ^C can still target the launcher's group.
+		stub := stubState + "trap 'echo stub-got-INT; exit 9' INT; " +
+			"until state=$(st); [[ $state =~ pgrp=([0-9]+).*tpgid=([0-9]+) ]] && [[ ${BASH_REMATCH[1]} == ${BASH_REMATCH[2]} ]]; do :; done; " +
+			"echo stub-up; for i in $(seq 1 100); do sleep 0.1; done; exit 0\n"
+		r, _ := run(t, stub)
 		r.waitOutput("stub-up")
 		if _, err := r.master.Write([]byte{0x03}); err != nil {
 			t.Fatal(err)
