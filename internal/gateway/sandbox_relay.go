@@ -46,14 +46,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"go.opentelemetry.io/otel/propagation"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // sandboxRelayRoute is one relayed route: its class, the connector its path
