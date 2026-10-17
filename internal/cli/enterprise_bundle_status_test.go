@@ -137,6 +137,51 @@ func TestConfirmedSignerRevocationIsReported(t *testing.T) {
 	}
 }
 
+// The confirmed bundle's signer is checked against the installed anchors
+// also after its confirmed receipt was pruned (MaxReceipts newer receipts):
+// the store state names the signer.
+func TestBundleStatusWarnsOfAnUntrustedSignerAfterTheReceiptWasPruned(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k2": e.edKey.Public()})
+	store := bundleDevice(t, e)
+	const id = "b-01JA0000000000000000000041"
+	digest := "sha256:" + strings.Repeat("4", 64)
+	r, err := store.Receive(id, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stage(r, &enterprisebundle.Bundle{Files: map[string][]byte{"config.yaml": []byte("config_version: 9\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateVerified, func(r *enterprisebundle.Receipt) {
+		r.SignerKeyID, r.ManifestSHA256, r.ExpectedDigest = "k1", strings.Repeat("f", 64), digest
+		r.SetDigestComparison(true, false, false)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Promote(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Advance(r, enterprisebundle.StateApplied, func(r *enterprisebundle.Receipt) { r.EffectivePolicyDigest = digest }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Confirm(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, r.ReceiptID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	out, code := runBundle(t, "status", "--json")
+	var result bundleStatusResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil || code != 0 {
+		t.Fatalf("status exit %d, %v:\n%s", code, err, out)
+	}
+	if result.Current == nil || result.Current.BundleID != id || result.LastReceipt != nil ||
+		!hasBundleWarning(result.Warnings, string(enterprisebundle.CodeKeyUnknown)) {
+		t.Fatalf("pruned confirmed receipt, signer k1 not in the anchors: want key_unknown:\n%s", out)
+	}
+}
+
 func TestBundleStatusSettlesBeforeReadingCurrent(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	store := bundleDevice(t, e)

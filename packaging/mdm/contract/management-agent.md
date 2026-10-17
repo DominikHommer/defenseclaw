@@ -450,7 +450,8 @@ Exit 0.
   `not_root`, `state_invalid`) did not scan sessions and reports
   `sessions_restart_required` with state `unknown`. Warnings to act on:
   `bundle_failed`, `bundle_pending`, `anchor_missing`, `key_unknown` /
-  `key_revoked` (the confirmed bundle's signer is no longer trusted),
+  `key_revoked` (the confirmed bundle's signer, as the bundle state records
+  it, is no longer trusted; checked also after its receipt was pruned),
   `policy_reload_rejected`, `gateway_unchecked`.
 - Exit: 0; 1 / 1603.
 

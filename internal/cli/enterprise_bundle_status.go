@@ -226,10 +226,18 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 		}
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: code, Message: bundleReceiptWarningMessage(code, currentReceipt)})
 	}
+	// The state records the signer of the current bundle, so the check
+	// still runs once its confirmed receipt was pruned.
+	signer := ""
 	if currentReceipt != nil {
-		if warning := bundleCurrentSignerWarning(res.Anchors, currentReceipt.SignerKeyID); warning != nil {
-			res.Warnings = append(res.Warnings, *warning)
-		}
+		signer = currentReceipt.SignerKeyID
+	} else if st.Current != nil {
+		signer = st.Current.SignerKeyID
+	}
+	if warning := bundleCurrentSignerWarning(res.Anchors, signer); warning != nil {
+		res.Warnings = append(res.Warnings, *warning)
+	}
+	if currentReceipt != nil {
 		for _, code := range currentReceipt.WarningCodes {
 			addReceiptWarning(code)
 		}
