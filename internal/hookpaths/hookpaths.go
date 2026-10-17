@@ -2364,10 +2364,13 @@ func envCommandWordsDepth(words []string, cwd string, depth int) (string, []stri
 			// These options print or terminate without launching a command.
 			return cmdCWD, nil, true
 		case word == "--":
-			if i+1 >= len(words) {
-				return cmdCWD, nil, true
+			// Assignments still precede the utility after the option terminator.
+			for i++; i < len(words); i++ {
+				if !strings.Contains(words[i], "=") || strings.HasPrefix(words[i], "-") {
+					return cmdCWD, words[i:], true
+				}
 			}
-			return cmdCWD, words[i+1:], true
+			return cmdCWD, nil, true
 		case word == "-C" || word == "--chdir":
 			i++
 			if i >= len(words) || words[i] == "" {

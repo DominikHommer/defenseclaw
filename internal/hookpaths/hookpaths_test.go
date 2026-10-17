@@ -32,6 +32,7 @@ func TestEnvCommandWordsOptions(t *testing.T) {
 		{"split short", []string{"env", "-S", `python3 -c "open(\"disklink\",\"a\")"`}, "/work", []string{"python3", "-c", `open("disklink","a")`}},
 		{"split long", []string{"env", `--split-string=python3 -c "open(\"disklink\",\"a\")"`}, "/work", []string{"python3", "-c", `open("disklink","a")`}},
 		{"combined and assignment", []string{"env", "-i", "-u", "UNUSED", "A=B", "--", "python3"}, "/work", []string{"python3"}},
+		{"assignment after separator", []string{"env", "--", "A=B", "python3"}, "/work", []string{"python3"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cwd, got, ok := envCommandWords(tc.words, "/work")
@@ -53,6 +54,7 @@ func TestEnvOptionLiteralWriteTargets(t *testing.T) {
 		{"chdir", "env -C . " + program},
 		{"split", `env -S 'python3 -c "open(\"disklink\",\"a\").write(\"x\")"'`},
 		{"split long", `env --split-string='python3 -c "open(\"disklink\",\"a\").write(\"x\")"'`},
+		{"assignment after separator", "env -- A=B " + program},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := LiteralWriteOperands(tc.command, "/work", "/home/test")
