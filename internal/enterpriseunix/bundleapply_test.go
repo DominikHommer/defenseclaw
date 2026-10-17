@@ -1136,6 +1136,89 @@ func TestBundleApplyThatTheGatewayDoesNotConfirmRollsBack(t *testing.T) {
 	}
 }
 
+// GAP-0032: a gateway killed after the transaction's confirm (the receipt
+// is applied) and absent until the receipt would be confirmed returned
+// confirmed with policy.applied false. Confirmed means the running gateway
+// enforces the digest, so the apply fails not_confirmed with the retry exit
+// code and the receipt stays applied; the resubmit of the same bundle, once
+// the gateway runs again, confirms it and passes the success test. A gateway
+// that its service manager starts again within the confirm wait confirms
+// the bundle in the same run, and the policy block says it is applied.
+func TestBundleApplyGatewayKilledBeforeConfirmIsNotConfirmed(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, _ := bundleConfigs(b.testHost)
+			requireOK(t, b.apply(b.dir(1, v1)))
+			killAfterApplied := func(phase string) error {
+				if phase == enterprisebundle.StateApplied {
+					b.healthy = false
+				}
+				return nil
+			}
+			b.env.bundleFault = killAfterApplied
+			path := b.dir(2, v2)
+			r := b.apply(path)
+			b.env.bundleFault = nil
+			requireError(t, r, codeBundleNotConfirmed)
+			if r.OK || r.ExitCode != enterprisestatus.UnixExitBusy {
+				t.Fatalf("apply ok=%t exit=%d, want the retry exit %d", r.OK, r.ExitCode, enterprisestatus.UnixExitBusy)
+			}
+			if r.Bundle == nil || r.Bundle.BundleID != bundleID(2) || r.Bundle.State == enterprisestatus.BundleConfirmed {
+				t.Fatalf("bundle block = %+v, want bundle 2 not confirmed", r.Bundle)
+			}
+			if r.Policy != nil && r.Policy.Applied {
+				t.Fatalf("policy block says applied while the gateway is down: %+v", r.Policy)
+			}
+			if rc := b.receipt(bundleID(2)); rc.State != enterprisebundle.StateApplied {
+				t.Fatalf("receipt = %+v, want applied for the next run to settle", rc)
+			}
+			if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(1) {
+				t.Fatalf("current = %+v, want the last good bundle", st.Current)
+			}
+
+			// The gateway runs again; the agent resubmits the same bundle.
+			b.healthy = true
+			again := b.apply(path)
+			requireOK(t, again)
+			if again.ExitCode != 0 || again.Bundle == nil || again.Bundle.BundleID != bundleID(2) ||
+				again.Bundle.State != enterprisestatus.BundleConfirmed || !hasWarning(again, codeBundleConfirmedLate) {
+				t.Fatalf("resubmit exit=%d bundle=%+v warnings=%+v", again.ExitCode, again.Bundle, again.Warnings)
+			}
+			if again.Policy == nil || !again.Policy.Applied {
+				t.Fatalf("resubmit policy = %+v", again.Policy)
+			}
+			if st := b.state(); st.Current == nil || st.Current.BundleID != bundleID(2) {
+				t.Fatalf("current after resubmit = %+v", st.Current)
+			}
+
+			// Killed after applied, started again by the service manager
+			// while the confirm waits: confirmed in the same run.
+			_, _, v3 := bundleConfigs(b.testHost)
+			down := 0
+			health := b.env.HealthGet
+			b.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+				if !b.healthy {
+					if down++; down == 3 {
+						b.healthy = true
+					}
+				}
+				return health(ctx)
+			}
+			b.env.bundleFault = killAfterApplied
+			late := b.apply(b.dir(3, v3))
+			b.env.bundleFault, b.env.HealthGet = nil, health
+			requireOK(t, late)
+			if late.Bundle == nil || late.Bundle.BundleID != bundleID(3) || late.Bundle.State != enterprisestatus.BundleConfirmed {
+				t.Fatalf("restarted gateway: bundle = %+v", late.Bundle)
+			}
+			if late.Policy == nil || !late.Policy.Applied || late.Policy.GatewayReportedDigest != late.Policy.EffectiveDigest {
+				t.Fatalf("restarted gateway: policy = %+v", late.Policy)
+			}
+		})
+	}
+}
+
 func TestBundleConfirmRejectsGatewayConfigErrorAndRestoresLastGood(t *testing.T) {
 	b := newBundleHost(t, "darwin")
 	v1, v2, _ := bundleConfigs(b.testHost)

@@ -50,7 +50,7 @@ Setup returns only `0` and `1603`, its argument errors included.
 | `0` | Success or nothing to do. | Success |
 | `1` | The action failed (already rolled back), the config is invalid (`config_invalid`), or the wrapper refused an input. | Failure; read `errors[].code` |
 | `2` | Invalid arguments. | Failure; fix the script settings |
-| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock. | Retry later (set Intune's retry count or your MDM's retry policy) |
+| `75` | `EX_TEMPFAIL`: another lifecycle run or the package manager holds a lock, or a signed policy bundle whose gateway stopped reporting its policy before the receipt was confirmed (`not_confirmed`, receipt `applied`). | Retry later (set Intune's retry count or your MDM's retry policy) |
 
 ## Error codes
 
@@ -94,7 +94,12 @@ lifecycle itself.
 A signed policy bundle (`--bundle-file`, `-BundlePath`, Setup `BUNDLE=`) uses
 the same exit codes. Its refusals (`signature_invalid`, `version_not_newer`,
 `secret_ref_missing`, `not_confirmed` and the rest) exit `1603` / `1`;
-`lifecycle_busy` exits `1618` / `75`. On Windows, a bundle that verified
+`lifecycle_busy` exits `1618` / `75`. On Linux and macOS a bundle whose
+config the transaction committed, but whose gateway stopped reporting its
+policy (it crashed or was killed) before the receipt was confirmed, exits
+`75` with `not_confirmed`: the receipt stays `applied`, the last good bundle
+stays current, and the retry confirms it or puts the last good bundle back.
+On Windows, a bundle that verified
 but did not finish applying to the running deployment exits `1618` too:
 `bundle_apply_failed`, after the error that names the cause (for example
 `bundle_hot_apply_unavailable` with the verify detail, or
@@ -131,7 +136,9 @@ A management agent that runs the `enterprise` commands itself
   `75` busy. Windows installs anchors with `enterprise windows ensure
   --trust-anchors`, which exits like `ensure`.
 - `enterprise secret set` and `remove`: Linux and macOS `0`, `1`, `2` and
-  `75`, as above. Windows `0`; `5` not elevated on a managed computer
+  `75`, as above; with `--json` every failure prints one JSON document (a
+  failure before the lifecycle ran: `invalid_arguments` `2`, `not_root`,
+  `change_failed` or `state_invalid` `1`). Windows `0`; `5` not elevated on a managed computer
   (`1603` with the same `elevation_required` code on a computer without the
   standalone deployment marker); `1603` not installed,
   `credential_in_use`, `change_failed` or `restart_failed`; `1618` when

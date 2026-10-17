@@ -70,11 +70,11 @@ type windowsSecretLockEvents struct {
 func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windowsSecretLockEvents {
 	t.Helper()
 	previousLayout, previousInstalled, previousElevated, previousRestart := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
-	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, windowsSecretRawArgs
+	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
 	previousManaged := managedHostWindowsStandalone
 	t.Cleanup(func() {
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousLayout, previousInstalled, previousElevated, previousRestart
-		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, windowsSecretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
+		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		managedHostWindowsStandalone = previousManaged
 	})
 	host := &windowsSecretLockEvents{}
@@ -101,7 +101,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 		host.events = append(host.events, "lock lifecycle")
 		return func() { host.events = append(host.events, "unlock lifecycle") }, nil
 	}
-	windowsSecretRawArgs = func() []string { return nil }
+	secretRawArgs = func() []string { return nil }
 	// The standalone marker of the computer the test runs on must not pick
 	// the refusal class: a managed test host turned the unmanaged 1603
 	// expectation into exit 5 (mgmt-agent-api GAP-0002). A test that wants
@@ -267,11 +267,11 @@ func TestWindowsSecretRefusals(t *testing.T) {
 
 // windowsSecretFailureDoc decodes stdout as exactly one failure document of
 // secret-result.schema.json and checks its shape against err.
-func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code string) windowsSecretFailureResult {
+func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code string) secretFailureResult {
 	t.Helper()
 	dec := json.NewDecoder(strings.NewReader(out))
 	dec.DisallowUnknownFields()
-	var doc windowsSecretFailureResult
+	var doc secretFailureResult
 	if decodeErr := dec.Decode(&doc); decodeErr != nil {
 		t.Fatalf("stdout is not one failure document: %v\n%s", decodeErr, out)
 	}
@@ -318,6 +318,10 @@ func TestWindowsSecretFailuresPrintOneDocument(t *testing.T) {
 		{name: "bad name", action: "set", opts: enterpriseSecretOptions{name: "../escape", fromStdin: true}, stdin: value, code: "invalid_arguments", exit: windowsSecretExitInvalid},
 		{name: "no source", action: "set", opts: enterpriseSecretOptions{name: "ok-name"}, code: "invalid_arguments", exit: windowsSecretExitInvalid},
 		{name: "two lines", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value + "\nmore", code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		// mgmt-agent-api GAP-0031 parity: a stdin closed with no value (the
+		// agent stopped) and a blank line are one invalid_arguments document.
+		{name: "closed stdin, empty value", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: "", code: "invalid_arguments", exit: windowsSecretExitInvalid},
+		{name: "blank line", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: " \r\n", code: "invalid_arguments", exit: windowsSecretExitInvalid},
 		{name: "lock wait over 15m", action: "remove", opts: enterpriseSecretOptions{name: "ok-name", lockWait: 16 * time.Minute}, code: "invalid_arguments", exit: windowsSecretExitInvalid},
 		{name: "not installed", action: "set", opts: enterpriseSecretOptions{name: "ok-name", fromStdin: true}, stdin: value, code: "not_installed", exit: windowsSecretExitFailure,
 			setup: func(*windowsSecretLockEvents) {
@@ -411,7 +415,7 @@ func TestWindowsSecretFlagErrorsPrintTheFailureDocument(t *testing.T) {
 		cmd.SetErr(io.Discard)
 		cmd.SetIn(strings.NewReader(""))
 		cmd.SetArgs(tc.args)
-		windowsSecretRawArgs = func() []string { return tc.args }
+		secretRawArgs = func() []string { return tc.args }
 		err := cmd.Execute()
 		if commandExitCode(err) != windowsSecretExitInvalid {
 			t.Fatalf("%v: exit %d (%v), want 1639", tc.args, commandExitCode(err), err)
@@ -552,7 +556,7 @@ func TestWindowsArgsRequestJSON(t *testing.T) {
 		"--json": true, "--name x --json": true, "--json=true": true, "--json=1": true,
 		"--json=false": false, "--json=maybe": false, "": false, "-- --json": false, "--jsonx": false,
 	} {
-		if got := windowsArgsRequestJSON(strings.Fields(args)); got != want {
+		if got := secretArgsRequestJSON(strings.Fields(args)); got != want {
 			t.Fatalf("%q: %v, want %v", args, got, want)
 		}
 	}
