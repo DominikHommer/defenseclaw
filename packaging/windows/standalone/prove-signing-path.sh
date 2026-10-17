@@ -58,11 +58,13 @@ openssl req -x509 -newkey rsa:3072 -sha256 -days 2 -nodes \
     -addext "keyUsage=critical,digitalSignature" \
     -addext "extendedKeyUsage=codeSigning" \
     -keyout "$work/key.pem" -out "$work/cert.pem" 2>/dev/null
+# A random password, so the proof opens the PFX the way the release does.
+AUTHENTICODE_PFX_PASSWORD="$(openssl rand -hex 16)"
+export AUTHENTICODE_PFX_PASSWORD
 openssl pkcs12 -export -inkey "$work/key.pem" -in "$work/cert.pem" \
-    -out "$work/test.pfx" -passout pass: 2>/dev/null
+    -out "$work/test.pfx" -passout env:AUTHENTICODE_PFX_PASSWORD 2>/dev/null
 
 export AUTHENTICODE_PFX="$work/test.pfx"
-export AUTHENTICODE_PFX_PASSWORD=""
 # A throwaway certificate gets no timestamp; the post-sign verify of each
 # file trusts that certificate alone.
 export AUTHENTICODE_TIMESTAMP_URL=none

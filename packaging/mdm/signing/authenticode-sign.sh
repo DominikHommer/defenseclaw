@@ -45,14 +45,21 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/dc-authenticode.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 chmod 0700 "$work"
 
-# The password travels through a 0600 file, not argv.
-password_file="$work/password"
-printf '%s' "${AUTHENTICODE_PFX_PASSWORD:-}" >"$password_file"
+# The password never goes on argv: osslsigncode reads it from a 0600 file,
+# openssl from the environment. Neither reads an empty password file, so a
+# PFX without a password is opened without one.
+export AUTHENTICODE_PFX_PASSWORD="${AUTHENTICODE_PFX_PASSWORD:-}"
+password_args=()
+if [ -n "$AUTHENTICODE_PFX_PASSWORD" ]; then
+    password_file="$work/password"
+    printf '%s' "$AUTHENTICODE_PFX_PASSWORD" >"$password_file"
+    password_args=(-readpass "$password_file")
+fi
 
 # Signer certificate thumbprint = SHA-256 over the DER certificate, the same
 # value Windows-side checks compute from SignerCertificate.RawData.
 signer_thumbprint() {
-    openssl pkcs12 -in "$AUTHENTICODE_PFX" -passin "file:$password_file" -clcerts -nokeys -out "$work/signer.pem" 2>/dev/null
+    openssl pkcs12 -in "$AUTHENTICODE_PFX" -passin env:AUTHENTICODE_PFX_PASSWORD -clcerts -nokeys -out "$work/signer.pem" 2>/dev/null
     openssl x509 -in "$work/signer.pem" -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1
 }
 
@@ -67,7 +74,7 @@ signed="$work/$(basename "$file")"
 timestamp=(-ts "${AUTHENTICODE_TIMESTAMP_URL:-http://timestamp.digicert.com}")
 [ "${AUTHENTICODE_TIMESTAMP_URL:-}" != none ] || timestamp=()
 osslsigncode sign \
-    -pkcs12 "$AUTHENTICODE_PFX" -readpass "$password_file" \
+    -pkcs12 "$AUTHENTICODE_PFX" ${password_args[@]+"${password_args[@]}"} \
     -h sha256 \
     ${timestamp[@]+"${timestamp[@]}"} \
     -n "Cisco DefenseClaw" -i "https://github.com/cisco-ai-defense/defenseclaw" \
