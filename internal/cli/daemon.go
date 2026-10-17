@@ -543,15 +543,14 @@ func runStop(cmd *cobra.Command, _ []string) error {
 			// Stop needs only the verified listener identity and gateway token.
 			// An unset export destination must not strand a per-user uninstall.
 			cfg, cfgErr = loadShutdownConfigWithoutDestinations(config.ConfigPath())
+			if cfgErr == nil {
+				applyDaemonEndpointOverrides(cfg)
+			}
 		}
 		if cfgErr != nil {
-			if running, _ := d.IsRunning(); !running {
-				// No listener needs authentication; ordinary uninstall can
-				// still clear its watchdog and local data.
-				cfgErr = nil
-			} else {
-				return fmt.Errorf("cannot stop the gateway: configuration is unavailable: %w", cfgErr)
-			}
+			// A damaged config cannot supply an authenticated listener, but a
+			// verified PID can still be stopped by the signal fallback.
+			cfg = config.DefaultConfig()
 		}
 	}
 	var running bool
@@ -638,7 +637,15 @@ func runStop(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
-	if err := stopGatewayGracefully(d, cfg, defaultStopTimeout); err != nil {
+	var stopErr error
+	if cfgErr != nil {
+		// With no verified listener configuration, never send a credential to
+		// the default port. The daemon still verifies its PID before signalling.
+		stopErr = d.StopGracefully(defaultStopTimeout, nil)
+	} else {
+		stopErr = stopGatewayGracefully(d, cfg, defaultStopTimeout)
+	}
+	if err := stopErr; err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		if rotationTransaction && watchdogWasRunning {
 			if restoreErr := runWatchdogStart(nil, nil); restoreErr != nil {
@@ -1291,13 +1298,17 @@ func loadDaemonConfig(_ *cobra.Command) (*config.Config, error) {
 	}
 	// The child receives these as flags, so startup verification must inspect
 	// the same effective endpoint instead of the on-disk defaults.
+	applyDaemonEndpointOverrides(cfg)
+	return cfg, err
+}
+
+func applyDaemonEndpointOverrides(cfg *config.Config) {
 	if sidecarHost != "" {
 		cfg.Gateway.APIBind = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.APIPort = sidecarPort
 	}
-	return cfg, err
 }
 
 // loadShutdownConfigWithoutDestinations decodes the same bounded, schema-

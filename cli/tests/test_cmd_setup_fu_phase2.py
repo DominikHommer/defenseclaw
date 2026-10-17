@@ -318,6 +318,8 @@ class _BaseSetup(unittest.TestCase):
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
 class TestPerConnectorWriteSurface(_BaseSetup):
+    # An explicit guardrail target must already be set up. The OpenCode
+    # selection fixtures below include it in the configured roster.
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -1212,7 +1214,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 with self.subTest(cancellation=cancellation, prior_exists=prior_exists):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "observe"
                     prior_gc = copy.deepcopy(gc)
@@ -1302,7 +1304,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 with self.subTest(abort_at=abort_at, prior_exists=prior_exists):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "action"
                     gc.judge.enabled = False
@@ -1399,7 +1401,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         secret_value = "disposable judge marker value"
         other_env_value = "disposable unrelated process marker"
         gc = self.app.cfg.guardrail
-        gc.connector = "amp"
+        gc.connector = "opencode"
         gc.enabled = True
         gc.mode = "action"
         gc.judge.enabled = False
@@ -1494,7 +1496,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 ):
                     self.app.cfg = copy.deepcopy(pristine)
                     gc = self.app.cfg.guardrail
-                    gc.connector = "amp"
+                    gc.connector = "opencode"
                     gc.enabled = True
                     gc.mode = "action"
                     gc.judge.enabled = False
@@ -1939,7 +1941,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(setup_rollback_fails=setup_rollback_fails):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -2235,7 +2237,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(failure_phase=failure_phase):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -2358,7 +2360,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             with self.subTest(failure_phase=failure_phase):
                 self.app.cfg = copy.deepcopy(pristine)
                 gc = self.app.cfg.guardrail
-                gc.connector = "amp"
+                gc.connector = "opencode"
                 gc.enabled = True
                 gc.mode = "action"
                 gc.judge.enabled = False
@@ -2494,7 +2496,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
     def test_windows_opencode_guardrail_selection_observes_pristine_explicit_state(self):
         gc = self.app.cfg.guardrail
         gc.enabled = True
-        gc.connector = "amp"
+        gc.connector = "opencode"
         gc.mode = "observe"
         gc.scanner_mode = "both"
         gc.hilt.enabled = False
@@ -2567,6 +2569,12 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     gc.enabled = True
                     # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
                     gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
+                    if target_case == "explicit":
+                        # Both connectors are registered; explicit selection
+                        # still exercises the exact OpenCode admission path.
+                        gc.connectors = {
+                            name: PerConnectorGuardrailConfig() for name in ("codex", "opencode")
+                        }
                     gc.mode = "observe"
                     gc.scanner_mode = "both"
                     gc.hilt.enabled = False

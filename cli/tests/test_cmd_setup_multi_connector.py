@@ -1023,6 +1023,60 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connectors, {})
         self.assertFalse(os.path.exists(self.cfg_path))
 
+    def test_setup_guardrail_refuses_switch_when_only_claw_mode_names_codex(self):
+        self._seed_single("codex")
+        self.app.cfg.guardrail.connector = ""
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Claude Code is not set up here (set up: codex)", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.claw.mode, "codex")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_setup_guardrail_can_select_connector_on_unconfigured_install(self):
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = ""
+        self.app.cfg.guardrail.connectors = {}
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
+
+    def test_setup_guardrail_accepts_connector_recorded_only_in_claw_mode(self):
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = "claudecode"
+        self.app.cfg.guardrail.connectors = {}
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
+    def test_setup_guardrail_default_unsaved_openclaw_allows_first_connector_choice(self):
+        # The loader's OpenClaw default is not a saved registration.
+        self.app.cfg.guardrail.connector = ""
+        self.app.cfg.claw.mode = "openclaw"
+        self.app.cfg.guardrail.connectors = {}
+        self.assertFalse(os.path.exists(self.cfg_path))
+        with _setup_patches():
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+
     # GAP-0371 reopen: an earlier build left guardrail.connector at claudecode
     # with only Codex on the roster. Re-running setup for Codex must repair the
     # mirror, not name Claude Code or enroll it.

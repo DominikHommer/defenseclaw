@@ -33,6 +33,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,10 +43,9 @@ from unittest.mock import patch
 import requests
 from click.testing import CliRunner
 from defenseclaw import config as config_module
-from defenseclaw.commands import cmd_init, cmd_setup
+from defenseclaw.commands import cmd_init, cmd_keys, cmd_setup
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
-from defenseclaw.commands import cmd_keys
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
@@ -163,6 +164,46 @@ class KeysSetGatewayTokenTests(_RunningTokenCase):
         self.assertEqual(second.exit_code, 0, second.output + repr(second.exception))
         self.assertEqual(gateway.tokens, [_RUNNING, _RUNNING])
         self.assertEqual(len(gateway.admitted), 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL and new-process token handoff")
+    def test_windows_two_rotations_then_new_cli_process_uses_loaded_token(self) -> None:
+        _gateway_running(self.app.cfg.data_dir)
+        gateway = _Gateway(_RUNNING)
+        first = self._set(gateway)
+        self.assertEqual(first.exit_code, 0, first.output + repr(first.exception))
+        os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = _NEW
+        second = self._set(gateway, value="second-gateway-token")
+        self.assertEqual(second.exit_code, 0, second.output + repr(second.exception))
+        code = """
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
+from defenseclaw.logger import _GatewayConfigRecorder
+
+seen = []
+class Client:
+    def __init__(self, **kwargs):
+        seen.append(kwargs.get('token'))
+    def emit_cli_observability(self, payload):
+        pass
+    def close(self):
+        pass
+cfg = SimpleNamespace(data_dir=sys.argv[1], gateway=SimpleNamespace(resolved_token=lambda: 'second-gateway-token'))
+with patch('defenseclaw.logger.OrchestratorClient', Client):
+    _GatewayConfigRecorder(cfg).emit_cli_observability({})
+sys.exit(0 if seen == ['running-gateway-token'] else 1)
+"""
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join([str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")])
+        child = subprocess.run(
+            [sys.executable, "-c", code, self.app.cfg.data_dir],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(child.returncode, 0, child.stderr)
 
     def test_another_key_keeps_the_token_it_had(self) -> None:
         _gateway_running(self.app.cfg.data_dir)

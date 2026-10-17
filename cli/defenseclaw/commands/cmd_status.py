@@ -1707,13 +1707,15 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
         # the JSON projection in agreement, including manual hook connectors.
-        if name in health_map and health_map[name].get("state"):
+        if row.get("enabled") and name in health_map and health_map[name].get("state"):
             row["state"] = health_map[name]["state"]
+        elif not row.get("enabled"):
+            row["state"] = "disabled"
         if row.get("enabled") and _agent_missing(cfg, name):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
-    if "opencode" in rows and "runtime_detail" not in rows["opencode"]:
+    if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
             gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -1721,7 +1723,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if "omnigent" in rows and (omnigent_health := health_map.get("omnigent")) is not None:
+    if (
+        "omnigent" in rows
+        and rows["omnigent"].get("enabled")
+        and (omnigent_health := health_map.get("omnigent")) is not None
+    ):
         runtime_state, readiness_detail = _omnigent_effective_runtime_state(
             cfg,
             str(omnigent_health.get("state") or ""),

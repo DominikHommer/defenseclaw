@@ -24,8 +24,8 @@ handling, local persistence, route-specific redaction, and destination fanout.
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import secrets
 import stat
 from collections.abc import Mapping
@@ -256,7 +256,7 @@ def _running_gateway_token(data_dir: str) -> str:
     path = os.path.join(data_dir, "gateway_running_token.json")
     try:
         info = os.stat(path, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
             return ""
         if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
             return ""

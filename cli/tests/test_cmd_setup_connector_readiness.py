@@ -699,6 +699,32 @@ def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tm
     assert restarted == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+@pytest.mark.parametrize(
+    "restart_kwargs",
+    [{"teardown": True}, {"title": cmd_setup._ROLLBACK_RESTART_TITLE}],
+)
+def test_opencode_teardown_or_rollback_skips_setup_folder_preflight(
+    monkeypatch, tmp_path: Path, restart_kwargs: dict
+) -> None:
+    from defenseclaw import connector_paths
+
+    folder = tmp_path / ".config" / "opencode" / "plugins"
+    folder.mkdir(parents=True)
+    folder.chmod(0o775)
+    plugin = folder / "defenseclaw.js"
+    monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
+
+    def reached_restart(*_args, **_kwargs):
+        raise RuntimeError("restart reached")
+
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", reached_restart)
+    with pytest.raises(RuntimeError, match="restart reached"):
+        cmd_setup._restart_services(
+            str(tmp_path), connector="opencode", wait_for_connector_ready=True, **restart_kwargs
+        )
+
+
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(
     monkeypatch,
     tmp_path: Path,

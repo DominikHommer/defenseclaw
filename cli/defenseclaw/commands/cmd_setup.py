@@ -6697,7 +6697,7 @@ def setup_guardrail(
         proxy_active = _guarded_proxy_connector(gc)
         if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
-        _refuse_guardrail_for_connector_not_set_up(gc, explicit_connector)
+        _refuse_guardrail_for_connector_not_set_up(app.cfg, explicit_connector)
     elif (
         non_interactive
         and not app.cfg.has_connector_configured()
@@ -12918,7 +12918,7 @@ def _guarded_proxy_connector(gc) -> str:
     return single if single in _PROXY_BACKED_CONNECTORS else ""
 
 
-def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
+def _refuse_guardrail_for_connector_not_set_up(cfg, connector: str) -> None:
     """Fail when ``setup guardrail --connector X`` names a connector the roster lacks.
 
     GAP-0371: on an install whose ``guardrail.connectors`` roster held only
@@ -12930,11 +12930,22 @@ def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
     install without a roster still has its singular configured connector;
     proxy connectors keep their own rules.
     """
-    roster = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    gc = cfg.guardrail
+    roster = {normalize_connector(name) for name in (gc.connectors or {}) if name.strip()}
+    if not roster and cfg.has_connector_configured():
+        from defenseclaw import config as cfg_mod
+
+        # An unsaved default config mentions OpenClaw only through its loader
+        # default; there is no registered connector to switch away from yet.
+        default_openclaw = (
+            not gc.connector.strip()
+            and normalize_connector(cfg.claw.mode) == "openclaw"
+            and not cfg_mod.config_path().exists()
+        )
+        if not default_openclaw:
+            roster.add(cfg.active_connector())
     if not roster:
-        singular = normalize_connector((getattr(gc, "connector", "") or "").strip())
-        if singular and singular != "none":
-            roster.add(singular)
+        return
     if connector in roster or connector in _PROXY_BACKED_CONNECTORS:
         return
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
@@ -14465,7 +14476,7 @@ def _restart_services(
     )
 
     must_converge = required_connectors or frozenset({normalize_connector(connector)})
-    if "opencode" in must_converge:
+    if wait_for_connector_ready and not teardown and title != _ROLLBACK_RESTART_TITLE and "opencode" in must_converge:
         from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
 
         if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):

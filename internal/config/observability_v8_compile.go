@@ -1754,6 +1754,16 @@ func compileObservabilityV8Warnings(
 				Summary: "destination transport uses an explicitly unsafe TLS mode",
 			})
 		}
+		if endpoint, err := url.Parse(destination.Transport.Endpoint); err == nil && endpoint.Scheme == "http" {
+			host := endpoint.Hostname()
+			ip := net.ParseIP(host)
+			if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+				warnings = append(warnings, ObservabilityV8Warning{
+					Code: "plaintext_transport", Path: base + ".endpoint",
+					Summary: "destination sends telemetry over plaintext HTTP to a non-loopback endpoint",
+				})
+			}
+		}
 		if destination.Transport.NetworkSafety != nil && destination.Transport.NetworkSafety.AllowPrivateNetworks {
 			warnings = append(warnings, ObservabilityV8Warning{
 				Code: "private_export_network_allowed", Path: base + ".network_safety.allow_private_networks",

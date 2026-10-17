@@ -684,10 +684,13 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
         # The top-level `config` command skips the normal config load, so
         # app.cfg is normally None. Capture the old token before the writer
         # changes token_env; loading only afterward selects the new token.
-        before_cfg = app.cfg if app.cfg is not None else config_module.load()
-        keep_running_gateway_token(
-            getattr(app, "logger", None), before_cfg.data_dir, before_cfg.gateway.resolved_token(), ""
-        )
+        try:
+            before_cfg = app.cfg if app.cfg is not None else config_module.load()
+            keep_running_gateway_token(
+                getattr(app, "logger", None), before_cfg.data_dir, before_cfg.gateway.resolved_token(), ""
+            )
+        except (yaml.YAMLError, V8ConfigError, config_module.ConfigVersionError, ValueError, OSError) as exc:
+            raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
     try:
         result = config_writer.apply(
             changes,

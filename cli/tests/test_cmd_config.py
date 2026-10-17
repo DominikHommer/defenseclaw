@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import click
+import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -45,6 +47,18 @@ def test_config_set_hilt_false_names_connector_override(monkeypatch) -> None:
     )
     assert "HILT remains on for codex" in notes[0]
     assert "guardrail hilt off" in notes[0]
+
+
+def test_token_env_change_reports_broken_config_before_writer(monkeypatch) -> None:
+    app = SimpleNamespace(cfg=None, logger=None)
+    change = SimpleNamespace(path="gateway.token_env", value="NEW_TOKEN_NAME")
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: (_ for _ in ()).throw(
+        cmd_config.config_module.ConfigVersionError("config schema is invalid")
+    ))
+    with patch("defenseclaw.config_writer.apply") as writer:
+        with pytest.raises(click.ClickException, match="config.yaml was not changed: config schema is invalid"):
+            cmd_config._write_config_change(app, [change], None, "set")
+    writer.assert_not_called()
 
 
 class _IsolatedHome:

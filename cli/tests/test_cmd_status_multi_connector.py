@@ -74,6 +74,15 @@ def test_json_roster_carries_healthy_manual_hook_state():
     }
 
 
+def test_json_roster_preserves_disabled_manual_state_even_with_stale_health():
+    cfg = _cfg(["codex"], disabled={"codex"})
+    health = {"connectors": [{"name": "codex", "state": "running", "source": "manual"}]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert rows[0]["enabled"] is False
+    assert rows[0]["state"] == "disabled"
+
+
 def _render(cfg) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

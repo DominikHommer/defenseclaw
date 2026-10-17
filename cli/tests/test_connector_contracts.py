@@ -904,7 +904,9 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_peer_observe_mode_warns_and_stages_unsupported_installed_version(self) -> None:
+    def test_peer_observe_mode_refuses_installed_version_without_app_server_stdio(self) -> None:
+        # Both modes need the app-server --stdio command, first present in
+        # Codex 0.136.0. A staged registration would claim unsupported hooks.
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
             return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
@@ -916,10 +918,10 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
                 restart=False,
             )
 
-        self.assertTrue(ok)
-        self.assertEqual(self.save_calls, 1)
-        self.assertEqual(self.app.cfg.claw.mode, "codex")
-        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertFalse(ok)
+        self.assertEqual(self.save_calls, 0)
+        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
+        self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     def test_opencode_11819_is_exactly_supported(self) -> None:
         resolved = resolve_connector_contract("opencode", "opencode 1.18.19")
