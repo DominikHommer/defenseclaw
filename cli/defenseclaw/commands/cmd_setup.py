@@ -29,6 +29,7 @@ import os
 import queue
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import stat
@@ -5654,6 +5655,14 @@ def _check_connector_version_supported_for_setup(
         raw_version = signal.version or ""
         installed = bool(signal.installed)
         probe_error = signal.error or ""
+
+    if connector == "codex" and installed:
+        from defenseclaw.agent_selection import codex_setup_version_problem
+
+        if problem := codex_setup_version_problem(raw_version):
+            if emit:
+                ux.err(problem)
+            return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
     # Some CLIs end their version banner with a period ("... 1.0.90.").
@@ -12918,11 +12927,15 @@ def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
     Codex hook registration while status still listed Codex. ``setup
     <connector>`` adds a connector to the roster (or replaces it with
     ``--replace``); this command tunes one that is on it. A single-connector
-    install without a roster keeps its switch, and proxy connectors keep their
-    own rules.
+    install without a roster still has its singular configured connector;
+    proxy connectors keep their own rules.
     """
     roster = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
-    if not roster or connector in roster or connector in _PROXY_BACKED_CONNECTORS:
+    if not roster:
+        singular = normalize_connector((getattr(gc, "connector", "") or "").strip())
+        if singular and singular != "none":
+            roster.add(singular)
+    if connector in roster or connector in _PROXY_BACKED_CONNECTORS:
         return
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     slug = "claude-code" if connector == "claudecode" else connector
@@ -14389,6 +14402,7 @@ def _restart_services(
     title: str = "Restarting services",
     summary_exclude: frozenset[str] = frozenset(),
     teardown: bool = False,
+    required_connectors: frozenset[str] = frozenset(),
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -14450,6 +14464,16 @@ def _restart_services(
         _gateway_runtime_generation_before_restart(data_dir) if wait_for_connector_ready and hook_targets else None
     )
 
+    must_converge = required_connectors or frozenset({normalize_connector(connector)})
+    if "opencode" in must_converge:
+        from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
+
+        if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
+            raise click.ClickException(
+                f"OpenCode plugin folder {loose} is group/other writable; "
+                f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
+            )
+
     gateway_restarted = (
         _restart_defense_gateway(
             data_dir,
@@ -14479,8 +14503,8 @@ def _restart_services(
         # peers may be skipped.
         unverified_peers: frozenset[str] = frozenset()
         if len(wait_targets) > 1 and connector:
-            readiness_kwargs["required"] = {normalize_connector(connector)}
-            unverified_peers = _unverified_setup_peers() - {normalize_connector(connector)}
+            readiness_kwargs["required"] = set(must_converge)
+            unverified_peers = _unverified_setup_peers() - must_converge
             if unverified_peers:
                 readiness_kwargs["unverified"] = unverified_peers
         readiness = _wait_for_connector_runtime(
@@ -16420,6 +16444,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                 connectors=batch_targets,
                 wait_for_connector_ready=True,
                 start_if_stopped=True,
+                required_connectors=frozenset(focus),
             )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(

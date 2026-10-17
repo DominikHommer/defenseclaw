@@ -227,6 +227,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             connectors=["codex", "cursor"],
             wait_for_connector_ready=True,
             start_if_stopped=True,
+            required_connectors=frozenset({"codex", "cursor"}),
         )
 
     def test_bare_batch_cannot_report_success_when_readiness_gate_fails(self):
@@ -1003,6 +1004,23 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         restart.assert_not_called()
         self.assertEqual(sorted(self.app.cfg.guardrail.connectors), ["codex"])
         self.assertNotEqual(self.app.cfg.guardrail.connector, "claudecode")
+        self.assertFalse(os.path.exists(self.cfg_path))
+
+    def test_setup_guardrail_refuses_switch_from_single_codex_without_roster(self):
+        self._seed_single("codex")
+        self.app.cfg.guardrail.enabled = True
+        with _setup_patches() as restart:
+            result = CliRunner().invoke(
+                setup_group,
+                ["guardrail", "--non-interactive", "--connector", "claudecode", "--mode", "action"],
+                obj=self.app,
+            )
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No changes made", result.output)
+        self.assertIn("set up: codex", result.output)
+        restart.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
+        self.assertEqual(self.app.cfg.guardrail.connectors, {})
         self.assertFalse(os.path.exists(self.cfg_path))
 
     # GAP-0371 reopen: an earlier build left guardrail.connector at claudecode

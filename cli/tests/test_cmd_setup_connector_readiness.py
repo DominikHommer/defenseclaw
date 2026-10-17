@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -651,6 +652,44 @@ def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp
 
     assert any(hint.startswith("3 hook connectors (claudecode, codex, opencode):") for hint in hints), hints
     assert not any("hermes" in hint for hint in hints), hints
+
+
+def test_batch_readiness_requires_every_selected_connector(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["codex", "cursor"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+
+    def wait(*_args, **kwargs):
+        captured.update(kwargs)
+        return cmd_setup._ConnectorRuntimeReadiness(True)
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_connector_runtime", wait)
+    cmd_setup._restart_services(
+        str(tmp_path), connector="codex", connectors=["codex", "cursor"],
+        wait_for_connector_ready=True, required_connectors=frozenset({"codex", "cursor"}),
+    )
+    assert captured["required"] == {"codex", "cursor"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode check")
+def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tmp_path: Path) -> None:
+    from defenseclaw import connector_paths
+
+    folder = tmp_path / ".config" / "opencode" / "plugins"
+    folder.mkdir(parents=True)
+    folder.chmod(0o775)
+    plugin = folder / "defenseclaw.js"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
+    restarted = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: restarted.append(True))
+    with pytest.raises(click.ClickException) as caught:
+        cmd_setup._restart_services(str(tmp_path), connector="opencode", wait_for_connector_ready=True)
+    assert str(folder) in str(caught.value)
+    assert "chmod go-w" in str(caught.value)
+    assert restarted == []
 
 
 def test_restart_services_labels_hermes_pending_reload_without_live_claim(

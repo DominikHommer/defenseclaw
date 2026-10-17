@@ -38,7 +38,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from defenseclaw import windows_acl
-from defenseclaw.connector_contracts import STATUS_KNOWN, normalize_agent_version, resolve_connector_contract
+from defenseclaw.connector_contracts import (
+    STATUS_KNOWN,
+    compare_agent_versions,
+    normalize_agent_version,
+    resolve_connector_contract,
+)
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -49,6 +54,18 @@ SELECTION_FILENAME = "agent_selection.json"
 UNVERIFIED_FILENAME = "agent_selection_unverified.json"
 SELECTION_SCHEMA_VERSION = 1
 SELECTION_LIFETIME = timedelta(minutes=15)
+CODEX_APP_SERVER_STDIO_MIN_VERSION = "0.136.0"
+
+
+def codex_setup_version_problem(raw_version: str) -> str:
+    """Name Codex versions lacking the app-server flag used by setup."""
+    normalized = normalize_agent_version(raw_version)
+    if normalized and compare_agent_versions(normalized, CODEX_APP_SERVER_STDIO_MIN_VERSION) < 0:
+        return (
+            f"Codex {normalized} cannot run the app-server command this connector requires; "
+            f"update to Codex {CODEX_APP_SERVER_STDIO_MIN_VERSION} or newer before setup"
+        )
+    return ""
 _CODEX_WINDOWS_PLATFORM_VARIANTS = (
     ("codex-win32-x64", "x86_64-pc-windows-msvc"),
     ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
@@ -315,6 +332,9 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         normalized = normalize_agent_version(raw_version)
         if not normalized:
             rejection = f"could not normalize agent version {raw_version!r}"
+            continue
+        if connector == "codex" and (problem := codex_setup_version_problem(raw_version)):
+            rejection = problem
             continue
         if connector == "amp" or protected_windows_opencode or protected_darwin_openhands:
             compatibility = resolve_connector_contract(connector, raw_version)

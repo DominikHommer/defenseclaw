@@ -108,7 +108,9 @@ it knows otherwise:
 The floors and bounds come from upstream release notes, current vendor docs,
 or source review:
 
-- **Codex.** `0.124.0` is the stable-hooks release.
+- **Codex.** The hook contract begins at `0.124.0`, but per-user setup requires
+  Codex `0.136.0` or newer for its app-server command. Setup checks this before
+  changing the connector registration.
 - **Claude Code.** v1 covers `>=2.1.154, <2.1.219`; v2 begins at `2.1.219`
   and adds the observation-only `DirectoryAdded` event.
 - **Copilot CLI.** v1 starts at `1.0.18`, v2 at `1.0.76`.
