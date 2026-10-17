@@ -67,8 +67,8 @@ func TestEnforceCodexUserHookPolicy(t *testing.T) {
 		t.Fatalf("blocked user-hook policy error = %v", err)
 	}
 	if runtime.GOOS == "windows" {
-		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err != nil {
-			t.Fatalf("managed-only policy rejected the managed enterprise registration: %v", err)
+		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err == nil {
+			t.Fatal("direct managed Setup accepted a policy that ignores config.toml hooks")
 		}
 	}
 

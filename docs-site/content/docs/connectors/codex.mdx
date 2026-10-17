@@ -65,6 +65,10 @@ official `install.ps1` at its default location, or WinGet. A Codex install
 under a relocated `CODEX_HOME`, or another folder that discovery finds but
 cannot enroll, is reported as `agent_unprotected`; use one of the supported
 install locations named in [Enrollment](/docs/enterprise/enrollment#where-agents-are-found).
+Managed enrollment publishes hooks in the administrator-owned
+`%ProgramData%\OpenAI\Codex\requirements.toml` and maintains a protected
+user runtime. The per-user `managed_config.toml` is only read for cleanup of
+older DefenseClaw registrations.
 
   </Tab>
 </Tabs>

@@ -92,10 +92,9 @@ var codexPolicyWarningOutput io.Writer = os.Stderr
 const codexPolicyNoAnswerHint = "if a Codex session is open (for example one that ran out of disk space), quit it, then run: defenseclaw-gateway restart"
 
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
-// will ignore the hook source DefenseClaw is about to write. Managed enterprise
-// Windows setup writes managed_config.toml, which is itself a Codex-managed
-// source and remains effective under allow_managed_hooks_only. Per-user installs
-// use config.toml and must reject that policy.
+// will ignore the hook source DefenseClaw is about to write. Connector Setup
+// uses config.toml and must reject a managed-only policy. Managed Windows
+// enrollment publishes machine requirements through the enterprise installer.
 func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 	policy, err := codexPolicyInspector(ctx, opts)
 	if err != nil {
@@ -114,7 +113,7 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 }
 
 func refuseCodexManagedHooksOnly(opts SetupOpts, policy codexEffectivePolicy) error {
-	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && !codexUsesManagedHookLayer(opts) {
+	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly {
 		return fmt.Errorf(
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,
