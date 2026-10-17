@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -41,6 +42,34 @@ func TestComparisonKeyFoldsSpellingsOfOneFolder(t *testing.T) {
 	}
 	if ComparisonKey(dir+"2") == want {
 		t.Fatal("another folder shares the key")
+	}
+}
+
+// A long-name lookup on storage that never answers must not hold
+// ComparisonKey: the WinGet scan computes its slot key before its own
+// deadline starts, and the guardian keys its pending restores (B-21 review).
+func TestComparisonKeyDoesNotWaitForAStalledLongNameLookup(t *testing.T) {
+	oldLookups, oldLookup := longNames, getLongPathName
+	release := make(chan struct{})
+	longNames = newLongNameLookups()
+	getLongPathName = func(string) (string, bool) {
+		<-release
+		return `C:\Users\Stalled Profile\AppData\Local\Microsoft\WinGet\Packages`, true
+	}
+	t.Cleanup(func() {
+		close(release)
+		longNames, getLongPathName = oldLookups, oldLookup
+	})
+	path := `C:\Users\STALLE~1\AppData\Local\Microsoft\WinGet\Packages`
+	want := strings.ToLower(path)
+	for i := 0; i < 2; i++ {
+		started := time.Now()
+		if got := ComparisonKey(path); got != want {
+			t.Fatalf("ComparisonKey = %q, want %q", got, want)
+		}
+		if waited := time.Since(started); waited > longNameLookupBudget+2*time.Second {
+			t.Fatalf("ComparisonKey waited %v for a stalled lookup", waited)
+		}
 	}
 }
 

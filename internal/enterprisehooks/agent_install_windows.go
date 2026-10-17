@@ -339,6 +339,9 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 	if budget <= 0 || maxEntries <= 0 {
 		return "", false, windowsWinGetScanTooManyEntries
 	}
+	// The deadline starts before the key: the key's 8.3 lookup touches the
+	// same storage, so its (bounded) wait counts against the scan budget.
+	deadline := time.Now().Add(budget)
 	key := windowsWinGetPackageScanKey(packages)
 	windowsWinGetPackageScans.Lock()
 	if windowsWinGetPackageScans.inFlight[key] {
@@ -347,7 +350,6 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 	}
 	windowsWinGetPackageScans.inFlight[key] = true
 	windowsWinGetPackageScans.Unlock()
-	deadline := time.Now().Add(budget)
 	readNames := windowsWinGetReadPackageNames
 	type scanResult struct {
 		match      string
@@ -366,7 +368,7 @@ func findWindowsWinGetPackageFolder(packages string, packageIDs []string) (strin
 		}()
 		results <- scanResult{match, incomplete}
 	}()
-	timer := time.NewTimer(budget)
+	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
 	case found := <-results:

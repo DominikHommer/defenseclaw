@@ -18,7 +18,8 @@ import (
 // name, and the result is cleaned and lower-cased. It is a key, never a
 // path to open. Keys that differed by spelling let a second WinGet scan of
 // one folder start while the first was stuck, and kept a guardian's pending
-// restores apart (GAP-0626).
+// restores apart (GAP-0626). The 8.3 expansion waits a bounded time; a
+// spelling whose lookup did not answer keeps its own spelling as its key.
 func ComparisonKey(path string) string {
 	path = filepath.FromSlash(strings.TrimSpace(path))
 	if path == "" {
@@ -36,11 +37,25 @@ func ComparisonKey(path string) string {
 	return strings.ToLower(filepath.Clean(path))
 }
 
-// longPathName expands the 8.3 short-name components of an existing path.
+// longNames bounds the long-name lookups of ComparisonKey; tests replace it
+// and getLongPathName to model storage that does not answer.
+var (
+	longNames       = newLongNameLookups()
+	getLongPathName = lookupLongPathName
+)
+
+// longPathName expands the 8.3 short-name components of an existing path,
+// waiting at most longNameLookupBudget for the file system (B-21 review).
 func longPathName(path string) (string, bool) {
 	if !strings.Contains(path, "~") {
 		return "", false
 	}
+	return longNames.expand(path, longNameLookupBudget, getLongPathName)
+}
+
+// lookupLongPathName asks the file system for the long name of path; it can
+// block for as long as the storage holding path does not answer.
+func lookupLongPathName(path string) (string, bool) {
 	short, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return "", false

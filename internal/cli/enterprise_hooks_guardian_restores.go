@@ -125,12 +125,12 @@ func enterpriseHookGuardianRestoreRowKey(row enterpriseHookReconcileRow) string 
 	return enterpriseHookGuardianRestoreEntryKey(entry)
 }
 
-// The caller holds enterpriseHookGuardianRestorePending while changing its map.
-func mergeEnterpriseHookGuardianRestorePending(path string, restored []enterpriseHookGuardianRestore) {
+// The caller holds enterpriseHookGuardianRestorePending while changing its
+// map; pathKey is enterpriseHookGuardianRestorePendingKey of the record path.
+func mergeEnterpriseHookGuardianRestorePending(pathKey string, restored []enterpriseHookGuardianRestore) {
 	if len(restored) == 0 {
 		return
 	}
-	pathKey := enterpriseHookGuardianRestorePendingKey(path)
 	pending := enterpriseHookGuardianRestorePending.byPath[pathKey]
 	if pending == nil {
 		pending = make(map[string]enterpriseHookGuardianRestore, len(restored))
@@ -192,6 +192,9 @@ func recordEnterpriseHookGuardianRestores(
 			normalized = append(normalized, entry)
 		}
 	}
+	// The key may touch the file system (an 8.3 name on Windows), so it is
+	// computed before the lock that every pass's recorder waits on.
+	pathKey := enterpriseHookGuardianRestorePendingKey(path)
 	// Hold the lock through the read and write, so another pass cannot add an
 	// entry between this pass's pending snapshot and its successful clear.
 	enterpriseHookGuardianRestorePending.Lock()
@@ -205,7 +208,6 @@ func recordEnterpriseHookGuardianRestores(
 			unresolved[key] = true
 		}
 	}
-	pathKey := enterpriseHookGuardianRestorePendingKey(path)
 	entries := map[string]enterpriseHookGuardianRestore{}
 	changed := false
 	var invalidErr error
@@ -241,7 +243,7 @@ func recordEnterpriseHookGuardianRestores(
 			}
 		}
 	} else if !os.IsNotExist(err) {
-		mergeEnterpriseHookGuardianRestorePending(path, normalized)
+		mergeEnterpriseHookGuardianRestorePending(pathKey, normalized)
 		fmt.Fprintf(stderr, "[hook-guardian] warn: could not read the restore record in %s: %v; record left unchanged, this pass's restored targets are kept in memory and recorded once it can be read (status reports restart status unknown until then)\n", path, err)
 		return err
 	}
@@ -290,7 +292,7 @@ func recordEnterpriseHookGuardianRestores(
 		err = writeEnterpriseHookProtectedFile(path, data)
 	}
 	if err != nil {
-		mergeEnterpriseHookGuardianRestorePending(path, normalized)
+		mergeEnterpriseHookGuardianRestorePending(pathKey, normalized)
 		fmt.Fprintf(stderr, "[hook-guardian] warn: could not record the restored targets in %s: %v\n", path, err)
 		return err
 	}
