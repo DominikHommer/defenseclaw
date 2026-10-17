@@ -151,7 +151,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
         section = text.split("### `sandbox kernel-feed install`", 1)[1].split(
             "### `sandbox kernel-feed status`", 1
         )[0]
-        self.assertIn("Current install output also says", section)
+        self.assertIn("An install or update restarts the feed:", section)
         self.assertIn("own hook calls in full until you stop and start it", section)
 
 
