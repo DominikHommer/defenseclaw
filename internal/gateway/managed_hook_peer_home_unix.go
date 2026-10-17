@@ -16,14 +16,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -46,27 +43,19 @@ const managedHookPeerLookupRetry = 15 * time.Second
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
 
 // managedHookPeerAccountsStamp identifies the state of the local account
-// database: useradd, userdel and usermod replace /etc/passwd, and macOS
-// keeps a local account's record in the dslocal users directory. When it
-// changes, every cached account is looked up again at once, so a uid that
-// was removed and handed to a new account inside managedHookPeerHomeTTL
-// never gets the removed account's name, home, directory facts or agent
-// identity (GAP-0947). "" when it cannot be read: the TTL alone applies.
-var managedHookPeerAccountsStamp = func() string {
-	path := "/etc/passwd"
-	if runtime.GOOS == "darwin" {
-		path = "/var/db/dslocal/nodes/Default/users"
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return ""
-	}
-	stamp := strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10)
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		stamp += "/" + strconv.FormatUint(uint64(st.Ino), 10)
-	}
-	return stamp
-}
+// database (managedHookPeerAccountsSource: the account database file, or on
+// macOS, where the service account cannot read it, the listed local
+// accounts). When it changes, every cached account is looked up again at
+// once, so a uid that was removed and handed to a new account inside
+// managedHookPeerHomeTTL never gets the removed account's name, home,
+// directory facts or agent identity (GAP-0947, GAP-0669). "" when no source
+// can be read: the TTL alone applies.
+var managedHookPeerAccountsStamp = func() string { return managedHookPeerAccounts.get() }
+
+// managedHookPeerAccountsRefresh brings the stamp up to date before an
+// administrator view (explain) compares it, as a listed stamp a request
+// reads can be up to managedHookPeerListedStampInterval old.
+var managedHookPeerAccountsRefresh = func() { managedHookPeerAccounts.refresh() }
 
 func managedHookPeerStamp() string {
 	if ManagedEnterpriseActive() {
@@ -481,6 +470,9 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 		holders[uid] = holder
 	}
 	c.mu.Unlock()
+	if !ManagedEnterpriseActive() {
+		managedHookPeerAccountsRefresh()
+	}
 	stamp := managedHookPeerStamp()
 	for uid, holder := range holders {
 		facts, _, served := c.directoryCache().peek(strconv.Itoa(uid))
