@@ -126,6 +126,7 @@ def test_all_binaries_finishes_when_splunk_secret_is_no_longer_set(per_user_inst
     data_dir = per_user_install.data_dir
     (data_dir / "config.yaml").write_text(
         "config_version: 8\n"
+        "claw: {mode: ''}\n"
         "observability:\n"
         "  destinations:\n"
         "    - name: splunk\n"
