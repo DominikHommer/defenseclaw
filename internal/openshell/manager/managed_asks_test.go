@@ -229,6 +229,7 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
 	blocked := map[string]string{"claudebox": "pypi.org", "codexbox": "api.github.com"}
 	retention := map[string]string{"claudebox": "2h", "codexbox": "3h"}
+	proposals := map[string]bool{"claudebox": true, "codexbox": false}
 	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
 		profile, ok := floors[name]
 		if !ok {
@@ -238,6 +239,8 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		cfg.OpenShell.Admin.MinProfile = profile
 		cfg.OpenShell.Admin.EgressBlock = []string{blocked[name]}
 		cfg.OpenShell.Admin.DeleteStoppedAfter = retention[name]
+		allowProposals := proposals[name]
+		cfg.OpenShell.Approvals.AgentProposals = &allowProposals
 		return &cfg
 	}
 	for name, want := range floors {
@@ -266,6 +269,9 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 		if got := org.DecideEgress(blocked[other], 443); got.Rule == packs.RuleAdminBlock {
 			t.Fatalf("%s fallback inherited %s's block: %+v", name, other, got)
 		}
+		if got := e.m.triagePolicy(b, org).AgentProposals; got != proposals[name] {
+			t.Fatalf("%s triage used another sandbox's proposal setting: %t", name, got)
+		}
 	}
 	auth.noFloor.Store(true)
 	for name, want := range map[string]time.Duration{"claudebox": 2 * time.Hour, "codexbox": 3 * time.Hour} {
@@ -286,6 +292,9 @@ func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 	}
 	if got := e.m.retention(b); got != 0 {
 		t.Fatalf("unconfirmed sandbox inherited another floor's retention: %s", got)
+	}
+	if got := e.m.triagePolicy(b, nil).Effective; got != nil {
+		t.Fatal("unconfirmed sandbox's triage inherited a policy")
 	}
 }
 
