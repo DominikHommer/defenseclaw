@@ -260,6 +260,13 @@ func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+	var rootRefusal string
+	if err := database.QueryRow(`SELECT details FROM audit_events WHERE action = 'action' AND target = 'enterprise linux ensure' ORDER BY rowid DESC LIMIT 1`).Scan(&rootRefusal); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rootRefusal, "reason=not_root") || !strings.Contains(rootRefusal, "actor=uid:508") {
+		t.Fatalf("not_root row lost verified attribution: %q", rootRefusal)
+	}
 	var count int
 	var details string
 	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(details), "") FROM audit_events WHERE action = "skill-block" AND target = "p0-test-skill"`).Scan(&count, &details); err != nil {
