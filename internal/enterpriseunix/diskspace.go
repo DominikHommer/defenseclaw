@@ -13,7 +13,12 @@
 package enterpriseunix
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -60,5 +65,123 @@ func (l *lifecycle) warnLowDiskSpace() {
 		}
 		l.result.AddWarning(codeDiskSpaceLow, fmt.Sprintf("the filesystem holding %s has %.1f MiB free (%.1f%%): enforcement continues, but the audit database and logs stop recording when it fills; free space on it",
 			dir, float64(avail)/(1<<20), float64(avail)*100/float64(total)))
+	}
+}
+
+// codeDiskFull names the filesystem a failed transaction ran out of space
+// on. It follows the error of the step that failed, whose code callers
+// already match, so the result says the disk is the cause.
+const codeDiskFull = "disk_full"
+
+// diskFullBytes is the free space below which a failed transaction names a
+// filesystem it writes as the likely cause. The services write their state
+// as they start, and on a filesystem this full they fail before verify sees
+// them active: ensure then reported only that the services were not active
+// (GAP-0662).
+const diskFullBytes = 16 << 20
+
+// transactionDirs are the directories a lifecycle transaction and the
+// services it starts write.
+func (l *lifecycle) transactionDirs() []string {
+	layout := l.env.Layout
+	return []string{
+		layout.LifecycleDir, layout.DataDir, layout.LogDir, layout.GuardianAuthDir,
+		layout.ConfigDir, layout.InstallRoot, layout.HookSocketDir, layout.SensorSocketDir,
+	}
+}
+
+// noSpace reports an error that a full filesystem or an exhausted quota
+// caused, also one wrapped as text only.
+func noSpace(err error) bool {
+	return err != nil && (errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) ||
+		strings.Contains(err.Error(), syscall.ENOSPC.Error()))
+}
+
+// failedWritePath is the path the failed operation in err named, or "".
+func failedWritePath(err error) string {
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.New
+	}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Path
+	}
+	return ""
+}
+
+// diskSpaceOf is DiskSpace of the nearest existing directory holding path
+// (a file the failed write could not create does not exist).
+func (l *lifecycle) diskSpaceOf(path string) (avail, total, device uint64, ok bool) {
+	for dir := path; ; dir = filepath.Dir(dir) {
+		if avail, total, device, err := l.env.DiskSpace(dir); err == nil && total > 0 {
+			return avail, total, device, true
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return 0, 0, 0, false
+		}
+	}
+}
+
+// canonicalPath is path without the test root (Env.P).
+func (l *lifecycle) canonicalPath(path string) string {
+	if root := l.env.Root; root != "" {
+		if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return string(filepath.Separator) + rel
+		}
+	}
+	return path
+}
+
+// reportDiskFull adds codeDiskFull to a failed transaction: the path a write
+// failed on for lack of space, and each filesystem the transaction writes
+// with less than diskFullBytes free. A disk filled during the run made the
+// services stop before verify, and ensure reported only verify_failed with
+// the services not active, naming neither the condition nor the path
+// (GAP-0662).
+func (l *lifecycle) reportDiskFull(cause error) {
+	var problems []string
+	seen := map[uint64]bool{}
+	if noSpace(cause) {
+		if path := failedWritePath(cause); path != "" {
+			problem := "no space left on the filesystem holding " + l.canonicalPath(path)
+			if avail, total, device, ok := l.diskSpaceOf(path); ok {
+				seen[device] = true
+				problem += fmt.Sprintf(" (%s free of %s)", formatDiskBytes(avail), formatDiskBytes(total))
+			}
+			problems = append(problems, problem)
+		} else {
+			problems = append(problems, "a write failed with no space left on device")
+		}
+	}
+	for _, dir := range l.transactionDirs() {
+		if dir == "" {
+			continue
+		}
+		avail, total, device, ok := l.diskSpaceOf(l.env.P(dir))
+		if !ok || seen[device] || avail >= diskFullBytes {
+			continue
+		}
+		seen[device] = true
+		problems = append(problems, fmt.Sprintf("the filesystem holding %s has %s free of %s", dir, formatDiskBytes(avail), formatDiskBytes(total)))
+	}
+	if len(problems) == 0 {
+		return
+	}
+	l.result.AddError(codeDiskFull, strings.Join(problems, "; ")+
+		": the transaction and the services it starts cannot write their state on a full disk; free space on it and run "+
+		l.opts.Action+" again")
+}
+
+// formatDiskBytes prints a free-space figure in KiB below 1 MiB, in MiB
+// below 1 GiB and in GiB above.
+func formatDiskBytes(n uint64) string {
+	switch {
+	case n < 1<<20:
+		return fmt.Sprintf("%.0f KiB", float64(n)/(1<<10))
+	case n < 1<<30:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	default:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 	}
 }
