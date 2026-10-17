@@ -20,6 +20,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,12 +71,16 @@ func TestPlanSandboxOpenShellExecDefaultNamespaceBridge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	restoreHost, restoreHome, restoreFile, restoreProbe, restoreSettings := sandboxDaemonHost, openShellExecHome,
-		openShellExecTrustedFile, openShellExecVMProbe, openShellExecSettings
+	restoreHost, restoreHome, restoreFile, restoreProbe, restoreSettings, restoreIDs := sandboxDaemonHost, openShellExecHome,
+		openShellExecTrustedFile, openShellExecVMProbe, openShellExecSettings, openShellExecDefaultNamespaceSandboxIDs
 	t.Cleanup(func() {
-		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecVMProbe, openShellExecSettings =
-			restoreHost, restoreHome, restoreFile, restoreProbe, restoreSettings
+		sandboxDaemonHost, openShellExecHome, openShellExecTrustedFile, openShellExecVMProbe, openShellExecSettings, openShellExecDefaultNamespaceSandboxIDs =
+			restoreHost, restoreHome, restoreFile, restoreProbe, restoreSettings, restoreIDs
 	})
+	// The sandboxes Docker has in the default namespace.
+	var dockerErr error
+	inDocker := map[string]bool{"fcs-m-eng-101": true, "fcs-m-ctr-101a": true}
+	openShellExecDefaultNamespaceSandboxIDs = func() (map[string]bool, error) { return inDocker, dockerErr }
 	sandboxDaemonHost = func(string) (managed.StandaloneLayout, *managed.RuntimeDescriptor, error) {
 		return managed.StandaloneLayout{ConfigDir: filepath.Dir(dir)}, &managed.RuntimeDescriptor{}, nil
 	}
@@ -124,6 +129,21 @@ func TestPlanSandboxOpenShellExecDefaultNamespaceBridge(t *testing.T) {
 	}
 	if got := configOf("linux"); got != primary {
 		t.Fatalf("an account with no sandbox left in the default namespace: %s", got)
+	}
+	// A folder whose sandbox Docker no longer has (its containers were
+	// removed outside OpenShell, or by a purge) does not keep the account on
+	// the bridge (GAP-0677), unless Docker cannot say.
+	keep(openshell.DefaultDockerNamespace, "2ca1ed06-stale")
+	if got := configOf("linux"); got != primary {
+		t.Fatalf("a stray default-namespace folder kept the bridge: %s", got)
+	}
+	dockerErr = errors.New("permission denied on the docker socket")
+	if got := configOf("linux"); got != bridge {
+		t.Fatalf("Docker did not answer: %s, want the bridge (kept sandboxes are not stranded)", got)
+	}
+	dockerErr = nil
+	if err := os.Remove(filepath.Join(tokens(openshell.DefaultDockerNamespace), "2ca1ed06-stale")); err != nil {
+		t.Fatal(err)
 	}
 
 	// The MicroVM driver with the docker fallback: only a docker gateway

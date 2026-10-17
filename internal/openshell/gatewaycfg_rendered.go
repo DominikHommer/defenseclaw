@@ -116,8 +116,8 @@ const (
 // dropped them and their unpulled work was lost. The lifecycle renders the
 // file on a host upgraded from a 1.0.1 docker record, and the exec shim
 // starts an account's docker gateway on it while that account still keeps a
-// sandbox in the default namespace (DockerNamespaceInUse) and none in the
-// managed one; an account without one, or once its last one is deleted,
+// sandbox in the default namespace (DockerNamespaceInUse, and Docker still
+// has it) and none in the managed one; an account without one, or once its last one is deleted,
 // moves to ManagedDockerNamespace at its next gateway start. 1.0.1 upgrade
 // bridge, remove when 1.0.1 is out of support.
 const GatewayDefaultNamespaceTOMLFile = "gateway-docker-default-namespace.toml"
