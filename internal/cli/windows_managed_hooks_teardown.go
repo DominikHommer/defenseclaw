@@ -108,6 +108,8 @@ type windowsManagedHooksTeardownReport struct {
 	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	UserStateRemaining           []string                            `json:"user_state_remaining,omitempty"`
 	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
+	UserSettingsEdited           []string                            `json:"user_settings_edited,omitempty"`
+	UserSettingsHooksLeft        []string                            `json:"user_settings_hooks_left,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -140,6 +142,8 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	report.UserSettingsEdited = cleanup.SettingsEdited
+	report.UserSettingsHooksLeft = cleanup.SettingsLeft
 	if revokeErr != nil {
 		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))

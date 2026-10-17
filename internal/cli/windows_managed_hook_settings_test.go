@@ -30,6 +30,31 @@ func TestWindowsUninstallRemovesOnlyExactClaudeLauncher(t *testing.T) {
 	}
 }
 
+// #1286: after the exact per-user hook is removed, every command that still
+// names a DefenseClaw launcher is found, whatever its shape, in a stable
+// order; the user's other hooks are not.
+func TestWindowsClaudeCommandsNamingDefenseClawFindsLeftovers(t *testing.T) {
+	raw := []byte(`{"hooks":{
+		"Stop":[{"hooks":[{"command":"powershell -File C:\\Users\\alice\\hooks\\notify.ps1"}]}],
+		"PreToolUse":[{"matcher":"Bash","hooks":[
+			{"command":"& 'C:\\Users\\alice\\.local\\bin\\DefenseClaw-Hook.exe' hook --connector claudecode"},
+			{"command":"C:\\tools\\lint.exe"}]}],
+		"PostToolUse":[{"hooks":[{"command":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe hook"}]}]}}`)
+	got := windowsClaudeCommandsNamingDefenseClaw(raw)
+	want := []string{
+		`PostToolUse: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe hook`,
+		`PreToolUse: & 'C:\Users\alice\.local\bin\DefenseClaw-Hook.exe' hook --connector claudecode`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("leftovers = %q, want %q", got, want)
+	}
+	for _, clean := range []string{`{"model":"sonnet"}`, `{"hooks":{"Stop":[{"hooks":[{"command":"notify.exe"}]}]}}`, `not json`} {
+		if got := windowsClaudeCommandsNamingDefenseClaw([]byte(clean)); len(got) != 0 {
+			t.Fatalf("%s: leftovers = %q, want none", clean, got)
+		}
+	}
+}
+
 func TestWindowsManagedHookCommandRequiresExactLauncherBoundary(t *testing.T) {
 	const launcher = `C:\Users\Alice Doe\.local\bin\defenseclaw-hook.exe`
 	for _, command := range []string{

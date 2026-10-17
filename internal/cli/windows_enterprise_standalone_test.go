@@ -2112,6 +2112,37 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 	}
 }
 
+// #1290, #1286: an uninstall result lists each Claude settings file it
+// edited in changes, once, and warns about each DefenseClaw hook command
+// left in users' settings, without failing.
+func TestWindowsEnterpriseUninstallResultNamesEditedAndLeftoverClaudeSettings(t *testing.T) {
+	edited := `removed 1 DefenseClaw hook command(s) from C:\Users\alice\.claude\settings.json`
+	left := `C:\Users\bob\.claude\settings.json: PreToolUse: C:\Users\bob\.local\bin\defenseclaw-hook.exe --wrapped`
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "uninstall", "installed": false, "transaction_pending": false,
+		"errors":                   []string{},
+		"user_settings_edited":     []string{edited},
+		"user_settings_hooks_left": left,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("uninstall", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseUserSettingsChanges(result, report)
+	addWindowsEnterpriseUserSettingsChanges(result, report)
+	if len(result.Changes) != 1 || result.Changes[0] != edited {
+		t.Fatalf("changes = %q", result.Changes)
+	}
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != "claude_settings_hook_left" ||
+		!strings.Contains(result.Warnings[0].Message, left) || len(result.Errors) != 0 {
+		t.Fatalf("warnings = %+v errors = %+v", result.Warnings, result.Errors)
+	}
+}
+
 // GAP-1680: when the lifecycle removes a stale committed managed-hook
 // lifecycle journal itself, the Setup result and lifecycle log say so.
 func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {

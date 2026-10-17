@@ -6,6 +6,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -81,6 +82,50 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 	}
 	out, err := json.MarshalIndent(settings, "", "  ")
 	return append(out, '\n'), removed, err
+}
+
+// windowsClaudeCommandsNamingDefenseClaw lists, in file order, each hook
+// command in Claude Code settings that names a DefenseClaw launcher or binary
+// (defenseclaw-hook, defenseclaw.exe, defenseclaw-gateway), whatever its
+// shape. Settings it cannot read as Claude hooks have none: the removal
+// before it reports such a file.
+func windowsClaudeCommandsNamingDefenseClaw(raw []byte) []string {
+	var settings struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return nil
+	}
+	events := make([]string, 0, len(settings.Hooks))
+	for event := range settings.Hooks {
+		events = append(events, event)
+	}
+	sort.Strings(events)
+	var found []string
+	for _, event := range events {
+		for _, group := range settings.Hooks[event] {
+			for _, hook := range group.Hooks {
+				if windowsCommandNamesDefenseClaw(hook.Command) {
+					found = append(found, event+": "+strings.TrimSpace(hook.Command))
+				}
+			}
+		}
+	}
+	return found
+}
+
+func windowsCommandNamesDefenseClaw(command string) bool {
+	lower := strings.ToLower(command)
+	for _, name := range []string{"defenseclaw-hook", "defenseclaw.exe", "defenseclaw-gateway"} {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsManagedHookCommandIs(command, executable string) bool {

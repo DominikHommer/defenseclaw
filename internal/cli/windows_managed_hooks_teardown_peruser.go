@@ -91,6 +91,35 @@ func windowsManagedClaudeRegistrationPresent(home, sid string) (bool, error) {
 
 var windowsManagedClaudeRegistrationProbe = windowsManagedClaudeRegistrationPresent
 
+// windowsManagedClaudeLeftoverHooks returns each hook command in the
+// account's Claude Code user settings that still names a DefenseClaw launcher
+// once the exact per-user hook is gone: a hand-written or differently shaped
+// command the cleanup correctly keeps, but which Claude Code then runs
+// against a launcher this uninstall removed or no longer serves (#1286).
+// Claude's DefenseClaw enrollment is machine policy, so no such command in
+// user settings belongs to the deployment. An absent profile or settings
+// file has none. It runs only where the removal ran (LocalSystem, or the
+// administrator's own profile).
+func windowsManagedClaudeLeftoverHooks(home, sid string) ([]string, error) {
+	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	// Match the connector's 32 MiB atomic settings limit.
+	raw, err := safefile.ReadRegularFileBounded(filepath.Join(home, ".claude", "settings.json"), 32<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return windowsClaudeCommandsNamingDefenseClaw(raw), nil
+}
+
+var windowsManagedClaudeLeftoverHookProbe = windowsManagedClaudeLeftoverHooks
+
 // An elevated Setup can edit its own Claude settings without impersonating
 // another account. All other user profiles still require LocalSystem.
 var windowsManagedClaudeCurrentUserSID = func() (string, error) {
@@ -446,10 +475,22 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 				continue
 			}
 		}
+		settings := filepath.Join(target.UserHome, ".claude", "settings.json")
 		if n, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, runtimeDir); err != nil {
 			result.Failed = append(result.Failed, "claudecode/"+target.SID+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			continue
 		} else if n > 0 {
 			result.Removed = append(result.Removed, "claudecode/"+target.SID)
+			// The result named only the per-user data a purge removed, so an
+			// MDM report could not see that users' files were edited (#1290).
+			result.SettingsEdited = append(result.SettingsEdited, fmt.Sprintf(
+				"removed %d DefenseClaw hook command(s) from %s", n, settings))
+		}
+		// The check is a hint for the administrator: a read that fails here
+		// adds nothing, since the removal above already read the file.
+		left, _ := windowsManagedClaudeLeftoverHookProbe(target.UserHome, target.SID)
+		for _, command := range left {
+			result.SettingsLeft = append(result.SettingsLeft, settings+": "+boundedEnterpriseHookUserCleanupText(command))
 		}
 	}
 	if identityErr != nil && blockedClaude && len(entries) == 0 {

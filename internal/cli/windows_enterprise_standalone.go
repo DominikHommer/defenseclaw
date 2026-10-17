@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +101,13 @@ type windowsEnterpriseInstallerReport struct {
 	// UserStatePurged names each enrolled account whose per-user folder and
 	// per-user binaries a purge removed ("user (SID): path").
 	UserStatePurged json.RawMessage `json:"user_state_purged"`
+	// UserSettingsEdited is a change line for each user agent settings
+	// file an uninstall edited (#1290); UserSettingsHooksLeft names each hook
+	// command a user's Claude Code settings keep that still names a
+	// DefenseClaw launcher ("<file>: <event>: <command>", #1286). Decoded
+	// leniently, like the registration lists.
+	UserSettingsEdited    json.RawMessage `json:"user_settings_edited"`
+	UserSettingsHooksLeft json.RawMessage `json:"user_settings_hooks_left"`
 	// MachineStateRemaining names what a standalone purge could not remove
 	// outside StateRoot ("path: reason"), such as a stale protected
 	// PowerShell temp folder (GAP-1734).
@@ -142,7 +150,8 @@ type windowsEnterpriseInstallerReport struct {
 	// LifecycleRetireSkipped names each account whose old managed runtime
 	// generations a retire left because the account's DefenseClaw folder has
 	// permissions DefenseClaw could not verify or apply (#1105, GAP-0781).
-	LifecycleRetireSkipped []string `json:"lifecycle_retire_skipped"`
+	// Decoded leniently, like the registration lists.
+	LifecycleRetireSkipped json.RawMessage `json:"lifecycle_retire_skipped"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1202,6 +1211,7 @@ func applyWindowsEnterpriseInstallerReport(
 		}
 	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report, opts != nil && opts.purge)
+	addWindowsEnterpriseUserSettingsChanges(result, report)
 	if opts != nil && opts.purge {
 		addWindowsEnterpriseUserStateWarning(result, report)
 	}
@@ -1337,7 +1347,7 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: message,
 		})
 	}
-	if skipped := windowsEnterpriseReportStringList(report.LifecycleRetireSkipped); len(skipped) != 0 {
+	if skipped := windowsEnterpriseReportStrings(report.LifecycleRetireSkipped); len(skipped) != 0 {
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: windowsEnterpriseUntrustedUserFolderCode,
 			Message: fmt.Sprintf("the lifecycle left the old DefenseClaw hook runtime copies of %d account(s) in place and changed nothing in their folders, "+
@@ -1424,17 +1434,6 @@ const (
 		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
 )
 
-// windowsEnterpriseReportStringList bounds a list the installer reported.
-func windowsEnterpriseReportStringList(values []string) []string {
-	var kept []string
-	for _, value := range values {
-		if value = strings.TrimSpace(value); value != "" {
-			kept = append(kept, windowsEnterpriseBoundedDiagnostic(value))
-		}
-	}
-	return kept
-}
-
 // windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of
 // a failed first install could not remove, with what removes it. A file the
 // account changed after DefenseClaw wrote it is kept whole, so only a manual
@@ -1465,6 +1464,35 @@ func windowsEnterpriseBoundedDiagnostic(message string) string {
 		return message[:windowsEnterpriseDiagnosticMax] + "..."
 	}
 	return message
+}
+
+// addWindowsEnterpriseUserSettingsChanges lists each user settings file an
+// uninstall edited in Changes (#1290), and warns about each hook command a
+// user's Claude Code settings keep that still names a DefenseClaw launcher:
+// the uninstall removes only the exact per-user hook it registered, so a
+// hand-written or differently shaped one stayed silently and Claude Code kept
+// running a launcher that was gone (#1286). The exit code is unchanged.
+func addWindowsEnterpriseUserSettingsChanges(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	for _, change := range windowsEnterpriseReportStrings(report.UserSettingsEdited) {
+		line := windowsEnterpriseBoundedDiagnostic(change)
+		if !slices.Contains(result.Changes, line) {
+			result.Changes = append(result.Changes, line)
+		}
+	}
+	if left := windowsEnterpriseReportStrings(report.UserSettingsHooksLeft); len(left) > 0 {
+		message := fmt.Sprintf(
+			"%d hook command(s) in users' Claude Code settings still name a DefenseClaw launcher; the uninstall removes only the hook "+
+				"DefenseClaw registered, so Claude Code keeps running these and they fail. Remove each one from the named file as that user: %s",
+			len(left),
+			windowsEnterpriseBoundedLabels(left),
+		)
+		for _, existing := range result.Warnings {
+			if existing.Code == "claude_settings_hook_left" && existing.Message == message {
+				return
+			}
+		}
+		result.AddWarning("claude_settings_hook_left", message)
+	}
 }
 
 // windowsEnterpriseUserRegistrationListMax bounds how many connector/SID

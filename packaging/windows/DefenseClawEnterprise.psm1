@@ -24932,8 +24932,16 @@ function Add-DefenseClawUserRegistrationCleanupResult {
     }
     # The standalone finalize names each enrolled account's per-user folder
     # that stays (with purge, each one it could not remove and why) and,
-    # with purge, each account whose per-user data and binaries it removed.
-    foreach ($name in @('user_state_remaining', 'user_state_purged')) {
+    # with purge, each account whose per-user data and binaries it removed;
+    # each user settings file it edited (#1290) and each hook command a
+    # user's Claude Code settings keep that still names a DefenseClaw
+    # launcher (#1286).
+    foreach ($name in @(
+            'user_state_remaining',
+            'user_state_purged',
+            'user_settings_edited',
+            'user_settings_hooks_left'
+        )) {
         $state = $null
         if ($null -ne $report) {
             $state = $report.PSObject.Properties[$name]

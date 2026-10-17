@@ -124,6 +124,48 @@ func TestWindowsStandaloneUninstallCleansClaudeSettingsWithoutUserSession(t *tes
 	}
 }
 
+// #1290: the cleanup names each Claude settings file it edited and how many
+// commands it removed; #1286: it names each command left there that still
+// names a DefenseClaw launcher. The exit stays a success.
+func TestWindowsStandaloneUninstallReportsClaudeSettingsEditsAndLeftovers(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	originalIdentity, originalRemover := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover
+	originalLeftovers := windowsManagedClaudeLeftoverHookProbe
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeSettingsRemover = originalIdentity, originalRemover
+		windowsManagedClaudeLeftoverHookProbe = originalLeftovers
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	removed := 2
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, error) { return removed, nil }
+	left := []string{`PreToolUse: & 'C:\Users\alice\.local\bin\defenseclaw-hook.exe' hook --other`}
+	windowsManagedClaudeLeftoverHookProbe = func(home, sid string) ([]string, error) {
+		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
+			t.Fatalf("leftovers checked for %s %s", home, sid)
+		}
+		return left, nil
+	}
+	settings := `C:\Users\alice\.claude\settings.json`
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.SettingsEdited) != 1 || result.SettingsEdited[0] != "removed 2 DefenseClaw hook command(s) from "+settings {
+		t.Fatalf("edited = %q", result.SettingsEdited)
+	}
+	if len(result.SettingsLeft) != 1 || result.SettingsLeft[0] != settings+": "+left[0] || len(result.Failed) != 0 {
+		t.Fatalf("left = %q, failed = %q", result.SettingsLeft, result.Failed)
+	}
+
+	// A file with nothing of DefenseClaw's is neither edited nor reported,
+	// and a check that cannot read the file reports nothing extra.
+	removed, left = 0, nil
+	windowsManagedClaudeLeftoverHookProbe = func(string, string) ([]string, error) { return nil, errors.New("access denied") }
+	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	if len(result.SettingsEdited) != 0 || len(result.SettingsLeft) != 0 || len(result.Failed) != 0 || len(result.Removed) != 0 {
+		t.Fatalf("untouched settings = %+v", result)
+	}
+}
+
 func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing.T) {
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	runtimeDir := useUserCleanupStateDir(t)
