@@ -28,6 +28,11 @@ administrator's `enterprise.openshell.e2fsprogs_dir`, the user's own
 administrator setting overrides both other sources. The managed setup mode
 does not need Homebrew or Xcode tools on the user's account. See
 [Sandboxes on managed computers](/docs/enterprise/sandboxes).
+The per-user MicroVM finder also checks the e2fsprogs kegs under
+`/opt/homebrew` and `/usr/local` directly, even when `brew` is absent from
+the shell's `PATH`. On a managed computer, use the explicit
+`enterprise.openshell.e2fsprogs_dir` override for an administrator-owned host
+install; managed setup never borrows another account's Homebrew keg.
 
 ## How it fits together
 
