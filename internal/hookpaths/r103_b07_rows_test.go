@@ -204,6 +204,30 @@ func TestR103B07LinkCreatingExtractorRows(t *testing.T) {
 	}
 }
 
+func TestR103B07ReadOnlyGitRowsStayOutsideExtractorScope(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, tc := range []struct{ id, command, target string }{
+		{"B-NEW-00024", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/api/README.md > build/api/diff.patch`, "build/api/diff.patch"},
+		{"B-NEW-00046", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/web/README.md > build/web/diff.patch`, "build/web/diff.patch"},
+		{"B-NEW-00065", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/cli/README.md > build/cli/diff.patch`, "build/cli/diff.patch"},
+		{"B-NEW-00084", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/worker/README.md > build/worker/diff.patch`, "build/worker/diff.patch"},
+		{"B-NEW-00103", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/sdk/README.md > build/sdk/diff.patch`, "build/sdk/diff.patch"},
+		{"B-NEW-00122", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/docs/README.md > build/docs/diff.patch`, "build/docs/diff.patch"},
+		{"B-NEW-00141", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/dashboard/README.md > build/dashboard/diff.patch`, "build/dashboard/diff.patch"},
+		{"B-NEW-00160", `git -C "$(git rev-parse --show-toplevel)" diff -- packages/tools/README.md > build/tools/diff.patch`, "build/tools/diff.patch"},
+		{"B-REAL-03878", `for d in review-wt a06-r21-review profile-r25; do git -C "$d" rev-parse HEAD 2>/dev/null | sed "s|^|$d |"; done`, "report.txt"},
+		{"B-REAL-05280", `for d in a12-review area04-wt review-wt a02-r5-review p02-r22-probe; do printf '%s ' "$d"; git -C "$d" rev-parse HEAD 2>/dev/null; done`, "report.txt"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			links := CommandLinks("Bash", tc.command, cwd, home)
+			if links.OpaqueTarget(filepath.Join(cwd, tc.target)) {
+				t.Fatalf("read-only git command made %q an opaque extractor target", tc.target)
+			}
+		})
+	}
+}
+
 func TestR103B07SafeDynamicRedirectProof(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("POSIX redirects")

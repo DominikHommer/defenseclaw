@@ -2211,6 +2211,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], cwd))
 			}
 		case slices.Contains(archivePrograms, program):
+			// Only clone materializes a Git worktree. Read-only Git commands
+			// with dynamic -C operands are not archive extractors.
+			if program == "git" && (len(words) < 2 || !static[1] || words[1] != "clone") {
+				return true
+			}
 			destination := archiveDestination(program, words[1:], static[1:], cwd)
 			opaqueIn := links.unknownIn
 			if (program == "rsync" || program == "git") && destination != "" {
