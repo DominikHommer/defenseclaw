@@ -72,6 +72,45 @@ defenseclaw-sensor-helper.service defenseclaw-enterprise-apply.service
 defenseclaw-enterprise-verify.service defenseclaw-hook-guardian-reconcile.service"
 # The transient timer the preinstall starts to recover the apply trigger.
 recovery_timer=defenseclaw-enterprise-apply-recovery.timer
+# The sandbox subsystem's user units the package ships in
+# /usr/lib/systemd/user (the packaging tests compare the list too).
+user_units="defenseclaw-sandbox.socket defenseclaw-sandbox.service defenseclaw-openshell-gateway.service"
+# Where each account's user service manager keeps its runtime directory.
+user_runtime=/run/user
+
+# stop_user_units stops the package's user units in the user service manager
+# of every account that runs one, as that account, so no sandbox daemon or
+# OpenShell gateway keeps running from a unit file the removal deletes (a
+# socket left listening started the daemon again, which then failed 203/EXEC
+# on the deleted binary in a loop: #1210). Stopping the daemon runs its
+# ExecStop, which stops the account's sandboxes first. The uninstall above
+# stopped the units of the accounts it knows; this also covers an account it
+# did not know and a removal whose uninstall did not run. Then the global
+# enable link of the socket goes, so no later sign-in starts it.
+stop_user_units() {
+    for dir in "$user_runtime"/*; do
+        uid=${dir##*/}
+        case "$uid" in '' | *[!0-9]*) continue ;; esac
+        [ "$uid" -gt 0 ] || continue
+        # Only a runtime directory the account owns, with its manager's
+        # private socket: the account has a running user manager.
+        if [ ! -d "$dir" ] || [ -L "$dir" ] || [ ! -S "$dir/systemd/private" ]; then
+            continue
+        fi
+        [ "$(stat -c %u "$dir" 2>/dev/null)" = "$uid" ] || continue
+        name=$(getent passwd "$uid" | cut -d: -f1)
+        [ -n "$name" ] || continue
+        # shellcheck disable=SC2086 # unit names have no spaces or globs
+        runuser -u "$name" -- env XDG_RUNTIME_DIR="$dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$dir/bus" \
+            systemctl --user stop $user_units >/dev/null 2>&1
+        # shellcheck disable=SC2086
+        if runuser -u "$name" -- env XDG_RUNTIME_DIR="$dir" DBUS_SESSION_BUS_ADDRESS="unix:path=$dir/bus" \
+            systemctl --user is-active --quiet $user_units >/dev/null 2>&1; then
+            echo "defenseclaw-enterprise: could not stop the sandbox units of $name; stop them as that user with \`systemctl --user stop $user_units\`" >&2
+        fi
+    done
+    systemctl --global disable defenseclaw-sandbox.socket >/dev/null 2>&1 || true
+}
 
 # recorded_policies prints the DefenseClaw policy names the sensor helper
 # recorded loading, one per line.
@@ -225,5 +264,6 @@ if [ -d /run/systemd/system ]; then
     if [ -n "$running" ]; then
         echo "defenseclaw-enterprise: could not stop$running; stop them with \`systemctl stop$running\` after the removal" >&2
     fi
+    stop_user_units
 fi
 exit 0

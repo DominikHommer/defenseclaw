@@ -856,8 +856,13 @@ exit {gateway_rc}""")
 
 
 def _linux_scriptlet(host: _Host, name: str) -> str:
+    text = (LINUX / name).read_text(encoding="utf-8")
+    # The preremove walks the user managers' runtime directories; a test
+    # never reaches the real /run/user.
+    if "user_runtime=/run/user" in text:
+        text = text.replace("user_runtime=/run/user", f"user_runtime={host.tmp / 'run-user'}")
     return _rooted(
-        (LINUX / name).read_text(encoding="utf-8"),
+        text,
         {
             "gateway=/opt/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
             "state=/var/lib/defenseclaw-enterprise": f"state={host.state}",
@@ -1681,3 +1686,77 @@ def test_macos_pkg_postinstall_names_the_lifecycle_error_and_the_finish_step(tmp
     assert "fix that, then install the package again" in result.stderr
     assert "records the pkg receipt" in result.stderr
     assert f"sudo {host.gateway} enterprise macos ensure --from-package also finishes the install, but records no pkg receipt" in result.stderr
+
+
+# #1210: the package removal deleted the sandbox user units while an
+# account's socket still listened, and the daemon it started failed 203/EXEC
+# on the deleted binary in a loop. The preremove stops the user units in the
+# user manager of every account that runs one, as that account, after the
+# system units, and drops the socket's global enable link.
+def _package_user_units() -> set[str]:
+    return {
+        Path(c["dst"]).name
+        for c in _enterprise_nfpm_contents()
+        if c.get("dst", "").startswith("/usr/lib/systemd/user/") and c.get("type") != "dir"
+    }
+
+
+def test_linux_preremove_names_every_user_unit_the_package_ships() -> None:
+    assert set(_preremove_units("user_units")) == _package_user_units() == {
+        "defenseclaw-sandbox.socket",
+        "defenseclaw-sandbox.service",
+        "defenseclaw-openshell-gateway.service",
+    }
+
+
+def _user_manager(host: _Host, uid: int) -> Path:
+    """A runtime directory with the user manager's private socket."""
+    import socket
+
+    runtime = host.tmp / "run-user" / str(uid)
+    (runtime / "systemd").mkdir(parents=True)
+    cwd = os.getcwd()
+    os.chdir(runtime / "systemd")
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind("private")
+        sock.close()
+    finally:
+        os.chdir(cwd)
+    return runtime
+
+
+@pytest.mark.skipif(not os.uname().sysname == "Linux" or os.getuid() == 0, reason="GNU stat and a non-root runtime directory owner")
+@pytest.mark.parametrize("still_active", [False, True])
+def test_linux_preremove_stops_the_sandbox_user_units_in_every_user_manager(tmp_path: Path, still_active: bool) -> None:
+    host = _Host(tmp_path)
+    uid = os.getuid()
+    runtime = _user_manager(host, uid)
+    # Not a user manager: a directory someone else's uid names, a name that
+    # is no uid, and a runtime directory without the private socket.
+    _user_manager(host, uid + 1)
+    (host.tmp / "run-user" / "abc" / "systemd").mkdir(parents=True)
+    (host.tmp / "run-user" / str(uid + 2)).mkdir()
+    _write_stub(host.bin, "getent", f"""[ "$2" = {uid} ] && echo "sample-user:x:{uid}:{uid}::/home/sample-user:/bin/sh" """)
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'
+case "$*" in *is-active*) exit {0 if still_active else 1} ;; esac""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "remove")
+    assert result.returncode == 0, result.stderr
+    calls = host.calls()
+    env = f"env XDG_RUNTIME_DIR={runtime} DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"
+    units = " ".join(_preremove_units("user_units"))
+    stop = f"runuser -u sample-user -- {env} systemctl --user stop {units}"
+    assert [c for c in calls if c.startswith("runuser ") and " stop " in c] == [stop], calls
+    system_stop = next(c for c in calls if c.startswith("systemctl stop "))
+    assert calls.index(system_stop) < calls.index(stop) < calls.index("systemctl --global disable defenseclaw-sandbox.socket")
+    assert ("could not stop the sandbox units of sample-user" in result.stderr) is still_active
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+@pytest.mark.parametrize("arguments", [("upgrade", "9.9.10"), ("1",)])
+def test_linux_preremove_leaves_the_user_units_alone_on_an_upgrade(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    host = _Host(tmp_path)
+    _write_stub(host.bin, "runuser", f"""echo "runuser $*" >>'{host.log}'""")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), *arguments)
+    assert result.returncode == 0, result.stderr
+    assert not [c for c in host.calls() if c.startswith(("runuser", "systemctl --global"))]

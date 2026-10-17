@@ -1123,6 +1123,7 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			}
 		}
 	}
+	l.bootOutMacOSAgents(ctx)
 	switch {
 	case purge:
 	case len(kept) > 0:
@@ -1135,6 +1136,64 @@ func (l *lifecycle) teardownOpenShell(ctx context.Context, accounts []SandboxAcc
 			strings.Join(kept, ", "), env.lifecycleCommand(ActionUninstall)))
 	case applied != nil && applied.Enabled:
 		r.Changes = append(r.Changes, "stopped the sandbox subsystem; no account had sandboxes to keep")
+	}
+}
+
+// bootOutMacOSAgents boots DefenseClaw's two LaunchAgents out of the gui
+// and the user launchd domain of every account that runs a process on the
+// Mac, once the accounts' own teardown above is done and before the plists
+// and the binary they name go. launchd loads both agents (they are in
+// /Library/LaunchAgents) for every account that signs in, also one the
+// deployment never served, and a job can stay loaded in either domain, while
+// Stop boots out only one of them; a job left loaded named a deleted plist
+// and binary until the account logged out (#1210). An agent that is not
+// loaded is fine. What could not be unloaded is a warning: it goes at the
+// account's next logout.
+func (l *lifecycle) bootOutMacOSAgents(ctx context.Context) {
+	env, r := l.env, l.result
+	if env.GOOS != "darwin" {
+		return
+	}
+	res, err := env.Runner.Run(ctx, "ps", "-axo", "uid=")
+	if err != nil {
+		r.AddWarning(codeSandboxUserState, fmt.Sprintf("could not list the accounts that run processes to unload the DefenseClaw LaunchAgents (%v); a loaded one unloads at that account's next logout", err))
+		return
+	}
+	seen := map[int]bool{}
+	var uids []int
+	for _, field := range strings.Fields(string(res.Stdout)) {
+		uid, err := strconv.Atoi(field)
+		// 501 is the first macOS user account; below it are the system's.
+		if err != nil || uid < 501 || uid >= 4294967294 || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		uids = append(uids, uid)
+	}
+	sort.Ints(uids)
+	var unloaded, failed []string
+	for _, uid := range uids {
+		for _, domain := range []string{"gui/" + strconv.Itoa(uid), "user/" + strconv.Itoa(uid)} {
+			for _, label := range []string{labelSandbox, labelOpenShellGateway} {
+				res, err := env.Runner.Run(ctx, "launchctl", "bootout", domain+"/"+label)
+				message := string(res.Stdout) + " " + string(res.Stderr)
+				switch {
+				case err == nil:
+					unloaded = append(unloaded, domain+"/"+label)
+				case launchdNotLoaded(err), strings.Contains(message, "Could not find"), strings.Contains(message, "No such process"),
+					guiDomainUnsupported(res, message+" "+err.Error()):
+					// Not loaded there, or no GUI session.
+				default:
+					failed = append(failed, fmt.Sprintf("%s/%s (%v)", domain, label, err))
+				}
+			}
+		}
+	}
+	if len(unloaded) > 0 {
+		r.Changes = append(r.Changes, "unloaded the DefenseClaw sandbox LaunchAgents of the signed-in accounts ("+strings.Join(unloaded, ", ")+")")
+	}
+	if len(failed) > 0 {
+		r.AddWarning(codeSandboxUserState, "could not unload "+strings.Join(failed, ", ")+"; each unloads at that account's next logout, or run `launchctl bootout <domain>/<label>` as root")
 	}
 }
 
