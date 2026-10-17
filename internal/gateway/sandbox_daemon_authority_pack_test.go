@@ -59,9 +59,9 @@ func requiredPackAnswer(t *testing.T, dir, name string) (sandboxrelay.ResolveRes
 }
 
 // The daemon resolves a required-pack run with the pack the managed
-// gateway's answer carries, never the root-only file, and installs it again
-// from its registrations after a restart; a pack off the floor's pin fails
-// closed (GAP-0440).
+// gateway's answer carries, never the root-only file or the user-owned
+// registrations cache. After a restart it waits for the current gateway
+// answer; a pack off the floor's pin fails closed (GAP-0440).
 func TestSandboxDaemonUsesTheGatewaysRequiredPack(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
 	resp, file := requiredPackAnswer(t, t.TempDir(), "contractors")
