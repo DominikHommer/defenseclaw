@@ -296,7 +296,7 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 				if left {
 					return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"removed":2,"failed":["alice/devin: devin teardown: remove hook entries: permission denied"]}`)}, errors.New("exit 1")
 				}
-				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"]}`)}, nil
+				return CommandResult{Stdout: []byte(`{"ok":true,"removed":1,"purged":["alice"],"purged_detail":{"alice":{"data":true,"binaries":true,"gateway":true}}}`)}, nil
 			}}
 			failed := h.run(Options{Action: ActionUninstall, Purge: true})
 			requireError(t, failed, codePerUserHooks)
