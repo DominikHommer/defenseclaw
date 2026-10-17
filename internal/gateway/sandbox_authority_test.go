@@ -688,7 +688,10 @@ func TestSandboxAuthorityNamesAMistakeInTheUsersOwnInput(t *testing.T) {
 // along and which it left out, so the administrator's view can list them.
 func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	prev := sandboxFilterMCP
-	sandboxFilterMCP = func(context.Context, *APIServer, managedHookPeer, string, []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+	sandboxFilterMCP = func(_ context.Context, _ *APIServer, _ managedHookPeer, _ string, claims []sandboxrelay.MCPServerClaim) ([]string, []sandboxrelay.MCPSkip) {
+		if len(claims) == 1 && claims[0].Name == "fresh-srv" {
+			return []string{"fresh-srv"}, nil
+		}
 		return []string{"ok-srv"}, []sandboxrelay.MCPSkip{{Name: "blocked-srv", Reason: sandboxrelay.MCPSkipOrganizationBlock}}
 	}
 	t.Cleanup(func() { sandboxFilterMCP = prev })
@@ -705,6 +708,11 @@ func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	if !slices.Equal(explain.MCPIncluded, reg.MCPKept) || len(explain.MCPBlocked) != 1 ||
 		explain.MCPBlocked[0].Name != "blocked-srv" {
 		t.Fatalf("registered explain MCP = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
+	}
+	explain = postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID,
+		MCP: []sandboxrelay.MCPServerClaim{{Name: "fresh-srv", Command: "npx"}}})
+	if !slices.Equal(explain.MCPIncluded, []string{"fresh-srv"}) || len(explain.MCPBlocked) != 0 {
+		t.Fatalf("registered MCP recheck = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
 	}
 }
 

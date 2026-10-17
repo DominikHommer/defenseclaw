@@ -957,6 +957,9 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		out.Driver, out.DriverReason = scope.reg.Driver, scope.reg.DriverReason
 		eff, violations, err = sandboxRegistrationEffective(cfg, auth, peer, scope.reg, floor)
 		tier = scope.reg.TamperTier
+		if err == nil {
+			importMCP = eff.MCP.Import
+		}
 	} else {
 		// The driver a sandbox would get now, by the gateway's view (the
 		// daemon's own probe at sandbox start decides).
@@ -986,7 +989,7 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 	}
 	// The caller's own MCP servers, judged as a resolve judges them: the
 	// MCP row of the caller's explain, and what a start brings along.
-	if scope.registered {
+	if scope.registered && len(req.MCP) == 0 {
 		out.MCPIncluded = slices.Clone(scope.reg.MCPKept)
 		for _, s := range scope.reg.MCPSkipped {
 			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
