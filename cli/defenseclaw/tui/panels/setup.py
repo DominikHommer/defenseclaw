@@ -8648,6 +8648,11 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         ),
         field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
         field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
+        field(
+            "Trusted CA Bundle",
+            "openshell.trusted_ca_bundle",
+            hint="PEM file of your TLS-inspecting proxy's root CA (absolute or ~/); images are rebuilt to trust it.",
+        ),
         field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),
         field("Agent Proposals", "openshell.approvals.agent_proposals", "choice", inherit_bool, hint="Let the agent propose rules (default on)."),
         field("CPU", "openshell.resources.cpu", hint="Per-sandbox CPU, for example 2 or 500m."),

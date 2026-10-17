@@ -1748,6 +1748,10 @@ class OpenShellConfig:
     upstream_telemetry: bool = False
     token_delivery: str = "provider"
     middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
+    # A PEM file of CA certificates sandboxes trust besides the image's public
+    # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
+    # built while it is set carry them; nothing comes from the host's store.
+    trusted_ca_bundle: str = ""
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
 
     def effective_ingress_port(self, api_port: int) -> int:
@@ -6575,6 +6579,7 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         yolo=_openshell_optional_bool(raw.get("yolo")),
         llm=_openshell_str(raw.get("llm")) or "auto",
         keep_headless=_coerce_bool(raw.get("keep_headless", False)),
+        trusted_ca_bundle=_openshell_str(raw.get("trusted_ca_bundle")),
         workdir=OpenShellWorkdirConfig(
             mode=_openshell_str(workdir.get("mode")),
             masks=_openshell_str_list(workdir.get("masks")),

@@ -28,6 +28,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // OpenShell sandbox profiles, from loosest to strictest. They name the
@@ -186,6 +188,21 @@ type OpenShellConfig struct {
 	UpstreamTelemetry bool                      `mapstructure:"upstream_telemetry" yaml:"upstream_telemetry,omitempty"`
 	TokenDelivery     string                    `mapstructure:"token_delivery"     yaml:"token_delivery,omitempty"`
 	Middleware        OpenShellMiddlewareConfig `mapstructure:"middleware"         yaml:"middleware,omitempty"`
+	// TrustedCABundle names a PEM file of CA certificates sandboxes trust
+	// besides the image's public roots: the root of a TLS-inspecting proxy
+	// that re-signs provider certificates (#1296). Every overlay image
+	// built while it is set carries them in its system store, which
+	// OpenShell's sandbox bundle (SSL_CERT_FILE) is made from. An absolute
+	// path or one starting with "~/"; in managed_enterprise an absolute
+	// path to an administrator-owned file. Nothing is imported from the
+	// host's own store.
+	TrustedCABundle string `mapstructure:"trusted_ca_bundle" yaml:"trusted_ca_bundle,omitempty"`
+	// TrustedCAPEM and TrustedCAError are runtime only: the trusted CAs a
+	// managed computer's sandbox daemon got from the managed gateway (the
+	// administrator's openshell.trusted_ca_bundle, read there), or why the
+	// gateway could not read them. Never read from or written to a file.
+	TrustedCAPEM   string `mapstructure:"-" yaml:"-" json:"-"`
+	TrustedCAError string `mapstructure:"-" yaml:"-" json:"-"`
 	// Admin holds the administrator's constraints. In managed_enterprise the
 	// config file is administrator-owned and Admin is authoritative;
 	// elsewhere it is still enforced, but the user owns the file.
@@ -951,6 +968,9 @@ func (c *Config) ValidateOpenShell() error {
 	if err := c.validateSecureClientOpenShell(); err != nil {
 		return err
 	}
+	if err := c.validateManagedTrustedCABundle(); err != nil {
+		return err
+	}
 	if err := c.validateManagedSandboxPack("admin", c.OpenShell.Admin.RequiredPack); err != nil {
 		return err
 	}
@@ -989,6 +1009,33 @@ func (c *Config) validateOpenShellListeners() error {
 	return errors.Join(errs...)
 }
 
+// validateOpenShellTrustedCABundle checks the shape of
+// openshell.trusted_ca_bundle; the file itself is read when an image is
+// built and by `sandbox doctor`.
+func validateOpenShellTrustedCABundle(p string) error {
+	switch {
+	case p == "":
+		return nil
+	case len(p) > 4096:
+		return errors.New("trusted_ca_bundle is longer than 4096 bytes")
+	case strings.TrimSpace(p) != p || strings.ContainsAny(p, "\x00\n\r"):
+		return fmt.Errorf("trusted_ca_bundle %q has surrounding spaces or control characters", p)
+	case !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "~/"):
+		return fmt.Errorf("trusted_ca_bundle %q must be an absolute path or start with ~/", p)
+	}
+	return nil
+}
+
+// validateManagedTrustedCABundle: an administrator's
+// openshell.trusted_ca_bundle names a file by absolute path (the gateway's
+// service account has no home of the user's).
+func (c *Config) validateManagedTrustedCABundle() error {
+	if p := c.OpenShell.TrustedCABundle; p != "" && managed.IsManagedEnterprise(c.DeploymentMode) && !strings.HasPrefix(p, "/") {
+		return fmt.Errorf("trusted_ca_bundle %q: a managed configuration needs an absolute path to an administrator-owned file", p)
+	}
+	return nil
+}
+
 // Validate checks the openshell section's values and relationships. The v8
 // schema owns shape; this also protects programmatic configs and checks what
 // the schema cannot express (quantities, distinct ports, known lockable keys).
@@ -1004,6 +1051,7 @@ func (o *OpenShellConfig) Validate() error {
 		}
 	}
 	check(validateOpenShellBinary(o.Binary))
+	check(validateOpenShellTrustedCABundle(o.TrustedCABundle))
 	check(validateOpenShellPort("ingress_port", o.IngressPort, true))
 	check(validateOpenShellPort("egress_port", o.EgressPort, true))
 	if o.IngressPort != 0 && o.IngressPort == o.EgressPort {
