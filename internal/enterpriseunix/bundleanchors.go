@@ -70,6 +70,8 @@ func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsIns
 	dest := e.bundleAnchorsPath()
 	out := &AnchorsInstall{Path: filepath.Join(e.Layout.ConfigDir, "trust", enterprisebundle.AnchorsName)}
 	refused := func(err error) (*AnchorsInstall, error) {
+		// Only the file still installed is reported, never the refused one.
+		out = &AnchorsInstall{Path: out.Path}
 		if installed, readErr := readInstalledAnchors(dest); readErr == nil && installed != nil {
 			out.SHA256 = sha256Bytes(installed)
 		}

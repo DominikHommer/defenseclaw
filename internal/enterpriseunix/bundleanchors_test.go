@@ -296,7 +296,7 @@ func TestInstallBundleAnchorsPutsThePreviousFileBack(t *testing.T) {
 				}
 				return check(path, kind)
 			}
-			_, err := b.env.InstallBundleAnchors(context.Background(), src)
+			out, err := b.env.InstallBundleAnchors(context.Background(), src)
 			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeAnchorInsecure {
 				t.Fatalf("failed post-check: %v", err)
 			}
@@ -306,6 +306,15 @@ func TestInstallBundleAnchorsPutsThePreviousFileBack(t *testing.T) {
 			}
 			if !hadFile && !os.IsNotExist(readErr) {
 				t.Fatalf("new file left in place: %v", readErr)
+			}
+			// The result names the file still installed: the previous one,
+			// or none, never the refused file.
+			want := ""
+			if hadFile {
+				want = sha256Bytes([]byte(before))
+			}
+			if out == nil || out.SHA256 != want || out.Anchors != nil || out.Result != "" {
+				t.Fatalf("refused install result = %+v, want sha256 %q only", out, want)
 			}
 		})
 	}
