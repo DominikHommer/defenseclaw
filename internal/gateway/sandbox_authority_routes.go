@@ -709,18 +709,6 @@ func (a *APIServer) handleSandboxDeleted(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sandboxLiveFields are the floor fields a running sandbox applies at
-// once.
-func sandboxLiveFields(f config.OpenShellAdminConfig) sandboxrelay.LiveFields {
-	return sandboxrelay.LiveFields{
-		EgressBlock: slices.Clone(f.EgressBlock), EgressAllowOnly: slices.Clone(f.EgressAllowOnly),
-		BlockLargeUploads: f.BlockLargeUploads, AllowUnblock: f.AllowUnblock, AllowLearnMode: f.AllowLearnMode,
-		UserApprovals: f.UserApprovals, OnSilence: f.OnSilence, MaxSilenceAfter: f.MaxSilenceAfter,
-		ProcessTree: f.ProcessTree, ForeignSandboxes: f.ForeignSandboxes, DeleteStoppedAfter: f.DeleteStoppedAfter,
-		RequestAccess: sandboxRequestAccess(f),
-	}
-}
-
 // sandboxRevokedText is the user text of a revoked registration: what the
 // policy no longer allows when a re-match revoked it.
 func sandboxRevokedText(auth *sandboxAuthority, reg sandboxreg.Registration) string {
@@ -736,7 +724,7 @@ func sandboxRevokedText(auth *sandboxAuthority, reg sandboxreg.Registration) str
 }
 
 // handleSandboxCurrent answers GET policy/current?registration=ID: the
-// live fields of the caller's registration now, its generation, and
+// complete floor of the caller's registration now, its generation, and
 // whether it is revoked or must stop.
 func (a *APIServer) handleSandboxCurrent(w http.ResponseWriter, r *http.Request) {
 	a.serveSandboxCurrent(w, r, r.URL.Query().Get(sandboxrelay.RegistrationQuery), false)
@@ -806,7 +794,7 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	}
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Floor: &floor, Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
+		Floor: &floor, Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)

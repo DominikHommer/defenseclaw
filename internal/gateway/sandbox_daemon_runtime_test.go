@@ -816,7 +816,7 @@ func TestSandboxDaemonPollAdoptsOnlyARunningSandboxFloor(t *testing.T) {
 	f.d.floorMu.Unlock()
 	f.d.reloadConfig()
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Live: sandboxrelay.LiveFields{DeleteStoppedAfter: "14d"}}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:new", Floor: &config.OpenShellAdminConfig{DeleteStoppedAfter: "14d"}}, nil
 	}
 	f.d.pollOnce(context.Background())
 	if r, _ := f.d.regs.get("dc-old"); r.Digest != "sha256:new" || r.Floor.DeleteStoppedAfter != "14d" {

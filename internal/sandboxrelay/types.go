@@ -503,13 +503,12 @@ type BindRequest struct {
 }
 
 // CurrentPolicy answers GET policy/current: the registration's complete
-// policy floor and live fields now.
+// policy floor now.
 type CurrentPolicy struct {
-	V             int        `json:"v"`
-	Generation    uint64     `json:"generation"`
-	Revoked       bool       `json:"revoked,omitempty"`
-	RevokedReason string     `json:"revoked_reason,omitempty"`
-	Live          LiveFields `json:"live"`
+	V             int    `json:"v"`
+	Generation    uint64 `json:"generation"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
 	// Floor is the complete gateway-owned policy floor. A managed daemon
 	// adopts it after confirmation instead of its user-writable cache.
 	Floor *config.OpenShellAdminConfig `json:"floor,omitempty"`
@@ -522,23 +521,6 @@ type CurrentPolicy struct {
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
-}
-
-// LiveFields are the floor fields that switch on a running sandbox at once
-// (plan §5.2 "live").
-type LiveFields struct {
-	EgressBlock        []string `json:"egress_block,omitempty"`
-	EgressAllowOnly    []string `json:"egress_allow_only,omitempty"`
-	BlockLargeUploads  bool     `json:"block_large_uploads,omitempty"`
-	AllowUnblock       *bool    `json:"allow_unblock,omitempty"`
-	AllowLearnMode     *bool    `json:"allow_learn_mode,omitempty"`
-	UserApprovals      string   `json:"user_approvals,omitempty"`
-	OnSilence          string   `json:"on_silence,omitempty"`
-	MaxSilenceAfter    string   `json:"max_silence_after,omitempty"`
-	ProcessTree        *bool    `json:"process_tree,omitempty"`
-	ForeignSandboxes   string   `json:"foreign_sandboxes,omitempty"`
-	DeleteStoppedAfter string   `json:"delete_stopped_after,omitempty"`
-	RequestAccess      string   `json:"request_access,omitempty"`
 }
 
 // Decision kinds and scopes (DecisionRequest).

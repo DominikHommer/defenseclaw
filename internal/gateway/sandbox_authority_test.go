@@ -573,7 +573,7 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
 	genMu.Unlock()
 	code, after := f.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || len(after.Live.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
+	if code != http.StatusOK || after.Floor == nil || len(after.Floor.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
 		t.Fatalf("current after the change: %d %+v (before %+v)", code, after, before)
 	}
 	f.mu.Lock()

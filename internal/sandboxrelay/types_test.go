@@ -35,7 +35,7 @@ var wireTypes = []any{
 	ResolveResponse{}, RegistrationView{}, MCPSkip{}, BannerView{}, Refusal{},
 	OperationalSettings{}, ImageSettings{}, ApprovalsSettings{}, MCPSettings{},
 	DaemonSettings{}, EnterpriseOpenShell{}, HookDecision{}, BindRequest{},
-	CurrentPolicy{}, LiveFields{}, DecisionRequest{}, DecisionResult{}, Decision{},
+	CurrentPolicy{}, DecisionRequest{}, DecisionResult{}, Decision{},
 	EventBatch{}, Event{}, ExplainRequest{}, PackView{}, ErrorBody{},
 }
 
