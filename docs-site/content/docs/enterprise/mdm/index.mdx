@@ -668,14 +668,17 @@ a no-op result and exit `0`.
 
 | OS | Command | Removes |
 | --- | --- | --- |
-| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Without `--purge`, if an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` can stay. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
-| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), binaries, config, credentials, most state and logs, and the `_defenseclaw` service account; the lifecycle forgets the pkg receipt. Without `--purge`, if an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` can stay. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
+| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Without `--purge`, if an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` can stay, with the sandbox setup record. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
+| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), binaries, config, credentials, most state and logs, and the `_defenseclaw` service account; the lifecycle forgets the pkg receipt. Without `--purge`, if an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` can stay, with the sandbox setup record. `--purge` removes them and each enrolled account's `~/.defenseclaw` and per-user binaries. |
 | Windows | `uninstall.ps1 [-Purge]` (runs in Windows PowerShell 5.1 or PowerShell 7), or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. |
 
 Every removal script deletes the config and the AI Defense key. On Linux and
 macOS, the kept `sandbox` store and `redaction-correlation.key` are root-owned
 while the service account is gone; the next `ensure` adopts them. Use
-`--purge` for a clean image. To keep the other machine state for a later
+`--purge` for a clean image, in the first removal: the scripts run the
+lifecycle only while the DefenseClaw binaries are installed, so a purge after
+a plain removal finds nothing to run and exits `0` with that state still
+there. Install the package again and purge, or delete it by hand. To keep the other machine state for a later
 reinstall, run the lifecycle's own `uninstall` with `--keep-state` instead;
 see [Uninstall](/docs/enterprise/lifecycle#uninstall) for what each account keeps.
 

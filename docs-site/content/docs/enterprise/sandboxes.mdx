@@ -1338,13 +1338,12 @@ running sandbox counts again within the next minute.
   user at the gateway's next start once their last 1.0.1 sandbox is deleted
   (`defenseclaw sandbox delete NAME`, after `defenseclaw sandbox pull NAME
   --apply` for work to keep) or purged. One account runs sandboxes at a time
-  either way. The bridge lives in the setup's applied record, which an uninstall
-  removes, so it does not come back with a later install: before an uninstall,
-  pull the work you want to keep from the sandboxes kept under 1.0.1
-  (`defenseclaw sandbox pull NAME --apply`), because after the install their
-  gateway starts in `defenseclaw-managed` and no longer lists them (a known
-  limit). This is the 1.0.1 upgrade bridge; it is removed when 1.0.1 is out of
-  support.
+  either way. A sandbox folder of the docker driver whose containers are gone
+  (removed outside OpenShell) does not keep a user on the bridge. The bridge
+  lives in the setup's applied record. A non-purge uninstall keeps that record
+  while an account keeps sandboxes, so the bridge comes back with the next
+  `ensure`, also after a package reinstall; a purge removes it. This is the
+  1.0.1 upgrade bridge; it is removed when 1.0.1 is out of support.
 - **Roll back.** The lifecycle snapshot covers the user units and the launcher. A
   `setup`-installed OpenShell under `~/.local` is removed with the user's
   teardown.
@@ -1357,19 +1356,22 @@ running sandbox counts again within the next minute.
   `/opt/cisco/defenseclaw/runtime` on macOS) also keeps the gateway's sandbox
   registrations and decisions (`sandbox/registrations` and `sandbox/decisions`)
   and their key (`redaction-correlation.key`); the rest of the machine state
-  goes. If the uninstall removed the service account, those files are root's
+  goes. The lifecycle directory (`/var/lib/defenseclaw-enterprise` on Linux,
+  `/opt/cisco/defenseclaw/lifecycle` on macOS) keeps the root-only record of
+  the sandbox setup they were made under (`openshell-state.kept.json`). If
+  the uninstall removed the service account, the store and key are root's
   until the next `ensure`, which adopts them and gives them to the service
-  account, also after a package reinstall (`rpm -e` or `apt remove`, then an
-  install). The kept sandboxes then start, review and pull as before, except
-  the sandboxes kept under 1.0.1 (the 1.0.1 upgrade bridge): the bridge lives in
-  the setup's applied record, which an uninstall removes, so after the reinstall
-  their gateway starts in `defenseclaw-managed` and no longer lists them. Before
-  an uninstall, pull the work you want to keep from the sandboxes kept under
-  1.0.1 (`defenseclaw sandbox pull NAME --apply`); they do not survive an
-  uninstall and reinstall (a known limit). Only
+  account, also after a package reinstall
+  (`rpm -e` or `apt remove`, then an install) and after a reinstall whose first
+  `ensure` failed and rolled back. That `ensure` compares the new setup with
+  the kept record, so a driver or version change is a switch that waits for
+  running sandboxes, and it keeps the 1.0.1 upgrade bridge. The kept sandboxes
+  then start, review and pull as before, the sandboxes kept under 1.0.1
+  included. Only
   `--purge` runs each user's teardown as that user and removes the daemon
   state, MicroVM disks, images, both stores and the rendered `gateway.toml`;
-  it also removes the kept registrations, decisions and key. On Linux, purge
+  it also removes the kept registrations, decisions and key, and the kept
+  setup record. On Linux, purge
   first asks host Docker as root to remove the containers and volumes of each
   account's sandboxes in both managed Docker namespaces, OpenShell's `default`
   (the sandboxes kept under 1.0.1) and `defenseclaw-managed`, matched by

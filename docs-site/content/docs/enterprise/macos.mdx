@@ -442,7 +442,7 @@ install, `status` and `verify` name each such account with the
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay, with the root-only sandbox setup record in `/opt/cisco/defenseclaw/lifecycle`. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`. | `defenseclaw-gateway enterprise macos uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
 | Keep only the `_defenseclaw` account | Add `--keep-service-account` |

@@ -587,7 +587,13 @@ folder if it keeps naming the other home, and rerun. If a backup receipt is
 unreadable or invalid, removal still runs, but a re-homed record stays until
 the named receipt is corrected or removed. An operator-edited
 plugin left in the recorded home is left for the operator and does not alone
-keep the record after the current home is verified clean. The guardian logs
+keep the record after the current home is verified clean. A home moved by
+copying it and then emptying the old folder counts as moved: the copied
+receipts follow it. An agent config that is a symlink to a file in the same
+home is checked through the link; a link out of the home keeps the record
+until you clean the file it names. Uninstall runs this cleanup also when a
+`targets.yaml` row still names the re-homed account, and fails a removal that
+leaves a DefenseClaw entry the agent still loads. The guardian logs
 both homes once when cleanup completes. If the recorded
 home may still exist but cannot be trusted, the record stays and the warning
 names it. Uninstall warns and goes on: remove DefenseClaw's entries from
