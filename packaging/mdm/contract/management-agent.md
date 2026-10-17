@@ -78,9 +78,13 @@ whose file or any folder above it a non-root (non-administrator) account can
 write (`anchor_insecure`, nothing written). So the folder must be root-only
 from the start:
 
-- Linux and macOS: `install -d -o 0 -g 0 -m 0700 /var/lib/<vendor>/trust`.
+- Linux: `install -d -o 0 -g 0 -m 0700 /var/lib/<vendor>/trust`. macOS:
+  `install -d -o 0 -g 0 -m 0700 "/Library/Application Support/<vendor>/trust"`.
   Every folder above it must be root-owned and not group or other writable,
-  which `/var/lib` and `/Library/Application Support` are.
+  which `/var/lib` and `/Library/Application Support` are. On macOS `/var`
+  and `/tmp` are links to `/private/...`, so a source under them is refused
+  `anchor_insecure`; the `/var/lib/<vendor>` paths in the examples below are
+  Linux paths.
 - Windows: standard users can create subfolders of `C:\ProgramData`, so a
   user can pre-create the agent's folder and own it. Create the folder
   yourself, as SYSTEM, before the first download, with a protected DACL (no
@@ -146,7 +150,7 @@ stderr, and the exit code is the only signal.
 | Case | Exit |
 |---|---|
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
-| `--lock-wait` outside 0 to 15m (Linux, macOS) | 2 |
+| `--lock-wait` outside 0 to 15m (Linux, macOS; `bundle anchors install` prints a JSON `invalid_arguments` document) | 2 |
 | Linux and macOS `secret set` / `remove` not run as root | 1 |
 | Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
@@ -163,7 +167,7 @@ on every outcome (section 4.7).
   `nohup`, double fork or other wrapper that exits before the CLI does.
   Linux and macOS `secret set` refuse to store a credential when their parent
   changed while they waited for the lock (`errors[0].code` `change_failed`),
-  and a wrapper that exits makes init the parent.
+  and a wrapper that exits makes init the parent. Windows has no such rule.
 - Run long commands on a worker thread. An apply blocks for its lock wait plus
   the transaction and the confirm step (usually under 2 minutes, plus up to
   15 minutes of lock wait). Do not kill a child on a timeout; stop waiting,
@@ -174,9 +178,11 @@ on every outcome (section 4.7).
   and on Windows no job object with kill-on-close. Do not start children
   outside the agent's cgroup to get this (that needs a wrapper). When the
   agent stops, a running `bundle apply` finishes and writes its receipt; a
-  `secret set` still waiting for the lock sees its parent gone and refuses
-  without storing (`change_failed`), and the agent re-sends the credential
-  after its restart (section 5.2). A killed child leaves an interrupted
+  Linux or macOS `secret set` still waiting for the lock sees its parent gone
+  and refuses without storing (`change_failed`), and the agent re-sends the
+  credential after its restart (section 5.2). A Windows `secret set` waiting
+  for its locks stores the value after the agent stopped; the agent compares
+  `sha256_prefix` after its restart (2.5). A killed child leaves an interrupted
   transaction; managed hooks fail closed until the next mutating run
   recovers it.
 - One mutating call at a time per device is enough; the device serializes
@@ -326,7 +332,8 @@ Exit 0.
   this run (`not_managed`); every `secret_refs` credential stored (4.7).
 - Lock: Linux and macOS take `lifecycle.lock` and wait `--lock-wait` (default
   5 s, at most 15 m). Windows takes `bundle.lock`, waiting up to
-  `--lock-wait`, then the installer's `lifecycle.lock`. On Windows
+  `--lock-wait` (default: no wait, at most 15 m), then the installer's
+  `lifecycle.lock`. On Windows
   `--lock-wait` covers **only** `bundle.lock`: a busy installer
   `lifecycle.lock` (a repair, an `ensure` without a bundle, a guardian repair;
   held for a fixed 30 s wait) still returns 1618 `lifecycle_busy`, whatever
@@ -354,7 +361,12 @@ Exit 0.
   ids (section 2.6). For the `already_applied` no-op it is the current
   confirmed receipt's id, which may be an MDM delivery's id (no new receipt
   is written). It is absent when the apply refused before the bundle was
-  received.
+  received. One exception: when a newer delivery failed after staging and the
+  agent re-sends the current bundle, the result is `already_applied` but the
+  `bundle` block reports the newer failed receipt (its `bundle_id`, `state:
+  "failed"`, `current_bundle_id` set). Treat `noop_reason ==
+  "already_applied"` with `bundle.current_bundle_id == <submitted id>` as
+  success too (section 8).
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
@@ -460,15 +472,19 @@ Exit 0.
   `enterprise secret status --json`. On Windows pass `--lock-wait` only to a
   `management_contract` 1 build.
 - Privilege: root on Linux and macOS (checked first, no JSON); an elevated
-  administrator or SYSTEM on Windows (exit 5 `elevation_required`).
+  administrator or SYSTEM on Windows (exit 5 `elevation_required` on a
+  managed computer; exit 1603 with the same code on a computer without the
+  standalone deployment marker).
 - Preconditions: Windows needs an installed deployment (`not_installed`, exit
-  1603). Linux and macOS store a credential before the first install and
+  1603) and the installer's `lifecycle.lock` file (`state_invalid`, exit 1603,
+  nothing written, when an install never created it). Linux and macOS store a credential before the first install and
   report `noop: true`, `noop_reason: "not_installed"`. Windows `remove`
   refuses while the installed config still references the credential
   (`credential_in_use`).
 - Lock: Linux and macOS write and apply under one `lifecycle.lock` and wait
-  `--lock-wait`. Windows takes the two locks in the order a bundle apply takes
-  them: `bundle.lock` (waiting up to `--lock-wait`), then the installer's
+  `--lock-wait` (default 5 s). Windows takes the two locks in the order a
+  bundle apply takes them: `bundle.lock` (waiting up to `--lock-wait`,
+  default no wait), then the installer's
   `lifecycle.lock` (a fixed 30 s, as the installer waits). It writes and
   restarts the gateway while it holds both, so the restart cannot land inside
   an apply's confirm step, a repair, an `ensure` without a bundle or a
@@ -532,8 +548,10 @@ is still the one owner.
   installs are exactly the bytes it validated in that one read. Keep the
   source in a root-only folder (section 1).
 - Privilege: root (`not_root`). Lock: `lifecycle.lock`, waits `--lock-wait`.
-- Behaviour: a file byte-identical to the installed one is `result:
-  "unchanged"` and writes nothing. Otherwise the command writes
+- Behaviour: a file byte-identical to a trusted installed file is `result:
+  "unchanged"` and writes nothing. Identical bytes in an installed file that
+  fails its check (another owner, a loose mode) are rewritten and reported
+  `replaced`, with `previous_sha256` equal to `sha256`. Otherwise the command writes
   `<etc>/trust/bundle-anchors.json` atomically (root:root 0644 in a root 0755
   folder), re-checks it, and puts the previous file back if that check fails.
   Warnings, checked against the new file: `key_unknown` (the confirmed
@@ -743,3 +761,8 @@ Per-user installs and Secure Client computers refuse every command.
   authoritative.
 - Trust anchor and credential changes are not audited by DefenseClaw
   (section 0).
+- A repeated delivery of the current bundle after a newer delivery failed is
+  `already_applied`, but its `bundle` block reports the failed receipt, not
+  the current one (4.3 says how to read it).
+- Windows `bundle apply` and `secret set` / `remove` default to no wait for
+  `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.

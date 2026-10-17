@@ -8,6 +8,7 @@ package cli
 
 import (
 	"io"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -57,10 +58,18 @@ Exit codes: 0, 1 (errors[].code names the refusal), 75 busy, 2 usage.`,
 	f.BoolVar(&opts.refuseCapabilityLoss, "refuse-capability-loss", false, "refuse a bundle that disables a currently enforced capability")
 	f.StringVar(&opts.reason, "reason", "bundle", "annotate the run (recorded in the lifecycle result)")
 	addLockWaitFlag(f, &opts.lockWait)
+	if runtime.GOOS == "windows" {
+		f.Lookup("lock-wait").Usage = windowsApplyLockWaitUsage
+		f.Lookup("reason").Usage = "accepted for one command line on every OS; has no effect on Windows"
+	}
 	f.BoolVar(&opts.json, "json", false, "print the result as JSON")
 	cmd.SetFlagErrorFunc(lifecycleFlagError)
 	return cmd
 }
+
+// windowsApplyLockWaitUsage is --lock-wait of Windows `bundle apply`: it
+// covers bundle.lock only, and its default is no wait.
+const windowsApplyLockWaitUsage = "wait up to this long for another policy bundle run to release bundle.lock (default: no wait, at most 15m) before exiting 1618"
 
 // bundleApplyRefused prints an apply refused before the lifecycle ran.
 func bundleApplyRefused(cmd *cobra.Command, asJSON bool, err error) error {
