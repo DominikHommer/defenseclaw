@@ -37,7 +37,7 @@ DC_LOG=""
 dc_put_anchors() {{ cp "$1" "$DC_ANCHORS"; }}
 trap dc_cleanup EXIT
 trap 'dc_stop_child; dc_fail_result "$DC_EXIT_FAILURE" mdm_cancelled "the MDM run was cancelled; the lifecycle was stopped"' TERM
-sleep 30 &
+sleep 30 >/dev/null 2>&1 &
 DC_CHILD=$!
 printf 'ready\\n'
 wait "$DC_CHILD" || true
@@ -48,9 +48,14 @@ wait "$DC_CHILD" || true
             ["sh", str(script)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, start_new_session=True,
         )
-        assert process.stdout.readline().strip() == "ready"
-        process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=10)
+        try:
+            assert process.stdout.readline().strip() == "ready"
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=20)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
         assert process.returncode == 1, (stdout, stderr)
         assert 'mdm_cancelled' in stdout
         if had_anchor:
