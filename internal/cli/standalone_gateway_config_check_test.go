@@ -202,6 +202,13 @@ func TestRulePackNestedCopyHintNamesTheNestedFolder(t *testing.T) {
 	if hint := rulePackNestedCopyHint(pack, other); hint != "" {
 		t.Fatalf("a component that is not a nested copy got hint %q", hint)
 	}
+	if err := os.MkdirAll(filepath.Join(pack, "extra"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if hint := rulePackNestedCopyHint(pack, fmt.Errorf("wrapped: %w", other)); !strings.Contains(hint, filepath.Join(pack, "extra")) ||
+		!strings.Contains(hint, "move it outside") || !strings.Contains(hint, "remove it") {
+		t.Fatalf("GAP-1566 unexpected folder hint = %q", hint)
+	}
 }
 
 // GAP-0932: inline secrets are refused naming every rejected key, never a

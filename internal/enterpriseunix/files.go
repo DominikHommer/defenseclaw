@@ -165,11 +165,19 @@ func (e *Env) ensureDir(path string, mode os.FileMode, owner fileOwner) error {
 	default:
 		return fmt.Errorf("inspect %s: %w", path, err)
 	}
-	if err := os.Chmod(path, mode); err != nil {
-		return fmt.Errorf("chmod %s: %w", path, err)
+	// A correctly owned directory may be immutable on macOS. Reapplying the
+	// same metadata can fail even though the directory is already usable.
+	const managedDirModeBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if info == nil || info.Mode()&managedDirModeBits != mode&managedDirModeBits {
+		if err := os.Chmod(path, mode); err != nil {
+			return fmt.Errorf("chmod %s: %w", path, err)
+		}
 	}
-	if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
-		return fmt.Errorf("chown %s: %w", path, err)
+	uid, gid, ownerErr := e.OwnerOf(path)
+	if ownerErr != nil || uid != owner.UID || gid != owner.GID {
+		if err := e.Lchown(path, owner.UID, owner.GID); err != nil {
+			return fmt.Errorf("chown %s: %w", path, err)
+		}
 	}
 	return nil
 }

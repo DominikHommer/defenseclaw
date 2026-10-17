@@ -243,14 +243,18 @@ func rulePackNestedCopyHint(dir string, err error) string {
 		return ""
 	}
 	first, _, found := strings.Cut(packErr.Path, "/")
-	if !found || !strings.EqualFold(first, filepath.Base(filepath.Clean(dir))) {
+	if !found || first == "." || first == ".." || filepath.Base(first) != first ||
+		strings.ContainsAny(first, `\\/`) {
 		return ""
 	}
 	nested := filepath.Join(dir, first)
 	if info, statErr := os.Lstat(nested); statErr != nil || !info.IsDir() {
 		return ""
 	}
-	return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
+	if strings.EqualFold(first, filepath.Base(filepath.Clean(dir))) {
+		return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
+	}
+	return fmt.Sprintf("; %s is an unexpected folder inside the rule pack: move it outside %s or remove it, then run again", nested, dir)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can

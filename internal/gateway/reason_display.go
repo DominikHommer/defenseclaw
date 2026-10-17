@@ -29,6 +29,8 @@ import (
 
 const builtInMatchReasonPrefix = "matched: "
 
+const archiveChainBlockTitle = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
+
 // trustedBuiltInMatchReason reports whether reason consists exclusively of
 // exact rule ID/title pairs from the compiled-in catalog. The equality check
 // is deliberately stricter than a character allow-list: scanner-provided
@@ -72,6 +74,9 @@ func splitMatchLabels(body string) []string {
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
+	if label == "persistence.ssh_authorized_keys_command:"+archiveChainBlockTitle {
+		return true
+	}
 	for _, category := range defaultRuleCategories {
 		for _, rule := range category.Rules {
 			base := rule.ID + ":" + rule.Title

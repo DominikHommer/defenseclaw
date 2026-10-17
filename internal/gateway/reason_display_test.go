@@ -214,6 +214,22 @@ func TestSanitizeForResponseHonorsManagedRedactionDirective(t *testing.T) {
 	}
 }
 
+func TestR103B07ArchiveChainGuidanceReachesAgent(t *testing.T) {
+	source := builtInMatchReasonPrefix + "persistence.ssh_authorized_keys_command:" + archiveChainBlockTitle
+	if got := agentDisplayReason(source, redaction.SinkPolicyDefault); got != source {
+		t.Fatalf("archive guidance was hidden: %q", got)
+	}
+	if got := notificationDisplayReason(source, redaction.SinkPolicyDefault); got != source {
+		t.Fatalf("archive notification guidance was hidden: %q", got)
+	}
+	if got := agentDisplayReason(source+" attacker text", redaction.SinkPolicyDefault); got == source+" attacker text" {
+		t.Fatal("untrusted suffix was displayed")
+	}
+	if got := agentDisplayReason(source, redaction.SinkPolicyRedact); got == source {
+		t.Fatal("managed redaction directive was ignored")
+	}
+}
+
 // GAP-1099: a static block-list verdict reaches the agent as a DefenseClaw
 // block naming the tool, not as a fully redacted reason.
 func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {

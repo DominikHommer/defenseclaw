@@ -65,6 +65,27 @@ func TestR103B07EnvBypassRows(t *testing.T) {
 	}
 }
 
+func TestR103B07EnvNullRowsDoNotLaunchUtility(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, tc := range []struct{ id, flag, command string }{
+		{"BYP-0295", "-0", `env -0 python3 -c 'open("disklink","a").write("k")'`},
+		{"BYP-0296", "--null", `env --null python3 -c 'open("disklink","a").write("k")'`},
+		{"BYP-0311", "-0", `env -0 node -e 'require("fs").appendFileSync("disklink","k")'`},
+		{"BYP-0312", "--null", `env --null node -e 'require("fs").appendFileSync("disklink","k")'`},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			if got := LiteralWriteOperands(tc.command, cwd, home); len(got) != 0 {
+				t.Fatalf("non-executing env command has write operands %v", got)
+			}
+			_, words, ok := envCommandWords([]string{"env", tc.flag, "python3"}, cwd)
+			if !ok || len(words) != 0 {
+				t.Fatalf("env null command words=%v ok=%v", words, ok)
+			}
+		})
+	}
+}
+
 func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("POSIX link traversal")
@@ -113,6 +134,55 @@ func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 			targets, ok := Decode(Resolve(payload))
 			if !ok || targets[link] != tc.want {
 				t.Fatalf("resolved target=%q, want %q", targets[link], tc.want)
+			}
+		})
+	}
+}
+
+func TestR103B07MulticallCopyDestination(t *testing.T) {
+	cwd := "/work/project"
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"GAP-1560-busybox", []string{"busybox", "cp", "-r", "big", "copy"}, "/work/project/copy"},
+		{"GAP-1560-toybox", []string{"toybox", "cp", "-r", "big", "copy"}, "/work/project/copy"},
+		{"ordinary-cp", []string{"cp", "-r", "big", "copy"}, "/work/project/copy"},
+		{"not-copy", []string{"busybox", "ln", "big", "copy"}, ""},
+		{"malformed-copy", []string{"busybox", "cp", "-r", "big"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CopyDestination(tc.argv, cwd); got != tc.want {
+				t.Fatalf("destination=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestR103B07LinkCreatingExtractorRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "src"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id, command, target string
+		want                bool
+	}{
+		{"GAP-1550-git", "git clone https://example.invalid/repo.git out; echo k > out/report.txt", "out/report.txt", true},
+		{"GAP-1550-rsync-remote", "rsync -a example.invalid:/src out; echo k > out/report.txt", "out/report.txt", true},
+		{"GAP-1550-jar", "jar xf archive.jar; echo k > report.txt", "report.txt", true},
+		{"GAP-1550-ditto", "ditto -x -k archive.zip out; echo k > out/report.txt", "out/report.txt", true},
+		{"GAP-1550-git-status", "git status; echo k > report.txt", "report.txt", false},
+		{"GAP-1550-jar-list", "jar tf archive.jar; echo k > report.txt", "report.txt", false},
+		{"GAP-1550-rsync-local", "rsync -a src/ out; echo k > out/report.txt", "out/report.txt", false},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			links := CommandLinks("Bash", tc.command, cwd, home)
+			got := links.OpaqueTarget(filepath.Join(cwd, tc.target))
+			if got != tc.want {
+				t.Fatalf("opaque=%v, want %v", got, tc.want)
 			}
 		})
 	}

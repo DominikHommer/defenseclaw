@@ -1492,7 +1492,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}
 			title := rule.Title
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
-				title = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
+				title = archiveChainBlockTitle
 			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
 				RuleID: rule.ID, Title: title, Severity: rule.Severity,

@@ -1199,6 +1199,10 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd ~/x && tar -C ~/x -xf keys.tar && echo k >> n1.txt`,
 		`cpio -id -D unpack < keys.cpio; echo k >> notes.txt`,
 		`tar -P -C unpack -xf keys.tar; echo k >> notes.txt`,
+		`git clone https://example.invalid/repo.git out; echo k > out/report.txt`,
+		`rsync -a example.invalid:/src out; echo k > out/report.txt`,
+		`jar xf archive.jar; echo k > report.txt`,
+		`ditto -x -k archive.zip out; echo k > out/report.txt`,
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
@@ -1297,6 +1301,8 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,
+		`busybox cp -r big copy3`, // GAP-1560: its own destination is an ordinary write.
+		`toybox cp -r big copy3`,
 		`cp -a tree copy4`,
 		`cp -r big copy6 && echo done > report.txt`,
 		`cp --archive disklink notes.txt`,

@@ -1989,7 +1989,7 @@ var (
 	renamePrograms    = []string{"mv", "gmv", "rename"}
 	cdPrograms        = []string{"cd", "pushd", "popd"}
 	multicallPrograms = []string{"busybox", "toybox"}
-	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr"}
+	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "git", "jar", "ditto"}
 	copyLinkOption    = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
 	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
 	// creates from text this package does not evaluate.
@@ -2193,7 +2193,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		case slices.Contains(archivePrograms, program):
 			destination := archiveDestination(program, words[1:], static[1:], cwd)
 			opaqueIn := links.unknownIn
-			if program == "rsync" && destination != "" {
+			if (program == "rsync" || program == "git") && destination != "" {
 				// Its own destination is an ordinary write operand.
 				// A later write into the copied tree still sees the scope.
 				links.copyDestinations = append(links.copyDestinations, destination)
@@ -2208,7 +2208,8 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			}
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
 				copyScopes = append(copyScopes, destination)
-				if copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
+				if program == "rsync" && rsyncRemoteSource(words[1:], static[1:]) ||
+					copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
 					opaqueIn(destination)
 				}
 			}
@@ -2894,6 +2895,9 @@ func tarExplicitExtractMembers(program string, args []string, cwd string) []stri
 
 // CopyDestination returns a statically understood cp destination.
 func CopyDestination(argv []string, cwd string) string {
+	for len(argv) > 1 && slices.Contains(multicallPrograms, programBase(argv[0])) {
+		argv = argv[1:]
+	}
 	if len(argv) < 2 || !slices.Contains(copyPrograms, programBase(argv[0])) {
 		return ""
 	}
@@ -2993,7 +2997,12 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 		return ""
 	}
 	destination := cwd
-	if strings.HasSuffix(program, "tar") {
+	if program == "git" && len(args) == 3 && args[0] == "clone" &&
+		static[1] && static[2] && !strings.HasPrefix(args[1], "-") && !strings.HasPrefix(args[2], "-") {
+		destination = args[len(args)-1]
+	} else if program == "ditto" && len(args) >= 4 && static[len(args)-1] {
+		destination = args[len(args)-1]
+	} else if strings.HasSuffix(program, "tar") {
 		var ok bool
 		destination, ok = tarDestination(args, static, cwd)
 		if !ok {
@@ -3207,6 +3216,16 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 
 // archiveMayLink reports an archive or sync call that can create links.
 func archiveMayLink(program string, args []string, static []bool) bool {
+	if program == "git" {
+		return len(args) >= 2 && static[0] && args[0] == "clone" &&
+			!slices.Contains(args, "--no-checkout") && !slices.Contains(args, "-n")
+	}
+	if program == "jar" {
+		return len(args) >= 2 && static[0] && strings.ContainsRune(strings.TrimPrefix(args[0], "-"), 'x')
+	}
+	if program == "ditto" {
+		return len(args) >= 4 && slices.Contains(args, "-x") && slices.Contains(args, "-k")
+	}
 	tar := strings.HasSuffix(program, "tar")
 	cpio := program == "cpio" || program == "bsdcpio"
 	pax := program == "pax"
@@ -3254,6 +3273,18 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 			cpio && strings.ContainsAny(cluster, "il"),
 			pax && strings.ContainsAny(cluster, "rl"),
 			tar && tarExtracts(cluster):
+			return true
+		}
+	}
+	return false
+}
+
+func rsyncRemoteSource(args []string, static []bool) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if !static[i] || strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		if strings.Contains(args[i], ":") && !strings.HasPrefix(args[i], "/") {
 			return true
 		}
 	}
