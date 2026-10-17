@@ -610,7 +610,7 @@ class _OverviewRenderSnapshot:
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     # The terminal size the body was laid out for (_overview_layout_key).
-    layout: tuple[int, bool]
+    layout: tuple[int]
 
 
 @dataclass(frozen=True)
@@ -4989,9 +4989,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             "inventory": [
                 ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
                 ("j/k or Up/Down", "Navigate items and Summary metrics"),
-                ("PgUp/PgDn or Home/End", "Jump through Summary metrics or a list"),
+                ("PgUp/PgDn or Home/End", "Jump through Summary metrics or a list; PgUp/PgDn scroll the open detail"),
                 ("Enter / Esc", "Open / close the detail pane"),
-                ("PgUp / PgDn", "Scroll the open detail"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
@@ -9754,18 +9753,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
 
-    def _overview_layout_key(self) -> tuple[int, bool]:
+    def _overview_layout_key(self) -> tuple[int]:
         """The part of the terminal size the Overview layout depends on."""
 
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        # Notices are one "…" line below 32 rows and wrap above it, so the
-        # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
-        # wrapped notice, its end hidden under the button bar (GAP-2519).
-        short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
-        return (width, short)
+        return (width,)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".

@@ -107,7 +107,7 @@ def test_watchdog_row_counts_one_dir_in_the_singular() -> None:
 async def test_notice_keeps_full_action_after_a_height_only_resize_to_80x24(tmp_path, monkeypatch) -> None:
     # GAP-0514: the end of an actionable notice must remain readable at 80x24.
     # The Overview sample started at 80x45 lands after the resize, as it did on
-    # a slow Windows runner, and must not put the wrapped notice back.
+    # a slow Windows runner, and must preserve the full notice after resizing.
     started, resized = threading.Event(), threading.Event()
     build = app_module.DefenseClawTUI._build_overview_render_snapshot
 

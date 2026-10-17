@@ -168,6 +168,29 @@ func TestPolicyExplainManagedKeepsIdentityAfterLongSettings(t *testing.T) {
 	has(t, ta.output(), "SETTING", "setting.35", "[from your organization profile]")
 }
 
+func TestPolicyExplainManagedFooterNamesTheSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		given PolicyOptions
+		want  string
+	}{
+		{"default agent", PolicyOptions{}, "Agent: default agent (add --harness NAME for another)"},
+		{"running sandbox", PolicyOptions{Sandbox: "bob-codex"}, "Agent: agent in sandbox bob-codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			m := managedExplainFixture()
+			m.Provisional = true
+			ta.daemon.explain.Managed = m
+			ta.ok(t, ta.PolicyExplain(bg, tc.given))
+			output := ta.output()
+			has(t, output, "Policy at a glance", tc.want, "Organization profile: contractors",
+				"matched: your group CORP\\Contractors", "provisional until your directory answers")
+			lacks(t, output, "Agent: default agent (Claude Code)")
+		})
+	}
+}
+
 // GAP-0179/GAP-0550: the floor's source map identifies who supplied each
 // constraint, even though the posture calls every floor setting admin.
 func TestManagedExplainConstraintProvenance(t *testing.T) {
