@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -74,6 +75,18 @@ func TestRequestArgRoundTripAndValidation(t *testing.T) {
 	if _, err := decodeRequest([]byte(`{"version":1,"gateway_service":"G","sid":"S-1-5-21-1-2-3","connector":"kiro","name":"n","digest":"` +
 		strings.Repeat("a", 64) + `","command":"cmd.exe"}`)); !errors.Is(err, ErrProtocol) {
 		t.Fatalf("accepted a request with a command: %v", err)
+	}
+	valid, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeRequest(valid); err != nil {
+		t.Fatalf("refused a valid request: %v", err)
+	}
+	for _, trailing := range []string{"}", "]", " {}", "x"} {
+		if _, err := decodeRequest(append(append([]byte{}, valid...), trailing...)); !errors.Is(err, ErrProtocol) {
+			t.Fatalf("accepted a request followed by %q: %v", trailing, err)
+		}
 	}
 }
 

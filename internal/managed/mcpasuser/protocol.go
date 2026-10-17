@@ -190,7 +190,8 @@ func decodeRequest(data []byte) (Request, error) {
 	if err := decoder.Decode(&request); err != nil {
 		return Request{}, fmt.Errorf("%w: request is not JSON: %v", ErrProtocol, err)
 	}
-	if decoder.More() {
+	// Exactly one JSON value: More() misses a trailing "}" or "]".
+	if err := decoder.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
 		return Request{}, fmt.Errorf("%w: trailing data after the request", ErrProtocol)
 	}
 	request.SID = strings.ToUpper(request.SID)
