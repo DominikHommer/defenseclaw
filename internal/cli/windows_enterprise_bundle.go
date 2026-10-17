@@ -622,7 +622,12 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// Installing the anchors puts the computer in bundle mode, which
 		// refuses CONFIG=; installing them first would let this one run
 		// apply an unsigned config past that check.
-		return refuse("invalid_arguments", "TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")
+		// The code is bundle_required, as for a CONFIG= on a computer
+		// already in bundle mode; the exit stays 1639, because the command
+		// line itself can never succeed (#1288).
+		return true, writeWindowsBundleRefusalWithExit(cmd, action, opts, string(enterprisebundle.CodeBundleRequired),
+			"TRUSTANCHORS= (--trust-anchors) cannot be combined with CONFIG= (--config): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=",
+			floorSource, enterprisestatus.WindowsExitInvalidArgs)
 	}
 	if !windowsEnterpriseMutationAction(action) {
 		return false, nil
@@ -755,11 +760,20 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 // transaction: nothing was installed, so the result is the host as it is
 // with the bundle block of the receipt.
 func writeWindowsBundleRefusal(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message, floorSource string) error {
+	return writeWindowsBundleRefusalWithExit(cmd, action, opts, code, message, floorSource, 0)
+}
+
+// writeWindowsBundleRefusalWithExit is writeWindowsBundleRefusal with an
+// explicit exit code; 0 derives it from the error code.
+func writeWindowsBundleRefusalWithExit(cmd *cobra.Command, action string, opts *windowsEnterpriseLifecycleOptions, code, message, floorSource string, exit int) error {
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
 	applyWindowsEnterpriseRecordedDeployment(result)
 	result.FloorSource = floorSource
 	result.AddError(code, message)
-	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+	if exit == 0 {
+		exit = windowsEnterpriseFailureCodeFor(result)
+	}
+	return finishWindowsEnterpriseStandalone(cmd, opts, result, exit)
 }
 
 func windowsBundleCode(err error, fallback enterprisebundle.Code) enterprisebundle.Code {

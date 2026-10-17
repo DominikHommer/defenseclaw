@@ -14,6 +14,8 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
 func TestParseEnterpriseSetupInstallContract(t *testing.T) {
@@ -544,6 +546,62 @@ func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 	}
 	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
 		t.Fatal("the Secure Client Setup accepted BUNDLE=")
+	}
+}
+
+// #1288: anchors with an unsigned CONFIG= (or the --mode shorthand, which
+// renders one) is refused before anything is staged, exit 1639, with the
+// bundle_required code the lifecycle and the Unix kit use, not
+// invalid_arguments.
+func TestStandaloneSetupRefusesTrustAnchorsWithConfigAsBundleRequired(t *testing.T) {
+	if setupCodeBundleRequired != string(enterprisebundle.CodeBundleRequired) {
+		t.Fatalf("Setup code %q drifted from %q", setupCodeBundleRequired, enterprisebundle.CodeBundleRequired)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`},
+		{"/ensure", `CONFIG=C:\c.yaml`, `trust-anchors=C:\b\a.json`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, "--mode=action", "--connector=codex"},
+	} {
+		_, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+		var bundleRequired enterpriseSetupBundleRequired
+		if !errors.As(err, &bundleRequired) {
+			t.Errorf("standalone %v: err %v, want a bundle_required refusal", arguments, err)
+		}
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("BUNDLE= with TRUSTANCHORS= was refused: %v", err)
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("TRUSTANCHORS= alone was refused: %v", err)
+	}
+
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	loads := 0
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { loads++; return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`, "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		Action   string `json:"action"`
+		OK       bool   `json:"ok"`
+		ExitCode int    `json:"exit_code"`
+		Errors   []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.OK || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "bundle_required" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+	// The refusal came from the command line: the payload was read only to
+	// pick the exit code, and the lifecycle never ran.
+	if loads != 1 {
+		t.Fatalf("payload loads = %d, want 1 (exit-code lookup only)", loads)
 	}
 }
 

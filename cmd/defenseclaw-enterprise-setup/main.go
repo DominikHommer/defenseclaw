@@ -76,6 +76,18 @@ type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
 
+// setupCodeBundleRequired is enterprisebundle.CodeBundleRequired, the code
+// the lifecycle and the Unix kit report when a computer that takes signed
+// bundles is given a config. A test pins the two together.
+const setupCodeBundleRequired = "bundle_required"
+
+// enterpriseSetupBundleRequired is a command line that hands a config to a
+// run that installs bundle trust anchors. It is still a command line that
+// can never succeed (1639), reported with the bundle_required code.
+type enterpriseSetupBundleRequired struct{ error }
+
+func (err enterpriseSetupBundleRequired) Unwrap() error { return err.error }
+
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -511,6 +523,12 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
 		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
 	}
+	if strings.TrimSpace(opts.TrustAnchors) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
+		// Installing the anchors puts the computer in bundle mode, which takes
+		// its policy only from signed bundles: the same refusal, and code, as a
+		// CONFIG= on a computer in bundle mode (#1288).
+		return opts, false, enterpriseSetupBundleRequired{errors.New("TRUSTANCHORS= cannot be combined with CONFIG= (or --mode/--connector): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")}
+	}
 	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
 		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
 	}
@@ -828,9 +846,12 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
+	var bundleRequired enterpriseSetupBundleRequired
 	var invalid enterpriseSetupInvalidArguments
 	var timeout enterpriseSetupLifecycleTimeout
 	switch {
+	case errors.As(err, &bundleRequired):
+		code = setupCodeBundleRequired
 	case errors.As(err, &invalid):
 		code = "invalid_arguments"
 	case errors.As(err, &timeout):
@@ -905,7 +926,7 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
 	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure on an installed computer: apply this signed policy bundle (not with CONFIG=)")
-	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first")
+	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure: install this administrator-only bundle trust anchor file first (not with CONFIG=)")
 	fmt.Fprintln(output, "  REFUSECAPABILITYLOSS=1         with /ensure: refuse a bundle that disables an enforced capability")
 	fmt.Fprintln(output, "  JSON=1                         print the result document on standard output")
 	fmt.Fprintln(output, "  NOSTART=1                      install or update with the services stopped and disabled")
