@@ -359,9 +359,16 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
+		if opts.json {
+			message := "--name must contain 1 to 63 lowercase letters, digits or dashes and start with a letter or digit"
+			return enterpriseSecretRefusal(cmd, action, "invalid_arguments", message, enterprisestatus.UnixExitInvalidArgs)
+		}
 		return lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
+		if opts.json {
+			return enterpriseSecretRefusal(cmd, action, "invalid_arguments", "pass exactly one of --from-stdin or --from-file", enterprisestatus.UnixExitInvalidArgs)
+		}
 		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
 	var mutate func(context.Context) error
@@ -371,10 +378,16 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
+				if opts.json {
+					return enterpriseSecretRefusal(cmd, action, "secret_source_unreadable", err.Error(), enterprisestatus.UnixExitInvalidArgs)
+				}
 				return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
+				if opts.json {
+					return enterpriseSecretRefusal(cmd, action, "secret_source_unreadable", err.Error(), enterprisestatus.UnixExitFailure)
+				}
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
 			}
 			defer file.Close()
@@ -382,6 +395,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		value, err := enterpriseunix.ReadSecretValue(source)
 		if err != nil {
+			if opts.json {
+				return enterpriseSecretRefusal(cmd, action, "secret_value_invalid", err.Error(), enterprisestatus.UnixExitInvalidArgs)
+			}
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
 		caller := secretCallerPID()
@@ -414,6 +430,20 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// enterpriseSecretRefusal gives an MDM caller the same lifecycle JSON shape
+// as a failed ensure, even when secret set refuses before running a lifecycle.
+func enterpriseSecretRefusal(cmd *cobra.Command, action, code, message string, exitCode int) error {
+	result := enterprisestatus.New("secret "+action, "standalone", enterpriseunix.CurrentGOOS(), "")
+	result.AddError(code, message)
+	result.Finish(enterpriseunix.CurrentGOOS(), exitCode)
+	if err := printLifecycleResult(cmd.OutOrStdout(), result, true); err != nil {
+		return err
+	}
+	refusal := withExitCode(errors.New(message), exitCode)
+	silenceJSONReportedError(cmd, true, refusal)
+	return refusal
 }
 
 // secretCallerPID is the parent of this process. A seam for tests.
