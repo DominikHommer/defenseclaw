@@ -63,6 +63,20 @@ func postureExplain(t *testing.T, f *sandboxFixture, peer managedHookPeer, req s
 	return out
 }
 
+func TestSandboxExplainCarriesForeignSandboxActionAndSource(t *testing.T) {
+	f := postureFixture(t)
+	f.cfg.OpenShell.Admin.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	f.cfg.Guardrail.Profiles["contractors"].Sandbox.ForeignSandboxes = config.OpenShellForeignSandboxesStop
+	got := postureExplain(t, f, sbxAlice, sandboxrelay.ExplainRequest{Sources: true})
+	if got.ForeignSandboxes != config.OpenShellForeignSandboxesStop || got.Sources["foreign_sandboxes"] != sandboxapi.ExplainSourceProfile {
+		t.Fatalf("contractor foreign sandbox action: %q source %q", got.ForeignSandboxes, got.Sources["foreign_sandboxes"])
+	}
+	got = postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Sources: true})
+	if got.ForeignSandboxes != config.OpenShellForeignSandboxesAlert || got.Sources["foreign_sandboxes"] != sandboxapi.ExplainSourceOrganization {
+		t.Fatalf("base foreign sandbox action: %q source %q", got.ForeignSandboxes, got.Sources["foreign_sandboxes"])
+	}
+}
+
 // GAP-0179, GAP-0438, GAP-0487: the explain of a new run carries the
 // authoritative posture under the caller's own floor: the required pack,
 // the profile minimum, and balanced where the profile names no pack.

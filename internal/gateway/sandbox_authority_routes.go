@@ -930,7 +930,8 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,
-		WorkdirMode: "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
+		ForeignSandboxes: floor.ForeignSandboxes,
+		WorkdirMode:      "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
 		AllowYolo: floor.AllowYolo == nil || *floor.AllowYolo, OnSilence: floor.OnSilence, MaxSilenceAfter: floor.MaxSilenceAfter,
 		ProcessTree: floor.ProcessTree != nil && *floor.ProcessTree, DeleteStoppedAfter: floor.DeleteStoppedAfter,
 		RequestAccess:  sandboxRequestAccess(floor),
@@ -985,7 +986,16 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 	}
 	// The caller's own MCP servers, judged as a resolve judges them: the
 	// MCP row of the caller's explain, and what a start brings along.
-	if len(req.MCP) > 0 && importMCP {
+	if scope.registered {
+		out.MCPIncluded = slices.Clone(scope.reg.MCPKept)
+		for _, s := range scope.reg.MCPSkipped {
+			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
+		}
+	} else if len(req.MCP) > 0 && !importMCP {
+		for _, claim := range req.MCP {
+			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: claim.Name, Reason: sandboxrelay.MCPSkipOrganizationBlock})
+		}
+	} else if len(req.MCP) > 0 {
 		kept, skipped := sandboxFilterMCP(r.Context(), a, peer, scope.connector, req.MCP)
 		out.MCPIncluded = kept
 		for _, s := range skipped {
@@ -1039,7 +1049,7 @@ func sandboxExplainRepo(overlay []byte) (*packs.RepoPolicy, error) {
 // sandboxExplainKeys are the floor keys a managed explain's sources name.
 var sandboxExplainKeys = []string{"allowed", "required_for", "when_unavailable", "allowed_harnesses", "allowed_credentials",
 	"egress_allow_only", "egress_block", "user_approvals", "allow_unblock", "allow_mount", "allow_host_ports", "allow_yolo",
-	"on_silence", "max_silence_after", "process_tree", "delete_stopped_after", "request_access", "driver_fallback",
+	"on_silence", "max_silence_after", "process_tree", "foreign_sandboxes", "delete_stopped_after", "request_access", "driver_fallback",
 	"min_profile", "required_pack"}
 
 // sandboxExplainSources says where each floor key of the caller's floor

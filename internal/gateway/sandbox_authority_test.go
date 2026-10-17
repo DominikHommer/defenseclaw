@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -699,6 +700,11 @@ func TestSandboxAuthorityResolveKeepsTheMCPJudgment(t *testing.T) {
 	if !ok || len(reg.MCPKept) != 1 || reg.MCPKept[0] != "ok-srv" ||
 		len(reg.MCPSkipped) != 1 || reg.MCPSkipped[0].Name != "blocked-srv" || reg.MCPSkipped[0].Reason != sandboxrelay.MCPSkipOrganizationBlock {
 		t.Fatalf("registration MCP = kept %v skipped %v", reg.MCPKept, reg.MCPSkipped)
+	}
+	explain := postureExplain(t, f, sbxBob, sandboxrelay.ExplainRequest{Registration: resp.Registration.ID})
+	if !slices.Equal(explain.MCPIncluded, reg.MCPKept) || len(explain.MCPBlocked) != 1 ||
+		explain.MCPBlocked[0].Name != "blocked-srv" {
+		t.Fatalf("registered explain MCP = kept %v blocked %v", explain.MCPIncluded, explain.MCPBlocked)
 	}
 }
 

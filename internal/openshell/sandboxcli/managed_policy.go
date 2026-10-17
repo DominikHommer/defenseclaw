@@ -396,6 +396,11 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 		approvals += "; you can't unblock destinations"
 	}
 	add("Approvals", approvals, "user_approvals", "allow_unblock")
+	foreign := "stopped"
+	if m.ForeignSandboxes == config.OpenShellForeignSandboxesAlert {
+		foreign = "reported to your administrators"
+	}
+	add("Other sandboxes", "sandboxes outside DefenseClaw are "+foreign, "foreign_sandboxes")
 
 	if len(m.MCPIncluded) > 0 || len(m.MCPBlocked) > 0 {
 		var org, asset int

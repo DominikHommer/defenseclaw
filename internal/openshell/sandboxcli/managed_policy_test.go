@@ -220,6 +220,21 @@ func TestManagedExplainSummaryUsesRepresentedSourcesAndRules(t *testing.T) {
 	has(t, out, "contractors (required)", "2 host patterns are always blocked")
 }
 
+func TestManagedExplainNamesForeignSandboxActionAndSource(t *testing.T) {
+	for _, tc := range []struct{ action, source, want string }{
+		{"stop", "profile", "sandboxes outside DefenseClaw are stopped"},
+		{"alert", "organization", "sandboxes outside DefenseClaw are reported to your administrators"},
+	} {
+		ta := newTestApp(t, "")
+		ta.daemon.explain = sandboxapi.Explain{Managed: &sandboxapi.ManagedExplain{
+			Profile: "contractors", Allowed: true, ForeignSandboxes: tc.action,
+			Sources: map[string]string{"foreign_sandboxes": tc.source},
+		}}
+		ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Sources: true}))
+		has(t, ta.output(), tc.want, explainSourceText(tc.source))
+	}
+}
+
 // GAP-0568: a required pack's effective hook settings apply even when the
 // organization's floor has no silence interval of its own.
 func TestManagedHooksSummaryUsesEffectivePackSettings(t *testing.T) {
