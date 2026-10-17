@@ -61,6 +61,35 @@ wait "$DC_CHILD" || true
 
 
 @pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_failed_anchor_restore_removes_new_anchor_and_keeps_backup(platform):
+    source = (MDM / platform / "defenseclaw-enterprise.sh").read_text()
+    source = source.rsplit('dc_main "$@"', 1)[0]
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        stage = root / "stage"
+        stage.mkdir()
+        anchor = root / "bundle-anchors.json"
+        previous = stage / "bundle-anchors.previous.json"
+        anchor.write_text("new-anchor\n")
+        previous.write_text("old-anchor\n")
+        harness = f'''
+DC_STAGE={shlex.quote(str(stage))}
+DC_ANCHORS={shlex.quote(str(anchor))}
+DC_ANCHORS_PREVIOUS={shlex.quote(str(previous))}
+DC_ANCHORS_CHANGED=1
+DC_LOG=""
+dc_put_anchors() {{ return 1; }}
+dc_cleanup
+'''
+        script = root / "restore-failure.sh"
+        script.write_text(source + harness)
+        result = subprocess.run(["sh", str(script)], text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert not anchor.exists()
+        assert previous.read_text() == "old-anchor\n"
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos"])
 def test_exit_detection_reports_lifecycle_busy_without_health_flag(platform):
     source = (MDM / platform / "detect.sh").read_text()
     with tempfile.TemporaryDirectory() as folder:

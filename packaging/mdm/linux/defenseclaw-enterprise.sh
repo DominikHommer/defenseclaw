@@ -201,7 +201,11 @@ dc_log() {
 
 dc_cleanup() {
     # A failed or interrupted apply must leave the as-found trust anchors.
-    dc_restore_anchors || true
+    if ! dc_restore_anchors; then
+        # Keep the root-only backup for an administrator if restoration failed.
+        dc_log "kept $DC_STAGE because the previous trust anchor could not be restored"
+        return 0
+    fi
     if [ -n "$DC_STAGE" ] && [ -d "$DC_STAGE" ]; then
         rm -rf "$DC_STAGE"
     fi
@@ -1370,6 +1374,8 @@ dc_restore_anchors() {
     if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
         ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
             dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
+            # The new anchor must not stay trusted after a failed apply.
+            rm -f "$DC_ANCHORS" || true
             return 1
         }
     else
