@@ -348,6 +348,29 @@ stays, and the next cycle tries again. The worker reads homes with the
 user's own credentials, so NFS `root_squash` homes work once they are
 mounted.
 
+### Directory accounts on a Mac
+
+On a Mac bound to a directory, an account that resolves through Open Directory
+is enrolled only when it has a home and DefenseClaw finds an agent installed in
+it. DefenseClaw does not create the account's home, a mobile account or a
+login method; you provide them with your own Mac management (a mobile account
+gives the user a home under `/Users`, and the Mac must let that user sign in,
+for example over SSH when you test through a terminal). Then:
+
+1. Add the account to `include_users` when discovery does not list it, and run
+   `sudo defenseclaw-gateway enterprise macos reconcile` (or wait for the next cycle).
+2. Install the agent in the user's account. An agent whose runtime appears
+   only after its first start (Hermes) is found by the next cycle; to see it at once run
+   `reconcile` again after the install, and restart the agent so it loads
+   its per-user hooks.
+3. For a Bedrock model route, the user's own account needs working AWS
+   credentials for the agent that calls Bedrock (for OpenCode, an AWS profile
+   in the user's `~/.aws/config`, for example one with a `credential_process`).
+   DefenseClaw writes the provider settings for each enrolled agent but does
+   not create or copy AWS credentials.
+
+A home that does not exist yet is deferred, not failed (see [Unavailable homes](#unavailable-homes)).
+
 ### Users without an enrollment
 
 The gateway checks the kernel-reported uid of every hook call on the Unix

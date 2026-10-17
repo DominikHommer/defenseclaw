@@ -61,7 +61,7 @@ class R102ReferencePagesDocsTest(unittest.TestCase):
     def test_gap_0297_managed_windows_tool_names_are_exact(self):
         text = " ".join(page("policies/admission.mdx").split())
         self.assertIn("Claude Code reports `Bash` for shell calls, `Read` for file reads, and `Skill` for skill calls", text)
-        self.assertIn("Codex reports `Bash` for shell commands and `apply_patch` for file edits", text)
+        self.assertIn("Codex reports `Bash` for shell commands. A Codex build that edits files with its own patch tool reports `apply_patch` for those edits", text)
         self.assertIn("Codex has no `Read` or `Skill` tool name", text)
         self.assertIn("Write these exact names, including capitals", text)
         self.assertNotIn("the Claude Code and Codex hooks receive the native tool names", text)

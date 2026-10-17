@@ -534,7 +534,7 @@ the sandbox policy of each person's directory group. They are off until
 `openshell.enabled` is on. The rpm and deb package the `defenseclaw` launcher
 and the user units; you provide OpenShell (`install: prerequisite`) or let each
 person's daemon download it (`install: setup`). The Docker driver needs Docker
-Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) and the person
+Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (kernel 6.2 upstream; a distribution kernel may carry a backport, and `sandbox doctor` reports the ABI of the running kernel) and the person
 in the `docker` group. The optional MicroVM driver also needs `/dev/kvm`, the
 `kvm` group and `e2fsprogs`, and falls back to Docker where KVM does not work;
 its agent images are built in Docker, so it needs the `docker` group too.

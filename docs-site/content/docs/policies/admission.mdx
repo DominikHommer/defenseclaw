@@ -512,6 +512,13 @@ copy at its own path. An `asset_policy.skill.denied` rule pinned with
 several copies exist, a matching deny on any copy blocks the call; a pin to a
 copy the caller does not have matches nothing.
 
+This per-copy check is for Linux and macOS. On managed Windows the gateway
+runs as LocalSystem and does not look inside user profiles, so it cannot see a
+skill folder under a user profile, and a deny pinned with
+`source_path_contains` to such a copy does not match at the Claude Code `Skill`
+hook. Write the deny by skill name there. Install admission and the folder
+watcher still act on a copy in a watched root.
+
 ### enabled and mode
 
 The explicit lists always apply, whatever `asset_policy.enabled` and
@@ -639,8 +646,11 @@ a tool that writes files still goes through CodeGuard.
 
 On managed Windows, Claude Code reports `Bash` for shell calls, `Read` for
 file reads, and `Skill` for skill calls. Codex reports `Bash` for shell
-commands and `apply_patch` for file edits. Codex has no `Read` or `Skill` tool
-name. Write these exact names, including capitals, in
+commands. A Codex build that edits files with its own patch tool reports
+`apply_patch` for those edits, but a Codex build that edits files through the
+shell reports them as `Bash`; check the `tool_name` of a real edit in the
+audit log of your Codex version before you write the rule. Codex has no `Read`
+or `Skill` tool name. Write these exact names, including capitals, in
 `asset_policy.tool.denied`; a lower-case spelling does not match.
 
 ## Change the lists
