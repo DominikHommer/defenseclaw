@@ -336,16 +336,29 @@ definition. It carries no command.
   code-running flag, no `cmd.exe` metacharacter on the npx hop), and takes
   the user's signed-in session token (no S4U). It checks the token SID and
   profile against the manifest, then, while impersonating the user, checks
-  the folder (fixed local volume, inside the project or the user's own
-  profile, no other profile, no reparse point, final path equal) and finds
-  the launcher on the user's `PATH`. It starts the server with
-  `CreateProcessWithTokenW` (Secondary Logon; only `SeImpersonatePrivilege`,
-  which the enumerator holds), suspended, hidden on the user's session
-  desktop, in a kill-on-close job with an active-process limit, and relays
-  stdio in bounded frames. A session ends after five minutes at most, or five
+  the folder the agent uses (the `cwd`, else the project, else the profile;
+  a refused `cwd` refuses the start, the project never stands in for it:
+  fixed local volume, inside the project or the user's own profile, no other
+  profile, no reparse point, final path equal) and resolves the launcher as
+  the agent would with the server's `env` (folder first, then `PATH` and
+  `PATHEXT` order). The launcher must be `npx.cmd` or `uvx.exe` under
+  Program Files that only administrators can change (owner, DACL, no reparse
+  point up the chain), the policy the scanner applies to a server the
+  gateway starts; any other same-name file earlier in the search refuses the
+  start. It starts the server with `CreateProcessWithTokenW` (Secondary
+  Logon; only `SeImpersonatePrivilege`, which the enumerator holds),
+  suspended, hidden, in a kill-on-close job with an active-process limit,
+  and relays stdio in bounded frames. `CreateProcessWithTokenW` runs the
+  process in the caller's session, so the server runs in session 0 with the
+  user's identity, environment and profile hive; its desktop is a window
+  station and desktop created for that one server with a DACL of SYSTEM and
+  the user only (the services desktop is never opened to the user). A server
+  that needs the user's interactive session fails its scan and stays
+  blocked. A session ends after five minutes at most, or five
   seconds after the relay goes away.
 - Every failure (not enrolled, record unreadable, definition changed, user
-  signed out, folder refused, launcher missing, Secondary Logon disabled) is
+  signed out, folder refused, launcher missing or untrusted, Secondary Logon
+  disabled, command line over the 1024 characters the call accepts) is
   a scan error, and the watcher blocks the server.
 
 Residual: the server starts as the user before its verdict, as it does on a

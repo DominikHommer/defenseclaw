@@ -430,8 +430,8 @@ On a managed Windows computer there is no per-user trusted-paths list and `setup
 the scanner runs in the gateway service and trusts launchers under Program Files only (for example
 Node.js in `C:\Program Files\nodejs`), so an administrator installs Node.js or uv there for all users.
 A `uvx.exe` in a user profile is never trusted there for a server the gateway starts itself, because
-the user can replace it. An enrolled user's own server starts as that user with the launcher on the
-user's `PATH`, so a per-user launcher works for it.
+the user can replace it. An enrolled user's own server starts as that user under the same rule: its
+launcher must be the one under Program Files, and a same-name file earlier on `PATH` is refused.
 When the server exits before it answers, its last stderr lines are printed.
 
 ## How the settings reach the scanner

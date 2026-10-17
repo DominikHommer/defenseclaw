@@ -922,7 +922,7 @@ of the admin config:
   user profile fails that scan, and the server is blocked
   (`MCPStdioLaunchError ... untrusted Windows path`). There is no per-user
   trusted-paths list on a managed computer. An enrolled user's own servers
-  start as that user instead, with the launcher on the user's `PATH` (see
+  start as that user instead, under the same launcher rule (see
   [MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
@@ -1001,17 +1001,29 @@ cannot change its verdict. Only the server's own process runs as the user:
   only when it is the one the gateway is scanning. A server that changed in
   between is scanned again at the next poll.
 - The same launcher rules apply as everywhere: only `npx` or `uvx` with a
-  package argument, and no code-running flag. The launcher is the one on the
-  user's `PATH` (a per-user Node.js or `uvx.exe` in
-  `%USERPROFILE%\.local\bin` works), and the server's `env` entries apply on
-  top of the user's environment.
-- The server starts in its `cwd`, else its project, else the profile folder.
-  The enumerator checks that folder while it acts as the user: it must be on
-  a local fixed drive, inside the project or the user's own profile, in no
-  other user's profile, with no link or junction on the way. Otherwise the
-  server is not started and the scan fails with the reason.
+  package argument, and no code-running flag. The server's `env` entries
+  apply on top of the user's environment, and the launcher is the `npx.cmd`
+  or `uvx.exe` the agent would run with them (the server's folder first,
+  then `PATH`). As for a server the gateway starts itself, it must be
+  installed for all users under Program Files, in a folder only
+  administrators can change. A launcher in the profile, or another file of
+  the same name earlier on `PATH` (including a `PATH` the server sets), is
+  refused.
+- The server starts in its `cwd` when it names one (an absolute folder),
+  else in its project, else in the profile folder. The enumerator checks
+  that folder while it acts as the user: it must be on a local fixed drive,
+  inside the project or the user's own profile, in no other user's profile,
+  with no link or junction on the way. Otherwise the server is not started
+  and the scan fails with the reason; no other folder stands in for a
+  refused `cwd`.
 - The server runs hidden, in a job that ends every process it started when
-  the scan ends, after five minutes at most.
+  the scan ends, after five minutes at most. It runs in the services session
+  (session 0) on a desktop made for it that only that user and LocalSystem
+  can open, not on the user's own desktop: Windows starts a process with
+  another user's token in the caller's session. The scan speaks MCP over
+  stdio and needs no desktop. A server that needs the user's interactive
+  desktop, clipboard or other session-only resources fails its scan and
+  stays blocked.
 
 Any failure blocks the server as not scanned, with the reason in the
 `install-scan-error` audit row. A user who is not signed in has no session
