@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +24,47 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	kernelcontrols "github.com/defenseclaw/defenseclaw/policies/kernel"
 )
+
+func TestConfigDigestNormalizesImplicitLegacySandboxPack(t *testing.T) {
+	dataDir, policyDir := t.TempDir(), t.TempDir()
+	legacy := filepath.Join(dataDir, "policies", config.DefaultOpenShellPackDirName)
+	if err := os.MkdirAll(filepath.Join(legacy, "old-pack"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := fmt.Sprintf("config_version: 9\ndeployment_mode: managed_enterprise\ndata_dir: %q\npolicy_dir: %q\nenterprise:\n  profile: standalone\n", dataDir, policyDir)
+	cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), []byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenShell.PackDir != legacy {
+		t.Fatalf("runtime pack path = %q, want legacy folder %q", cfg.OpenShell.PackDir, legacy)
+	}
+	canonical, err := cfg.DeepCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical.OpenShell.PackDir = filepath.Join(policyDir, config.DefaultOpenShellPackDirName)
+	scope := newDigestScope(cfg, runtime.GOOS, "")
+	legacyDigest, err := configDigest(cfg, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalDigest, err := configDigest(canonical, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyDigest != canonicalDigest {
+		t.Fatalf("implicit legacy pack changed digest: live %s, signer %s", legacyDigest, canonicalDigest)
+	}
+	canonical.OpenShell.PackDir = filepath.Join(policyDir, "custom-packs")
+	explicitDigest, err := configDigest(canonical, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitDigest == legacyDigest {
+		t.Fatal("an explicit pack path change did not change the digest")
+	}
+}
 
 // TestEffectivePolicyDigestAndHealth covers effective_policy_digest: two
 // users with the same policy get the same digest (secrets are dropped and
