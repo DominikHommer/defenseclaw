@@ -3556,9 +3556,8 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 // v9MergeOverlayProvider folds src, an overlay provider, into dst, the
 // provider of the same name, with the 0.8.x overlay merge rules
 // (configs.ApplyOverlay): a list gains the items it lacks, the string maps
-// take src's keys (ApplyOverlay drops extra_headers; it is kept here) and any
-// other field src sets replaces dst's. src holds only the fields its overlay
-// entry sets.
+// (request_path_overrides, extra_headers) take src's keys and any other field
+// src sets replaces dst's. src holds only the fields its overlay entry sets.
 func v9MergeOverlayProvider(dst, src *yaml.Node) {
 	for i := 0; i+1 < len(src.Content); i += 2 {
 		key, value := src.Content[i].Value, src.Content[i+1]
