@@ -1947,6 +1947,44 @@ def test_signing_helpers_refuse_without_credentials(tmp_path: Path) -> None:
             subprocess.run(["shellcheck", "-S", "warning", str(path)], check=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run the signing helpers with bash on Linux and macOS")
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_signing_helper_prints_the_pfx_thumbprint(tmp_path: Path) -> None:
+    # #1280: build-setup.sh takes the signer pin as --expected-signer-sha256;
+    # --thumbprint prints it from the PFX without signing anything.
+    key, cert, pfx = tmp_path / "key.pem", tmp_path / "cert.pem", tmp_path / "test.pfx"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                    "-subj", "/CN=DefenseClaw thumbprint test", "-keyout", str(key), "-out", str(cert)],
+                   check=True, capture_output=True)
+    subprocess.run(["openssl", "pkcs12", "-export", "-inkey", str(key), "-in", str(cert), "-out", str(pfx),
+                    "-passout", "pass:"], check=True, capture_output=True)
+    der = subprocess.run(["openssl", "x509", "-in", str(cert), "-outform", "DER"], check=True, capture_output=True).stdout
+    result = subprocess.run(["bash", str(MDM / "signing" / "authenticode-sign.sh"), "--thumbprint"],
+                            capture_output=True, text=True,
+                            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "AUTHENTICODE_PFX": str(pfx)})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == hashlib.sha256(der).hexdigest()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release jobs run build-setup.sh with bash on Linux")
+def test_signed_standalone_build_runs_on_linux_with_osslsigncode(tmp_path: Path) -> None:
+    # #1280: the signed channels no longer need a Windows build host; on Linux
+    # and macOS they need osslsigncode, checked before any build work.
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    (tools / "uname").symlink_to(shutil.which("uname"))
+    builder = ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh"
+    sign = MDM / "signing" / "authenticode-sign.sh"
+    result = subprocess.run(
+        [shutil.which("bash"), str(builder), "--version", "1.0.0", "--sign-command", str(sign),
+         "--signing-type", "DEV", "--expected-signer-sha256", "ab" * 32],
+        capture_output=True, text=True, env={"PATH": str(tools)},
+    )
+    assert result.returncode == 1, result.stderr
+    assert "need osslsigncode 2.5 or later" in result.stderr
+    assert "Windows build host" not in result.stderr
+
+
 # The macOS app job needs these five for every release (release.yaml).
 _MACOS_APP_SECRETS = {
     "MACOS_DEVELOPER_ID_P12_BASE64": "cDEy",

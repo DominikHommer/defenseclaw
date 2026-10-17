@@ -230,12 +230,23 @@ directory.
 | `build-setup.sh --version <version> --sign-command <cmd>` | Builds the inner files, runs `<cmd> <file>` to sign each one in place, embeds them, and signs the outer Setup with the same command. |
 | `build-setup.sh --version <version> --payload-dir <dir>` | Embeds seven files that were already signed. The directory must hold exactly those seven files. |
 
+Both signed forms also take `--signing-type DEV|PROD` and
+`--expected-signer-sha256 <64-hex>`: the assembler verifies every signed inner
+file against that signer before it appends the payload, with `osslsigncode
+verify` (2.5 or later) on macOS and Linux. `PROD` needs a chain to a root the
+build host trusts; `DEV` also accepts a test or self-signed certificate.
+`authenticode-sign.sh --thumbprint` prints the value of `AUTHENTICODE_PFX`.
+
 With `--payload-dir`, sign the outer Setup afterwards with the same
 certificate, then compute its SHA-256 again: the script hashes the Setup
 before you sign it. `packaging/mdm/signing/authenticode-sign.sh` is a signing
 command for `--sign-command`; the release workflow uses it when a
 code-signing certificate is configured and otherwise ships the hash-pinned
-flavor.
+flavor. Every release dry run proves the signed build with a throwaway
+self-signed certificate (`packaging/windows/standalone/prove-signing-path.sh`).
+
+Every build links the payload binding (the flavor and the SHA-256 of each
+inner file) into the outer Setup, and the Setup stages only that payload.
 
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only

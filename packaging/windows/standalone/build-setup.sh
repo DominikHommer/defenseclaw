@@ -39,9 +39,10 @@
 #   Both signed channels need --signing-type DEV|PROD and
 #   --expected-signer-sha256 <64-hex>: windows-avc-assembler verifies every
 #   signable inner file against that chain policy and signer fingerprint before it
-#   appends the payload trailer. That check runs powershell.exe, so the
-#   signed channels need a Windows build host (Git Bash or MSYS2); the
-#   default unsigned channel builds anywhere.
+#   appends the payload trailer. On Linux and macOS that check runs
+#   osslsigncode verify (2.5 or later), on Windows powershell.exe. PROD needs
+#   a chain to a root the host trusts; DEV also accepts a chain that ends at
+#   a certificate the signature carries (a test or self-signed certificate).
 #
 #   Every channel links the payload binding (the flavor and the SHA-256 of
 #   each payload file) into the outer Setup, which then stages only that
@@ -62,7 +63,7 @@
 set -euo pipefail
 
 usage() {
-    sed -n '4,57p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,58p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 die() {
@@ -99,7 +100,7 @@ if [ -n "${SIGNED_PAYLOAD_DIR}" ] || [ -n "${SIGN_COMMAND}" ]; then
     [[ "${EXPECTED_SIGNER_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] || die "--payload-dir and --sign-command need --expected-signer-sha256 <64-hex>"
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) ;;
-        *) die "signed standalone builds need a Windows build host: windows-avc-assembler verifies Authenticode with powershell.exe" ;;
+        *) command -v osslsigncode >/dev/null 2>&1 || die "signed standalone builds on $(uname -s) need osslsigncode 2.5 or later: windows-avc-assembler verifies Authenticode with it" ;;
     esac
 elif [ -n "${SIGNING_TYPE}" ] || [ -n "${EXPECTED_SIGNER_SHA256}" ]; then
     die "--signing-type and --expected-signer-sha256 apply only with --payload-dir or --sign-command"
