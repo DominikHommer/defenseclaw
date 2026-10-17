@@ -430,6 +430,24 @@ func (a *App) PolicyExplain(ctx context.Context, o PolicyOptions) error {
 	for _, v := range ex.Violations {
 		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
 	}
+	if managedHost {
+		// The settings table can exceed a terminal page. Repeat only the
+		// identity of the policy being explained at the end of the output.
+		profile := sandboxapi.DisplayText(ex.Managed.Profile)
+		if profile == "" {
+			profile = "(your organization's floor)"
+		}
+		a.println()
+		a.line(a.bold("Policy at a glance"))
+		a.line("Organization profile: " + profile + "   matched: " + matchText(ex.Managed))
+		agent := "default agent (Claude Code)"
+		if o.Harness != "" {
+			agent = sandboxapi.DisplayText(o.Harness)
+		} else if o.Sandbox != "" {
+			agent = "agent in sandbox " + sandboxapi.DisplayText(o.Sandbox)
+		}
+		a.line("Agent: " + agent)
+	}
 	return nil
 }
 

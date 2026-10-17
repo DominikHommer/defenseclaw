@@ -8,6 +8,7 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,22 @@ func TestPolicyExplainManagedUsesTheDaemonNotTheLocalConfig(t *testing.T) {
 	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
 	has(t, ta.output(), "Your sandbox policy on this computer", "policy explain --sources")
 	lacks(t, ta.output(), "local-secret-pack")
+}
+
+func TestPolicyExplainManagedKeepsIdentityAfterLongSettings(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.Width = 80
+	ta.daemon.explain.Managed = managedExplainFixture()
+	for i := range 36 {
+		ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{
+			Key: fmt.Sprintf("setting.%02d", i), Value: "enabled", Source: "pack", Origin: "pack contractors",
+		})
+	}
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Harness: "codex", Sources: true}))
+	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
+	lastPage := strings.Join(lines[max(0, len(lines)-24):], "\n")
+	has(t, lastPage, "Policy at a glance", "Organization profile: contractors", `matched: your group CORP\Contractors`, "Agent: codex")
+	has(t, ta.output(), "SETTING", "setting.35", "[from your organization profile]")
 }
 
 // GAP-0179/GAP-0550: the floor's source map identifies who supplied each
