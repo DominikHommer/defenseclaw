@@ -2358,6 +2358,51 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	}
 }
 
+// #1105 (GAP-0753, rel-1-0-2 GAP-0177): an administrator's verify that
+// PowerShell 7 trust refuses before any check ran reports the recorded,
+// running deployment and its services with health_not_checked, not
+// installed:false, targets:0 for a deployment that keeps protecting users.
+func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.T) {
+	stubWindowsEnterpriseDeployments(t, map[string]winpath.EnterpriseDeploymentState{"standalone": winpath.EnterpriseDeploymentInstalled})
+	originalRunner := windowsEnterpriseStandaloneRunner
+	originalObserver := windowsEnterpriseStandaloneObserver
+	originalElevated := windowsEnterpriseIsElevated
+	originalServiceState := windowsEnterpriseServiceState
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneRunner = originalRunner
+		windowsEnterpriseStandaloneObserver = originalObserver
+		windowsEnterpriseIsElevated = originalElevated
+		windowsEnterpriseServiceState = originalServiceState
+	})
+	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
+		return windowsEnterpriseStandaloneRun{}, fmt.Errorf("%w: C:\\Program Files\\PowerShell\\7\\pwsh.exe is not a regular non-link file", errPowerShell7Untrusted)
+	}
+	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsEnterpriseServiceState = func(string) string { return "running" }
+
+	var stdout bytes.Buffer
+	command := &cobra.Command{}
+	command.SetOut(&stdout)
+	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: true}
+	err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "verify", opts, `C:\x\install-enterprise.ps1`, nil)
+	if err == nil {
+		t.Fatal("a refused verify succeeded")
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v: %s", err, stdout.String())
+	}
+	notChecked := false
+	for _, warning := range result.Warnings {
+		notChecked = notChecked || warning.Code == windowsEnterpriseHealthNotChecked
+	}
+	if !result.Installed || len(result.Services) != 4 || len(result.Errors) != 1 ||
+		result.Errors[0].Code != "powershell7_untrusted" || !notChecked {
+		t.Fatalf("refused verify result = %+v", result)
+	}
+}
+
 // GAP-2162: a standard account's status or verify reports what any account
 // can read (the recorded deployment, present but unreadable to it, and the
 // service states) instead of installed=false with no services, and text
