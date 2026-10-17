@@ -150,6 +150,9 @@ func (a *APIServer) sandboxGuestSignal(ctx context.Context, auth *sandboxAuthori
 // sandboxGuestSignalForget removes a registration's rate keys when it has
 // been sighted, revoked, removed or evicted.
 func (a *APIServer) sandboxGuestSignalForget(reg sandboxreg.Registration) {
+	if a == nil {
+		return
+	}
 	auth := a.sandboxAuthority.ready.Load()
 	if auth == nil {
 		return
