@@ -972,7 +972,7 @@ func claudeCodeHookContractForSetup(opts SetupOpts) (HookContract, error) {
 	}
 	resolution := ResolveHookContract("claudecode", opts.AgentVersion)
 	if resolution.Contract.ContractID == "" {
-		return HookContract{}, fmt.Errorf(
+		return HookContract{}, fmt.Errorf( //nolint:staticcheck // Keep the product name in the first words of the diagnostic.
 			"Claude Code version %q does not resolve to a supported hook contract",
 			strings.TrimSpace(opts.AgentVersion),
 		)
@@ -993,7 +993,7 @@ func claudeCodeHookGroupsForSetup(opts SetupOpts) ([]claudeCodeHookGroup, error)
 	for _, eventType := range contract.Events {
 		group, ok := registry[eventType]
 		if !ok {
-			return nil, fmt.Errorf(
+			return nil, fmt.Errorf( //nolint:staticcheck // Keep the product name in the first words of the diagnostic.
 				"Claude Code hook contract %s contains unregistered event %s",
 				contract.ContractID,
 				eventType,
@@ -1012,7 +1012,7 @@ func (c *ClaudeCodeConnector) ownedHookContractPresent(opts SetupOpts) (bool, er
 	if runtime.GOOS == "windows" && opts.ManagedEnterprise {
 		hookExecutable := strings.TrimSpace(opts.HookExecutable)
 		if hookExecutable == "" || !filepath.IsAbs(hookExecutable) {
-			return false, fmt.Errorf("Claude Code managed hook audit requires an absolute native hook executable")
+			return false, fmt.Errorf("Claude Code managed hook audit requires an absolute native hook executable") //nolint:staticcheck // Keep the product name in the first words of the diagnostic.
 		}
 	}
 	return claudeCodeEffectiveHookContract(opts)

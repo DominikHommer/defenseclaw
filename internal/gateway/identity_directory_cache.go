@@ -229,7 +229,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
-	if !(block || first) || wait == nil {
+	if (!block && !first) || wait == nil {
 		return zero, false
 	}
 	timer := time.NewTimer(identityDirectoryBudget)
