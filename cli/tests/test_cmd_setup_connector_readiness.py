@@ -641,6 +641,13 @@ def test_restart_services_roster_line_leaves_out_a_refused_peer(monkeypatch, tmp
     monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: list(roster))
     monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
     monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+    # Keep this readiness test independent of the build host's OpenCode home.
+    from defenseclaw import connector_paths
+
+    monkeypatch.setattr(
+        connector_paths, "connector_config_files",
+        lambda _name: [str(tmp_path / "opencode" / "plugins" / "defenseclaw.js")],
+    )
     monkeypatch.setattr(
         cmd_setup,
         "_wait_for_connector_runtime",

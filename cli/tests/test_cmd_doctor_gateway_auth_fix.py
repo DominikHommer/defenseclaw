@@ -597,6 +597,25 @@ def test_fix_gateway_token_generates_canonical_token_when_openclaw_has_none(tmp_
     assert "OPENCLAW_GATEWAY_TOKEN" not in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
+def test_fix_gateway_token_preserves_running_token_before_openclaw_resync(tmp_path):
+    from defenseclaw.logger import _running_gateway_token
+
+    cfg = _cfg(str(tmp_path), token="running-token")
+    cfg.active_connector = lambda: "openclaw"
+    cfg.claw = SimpleNamespace(config_file=str(tmp_path / "openclaw.json"))
+    (tmp_path / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    with patch(
+        "defenseclaw.commands.cmd_setup._detect_openclaw_gateway_token",
+        return_value="new-token",
+    ):
+        tag, _ = _fix_gateway_token(cfg, assume_yes=True)
+
+    assert tag == "pass"
+    assert _running_gateway_token(str(tmp_path)) == "running-token"
+    assert "OPENCLAW_GATEWAY_TOKEN=new-token" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
 def test_fix_stale_pid_removes_malformed_file(tmp_path):
     pid_file = tmp_path / "gateway.pid"
     pid_file.write_text("{broken", encoding="utf-8")
