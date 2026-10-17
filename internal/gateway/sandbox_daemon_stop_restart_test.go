@@ -543,8 +543,9 @@ func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *test
 }
 
 // Adopting a confirmed registration's floor (Start's adoptFloor)
-// re-resolves every sandbox's policy at once, not only the started one's
-// and not on the configuration check's next tick.
+// re-resolves every sandbox's policy at once. A second sandbox without a
+// confirmed registration remains closed rather than borrowing the first's
+// floor, without waiting for the configuration check's next tick.
 func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
 	c := newClosedFloorFixture(t, "dc-x")
 	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
@@ -555,7 +556,11 @@ func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		assertOrganizationPolicy(t, "the manager's view of "+name+" after adoptFloor", *raw)
+		if name == "dc-a" {
+			assertOrganizationPolicy(t, "the manager's view of dc-a after adoptFloor", *raw)
+		} else {
+			assertClosedFloorDeny(t, "the manager's view of dc-x after adoptFloor", *raw)
+		}
 	}
 }
 
