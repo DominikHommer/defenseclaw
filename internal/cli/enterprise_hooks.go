@@ -52,6 +52,30 @@ import (
 // token the guardian impersonates.
 var enterpriseHookWatchSessionSettle = 5 * time.Second
 
+// enterpriseHookWatchDebounceMaxWait bounds how long filesystem events can
+// postpone the pass they armed. Every event re-armed the debounce with no
+// limit, so writes faster than the debounce held the pass back until the
+// interval pass, long enough to start an agent without hooks and put the
+// file back unseen (GAP-0532).
+var enterpriseHookWatchDebounceMaxWait = 3 * time.Second
+
+// enterpriseHookWatchDebounceDelay is the delay to arm the debounce with at
+// now for a burst whose first event armed it at first: the debounce, cut to
+// what is left of maxWait (never below zero).
+func enterpriseHookWatchDebounceDelay(now, first time.Time, debounce, maxWait time.Duration) time.Duration {
+	if first.IsZero() || maxWait <= 0 {
+		return debounce
+	}
+	left := maxWait - now.Sub(first)
+	if left < 0 {
+		left = 0
+	}
+	if left < debounce {
+		return left
+	}
+	return debounce
+}
+
 // enterpriseHookTargetsWaitTimeout is the bounded window the hook-guardian
 // will fsnotify-wait for a missing targets.yaml before returning a
 // distinguishable error. See spec 003 (docs/specs/003-windows-deferred-config/)
@@ -2559,6 +2583,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	debouncePending := false
 	debounceReason := ""
+	// debounceArmedAt is when the pending debounce was first armed.
+	var debounceArmedAt time.Time
 	repairRetry := time.NewTimer(time.Hour)
 	if !repairRetry.Stop() {
 		<-repairRetry.C
@@ -2675,7 +2701,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				lastTriggerPath = filepath.Clean(event.Name)
 				lastTriggerOp = event.Op
 			}
-			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			if !debouncePending {
+				debounceArmedAt = time.Now()
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
 			debounceReason = "fsnotify"
 		case err, ok := <-events.Errors:
@@ -2689,7 +2718,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-events.Overflow:
 			// Events were dropped while a reconcile ran; reconcile once more
 			// so a dropped change is not left to the interval pass.
-			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
+			if !debouncePending {
+				debounceArmedAt = time.Now()
+			}
+			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
 			debouncePending = true
 			if debounceReason == "" {
 				debounceReason = "fsnotify"
