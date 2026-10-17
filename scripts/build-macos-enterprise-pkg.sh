@@ -153,7 +153,7 @@ done
 if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
     sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
     [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
-    for binary in "$ROOT/$INSTALL_BIN"/*; do
+    for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
     done
 fi

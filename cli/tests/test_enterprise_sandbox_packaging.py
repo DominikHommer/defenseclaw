@@ -14,6 +14,7 @@ launcher is covered by internal/cli/launcher_test.go; the install lane
 
 import os
 import plistlib
+import shlex
 import shutil
 import stat
 import subprocess
@@ -31,6 +32,8 @@ SYSTEMD_USER = SYSTEMD / "user"
 LAUNCHD = ROOT / "packaging" / "launchd-standalone"
 LAUNCHD_AGENTS = LAUNCHD / "agents"
 BUILDER = ROOT / "scripts" / "build-macos-enterprise-pkg.sh"
+E2FSPROGS_TOOLS = ("mke2fs", "debugfs", "e2fsck")
+E2FSPROGS_LICENSES = ("NOTICE", "e2fsprogs-1.47.3.tar.xz", "README.txt")
 
 USER_UNITS = (
     "defenseclaw-sandbox.socket",
@@ -141,6 +144,16 @@ def _build_fixture(
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     shutil.copy(BUILDER, repo / "scripts" / BUILDER.name)
+    e2fs_builder = repo / "scripts" / "build-macos-e2fsprogs.sh"
+    e2fs_builder.write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'install -d -m 0755 "$1/sbin" "$1/licenses"\n'
+        + "".join(f'install -m 0755 /dev/null "$1/sbin/{name}"\n' for name in E2FSPROGS_TOOLS)
+        + "".join(f'install -m 0644 /dev/null "$1/licenses/{name}"\n' for name in E2FSPROGS_LICENSES),
+        encoding="utf-8",
+    )
+    e2fs_builder.chmod(0o755)
     launchd = repo / "packaging" / "launchd-standalone" / "agents"
     launchd.mkdir(parents=True)
     for label in agents:
@@ -172,6 +185,14 @@ def _build_fixture(
     _stub(bin_dir, "pkgbuild", pkgbuild)
     _stub(bin_dir, "productbuild", 'for last; do :; done; : >"$last"')
     _stub(bin_dir, "shasum", "echo 0000")
+    codesign_calls = tmp_path / "codesign-calls"
+    codesign_calls.mkdir()
+    _stub(
+        bin_dir,
+        "codesign",
+        'for target; do :; done\n'
+        f'printf "%s\\n" "$@" > {shlex.quote(str(codesign_calls))}/"$(basename "$target")"',
+    )
     return repo, payload, bin_dir, captured
 
 
@@ -180,9 +201,12 @@ def _run_builder(
     umask: str = "022",
     agents: tuple[str, ...] = LAUNCH_AGENTS,
     compiler_kind: str = "regular",
+    sign_identity: str | None = None,
 ):
     repo, payload, bin_dir, captured = _build_fixture(tmp_path, agents, compiler_kind)
     env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "TMPDIR": str(tmp_path)}
+    if sign_identity is not None:
+        env["MACOS_APP_SIGN_IDENTITY"] = sign_identity
     result = subprocess.run(
         [
             "sh",
@@ -239,6 +263,40 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     assert not (root / "opt" / "cisco" / "defenseclaw" / "lib" / "defenseclaw" / "policy_compiler.py").exists()
     assert _mode(compiler) == 0o644
     assert _mode(compiler.parent) == 0o755
+
+    e2fs = root / "opt" / "cisco" / "defenseclaw" / "share" / "e2fsprogs"
+    for name in E2FSPROGS_TOOLS:
+        tool = e2fs / "sbin" / name
+        assert tool.is_file() and not tool.is_symlink(), name
+        assert _mode(tool) == 0o755, name
+    for name in E2FSPROGS_LICENSES:
+        license_file = e2fs / "licenses" / name
+        assert license_file.is_file() and not license_file.is_symlink(), name
+        assert _mode(license_file) == 0o644, name
+    assert _mode(e2fs / "sbin") == 0o755
+    assert _mode(e2fs / "licenses") == 0o755
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
+    result, root = _run_builder(tmp_path, sign_identity="fixture-developer-id")
+    assert result.returncode == 0, result.stderr
+
+    install_root = root / "opt" / "cisco" / "defenseclaw"
+    executable_dirs = (install_root / "bin", install_root / "share" / "e2fsprogs" / "sbin")
+    executables = {path.name: path for directory in executable_dirs for path in directory.iterdir()}
+    assert set(executables) == {
+        "defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", *E2FSPROGS_TOOLS
+    }
+    calls = tmp_path / "codesign-calls"
+    assert {path.name for path in calls.iterdir()} == set(executables)
+    for name, executable in executables.items():
+        args = (calls / name).read_text(encoding="utf-8").splitlines()
+        assert args[:-1] == [
+            "--force", "--timestamp", "--options", "runtime", "--sign", "fixture-developer-id",
+            "--identifier", f"com.cisco.defenseclaw.{name}",
+        ]
+        assert args[-1].endswith("/" + executable.relative_to(root).as_posix())
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
