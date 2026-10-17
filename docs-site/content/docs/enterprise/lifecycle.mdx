@@ -721,6 +721,35 @@ to keep the machine state for a reinstall instead.
   that could not be stopped. Fix the cause and run the same uninstall again.
   Back up `~/.defenseclaw/foreign-hooks-backup` first if a user wants their
   own moved-aside hooks back.
+- **A user's own install from before the enrollment (Linux and macOS).** When
+  a user's `~/.defenseclaw` holds a personal DefenseClaw install from before
+  the managed deployment enrolled them (it has a `config.yaml`, `.env`,
+  `audit.db` or `previous`), the purge first moves that install's data, as
+  the user, to a new `~/.defenseclaw-backup-<UTC time>` folder (mode `0700`,
+  owned by the user) with a `DEFENSECLAW-BACKUP.txt` that says how to restore
+  it: the config, secrets, audit history, policies, logs, upgrade copies and
+  `foreign-hooks-backup`. The hook scripts, hook credentials, connector
+  backups, the session cache and the install's Python environment and `uv`
+  caches are not kept; a reinstall recreates them. The move is a rename on
+  the same filesystem, so it needs no free space. The result says so for that
+  user. If the move fails, the purge keeps that user's state and names the
+  user. Delete the backup folder when the user does not need it.
+- **A user whose home is gone (Linux and macOS).** When an enrolled user's
+  home folder no longer exists (it was deleted or moved away, for example the
+  home of a macOS mobile account), the hooks and `~/.defenseclaw` went with
+  it. The uninstall warns (`per_user_hooks_remaining`) with the home and
+  goes on; it does not stop for that user. A home that does not answer, or
+  whose parent folder is missing too (an unmounted volume), is not available
+  rather than gone: the result names it so you can rerun the purge once it
+  is mounted.
+- **Sandboxes (Linux and macOS).** The uninstall stops the sandbox daemon
+  and OpenShell gateway of each account. On Linux, `apt remove`, `dnf remove`
+  and `rpm -e` also stop the sandbox user units in the user manager of every
+  signed-in account before the package's files go, and remove the socket's
+  global enable link, so no daemon keeps running from a deleted unit. On
+  macOS the uninstall unloads both sandbox LaunchAgents from the `gui` and
+  `user` launchd domains of every signed-in account, and removes the
+  `defenseclaw` launcher link and both plists from `/Library/LaunchAgents`.
 - **MDM.** Use `uninstall.sh [--purge]` on Linux and macOS, or `uninstall.ps1`
   on Windows. See [Install with an MDM](/docs/enterprise/mdm).
 - **Windows per-user registrations.** Acting as a user needs that user's
