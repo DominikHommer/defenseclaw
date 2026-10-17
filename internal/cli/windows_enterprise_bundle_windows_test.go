@@ -11,6 +11,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -878,6 +879,55 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 		t.Fatalf("the run kept the bundle store lock: %v", err)
 	}
 	unlock()
+
+	// GAP-0034: a repeat of the confirmed bundle with TRUSTANCHORS= that
+	// adds a key (A -> A and B) commits the new anchors, so the run is not
+	// an already_applied no-op and says what it replaced. The same anchors
+	// again are a no-op.
+	keyAOnly := e.anchors
+	e.anchors = filepath.Join(e.dir, "anchors-ab.json")
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public(), "k2": ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, 32)).Public()})
+	rotatedPath := e.anchors
+	e.anchors = keyAOnly
+	rotated, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsBundlePublishPrivateFile = func(path string) error {
+		if path == installedAnchors {
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, rotated) {
+				t.Errorf("rotation commit published other bytes than TRUSTANCHORS=: read %v", err)
+			}
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		name   string
+		noop   bool
+		reason string
+		change []string
+	}{
+		{"new anchors", false, "", []string{"replaced the trust anchors in " + installedAnchors}},
+		{"same anchors again", true, "already_applied", nil},
+	} {
+		cmd, _ = windowsBundleCommand()
+		repeat := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: rotatedPath,
+			profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
+		if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", repeat); done || err != nil {
+			t.Fatalf("%s: prepare: done=%v err=%v", tc.name, done, err)
+		}
+		cleanupPreparedWindowsBundle(t, repeat)
+		if repeat.bundle.prepared == nil || !repeat.bundle.prepared.AlreadyApplied {
+			t.Fatalf("%s: repeat delivery was not already applied: %+v", tc.name, repeat.bundle.prepared)
+		}
+		got := newWindowsEnterpriseStandaloneResult("ensure", repeat)
+		got.Noop = true
+		finishWindowsEnterpriseBundle(cmd, repeat, got)
+		if len(got.Errors) != 0 || got.Noop != tc.noop || got.NoopReason != tc.reason || !slices.Equal(got.Changes, tc.change) {
+			t.Fatalf("%s: errors %+v noop=%v reason=%q changes=%q", tc.name, got.Errors, got.Noop, got.NoopReason, got.Changes)
+		}
+		assertWindowsBundleInstalledAnchors(t, layout, rotated, "after the repeat delivery with "+tc.name)
+	}
 
 	other := filepath.Join(e.dir, "other.yaml")
 	writeBundleTestFile(t, other, []byte("config_version: 9\n"))

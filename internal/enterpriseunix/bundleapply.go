@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -83,6 +84,11 @@ type bundleRun struct {
 	receipt *enterprisebundle.Receipt
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
+	// confirmPending is set when the deployment committed the bundle config
+	// but the gateway stopped reporting its policy before the receipt was
+	// confirmed: the receipt stays applied for the next run to settle, and
+	// the run exits with the retry code (GAP-0032).
+	confirmPending bool
 }
 
 // bundleAnchorsPath is <etc>/trust/bundle-anchors.json (rooted).
@@ -489,6 +495,9 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	// change.
 	l.finishBundle(ctx)
 	l.describeBundle()
+	if run.confirmPending && code == 0 {
+		code = enterprisestatus.BusyExitCode(env.GOOS)
+	}
 	return code
 }
 
@@ -535,12 +544,13 @@ func (l *lifecycle) markBundleApplied(digest string, generation uint64, configSH
 // gateway; anything else fails the receipt.
 func (l *lifecycle) finishBundle(ctx context.Context) {
 	env, r, run := l.env, l.result, l.bundle
-	if run == nil || enterprisebundle.Finished(run.receipt.State) {
+	if run == nil || run.confirmPending || enterprisebundle.Finished(run.receipt.State) {
 		return
 	}
 	rc := run.receipt
 	record, _ := env.loadDeployment()
 	committed := record != nil && len(r.Errors) == 0 && record.ConfigSHA256 == run.configSHA
+	checked := false
 	if committed && rc.State == enterprisebundle.StateStaged {
 		// Recorded without a reload: the gateway reports the generation it
 		// last loaded, so only its digest and reload state are compared.
@@ -557,11 +567,15 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 			l.failBundle(ctx, run, record, bundleConfirmationCode(err), err.Error())
 			return
 		}
+		checked = true
 	}
 	if committed && rc.State == enterprisebundle.StateApplied {
 		if env.fault("committed") != nil {
 			// The test seam ends the run here, as a crash between the commit
 			// and the swap would: settle finishes it on the next run.
+			return
+		}
+		if !checked && !l.bundleStillEnforced(ctx, record, rc) {
 			return
 		}
 		rc.SessionsRestartRequired = env.UnprotectedSessions(ctx).Count
@@ -595,6 +609,39 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		}
 	}
 	l.failBundle(ctx, run, record, code, message)
+}
+
+// bundleStillEnforced asks the gateway again, just before the receipt of a
+// committed bundle is confirmed, whether it reports the bundle's policy.
+// The transaction checked it before the commit, but a gateway that crashed
+// or was killed after that check returned confirmed with policy.applied
+// false (GAP-0032): confirmed means the running gateway enforces the digest.
+// It waits as long as the transaction's check does, so a gateway its service
+// manager starts again on the committed config still confirms the bundle.
+// Otherwise the receipt stays applied (neither confirmed nor failed), the
+// result fails with not_confirmed and the run exits with the retry code: the
+// next lifecycle run (the agent's resubmit of the same bundle, an MDM or
+// path-triggered ensure) confirms it once the gateway reports its policy, or
+// fails it and puts the last good bundle back (settleUnconfirmedBundle).
+func (l *lifecycle) bundleStillEnforced(ctx context.Context, record *Deployment, rc *enterprisebundle.Receipt) bool {
+	r := l.result
+	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, false, rc)
+	if err == nil && digest != rc.EffectivePolicyDigest {
+		err = fmt.Errorf("the gateway reports effective policy %s, not %s of the applied receipt", shortDigest(digest), shortDigest(rc.EffectivePolicyDigest))
+	}
+	if err == nil {
+		// The result's policy block was read after the commit, possibly
+		// while the gateway was down; it reports what was just confirmed.
+		if p := r.Policy; p != nil && p.EffectiveDigest == digest {
+			p.GatewayReportedDigest, p.LastReloadError, p.Applied = digest, "", true
+		}
+		return true
+	}
+	l.bundle.confirmPending = true
+	r.AddError(codeBundleNotConfirmed, fmt.Sprintf(
+		"policy bundle %s version %d is installed, but the gateway stopped reporting its policy before the bundle was confirmed (%v); the receipt stays applied and the last good bundle stays current: resubmit the same bundle, and the next lifecycle run confirms it once the gateway reports its policy, or puts the last good bundle back",
+		displayID(rc), rc.Version, err))
+	return false
 }
 
 // failBundle ends the receipt of run as failed(code), records whether the

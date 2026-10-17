@@ -24,7 +24,7 @@
     "product_version": { "type": "string", "description": "Version of the payload this run used; empty for read-only actions without a payload." },
     "installed_version": { "type": "string", "description": "Version installed on the host after the action; MDM detection compares this." },
     "installed": { "type": "boolean" },
-    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first." },
+    "transaction_pending": { "type": "boolean", "description": "An interrupted transaction awaits recovery; the next mutating run repairs it first. Linux, macOS and Windows status also set it, with warning bundle_pending, when a policy bundle receipt is unfinished and no run holds the lock (a killed apply): ensure settles it, and the current or last good bundle enforces until then." },
     "services": { "type": "array", "items": { "$ref": "#/$defs/service" } },
     "readiness": {
       "type": "object",

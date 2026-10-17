@@ -151,7 +151,7 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_failed",
 				Message: message})
 		case !enterprisebundle.Finished(last.State):
-			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "bundle_pending",
+			res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
 				Message: "the last bundle received is " + last.State + " and not confirmed yet; the next lifecycle run settles it"})
 		}
 	} else if summary, err := store.Summary(); err == nil {

@@ -529,6 +529,54 @@ echo installed-ok
     assert "step 1.0.4101 -> 1.0.4101" in result.stdout, result.stdout
     assert log.read_text(encoding="utf-8").strip() == "rpm -U --replacepkgs"
 
+# GAP-0030: a --staging-dir folder that does not exist exited 1 with no
+# result and "DC_TRUST_ACL: unbound variable" (set -u): the check skipped
+# dc_trusted_path, which is what set the variable. Both twins run their own
+# settings and state block and the real dc_stage_parent; a stub stat makes an
+# existing folder read as another account's on either host.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+@pytest.mark.parametrize("case", ["missing", "untrusted"])
+def test_unix_wrapper_refuses_a_bad_custom_staging_dir_with_a_result(os_dir: str, shell: str, case: str, tmp_path: Path) -> None:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    validator = _schema_validator()
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    header = text[text.index("set -eu\n"):text.index("dc_platform() {")]
+    functions = "\n".join(_shell_function(text, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_fail_result", "dc_log", "dc_stat_uid", "dc_stat_mode",
+        "dc_acl_write_entry", "dc_trusted_path", "dc_stage_parent"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat = bin_dir / "stat"
+    stat.write_text("#!/bin/sh\necho 501\n", encoding="utf-8")  # owned by another account
+    stat.chmod(0o755)
+    staging = tmp_path / "mdm-stage"
+    if case == "untrusted":
+        staging.mkdir()
+    script = f"""{header}
+PATH='{bin_dir}':$PATH
+DC_STAGING_DIR='{staging}'
+{functions}
+dc_stage_parent
+echo staged
+"""
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+    assert result.returncode == 1 and result.stderr == "", (result.stdout, result.stderr)
+    documents = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(documents) == 1, result.stdout
+    document = json.loads(documents[0])
+    assert not sorted(validator.iter_errors(document), key=str), document
+    assert document["exit_code"] == 1 and document["platform"] == ("darwin" if os_dir == "macos" else "linux")
+    assert [e["code"] for e in document["errors"]] == ["mdm_staging_untrusted"], document
+    message = document["errors"][0]["message"]
+    if case == "missing":
+        assert f"the staging folder {staging} does not exist" in message and "mkdir -m 0700" in message, message
+    else:
+        assert f"the staging folder {staging} is not a root-owned directory that only root can write" in message, message
+
+
 # GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
 # could not run from the wrapper's /var/tmp staging folder, and the result was
 # mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
@@ -1028,6 +1076,57 @@ echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("reason", ["already_applied", "compliant"])
+def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
+    # GAP-0034 (twin of the Windows finding): a kit run that installed other
+    # trust anchors, then found the confirmed bundle already applied (or,
+    # without a bundle, the deployment compliant), printed the lifecycle's
+    # "noop": true. It changed the device, so it is not a no-op, and changes
+    # names the anchor file. An unchanged anchor file keeps the no-op.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
+    anchors = tmp_path / "trust" / "bundle-anchors.json"
+    base = {
+        "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": reason,
+        "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+        "installed": True, "transaction_pending": False, "services": [],
+        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+        "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+        "coverage_complete": True, "security_complete": True, "errors": [],
+    }
+    validator = _schema_validator()
+
+    def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
+        document = dict(base)
+        if changes is not None:
+            document["changes"] = changes
+        document["exit_code"] = 0
+        result = tmp_path / "result.json"
+        result.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        script = f"""DC_STAGE="{tmp_path}" DC_RESULT="{result}" DC_ANCHORS="{anchors}"
+DC_ANCHORS_CHANGED={changed} DC_ANCHORS_PREVIOUS="{previous}"
+{functions}
+dc_annotate_anchors_step
+cat "$DC_RESULT"
+"""
+        completed = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        out = json.loads(completed.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), out
+        return out
+
+    rotated = run("1", str(tmp_path / "previous.json"))
+    assert rotated["noop"] is False and "noop_reason" not in rotated, rotated
+    assert rotated["changes"] == [f"replaced the trust anchors in {anchors}"], rotated
+    first = run("1", "", changes=["restarted the gateway"])
+    assert first["noop"] is False and "noop_reason" not in first, first
+    assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
+    unchanged = run("0", "")
+    assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize(("version", "untrusted", "missing", "expected"), [
     (_VERSION_CONTRACT, False, False, "verb"),
     (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":2'), False, False, "verb"),
@@ -1481,7 +1580,7 @@ dc_trusted_path() {{ :; }}; dc_binaries_damaged() {{ return 1; }}
 dc_stage_source() {{ :; }}; dc_install_package() {{ call package; }}
 dc_run_lifecycle_retry() {{ shift; call "$@"; }}
 dc_install_anchors() {{ call anchors; }}; dc_restore_anchors() {{ call restore; }}
-dc_annotate_package_step() {{ :; }}; dc_emit_result() {{ :; }}
+dc_annotate_package_step() {{ :; }}; dc_annotate_anchors_step() {{ :; }}; dc_emit_result() {{ :; }}
 dc_fail_result() {{ call "fail $2"; exit "$1"; }}
 dc_cleanup() {{ rm -rf "$DC_STAGE"; }}; dc_stop_child() {{ :; }}
 dc_main

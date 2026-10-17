@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -89,16 +88,13 @@ var (
 	// lifecycle.lock: the 30 s default of Enter-DefenseClawLifecycleLock
 	// (packaging/windows/DefenseClawEnterprise.psm1).
 	windowsSecretInstallerLockWait = 30 * time.Second
-	// windowsSecretRawArgs is the command line a flag error is read from:
-	// cobra stops parsing at the bad flag, so a later --json is not in opts.
-	windowsSecretRawArgs = func() []string { return os.Args[1:] }
 )
 
 func init() {
 	// Every verb prints its --json failure document for a flag error,
 	// status too (mgmt-agent-api GAP-0029).
 	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
-		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || windowsArgsRequestJSON(windowsSecretRawArgs()))
+		return reportWindowsSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
 	}
 }
 
@@ -124,78 +120,12 @@ type windowsSecretState struct {
 	ModifiedAt   string `json:"modified_at,omitempty"`
 }
 
-// windowsSecretFailureResult is what `secret set|remove|status --json`
-// prints when it fails: the Windows failure branch of
-// secret-result.schema.json. The value never appears in it.
-type windowsSecretFailureResult struct {
-	SchemaVersion    int                        `json:"schema_version"`
-	OK               bool                       `json:"ok"`
-	Action           string                     `json:"action"`
-	Name             string                     `json:"name,omitempty"`
-	GatewayRestarted bool                       `json:"gateway_restarted"`
-	Errors           []enterprisestatus.Message `json:"errors"`
-	ExitCode         int                        `json:"exit_code"`
-}
-
-// windowsSecretRefusal names the errors[].code of a set or remove failure.
-type windowsSecretRefusal struct {
-	code string
-	err  error
-}
-
-func (r *windowsSecretRefusal) Error() string { return r.err.Error() }
-func (r *windowsSecretRefusal) Unwrap() error { return r.err }
-
-func windowsSecretFailed(code string, exit int, err error) error {
-	return withExitCode(&windowsSecretRefusal{code: code, err: err}, exit)
-}
-
 // reportWindowsSecretFailure prints the failure document of err when asJSON
 // and returns err, labelled 1603 when nothing chose an exit code.
 func reportWindowsSecretFailure(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error, asJSON bool) error {
-	err = withExitCode(err, windowsSecretExitFailure)
-	if !asJSON {
-		return err
-	}
-	exit := commandExitCode(err)
-	code := ""
-	var refusal *windowsSecretRefusal
-	var view *managedViewRefusal
-	switch {
-	case errors.As(err, &refusal):
-		code = refusal.code
-	case errors.As(err, &view):
-		code = view.code
-	case exit == windowsSecretExitInvalid:
-		code = "invalid_arguments"
-	default:
-		code = string(enterprisebundle.CodeStateInvalid)
-	}
-	result := windowsSecretFailureResult{SchemaVersion: 1, Action: action, Name: opts.name,
-		Errors: []enterprisestatus.Message{{Code: code, Message: err.Error()}}, ExitCode: exit}
-	if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(result); encodeErr != nil {
-		return encodeErr
-	}
-	silenceJSONReportedError(cmd, true, err)
+	err = reportSecretFailure(cmd, action, opts, err, asJSON, windowsSecretExitFailure, windowsSecretExitInvalid)
+	silenceJSONReportedError(cmd, asJSON, err)
 	return err
-}
-
-// windowsArgsRequestJSON reports whether a command line passes --json
-// before any "--".
-func windowsArgsRequestJSON(args []string) bool {
-	for _, arg := range args {
-		if arg == "--" {
-			return false
-		}
-		if arg == "--json" {
-			return true
-		}
-		if value, ok := strings.CutPrefix(arg, "--json="); ok {
-			on, err := strconv.ParseBool(value)
-			return err == nil && on
-		}
-	}
-	return false
 }
 
 // runEnterpriseSecret implements `enterprise secret` on Windows.
@@ -238,7 +168,7 @@ func windowsSecretElevation(action string, opts *enterpriseSecretOptions) error 
 		return withExitCode(&managedViewRefusal{code: "elevation_required", message: windowsSecretStandardUserAnswer(action, opts)},
 			enterprisestatus.WindowsExitAccessDenied)
 	}
-	return windowsSecretFailed("elevation_required", windowsSecretExitFailure, errors.New("run this command from an elevated Administrator prompt or the MDM agent"))
+	return secretFailed("elevation_required", windowsSecretExitFailure, errors.New("run this command from an elevated Administrator prompt or the MDM agent"))
 }
 
 func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) error {
@@ -247,11 +177,11 @@ func runWindowsSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) e
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	states, err := windowsSecretStatus(layout.SecretsDir)
 	if err != nil {
-		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if opts.json {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
@@ -279,10 +209,10 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return false, windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return false, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !managed.ValidCredentialName(opts.name) {
-		return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
+		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
 	}
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return false, err
@@ -291,26 +221,26 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	switch action {
 	case "set":
 		if opts.fromStdin == (opts.fromFile != "") {
-			return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
+			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, errors.New("pass exactly one of --from-stdin or --from-file"))
 		}
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := managed.ValidateTrustedFilePath(opts.fromFile, "credential source"); err != nil {
-				return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+				return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return false, windowsSecretFailed("change_failed", windowsSecretExitFailure, err)
+				return false, secretFailed("change_failed", windowsSecretExitFailure, err)
 			}
 			defer file.Close()
 			source = file
 		}
 		if value, err = readWindowsSecretValue(source); err != nil {
-			return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+			return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
 		}
 	case "remove":
 	default:
-		return false, windowsSecretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
+		return false, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("unknown action %q", action))
 	}
 	release, err := lockWindowsSecretChange(cmd.Context(), layout, opts.lockWait)
 	if err != nil {
@@ -324,7 +254,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	if action == "set" {
 		if err := writeWindowsSecret(layout.SecretsDir, opts.name, value); err != nil {
-			return false, windowsSecretFailed("change_failed", windowsSecretExitFailure, err)
+			return false, secretFailed("change_failed", windowsSecretExitFailure, err)
 		}
 	} else if err := removeWindowsSecret(layout, opts.name); err != nil {
 		return false, err
@@ -332,7 +262,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// The gateway reads credentials when it starts; apply the change now.
 	restarted, err := windowsSecretRestartGateway()
 	if err != nil {
-		return false, windowsSecretFailed("restart_failed", windowsSecretExitFailure,
+		return false, secretFailed("restart_failed", windowsSecretExitFailure,
 			fmt.Errorf("credential %s %s, but restarting the gateway failed: %w", opts.name, windowsSecretChanged(action), err))
 	}
 	return restarted, nil
@@ -343,10 +273,10 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 func requireWindowsSecretDeployment() error {
 	installed, err := windowsSecretDeploymentInstalled()
 	if err != nil {
-		return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !installed {
-		return windowsSecretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
 	}
 	return nil
 }
@@ -362,16 +292,16 @@ func removeWindowsSecret(layout managed.StandaloneLayout, name string) error {
 		switch {
 		case err == nil:
 			if at := config.InstalledCredentialReference(layout.ConfigPath, raw, layout.DataDir, name); at != "" {
-				return windowsSecretFailed("credential_in_use", windowsSecretExitFailure,
+				return secretFailed("credential_in_use", windowsSecretExitFailure,
 					fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at))
 			}
 		case !errors.Is(err, os.ErrNotExist):
-			return windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+			return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 				fmt.Errorf("cannot read the installed config %s to check that it no longer references credential %s (%v); nothing was removed: restore read access to the config and run it again", layout.ConfigPath, name, err))
 		}
 	}
 	if err := os.Remove(filepath.Join(layout.SecretsDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return windowsSecretFailed("change_failed", windowsSecretExitFailure, err)
+		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}
 	return nil
 }
@@ -388,16 +318,16 @@ func lockWindowsSecretChange(ctx context.Context, layout managed.StandaloneLayou
 	unlockBundle, err := windowsSecretLockBundleStore(ctx, layout.LifecycleDir, wait)
 	if err != nil {
 		if errors.Is(err, errWindowsBundleStoreBusy) {
-			return nil, windowsSecretFailed("lifecycle_busy", enterprisestatus.WindowsExitBusy,
+			return nil, secretFailed("lifecycle_busy", enterprisestatus.WindowsExitBusy,
 				fmt.Errorf("the credential was not changed and the run can be retried: %w", err))
 		}
-		return nil, windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot lock the policy bundle store; the credential was not changed: %w", err))
 	}
 	path, err := windowsSecretLifecycleLockPath()
 	if err != nil {
 		unlockBundle()
-		return nil, windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot resolve the trusted enterprise roots; the credential was not changed: %w", err))
 	}
 	unlockLifecycle, err := acquireWindowsLockWithin(ctx, windowsSecretInstallerLockWait,
@@ -405,10 +335,10 @@ func lockWindowsSecretChange(ctx context.Context, layout managed.StandaloneLayou
 	if err != nil {
 		unlockBundle()
 		if windowsLifecycleLockBusy(err) {
-			return nil, windowsSecretFailed("lifecycle_busy", enterprisestatus.WindowsExitBusy,
+			return nil, secretFailed("lifecycle_busy", enterprisestatus.WindowsExitBusy,
 				fmt.Errorf("another DefenseClaw lifecycle run holds lifecycle.lock for more than %s; the credential was not changed and the run can be retried", formatWindowsLockWait(windowsSecretInstallerLockWait)))
 		}
-		return nil, windowsSecretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			fmt.Errorf("cannot open lifecycle.lock; the credential was not changed: %w", err))
 	}
 	return func() {

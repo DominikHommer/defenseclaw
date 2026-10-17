@@ -154,6 +154,7 @@ DC_ANCHORS_SOURCE=""   # the private copy of the anchor file that command reads
 DC_ANCHORS_RESULT=""   # its result: installed, replaced or unchanged
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
+DC_TRUST_ACL=""        # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
 
 dc_platform() {
     case "$(uname -s)" in
@@ -258,6 +259,11 @@ dc_stage_parent() {
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
+    if [ ! -e "$DC_STAGE_PARENT" ] && [ ! -L "$DC_STAGE_PARENT" ]; then
+        # The wrapper creates only its Linux default; a --staging-dir folder
+        # is the administrator's (GAP-0030: this read as a shell error).
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist; create it as a root-owned directory that only root can write (mkdir -m 0700), or leave out --staging-dir"
+    fi
     if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi
@@ -959,6 +965,34 @@ dc_annotate_package_step() {
             /^  "noop_reason": / { next }
             /^  "warnings": \[$/ { print; print "    " warning ","; warned = 1; next }
             /^  "exit_code": / && !warned { print "  \"warnings\": [" warning "],"; warned = 1 }
+            { print }
+        ' "$DC_RESULT" >"$annotated"; then
+        DC_RESULT=$annotated
+    fi
+}
+
+# dc_annotate_anchors_step: after a successful run, make the result document
+# report the trust anchor file this run installed. The lifecycle result is
+# the ensure that ran before the anchors, or the bundle apply that found the
+# confirmed bundle again: its "noop": true ("compliant", "already_applied")
+# would tell the MDM nothing changed although the anchors did (GAP-0034). The
+# lifecycle prints the document with two-space indentation, one top-level
+# field per line.
+dc_annotate_anchors_step() {
+    [ "$DC_ANCHORS_CHANGED" = 1 ] && [ -n "$DC_RESULT" ] || return 0
+    if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
+        change="replaced the trust anchors in $DC_ANCHORS"
+    else
+        change="installed trust anchors in $DC_ANCHORS"
+    fi
+    annotated="$DC_STAGE/result.anchors.json"
+    if DC_AWK_CHANGE="\"$(dc_json_escape "$change")\"" \
+        awk '
+            BEGIN { change = ENVIRON["DC_AWK_CHANGE"] }
+            /^  "noop": true,$/ { print "  \"noop\": false,"; next }
+            /^  "noop_reason": / { next }
+            /^  "changes": \[$/ { print; print "    " change ","; noted = 1; next }
+            /^  "exit_code": / && !noted { print "  \"changes\": [" change "],"; noted = 1 }
             { print }
         ' "$DC_RESULT" >"$annotated"; then
         DC_RESULT=$annotated
@@ -1669,6 +1703,7 @@ dc_main() {
     [ -z "$anchors" ] || dc_install_anchors "$anchors"
     if [ -z "$bundle" ]; then
         dc_annotate_package_step
+        dc_annotate_anchors_step
         dc_emit_result
         return 0
     fi
@@ -1680,6 +1715,7 @@ dc_main() {
     fi
     if [ "$status" = 0 ]; then
         dc_annotate_package_step
+        dc_annotate_anchors_step
     else
         dc_restore_anchors
     fi

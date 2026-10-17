@@ -106,20 +106,37 @@ func init() {
 // receipt and the confirmed state. The store lock excludes a live apply; an
 // active writer retains ownership and status reports its pending receipt.
 func settleWindowsBundleStatus(ctx context.Context) error {
+	_, err := settleWindowsBundleStatusReport(ctx)
+	return err
+}
+
+// settleWindowsBundleStatusReport is settleWindowsBundleStatus that also
+// returns the receipts still unsettled afterwards, read under the store
+// lock: no live apply owns them, a killed one left them (GAP-0028). nil
+// while a live apply holds the lock.
+func settleWindowsBundleStatusReport(ctx context.Context) ([]*enterprisebundle.Receipt, error) {
 	layout, err := windowsBundleLayout()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
 	if err != nil {
 		// A live apply may hold this lock. It will settle its own receipt.
 		if errors.Is(err, errWindowsBundleStoreBusy) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer unlock()
 	driver := newWindowsBundleDriver(layout)
+	if err := settleWindowsBundleStatusLocked(ctx, layout, driver); err != nil {
+		return nil, err
+	}
+	unsettled, _ := driver.Store.Unsettled()
+	return unsettled, nil
+}
+
+func settleWindowsBundleStatusLocked(ctx context.Context, layout managed.StandaloneLayout, driver *enterprisebundle.Driver) error {
 	receipts, err := driver.Store.Receipts()
 	if err != nil {
 		return err
@@ -242,6 +259,11 @@ type windowsBundleRun struct {
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
+	// anchorCommit records the anchor file a BUNDLE= TRUSTANCHORS= run
+	// committed (commitAnchors), so a repeat of the confirmed bundle that
+	// installed other anchors is not reported as an already_applied no-op
+	// (GAP-0034).
+	anchorCommit *anchorOnlyChange
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
@@ -863,6 +885,9 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	}
 	confirmed := attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
 	settleAnchorOnlyEnsure(result, run.anchorOnly, confirmed)
+	// The bundle of this run verified against the committed anchors, so the
+	// change line needs no clause about the confirmed bundle.
+	settleAnchorOnlyEnsure(result, run.anchorCommit, false)
 }
 
 func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
@@ -872,15 +897,19 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 	}
 }
 
-// commitAnchors installs the staged trust anchors of a confirmed bundle; a
-// failed commit puts the previous anchors back and fails the run.
+// commitAnchors installs the staged trust anchors of a confirmed bundle and
+// records what it installed for the result; a failed commit puts the
+// previous anchors back and fails the run.
 func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
-	if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+	installed, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
+	if err != nil {
 		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		if restoreErr := run.restoreAnchors(); restoreErr != nil {
 			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
 		}
+		return
 	}
+	run.anchorCommit = &anchorOnlyChange{path: run.anchorPath, existed: run.anchorExisted, previous: run.anchorPrevious, installed: installed}
 }
 
 func (run *windowsBundleRun) restoreAnchors() error {

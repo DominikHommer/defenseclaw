@@ -261,7 +261,7 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 				if class.args != nil {
 					args = class.args(verb)
 				}
-				windowsSecretRawArgs = func() []string { return args }
+				secretRawArgs = func() []string { return args }
 				cmd := newEnterpriseSecretCommand(verb, "matrix")
 				var stdout, stderr bytes.Buffer
 				cmd.SetOut(&stdout)
