@@ -8,9 +8,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package enterpriseunix
 
-// yieldToHooks is a no-op where the lifecycle does not run.
+// yieldToHooks is a no-op on the other Unix systems, where the lifecycle
+// does not run; Windows has its own lifecycle (packaging/windows).
 func yieldToHooks() {}
