@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "connector": "claudecode",
+  "transport": "command-hook",
+  "local_sources": {
+    "registry": "cli/defenseclaw/inventory/hook_contracts.json",
+    "registration": "internal/gateway/connector/claudecode.go",
+    "request": "internal/gateway/claude_code_hook.go",
+    "profile": "internal/gateway/connector/claudecode_hook_profile.go",
+    "execution": "internal/gateway/connector/hookexec/hookexec.go",
+    "failure": "internal/gateway/connector/hookexec/spec.go"
+  },
+  "selectors": {
+    "config_root_function": "claudeCodeConfigDir",
+    "config_path_function": "claudeCodeSettingsPath",
+    "request_struct": "claudeCodeHookRequest",
+    "response_function": "claudeCodeOutputForProfile",
+    "registration_function": "newClaudeCodeHookGroup",
+    "timeout_function": "ClaudeCodeHookTimeoutSeconds"
+  },
+  "bindings": [
+    {"id":"hook.discovery","artifact_classes":["config_discovery"],"scope":"user-default"},
+    {"id":"hook.registration","artifact_classes":["config_discovery"],"scope":"user-default"},
+    {"id":"hook.event_delivery","artifact_classes":["hook_events"],"scope":"owned-events"},
+    {"id":"hook.payload","artifact_classes":["input_correlation"],"scope":"typed-hook-request"},
+    {"id":"hook.decision","artifact_classes":["response_semantics"],"scope":"emitted-block-response"},
+    {"id":"hook.execution","artifact_classes":["runtime_behavior","hook_events"],"scope":"synchronous-enforcement-events"},
+    {"id":"hook.failure","artifact_classes":["runtime_behavior","response_semantics"],"scope":"declared-blocking-exit"},
+    {"id":"hook.correlation","artifact_classes":["input_correlation"],"scope":"paired-tool-identity"}
+  ]
+}

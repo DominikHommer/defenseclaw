@@ -1,0 +1,23 @@
+[
+  {"version":"2.1.152","contains":"MessageDisplay","expected_classes":["hook_events"]},
+  {"version":"2.1.154","contains":"defaultEnabled","expected_classes":["plugin_inventory"]},
+  {"version":"2.1.219","contains":"DirectoryAdded","expected_classes":["hook_events"]},
+  {"version":"2.1.268","contains":"CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS","expected_classes":["hook_events","runtime_behavior"]},
+  {"version":"2.1.280","contains":"hook_execution_complete","expected_classes":["telemetry"]},
+  {"version":"2.1.280","contains":"agent-type hook no longer runs","expected_classes":["hook_events","response_semantics"]},
+  {"version":"2.1.284","contains":"returned by Elicitation","expected_classes":["hook_events","response_semantics"]},
+  {"version":"2.1.284","contains":"dropping a failed hook's stderr","expected_classes":["runtime_behavior"]},
+  {"version":"2.1.284","contains":"claudeCode.environmentVariables","expected_classes":["config_discovery"]},
+  {"version":"2.1.299","contains":"UserPromptSubmit` hooks to run before","expected_classes":["hook_events"]},
+  {"version":"2.1.299","contains":"failing open when Git for Windows","expected_classes":["hook_events"]},
+  {"version":"2.1.300","contains":"SessionEnd hooks sometimes not running","expected_classes":["hook_events","runtime_behavior"]},
+  {"version":"2.1.300","contains":"updatedInput` from PreToolUse","expected_classes":["response_semantics"]},
+  {"version":"2.1.300","contains":"GenAI semantic-convention","expected_classes":["telemetry"]},
+  {"version":"2.1.301","contains":"classifier_verdict","expected_classes":["telemetry"]},
+  {"version":"2.1.301","contains":"`%` motion to vim","expected_classes":[]},
+  {"version":"2.1.301","contains":"LaTeX math rendering","expected_classes":[]},
+  {"version":"2.1.301","contains":"rows` to a mod's `Input","expected_classes":[]},
+  {"version":"2.1.300","contains":"dir` prop on a mod's `Text","expected_classes":[]},
+  {"version":"2.1.299","contains":"idleCompaction","expected_classes":[]},
+  {"version":"2.1.284","contains":"Continue automatically at usage limit","expected_classes":[]}
+]

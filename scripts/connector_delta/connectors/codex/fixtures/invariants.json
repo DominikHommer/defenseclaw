@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "evaluation": "Synthetic Codex source/schema mutations against current DefenseClaw. Not released-client regressions or an independent accuracy evaluation.",
+  "cases": [
+    {
+      "id": "default-directory-move-needs-legacy-support-proof",
+      "kind": "document",
+      "source": "codex-home-discovery",
+      "url": "fixture:home-dir.rs",
+      "before": "None => {\nlet mut p = home_dir().ok_or_else(|| { error() })?;\np.push(\".codex\");\nAbsolutePathBuf::from_absolute_path(p)\n}\n",
+      "text": "None => {\nlet mut p = home_dir().ok_or_else(|| { error() })?;\np.push(\".new-codex\");\nAbsolutePathBuf::from_absolute_path(p)\n}\n",
+      "expected": {"hook.discovery": "review_required"},
+      "selected": ["config_discovery"]
+    },
+    {
+      "id": "payload-object-to-string",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"string\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "expected": {
+        "hook.payload": "breaking_change"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "payload-new-optional-field",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    },\n    \"new_optional\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "expected": {
+        "hook.payload": "compatible"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "correlation-id-removed-closed-schema",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    }\n  }\n}",
+      "expected": {
+        "hook.correlation": "breaking_change",
+        "hook.payload": "review_required"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "correlation-omission-open-schema",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": true,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    }\n  }\n}",
+      "expected": {
+        "hook.correlation": "review_required"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "correlation-id-to-number",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"number\"\n    }\n  }\n}",
+      "expected": {
+        "hook.correlation": "breaking_change",
+        "hook.payload": "breaking_change"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "payload-unconstrained-type",
+      "kind": "document",
+      "source": "codex-pre-tool-use-input",
+      "url": "fixture:pre-tool-use.command.input.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": {\n      \"type\": \"object\"\n    },\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.input\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"tool_input\": true,\n    \"tool_use_id\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "expected": {
+        "hook.payload": "review_required"
+      },
+      "selected": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "deny-enum-retired",
+      "kind": "document",
+      "source": "codex-pre-tool-use-output",
+      "url": "fixture:pre-tool-use.command.output.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"permissionDecision\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"allow\",\n            \"deny\"\n          ]\n        }\n      }\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"permissionDecision\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"allow\"\n          ]\n        }\n      }\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "breaking_change"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "deny-field-removed-closed",
+      "kind": "document",
+      "source": "codex-pre-tool-use-output",
+      "url": "fixture:pre-tool-use.command.output.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"permissionDecision\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"allow\",\n            \"deny\"\n          ]\n        }\n      }\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {}\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "breaking_change"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "deny-field-omitted-open",
+      "kind": "document",
+      "source": "codex-pre-tool-use-output",
+      "url": "fixture:pre-tool-use.command.output.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"permissionDecision\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"allow\",\n            \"deny\"\n          ]\n        }\n      }\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": true,\n      \"properties\": {}\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "review_required"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "external-schema-ref-not-fetched",
+      "kind": "document",
+      "source": "codex-pre-tool-use-output",
+      "url": "fixture:pre-tool-use.command.output.schema.json",
+      "before": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"type\": \"object\",\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"permissionDecision\": {\n          \"type\": \"string\",\n          \"enum\": [\n            \"allow\",\n            \"deny\"\n          ]\n        }\n      }\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"pre-tool-use.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"hookSpecificOutput\": {\n      \"$ref\": \"https://invalid.example/schema\"\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "review_required"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "continue-false-rejected",
+      "kind": "document",
+      "source": "codex-session-start-output",
+      "url": "fixture:session-start.command.output.schema.json",
+      "before": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"boolean\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"boolean\",\n      \"enum\": [\n        true\n      ]\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "breaking_change"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "continue-false-is-not-number-zero",
+      "kind": "document",
+      "source": "codex-session-start-output",
+      "url": "fixture:session-start.command.output.schema.json",
+      "before": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"boolean\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"number\",\n      \"enum\": [\n        0\n      ]\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "breaking_change"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "continue-type-incompatible",
+      "kind": "document",
+      "source": "codex-session-start-output",
+      "url": "fixture:session-start.command.output.schema.json",
+      "before": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"boolean\"\n    }\n  }\n}",
+      "text": "{\n  \"title\": \"session-start.command.output\",\n  \"type\": \"object\",\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"continue\": {\n      \"type\": \"string\"\n    }\n  }\n}",
+      "expected": {
+        "hook.decision": "breaking_change"
+      },
+      "selected": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "owned-event-removed-from-type-and-dispatch",
+      "kind": "document",
+      "source": "codex-hook-config",
+      "url": "fixture:hook_config.rs",
+      "before": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "text": "pub struct HookEventsToml {\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "expected": {
+        "hook.event_delivery": "breaking_change"
+      },
+      "selected": [
+        "hook_events"
+      ]
+    },
+    {
+      "id": "event-alias-keeps-removal-unproven",
+      "kind": "document",
+      "source": "codex-hook-config",
+      "url": "fixture:hook_config.rs",
+      "before": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "text": "pub struct HookEventsToml {\n #[serde(rename = \"Stop\", default, alias = \"PreToolUse\")]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "expected": {
+        "hook.event_delivery": "review_required"
+      },
+      "selected": [
+        "hook_events"
+      ]
+    },
+    {
+      "id": "command-handler-type-retired",
+      "kind": "document",
+      "source": "codex-hook-config",
+      "url": "fixture:hook_config.rs",
+      "before": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "text": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"exec\")]\n Exec { command: String },\n}\n",
+      "expected": {
+        "hook.registration": "breaking_change"
+      },
+      "selected": [
+        "config_discovery"
+      ]
+    },
+    {
+      "id": "command-handler-alias-not-retired",
+      "kind": "document",
+      "source": "codex-hook-config",
+      "url": "fixture:hook_config.rs",
+      "before": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"command\")]\n Command { command: String },\n}\n",
+      "text": "pub struct HookEventsToml {\n #[serde(rename = \"PreToolUse\", default)]\n pub pretooluse: Vec<MatcherGroup>,\n #[serde(rename = \"Stop\", default)]\n pub stop: Vec<MatcherGroup>,\n}\npub fn matcher_groups_mut(&mut self) {\n [(Event::PreToolUse, &mut self.pretooluse),(Event::Stop, &mut self.stop)]\n    }\npub enum HookHandlerConfig {\n#[serde(rename = \"exec\", alias = \"command\")]\n Exec { command: String },\n}\n",
+      "expected": {
+        "hook.registration": "review_required"
+      },
+      "selected": [
+        "config_discovery"
+      ]
+    },
+    {
+      "id": "session-end-hard-cap-too-short",
+      "kind": "document",
+      "source": "codex-session-end",
+      "url": "fixture:session_end.rs",
+      "before": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 3;\n",
+      "text": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 1;\n",
+      "expected": {
+        "hook.execution": "breaking_change"
+      },
+      "selected": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "session-end-default-only",
+      "kind": "document",
+      "source": "codex-session-end",
+      "url": "fixture:session_end.rs",
+      "before": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 3;\n",
+      "text": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 2;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 3;\n",
+      "expected": {
+        "hook.execution": "compatible"
+      },
+      "selected": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "already-clamped-session-end-budget",
+      "kind": "document",
+      "source": "codex-session-end",
+      "url": "fixture:session_end.rs",
+      "before": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 60;\n",
+      "text": "pub(crate) const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\npub(crate) const SESSION_END_MAX_TIMEOUT_SEC: u64 = 3;\n",
+      "expected": {
+        "hook.execution": "compatible"
+      },
+      "selected": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "blocking-exit-code-reassigned",
+      "kind": "document",
+      "source": "codex-pre-tool-runtime",
+      "url": "fixture:pre_tool_use.rs",
+      "before": "fn parse_completed() {\n match run_result.exit_code {\n Some(2) if handler.can_apply_control_effects() => {\n should_block = true;\n }\n Some(exit_code) => {\n status = HookRunStatus::Failed;\n }\n }\n}\n",
+      "text": "fn parse_completed() {\n match run_result.exit_code {\n Some(3) if handler.can_apply_control_effects() => {\n should_block = true;\n }\n Some(exit_code) => {\n status = HookRunStatus::Failed;\n }\n }\n}\n",
+      "expected": {
+        "hook.failure": "breaking_change"
+      },
+      "selected": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "unknown-exit-implementation-stays-review",
+      "kind": "document",
+      "source": "codex-pre-tool-runtime",
+      "url": "fixture:pre_tool_use.rs",
+      "before": "fn parse_completed() {\n match run_result.exit_code {\n Some(2) if handler.can_apply_control_effects() => {\n should_block = true;\n }\n Some(exit_code) => {\n status = HookRunStatus::Failed;\n }\n }\n}\n",
+      "text": "fn parse_completed() { new_output_api(); }\n",
+      "expected": {
+        "hook.failure": "review_required"
+      },
+      "selected": [
+        "runtime_behavior"
+      ]
+    }
+  ]
+}

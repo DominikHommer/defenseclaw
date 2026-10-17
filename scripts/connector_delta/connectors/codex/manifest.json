@@ -1,0 +1,305 @@
+{
+  "schema_version": 1,
+  "connector": "codex",
+  "pr_inventory": {"paths": [
+    {"pattern": "(?i)^codex-rs/.*hook", "invariants": ["hook.payload", "hook.decision", "hook.execution"], "review_focus": "Check that hook input, emitted denial and additional-context delivery remain effective through the changed runtime path."},
+    {"pattern": "^codex-rs/(?:protocol/src/models|tools/src/tool_output|context-fragments/src/fragment)\\.rs$", "invariants": ["hook.payload", "hook.decision"], "review_focus": "Check typed-content and tool-output conversions used by hook context; unchanged schemas do not prove end-to-end behavior."}
+  ]},
+  "upstream_repository": "openai/codex",
+  "coverage": "Pinned public Codex hook source and selected JSON schemas; not complete tool-routing or runtime coverage.",
+  "sources": [
+    {
+      "id": "codex-home-discovery",
+      "kind": "source",
+      "path": "codex-rs/utils/home-dir/src/lib.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/utils/home-dir/src/lib.rs",
+      "artifact_classes": ["config_discovery"]
+    },
+    {
+      "id": "codex-command-runner",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/engine/command_runner.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/engine/command_runner.rs",
+      "artifact_classes": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-wire-schema",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/schema.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/schema.rs",
+      "artifact_classes": [
+        "input_correlation",
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-hook-runtime",
+      "kind": "source",
+      "path": "codex-rs/core/src/hook_runtime.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/core/src/hook_runtime.rs",
+      "artifact_classes": [
+        "hook_events",
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-tool-registry",
+      "kind": "source",
+      "path": "codex-rs/core/src/tools/registry.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/core/src/tools/registry.rs",
+      "artifact_classes": [
+        "hook_events",
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-config-defaults",
+      "kind": "source",
+      "path": "codex-rs/config/src/lib.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/config/src/lib.rs",
+      "artifact_classes": [
+        "config_discovery"
+      ]
+    },
+    {
+      "id": "codex-hook-config",
+      "kind": "source",
+      "path": "codex-rs/config/src/hook_config.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/config/src/hook_config.rs",
+      "artifact_classes": [
+        "config_discovery",
+        "hook_events"
+      ]
+    },
+    {
+      "id": "codex-hook-discovery",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/engine/discovery.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/engine/discovery.rs",
+      "artifact_classes": [
+        "config_discovery",
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-hook-dispatcher",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/engine/dispatcher.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/engine/dispatcher.rs",
+      "artifact_classes": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-pre-tool-runtime",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/events/pre_tool_use.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/events/pre_tool_use.rs",
+      "artifact_classes": [
+        "runtime_behavior",
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-output-parser",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/engine/output_parser.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/engine/output_parser.rs",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-session-end",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/events/session_end.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/events/session_end.rs",
+      "artifact_classes": [
+        "runtime_behavior"
+      ]
+    },
+    {
+      "id": "codex-pre-tool-use-input",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json",
+      "artifact_classes": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "codex-pre-tool-use-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-post-tool-use-input",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json",
+      "artifact_classes": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "codex-post-tool-use-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/post-tool-use.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/post-tool-use.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-permission-request-input",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/permission-request.command.input.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/permission-request.command.input.schema.json",
+      "artifact_classes": [
+        "input_correlation"
+      ]
+    },
+    {
+      "id": "codex-permission-request-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/permission-request.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/permission-request.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-session-start-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/session-start.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/session-start.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-user-prompt-submit-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-subagent-stop-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/subagent-stop.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/subagent-stop.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-pre-compact-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/pre-compact.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/pre-compact.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-post-compact-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/post-compact.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/post-compact.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    },
+    {
+      "id": "codex-stop-output",
+      "kind": "source",
+      "path": "codex-rs/hooks/schema/generated/stop.command.output.schema.json",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/schema/generated/stop.command.output.schema.json",
+      "artifact_classes": [
+        "response_semantics"
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": "config_discovery",
+      "risk": "high",
+      "patterns": [
+        "."
+      ],
+      "consumers": [
+        "internal/gateway/connector/codex.go"
+      ],
+      "tests": [
+        "go test ./internal/gateway/connector -run Codex",
+        "go test ./internal/gateway -run Codex"
+      ]
+    },
+    {
+      "id": "hook_events",
+      "risk": "high",
+      "patterns": [
+        "."
+      ],
+      "consumers": [
+        "internal/gateway/connector/codex.go"
+      ],
+      "tests": [
+        "go test ./internal/gateway/connector -run Codex",
+        "go test ./internal/gateway -run Codex"
+      ]
+    },
+    {
+      "id": "input_correlation",
+      "risk": "high",
+      "patterns": [
+        "."
+      ],
+      "consumers": [
+        "internal/gateway/codex_hook.go"
+      ],
+      "tests": [
+        "go test ./internal/gateway/connector -run Codex",
+        "go test ./internal/gateway -run Codex"
+      ]
+    },
+    {
+      "id": "response_semantics",
+      "risk": "high",
+      "patterns": [
+        "."
+      ],
+      "consumers": [
+        "internal/gateway/connector/codex_hook_profile.go"
+      ],
+      "tests": [
+        "go test ./internal/gateway/connector -run Codex",
+        "go test ./internal/gateway -run Codex"
+      ]
+    },
+    {
+      "id": "runtime_behavior",
+      "risk": "high",
+      "patterns": [
+        "."
+      ],
+      "consumers": [
+        "internal/gateway/connector/codex.go",
+        "internal/gateway/connector/hookexec/hookexec.go"
+      ],
+      "tests": [
+        "go test ./internal/gateway/connector -run Codex",
+        "go test ./internal/gateway -run Codex"
+      ]
+    }
+  ]
+}

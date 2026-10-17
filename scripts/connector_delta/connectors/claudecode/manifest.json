@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "connector": "claudecode",
+  "pr_inventory": {"paths": [
+    {"pattern": "^examples/settings/", "invariants": ["hook.discovery", "hook.registration"], "review_focus": "Inspect allowManagedHooksOnly and strictPluginOnlyCustomization if this optional example is deployed; it is not a host-default change."},
+    {"pattern": "(?i)(?:^|/)[^/]*hook[^/]*", "invariants": ["hook.event_delivery", "hook.payload", "hook.decision"], "review_focus": "Check whether this is our local command-hook API rather than a separate mod, plugin or cloud API."}
+  ]},
+  "sources": [
+    {"id": "claude-changelog", "kind": "changelog", "url": "https://raw.githubusercontent.com/anthropics/claude-code/{revision}/CHANGELOG.md"},
+    {"id": "claude-hooks", "kind": "document", "url": "https://code.claude.com/docs/en/hooks.md"},
+    {"id": "claude-settings", "kind": "document", "url": "https://code.claude.com/docs/en/settings.md"}
+  ],
+  "rules": [
+    {
+      "id": "hook_events", "risk": "medium",
+      "patterns": ["\\b(?:SessionStart|SessionEnd|PreToolUse|PostToolUse|PostToolUseFailure|PermissionRequest|PermissionDenied|PostCompact|PreCompact|DirectoryAdded|ConfigChange|InstructionsLoaded|UserPromptSubmit|UserPromptExpansion|SubagentStart|SubagentStop|StopFailure|WorktreeCreate|WorktreeRemove|PostToolBatch|TaskCreated|TaskCompleted|TeammateIdle|MessageDisplay|CwdChanged|FileChanged|Elicitation|ElicitationResult|Notification)\\b", "\\b(?:new|added|removed|renamed)\\b.{0,70}\\bhook(?:s| event)?\\b"],
+      "consumers": ["internal/gateway/connector/claudecode.go", "internal/gateway/claude_code_hook.go", "internal/gateway/connector/claudecode_hook_profile.go"],
+      "tests": ["go test ./internal/gateway/connector -run 'Claude|HookContract'", "go test ./internal/gateway -run 'ClaudeCode'"]
+    },
+    {
+      "id": "response_semantics", "risk": "high",
+      "patterns": ["\\b(?:permissionDecision|permissionDecisionReason|hookSpecificOutput|updatedInput|updatedPermissions|updatedMCPToolOutput|suppressOutput|additionalContext)\\b", "[\"`]continue[\"`]", "\\bhooks?\\b.{0,100}\\b(?:deny|denies|allow|ask|decision|block|exit|permission|input|response|output)\\b", "\\b(?:deny|allow|ask|decision|block|exit|permission|input|response|output)\\b.{0,100}\\bhooks?\\b"],
+      "consumers": ["internal/gateway/connector/claudecode_hook_profile.go", "internal/gateway/claude_code_hook.go", "internal/gateway/connector/hookexec/hookexec.go", "internal/gateway/connector/hooks/claude-code-hook.sh"],
+      "tests": ["go test ./internal/gateway -run 'ClaudeCodeOutput|ClaudeCodeHook'", "go test ./internal/gateway/connector -run 'Claude'"]
+    },
+    {
+      "id": "runtime_behavior", "risk": "high",
+      "patterns": ["\\bhook.{0,100}\\b(?:timeout|timed out|async|synchronous|background|hang|spawn|subprocess|parallel|order|stdin|stdout|stderr|not running|not firing|not called|not invoking|not executed|fail.open|fail.closed)\\b", "\\b(?:timeout|timed out|async|synchronous|background|hang|exit code)\\b.{0,100}\\bhook"],
+      "consumers": ["internal/gateway/connector/claudecode.go", "internal/gateway/connector/hooks/claude-code-hook.sh", "internal/gateway/connector/hookexec/spec.go", "internal/gateway/connector/hookexec/hookexec.go"],
+      "tests": ["go test ./internal/gateway/connector -run 'Claude'", "go test ./internal/gateway/connector/hookexec"]
+    },
+    {
+      "id": "config_discovery", "risk": "high",
+      "patterns": ["\\b(?:CLAUDE_CONFIG_DIR|disableAllHooks|allowManagedHooksOnly|managed-settings|policy_settings)\\b", "\\b(?:hooks?|plugins?)\\b.{0,80}\\b(?:discover|register|precedence|managed|reload|snapshot|merge)\\b", "\\b(?:managed|settings|config)\\b.{0,80}\\b(?:hooks?|plugins?)\\b", "\\b(?:settings\\.json|settings file)\\b.{0,90}\\b(?:skip|invalid|reject|parse|malformed)\\b", "\\b(?:skip|invalid|reject|parse|malformed)\\b.{0,90}\\b(?:settings\\.json|settings file)\\b"],
+      "consumers": ["internal/gateway/connector/claudecode_policy.go", "internal/gateway/connector/claudecode.go"],
+      "tests": ["go test ./internal/gateway/connector -run 'ClaudeEffectivePolicy|ClaudeManaged|Claude.*Hook'"]
+    },
+    {
+      "id": "input_correlation", "risk": "medium",
+      "patterns": ["\\b(?:tool_use_id|hook_event_name|tool_input|tool_response|session_id|agent_id|agent_type|last_assistant_message|transcript_path)\\b", "\\bhook.{0,90}\\b(?:payload|schema|field|tool name|tool call|tool result|agentId)\\b"],
+      "consumers": ["internal/gateway/claude_code_hook.go", "internal/gateway/connector/claudecode_hook_profile.go", "internal/gateway/otel_ingest_correlation_v8.go"],
+      "tests": ["go test ./internal/gateway -run 'Claude.*Correlation|ClaudeCodeHook'"]
+    },
+    {
+      "id": "telemetry", "risk": "medium",
+      "patterns": ["\\b(?:OpenTelemetry|OTLP|OTEL_[A-Z_]+|tool_decision|gen_ai\\.)"],
+      "consumers": ["internal/gateway/otel_ingest.go", "internal/gateway/otel_ingest_correlation_v8.go", "internal/gateway/connector/claudecode.go"],
+      "tests": ["go test ./internal/gateway -run 'OTel.*Claude|Claude.*OTel'"]
+    },
+    {
+      "id": "plugin_inventory", "risk": "medium",
+      "patterns": ["\\b(?:defaultEnabled|enabledPlugins|plugin\\.json|installed_plugins\\.json|known_marketplaces\\.json)\\b", "\\bplugins?\\b.{0,80}\\b(?:enabled by default|disabled by default|dependencies|namespacing|manifest)\\b"],
+      "consumers": ["cli/defenseclaw/inventory/plugin_directories.py"],
+      "tests": ["python3 -m unittest discover -s cli/tests -p test_plugin_directories.py"]
+    },
+    {
+      "id": "unclassified_hook_change", "risk": "unknown",
+      "patterns": ["\\bhooks?\\b"],
+      "fallback": true,
+      "consumers": ["internal/gateway/connector/claudecode.go"],
+      "tests": ["go test ./internal/gateway/connector -run 'Claude'"]
+    }
+  ]
+}

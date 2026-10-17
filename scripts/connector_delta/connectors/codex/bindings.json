@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "connector": "codex",
+  "transport": "command-hook",
+  "source_invariants": {
+    "codex-home-discovery": [
+      "hook.discovery"
+    ],
+    "codex-config-defaults": [
+      "hook.discovery"
+    ],
+    "codex-hook-config": [
+      "hook.registration",
+      "hook.event_delivery",
+      "hook.execution"
+    ],
+    "codex-hook-discovery": [
+      "hook.discovery",
+      "hook.registration",
+      "hook.event_delivery",
+      "hook.execution"
+    ],
+    "codex-hook-dispatcher": [
+      "hook.event_delivery",
+      "hook.execution",
+      "hook.failure"
+    ],
+    "codex-command-runner": [
+      "hook.execution",
+      "hook.failure"
+    ],
+    "codex-wire-schema": [
+      "hook.payload",
+      "hook.decision",
+      "hook.correlation"
+    ],
+    "codex-hook-runtime": [
+      "hook.event_delivery",
+      "hook.execution",
+      "hook.correlation"
+    ],
+    "codex-tool-registry": [
+      "hook.event_delivery",
+      "hook.execution",
+      "hook.correlation"
+    ],
+    "codex-pre-tool-runtime": [
+      "hook.execution",
+      "hook.failure",
+      "hook.decision"
+    ],
+    "codex-output-parser": [
+      "hook.decision"
+    ],
+    "codex-session-end": [
+      "hook.execution"
+    ],
+    "codex-pre-tool-use-input": [
+      "hook.payload",
+      "hook.correlation"
+    ],
+    "codex-post-tool-use-input": [
+      "hook.payload",
+      "hook.correlation"
+    ],
+    "codex-permission-request-input": [
+      "hook.payload"
+    ],
+    "codex-pre-tool-use-output": [
+      "hook.decision"
+    ],
+    "codex-post-tool-use-output": [
+      "hook.decision"
+    ],
+    "codex-permission-request-output": [
+      "hook.decision"
+    ],
+    "codex-session-start-output": [
+      "hook.decision"
+    ],
+    "codex-user-prompt-submit-output": [
+      "hook.decision"
+    ],
+    "codex-subagent-stop-output": [
+      "hook.decision"
+    ],
+    "codex-pre-compact-output": [
+      "hook.decision"
+    ],
+    "codex-post-compact-output": [
+      "hook.decision"
+    ],
+    "codex-stop-output": [
+      "hook.decision"
+    ]
+  },
+  "local_sources": {
+    "registry": "cli/defenseclaw/inventory/hook_contracts.json",
+    "registration": "internal/gateway/connector/codex.go",
+    "root": "internal/gateway/connector/codeguard_native.go",
+    "request": "internal/gateway/codex_hook.go",
+    "profile": "internal/gateway/connector/codex_hook_profile.go",
+    "execution": "internal/gateway/connector/hookexec/hookexec.go",
+    "failure": "internal/gateway/connector/hookexec/spec.go"
+  },
+  "selectors": {
+    "config_root_function": "codexHomeDir",
+    "config_path_function": "codexConfigPath",
+    "response_function": "codexOutputForProfile",
+    "registration_function": "buildCodexHooksTable",
+    "trust_hash_function": "codexCommandHookHash",
+    "trust_key_function": "codexHookStateKey"
+  },
+  "bindings": [
+    {
+      "id": "hook.discovery",
+      "artifact_classes": [
+        "config_discovery"
+      ],
+      "scope": "local-user-inline"
+    },
+    {
+      "id": "hook.registration",
+      "artifact_classes": [
+        "config_discovery"
+      ],
+      "scope": "local-user-inline"
+    },
+    {
+      "id": "hook.event_delivery",
+      "artifact_classes": [
+        "hook_events"
+      ],
+      "scope": "owned-events"
+    },
+    {
+      "id": "hook.payload",
+      "artifact_classes": [
+        "input_correlation"
+      ],
+      "scope": "typed-hook-request"
+    },
+    {
+      "id": "hook.decision",
+      "artifact_classes": [
+        "response_semantics"
+      ],
+      "scope": "emitted-event-specific-block"
+    },
+    {
+      "id": "hook.execution",
+      "artifact_classes": [
+        "runtime_behavior"
+      ],
+      "scope": "synchronous-command-inspection"
+    },
+    {
+      "id": "hook.failure",
+      "artifact_classes": [
+        "runtime_behavior"
+      ],
+      "scope": "strict-unreachable-exit"
+    },
+    {
+      "id": "hook.correlation",
+      "artifact_classes": [
+        "input_correlation"
+      ],
+      "scope": "paired-tool-identity"
+    }
+  ]
+}

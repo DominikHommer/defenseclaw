@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Shared behavior requirements. Provider bindings supply values and applicability; these definitions contain no vendor event names, paths or response formats.",
+  "invariants": [
+    {"id":"hook.discovery","name":"Registration remains discoverable","applies_to":["command-hook"],"severity":"critical","behavior":"The host still reads the registration location written by the connector in its declared scope.","failure":"The hook is never invoked, so connector-side fail-closed behavior cannot protect the action."},
+    {"id":"hook.registration","name":"Registration shape remains accepted","applies_to":["command-hook"],"severity":"critical","behavior":"The host accepts the connector's configuration keys and handler type.","failure":"An installed registration is rejected or ignored."},
+    {"id":"hook.event_delivery","name":"Required events remain available","applies_to":["command-hook"],"severity":"high","behavior":"The host still delivers the events used for inspection or lifecycle handling.","failure":"An existing inspection or lifecycle boundary disappears."},
+    {"id":"hook.payload","name":"Incoming data remains decodable","applies_to":["command-hook"],"severity":"high","behavior":"Declared payload fields have types the local decoder accepts.","failure":"A payload cannot be decoded or a consumed field is no longer available."},
+    {"id":"hook.decision","name":"Blocking responses remain effective","applies_to":["command-hook"],"severity":"critical","behavior":"The host still honors the connector's actual deny response on its enforcement event.","failure":"A connector deny no longer prevents the protected action."},
+    {"id":"hook.execution","name":"Inspection completes before execution","applies_to":["command-hook"],"severity":"critical","behavior":"An enforcement hook remains a pre-action barrier with a compatible explicit time budget.","failure":"The host executes before the verdict or cancels the configured inspection budget."},
+    {"id":"hook.failure","name":"Failure behavior remains enforceable","applies_to":["command-hook"],"severity":"critical","behavior":"The host still honors the connector's declared blocking exit status where the connector relies on it.","failure":"The connector's failure response is treated as permission to continue."},
+    {"id":"hook.correlation","name":"Lifecycle identities remain usable","applies_to":["command-hook"],"severity":"high","behavior":"Fields used to pair actions and outcomes remain available with compatible types.","failure":"Action/outcome pairing loses its identity or cannot decode it."}
+  ]
+}
