@@ -146,3 +146,32 @@ func TestStandaloneSandboxPackDirKeepsAPackStagedAtTheOldDefault(t *testing.T) {
 		t.Fatalf("a per-user install must keep its pack_dir: got %q", cfg.OpenShell.PackDir)
 	}
 }
+
+func TestOfflineSandboxPackDefaultIgnoresSignerFolder(t *testing.T) {
+	dataDir, policyDir := t.TempDir(), t.TempDir()
+	legacy := filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+	if err := os.MkdirAll(filepath.Join(legacy, "old-pack"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{DataDir: dataDir, PolicyDir: policyDir, offlineInspection: true}
+	cfg.OpenShell.PackDir = legacy
+	standaloneOpenShellPackDirDefault(cfg, dataDir, runtime.GOOS)
+	want := filepath.Join(policyDir, DefaultOpenShellPackDirName)
+	if cfg.OpenShell.PackDir != want || cfg.OpenShellPackDirAdvisory() != "" {
+		t.Fatalf("offline default = %q (advisory %q), want %q", cfg.OpenShell.PackDir, cfg.OpenShellPackDirAdvisory(), want)
+	}
+
+	live := &Config{DataDir: dataDir, PolicyDir: policyDir}
+	live.OpenShell.PackDir = legacy
+	standaloneOpenShellPackDirDefault(live, dataDir, runtime.GOOS)
+	if live.OpenShell.PackDir != legacy || live.OpenShellPackDirForDigest() != want {
+		t.Fatalf("live pack path %q, digest path %q; want legacy runtime and %q digest", live.OpenShell.PackDir, live.OpenShellPackDirForDigest(), want)
+	}
+	copy, err := live.DeepCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copy.OpenShellPackDirForDigest() != want {
+		t.Fatalf("copy lost legacy digest path: %q", copy.OpenShellPackDirForDigest())
+	}
+}

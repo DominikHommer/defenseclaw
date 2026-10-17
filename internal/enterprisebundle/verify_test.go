@@ -406,9 +406,6 @@ ai_discovery:
 		{name: "data_dir explicit", prefix: "data_dir: /var/lib/defenseclaw\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if runtime.GOOS == "windows" && tc.defaultDataDir && tc.defaultPolicyDir {
-				t.Skip("rel-1-0-2:GAP-0635: on a Windows host the defaulted openshell.pack_dir of a Linux target gets Windows separators (the default is not target-aware); deferred to 1.0.3")
-			}
 			source := tc.prefix + base
 			if !tc.defaultPolicyDir {
 				_, file, _, _ := runtime.Caller(0)

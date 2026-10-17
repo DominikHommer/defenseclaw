@@ -901,7 +901,7 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 		if !cfg.openShellPackDirDeclared {
-			standaloneOpenShellPackDirDefault(cfg, cfg.DataDir)
+			standaloneOpenShellPackDirDefault(cfg, cfg.DataDir, goos)
 		}
 	}
 	if err := validateEnterpriseConfig(cfg); err != nil {
@@ -1125,24 +1125,39 @@ func standaloneRulePackDefaultWithExists(cfg *Config, dataDir, goos string, exis
 // reading them there while that folder holds entries and <policy_dir>/sandbox
 // is known to be absent, so an upgrade loses no staged pack;
 // OpenShellPackDirAdvisory asks the administrator to move them.
-func standaloneOpenShellPackDirDefault(cfg *Config, dataDir string) {
+func standaloneOpenShellPackDirDefault(cfg *Config, dataDir, goos string) {
 	cfg.legacyOpenShellPackDir = ""
-	implicit := filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
+	implicit := joinPathForPlatform(goos, dataDir, "policies", DefaultOpenShellPackDirName)
 	policyDir := strings.TrimSpace(cfg.PolicyDir)
-	if policyDir == "" || filepath.Clean(strings.TrimSpace(cfg.OpenShell.PackDir)) != implicit {
+	if policyDir == "" || joinPathForPlatform(goos, strings.TrimSpace(cfg.OpenShell.PackDir)) != implicit {
 		return
 	}
-	packDir := filepath.Join(filepath.Clean(policyDir), DefaultOpenShellPackDirName)
+	packDir := joinPathForPlatform(goos, policyDir, DefaultOpenShellPackDirName)
 	if packDir == implicit {
 		return
 	}
-	if entries, err := os.ReadDir(implicit); err == nil && len(entries) > 0 {
-		if _, err := os.Lstat(packDir); errors.Is(err, fs.ErrNotExist) {
-			cfg.legacyOpenShellPackDir = implicit
-			return
+	if !cfg.offlineInspection && goos == runtime.GOOS {
+		if entries, err := os.ReadDir(implicit); err == nil && len(entries) > 0 {
+			if _, err := os.Lstat(packDir); errors.Is(err, fs.ErrNotExist) {
+				cfg.legacyOpenShellPackDir = implicit
+				return
+			}
 		}
 	}
 	cfg.OpenShell.PackDir = packDir
+}
+
+// OpenShellPackDirForDigest uses the declared default when a live upgraded
+// device still reads its implicit legacy folder. Runtime keeps that folder
+// until an administrator moves its packs.
+func (c *Config) OpenShellPackDirForDigest() string {
+	if c == nil {
+		return ""
+	}
+	if c.legacyOpenShellPackDir != "" {
+		return joinPathForPlatform(runtime.GOOS, c.PolicyDir, DefaultOpenShellPackDirName)
+	}
+	return c.OpenShell.PackDir
 }
 
 // OpenShellPackDirAdvisory is the status and verify warning of a managed

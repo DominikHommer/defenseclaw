@@ -734,6 +734,8 @@ func (c *Config) DeepCopy() (*Config, error) {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
 	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
+	out.legacyOpenShellPackDir = c.legacyOpenShellPackDir
+	out.offlineInspection = c.offlineInspection
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

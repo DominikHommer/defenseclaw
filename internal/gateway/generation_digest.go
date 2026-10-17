@@ -120,6 +120,11 @@ var configDigestRuntimeKeys = map[string]struct{}{
 // dropped, paths under data_dir rewritten to ${data_dir}. Map keys marshal
 // sorted, so the JSON is canonical.
 func configDigest(cfg *config.Config, scope digestScope) (string, error) {
+	if canonical := cfg.OpenShellPackDirForDigest(); canonical != cfg.OpenShell.PackDir {
+		copy := *cfg
+		copy.OpenShell.PackDir = canonical
+		cfg = &copy
+	}
 	raw, err := yaml.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
