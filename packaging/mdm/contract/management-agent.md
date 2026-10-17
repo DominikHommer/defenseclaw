@@ -142,6 +142,11 @@ A refusal is final even when the same bytes are resubmitted:
 `digest_mismatch`, `capability_loss` and the rest repeat until the input
 changes.
 
+One 1603 is not final: Windows `secret set` / `remove` with `errors[0].code`
+`restart_failed` changed the stored credential but did not restart the
+gateway, which still runs with the old one. Resubmit the same call (it writes
+and restarts again) even though `sha256_prefix` now matches (section 2.5).
+
 ### 2.3 When stdout carries no JSON
 
 These fail before a result document exists: stdout is empty, one line goes to
@@ -183,8 +188,9 @@ on every outcome (section 4.7).
   Linux or macOS `secret set` still waiting for the lock sees its parent gone
   and refuses without storing (`change_failed`), and the agent re-sends the
   credential after its restart (section 5.2). A Windows `secret set` waiting
-  for its locks stores the value after the agent stopped; the agent compares
-  `sha256_prefix` after its restart (2.5). A killed child leaves an interrupted
+  for its locks stores the value after the agent stopped, and the agent does
+  not see whether its restart worked: re-send it after the agent's restart
+  (2.5). A killed child leaves an interrupted
   transaction; managed hooks fail closed until the next mutating run
   recovers it.
 - One mutating call at a time per device is enough; the device serializes
@@ -206,7 +212,11 @@ identical-value no-op. Compare first with `enterprise secret status --json`
 (no lock, read-only): `sha256_prefix` is the first 12 hex characters of the
 SHA-256 of the stored value. Hash the value the way the device stores it: on
 Windows with surrounding whitespace trimmed, on Linux and macOS without the
-one trailing newline. Equal prefix: skip the call.
+one trailing newline. Equal prefix: skip the call, unless the agent's last
+call for that name did not end with exit 0. After a Windows `restart_failed`
+(2.2), or an unknown outcome (a killed child, a `secret set` still waiting
+when the agent stopped, 2.4), the value can be stored while the gateway runs
+with the old one: resubmit even when the prefix matches.
 
 ### 2.6 `--reason`
 
@@ -505,9 +515,10 @@ Exit 0.
   ensure runs anyway (usually a no-op). On Windows every set writes and
   restarts the running gateway (managed hooks fail closed while it restarts);
   there is no identical-value no-op, so send a credential only when `status`
-  shows a different `sha256_prefix` (section 2.5). A Windows set that stored
-  the value and then failed to restart is `restart_failed`, exit 1603:
-  resubmit it, which writes and restarts again.
+  shows a different `sha256_prefix` (section 2.5). A Windows set or remove
+  that changed the store and then failed to restart is `restart_failed`,
+  exit 1603: resubmit it, which writes and restarts again, even though
+  `sha256_prefix` already shows the new value (2.2).
 - stdout: `secret-result.schema.json`. Linux and macOS print lifecycle result
   v2 (`action: "ensure"`). Windows prints `{schema_version, ok, action, name,
   gateway_restarted}` on success and `{schema_version, ok: false, action,
@@ -714,7 +725,8 @@ Later bundles go through 5.2.
 ### 5.2 Deliver a bundle
 
 1. Store every credential the bundle's `secret_refs` names (4.7), only when
-   `sha256_prefix` differs (2.5).
+   `sha256_prefix` differs or the last call for that name did not end with
+   exit 0 (2.5).
 2. If the anchors must change and the agent owns them (4.8), install them
    first.
 3. Run 4.2 verify. `already_applied`: done. `refused`: report
