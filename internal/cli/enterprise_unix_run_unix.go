@@ -344,7 +344,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitFailure)
 		}
-		if opts.json && !secureClientHost() {
+		if opts.json {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
 		}
 		if len(states) == 0 {
@@ -366,7 +366,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
-		if opts.json {
+		if opts.json && !secureClientHost() {
 			return enterpriseSecretRefusal(cmd, action, "invalid_arguments", "pass exactly one of --from-stdin or --from-file", enterprisestatus.UnixExitInvalidArgs)
 		}
 		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))

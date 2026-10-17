@@ -404,6 +404,8 @@ func TestEnterpriseSecretJSONRefusals(t *testing.T) {
 		name, action, input, code string
 		opts                      enterpriseSecretOptions
 	}{
+		{"missing source", "set", "", "invalid_arguments", enterpriseSecretOptions{name: "test-key", json: true}},
+		{"two sources", "set", "", "invalid_arguments", enterpriseSecretOptions{name: "test-key", fromStdin: true, fromFile: untrusted, json: true}},
 		{"unsafe file", "set", "", "secret_source_unreadable", enterpriseSecretOptions{name: "test-key", fromFile: untrusted, json: true}},
 		{"empty value", "set", "", "secret_value_invalid", enterpriseSecretOptions{name: "test-key", fromStdin: true, json: true}},
 		{"oversize value", "set", strings.Repeat("x", 1<<20), "secret_value_invalid", enterpriseSecretOptions{name: "test-key", fromStdin: true, json: true}},
@@ -427,6 +429,34 @@ func TestEnterpriseSecretJSONRefusals(t *testing.T) {
 				t.Fatalf("refusal = %s", out.String())
 			}
 		})
+	}
+}
+
+func TestEnterpriseSecretJSONRefusalKeepsSecureClientUsage(t *testing.T) {
+	previousHost := secureClientHost
+	secureClientHost = func() bool { return true }
+	t.Cleanup(func() { secureClientHost = previousHost })
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	previousEnv := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previousEnv })
+	for _, opts := range []enterpriseSecretOptions{
+		{name: "test-key", json: true},
+		{name: "BAD_NAME", fromStdin: true, json: true},
+	} {
+		cmd := newEnterpriseSecretCommand("set", "")
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		err := runEnterpriseSecret(cmd, "set", &opts)
+		if err == nil || !strings.Contains(err.Error(), "\nUsage: ") || out.Len() != 0 {
+			t.Fatalf("Secure Client refusal = %v, stdout %q; want the prior usage error", err, out.String())
+		}
 	}
 }
 
