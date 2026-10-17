@@ -157,7 +157,7 @@ def _build_fixture(
     launchd = repo / "packaging" / "launchd-standalone" / "agents"
     launchd.mkdir(parents=True)
     for label in agents:
-        (launchd / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+        shutil.copyfile(LAUNCHD_AGENTS / f"{label}.plist", launchd / f"{label}.plist")
     payload = tmp_path / "payload"
     payload.mkdir()
     for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp"):
