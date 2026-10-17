@@ -441,7 +441,7 @@ guardrail:
 
   hilt:
     enabled: false
-    min_severity: HIGH         # stored uppercase; CLI accepts high|medium|low|critical
+    min_severity: HIGH         # CRITICAL, HIGH, MEDIUM or LOW, any case (empty: HIGH)
 
   # Multi-connector overlay. One gateway can enforce guardrail policy for
   # several hook connectors at once; each key under `connectors` is a

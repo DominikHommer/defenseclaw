@@ -73,6 +73,29 @@ func TestV8SchemaRuleSeverityOverrideWords(t *testing.T) {
 	}
 }
 
+// GAP-0760 (#1099): hilt.min_severity follows the same case rule as block_at
+// and severity_overrides. The Go and Python validators and every gateway
+// reader already took any case; only the schema refused lower case.
+func TestV8SchemaHILTMinSeverityTakesAnyCase(t *testing.T) {
+	hilt := func(value string) []byte {
+		return []byte("config_version: 9\nguardrail:\n  hilt: {enabled: true, min_severity: \"" + value + "\"}\n" +
+			"  connectors:\n    codex:\n      hilt: {enabled: true, min_severity: \"" + value + "\"}\n")
+	}
+	for _, value := range []string{"", "CRITICAL", "high", "Medium", "low"} {
+		if err := ValidateV8SchemaBytes("admin.yaml", hilt(value)); err != nil {
+			t.Errorf("hilt.min_severity %q refused: %v", value, err)
+		}
+	}
+	for _, value := range []string{"INFO", "severe"} {
+		err := ValidateV8SchemaBytes("admin.yaml", hilt(value))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != "pattern" ||
+			schemaErr.Expected != "one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)" {
+			t.Errorf("hilt.min_severity %q = %v (%+v)", value, err, schemaErr)
+		}
+	}
+}
+
 func TestV8SchemaPatternWords(t *testing.T) {
 	for pattern, want := range map[string]string{
 		"^([Ll][Oo][Ww]|[Hh][Ii][Gg][Hh])$": "one of LOW, HIGH in any case",

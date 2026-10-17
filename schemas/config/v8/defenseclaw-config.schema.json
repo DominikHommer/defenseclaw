@@ -1441,13 +1441,8 @@
         },
         "min_severity": {
           "type": "string",
-          "enum": [
-            "",
-            "LOW",
-            "MEDIUM",
-            "HIGH",
-            "CRITICAL"
-          ]
+          "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+          "description": "Lowest finding severity that asks for approval: CRITICAL, HIGH, MEDIUM or LOW, in any case, as block_at takes them. Empty inherits (HIGH when nothing sets it)."
         }
       }
     },
