@@ -82,7 +82,8 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             "Each warning applies to one account",
             "a running enabled agent whose account SID cannot be resolved",
             "the warning names the account when known and otherwise says the owner is unknown",
-            'reaches its entry limit or deadline is reported as "not fully scanned"',
+            'reaches its entry limit or deadline, or whose earlier listing has not returned, is reported as "not fully scanned"',
+            "a folder whose storage does not answer",
         ):
             self.assertIn(phrase, reports)
         self.assertIn('If a per-user WinGet Packages listing reaches its entry limit or deadline, the account is reported as "not fully scanned" and is scanned again on the next enumeration', enrollment)
@@ -98,7 +99,8 @@ class R102DocsFinal4DocsTest(unittest.TestCase):
             "This usually names a user running an agent CLI",
             "For a known restart time, the warning clears once the sessions are restarted",
             "when those times can be read",
-            'an unreadable guardian restore record reports "restart status unknown" and sets `security_complete` to `false`, even when no session was listed',
+            'On Linux, macOS and Windows a guardian restore record that cannot be read, or whose content is invalid, reports "restart status unknown" and sets `security_complete` to `false`, even when no session was listed',
+            "it dates every enrolled target at that pass",
             "with neither name nor SID, its restart status is unknown",
             "if the restore record is unreadable, resolve that read failure and recheck",
         ):
