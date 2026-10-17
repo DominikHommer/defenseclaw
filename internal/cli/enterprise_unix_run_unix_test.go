@@ -398,7 +398,7 @@ func TestEnterpriseSecretJSONRefusals(t *testing.T) {
 	}
 	cases := []struct {
 		name, action, input, code string
-		opts enterpriseSecretOptions
+		opts                      enterpriseSecretOptions
 	}{
 		{"unsafe file", "set", "", "secret_source_unreadable", enterpriseSecretOptions{name: "test-key", fromFile: untrusted, json: true}},
 		{"empty value", "set", "", "secret_value_invalid", enterpriseSecretOptions{name: "test-key", fromStdin: true, json: true}},
