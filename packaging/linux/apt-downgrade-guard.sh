@@ -4,8 +4,8 @@
 #
 # defenseclaw-enterprise deb: apt Pre-Install-Pkgs hook that refuses to
 # downgrade the package before dpkg runs, so the running deployment is left
-# alone. The older release cannot read the config_version 9 file this release
-# writes, so its services would fail to start. A package script cannot do
+# alone. The older release may not read the current config, so its services
+# could fail to start. A package script cannot do
 # this: dpkg runs the installed package's prerm with the incoming version,
 # but when it fails dpkg falls back to the incoming package's own prerm and
 # unpacks the older files anyway. rpm has no such hook, and a plain
@@ -19,7 +19,6 @@
 # postinstall applies the package with --allow-downgrade and deletes it.
 
 set -u
-gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
 
 change=$(awk 'body && $1 == "defenseclaw-enterprise" && $3 == ">" && $4 != "-" { print $2, $4; exit } $0 == "" { body = 1 }')
@@ -39,7 +38,7 @@ if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     # postinstall applies the package with --allow-downgrade and deletes it.
     exit 0
 fi
-echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming, because the older release cannot read this release's config_version 9 config. Nothing was changed." >&2
+echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
 echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
-echo "  then install the older package. A release that reads config_version 8 must then be finished with: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config /etc/defenseclaw/config.yaml.v8.bak" >&2
+echo "  Then install the older package; its postinstall applies it. If it refuses the config, pass a compatible config file to enterprise linux ensure --from-package --allow-downgrade --config <file>." >&2
 exit 1

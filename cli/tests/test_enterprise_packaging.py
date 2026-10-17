@@ -1163,6 +1163,9 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     if exit_code:
         assert "refusing to downgrade to 1.0.45~SNAPSHOT-aaa" in result.stderr
         assert f"sudo touch {allow}" in result.stderr
+        assert "postinstall applies it" in result.stderr
+        assert "--config <file>" in result.stderr
+        assert "config.yaml.v8.bak" not in result.stderr
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
