@@ -77,14 +77,16 @@ The four services:
 The gateway needs no "Log on as a service" grant. Existing virtual-account
 installs move to LocalSystem on upgrade or repair; the service SID remains
 the gateway's write boundary. The gateway refuses reads and scans inside
-user profiles. Its install watcher skips profile roots for skills, plugins
-and MCP servers. `defenseclaw-gateway status --json` reports a degraded
-watcher with `health.watcher.details.profile_roots_skipped: true` when it skips
-them. The enterprise `status` and `verify` results do not report that field
+user profiles. Its install watcher skips profile roots for skills and
+plugins. `defenseclaw-gateway status --json` reports a degraded watcher with
+`health.watcher.details.profile_roots_skipped: true` when it skips them. The
+enterprise `status` and `verify` results do not report that field
 separately. For an administrator scan, copy the asset to a readable folder
 outside profiles and use the [scan commands](#scan-skills-mcp-servers-and-plugins).
-Keep shared skills outside profiles. A brokered scan as the enrolled user
-is planned for a later release.
+Keep shared skills outside profiles; a scan of profile skills and plugins as
+the enrolled user is planned for a later release. MCP servers in profiles are
+scanned: the hook enumerator starts each one as its user for the scan (see
+[MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 For skills and plugins in profiles, set
 `asset_policy.skill.runtime_detection.enabled: true` and
 `asset_policy.plugin.runtime_detection.enabled: true` so hooks apply default,
@@ -913,20 +915,21 @@ of the admin config:
   is admitted by the rescan that the config change starts: the
   `install-allowed` row follows, the block is released and `status` stops
   warning `asset_not_scanned` for it.
-- A stdio server started with `npx` or `uvx` is scanned only when the
-  launcher is installed for all users in a folder that only administrators
-  can change, such as Node.js in `C:\Program Files\nodejs` or uv under
-  `C:\Program Files`. A launcher in a user profile (uv installs `uvx.exe` in
-  `%USERPROFILE%\.local\bin` by default) fails the scan, and the server is
-  blocked (`MCPStdioLaunchError ... untrusted Windows path`). There is no
-  per-user trusted-paths list on a managed computer; install the launcher
-  under Program Files instead.
+- A stdio server the gateway starts itself (a server in the admin config) is
+  scanned only when its `npx` or `uvx` launcher is installed for all users in
+  a folder that only administrators can change, such as Node.js in
+  `C:\Program Files\nodejs` or uv under `C:\Program Files`. A launcher in a
+  user profile fails that scan, and the server is blocked
+  (`MCPStdioLaunchError ... untrusted Windows path`). There is no per-user
+  trusted-paths list on a managed computer. An enrolled user's own servers
+  start as that user instead, with the launcher on the user's `PATH` (see
+  [MCP servers in user profiles](#mcp-servers-in-user-profiles)).
 - Claude Code keeps user-scope and local-scope MCP servers in `.claude.json`
   in the profile folder, which the gateway service cannot read. The hook
   enumerator reads that file, and the `.mcp.json` of each project inside the
   profile, every 30 seconds and publishes their inventory to the gateway.
-  The LocalSystem watcher still skips their profile paths, so publication
-  does not start an install scan.
+  A new or changed server gets an install scan, run as the user (see
+  [MCP servers in user profiles](#mcp-servers-in-user-profiles)).
   The enumerator opens each project folder and its `.mcp.json` under the
   enrolled user's own token, so it reads only what that user can read, and it
   never follows a project key that points to a network, mapped or substituted
@@ -944,8 +947,8 @@ of the admin config:
 - Kiro keeps user MCP servers in `.kiro\settings\mcp.json`. For a user
   enrolled for Kiro, the hook guardian protects the `.kiro` folder, so the
   gateway service cannot read that file either. The hook enumerator reads and
-  publishes it the same way, but the LocalSystem watcher skips its profile
-  path instead of scanning the server. When the enumerator cannot read or
+  publishes it the same way, and its servers are scanned as the user, as
+  Claude Code servers are. When the enumerator cannot read or
   parse the file, DefenseClaw refuses that user's Kiro MCP tool calls, and
   status and `verify` warn with `kiro_mcp_unreadable`.
 - A watched folder outside profiles created after the gateway starts is
@@ -982,6 +985,41 @@ of the admin config:
   watched roots outside profiles carry no per-user attribution. The `scan`
   row includes `judge=<model>` when the LLM judge ran. A `quarantine` row
   has no `user=<account>` field from a watcher owner there.
+
+### MCP servers in user profiles
+
+The Claude Code and Kiro MCP servers of an enrolled user (user scope, local
+scope and the `.mcp.json` of a project in the profile) get an install scan
+like any other server, and admission decides on it as on any other server.
+The scanner runs in the gateway service as always, so the user
+cannot change its verdict. Only the server's own process runs as the user:
+
+- The hook enumerator starts it with the user's signed-in session token,
+  through the Windows Secondary Logon service (`seclogon`). The gateway never
+  starts a user's server with its own rights and never reads the profile.
+- The enumerator starts only the definition it published for that user, and
+  only when it is the one the gateway is scanning. A server that changed in
+  between is scanned again at the next poll.
+- The same launcher rules apply as everywhere: only `npx` or `uvx` with a
+  package argument, and no code-running flag. The launcher is the one on the
+  user's `PATH` (a per-user Node.js or `uvx.exe` in
+  `%USERPROFILE%\.local\bin` works), and the server's `env` entries apply on
+  top of the user's environment.
+- The server starts in its `cwd`, else its project, else the profile folder.
+  The enumerator checks that folder while it acts as the user: it must be on
+  a local fixed drive, inside the project or the user's own profile, in no
+  other user's profile, with no link or junction on the way. Otherwise the
+  server is not started and the scan fails with the reason.
+- The server runs hidden, in a job that ends every process it started when
+  the scan ends, after five minutes at most.
+
+Any failure blocks the server as not scanned, with the reason in the
+`install-scan-error` audit row. A user who is not signed in has no session
+token: their servers stay blocked until they sign in, and the gateway scans
+them again within about 30 seconds. If the Secondary Logon service is
+disabled, the reason says so; set it back to Manual. MCP servers of other
+connectors in a profile (Codex `config.toml`, for example) are not published
+by the enumerator and get no install scan.
 
 ### Release a blocked or quarantined skill
 

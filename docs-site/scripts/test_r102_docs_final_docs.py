@@ -21,7 +21,11 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("set `asset_policy.skill.runtime_detection.enabled: true` and "
                       "`asset_policy.plugin.runtime_detection.enabled: true`", text)
         self.assertIn("Set `asset_policy.enabled: true` as well", text)
-        self.assertIn("A brokered scan as the enrolled user is planned for a later release", text)
+        # #1164: profile MCP servers are scanned as their user; profile skills
+        # and plugins keep the documented limit.
+        self.assertIn("a scan of profile skills and plugins as the enrolled user is planned for a later release", text)
+        self.assertIn("MCP servers in profiles are scanned: the hook enumerator starts each one as its user", text)
+        self.assertNotIn("Its install watcher skips profile roots for skills, plugins and MCP servers", text)
         self.assertNotIn("gateway service watches the skill and plugin folders of every user", text)
 
     def test_gap_0012_admission_profile_roots(self):
@@ -78,9 +82,19 @@ class R102DocsFinalDocsTest(unittest.TestCase):
         self.assertIn("scan a copy outside profiles", text)
 
     def test_gap_0012_mcp_watcher_profile_roots(self):
+        # #1164: enrolled users' profile MCP servers get the install scan,
+        # with the server started as its user.
         text = page("scanning/mcp-scanner.mdx")
-        self.assertIn("those servers receive no install-watcher scan", text)
-        self.assertIn("watcher.details.profile_roots_skipped: true", text)
+        self.assertNotIn("those servers receive no install-watcher scan", text)
+        self.assertIn("receive the install-watcher scan: the scanner runs in the gateway service and the hook "
+                      "enumerator starts each server as its user", text)
+        windows = page("enterprise/windows.mdx")
+        for phrase in ("### MCP servers in user profiles", "Secondary Logon service (`seclogon`)",
+                       "only `npx` or `uvx` with a package argument",
+                       "in no other user's profile, with no link or junction on the way",
+                       "their servers stay blocked until they sign in"):
+            self.assertIn(" ".join(phrase.split()), windows)
+        self.assertNotIn("The LocalSystem watcher still skips their profile paths", windows)
 
     def test_gap_0461_kiro_prompt_scope(self):
         text = page("connectors/capability-matrix.mdx")

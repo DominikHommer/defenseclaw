@@ -266,11 +266,13 @@ It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exac
 MCP servers are admitted through the CLI, admitted when the agent's own
 commands add them, and rescanned on a schedule:
 
-On managed Windows, the LocalSystem gateway skips MCP server roots inside
-enrolled users' profiles, so those servers receive no install-watcher scan.
-Use the [administrator scan procedure](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
-for a one-shot review outside profiles; gateway health reports
-`watcher.details.profile_roots_skipped: true` when profile roots are skipped.
+On managed Windows, the Claude Code and Kiro MCP servers of enrolled users,
+including project servers inside their profiles, receive the install-watcher
+scan: the scanner runs in the gateway service and the hook enumerator starts
+each server as its user, from the definition it published, in a folder it
+checked as that user. A user who is not signed in has their servers blocked
+until they sign in. See
+[MCP servers in user profiles](/docs/enterprise/windows#mcp-servers-in-user-profiles).
 
 <Steps>
   <Step>
@@ -427,7 +429,9 @@ only administrators can change it and its folders. The error names the file it f
 On a managed Windows computer there is no per-user trusted-paths list and `setup` is refused:
 the scanner runs in the gateway service and trusts launchers under Program Files only (for example
 Node.js in `C:\Program Files\nodejs`), so an administrator installs Node.js or uv there for all users.
-A `uvx.exe` in a user profile is never trusted there, because the user can replace it.
+A `uvx.exe` in a user profile is never trusted there for a server the gateway starts itself, because
+the user can replace it. An enrolled user's own server starts as that user with the launcher on the
+user's `PATH`, so a per-user launcher works for it.
 When the server exits before it answers, its last stderr lines are printed.
 
 ## How the settings reach the scanner

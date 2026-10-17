@@ -309,16 +309,49 @@ could not read inside other users' profiles.
 Scanner children inherit the write-restricted gateway LocalSystem token with
 only `SeChangeNotifyPrivilege`. The gateway has no
 `SeAssignPrimaryTokenPrivilege` or `SeIncreaseQuotaPrivilege` to start a
-child as another user. For paths outside profiles, LocalSystem read access
+child as another user; the hook enumerator starts an enrolled user's MCP
+server as that user instead (next section). For paths outside profiles, LocalSystem read access
 now applies: a caller-supplied path readable only by administrators can be
 read by the gateway. This extends W-05's early-phase limitation.
 
-### Open decision: scanner child identity
+### MCP servers of enrolled users (issue 1164)
 
-May scanner and MCP-scan children keep that LocalSystem token, or must a
-broker scan as the enrolled user? The issue 1164 follow-up needs a brokered
-user-session scan for projects inside profiles, with exact user and profile
-binding and path revalidation before launching a child.
+Scanner children keep the gateway's write-restricted LocalSystem token, so a
+user cannot change a verdict. An enrolled user's local MCP server never runs
+with that token. For a Claude Code or Kiro server the hook enumerator
+published, the scanner runtime starts the gateway's relay
+(`enterprise windows mcp-relay`) in place of the server. The relay sends the
+enumerator a request on `\\.\pipe\DefenseClaw-<gateway service>-mcp-as-user`:
+account SID, connector, server name, project and the SHA-256 of the
+definition. It carries no command.
+
+- Pipe: created by the enumerator with `FILE_FLAG_FIRST_PIPE_INSTANCE`, owner
+  SYSTEM, DACL SYSTEM full and the gateway service SID read/write, remote
+  clients rejected. Each client is impersonated and must carry the gateway
+  service SID; the relay requires the pipe server process to run as
+  LocalSystem, so a pipe a user creates under that name is never used.
+- Start: the enumerator reads its own published record (trusted-file
+  check), finds the named server, requires the same digest, applies the
+  scanner's launcher rules (bare `npx` or `uvx`, a package argument, no
+  code-running flag, no `cmd.exe` metacharacter on the npx hop), and takes
+  the user's signed-in session token (no S4U). It checks the token SID and
+  profile against the manifest, then, while impersonating the user, checks
+  the folder (fixed local volume, inside the project or the user's own
+  profile, no other profile, no reparse point, final path equal) and finds
+  the launcher on the user's `PATH`. It starts the server with
+  `CreateProcessWithTokenW` (Secondary Logon; only `SeImpersonatePrivilege`,
+  which the enumerator holds), suspended, hidden on the user's session
+  desktop, in a kill-on-close job with an active-process limit, and relays
+  stdio in bounded frames. A session ends after five minutes at most, or five
+  seconds after the relay goes away.
+- Every failure (not enrolled, record unreadable, definition changed, user
+  signed out, folder refused, launcher missing, Secondary Logon disabled) is
+  a scan error, and the watcher blocks the server.
+
+Residual: the server starts as the user before its verdict, as it does on a
+per-user install and as the user's own agent would start it. The launcher
+rules are the pre-verdict gate. A malicious server can present clean tools
+to the scan; runtime hook rules still apply to its tool calls.
 
 ## Primary data flows
 

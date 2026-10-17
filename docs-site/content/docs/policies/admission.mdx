@@ -108,9 +108,13 @@ periodic rescan (`watch.rescan_enabled`, on by default).
 Until then a managed computer's `status` and `verify` warn with
 `asset_rejected_not_enforced`.
 
-On managed Windows, the LocalSystem install watcher skips skill, plugin and
-MCP server roots inside enrolled users' profiles, so assets there do not
-receive its install-admission scan. Gateway health reports
+On managed Windows, the LocalSystem install watcher skips skill and plugin
+roots inside enrolled users' profiles, so assets there do not receive its
+install-admission scan. Enrolled users' Claude Code and Kiro MCP servers,
+including those of projects in profiles, are admitted: the hook enumerator
+starts each server as its user for the scan
+([MCP servers in user profiles](/docs/enterprise/windows#mcp-servers-in-user-profiles)).
+Gateway health reports
 `watcher.details.profile_roots_skipped: true` when it skips those roots.
 Administrators can [scan a copy outside profiles](/docs/enterprise/windows#scan-skills-mcp-servers-and-plugins)
 and keep shared skills outside profiles. For policy on profile assets, set
