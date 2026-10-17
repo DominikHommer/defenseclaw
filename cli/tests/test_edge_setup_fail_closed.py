@@ -218,6 +218,20 @@ def test_explicit_fleet_assets_are_required_for_wheel_style_setup(tmp_path) -> N
     assert cmd_setup_edge_connector._install_fleet_compiler(str(tmp_path), assets).is_file()
 
 
+def test_wheel_setup_without_fleet_assets_leaves_fleet_off(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda: None)
+    result = CliRunner().invoke(
+        cmd_setup_edge_connector.edge_connector,
+        ["--non-interactive", "--token", "test-token"],
+        obj=_app(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "pass --source-dir" in result.output
+    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path / "config.yaml").exists()
+
+
 def test_edge_setup_service_write_failure_is_nonzero(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     monkeypatch.setattr(cmd_setup_edge_connector.sys, "platform", "linux")
