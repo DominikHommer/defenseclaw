@@ -410,7 +410,9 @@ Exit 0.
   the repeated delivery's receipt is discarded and no new public receipt is
   written. `noop_reason` is `already_applied` only when ensure also changed
   nothing else; a repeat that also repaired drift (a credential, a file
-  mode, a stopped service) has `noop: false` and no `noop_reason`. The
+  mode, a stopped service) or installed other trust anchors (`--trust-anchors`,
+  Setup `TRUSTANCHORS=`, the shell kit's `--trust-anchor-file`; a `changes`
+  entry names the anchor file) has `noop: false` and no `noop_reason`. The
   success test below does not read `noop_reason`. A lower or equal version
   with other bytes is
   `version_not_newer` (final). A retry after 75 / 1618 is safe.
@@ -770,7 +772,11 @@ fi
 [--bundle B] --json`** (every build). It takes `bundle.lock`, checks the source
 (the file and every folder above it writable only by SYSTEM and
 Administrators, no reparse points), installs the file with the administrator
-ACL, re-checks it, and reports the change. With `--bundle B` the anchors are
+ACL, re-checks it, and reports the change: other bytes than the installed
+file make the run `noop: false` with a `changes` entry `installed trust
+anchors in <path>` or `replaced the trust anchors in <path>`, also when the
+bundle is the confirmed one (no `already_applied`); the same bytes leave the
+run a no-op. With `--bundle B` the anchors are
 staged and committed only when that bundle is confirmed, so a failed bundle
 leaves the previous anchors. Do not combine it with `--config` (refused
 `invalid_arguments`). stdout: `lifecycle-result.schema.json`; the warnings

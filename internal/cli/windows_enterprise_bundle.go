@@ -259,6 +259,11 @@ type windowsBundleRun struct {
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
 	// BUNDLE= replaced, for the result (settleAnchorOnlyEnsure).
 	anchorOnly *anchorOnlyChange
+	// anchorCommit records the anchor file a BUNDLE= TRUSTANCHORS= run
+	// committed (commitAnchors), so a repeat of the confirmed bundle that
+	// installed other anchors is not reported as an already_applied no-op
+	// (GAP-0034).
+	anchorCommit *anchorOnlyChange
 	// gatewayRestarted is set by the config apply path after it actually
 	// restarts the gateway, and is copied into the shared receipt.
 	gatewayRestarted bool
@@ -880,6 +885,9 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	}
 	confirmed := attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
 	settleAnchorOnlyEnsure(result, run.anchorOnly, confirmed)
+	// The bundle of this run verified against the committed anchors, so the
+	// change line needs no clause about the confirmed bundle.
+	settleAnchorOnlyEnsure(result, run.anchorCommit, false)
 }
 
 func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions enterprisestatus.SessionRestartStatus) {
@@ -889,15 +897,19 @@ func recordWindowsBundleSessions(receipt *enterprisebundle.Receipt, sessions ent
 	}
 }
 
-// commitAnchors installs the staged trust anchors of a confirmed bundle; a
-// failed commit puts the previous anchors back and fails the run.
+// commitAnchors installs the staged trust anchors of a confirmed bundle and
+// records what it installed for the result; a failed commit puts the
+// previous anchors back and fails the run.
 func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
-	if _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath); err != nil {
+	installed, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
+	if err != nil {
 		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		if restoreErr := run.restoreAnchors(); restoreErr != nil {
 			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
 		}
+		return
 	}
+	run.anchorCommit = &anchorOnlyChange{path: run.anchorPath, existed: run.anchorExisted, previous: run.anchorPrevious, installed: installed}
 }
 
 func (run *windowsBundleRun) restoreAnchors() error {

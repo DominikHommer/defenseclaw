@@ -1076,6 +1076,57 @@ echo "changed=$DC_ANCHORS_CHANGED verb=$DC_ANCHORS_VERB"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("reason", ["already_applied", "compliant"])
+def test_unix_wrapper_result_reports_the_trust_anchors_it_installed(tmp_path: Path, reason: str) -> None:
+    # GAP-0034 (twin of the Windows finding): a kit run that installed other
+    # trust anchors, then found the confirmed bundle already applied (or,
+    # without a bundle, the deployment compliant), printed the lifecycle's
+    # "noop": true. It changed the device, so it is not a no-op, and changes
+    # names the anchor file. An unchanged anchor file keeps the no-op.
+    text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(text, name) for name in ("dc_json_escape", "dc_annotate_anchors_step"))
+    anchors = tmp_path / "trust" / "bundle-anchors.json"
+    base = {
+        "schema_version": 2, "ok": True, "action": "ensure", "noop": True, "noop_reason": reason,
+        "profile": "standalone", "platform": "linux", "product_version": "1.0.3", "installed_version": "1.0.3",
+        "installed": True, "transaction_pending": False, "services": [],
+        "readiness": {"gateway": True, "guardian": True, "enumerator": True, "sensor_helper": True},
+        "inspection": {"local": "active", "ai_defense": "disabled"}, "machine_policy": {},
+        "enrollment": {"targets": 0, "pending": 0, "failed": 0, "exempt": 0},
+        "coverage_complete": True, "security_complete": True, "errors": [],
+    }
+    validator = _schema_validator()
+
+    def run(changed: str, previous: str, changes: list[str] | None = None) -> dict:
+        document = dict(base)
+        if changes is not None:
+            document["changes"] = changes
+        document["exit_code"] = 0
+        result = tmp_path / "result.json"
+        result.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        script = f"""DC_STAGE="{tmp_path}" DC_RESULT="{result}" DC_ANCHORS="{anchors}"
+DC_ANCHORS_CHANGED={changed} DC_ANCHORS_PREVIOUS="{previous}"
+{functions}
+dc_annotate_anchors_step
+cat "$DC_RESULT"
+"""
+        completed = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        out = json.loads(completed.stdout)
+        assert not sorted(validator.iter_errors(out), key=str), out
+        return out
+
+    rotated = run("1", str(tmp_path / "previous.json"))
+    assert rotated["noop"] is False and "noop_reason" not in rotated, rotated
+    assert rotated["changes"] == [f"replaced the trust anchors in {anchors}"], rotated
+    first = run("1", "", changes=["restarted the gateway"])
+    assert first["noop"] is False and "noop_reason" not in first, first
+    assert first["changes"] == [f"installed trust anchors in {anchors}", "restarted the gateway"], first
+    unchanged = run("0", "")
+    assert unchanged["noop"] is True and unchanged["noop_reason"] == reason and "changes" not in unchanged, unchanged
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize(("version", "untrusted", "missing", "expected"), [
     (_VERSION_CONTRACT, False, False, "verb"),
     (_VERSION_CONTRACT.replace('"management_contract":1', '"management_contract":2'), False, False, "verb"),
@@ -1529,7 +1580,7 @@ dc_trusted_path() {{ :; }}; dc_binaries_damaged() {{ return 1; }}
 dc_stage_source() {{ :; }}; dc_install_package() {{ call package; }}
 dc_run_lifecycle_retry() {{ shift; call "$@"; }}
 dc_install_anchors() {{ call anchors; }}; dc_restore_anchors() {{ call restore; }}
-dc_annotate_package_step() {{ :; }}; dc_emit_result() {{ :; }}
+dc_annotate_package_step() {{ :; }}; dc_annotate_anchors_step() {{ :; }}; dc_emit_result() {{ :; }}
 dc_fail_result() {{ call "fail $2"; exit "$1"; }}
 dc_cleanup() {{ rm -rf "$DC_STAGE"; }}; dc_stop_child() {{ :; }}
 dc_main
