@@ -687,9 +687,9 @@ class Store:
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
                       enforced
-               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -747,7 +747,7 @@ class Store:
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
-               FROM audit_events ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -782,7 +782,7 @@ class Store:
                       AND (' ' || COALESCE(details, '')) LIKE '% action=block%')
                   OR action LIKE '%block%' OR action LIKE '%deny%'
                   OR action LIKE '%quarantine%' OR action LIKE '%reject%')
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             params,
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -796,7 +796,7 @@ class Store:
                       severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
                FROM audit_events
                WHERE {_ACTIONABLE_EVENT_WHERE}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._summary_row_to_event(r) for r in cur.fetchall()]
@@ -821,12 +821,12 @@ class Store:
         """List recent connector-hook rows without the actionable filter."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE action = 'connector-hook'
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -974,6 +974,18 @@ class Store:
             )
             self._audit_schema_version = schema_version
         return self._audit_event_columns_cache, self._audit_tables_cache
+
+    def _audit_event_order(self, alias: str = "", *, newest: bool = True) -> str:
+        """Order audit rows by their exact instant, with stable insert ties."""
+        columns, _ = self._audit_projection_schema()
+        prefix = f"{alias}." if alias else ""
+        instant = (
+            f"{prefix}retention_timestamp_unix_nano"
+            if "retention_timestamp_unix_nano" in columns
+            else f"julianday({prefix}timestamp)"
+        )
+        direction = "DESC" if newest else "ASC"
+        return f"{instant} {direction}, {prefix}rowid {direction}"
 
     @staticmethod
     def _sql_string_values(values: tuple[str, ...]) -> str:
@@ -1244,7 +1256,7 @@ class Store:
                       run_id, structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (max(limit, 1),),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1261,7 +1273,7 @@ class Store:
                       run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1278,7 +1290,7 @@ class Store:
                       run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE {where}
-               ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
+               ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
         return [self._row_to_event(r) for r in cur.fetchall()]
@@ -1576,7 +1588,7 @@ class Store:
                 AND (h.action IN ('connector-hook', 'guardrail-verdict', 'hook_decision', 'action')
                       OR h.action LIKE 'inspect-tool-%')
                WHERE f.id IN ({placeholders}) AND COALESCE(f.request_id, '') <> ''
-               ORDER BY h.timestamp ASC, h.rowid ASC""",
+               ORDER BY {self._audit_event_order("h", newest=False)}""",
             ids,
         )
         out: dict[str, list[str]] = {}
@@ -2243,7 +2255,7 @@ class Store:
             "SELECT id, timestamp, action, target, actor,"
             " details, severity, run_id, structured_json"
             " FROM audit_events WHERE action = 'drift'"
-            " ORDER BY timestamp DESC LIMIT ?",
+            f" ORDER BY {self._audit_event_order()} LIMIT ?",
             (limit,),
         ).fetchall()
         return [self._row_to_event(r) for r in rows]

@@ -384,6 +384,23 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(events[0].structured["connector"], "codex")
         self.assertEqual(events[0].connector, "codex")
 
+    def test_audit_lists_use_exact_timestamp_and_insert_ties(self):
+        self.store.db.execute("ALTER TABLE audit_events ADD COLUMN retention_timestamp_unix_nano INTEGER")
+        for event_id, stamp, instant in (
+            ("earlier", "2026-10-13T12:00:00.12345Z", 123450),
+            ("later", "2026-10-13T12:00:00.123451Z", 123451),
+            ("tie", "2026-10-13T12:00:00.123451Z", 123451),
+        ):
+            self.store.db.execute(
+                "INSERT INTO audit_events (id, timestamp, action, actor, severity, retention_timestamp_unix_nano) "
+                "VALUES (?, ?, 'scan-finding', 'test', 'HIGH', ?)",
+                (event_id, stamp, instant),
+            )
+        self.store.db.commit()
+        want = ["tie", "later", "earlier"]
+        self.assertEqual([e.id for e in self.store.list_events(3)], want)
+        self.assertEqual([e.id for e in self.store.list_event_summaries(3)], want)
+
     def test_connector_hook_stats_aggregate_normalized_connector_names(self):
         self.store.log_event(
             Event(

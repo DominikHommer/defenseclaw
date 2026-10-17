@@ -59,6 +59,38 @@ func TestExportAuditEventsFallbackHonorsLimit(t *testing.T) {
 	}
 }
 
+func TestExportAuditEventsFallbackOrdersExactTime(t *testing.T) {
+	db, err := sql.Open("sqlite", t.TempDir()+"/audit.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE audit_events (
+		id TEXT, timestamp TEXT, retention_timestamp_unix_nano INTEGER,
+		action TEXT, target TEXT, actor TEXT, details TEXT, severity TEXT, run_id TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id, timestamp string
+		instant       int64
+	}{
+		{"earlier", "2026-10-13T12:00:00.12345Z", 123450},
+		{"later", "2026-10-13T12:00:00.123451Z", 123451},
+	} {
+		if _, err := db.Exec(`INSERT INTO audit_events VALUES (?, ?, ?, 'scan-finding', '', 'test', '', 'HIGH', '')`, row.id, row.timestamp, row.instant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := exportAuditEventsFallback(db, &out, version.Provenance{}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Index(out.String(), `"id":"earlier"`) > strings.Index(out.String(), `"id":"later"`) ||
+		!strings.Contains(out.String(), `"id":"earlier"`) || !strings.Contains(out.String(), `"id":"later"`) {
+		t.Fatalf("audit export order = %s", out.String())
+	}
+}
+
 // TestNormalizeAuditAction_PassesThroughKnownActions guards the F3 fix:
 // `defenseclaw audit export` previously kept a hand-maintained copy of the
 // audit action enum that silently fell behind whenever internal/audit added

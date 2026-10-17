@@ -87,3 +87,22 @@ func TestListEventsOrdersByExactTimeNotText(t *testing.T) {
 		t.Fatalf("ListEvents order without the retention column %s, want %s", got, want)
 	}
 }
+
+func TestListAlertsOrdersByExactTime(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	for _, row := range []struct{ id, timestamp string }{
+		{"earlier", "2026-10-13T12:00:00.12345Z"},
+		{"later", "2026-10-13T12:00:00.123451Z"},
+	} {
+		if _, err := store.db.Exec(`INSERT INTO audit_events
+			(id, timestamp, action, actor, severity, bucket, event_name)
+			VALUES (?, ?, 'scan-finding', 'test', 'HIGH', 'security.finding', 'finding.observed')`, row.id, row.timestamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alerts, err := store.ListAlerts(2)
+	if err != nil || len(alerts) != 2 || alerts[0].ID != "later" || alerts[1].ID != "earlier" {
+		t.Fatalf("alerts = %+v, %v", alerts, err)
+	}
+}

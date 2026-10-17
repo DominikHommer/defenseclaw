@@ -3052,10 +3052,17 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 // v8 retention migration (an unmigrated 0.8.x store; kept while 0.8.x
 // upgrades are supported) has no such column and sorts by julianday instead.
 func (s *Store) auditEventsNewestFirst() string {
-	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
-		return "retention_timestamp_unix_nano DESC, rowid DESC"
+	return s.auditEventsNewestFirstForAlias("")
+}
+
+func (s *Store) auditEventsNewestFirstForAlias(alias string) string {
+	if alias != "" {
+		alias += "."
 	}
-	return "julianday(timestamp) DESC, rowid DESC"
+	if ok, err := hasColumnDB(s.db, "audit_events", "retention_timestamp_unix_nano"); err == nil && ok {
+		return alias + "retention_timestamp_unix_nano DESC, " + alias + "rowid DESC"
+	}
+	return "julianday(" + alias + "timestamp) DESC, " + alias + "rowid DESC"
 }
 
 // scanAuditEventRow holds the column-scan logic of ListEvents so the
@@ -3910,7 +3917,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
-		 ORDER BY event.timestamp DESC LIMIT ?`
+		 ORDER BY ` + s.auditEventsNewestFirstForAlias("event") + ` LIMIT ?`
 	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)

@@ -325,11 +325,12 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	if ok, _ := columnExists(db, "audit_events", "event_name"); ok {
 		eventNameCol = "event_name"
 	}
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `
-FROM audit_events` + where + ` ORDER BY ` + window.orderBy()
+FROM audit_events` + where + ` ORDER BY ` + window.orderBy(hasExactTime)
 	// When a connector or time filter is active the cap must apply to
 	// *matching* rows, so we filter in Go and bound the count there.
 	// Without one we push LIMIT into SQL (cheaper, unchanged behavior).
@@ -535,11 +536,15 @@ func (w auditExportWindow) keepsNewest() bool { return w.newest && w.limit > 0 }
 
 // orderBy is the SQL order: newest first while collecting the newest rows,
 // oldest first otherwise.
-func (w auditExportWindow) orderBy() string {
-	if w.keepsNewest() {
-		return "timestamp DESC, rowid DESC"
+func (w auditExportWindow) orderBy(hasExactTime bool) string {
+	instant := "julianday(timestamp)"
+	if hasExactTime {
+		instant = "retention_timestamp_unix_nano"
 	}
-	return "timestamp ASC"
+	if w.keepsNewest() {
+		return instant + " DESC, rowid DESC"
+	}
+	return instant + " ASC, rowid ASC"
 }
 
 // sqlPredicate is a coarse, index-friendly prefilter on the timestamp
@@ -743,8 +748,9 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 
 func exportAuditEventsFallbackWindow(db *sql.DB, out io.Writer, prov version.Provenance, connFilter string, window auditExportWindow) error {
 	where, args := window.sqlPredicate()
+	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
 	rows, err := db.Query(`SELECT id, timestamp, action, target, actor, details, severity, run_id FROM audit_events`+
-		where+` ORDER BY `+window.orderBy(), args...)
+		where+` ORDER BY `+window.orderBy(hasExactTime), args...)
 	if err != nil {
 		return fmt.Errorf("audit export: %w", err)
 	}
