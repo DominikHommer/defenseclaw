@@ -137,6 +137,9 @@ func TestWindowsMCPAsUserLauncherFSTrustsOnlyProgramFiles(t *testing.T) {
 	}
 	installed := filepath.Join(roots[0], "nodejs", "npx.cmd")
 	if _, err := os.Stat(installed); err != nil {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatalf("the CI runner has no Node.js under Program Files: %v", err)
+		}
 		t.Skipf("no Node.js installed for all users: %v", err)
 	}
 	if err := fs.trusted(installed); err != nil {
@@ -145,7 +148,7 @@ func TestWindowsMCPAsUserLauncherFSTrustsOnlyProgramFiles(t *testing.T) {
 }
 
 // windowsMCPAsUserHelperEnv makes the test binary act as an as-user server.
-const windowsMCPAsUserHelperEnv = "DEFENSECLAW_TEST_MCP_AS_USER_CHILD"
+const windowsMCPAsUserHelperEnv = "MCP_AS_USER_TEST_CHILD"
 
 // TestWindowsMCPAsUserHelperChild is the child process of
 // TestStartWindowsMCPAsUserProcessRunsOnItsOwnDesktop. It reports its
@@ -210,6 +213,11 @@ func TestStartWindowsMCPAsUserProcessRunsOnItsOwnDesktop(t *testing.T) {
 	if err != nil {
 		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) || strings.Contains(err.Error(), "does not hold") ||
 			strings.Contains(err.Error(), "Secondary Logon") {
+			if os.Getenv("GITHUB_ACTIONS") == "true" {
+				// The hosted runner is an elevated administrator with
+				// Secondary Logon: there the start must work.
+				t.Fatalf("start a process with a token on the CI runner: %v", err)
+			}
 			t.Skipf("this runner cannot start a process with a token: %v", err)
 		}
 		t.Fatal(err)
