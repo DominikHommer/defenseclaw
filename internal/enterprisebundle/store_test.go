@@ -606,6 +606,37 @@ func TestSummaryOfTheCurrentBundleNamesItsConfirmedReceipt(t *testing.T) {
 	}
 }
 
+// A repeated delivery of the current bundle reports the current confirmed
+// receipt, also when a newer delivery failed after staging and is the
+// latest receipt Summary reports, and after the confirmed receipt was
+// pruned.
+func TestCurrentSummaryReportsTheConfirmedReceiptPastANewerFailure(t *testing.T) {
+	s := testStore(t)
+	if got, err := s.CurrentSummary(); err != nil || got != nil {
+		t.Fatalf("no current bundle: %+v, %v", got, err)
+	}
+	v1 := applyThrough(t, s, 1, 1, StateConfirmed)
+	v2 := applyThrough(t, s, 2, 2, StateStaged)
+	if err := s.Fail(v2, CodeApplyFailed, "the gateway did not adopt it"); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := s.Summary(); err != nil || latest == nil || latest.ReceiptID != v2.ReceiptID || latest.State != StateFailed {
+		t.Fatalf("summary = %+v, %v; want the failed v2 receipt", latest, err)
+	}
+	got, err := s.CurrentSummary()
+	if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.BundleID != v1.BundleID || got.State != StateConfirmed ||
+		got.CurrentBundleID != "" || got.ConfirmedAt == "" {
+		t.Fatalf("current summary = %+v, %v; want the confirmed v1 receipt %s", got, err, v1.ReceiptID)
+	}
+	if err := os.Remove(s.receiptPath(v1.ReceiptID)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.CurrentSummary()
+	if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.BundleID != v1.BundleID || got.State != StateConfirmed {
+		t.Fatalf("current summary after prune = %+v, %v; want receipt_id %s", got, err, v1.ReceiptID)
+	}
+}
+
 // A process killed while it rewrites bundle-state.json leaves either the old
 // or the new state, never a torn or empty one; settle removes the temp file.
 func TestBundleStateSurvivesAKillDuringTheWrite(t *testing.T) {

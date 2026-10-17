@@ -1035,14 +1035,43 @@ func (s *Store) Summary() (*enterprisestatus.BundleState, error) {
 	if last != nil {
 		return last.Status(st.Current), nil
 	}
-	if c := st.Current; c != nil {
-		// The receipt that promoted the current bundle named its version
-		// directory, so its id survives the receipt being pruned.
-		return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID),
-			BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
-			EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt}, nil
+	if st.Current != nil {
+		return currentBundleState(st.Current), nil
 	}
 	return nil, nil
+}
+
+// CurrentSummary is the result v2 bundle block of the confirmed current
+// bundle, whatever a newer delivery left as the latest receipt: its
+// confirmed receipt, or the state's record of it once that receipt was
+// pruned; nil when no bundle is current. A repeated delivery of the current
+// bundle writes no receipt and reports this block.
+func (s *Store) CurrentSummary() (*enterprisestatus.BundleState, error) {
+	st, err := s.LoadState()
+	if err != nil || st.Current == nil {
+		return nil, err
+	}
+	c := st.Current
+	receipts, err := s.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	id := receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID)
+	for _, r := range receipts {
+		if r.State == StateConfirmed && r.BundleID == c.BundleID && r.Version == c.Version && (id == "" || r.ReceiptID == id) {
+			return r.Status(c), nil
+		}
+	}
+	return currentBundleState(c), nil
+}
+
+// currentBundleState is the bundle block of the current bundle from the
+// store state alone. The receipt that promoted it named its version
+// directory, so its id survives the receipt being pruned.
+func currentBundleState(c *Ref) *enterprisestatus.BundleState {
+	return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID),
+		BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
+		EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt}
 }
 
 // prune keeps the MaxReceipts newest receipts; an unfinished one is never

@@ -216,8 +216,9 @@ package and tamper handling. The agent passes `--reason management` or no
 `--reason`; `path`, `package`, `secret` and `mdm` are reserved for
 DefenseClaw's own units, packages and kits. Windows accepts the flag and
 ignores it, so one argv works on every OS. The only way to tell the agent's
-applies from MDM or administrator applies is the agent's own list of the
-`receipt_id`s its applies returned.
+applies from MDM or administrator applies is the agent's own list of receipt
+ids, kept as section 4.3 says (a repeat of the current bundle returns an id
+the agent did not create).
 
 ## 3. Version probe and fallbacks
 
@@ -357,16 +358,21 @@ Exit 0.
   elevated). Tell them apart by `schema_version`.
 - **Success test**: `exit == 0 && ok && bundle.bundle_id == <submitted id> &&
   bundle.state == "confirmed"`. The submitted id is `bundle.bundle_id` of the
-  4.2 result. Record `bundle.receipt_id` in the agent's own list of receipt
-  ids (section 2.6). For the `already_applied` no-op it is the current
-  confirmed receipt's id, which may be an MDM delivery's id (no new receipt
-  is written). It is absent when the apply refused before the bundle was
-  received. One exception: when a newer delivery failed after staging and the
-  agent re-sends the current bundle, the result is `already_applied` but the
-  `bundle` block reports the newer failed receipt (its `bundle_id`, `state:
-  "failed"`, `current_bundle_id` set). Treat `noop_reason ==
-  "already_applied"` with `bundle.current_bundle_id == <submitted id>` as
-  success too (section 8).
+  4.2 result. A repeated delivery of the current bundle writes no receipt:
+  its `bundle` block is the current confirmed bundle and its confirmed
+  receipt, also when a newer delivery failed after staging, so the same test
+  holds.
+- **The agent's own receipt id** (for its list, section 2.6):
+  `bundle.receipt_id` when `bundle.bundle_id` is the submitted id and the
+  apply was not a repeat of the current bundle (a confirmed or failed
+  delivery); `last_refusal.receipt_id` when the apply was refused after the
+  bundle was received (`last_refusal.bundle_id` is the submitted id, and the
+  `bundle` block stays on the current bundle); none when it was refused before
+  the bundle was received (no `receipt_id`) or was a repeat. A repeat returns
+  the current confirmed receipt's id, which can be an MDM or administrator
+  delivery's: do not add it to the list. A repeat has `noop_reason`
+  `already_applied`, or a `bundle.confirmed_at` earlier than the time the
+  agent started the apply.
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
@@ -609,8 +615,8 @@ enforcing.
   `failed`, as the gateway's own reader does.
 - Deduplicate by `receipt_id`; every delivery has its own id (the first
   delivery of a bundle uses the bundle id, later deliveries `r-<ULID>`).
-  Receipts whose id is not among the ids the agent's applies returned came
-  from MDM or an administrator. On a build without `management_contract`,
+  Receipts whose id is not in the agent's own list (4.3) came from MDM or an
+  administrator. On a build without `management_contract`,
   match on `bundle_id` with `finished_at` after the apply started.
 - Remember the last forwarded id; nothing is acknowledged back.
 
@@ -710,7 +716,7 @@ Later bundles go through 5.2.
    `errors[0].code` and stop (final).
 4. Run 4.3 apply on a worker thread, with `--refuse-capability-loss` (every
    apply after the first bundle). Apply the success test of 4.3 and the retry
-   classes of section 2.2. Record the returned `receipt_id`.
+   classes of section 2.2. Record the agent's own receipt id (4.3).
 5. Forward the receipt (4.9). Report anchor and credential changes yourself
    (section 0).
 
@@ -761,8 +767,5 @@ Per-user installs and Secure Client computers refuse every command.
   authoritative.
 - Trust anchor and credential changes are not audited by DefenseClaw
   (section 0).
-- A repeated delivery of the current bundle after a newer delivery failed is
-  `already_applied`, but its `bundle` block reports the failed receipt, not
-  the current one (4.3 says how to read it).
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.

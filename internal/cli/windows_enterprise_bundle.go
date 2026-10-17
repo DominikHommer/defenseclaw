@@ -852,6 +852,14 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 	if p != nil {
 		receipt = p.Receipt
 	}
+	if p != nil && p.AlreadyApplied && result.Bundle == nil {
+		// A repeated delivery of the current bundle wrote no receipt: its
+		// block is the confirmed current bundle, not a newer delivery that
+		// failed after staging (the store summary).
+		if current, err := run.driver.Store.CurrentSummary(); err == nil && current != nil {
+			result.Bundle = current
+		}
+	}
 	confirmed := attachWindowsBundleSummary(result, run.driver.Store, receipt, run.sessions)
 	settleAnchorOnlyEnsure(result, run.anchorOnly, confirmed)
 }

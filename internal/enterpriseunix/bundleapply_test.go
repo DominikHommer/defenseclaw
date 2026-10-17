@@ -464,6 +464,51 @@ func TestBundleApplyResultNamesTheReceipt(t *testing.T) {
 	}
 }
 
+// failAfterStaging delivers version v and fails it after its receipt reached
+// staging, so it is the latest receipt the store summary reports.
+func (b *bundleHost) failAfterStaging(version uint64, cfg string) {
+	b.t.Helper()
+	b.env.bundleFault = func(phase string) error {
+		if phase == enterprisebundle.StateStaged {
+			return errors.New("injected failure after staging")
+		}
+		return nil
+	}
+	defer func() { b.env.bundleFault = nil }()
+	if r := b.apply(b.dir(version, cfg)); r.OK || r.Bundle == nil || r.Bundle.BundleID != bundleID(version) || r.Bundle.State != enterprisebundle.StateFailed {
+		b.t.Fatalf("delivery of v%d did not fail after staging: ok %v, bundle block = %+v", version, r.OK, r.Bundle)
+	}
+}
+
+// A repeat of the current bundle after a newer delivery failed after
+// staging reports the current confirmed bundle and its receipt, not the
+// failed delivery that is the latest receipt: the receipt_id it returns is
+// the one the device enforces.
+func TestBundleApplyRepeatAfterANewerFailureNamesTheConfirmedReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	requireOK(t, b.apply(path))
+	confirmed := b.receipt(bundleID(1))
+	b.failAfterStaging(2, v2)
+
+	r := b.apply(path)
+	requireOK(t, r)
+	if r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID || r.Bundle.BundleID != bundleID(1) ||
+		r.Bundle.State != enterprisebundle.StateConfirmed || r.Bundle.CurrentBundleID != "" || r.Bundle.ConfirmedAt == "" {
+		t.Fatalf("repeat after a newer failure: bundle block = %+v, want the confirmed receipt %s", r.Bundle, confirmed.ReceiptID)
+	}
+	// The first repeat converged what the failed delivery left; the next
+	// is the already_applied no-op and reports the same block.
+	r = b.apply(path)
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != "already_applied" || r.Bundle == nil || r.Bundle.ReceiptID != confirmed.ReceiptID ||
+		r.Bundle.BundleID != bundleID(1) || r.Bundle.State != enterprisebundle.StateConfirmed {
+		t.Fatalf("no-op repeat: noop %v, reason %q, bundle block = %+v", r.Noop, r.NoopReason, r.Bundle)
+	}
+}
+
 func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
 	b := newBundleHost(t)
 	stagePackage(t, b.testHost, "1.0.0")

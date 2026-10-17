@@ -437,7 +437,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		if r.Noop {
 			r.NoopReason = "already_applied"
 		}
-		l.describeBundle()
+		l.describeCurrentBundle()
 		return code
 	}
 	m := res.Manifest
