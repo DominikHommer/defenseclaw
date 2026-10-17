@@ -335,8 +335,8 @@ func (d *SandboxDaemon) adoptApplied(ctx context.Context, refresh bool) (changed
 
 // adoptLocked is one adoption, under adoptMu: the floor of the sandboxes
 // phases lists as running (adoptRunningFloor), every sandbox's policy
-// re-resolved when the floor changed or with refresh. With listed, every
-// registration change applied before it is in force once it returns.
+// re-resolved when its registration changed or with refresh. With listed,
+// every registration change applied before it is in force once it returns.
 func (d *SandboxDaemon) adoptLocked(phases map[string]string, listed, refresh bool) bool {
 	target := d.regs.changeCount()
 	changed := d.adoptRunningFloor(phases)

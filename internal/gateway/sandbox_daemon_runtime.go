@@ -1348,11 +1348,10 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 	}
 }
 
-// adoptFloor makes the floor of name's registration the one the manager
-// resolves against, once the managed gateway confirmed the registration,
-// and re-resolves every sandbox's policy at once: the other sandboxes'
-// status and list are judged against it too, not only after the
-// configuration check's next tick (GAP-0462).
+// adoptFloor updates the daemon's current floor after a registration is
+// confirmed and re-resolves every sandbox at once. The manager resolves
+// each existing sandbox against its own confirmed registration; the current
+// floor is used for a new run and the daemon's no-run configuration.
 func (d *SandboxDaemon) adoptFloor(name string) {
 	r, ok := d.regs.get(name)
 	if !ok || !r.Confirmed || r.Revoked {
