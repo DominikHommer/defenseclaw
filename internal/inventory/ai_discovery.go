@@ -671,6 +671,9 @@ type ContinuousDiscoveryService struct {
 	// as the home's owner, but its report lands in the managed inventory,
 	// so the IDE scan follows no link out of the home (GAP-0396).
 	userHomeScan bool
+	// binaryFallbackDirs overrides the macOS lookup directories for a
+	// per-user scan test on another OS. Nil uses the platform default.
+	binaryFallbackDirs []string
 	// linkWarned holds the paths a managed Windows scan refused because
 	// they go through a link or junction, so each is warned about once.
 	linkWarned map[string]bool

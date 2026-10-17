@@ -208,17 +208,30 @@ func ReadUserScanPass(path string) (UserScanPass, error) {
 }
 
 // ScanUserHome runs one full scan of home, as the account that owns it, with
-// no state store, history or telemetry. It keeps only evidence inside home
-// and the account's own processes; machine-wide surfaces (system binaries,
-// application folders, loopback endpoints, the process environment) are
-// left to the gateway's own scan.
+// no state store, history or telemetry. It keeps evidence inside home, the
+// account's own processes, and macOS CLI binaries in the fixed system install
+// directories. Other machine-wide surfaces are left to the gateway's scan.
 func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserScanOptions, catalog []AISignature) AIDiscoveryReport {
+	var systemBinaryDirs []string
+	if runtime.GOOS == "darwin" {
+		systemBinaryDirs = macOSDiscoverySystemBinaryDirs()
+	}
+	return scanUserHomeWithSystemBinaryDirs(ctx, home, account, uid, opts, catalog, systemBinaryDirs)
+}
+
+// The directory argument lets Linux CI exercise the managed macOS binary
+// path without changing the platform's production search directories.
+func scanUserHomeWithSystemBinaryDirs(ctx context.Context, home, account string, uid int, opts UserScanOptions, catalog []AISignature, systemBinaryDirs []string) AIDiscoveryReport {
 	start := time.Now()
 	home = filepath.Clean(home)
 	// The model file detector reports paths with symlinks resolved.
 	homeRoots := []string{home}
 	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
 		homeRoots = append(homeRoots, filepath.Clean(resolved))
+	}
+	var fallbackDirs []string
+	if len(systemBinaryDirs) > 0 {
+		fallbackDirs = discoveryBinaryDirsWithHome(systemBinaryDirs, home)
 	}
 	svc := &ContinuousDiscoveryService{
 		opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
@@ -239,9 +252,10 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 			IDEInventory:     opts.IDEInventory,
 			IncludeUserEmail: opts.IncludeUserEmail,
 		}),
-		catalog:       catalog,
-		userHomeScan:  true,
-		processOwners: map[string]bool{account: true, strconv.Itoa(uid): true},
+		catalog:            catalog,
+		userHomeScan:       true,
+		processOwners:      map[string]bool{account: true, strconv.Itoa(uid): true},
+		binaryFallbackDirs: fallbackDirs,
 	}
 	scanID := newScanID()
 	signals, stats := svc.scanSignals(ctx, scanID, &aiDiscoveryScanObservation{}, true, nil)
@@ -249,7 +263,10 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	// No state store stamps these here; an unset time read as 0001-01-01.
 	seen := time.Now().UTC()
 	for _, sig := range signals {
-		if sig.Detector == "application" || !evidenceInsideHome(sig.Evidence, homeRoots) {
+		inHome := evidenceInsideHome(sig.Evidence, homeRoots)
+		inSystemBin := sig.Detector == "binary" && sig.Category == SignalAICLI &&
+			evidenceInSystemBinaryDirs(sig.Evidence, systemBinaryDirs)
+		if sig.Detector == "application" || (!inHome && !inSystemBin) {
 			continue
 		}
 		if !opts.StoreRawLocalPaths {
@@ -279,8 +296,8 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 		stats.Errors++
 		stats.DetectorErrors["user_scan"] = "signal limit reached"
 	}
-	// Every signal kept here lies in this home, which belongs to the
-	// account the scan runs as.
+	// Associate opt-in connector email from this account's home with its
+	// retained signals, including the fixed system binary signals.
 	svc.stampConnectorEmails(out, func(AISignal) string { return home })
 	if ctx.Err() != nil {
 		stats.Errors++
@@ -354,6 +371,19 @@ func evidenceInsideHome(evidence []AIEvidence, homes []string) bool {
 		}
 	}
 	return true
+}
+
+func evidenceInSystemBinaryDirs(evidence []AIEvidence, dirs []string) bool {
+	if len(evidence) != 1 || evidence[0].Type != "binary" || !filepath.IsAbs(evidence[0].RawPath) {
+		return false
+	}
+	pathDir := filepath.Dir(filepath.Clean(evidence[0].RawPath))
+	for _, dir := range dirs {
+		if pathDir == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceWithoutRawPaths(evidence []AIEvidence) []AIEvidence {
