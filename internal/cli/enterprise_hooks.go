@@ -2758,6 +2758,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// (never fires otherwise) can make a deferred row's exact
 			// active session available; reconcile after the same
 			// debounce instead of waiting for the interval tick.
+			if !debouncePending {
+				// A later filesystem event of this pass is bounded from
+				// here, not from the start of an earlier burst.
+				debounceArmedAt = time.Now()
+			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchSessionSettle)
 			debouncePending = true
 			if debounceReason == "" {
