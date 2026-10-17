@@ -19,6 +19,7 @@ them with their default return-code tables.
 | `1603` | `ERROR_INSTALL_FAILURE` | The action failed. Mutating actions have already rolled back to the previous deployment. | Failure; read `errors[].code` |
 | `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`). | Retry later (Intune's default table retries 1618) |
 | `1639` | `ERROR_INVALID_COMMAND_LINE` | Invalid arguments, for example a first install without a config. Retrying will not help. | Failure; fix the assignment |
+| `5` | `ERROR_ACCESS_DENIED` | A standard account ran the installed CLI's `enterprise windows status` or `verify`, or `enterprise secret`, which need an elevated administrator or SYSTEM token (`elevation_required`). Setup and the wrappers report an unelevated token as `1603` instead. | Failure; run the command as SYSTEM |
 | `3010` | `ERROR_SUCCESS_REBOOT_REQUIRED` | Reserved. The standalone lifecycle does not require reboots today. | Soft reboot |
 
 Intune's default Win32 return codes are `0` Success, `1707` Success, `3010`
@@ -112,6 +113,31 @@ On Windows, `enterprise bundle status` and `apply` require an elevated
 administrator or SYSTEM token. An unelevated token returns `not_admin` and
 exits `1603` before reading the protected deployment record. The refused
 status does not report bundle state that the caller could not read.
+
+## Management agent commands
+
+A management agent that runs the `enterprise` commands itself
+(`management-agent.md`) gets the same codes:
+
+- `enterprise bundle verify` and `apply`: `0`; `1` / `1603` for a refusal or
+  a failed apply; `75` / `1618` for `lifecycle_busy`; `2` / `1639` for invalid
+  arguments, with `errors[0].code` `invalid_arguments` in the JSON document.
+  On Windows, `apply --lock-wait` waits only for `bundle.lock`; a busy
+  installer `lifecycle.lock` (a repair, `ensure` without a bundle, a guardian
+  repair) still exits `1618` after its fixed 30 s.
+- `enterprise bundle anchors install` (Linux and macOS): `0`; `1` refused
+  (`anchor_insecure`, `anchor_invalid`, `anchor_missing`,
+  `anchor_restore_failed`, `not_root`, `not_managed`); `2` invalid arguments;
+  `75` busy. Windows installs anchors with `enterprise windows ensure
+  --trust-anchors`, which exits like `ensure`.
+- `enterprise secret set` and `remove`: Linux and macOS `0`, `1`, `2` and
+  `75`, as above. Windows `0`; `5` not elevated; `1603` not installed,
+  `credential_in_use`, `change_failed` or `restart_failed`; `1618` when
+  `bundle.lock` is not free within `--lock-wait` or the installer's
+  `lifecycle.lock` within 30 s (nothing was written); `1639` invalid
+  arguments, unknown flags included. Builds that do not report
+  `management_contract` in `--version-json` exit `1` for a flag error on
+  Windows and print no JSON for failures.
 
 ## Retries, downgrades and rollback
 
