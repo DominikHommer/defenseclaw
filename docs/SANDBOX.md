@@ -2776,8 +2776,8 @@ tighten it (`config.TightenOpenShellAdmin`, `Config.SandboxFloor`). See
 
 The managed daemon re-resolves each kept sandbox against the floor of its own
 confirmed registration. Concurrent sandboxes can therefore use different
-profile floors. A missing or revoked registration cannot inherit the floor
-of another sandbox.
+profile floors. A missing, unconfirmed or revoked registration resolves
+against the closed floor instead of inheriting another sandbox's floor.
 
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
