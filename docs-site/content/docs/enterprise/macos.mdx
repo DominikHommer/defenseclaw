@@ -516,7 +516,10 @@ such as `~/.claude`, `~/.codex` and `~/.config`. macOS privacy controls (TCC)
 do not protect those folders, so no profile is needed.
 
 The per-user AI Discovery scan also walks the home for package manifests and
-model files. Without Full Disk Access it never opens the folders that make
+model files. CLI binary discovery checks the scanner's `PATH`, common macOS
+install directories (including `/opt/dc-agents/bin`), and the user's
+`~/.local/bin` and `~/bin`; it does not execute a binary to identify it.
+Without Full Disk Access it never opens the folders that make
 macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
 Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
 `~/Library/Group Containers`, and Contacts. No employee sees a prompt
