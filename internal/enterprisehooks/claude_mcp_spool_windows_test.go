@@ -147,9 +147,10 @@ func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
 	}
 }
 
-// GAP-1317: the enumerator check runs on the real file system: a project
-// folder is accepted under its long path, while a junction (as the cwd or as
-// the project) and a short-name alias of the project are refused.
+// GAP-1317, #1164: the enumerator check runs on the real file system: a
+// project folder is accepted under its long path, while a junction (as the
+// cwd or as the project) and a short-name alias of the project are refused.
+// A refused cwd refuses the start: the project never stands in for it.
 func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -168,14 +169,18 @@ func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 		t.Skipf("mklink /J: %v: %s", err, out)
 	}
 	vet := func(cwd, project string) (string, string) {
-		return vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "srv", Command: "npx", CWD: cwd, Project: project},
+		dir, err := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "srv", Command: "npx", CWD: cwd, Project: project},
 			home, nil, windowsClaudeMCPWorkDirChecks)
+		if err != nil {
+			return dir, err.Error()
+		}
+		return dir, ""
 	}
 	if dir, refused := vet("", project); !strings.EqualFold(dir, project) || refused != "" {
 		t.Fatalf("project: %q (%q)", dir, refused)
 	}
-	if dir, refused := vet(junction, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "link or reparse point") {
-		t.Fatalf("junction cwd: %q (%q), want the project and the junction refused", dir, refused)
+	if dir, refused := vet(junction, project); dir != "" || !strings.Contains(refused, "link or reparse point") {
+		t.Fatalf("junction cwd: %q (%q), want the start refused, not the project", dir, refused)
 	}
 	if dir, refused := vet("", junction); dir != "" || !strings.Contains(refused, "link or reparse point") {
 		t.Fatalf("junction project: %q (%q)", dir, refused)
@@ -186,7 +191,7 @@ func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
 		// Only the last folder in its short form: the rest of the path is
 		// the home as the manifest names it.
 		if short := filepath.Join(home, filepath.Base(windows.UTF16ToString(buf[:n]))); !strings.EqualFold(short, project) {
-			if dir, refused := vet(short, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "alias") {
+			if dir, refused := vet(short, project); dir != "" || !strings.Contains(refused, "alias") {
 				t.Fatalf("short name %s: %q (%q)", short, dir, refused)
 			}
 		}

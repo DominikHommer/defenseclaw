@@ -104,20 +104,101 @@ func sameMCPProject(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
 }
 
-// findMCPLauncherOnPath is the first folder of the user's PATH that holds
-// file, as the user resolves it. isFile reports a regular file.
-func findMCPLauncherOnPath(file, pathValue string, isFile func(string) bool) (string, error) {
-	for _, dir := range strings.Split(pathValue, ";") {
-		dir = strings.Trim(strings.TrimSpace(dir), `"`)
-		if dir == "" || !mcpAsUserAbsolute(dir) {
-			continue
-		}
-		candidate := strings.TrimRight(dir, `\/`) + `\` + file
-		if isFile(candidate) {
-			return candidate, nil
+// mcpAsUserLauncherFS is the file system view of a launcher lookup, as the
+// user sees it.
+type mcpAsUserLauncherFS struct {
+	// exists reports a file (not a folder) at path.
+	exists func(path string) bool
+	// trusted fails unless path is a launcher the managed scan trusts:
+	// installed for all users in a folder only administrators can change.
+	trusted func(path string) error
+}
+
+// mcpAsUserLauncherExtensions are the extensions a bare launcher name runs
+// with, in the order Windows tries them (the default PATHEXT head), when the
+// server's PATHEXT does not name them.
+var mcpAsUserLauncherExtensions = []string{".com", ".exe", ".bat", ".cmd"}
+
+// resolveMCPAsUserLauncher is the launcher file the server's agent runs for
+// the bare name, looked up as the agent does (the working folder, then PATH,
+// with the server's env applied), accepted only when it is the expected
+// npx.cmd or uvx.exe and the trust policy of the managed scan accepts it.
+// The scanner applies the same policy to a server the gateway starts itself
+// (cli/defenseclaw/scanner/mcp.py _resolve_trusted_windows_launcher). A
+// different file of the same name earlier in the search (a server PATH entry
+// that puts its own npx.cmd first, a .bat beside the real launcher), a
+// relative or network PATH entry before it, or an untrusted launcher refuses
+// the start, so a definition cannot pick the program that starts before its
+// verdict (#1164).
+func resolveMCPAsUserLauncher(launcher mcpAsUserLauncher, workDir, pathValue, pathExt string, fs mcpAsUserLauncherFS) (string, error) {
+	if fs.exists == nil || fs.trusted == nil {
+		return "", errors.New("no launcher check")
+	}
+	// The extensions in the order the server's PATHEXT tries them, then the
+	// defaults it leaves out: an extension that wins for the agent is never
+	// skipped here.
+	var extensions []string
+	for _, ext := range append(strings.Split(pathExt, ";"), mcpAsUserLauncherExtensions...) {
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		if strings.HasPrefix(ext, ".") && !strings.ContainsAny(ext, `\/`) && !containsFold(extensions, ext) {
+			extensions = append(extensions, ext)
 		}
 	}
-	return "", fmt.Errorf("%s is not on the user's PATH", file)
+	// The working folder is searched first; it was vetted as the user.
+	dirs := append([]string{workDir}, strings.Split(pathValue, ";")...)
+	for i, dir := range dirs {
+		dir = strings.Trim(strings.TrimSpace(dir), `"`)
+		if dir == "" {
+			continue
+		}
+		if i > 0 && !mcpAsUserAbsolute(dir) {
+			return "", fmt.Errorf("PATH entry %q comes before %s and is not an absolute folder on a local drive", dir, launcher.file)
+		}
+		base := strings.TrimRight(dir, `\/`) + `\`
+		for _, ext := range extensions {
+			found := base + launcher.name + ext
+			if !fs.exists(found) {
+				continue
+			}
+			if !strings.EqualFold(launcher.name+ext, launcher.file) {
+				return "", fmt.Errorf("%s comes before %s in the launcher search, so the agent would not run %s", found, launcher.file, launcher.file)
+			}
+			if err := fs.trusted(found); err != nil {
+				return "", fmt.Errorf("launcher %s is not trusted (%v); on a managed computer a scan starts %s only when it is "+
+					"installed for all users under Program Files, in a folder only administrators can change", found, err, launcher.name)
+			}
+			return found, nil
+		}
+	}
+	return "", fmt.Errorf("%s is not on the PATH the server starts with", launcher.file)
+}
+
+func containsFold(values []string, value string) bool {
+	for _, v := range values {
+		if strings.EqualFold(v, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// planMCPAsUserLaunch is the folder and launcher a published server starts
+// with, both checked as the user (the caller impersonates the user around
+// it): the folder the agent uses (vetClaudeMCPWorkDir, no fallback) and the
+// launcher the agent would run there with the server's env. Any refusal
+// means no start, so the scan fails and the gateway blocks the server.
+func planMCPAsUserLaunch(entry config.MCPServerEntry, home string, otherHomes []string, launcher mcpAsUserLauncher,
+	env []string, checks claudeMCPWorkDirChecks, fs mcpAsUserLauncherFS,
+) (workDir, launcherPath string, err error) {
+	workDir, err = vetClaudeMCPWorkDir(entry, home, otherHomes, checks)
+	if err != nil {
+		return "", "", fmt.Errorf("MCP server %q is not started in %w", entry.Name, err)
+	}
+	launcherPath, err = resolveMCPAsUserLauncher(launcher, workDir, mcpAsUserEnvValue(env, "PATH"), mcpAsUserEnvValue(env, "PATHEXT"), fs)
+	if err != nil {
+		return "", "", fmt.Errorf("MCP server %q is not started: %w", entry.Name, err)
+	}
+	return workDir, launcherPath, nil
 }
 
 // mcpAsUserAbsolute reports a drive-absolute Windows path (C:\...).

@@ -221,15 +221,20 @@ type claudeMCPWorkDirChecks struct {
 }
 
 // vetClaudeMCPWorkDir is the folder a local stdio server starts in, as its
-// agent starts it: the entry cwd, else the project that lists the server.
+// agent starts it: the entry cwd when it names one, else the project that
+// lists the server, else the user home (a user-scope server). No other
+// folder stands in for a refused one: the scan must run the code the agent
+// runs, so a cwd that cannot be used refuses the start even when the
+// project could be (#1164).
+//
 // A folder is accepted only when it is absolute, on a fixed local volume,
 // inside the project or the user home and in no other user profile, no
 // folder of it is a link or reparse point, and the opened folder has the
 // same path (no short-name, junction or other alias). The returned folder
-// is the opened one. refused names the first folder not accepted and why.
-func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) (dir, refused string) {
+// is the opened one; the error names the folder and why it is refused.
+func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) (string, error) {
 	if entry.Command == "" || entry.URL != "" {
-		return "", ""
+		return "", errors.New("the server is not a local stdio server")
 	}
 	var roots []string
 	for _, root := range []string{entry.Project, home} {
@@ -237,19 +242,21 @@ func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []
 			roots = append(roots, filepath.Clean(root))
 		}
 	}
-	for _, candidate := range []string{entry.CWD, entry.Project} {
-		if candidate == "" {
-			continue
-		}
-		vetted, err := vetClaudeMCPWorkDirCandidate(candidate, home, roots, otherHomes, checks)
-		if err == nil {
-			return vetted, refused
-		}
-		if refused == "" {
-			refused = candidate + ": " + err.Error()
-		}
+	candidate := entry.CWD
+	if candidate == "" {
+		candidate = entry.Project
 	}
-	return "", refused
+	if candidate == "" {
+		candidate = home
+	}
+	if candidate == "" {
+		return "", errors.New("the server names no folder and the user has no home folder")
+	}
+	vetted, err := vetClaudeMCPWorkDirCandidate(candidate, home, roots, otherHomes, checks)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", candidate, err)
+	}
+	return vetted, nil
 }
 
 func vetClaudeMCPWorkDirCandidate(dir, home string, roots, otherHomes []string, checks claudeMCPWorkDirChecks) (string, error) {

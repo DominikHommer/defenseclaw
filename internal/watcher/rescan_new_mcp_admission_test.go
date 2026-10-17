@@ -7,6 +7,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -462,5 +463,47 @@ func TestMCPOnlyWatcherRunsAndAdmitsAddedServer(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("added MCP server received no install admission")
+	}
+}
+
+// asUserRefusalScanner fails every scan with the reason the as-user relay
+// reports when the hook enumerator refuses to start the server.
+type asUserRefusalScanner struct{ countingScanner }
+
+func (s *asUserRefusalScanner) Scan(context.Context, string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.calls++
+	s.mu.Unlock()
+	return nil, errors.New(`mcp-scan: MCP server "notes" is not started in server: the folder is not an absolute path`)
+}
+
+// #1164: an enrolled user's server whose configured cwd the hook enumerator
+// refuses (the project folder would pass) is not started, so its scan fails
+// and the watcher blocks it as not scanned. No allow verdict is recorded:
+// the project folder never stands in for the refused cwd.
+func TestAsUserServerWithARefusedFolderIsBlockedNotAllowed(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	server := config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."}, CWD: "server",
+		Project: `C:\Users\dcw-std1\proj`, Connector: "claudecode", Home: `C:\Users\dcw-std1`, RunAsSID: "S-1-5-21-1-2-3-1001"}
+	rows := auditRows(t, logger)
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	refusing := &asUserRefusalScanner{countingScanner{name: "mcp-scanner"}}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return refusing }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	w.AdmitAddedMCPServers([]string{server.Name})
+	w.admitAddedMCPServers(context.Background())
+	if refusing.calls == 0 {
+		t.Fatal("the server was not scanned")
+	}
+	if issues, _ := ReadAdmissionIssues(cfg.DataDir); len(issues) != 1 || issues[0].Kind != AdmissionUnscanned {
+		t.Fatalf("issues: %+v, want the server not scanned", issues)
+	}
+	entry, err := store.GetActionForConnector("mcp", server.Name, "claudecode")
+	if err != nil || entry == nil || entry.Actions.Install != "block" {
+		t.Fatalf("journal %+v (err %v), want an install block", entry, err)
+	}
+	all := strings.Join(rows(), "\n")
+	if !strings.Contains(all, "install-scan-error") || strings.Contains(all, "install-allowed") || strings.Contains(all, "reason=clean") {
+		t.Fatalf("rows:\n%s\nwant install-scan-error and no allow verdict", all)
 	}
 }

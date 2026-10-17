@@ -7,6 +7,8 @@ package enterprisehooks
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -34,11 +36,17 @@ const mcpAsUserActiveProcessLimit = 64
 //
 // It starts only the definition in its own published record (the request
 // names it, its digest pins it), only an npx or uvx launcher with a package
-// argument, only with the user's own signed-in session token, and only in a
-// folder it checked while impersonating the user: inside the project or the
-// user's profile, in no other profile, with no link or reparse point on the
-// way. The server and everything it starts run in a job that ends with the
-// scan. Any failure refuses the start, and the gateway blocks the server.
+// argument, only with the user's own signed-in session token, only in the
+// folder the agent uses (its cwd, else its project, else the profile, never
+// a stand-in for a refused one) after it checked that folder while
+// impersonating the user: inside the project or the user's profile, in no
+// other profile, with no link or reparse point on the way. The launcher is
+// the one the agent would run with the server's env, and only one installed
+// for all users under Program Files that only administrators can change. The
+// server runs in the services session on a private desktop (see
+// startWindowsMCPAsUserProcess), and it and everything it starts run in a job
+// that ends with the scan. Any failure refuses the start, and the gateway
+// blocks the server.
 type WindowsMCPAsUserStarter struct {
 	// Manifest returns the enrolled targets.
 	Manifest func() (Manifest, error)
@@ -135,32 +143,18 @@ func (s WindowsMCPAsUserStarter) Start(_ context.Context, request mcpasuser.Requ
 	}
 	env := mergeMCPAsUserEnv(userEnv, entry.Env)
 
+	programFiles, err := windowsProgramFilesRoots()
+	if err != nil {
+		return nil, err
+	}
 	// The folder and the launcher are resolved as the user: the user's
 	// access decides, so a junction into another profile fails.
 	var workDir, launcherPath string
 	if err := runWindowsEnterpriseImpersonatedCallback(impersonation, sid, func() error {
-		dir, refused := vetClaudeMCPWorkDir(entry, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
-		if dir == "" && refused != "" {
-			return fmt.Errorf("MCP server %q is not started in %s", entry.Name, refused)
-		}
-		if dir == "" {
-			// A user-scope server names no folder: it starts in the profile.
-			vetted, err := vetClaudeMCPWorkDirCandidate(home, home, []string{home}, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
-			if err != nil {
-				return fmt.Errorf("MCP server %q is not started in %s: %v", entry.Name, home, err)
-			}
-			dir = vetted
-		}
-		workDir = dir
-		found, err := findMCPLauncherOnPath(launcher.file, mcpAsUserEnvValue(env, "PATH"), func(path string) bool {
-			info, err := os.Stat(path)
-			return err == nil && info.Mode().IsRegular()
-		})
-		if err != nil {
-			return fmt.Errorf("MCP server %q is not started: %w", entry.Name, err)
-		}
-		launcherPath = found
-		return nil
+		var err error
+		workDir, launcherPath, err = planMCPAsUserLaunch(entry, home, otherWindowsHomes(homes, home), launcher, env,
+			windowsClaudeMCPWorkDirChecks, windowsMCPAsUserLauncherFS(programFiles))
+		return err
 	}); err != nil {
 		return nil, err
 	}
@@ -196,9 +190,55 @@ func mcpAsUserTarget(manifest Manifest, request mcpasuser.Request) (ManifestTarg
 	return found, homes, ok
 }
 
+// windowsProgramFilesRoots are the Program Files folders, from the Known
+// Folder API, not the environment.
+func windowsProgramFilesRoots() ([]string, error) {
+	var roots []string
+	for _, id := range []*windows.KNOWNFOLDERID{windows.FOLDERID_ProgramFiles, windows.FOLDERID_ProgramFilesX86} {
+		root, err := windows.KnownFolderPath(id, windows.KF_FLAG_DEFAULT)
+		if err != nil {
+			continue
+		}
+		if root = filepath.Clean(strings.TrimSpace(root)); filepath.IsAbs(root) && !containsFold(roots, root) {
+			roots = append(roots, root)
+		}
+	}
+	if len(roots) == 0 {
+		return nil, errors.New("the Program Files folder is unknown, so no MCP launcher can be trusted")
+	}
+	return roots, nil
+}
+
+// windowsMCPAsUserLauncherFS is the launcher policy of a managed scan, as the
+// scanner applies it to a server the gateway starts itself: the launcher is
+// under Program Files and only administrators can change it or any folder
+// above it (owner, DACL, no link or reparse point on the way).
+func windowsMCPAsUserLauncherFS(programFiles []string) mcpAsUserLauncherFS {
+	return mcpAsUserLauncherFS{
+		exists: func(path string) bool {
+			info, err := os.Lstat(path)
+			return err == nil && !info.IsDir()
+		},
+		trusted: func(path string) error {
+			inside := false
+			for _, root := range programFiles {
+				if claudeMCPPathWithin(path, root) {
+					inside = true
+					break
+				}
+			}
+			if !inside {
+				return errors.New("it is not under Program Files")
+			}
+			return managed.ValidateTrustedFilePath(path, "MCP launcher")
+		},
+	}
+}
+
 // windowsMCPAsUserSession is a server started by startWindowsMCPAsUserProcess.
 type windowsMCPAsUserSession struct {
 	process, job          windows.Handle
+	desktop               *windowsMCPAsUserDesktop
 	stdin, stdout, stderr *os.File
 	killOnce, releaseOnce sync.Once
 }
@@ -230,13 +270,29 @@ func (s *windowsMCPAsUserSession) Close() {
 		_ = s.stderr.Close()
 		_ = windows.CloseHandle(s.process)
 		_ = windows.CloseHandle(s.job)
+		s.desktop.close()
 	})
 }
 
+// windowsMCPAsUserMaxCommandLine is the longest command line
+// CreateProcessWithTokenW accepts, in UTF-16 units.
+const windowsMCPAsUserMaxCommandLine = 1024
+
 // startWindowsMCPAsUserProcess starts argv with the user's primary token in
-// workDir, hidden on the user's session desktop, in a job that kills every
-// process of the server when the job handle closes. The child gets only its
-// three stdio pipe ends.
+// workDir, hidden on a private desktop, in a job that kills every process of
+// the server when the job handle closes. The child gets only its three stdio
+// pipe ends.
+//
+// Session: CreateProcessWithTokenW starts the process in the caller's
+// session, whatever session the token names. The enumerator runs in the
+// services session (0), so the server runs there with the user's identity,
+// environment, profile hive and files, but not on the user's own desktop.
+// That is the supported contract of the scan: it speaks MCP over stdio and
+// needs no desktop; a server that needs the user's interactive desktop,
+// clipboard or session-local objects fails its scan and stays blocked. The
+// desktop is a window station and desktop made for this one server that only
+// LocalSystem and the user can open, never the services desktop, which the
+// function would otherwise open to the user.
 func startWindowsMCPAsUserProcess(token windows.Token, argv, env []string, workDir string) (_ mcpasuser.Session, err error) {
 	if len(argv) == 0 {
 		return nil, errors.New("no command to start")
@@ -245,11 +301,16 @@ func startWindowsMCPAsUserProcess(token windows.Token, argv, env []string, workD
 	for i, arg := range argv {
 		commandLine[i] = windows.EscapeArg(arg)
 	}
+	joined := strings.Join(commandLine, " ")
+	if n := len(utf16.Encode([]rune(joined))); n > windowsMCPAsUserMaxCommandLine {
+		return nil, fmt.Errorf("the server command line has %d characters; Windows starts at most %d as another user",
+			n, windowsMCPAsUserMaxCommandLine)
+	}
 	appName, err := windows.UTF16PtrFromString(argv[0])
 	if err != nil {
 		return nil, err
 	}
-	cmdLine, err := windows.UTF16PtrFromString(strings.Join(commandLine, " "))
+	cmdLine, err := windows.UTF16PtrFromString(joined)
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +322,17 @@ func startWindowsMCPAsUserProcess(token windows.Token, argv, env []string, workD
 	if err != nil {
 		return nil, err
 	}
-	desktop, err := windows.UTF16PtrFromString(`winsta0\default`)
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return nil, fmt.Errorf("read the user of the server token: %v", err)
+	}
+	desktop, err := newWindowsMCPAsUserDesktop(user.User.Sid)
 	if err != nil {
+		return nil, err
+	}
+	desktopName, err := windows.UTF16PtrFromString(desktop.name)
+	if err != nil {
+		desktop.close()
 		return nil, err
 	}
 
@@ -271,6 +341,7 @@ func startWindowsMCPAsUserProcess(token windows.Token, argv, env []string, workD
 		for _, handle := range closers {
 			_ = windows.CloseHandle(handle)
 		}
+		desktop.close()
 	}
 	inherit := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), InheritHandle: 1}
 	pipe := func(childReads bool) (parent, child windows.Handle, err error) {
@@ -293,14 +364,127 @@ func startWindowsMCPAsUserProcess(token windows.Token, argv, env []string, workD
 		var stdoutParent, stdoutChild, stderrParent, stderrChild windows.Handle
 		if stdoutParent, stdoutChild, err = pipe(false); err == nil {
 			if stderrParent, stderrChild, err = pipe(false); err == nil {
-				return startWindowsMCPAsUserChild(token, appName, cmdLine, block, dirPtr, desktop,
+				session, err := startWindowsMCPAsUserChild(token, appName, cmdLine, block, dirPtr, desktopName,
 					[3]windows.Handle{stdinChild, stdoutChild, stderrChild},
 					[3]windows.Handle{stdinParent, stdoutParent, stderrParent}, &closers, closeAll)
+				if err != nil {
+					return nil, err
+				}
+				session.desktop = desktop
+				return session, nil
 			}
 		}
 	}
 	closeAll()
 	return nil, fmt.Errorf("create the server stdio pipes: %w", err)
+}
+
+// windowsMCPAsUserDesktop is the private window station and desktop of one
+// as-user server.
+type windowsMCPAsUserDesktop struct {
+	station, desktop uintptr
+	// name is "station\desktop", as STARTUPINFO.lpDesktop names it.
+	name      string
+	closeOnce sync.Once
+}
+
+func (d *windowsMCPAsUserDesktop) close() {
+	if d == nil {
+		return
+	}
+	d.closeOnce.Do(func() {
+		if d.desktop != 0 {
+			_, _, _ = procCloseDesktop.Call(d.desktop)
+		}
+		if d.station != 0 {
+			_, _, _ = procCloseWindowStation.Call(d.station)
+		}
+	})
+}
+
+var (
+	modWindowsMCPAsUserUser32   = windows.NewLazySystemDLL("user32.dll")
+	procCreateWindowStationW    = modWindowsMCPAsUserUser32.NewProc("CreateWindowStationW")
+	procCreateDesktopW          = modWindowsMCPAsUserUser32.NewProc("CreateDesktopW")
+	procGetProcessWindowStation = modWindowsMCPAsUserUser32.NewProc("GetProcessWindowStation")
+	procSetProcessWindowStation = modWindowsMCPAsUserUser32.NewProc("SetProcessWindowStation")
+	procCloseWindowStation      = modWindowsMCPAsUserUser32.NewProc("CloseWindowStation")
+	procCloseDesktop            = modWindowsMCPAsUserUser32.NewProc("CloseDesktop")
+
+	// CreateDesktop makes the desktop in the process window station, so
+	// the enumerator switches to the new station for that one call.
+	windowsMCPAsUserStationMu sync.Mutex
+)
+
+const (
+	windowsCWFCreateOnly          = 0x00000001
+	windowsStandardRightsRequired = 0x000F0000
+	windowsWinstaAllAccess        = 0x0000037F | windowsStandardRightsRequired
+	windowsDesktopAllAccess       = 0x000001FF | windowsStandardRightsRequired
+)
+
+// newWindowsMCPAsUserDesktop makes a window station with one desktop that
+// only LocalSystem and user can open.
+func newWindowsMCPAsUserDesktop(user *windows.SID) (*windowsMCPAsUserDesktop, error) {
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;GA;;;" + user.String() + ")")
+	if err != nil {
+		return nil, fmt.Errorf("make the server desktop access list: %w", err)
+	}
+	attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	stationName := "DefenseClaw-MCP-" + hex.EncodeToString(nonce[:])
+	stationPtr, err := windows.UTF16PtrFromString(stationName)
+	if err != nil {
+		return nil, err
+	}
+	desktopPtr, err := windows.UTF16PtrFromString("Default")
+	if err != nil {
+		return nil, err
+	}
+	windowsMCPAsUserStationMu.Lock()
+	defer windowsMCPAsUserStationMu.Unlock()
+	station, _, callErr := procCreateWindowStationW.Call(uintptr(unsafe.Pointer(stationPtr)), windowsCWFCreateOnly,
+		windowsWinstaAllAccess, uintptr(unsafe.Pointer(&attributes)))
+	if station == 0 {
+		return nil, fmt.Errorf("create the server window station: %w", windowsCallError(callErr))
+	}
+	d := &windowsMCPAsUserDesktop{station: station, name: stationName + `\Default`}
+	previous, _, callErr := procGetProcessWindowStation.Call()
+	if previous == 0 {
+		d.close()
+		return nil, fmt.Errorf("read the enumerator window station: %w", windowsCallError(callErr))
+	}
+	if ok, _, callErr := procSetProcessWindowStation.Call(station); ok == 0 {
+		d.close()
+		return nil, fmt.Errorf("switch to the server window station: %w", windowsCallError(callErr))
+	}
+	desktop, _, desktopErr := procCreateDesktopW.Call(uintptr(unsafe.Pointer(desktopPtr)), 0, 0, 0,
+		windowsDesktopAllAccess, uintptr(unsafe.Pointer(&attributes)))
+	if ok, _, callErr := procSetProcessWindowStation.Call(previous); ok == 0 {
+		// The enumerator keeps the new station as its own; it is closed
+		// with the process. Nothing starts on it.
+		if desktop != 0 {
+			_, _, _ = procCloseDesktop.Call(desktop)
+		}
+		return nil, fmt.Errorf("switch back from the server window station: %w", windowsCallError(callErr))
+	}
+	runtime.KeepAlive(sd)
+	if desktop == 0 {
+		d.close()
+		return nil, fmt.Errorf("create the server desktop: %w", windowsCallError(desktopErr))
+	}
+	d.desktop = desktop
+	return d, nil
+}
+
+func windowsCallError(err error) error {
+	if err == nil || err == windows.ERROR_SUCCESS {
+		return errors.New("the call failed")
+	}
+	return err
 }
 
 func startWindowsMCPAsUserChild(
@@ -309,7 +493,7 @@ func startWindowsMCPAsUserChild(
 	child, parent [3]windows.Handle,
 	closers *[]windows.Handle,
 	closeAll func(),
-) (mcpasuser.Session, error) {
+) (*windowsMCPAsUserSession, error) {
 	startup := windows.StartupInfo{
 		Cb:         uint32(unsafe.Sizeof(windows.StartupInfo{})),
 		Desktop:    desktop,

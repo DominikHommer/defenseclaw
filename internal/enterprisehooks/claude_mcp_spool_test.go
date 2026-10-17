@@ -17,7 +17,8 @@ import (
 // GAP-1317, #1164: the enumerator, checking as the server's user, accepts a
 // server folder only inside the project or the user's own home, on a local volume,
 // with no link on the way and no alias; anything else is refused with the
-// reason, and the server's project is the fallback for a refused cwd.
+// reason. A refused cwd is never replaced by the project: the scan would run
+// code from another folder than the agent does.
 func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
 	base := t.TempDir()
 	users := filepath.Join(base, "Users")
@@ -56,24 +57,29 @@ func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
 	}{
 		{"project", "", project, project, ""},
 		{"shared project", "", shared, shared, ""},
+		{"user scope", "", "", home, ""},
 		{"cwd in home", filepath.Join(home, "tools"), project, filepath.Join(home, "tools"), ""},
-		{"relative", "server", project, project, "not an absolute path"},
+		{"relative", "server", project, "", "not an absolute path"},
 		{"dot-dot into another profile", filepath.Join(project, "..", "..", "u2"), users, "", "another user profile"},
 		{"other enrolled home as project", "", other, "", "another user profile"},
-		{"outside", filepath.Join(base, "elsewhere"), project, project, "outside the project"},
-		{"link", filepath.Join(linked, "sub"), project, project, "link or reparse point"},
-		{"unc", unc, project, project, "local drive letter"},
-		{"short name", short, project, project, "alias"},
-		{"unreadable", denied, project, project, "permission"},
+		{"outside", filepath.Join(base, "elsewhere"), project, "", "outside the project"},
+		{"link", filepath.Join(linked, "sub"), project, "", "link or reparse point"},
+		{"unc", unc, project, "", "local drive letter"},
+		{"short name", short, project, "", "alias"},
+		{"unreadable", denied, project, "", "permission"},
 	} {
 		entry := config.MCPServerEntry{Name: "srv", Command: "npx", CWD: tc.cwd, Project: tc.project}
-		dir, refused := vetClaudeMCPWorkDir(entry, home, []string{other}, checks)
-		if !strings.EqualFold(dir, tc.want) || (tc.refused == "") != (refused == "") || !strings.Contains(refused, tc.refused) {
+		dir, err := vetClaudeMCPWorkDir(entry, home, []string{other}, checks)
+		refused := ""
+		if err != nil {
+			refused = err.Error()
+		}
+		if !strings.EqualFold(dir, tc.want) || (tc.refused == "") != (err == nil) || !strings.Contains(refused, tc.refused) {
 			t.Errorf("%s: dir %q refused %q, want %q refused containing %q", tc.name, dir, refused, tc.want, tc.refused)
 		}
 	}
-	if dir, refused := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "remote", URL: "https://x.test", Project: project}, home, nil, checks); dir != "" || refused != "" {
-		t.Fatalf("remote server got folder %q (%q)", dir, refused)
+	if dir, err := vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "remote", URL: "https://x.test", Project: project}, home, nil, checks); dir != "" || err == nil {
+		t.Fatalf("remote server got folder %q (%v)", dir, err)
 	}
 }
 
