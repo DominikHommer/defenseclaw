@@ -3019,7 +3019,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
-		if _, drifted := windowsEnterpriseHookRuntimeDrift(); windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
+		_, drifted := windowsEnterpriseHookRuntimeDrift()
+		if windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == "" {
 			accepted := *verifyReport
 			accepted.OK = true
 			applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
@@ -3035,7 +3036,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
-		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
+		// Name the failed check: a compliant-looking host that ensure
+		// repaired said only "ensure_repair: verify_failed" (#1282).
+		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed",
+			Detail: windowsEnterpriseVerifyFailureDetail(verifyReport, drifted)}
 	}
 
 	// An upgrade that keeps the installed config: this release's gateway must

@@ -2786,6 +2786,19 @@ func TestWindowsEnterpriseEnsureRepairAfterAFailedVerifyKeepsThePayload(t *testi
 		!strings.Contains(strings.Join(stub.calls[2], " "), `-HookBinary C:\stage\defenseclaw-hook.exe`) {
 		t.Fatalf("installer runs %q", stub.calls)
 	}
+	// #1282: the repair warning names the check that failed.
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v: %s", err, stdout.String())
+	}
+	named := false
+	for _, warning := range result.Warnings {
+		named = named || warning.Code == "ensure_repair" &&
+			strings.Contains(warning.Message, `verify_failed: managed path is missing: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`)
+	}
+	if !named {
+		t.Fatalf("the repair did not name the failed verify check: %+v", result.Warnings)
+	}
 }
 
 func TestWindowsEnterpriseEnsureRepairsMissingOrModifiedInstalledCompiler(t *testing.T) {
