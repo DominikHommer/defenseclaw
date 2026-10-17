@@ -1231,6 +1231,9 @@ func TestMacOSDiscoveryBinaryFallback(t *testing.T) {
 			t.Fatalf("macOS binary directories %v omit %q", dirs, want)
 		}
 	}
+	if runtime.GOOS == "windows" {
+		return // Windows LookPath uses PATHEXT, unlike the Unix fallback.
+	}
 	first := filepath.Join(home, "first")
 	second := filepath.Join(home, "second")
 	if err := os.MkdirAll(second, 0o700); err != nil {
