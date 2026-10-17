@@ -411,7 +411,8 @@ _PACKAGE_TOOL_STUBS = {
     "dpkg": """case "$1" in --print-architecture) echo amd64 ;; -i) echo "dpkg -i" >>"$DC_TEST_LOG" ;; esac""",
     "dpkg-query": "exit 1",
     "rpm": """case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo "$DC_TEST_VERSION" ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) exit 1 ;;
     -U) echo "rpm -U" >>"$DC_TEST_LOG" ;;
 esac""",
@@ -501,7 +502,8 @@ def test_unix_wrapper_repairs_an_rpm_left_with_two_installed_versions(tmp_path: 
     rpm.write_text(
         """#!/bin/sh
 case "$1" in
-    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *) echo 1.0.4101-1 ;; esac ;;
+    -qp) case "$3" in *NAME*) echo defenseclaw-enterprise ;; *ARCH*) echo x86_64 ;; *) echo 1.0.4101-1 ;; esac ;;
+    --eval) echo x86_64 ;;
     -q) [ "$2" = --qf ] && printf '1.0.3602-1\\n1.0.4101-1\\n'; exit 0 ;;
     -U) case " $* " in *" --replacepkgs "*) echo "rpm -U --replacepkgs" >>"$DC_TEST_LOG" ;; *) echo "package is already installed" >&2; exit 1 ;; esac ;;
 esac
