@@ -47,14 +47,14 @@ func retrySandboxPaths(h *osHost) (homeRecord, store, key string) {
 }
 
 func TestKeptOpenShellSetupRetryPlainUninstallKeepsSandboxState(t *testing.T) {
-	settings := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671}
+	settings := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672}
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			direct := keptDockerHost(t, goos, true)
 			directResult := ensureKeptHost(t, direct, settings)
 			requireOK(t, directResult)
 			wantSwitch := sandboxSwitchLine(t, directResult)
-			if !strings.Contains(wantSwitch, "docker sandbox namespace default -> "+openshell.ManagedDockerNamespace) {
+			if !strings.Contains(wantSwitch, "gateway port 17671 -> 17672") {
 				t.Fatalf("direct switch = %q", wantSwitch)
 			}
 

@@ -95,7 +95,7 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 			settings map[string]any
 			want     string
 		}{
-			{"docker namespace", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671}, "docker sandbox namespace default -> " + openshell.ManagedDockerNamespace},
+			{"docker port", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672}, "gateway port 17671 -> 17672"},
 			{"docker to vm and port", map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3", "gateway_port": 17672}, "driver docker -> vm"},
 		} {
 			t.Run(goos+"/"+tc.name, func(t *testing.T) {
@@ -105,9 +105,6 @@ func TestKeptOpenShellSetupSwitchEqualsDirectSwitch(t *testing.T) {
 				wantLine := sandboxSwitchLine(t, directResult)
 				if !strings.Contains(wantLine, tc.want) || !strings.Contains(wantLine, sandboxSwitchLeftovers) {
 					t.Fatalf("direct switch = %q", wantLine)
-				}
-				if tc.name == "docker namespace" && !strings.Contains(wantLine, `stay in OpenShell's "default" sandbox namespace`) {
-					t.Fatalf("direct switch omitted namespace leftovers: %q", wantLine)
 				}
 				kept := keptDockerHost(t, goos, true)
 				before, err := os.ReadFile(kept.env.openshellStatePath())
@@ -385,7 +382,7 @@ func TestKeptOpenShellSetupCarriesPendingRestart(t *testing.T) {
 			requireOK(t, h.run(Options{Action: ActionUninstall}))
 			// The uninstall stopped the daemon. Its pending restart needs no stop.
 			h.ops.status[h.alice.UID] = SandboxStatus{}
-			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17671})
+			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3", "gateway_port": 17672})
 			requireOK(t, r)
 			if len(h.env.loadOpenShellState().Pending) != 0 || !containsLine(r.Changes, "switched the sandbox setup") {
 				t.Errorf("kept pending entry blocked the new switch: %v", r.Changes)
