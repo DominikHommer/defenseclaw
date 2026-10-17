@@ -2459,10 +2459,19 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     for path, is_dir in targets:
         try:
             info = os.lstat(path)
+        except FileNotFoundError:
+            continue
         except OSError:
+            unverified.append(f"{path} (cannot inspect)")
             continue
         if stat.S_ISLNK(info.st_mode):
             continue
+        if path == dotenv:
+            try:
+                read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+            except OSError:
+                unverified.append(f"{path} (cannot read)")
+                continue
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
             if problem:
@@ -2499,7 +2508,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         else:
             steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
     if unverified:
-        steps.append("inspect the Windows ACLs of " + ", ".join(unverified))
+        steps.append("restore this account's read access; inspect ownership and permissions for " + ", ".join(unverified))
     others = [path for path in files if path != dotenv]
     # doctor.state.private-files.protect (GAP-0560) removes read access for
     # other accounts; another unsafe Windows ACL, such as a write grant or

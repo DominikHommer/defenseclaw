@@ -125,6 +125,32 @@ def test_python_dotenv_loader_warns_when_safe_read_is_refused(
     assert os.fspath(tmp_path / ".env") in caplog.text
 
 
+def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=placeholder\n")
+    dotenv.chmod(0o600)
+    safe_read = cmd_doctor.read_regular_file_no_follow
+
+    def refuse_dotenv(path, *, max_bytes):
+        if os.fspath(path) == os.fspath(dotenv):
+            raise PermissionError(13, "access denied")
+        return safe_read(path, max_bytes=max_bytes)
+
+    monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", refuse_dotenv)
+    result = cmd_doctor._DoctorResult()
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    cmd_doctor._check_private_file_exposure(cfg, result)
+
+    assert len(result.checks) == 1
+    row = result.checks[0]
+    assert row["status"] == "warn" and row["label"] == "Private files"
+    assert os.fspath(dotenv) in row["detail"]
+    assert "restore this account's read access" in row["remediation"]
+    assert "placeholder" not in str(row)
+
+
 def test_empty_data_dir_never_consumes_cwd_gateway_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
