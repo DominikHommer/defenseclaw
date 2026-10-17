@@ -191,11 +191,11 @@ type ApprovalRequestRecord struct {
 // outer event wins when both report the same dimension; validation rejects
 // malformed values later instead of inventing replacements.
 func (p ApprovalRequestPayload) CorrelationContext() ApprovalCorrelationPayload {
-	result := p.ApprovalCorrelationPayload.normalized()
+	result := p.normalized()
 	if p.Request == nil {
 		return result
 	}
-	return result.withFallback(p.Request.ApprovalCorrelationPayload.normalized())
+	return result.withFallback(p.Request.normalized())
 }
 
 func (p ApprovalCorrelationPayload) normalized() ApprovalCorrelationPayload {

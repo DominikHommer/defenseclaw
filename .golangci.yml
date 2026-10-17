@@ -13,6 +13,5 @@ linters:
           - unused
       # Machine requirements types and helpers have Windows production callers.
       - path: 'internal/gateway/connector/codex_machine_requirements\.go'
-        text: 'windowsCodex'
         linters:
           - unused

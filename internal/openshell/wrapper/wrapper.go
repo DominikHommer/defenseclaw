@@ -539,7 +539,8 @@ func writeRC(path string, data []byte, exists bool) error {
 // shellQuote single-quotes s for a POSIX shell and fish.
 func shellQuote(s string) string {
 	if s != "" && strings.IndexFunc(s, func(r rune) bool {
-		return !(r == '/' || r == '.' || r == '-' || r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+		return r != '/' && r != '.' && r != '-' && r != '_' &&
+			(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 	}) < 0 {
 		return s
 	}

@@ -51,7 +51,7 @@ func TestPKRootSetuidShellNearMissesDoNotReachRule(t *testing.T) {
 	installToolCallCorpusProfileConnector(t, connector, "default")
 	for name, command := range map[string]string{
 		"ordinary wrapper": strings.Replace(pkrootSetuidShellGatewayFixture, "/pkroot/run", "/runner/run", 1),
-		"wrong target":     strings.Replace(pkrootSetuidShellGatewayFixture, "/tmp/.pksh", "/tmp/.helper", -1),
+		"wrong target":     strings.ReplaceAll(pkrootSetuidShellGatewayFixture, "/tmp/.pksh", "/tmp/.helper"),
 		"extra payload":    strings.Replace(pkrootSetuidShellGatewayFixture, "chmod 4755 /tmp/.pksh'", "chmod 4755 /tmp/.pksh && id'", 1),
 		"outer sequence":   pkrootSetuidShellGatewayFixture + "; id",
 	} {

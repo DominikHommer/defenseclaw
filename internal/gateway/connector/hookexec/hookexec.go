@@ -2277,21 +2277,21 @@ func validateCodexInvocationBinding(
 ) (string, error) {
 	event := strings.TrimSpace(explicitEvent)
 	if event == "" {
-		return "", errors.New("Codex hook command is missing its installer-bound event")
+		return "", errors.New("Codex hook command is missing its installer-bound event") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
-		return "", errors.New("Codex hook command is missing its installer-bound contract")
+		return "", errors.New("Codex hook command is missing its installer-bound contract") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	var envelope struct {
 		HookEventName string `json:"hook_event_name"`
 	}
 	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return "", errors.New("Codex hook stdin is not valid JSON")
+		return "", errors.New("Codex hook stdin is not valid JSON") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	stdinEvent := strings.TrimSpace(envelope.HookEventName)
 	if stdinEvent == "" {
-		return "", errors.New("Codex hook stdin is missing hook_event_name")
+		return "", errors.New("Codex hook stdin is missing hook_event_name") //nolint:staticcheck // Match the shipped hook diagnostic.
 	}
 	if stdinEvent != event {
 		return "", fmt.Errorf(
@@ -2659,7 +2659,7 @@ func copilotVSCodeLocalOutput(event, action, reason string) string {
 // denied, and a non-zero exit there only surfaces a warning, so it gets no
 // output and exit 0.
 func emitCopilotVSCodeLocalResult(opts Options, sp spec, result failResult) int {
-	if !(result.closed || result.exit != 0) {
+	if !result.closed && result.exit == 0 {
 		return emit(opts.Stdout, result)
 	}
 	reason := strings.TrimSpace(result.body)

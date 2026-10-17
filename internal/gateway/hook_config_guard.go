@@ -533,7 +533,7 @@ func (g *HookConfigGuard) runWithoutWatcher() {
 		g.mu.Unlock()
 		g.deactivate()
 		g.repairMu.Lock()
-		g.repairMu.Unlock()
+		g.repairMu.Unlock() //nolint:staticcheck // Wait for the active repair before releasing the guard.
 	}()
 	g.mu.Lock()
 	ctx := g.ctx

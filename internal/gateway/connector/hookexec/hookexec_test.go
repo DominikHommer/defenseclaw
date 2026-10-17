@@ -112,9 +112,10 @@ func runWithContext(
 		HTTPClient: &http.Client{Transport: rt},
 		Now:        func() time.Time { return time.Unix(0, 0).UTC() },
 	}
-	if connector == "codex" {
+	switch connector {
+	case "codex":
 		opts.HookContractID = "codex-hooks-v4"
-	} else if connector == "copilot" {
+	case "copilot":
 		// Copilot's official registration binds the exact camelCase event
 		// out-of-band because stdin does not carry an event discriminator.
 		opts.Event = "preToolUse"
@@ -1353,9 +1354,10 @@ func TestNativeConnectorEndpointMatrix(t *testing.T) {
 				t.Errorf("authorization = %q", got)
 			}
 			wantBody := `{"event":"x"}`
-			if connector == "codex" {
+			switch connector {
+			case "codex":
 				wantBody = `{"hook_event_name":"PreToolUse"}`
-			} else if connector == "copilot" {
+			case "copilot":
 				wantBody = `{"sessionId":"s","timestamp":1,"cwd":"C:\\work","toolName":"powershell","toolArgs":{"command":"Get-ChildItem"}}`
 			}
 			if got := string(rt.gotBody); got != wantBody {

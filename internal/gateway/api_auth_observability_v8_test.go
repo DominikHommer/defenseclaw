@@ -164,7 +164,7 @@ func TestAPIAuthenticationFailureV8ExclusivelyOwnsBearerAndCSRFFailures(t *testi
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				t.Fatal("rejected authentication request reached handler")
 			})
-			var handler http.Handler = api.tokenAuth(next)
+			handler := api.tokenAuth(next)
 			if test.csrf {
 				handler = api.tokenAuth(api.apiCSRFProtect(next))
 			}

@@ -27,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -538,9 +537,6 @@ func TestTheSummaryOffersNoUnblockOfAHostUnblockedSince(t *testing.T) {
 // the session said the bundle "does not apply to the uploaded history: git
 // bundle: signal: interrupt". A child the interrupt ended reads as such.
 func TestKilledByInterrupt(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("signals")
-	}
 	run := func(script string) error {
 		err := exec.Command("sh", "-c", script).Run()
 		return fmt.Errorf("workspace: the result bundle does not apply to the uploaded history: %w",
@@ -1080,7 +1076,7 @@ func TestSessionSummary(t *testing.T) {
 			}
 		}, want: []string{`notes\x1b[2J\x1b]0;DCMARKER\a\rx` + "\ufffdtxt.sh", "+changed"}, not: []string{"\x1b", "\x07", "\r", "\u202e"}},
 		{name: "keeping is confirmed and the diff paged", input: "d\ny\n", opts: claude, setup: func(ta *testApp) {
-			ta.App.pager = func(text string) bool {
+			ta.pager = func(text string) bool {
 				ta.err.WriteString(text)
 				return true
 			}
@@ -1316,7 +1312,7 @@ func TestKeepQuestionCtrlCSaysWhatIsLeft(t *testing.T) {
 	t.Cleanup(func() { _ = pw.Close() })
 	ta.IO.In = pr
 	sig := make(chan os.Signal, 1)
-	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+	ta.interrupts = func() (<-chan os.Signal, func()) {
 		sig <- os.Interrupt
 		return sig, func() {}
 	}

@@ -1147,7 +1147,7 @@ func TestPullCtrlCAtTheSensitiveQuestionSaysNothingWasApplied(t *testing.T) {
 	t.Cleanup(func() { _ = pw.Close() })
 	ta.IO.In, ta.IO.TTY = pr, true
 	sig := make(chan os.Signal, 1)
-	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+	ta.interrupts = func() (<-chan os.Signal, func()) {
 		sig <- os.Interrupt
 		return sig, func() {}
 	}
