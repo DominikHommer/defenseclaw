@@ -195,7 +195,6 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if seen.Header.Get("Traceparent") == "" || seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
 		t.Fatalf("allowlisted headers missing: %v", seen.Header)
 	}
-	mode = "plain"
 	mu.Unlock()
 	decisions, failures := obs.take()
 	if len(decisions) != 1 || len(failures) != 0 {
@@ -228,6 +227,7 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	}
 	mu.Lock()
 	decision.FailedClosed = false
+	mode = "plain"
 	mu.Unlock()
 
 	// A 2xx without a trailer records nothing.

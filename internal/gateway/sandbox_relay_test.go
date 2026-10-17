@@ -59,7 +59,7 @@ import (
 var relayTestPeer = managedHookPeer{UID: 1000, Name: "dev"}
 
 func TestSandboxRelayUsesAuthenticatedTraceParent(t *testing.T) {
-	const path = "/api/v1/sandbox-relay/hook/claudecode"
+	const path = sandboxrelay.PathHookPrefix + "claudecode"
 	var seen string
 	routes := map[string]sandboxRelayRoute{path: {
 		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
