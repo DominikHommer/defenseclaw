@@ -695,6 +695,7 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	run.previous = installed
 	driver.EnforcedConfig = installed
 	driver.RefuseCapabilityLoss = opts.refuseCapabilityLoss
+	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
 		return refuse(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error())

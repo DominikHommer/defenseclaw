@@ -257,3 +257,78 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 		})
 	}
 }
+
+// TestManagementContractBundleApplyDeliveryID pins F10 (guide section 4.3):
+// --delivery-id reaches the result bundle block, the public receipt files
+// and the refusal summary; a repeat of the current bundle reports the
+// confirmed receipt (and its delivery id), not its own; an invalid id or one
+// without a bundle is invalid_arguments, exit 2, before any receipt.
+func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
+	schemas := compileManagementContract(t)
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			v1, v2, _ := bundleConfigs(b.testHost)
+			b.mapPromotedBundleOwners(1)
+			path := b.dir(1, v1)
+			deliveryOf := func(doc map[string]any, block string) any {
+				t.Helper()
+				member, _ := doc[block].(map[string]any)
+				return member["delivery_id"]
+			}
+
+			first := b.run(Options{Action: ActionEnsure, Bundle: path, DeliveryID: "agent-7:d.1"})
+			requireOK(t, first)
+			doc := schemas.validateResult(t, "lifecycle-result.schema.json", first)
+			if got := deliveryOf(doc, "bundle"); got != "agent-7:d.1" {
+				t.Fatalf("bundle.delivery_id = %v, want agent-7:d.1", got)
+			}
+			store := b.env.bundleStore()
+			for _, file := range []string{filepath.Join(store.PublicReceiptEventsDir(), bundleID(1)+".json"), store.PublicReceiptPath()} {
+				raw, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if receipt := schemas.validate(t, "bundle-receipt.schema.json", raw); receipt["delivery_id"] != "agent-7:d.1" {
+					t.Fatalf("%s: %s", file, raw)
+				}
+			}
+
+			again := b.run(Options{Action: ActionEnsure, Bundle: path, DeliveryID: "agent-7:d.2"})
+			requireOK(t, again)
+			doc = schemas.validateResult(t, "lifecycle-result.schema.json", again)
+			// noop_reason is already_applied only when ensure repaired
+			// nothing else (guide 4.3), so the test reads the block alone.
+			if deliveryOf(doc, "bundle") != "agent-7:d.1" || doc["bundle"].(map[string]any)["receipt_id"] != bundleID(1) {
+				t.Fatalf("repeat: bundle=%v; want the confirmed receipt and its delivery id", doc["bundle"])
+			}
+			if events, _ := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json")); len(events) != 1 {
+				t.Fatalf("a repeat wrote a receipt: %v", events)
+			}
+
+			refused := b.run(Options{Action: ActionEnsure, Bundle: b.dir(1, v2), DeliveryID: "agent-7:d.3"})
+			requireError(t, refused, string(enterprisebundle.CodeVersionNotNewer))
+			doc = schemas.validateResult(t, "lifecycle-result.schema.json", refused)
+			if got := deliveryOf(doc, "last_refusal"); got != "agent-7:d.3" {
+				t.Fatalf("last_refusal.delivery_id = %v, want agent-7:d.3 (%v)", got, doc["last_refusal"])
+			}
+
+			events, _ := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json"))
+			for name, opts := range map[string]Options{
+				"invalid id":    {Action: ActionEnsure, Bundle: path, DeliveryID: "bad id"},
+				"id over 128":   {Action: ActionEnsure, Bundle: path, DeliveryID: string(bytes.Repeat([]byte("a"), 129))},
+				"id, no bundle": {Action: ActionEnsure, DeliveryID: "agent-7:d.4"},
+			} {
+				bad := b.run(opts)
+				requireError(t, bad, codeInvalidArguments)
+				if bad.ExitCode != enterprisestatus.UnixExitInvalidArgs {
+					t.Fatalf("%s: exit %d", name, bad.ExitCode)
+				}
+				schemas.validateResult(t, "lifecycle-result.schema.json", bad)
+			}
+			if after, _ := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json")); len(after) != len(events) {
+				t.Fatalf("an invalid delivery id wrote a receipt: %v -> %v", events, after)
+			}
+		})
+	}
+}

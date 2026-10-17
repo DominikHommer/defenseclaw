@@ -41,11 +41,14 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 
 // windowsBundleApplyLifecycleOptions turns the apply flags into the Windows
 // ensure options. --lock-wait bounds the wait for bundle.lock only; the
-// installer's lifecycle.lock keeps its fixed wait. --reason is accepted, so
-// one argv works on every OS, and not forwarded: nothing on Windows records
-// it.
+// installer's lifecycle.lock keeps its fixed wait. --delivery-id goes to the
+// receipt. --reason is accepted, so one argv works on every OS, and not
+// forwarded: nothing on Windows records it.
 func windowsBundleApplyLifecycleOptions(cmd *cobra.Command, opts *bundleApplyOptions) (*windowsEnterpriseLifecycleOptions, error) {
 	if err := checkWindowsLockWait(cmd, opts.lockWait); err != nil {
+		return nil, err
+	}
+	if err := checkDeliveryID(cmd, opts.deliveryID); err != nil {
 		return nil, err
 	}
 	bundle, err := filepath.Abs(opts.bundle)
@@ -54,6 +57,6 @@ func windowsBundleApplyLifecycleOptions(cmd *cobra.Command, opts *bundleApplyOpt
 	}
 	return &windowsEnterpriseLifecycleOptions{
 		bundlePath: bundle, profile: managed.ProfileStandalone, jsonOutput: opts.json,
-		refuseCapabilityLoss: opts.refuseCapabilityLoss, bundleLockWait: opts.lockWait,
+		refuseCapabilityLoss: opts.refuseCapabilityLoss, bundleLockWait: opts.lockWait, bundleDeliveryID: opts.deliveryID,
 	}, nil
 }

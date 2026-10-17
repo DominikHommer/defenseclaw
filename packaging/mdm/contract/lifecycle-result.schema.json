@@ -204,11 +204,16 @@
         "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
       }
     },
+    "deliveryId": {
+      "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "The opaque id the caller passed to `enterprise bundle apply --delivery-id` (management_contract 1): 1 to 128 bytes of A-Z a-z 0-9 . _ : -. Caller-supplied, so it names a delivery, not who made it: an MDM wrapper, a management agent and an administrator can all pass one. Absent when the apply had no --delivery-id (Setup BUNDLE=, `enterprise windows ensure --bundle`, the inbox path unit, the MDM kits) and on builds without the flag."
+    },
     "bundleRefusal": {
       "type": "object", "additionalProperties": false,
       "required": ["receipt_id", "error_code", "time"],
       "properties": {
         "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the refused delivery." },
         "bundle_id": { "type": "string", "pattern": "^b-[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
         "version": { "type": "integer", "minimum": 0 },
         "error_code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
@@ -223,6 +228,7 @@
       "required": ["bundle_id", "version", "state"],
       "properties": {
         "receipt_id": { "type": "string", "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$", "description": "The id of the receipt this block reports, the file name of <etc>/bundles/receipt-events/<receipt_id>.json (management_contract 1). Absent on older builds and when no receipt was kept (a refusal before the bundle was received). A repeated delivery of the current bundle (already_applied) writes no receipt and reports the current confirmed receipt's id." },
+        "delivery_id": { "$ref": "#/$defs/deliveryId", "description": "The --delivery-id of the delivery whose receipt this block reports. A repeated delivery of the current bundle (already_applied) reports the confirmed receipt, so this is that delivery's id (or absent), never the repeat's own." },
         "bundle_id": { "type": "string", "pattern": "^(b-[0-7][0-9A-HJKMNP-TV-Z]{25})?$", "description": "Empty only for the receipt of a bundle whose manifest could not be read: received (a run in progress or interrupted) or failed." },
         "version": { "type": "integer", "minimum": 0 },
         "state": { "type": "string", "enum": ["received", "verified", "staged", "applied", "confirmed", "failed"] },

@@ -157,6 +157,7 @@ stderr, and the exit code is the only signal.
 | Unknown flag, malformed value or stray argument on a lifecycle verb | 2 / 1639 |
 | `bundle apply` without `--bundle`; with both `--bundle` and `--inbox` (Linux, macOS); with `--inbox` (Windows) | 2 / 1639 |
 | `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
+| `bundle apply --delivery-id` empty, over 128 bytes, or with a byte outside `A-Z a-z 0-9 . _ : -` (2.6) | 2 / 1639 |
 | Linux and macOS `secret set` / `remove` not run as root | 1 |
 | Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
@@ -218,20 +219,39 @@ call for that name did not end with exit 0. After a Windows `restart_failed`
 when the agent stopped, 2.4), the value can be stored while the gateway runs
 with the old one: resubmit even when the prefix matches.
 
-### 2.6 `--reason`
+### 2.6 `--reason` and `--delivery-id`
 
 `--reason` is not recorded anywhere a caller can read: the result has no
-reason field, and receipts carry only `actor`, the OS account that ran the
+reason field, and receipts carry `actor`, the OS account that ran the
 apply (`os:uid:0:root` on Linux and macOS, `os:sid:S-1-5-18:<name>` for
-LocalSystem on Windows), which is the same for MDM and agent alike. On Linux and macOS some values switch modes: `path` takes
-a bundle from the inbox and runs the path unit's logic, and `package` runs the
-package and tamper handling. The agent passes `--reason management` or no
-`--reason`; `path`, `package`, `secret` and `mdm` are reserved for
-DefenseClaw's own units, packages and kits. Windows accepts the flag and
-ignores it, so one argv works on every OS. The only way to tell the agent's
-applies from MDM or administrator applies is the agent's own list of receipt
-ids, kept as section 4.3 says (a repeat of the current bundle returns an id
-the agent did not create).
+LocalSystem on Windows), which is the same for MDM and agent alike. On Linux
+and macOS some values switch modes: `path` takes a bundle from the inbox and
+runs the path unit's logic, and `package` runs the package and tamper
+handling. The agent passes `--reason management` or no `--reason`; `path`,
+`package`, `secret` and `mdm` are reserved for DefenseClaw's own units,
+packages and kits. Windows accepts the flag and ignores it, so one argv works
+on every OS.
+
+`--delivery-id <id>` (every OS) records an opaque id the caller chooses for
+one delivery: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`
+(no space, no control character; a bad or empty value is an argument error,
+section 2.3). It is written as `delivery_id` on the receipt and appears in
+`receipt-events/<receipt_id>.json` and `receipt.json` (also in their
+`last_refusal`), in the result `bundle` and `last_refusal` blocks, and in
+`bundle status` (`last_receipt`, `bundle`, `last_refusal`). Without the flag
+no `delivery_id` member is written and every output is unchanged. Use an id
+unique to the delivery, such as the agent's own delivery or job id.
+
+There is no delivery channel field. The MDM kits and a management agent both
+run `bundle apply --bundle` as root or SYSTEM, and nothing the apply can check
+without trusting the caller tells them apart (`--reason`, the argv and the
+parent process are all the caller's choice). `delivery_id` is caller-supplied
+too: it names a delivery and does not prove who made it, since any root or
+administrator caller can pass any id, including one the agent uses. The MDM
+kits, Setup `BUNDLE=`, `enterprise windows ensure --bundle` and the inbox path
+unit pass none. The agent's own list of receipt ids (section 4.3) stays the way
+to tell its applies from MDM or administrator applies; `delivery_id` makes
+matching a receipt to the agent's delivery direct.
 
 ## 3. Version probe and fallbacks
 
@@ -253,6 +273,7 @@ use these fallbacks on it:
 | Item | `management_contract` 1 | Member absent |
 |---|---|---|
 | `receipt_id` | apply and status results carry `bundle.receipt_id` | match the receipt by `bundle_id` and a `finished_at` after the apply started (section 4.9) |
+| `--delivery-id` | `bundle apply --delivery-id` records `delivery_id` (2.6) | an unknown flag: exit 2 / 1639 with no JSON; leave it out and match by `receipt_id` or as above |
 | Windows apply lock wait | Windows `bundle apply` waits up to `--lock-wait` for `bundle.lock` | the flag is accepted and ignored; a held `bundle.lock` returns 1618 at once, and the agent's backoff does the waiting |
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
@@ -335,10 +356,11 @@ Exit 0.
 ### 4.3 Apply a bundle: `enterprise bundle apply`
 
 - argv: `enterprise bundle apply --bundle <file> --reason management
-  [--refuse-capability-loss] --lock-wait 10m --json`. Pass
+  --delivery-id <id> [--refuse-capability-loss] --lock-wait 10m --json`. Pass
   `--refuse-capability-loss` on every apply after the first bundle: it refuses
   a bundle that turns off a capability the device enforces now
-  (`capability_loss`). Never use `--inbox`.
+  (`capability_loss`). Pass a `--delivery-id` unique to this delivery (2.6);
+  it is optional. Never use `--inbox`.
 - Privilege: root on Linux and macOS (`not_root`); an elevated administrator
   or SYSTEM on Windows (`not_admin`).
 - Preconditions: a standalone managed device; trust anchors installed
@@ -389,6 +411,11 @@ Exit 0.
   delivery's: do not add it to the list. A repeat has `noop_reason`
   `already_applied`, or a `bundle.confirmed_at` earlier than the time the
   agent started the apply.
+- **`delivery_id`**: `bundle.delivery_id` (or `last_refusal.delivery_id`) is
+  the `--delivery-id` of the delivery that block reports. It equals the id
+  passed exactly when the block is this apply's receipt by the rules above. A
+  repeat reports the confirmed receipt, so its `delivery_id` is that earlier
+  delivery's (an MDM or administrator apply has none), not the one passed.
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
@@ -397,12 +424,12 @@ Exit 0.
 
 ```sh
 "$GW" enterprise bundle apply --bundle /var/lib/<vendor>/inbox/v13.dcbundle \
-  --reason management --refuse-capability-loss --lock-wait 10m --json
+  --reason management --delivery-id acme-agent:d-000913 --refuse-capability-loss --lock-wait 10m --json
 ```
 ```powershell
 # --lock-wait waits for bundle.lock only; retry a 1618 from a busy installer lock yourself.
 & $GW enterprise bundle apply --bundle 'C:\ProgramData\<Vendor>\inbox\v13.dcbundle' `
-  --reason management --refuse-capability-loss --lock-wait 10m --json
+  --reason management --delivery-id acme-agent:d-000913 --refuse-capability-loss --lock-wait 10m --json
 ```
 
 ### 4.4 Device state: `enterprise <os> status`
@@ -647,6 +674,9 @@ enforcing.
   Receipts whose id is not in the agent's own list (4.3) came from MDM or an
   administrator. On a build without `management_contract`,
   match on `bundle_id` with `finished_at` after the apply started.
+- `delivery_id` is present when the apply had `--delivery-id` (2.6). The
+  `config.bundle.receipt` audit event and OTel do not carry it; only these
+  files, the command results and `bundle status` do.
 - Remember the last forwarded id; nothing is acknowledged back.
 
 ```sh
@@ -746,8 +776,8 @@ Later bundles go through 5.2.
    first.
 3. Run 4.2 verify. `already_applied`: done. `refused`: report
    `errors[0].code` and stop (final).
-4. Run 4.3 apply on a worker thread, with `--refuse-capability-loss` (every
-   apply after the first bundle). Apply the success test of 4.3 and the retry
+4. Run 4.3 apply on a worker thread, with a new `--delivery-id` and
+   `--refuse-capability-loss` (every apply after the first bundle). Apply the success test of 4.3 and the retry
    classes of section 2.2. Record the agent's own receipt id (4.3).
 5. Forward the receipt (4.9). Report anchor and credential changes yourself
    (section 0).
@@ -797,6 +827,9 @@ Per-user installs and Secure Client computers refuse every command.
   after a fixed 5 s wait; it is not a device failure.
 - Receipt files are written best effort (4.9); stdout and `bundle status` are
   authoritative.
+- `delivery_id` is caller-supplied and not authenticated, and no receipt
+  records the delivery channel (MDM, agent, administrator): the apply cannot
+  tell them apart without trusting the caller (2.6).
 - Trust anchor and credential changes are not audited by DefenseClaw
   (section 0).
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
