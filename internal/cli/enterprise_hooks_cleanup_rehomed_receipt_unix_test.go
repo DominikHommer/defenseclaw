@@ -205,6 +205,24 @@ func TestStandaloneCleanupMovedOpenCodeReceipt(t *testing.T) {
 	}
 }
 
+// A move by copy, then emptying the old home (rsync and delete), leaves the
+// old home as an empty folder. The copied receipt follows the move as it does
+// when the old home is gone, so the row ends once the current home is clean
+// (GAP-0633).
+func TestStandaloneCleanupEmptiedOldHomeOpenCodeReceipt(t *testing.T) {
+	c := setupRehomedOpenCodeCase(t, false, true)
+	if err := os.Mkdir(c.oldHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, c.entry, c.resolver)
+	if outcome != enterpriseHookUserCleanupDone || err != nil {
+		t.Fatalf("emptied old home cleanup = %v, %v", outcome, err)
+	}
+	if _, err := os.Lstat(c.newPlugin); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the current home still loads the plugin: %v", err)
+	}
+}
+
 func alterCopiedPluginFirstLine(t *testing.T, path string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(path)

@@ -463,8 +463,11 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 // The mapping only applies when the record itself lives under the current
 // home, the captured target is outside it, the old root of the captured
 // target no longer exists at all, and the same relative file exists under
-// the current home. Restore still compares the hash of the file with the
-// one setup recorded before it writes anything.
+// the current home. An account moved by copying its home and then emptying
+// the old folder (rsync, then deleting what it held) keeps the old home as an
+// empty folder; that empty folder is the old root too (GAP-0633). Restore
+// still compares the hash of the file with the one setup recorded before it
+// writes anything.
 func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" || strings.TrimSpace(captured) == "" {
@@ -476,8 +479,23 @@ func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool
 	if err != nil || !filepath.IsAbs(captured) || !managedPathWithin(record, home) || managedPathWithin(captured, home) {
 		return "", false
 	}
-	oldRoot := shallowestMissingAncestor(captured)
-	if oldRoot == "" || managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
+	missing := shallowestMissingAncestor(captured)
+	if missing == "" {
+		return "", false
+	}
+	if candidate, ok := managedBackupTargetUnder(home, missing, captured); ok {
+		return candidate, true
+	}
+	if parent := filepath.Dir(missing); parent != filepath.Dir(parent) && emptyDirectory(parent) {
+		return managedBackupTargetUnder(home, parent, captured)
+	}
+	return "", false
+}
+
+// managedBackupTargetUnder maps captured below oldRoot onto the same file
+// under home, when that file exists and neither root holds the other.
+func managedBackupTargetUnder(home, oldRoot, captured string) (string, bool) {
+	if managedPathWithin(home, oldRoot) || managedPathWithin(oldRoot, home) {
 		return "", false
 	}
 	rel, err := filepath.Rel(oldRoot, captured)
@@ -489,6 +507,17 @@ func managedBackupTargetAfterHomeMove(recordPath, captured string) (string, bool
 		return "", false
 	}
 	return candidate, true
+}
+
+// emptyDirectory reports whether path is a directory (not a link to one)
+// that holds no entry.
+func emptyDirectory(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
 }
 
 // shallowestMissingAncestor returns the first directory on the way down to
