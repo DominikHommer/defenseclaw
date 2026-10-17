@@ -805,6 +805,7 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" linux/amd64 windows/amd64
+      - run: test -s "$RUNNER_TEMP/assets/defenseclaw-fleet-assets.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: install-smoke-assets

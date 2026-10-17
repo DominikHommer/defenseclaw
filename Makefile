@@ -1369,7 +1369,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	@rm -rf build cli/*.egg-info
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
-	git archive --format=tar.gz --output "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" HEAD \
+	tar -czf "$(DIST_DIR)/defenseclaw-fleet-assets.tar.gz" -C . \
 		edge-connector bundles/local_observability_stack/docker-compose.fleet.yml \
 		bundles/local_observability_stack/prometheus/examples/fleet.yml \
 		bundles/local_observability_stack/grafana/dashboards/defenseclaw-fleet.json

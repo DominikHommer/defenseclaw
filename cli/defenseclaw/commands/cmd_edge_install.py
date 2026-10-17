@@ -272,18 +272,15 @@ def _configure_remote_env(
         return False
 
 
-def _find_service_file() -> Path | None:
+def _find_service_file(source: Path) -> Path | None:
     """Locate the systemd unit file relative to the edge-connector source."""
-    source = _find_edge_connector_source()
-    if source is None:
-        return None
     candidate = source / "packaging" / "edge-connector.service"
     return candidate if candidate.is_file() else None
 
 
-def _install_systemd_unit(target: str, user: str) -> bool:
+def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit file and enable/start the service on the remote device."""
-    service_file = _find_service_file()
+    service_file = _find_service_file(source)
     if service_file is None:
         ux.warn("Systemd unit file not found; skipping service installation.")
         return False
@@ -321,14 +318,14 @@ def _install_systemd_unit(target: str, user: str) -> bool:
     return True
 
 
-def _install_local_systemd_unit() -> bool:
+def _install_local_systemd_unit(source: Path) -> bool:
     """Install the systemd unit file and enable/start the service locally."""
     import platform
     if platform.system() != "Linux":
         ux.warn(f"Systemd is not available on {platform.system()}; skipping service installation.")
         return False
 
-    service_file = _find_service_file()
+    service_file = _find_service_file(source)
     if service_file is None:
         ux.warn("Systemd unit file not found; skipping service installation.")
         return False
@@ -485,7 +482,7 @@ def _verify_remote_daemon(target: str, user: str) -> bool:
     return False
 
 
-def _start_remote_daemon(target: str, user: str) -> bool:
+def _start_remote_daemon(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit and start the service on the remote device.
 
     Falls back to printing manual instructions if the unit file is missing
@@ -493,7 +490,7 @@ def _start_remote_daemon(target: str, user: str) -> bool:
 
     Returns True if the daemon was started and verified, False otherwise.
     """
-    if _install_systemd_unit(target, user):
+    if _install_systemd_unit(source, target, user):
         if _verify_remote_daemon(target, user):
             return True
         ux.err(
@@ -687,7 +684,7 @@ def edge_install(
             )
             raise SystemExit(1)
 
-        daemon_ok = _start_remote_daemon(target, user)
+        daemon_ok = _start_remote_daemon(source, target, user)
 
         ux.echo()
         if daemon_ok:
@@ -724,7 +721,7 @@ def edge_install(
             raise SystemExit(1)
 
         # Try to install the systemd service locally
-        svc_ok = _install_local_systemd_unit()
+        svc_ok = _install_local_systemd_unit(source)
 
         if svc_ok:
             if not _verify_local_service():
