@@ -22,9 +22,10 @@ import (
 )
 
 // Trust anchor install for a root management agent (`enterprise bundle
-// anchors install`, Linux and macOS). It writes the file the MDM kit's
-// dc_put_anchors writes (<etc>/trust/bundle-anchors.json, root 0644 in a
-// root 0755 folder), with three things the kit leaves to its caller: the
+// anchors install`, Linux and macOS; the MDM kit's dc_install_anchors runs it
+// when the installed gateway has it). It writes the file the kit's fallback
+// writer dc_put_anchors writes (<etc>/trust/bundle-anchors.json, root 0644 in
+// a root 0755 folder), with three things that writer leaves out: the
 // source is checked the way an installed anchor file is (LoadAnchors with
 // the managed trust check on the file and every folder above it) and read
 // once, the write happens under the lifecycle lock, so it cannot land in

@@ -548,9 +548,12 @@ $env:AI_DEFENSE_KEY | & $GW enterprise secret set --name ai-defense-api-key --fr
 
 **One anchors owner per device.** Either MDM owns the trust anchors (the
 shell kit's `--trust-anchor-file`, Windows Setup `TRUSTANCHORS=`) or the agent
-does (the calls below), never both. The shell kit writes and restores the
-anchor file without the lifecycle lock, so a kit run can undo an agent
-install at any time, and an MDM re-delivery puts its own file back. That
+does (the calls below), never both. The shell kit installs its anchor file
+on every run and puts the previous one back after a failed apply: with
+`bundle anchors install` under the lifecycle lock when the installed build
+has `management_contract`, otherwise by writing the file itself without the
+lock. Either way a kit run can undo an agent install at any time, and an MDM
+re-delivery puts its own file back. That
 fails closed (bundles signed by the agent's new key are refused
 `key_unknown`; the current bundle keeps enforcing) but stops policy updates.
 On a device where MDM owns the anchors, the agent applies only bundles signed
@@ -593,8 +596,9 @@ is still the one owner.
 "$GW" enterprise bundle anchors install --file /var/lib/<vendor>/trust/bundle-anchors.json --lock-wait 10m --json
 ```
 
-On a Linux or macOS build without `management_contract`, run the MDM kit's
-recipe as root. It does not check the source folder; check it yourself first:
+On a Linux or macOS build without `management_contract`, run the recipe the
+MDM kit falls back to on such a build, as root. It does not check the source
+folder; check it yourself first:
 
 ```sh
 ETC=/etc/defenseclaw            # macOS: /opt/cisco/defenseclaw/etc
@@ -769,8 +773,8 @@ busy past 30 s gets 1618.
 MDM runs and the Linux bundle path unit
 (`packaging/systemd/defenseclaw-enterprise-apply.{path,service}`) take the
 same locks, so an MDM apply and an agent apply serialize: one of them waits or
-gets 75 / 1618. The shell kit's anchor writes are the exception (4.8, one
-anchors owner).
+gets 75 / 1618. The shell kit's anchor writes on a build without
+`management_contract` are the exception (4.8, one anchors owner).
 
 ## 7. Not in the contract (version 1)
 
