@@ -841,7 +841,8 @@ func (t *procTree) candidatesAtLocked(exe string, at time.Time) []*procNode {
 	for _, nodes := range [][]*procNode{slices.Collect(maps.Values(t.live)), t.exited} {
 		for _, n := range nodes {
 			start := n.startedAt()
-			if !(n.runs(exe) || n.ExecID != "" && pythonInterpreterAlias(n.Exe, exe)) || n.PID <= 0 ||
+			matches := n.runs(exe) || n.ExecID != "" && pythonInterpreterAlias(n.Exe, exe)
+			if !matches || n.PID <= 0 ||
 				(n.ExecID == "" && start.Before(at.Add(-lineageStartWindow))) || start.After(at.Add(lineageClockSlack)) ||
 				(!n.ExitedAt.IsZero() && n.ExitedAt.Before(at)) {
 				continue
