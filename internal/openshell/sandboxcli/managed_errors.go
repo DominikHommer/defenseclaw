@@ -132,13 +132,37 @@ func accountOutageContact(contact string) string {
 	return "If it lasts, tell IT: " + text
 }
 
+// accountRechecks and accountRecheckEvery are how long a managed run waits
+// for the computer to look the account up before it refuses: 10 seconds, as
+// long as a create waits for a cold group lookup. An SSSD that restarts, or
+// whose cache comes back, then starts the run instead of refusing it
+// (GAP-0507).
+const (
+	accountRechecks     = 5
+	accountRecheckEvery = 2 * time.Second
+)
+
 // checkAccount stops a managed run at its start when the account cannot be
-// looked up, before the project is copied.
+// looked up, before the project is copied. It asks again for up to 10
+// seconds first, and refuses (fails closed) if the computer still names no
+// account: ssh, over which OpenShell reaches every sandbox, cannot run for
+// it.
 func (a *App) checkAccount(ctx context.Context) error {
 	if a.AccountCheck == nil {
 		return nil
 	}
-	return a.accountOutage(ctx, a.AccountCheck())
+	err := a.AccountCheck()
+	var lookup *openshell.AccountLookupError
+	if errors.As(err, &lookup) {
+		a.note("This computer can't look your account up right now; waiting up to 10 seconds for it.")
+		for i := 0; i < accountRechecks && errors.As(err, &lookup); i++ {
+			if a.Sleep == nil || a.Sleep(ctx, accountRecheckEvery) != nil {
+				break
+			}
+			err = a.AccountCheck()
+		}
+	}
+	return a.accountOutage(ctx, err)
 }
 
 // managedFlagRefusal refuses, before the project is copied or anything is
