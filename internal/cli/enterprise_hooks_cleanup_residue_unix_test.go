@@ -60,7 +60,8 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 		}
 		return home, plugin, receipt, opts
 	}
-	run := func(home string, opts enterprisehooks.InstallOptions) []enterpriseHookWorkerTargetResult {
+	run := func(t *testing.T, home string, opts enterprisehooks.InstallOptions) []enterpriseHookWorkerTargetResult {
+		t.Helper()
 		purge := enterpriseHookWorkerTarget{Index: 1, Mode: enterpriseHookWorkerModePurge, Options: enterpriseHookWorkerOptions{
 			UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(), DataDir: filepath.Join(home, ".defenseclaw"),
 		}}
@@ -71,10 +72,8 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 		if len(results) != 2 {
 			t.Fatalf("worker answered %d targets: %+v", len(results), results)
 		}
-		for i, target := range request.Targets {
-			if err := validateEnterpriseHookWorkerResult(target, results[i]); err != nil {
-				t.Fatalf("target %d: invalid worker result %+v: %v", i, results[i], err)
-			}
+		if err := validateEnterpriseHookWorkerRemoveReport(results[0]); err != nil {
+			t.Fatalf("invalid remove report %+v: %v", results[0], err)
 		}
 		return results
 	}
@@ -89,7 +88,7 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 		if err := os.WriteFile(plugin, edited, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		results := run(home, opts)
+		results := run(t, home, opts)
 		if !results[0].OK || !results[0].PathsReported || results[0].Remaining == "" {
 			t.Fatalf("remove did not report the edited plugin: %+v", results[0])
 		}
@@ -125,7 +124,7 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 		enterpriseHookWorkerRemover = func(context.Context, enterprisehooks.InstallOptions) error { return nil }
 		opts := enterprisehooks.InstallOptions{ConnectorName: "opencode", UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
 			DataDir: dataDir, Registry: connector.NewDefaultRegistry()}
-		results := run(home, opts)
+		results := run(t, home, opts)
 		if !results[0].OK || results[0].PathsReported || results[0].Unverified == "" {
 			t.Fatalf("remove did not stay unverified: %+v", results[0])
 		}
@@ -139,7 +138,7 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 
 	t.Run("clean removal purges", func(t *testing.T) {
 		home, plugin, _, opts := install(t)
-		results := run(home, opts)
+		results := run(t, home, opts)
 		if !results[0].OK || !results[0].PathsReported || results[0].Remaining != "" {
 			t.Fatalf("clean removal = %+v", results[0])
 		}
@@ -155,12 +154,18 @@ func TestEnterpriseHookWorkerPurgeKeepsStateAfterUncleanRemove(t *testing.T) {
 	})
 }
 
-// A re-homed row ends only when its recorded home is clean too. A plugin the
-// operator edited in the recorded home survives the teardown there, and an
-// agent run with that home still loads it, so the row stays Failed with the
-// path, and remove-all does not count it removed (GAP-0625).
+// A re-homed row ends only when its recorded home is clean too. The current
+// home is clean (its copied plugin is DefenseClaw's own and the stale copied
+// receipt is gone), but a plugin the operator edited in the recorded home
+// survives the teardown there, and an agent run with that home still loads
+// it. The row stays Failed with the path, and remove-all does not count it
+// removed (GAP-0625).
 func TestStandaloneCleanupRecordedHomeEditedPluginKeepsRow(t *testing.T) {
 	c := setupRehomedOpenCodeCase(t, false, false)
+	copiedReceipt := filepath.Join(c.currentHome, ".defenseclaw", "connector_backups", "opencode", "config.json")
+	if err := os.Remove(copiedReceipt); err != nil {
+		t.Fatal(err)
+	}
 	original, err := os.ReadFile(c.oldPlugin)
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +180,7 @@ func TestStandaloneCleanupRecordedHomeEditedPluginKeepsRow(t *testing.T) {
 		!strings.Contains(err.Error(), "rerun") {
 		t.Fatalf("recorded-home residue cleanup = %v, %v; want a kept row naming the recorded home", outcome, err)
 	}
+	t.Logf("kept row: %v", err)
 	if _, statErr := os.Lstat(c.newPlugin); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("the current home still loads the copied plugin: %v", statErr)
 	}
