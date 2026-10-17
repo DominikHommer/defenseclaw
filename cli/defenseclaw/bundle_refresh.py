@@ -316,7 +316,9 @@ _LOCAL_OBSERVABILITY_RETIRED_PATHS: tuple[str, ...] = ("grafana/dashboards/defen
 _LOCAL_OBSERVABILITY_RETIRED_SHA256: dict[str, frozenset[str]] = {
     "docker-compose.fleet.yml": frozenset({"064c52a51e34d1eecad79a3aa1c227d3c4eeff084ad905ab2eb15d23eaf558ca"}),
     "prometheus/examples/fleet.yml": frozenset({"ab61cbb6140b630af054e351acc213bff2e7b64fd4f5b0ff7532829db7b66075"}),
-    "grafana/dashboards/defenseclaw-fleet.json": frozenset({"f91450a43b59eb832501779fd9bb33fb6f644760de397dd34156e98213f7c202"}),
+    "grafana/dashboards/defenseclaw-fleet.json": frozenset(
+        {"f91450a43b59eb832501779fd9bb33fb6f644760de397dd34156e98213f7c202"}
+    ),
     "grafana/dashboards/defenseclaw-reliability.json": frozenset(
         {
             "4993c6ca65313823a410df84778531c377eec217b2947f2e78d083b18437aae5",

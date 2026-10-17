@@ -48,7 +48,11 @@ def _find_edge_connector_source(source_dir: Path | None = None) -> Path | None:
     if source_dir is None and cli_pkg.parent.name == "cli" and (cli_pkg.parent.parent / "pyproject.toml").is_file():
         candidates.append(cli_pkg.parent.parent / "edge-connector")
     for candidate in candidates:
-        if (candidate / "CMakeLists.txt").is_file() and (candidate / "src" / "main.c").is_file() and not candidate.is_symlink():
+        if (
+            (candidate / "CMakeLists.txt").is_file()
+            and (candidate / "src" / "main.c").is_file()
+            and not candidate.is_symlink()
+        ):
             return candidate
     return None
 
