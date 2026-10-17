@@ -28,6 +28,7 @@ const startupIntegrityCheckTimeout = 5 * time.Second
 const (
 	sqliteCodeReadOnly = 8
 	sqliteCodeCorrupt  = 11
+	sqliteCodeProtocol = 15
 	sqliteCodeNotADB   = 26
 )
 
@@ -215,7 +216,7 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 		return nil, errors.Join(validationErr, closeErr)
 	}
 	if checkErr != nil && !isSQLiteCorrupt(checkErr) {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) || isSQLiteBusy(checkErr) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || isTransientSQLiteProbeError(checkErr) {
 			fmt.Fprintf(warn, "[audit] startup integrity check skipped: %v\n", checkErr)
 			return sidecars, nil
 		}
@@ -236,6 +237,23 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 		return sidecars, nil
 	}
 	return sidecars, checkErr
+}
+
+// isTransientSQLiteProbeError reports contention a later open does not
+// hit: a busy or locked store, including the extended codes, or the WAL
+// locking protocol giving up while another process recovers the log.
+func isTransientSQLiteProbeError(err error) bool {
+	if isSQLiteBusy(err) {
+		return true
+	}
+	var coded sqliteCoded
+	if errors.As(err, &coded) {
+		switch coded.Code() & 0xff {
+		case sqliteCodeBusy, sqliteCodeLocked, sqliteCodeProtocol:
+			return true
+		}
+	}
+	return false
 }
 
 func hasPopulatedWAL(sidecars []auditSidecarAtStart) bool {

@@ -242,3 +242,27 @@ func TestArchiveRecoveryHintCopiesFirstAndRepairsTheHeaderOnTheCopy(t *testing.T
 		}
 	}
 }
+
+type codedProbeError int
+
+func (e codedProbeError) Error() string { return "sqlite error" }
+func (e codedProbeError) Code() int     { return int(e) }
+
+// Contention, including extended codes, skips the probe; any other read
+// failure with a populated WAL refuses the start (rel-1-0-2:GAP-0609).
+func TestIsTransientSQLiteProbeError(t *testing.T) {
+	for code, want := range map[int]bool{
+		5:        true,  // SQLITE_BUSY
+		5 | 1<<8: true,  // SQLITE_BUSY_RECOVERY
+		6:        true,  // SQLITE_LOCKED
+		15:       true,  // SQLITE_PROTOCOL
+		1:        false, // SQLITE_ERROR, such as an unsupported file format
+		10:       false, // SQLITE_IOERR
+		14:       false, // SQLITE_CANTOPEN
+		8 | 5<<8: false, // SQLITE_READONLY_CANTINIT: the writable open recovers it
+	} {
+		if got := isTransientSQLiteProbeError(codedProbeError(code)); got != want {
+			t.Errorf("isTransientSQLiteProbeError(code %d) = %v, want %v", code, got, want)
+		}
+	}
+}
