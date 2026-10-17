@@ -39,6 +39,7 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"standalone hermes", NewHermesConnector(), standalone, "closed"},
 		{"standalone copilot", NewCopilotConnector(), standalone, "closed"},
 		{"secure client hermes", NewHermesConnector(), secureClient, "open"},
+		{"secure client cursor observe", NewCursorConnector(), secureClient, "open"},
 		{"per-user cursor observe", NewCursorConnector(), perUser, "open"},
 		{"per-user hermes", NewHermesConnector(), perUser, "open"},
 	} {
@@ -66,9 +67,15 @@ func TestManagedShellHooksIgnoreTheEnvironmentFailMode(t *testing.T) {
 				if script.name != name {
 					continue
 				}
-				envOverride := strings.Contains(string(script.body), `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-`)
-				if managed == envOverride {
-					t.Errorf("%s managed=%v: environment fail mode honoured = %v", name, managed, envOverride)
+				body := string(script.body)
+				// The baked line keeps its form for doctor and status; a
+				// managed hook pins the rendered value right after it.
+				if !strings.Contains(body, `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-closed}"`) {
+					t.Errorf("%s managed=%v: baked fail-mode line missing", name, managed)
+				}
+				pinned := strings.Contains(body, "FAIL_MODE=\"${DEFENSECLAW_FAIL_MODE:-closed}\"\nFAIL_MODE=\"closed\"\n")
+				if managed != pinned {
+					t.Errorf("%s managed=%v: rendered fail mode pinned = %v", name, managed, pinned)
 				}
 			}
 		}

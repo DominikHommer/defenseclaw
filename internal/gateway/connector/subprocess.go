@@ -1463,9 +1463,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  0. A managed install's explicit "closed" stays closed: the managed config
-//     resolver already applied the managed rules (outside Secure Client
-//     every connector is closed, config.ManagedHooksFailClosed).
+//  0. A managed standalone render's "closed" stays closed: outside Secure
+//     Client the managed config resolves every connector closed
+//     (config.ManagedHooksFailClosed).
 //  1. Cursor observe mode always resolves to "open"; host failClosed and
 //     adapter transport failures must not enforce outside action mode.
 //  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
@@ -1571,10 +1571,10 @@ func managedStandaloneRender(opts SetupOpts) bool {
 // "closed" when the operator has set the matching enforcement flag for
 // codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
-	if opts.ManagedEnterprise && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "closed") {
-		// The managed config resolver already applied the managed rules
-		// (config.ManagedHooksFailClosed, the Secure Client Cursor
-		// boundary); a managed closed is never reopened here.
+	if managedStandaloneRender(opts) && strings.EqualFold(strings.TrimSpace(opts.HookFailMode), "closed") {
+		// A managed standalone config resolves every connector closed
+		// (config.ManagedHooksFailClosed); Cursor's observe boundary does
+		// not reopen it. Secure Client keeps the Cursor rule below.
 		return "closed"
 	}
 	if c != nil && c.Name() == "cursor" {

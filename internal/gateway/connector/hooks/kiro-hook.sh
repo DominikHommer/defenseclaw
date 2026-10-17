@@ -78,7 +78,8 @@ defenseclaw_harden_env
 
 # A managed hook takes only its rendered fail mode, never one from the
 # environment (the shared inspect hooks do the same).
-FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"
+FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}
 {{end}}DEFENSECLAW_HOOK_CONNECTOR="kiro"
 DEFENSECLAW_HOOK_NAME="kiro-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME

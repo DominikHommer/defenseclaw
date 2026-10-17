@@ -79,7 +79,8 @@ defenseclaw_harden_env
 # 429, an unversioned placeholder a relay 500), so no failed, refused or
 # unparseable reply may ever turn into an allow.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"{{end}}
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}{{end}}
 
 # Setup binds each handler to one finite vendor event and hook contract. Keep
 # those values out of environment variables so the registered command remains

@@ -66,7 +66,8 @@ defenseclaw_harden_env
 # Antigravity enforces only a synchronous PreToolUse {"decision":"deny"} on
 # stdout, which every failure below prints for that event.
 FAIL_MODE="closed"
-readonly FAIL_MODE{{else}}FAIL_MODE="{{if .Managed}}{{.FailMode}}{{else}}${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}{{end}}"{{end}}
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{if .Managed}}
+FAIL_MODE="{{.FailMode}}"{{end}}{{end}}
 
 {{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
 # an unreachable DefenseClaw, a request it refused, a reply that is no
