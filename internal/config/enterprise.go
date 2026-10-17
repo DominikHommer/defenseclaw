@@ -1362,8 +1362,8 @@ func standaloneInlineSecrets(cfg *Config) []string {
 	// Provider extra_headers has only scalar values today, with no reference
 	// form. A benign-looking name can still carry a credential, so a managed
 	// config cannot safely accept any of these literal values.
-	for name := range cfg.LLM.ExtraHeaders {
-		inline = append(inline, "llm.extra_headers."+name)
+	if len(cfg.LLM.ExtraHeaders) > 0 {
+		inline = append(inline, "llm.extra_headers")
 	}
 	slices.Sort(inline)
 	return inline

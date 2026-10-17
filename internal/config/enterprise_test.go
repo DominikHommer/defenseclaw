@@ -906,9 +906,9 @@ func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
 	}{
 		{"legacy inspect key", func(c *Config) { c.InspectLLM.APIKey = "example-sensitive-value" }, "inspect_llm.api_key"},
 		{"webhook URL", func(c *Config) { c.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}} }, "webhooks[0].url"},
-		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers.Authorization"},
-		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers.X-Route"},
-		{"provider opaque header", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "example-sensitive-value"} }, "llm.extra_headers.X-Route"},
+		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers"},
+		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers"},
+		{"provider opaque header", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "example-sensitive-value"} }, "llm.extra_headers"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base
