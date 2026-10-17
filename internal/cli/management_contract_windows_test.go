@@ -10,6 +10,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,9 +18,80 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// TestManagementContractWindowsBundleStatusDeliveryID drives the Windows
+// apply with --delivery-id to a confirmed bundle and validates the
+// `bundle status --json` and the public receipt files that follow
+// (GAP-0001: current carries the delivery id).
+func TestManagementContractWindowsBundleStatusDeliveryID(t *testing.T) {
+	schemas := contracttest.Compile(t)
+	e := newBundleCLIEnv(t)
+	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
+	signed := filepath.Join(e.dir, "v5.dcbundle")
+	if out, code := runBundle(t, e.signArgs("--out", signed, "--key", filepath.Join(e.dir, "key.pem"), "--key-id", "k1")...); code != 0 {
+		t.Fatalf("sign exit %d:\n%s", code, out)
+	}
+	layout := stubWindowsBundleHost(t)
+	ctx := context.Background()
+	cmd, out := windowsBundleCommand()
+	opts := &windowsEnterpriseLifecycleOptions{bundlePath: signed, trustAnchors: e.anchors,
+		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true, bundleDeliveryID: "agent-7:d.1"}
+	if done, err := prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", opts); done {
+		t.Fatalf("prepare ended the run: %v\n%s", err, out.String())
+	}
+	cleanupPreparedWindowsBundle(t, opts)
+	// The ensure transaction installs the rendered config.
+	rendered, err := os.ReadFile(opts.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.ConfigPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.ConfigPath, rendered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateManagedStandaloneConfig(ctx, layout.ConfigPath); err != nil {
+		t.Fatalf("record installed bundle config: %v", err)
+	}
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	expected := opts.bundle.prepared.Receipt.ExpectedDigest
+	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: expected, GatewayReportedDigest: expected, ConfigGeneration: 3, Applied: true}
+	finishWindowsEnterpriseBundle(cmd, opts, result)
+	if len(result.Errors) != 0 || result.Bundle == nil || result.Bundle.State != enterprisebundle.StateConfirmed || result.Bundle.DeliveryID != "agent-7:d.1" {
+		t.Fatalf("bundle not confirmed with its delivery id: errors %+v bundle %+v", result.Errors, result.Bundle)
+	}
+
+	// An elevated status reads the store the apply wrote.
+	store := newWindowsBundleDriver(layout).Store
+	bundleDevice(t, e)
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	bundlePrivilege = func() error { return nil }
+	bundleGatewayPolicy = func(context.Context) *enterprisestatus.PolicyState {
+		return &enterprisestatus.PolicyState{EffectiveDigest: expected, GatewayReportedDigest: expected, Applied: true}
+	}
+	status, code := runBundle(t, "status", "--json")
+	doc := schemas.Validate(t, "bundle-status.schema.json", []byte(status))
+	requireExit(t, doc, code, 0)
+	for _, block := range []string{"current", "last_receipt", "bundle"} {
+		if member, _ := doc[block].(map[string]any); member["delivery_id"] != "agent-7:d.1" {
+			t.Fatalf("%s.delivery_id = %v, want agent-7:d.1: %s", block, member["delivery_id"], status)
+		}
+	}
+	for _, file := range []string{filepath.Join(store.PublicReceiptEventsDir(), opts.bundle.prepared.Receipt.ReceiptID+".json"), store.PublicReceiptPath()} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if receipt := schemas.Validate(t, "bundle-receipt.schema.json", raw); receipt["delivery_id"] != "agent-7:d.1" {
+			t.Fatalf("%s: %s", file, raw)
+		}
+	}
+}
 
 // TestManagementContractWindowsSecret validates what Windows
 // `enterprise secret set`, `status` and `remove` print with --json.

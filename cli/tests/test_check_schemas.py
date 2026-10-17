@@ -396,6 +396,20 @@ class TestManagementContractSchemas(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must accept Windows lifecycle result elevation_required with exit 5", result.stderr)
 
+    def test_status_ref_without_delivery_id_is_caught(self) -> None:
+        # bundle status prints the state records current and last_good with
+        # the delivery_id that confirmed them (GAP-0001).
+        def drop_delivery_id(schema: dict) -> None:
+            schema["$defs"]["ref"]["properties"].pop("delivery_id")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(
+                tmp, lambda d: self._edit_schema(d, "bundle-status.schema.json", drop_delivery_id)
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("bundle-status.schema.json examples[0]", result.stderr)
+        self.assertIn("must accept bundle status last_good with a delivery_id of 128 bytes", result.stderr)
+
     def test_example_that_no_longer_validates_is_caught(self) -> None:
         def break_example(schema: dict) -> None:
             schema["examples"][0]["schema_version"] = 2

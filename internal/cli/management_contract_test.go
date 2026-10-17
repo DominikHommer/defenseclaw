@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -132,17 +133,31 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 	}
 }
 
+// TestManagementContractBundleStatusDescribesEveryMember pins the closed
+// bundle-status.schema.json to the Go result: every member status can print
+// is a schema property (its current, last_good and last_receipt members are
+// checked in internal/enterprisebundle).
+func TestManagementContractBundleStatusDescribesEveryMember(t *testing.T) {
+	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/full", reflect.TypeOf(bundleStatusResult{}))
+	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/warning", reflect.TypeOf(enterprisebundle.Warning{}))
+	contracttest.RequireMembers(t, "bundle-refused.schema.json#/$defs/bundleError", reflect.TypeOf(bundleError{}))
+}
+
 // TestManagementContractBundleStatus validates bundle status on a device with
-// a confirmed bundle and a later failed delivery, the public receipt files
-// those deliveries wrote, and the refusals.
+// two bundles confirmed with --delivery-id (current and last_good) and a later
+// failed delivery, the public receipt files those deliveries wrote, the status
+// once their receipts were pruned, and the refusals. Every block that names a
+// delivery carries its delivery_id (GAP-0001: current and last_good did, and
+// the schema rejected them).
 func TestManagementContractBundleStatus(t *testing.T) {
 	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	store := bundleDevice(t, e)
 	digest := "sha256:" + strings.Repeat("1", 64)
-	confirmBundle(t, store, "b-01JA0000000000000000000007", 7, digest)
-	bad, err := store.Receive("b-01JA0000000000000000000008", 8, "")
+	confirmBundleDelivery(t, store, "b-01JA0000000000000000000006", 6, "sha256:"+strings.Repeat("6", 64), "agent-7:d.6")
+	confirmBundleDelivery(t, store, "b-01JA0000000000000000000007", 7, digest, "agent-7:d.7")
+	bad, err := store.Receive("b-01JA0000000000000000000008", 8, "agent-7:d.8")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,9 +175,19 @@ func TestManagementContractBundleStatus(t *testing.T) {
 		doc["last_refusal"].(map[string]any)["error_code"] != "secret_ref_missing" {
 		t.Fatalf("status = %s", out)
 	}
+	requireDeliveryIDs := func(t *testing.T, doc map[string]any, want map[string]string) {
+		t.Helper()
+		for block, id := range want {
+			if member, _ := doc[block].(map[string]any); member["delivery_id"] != id {
+				t.Errorf("%s.delivery_id = %v, want %s", block, member["delivery_id"], id)
+			}
+		}
+	}
+	requireDeliveryIDs(t, doc, map[string]string{"current": "agent-7:d.7", "last_good": "agent-7:d.6",
+		"last_receipt": "agent-7:d.7", "bundle": "agent-7:d.7", "last_refusal": "agent-7:d.8"})
 
 	events, err := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json"))
-	if err != nil || len(events) != 2 {
+	if err != nil || len(events) != 3 {
 		t.Fatalf("receipt events %v (%v)", events, err)
 	}
 	states := map[any]int{}
@@ -176,15 +201,34 @@ func TestManagementContractBundleStatus(t *testing.T) {
 		if base := filepath.Base(file); base != receipt["receipt_id"].(string)+".json" {
 			t.Fatalf("receipt event %s holds receipt_id %v", base, receipt["receipt_id"])
 		}
+		if version, _ := receipt["version"].(json.Number); receipt["delivery_id"] != "agent-7:d."+version.String() {
+			t.Fatalf("receipt event %s: delivery_id %v", file, receipt["delivery_id"])
+		}
 	}
-	if states["confirmed"] != 1 || states["failed"] != 1 {
-		t.Fatalf("receipt event states %v, want one confirmed and one failed", states)
+	if states["confirmed"] != 2 || states["failed"] != 1 {
+		t.Fatalf("receipt event states %v, want two confirmed and one failed", states)
 	}
 	raw, err := os.ReadFile(store.PublicReceiptPath())
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemas.Validate(t, "bundle-receipt.schema.json", raw)
+	if receipt := schemas.Validate(t, "bundle-receipt.schema.json", raw); receipt["delivery_id"] != "agent-7:d.7" {
+		t.Fatalf("receipt.json: %s", raw)
+	}
+
+	// Pruned receipts: current and last_good keep their delivery ids from
+	// the state alone.
+	t.Run("receipts pruned", func(t *testing.T) {
+		for _, id := range []string{"b-01JA0000000000000000000006", "b-01JA0000000000000000000007"} {
+			if err := os.Remove(filepath.Join(store.LifecycleDir, enterprisebundle.ReceiptsDirName, id+".json")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, code := runBundle(t, "status", "--json")
+		doc := schemas.Validate(t, "bundle-status.schema.json", []byte(out))
+		requireExit(t, doc, code, 0)
+		requireDeliveryIDs(t, doc, map[string]string{"current": "agent-7:d.7", "last_good": "agent-7:d.6"})
+	})
 
 	t.Run("not_admin", func(t *testing.T) {
 		saved := bundlePrivilege

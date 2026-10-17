@@ -197,6 +197,10 @@ def _elevation_required(platform: str):
                 errors=[{"code": "elevation_required", "message": "run this command elevated"}])
 
 
+def _status_last_good_from_current(document: dict) -> None:
+    document["last_good"] = dict(document["current"], delivery_id="a" * 128)
+
+
 def _refused_status_with_go_zero_value(document: dict) -> None:
     document.update(ok=False, errors=[{"code": "not_managed", "message": "not a managed device"}],
                     sessions_restart_required={"state": "", "count": 0, "entries": None})
@@ -231,6 +235,10 @@ MANAGEMENT_CONTRACT_RULES = (
      _from_example("bundle-verify.schema.json", 0, _set(errors=[{"code": "x", "message": "m"}])), False),
     ("bundle status with an unknown member", "bundle-status.schema.json",
      _from_example("bundle-status.schema.json", 0, _set(user="alice")), False),
+    ("bundle status last_good with a delivery_id of 128 bytes", "bundle-status.schema.json",
+     _from_example("bundle-status.schema.json", 0, _status_last_good_from_current), True),
+    ("bundle status current delivery_id with a space", "bundle-status.schema.json",
+     _from_example("bundle-status.schema.json", 0, lambda d: d["current"].update(delivery_id="agent 7")), False),
     ("refused bundle status with the Go zero value for sessions", "bundle-status.schema.json",
      _from_example("bundle-status.schema.json", 0, _refused_status_with_go_zero_value), False),
     ("anchor key time not ending in Z", "bundle-anchors.schema.json",
