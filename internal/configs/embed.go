@@ -288,13 +288,13 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 	// Index the base by lowercase name for case-insensitive matching.
 	byName := make(map[string]int, len(base.Providers))
 	for i, p := range base.Providers {
-		byName[lower(p.Name)] = i
+		byName[strings.ToLower(p.Name)] = i
 	}
 	for _, op := range overlay.Providers {
 		if op.Name == "" {
 			continue
 		}
-		idx, ok := byName[lower(op.Name)]
+		idx, ok := byName[strings.ToLower(op.Name)]
 		if ok {
 			base.Providers[idx].Domains = unionStrings(
 				base.Providers[idx].Domains, op.Domains,
@@ -360,7 +360,7 @@ func ApplyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			}
 		} else {
 			base.Providers = append(base.Providers, op)
-			byName[lower(op.Name)] = len(base.Providers) - 1
+			byName[strings.ToLower(op.Name)] = len(base.Providers) - 1
 		}
 	}
 	base.OllamaPorts = unionInts(base.OllamaPorts, overlay.OllamaPorts)
@@ -392,20 +392,6 @@ func sanitizeDomains(in []string) []string {
 		out = append(out, s)
 	}
 	return out
-}
-
-func lower(s string) string {
-	// local lowercase — stdlib strings would add a dep to a package
-	// that currently has zero third-party imports.
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		b[i] = c
-	}
-	return string(b)
 }
 
 // mergeStringMaps is a new map with the keys of a, then those of b (b wins).
