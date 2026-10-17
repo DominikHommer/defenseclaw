@@ -2065,6 +2065,53 @@ func TestWindowsEnterpriseResultNamesRestoredCursorAdapter(t *testing.T) {
 	}
 }
 
+// #1105 (GAP-0781): an upgrade over a host where one account's DefenseClaw
+// folder has permissions DefenseClaw cannot verify no longer rolls back. The
+// result names the installed release's stopped retire with the remedy, and
+// each account this release's retire skipped, once.
+func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
+	untrusted := `managed-hook lifecycle snapshot retire failed: retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103: ` +
+		`enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied`
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "upgrade", "installed": true, "transaction_pending": false,
+		"errors":                          []string{},
+		"stale_lifecycle_journal_removed": untrusted,
+		"lifecycle_retire_skipped": []string{
+			`claudecode generations of SID S-1-5-21-1-2-3-1103: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied`,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	var stale, skipped []string
+	for _, warning := range result.Warnings {
+		switch warning.Code {
+		case "stale_lifecycle_journal_removed":
+			stale = append(stale, warning.Message)
+		case windowsEnterpriseUntrustedUserFolderCode:
+			skipped = append(skipped, warning.Message)
+		}
+	}
+	if len(stale) != 1 || !strings.Contains(stale[0], "reset its permissions or remove it") {
+		t.Fatalf("stale journal warning = %q", stale)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "of 1 account(s)") ||
+		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) ||
+		!strings.Contains(skipped[0], "run Setup /ensure again") {
+		t.Fatalf("skipped folder warning = %q", skipped)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("a skipped folder became an error: %+v", result.Errors)
+	}
+}
+
 // GAP-1680: when the lifecycle removes a stale committed managed-hook
 // lifecycle journal itself, the Setup result and lifecycle log say so.
 func TestWindowsEnterpriseResultNamesRemovedStaleLifecycleJournal(t *testing.T) {

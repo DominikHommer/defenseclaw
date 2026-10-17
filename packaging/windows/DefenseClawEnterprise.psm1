@@ -202,6 +202,11 @@ $script:DefenseClawCursorAdapterRestored = $false
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
 $script:DefenseClawRollbackLeftovers = @()
+# Standalone: each account whose old managed runtime generations a
+# managed-hook lifecycle retire left in place, because DefenseClaw could not
+# verify or apply the permissions of that account's DefenseClaw folder
+# (#1105, GAP-0781). Reset per lifecycle run.
+$script:DefenseClawRetireSkipped = @()
 # Standalone pending-transaction recovery that may leave the restored release
 # stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
 # and whether this run did. Set per recovery; reset per lifecycle run.
@@ -18146,6 +18151,24 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
         $script:DefenseClawCursorAdapterRestored = $true
     }
+    # A retire skips an account whose DefenseClaw folder it cannot trust and
+    # names it; keep each one for the result (#1105, GAP-0781).
+    $skipped = $report.PSObject.Properties['retire_skipped']
+    if ($null -ne $skipped -and $null -ne $skipped.Value) {
+        $kept = [Collections.Generic.List[string]]::new()
+        foreach ($item in @($script:DefenseClawRetireSkipped)) {
+            $kept.Add([string]$item)
+        }
+        foreach ($item in @($skipped.Value)) {
+            $text = ConvertTo-DefenseClawBoundedDiagnostic `
+                -Value ([string]$item) `
+                -MaxLength 1024
+            if ($text.Trim().Length -gt 0 -and -not $kept.Contains($text) -and $kept.Count -lt 256) {
+                $kept.Add($text)
+            }
+        }
+        $script:DefenseClawRetireSkipped = @($kept)
+    }
     return $report
 }
 
@@ -18185,6 +18208,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
+    $script:DefenseClawRetireSkipped = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -18719,17 +18743,34 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         $failure = $_
     }
     $message = [string]$failure.Exception.Message
-    if ((Test-DefenseClawStandaloneProfile) -and
-        $message.IndexOf(
-            'managed runtime generation directory is untrusted',
-            [StringComparison]::OrdinalIgnoreCase
-        ) -ge 0) {
+    # An installed release whose retire stops at the first per-user folder it
+    # cannot trust (a stale or foreign profile) left the committed journal,
+    # and every later upgrade rolled back with 1603 (#1105, GAP-0781). The
+    # journal only lets that retire collect old generations, which are inert:
+    # remove it as below, and this release's retire after the commit collects
+    # every other account and names the skipped one.
+    $untrustedFolder = $message.IndexOf(
+        'managed runtime generation directory is untrusted',
+        [StringComparison]::OrdinalIgnoreCase
+    ) -ge 0
+    if ((Test-DefenseClawStandaloneProfile) -and $untrustedFolder -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
         throw (
             "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
             'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
             'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
             $message
         )
+    }
+    if ((Test-DefenseClawStandaloneProfile) -and $untrustedFolder) {
+        $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
+        Assert-DefenseClawNoReparsePath -Path $journalPath
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $journalPath `
+            -Force
+        $script:DefenseClawStaleLifecycleJournalRemoved =
+            ConvertTo-DefenseClawBoundedDiagnostic -Value $message -MaxLength 1024
+        return
     }
     if (-not (Test-DefenseClawStandaloneProfile) -or
         -not $message.StartsWith(
@@ -22088,6 +22129,12 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
             $status['rollback_leftovers'] = [string[]]@(
                 $script:DefenseClawRollbackLeftovers
+            )
+        }
+        # The accounts whose untrusted DefenseClaw folder a retire skipped.
+        if (@($script:DefenseClawRetireSkipped).Count -gt 0) {
+            $status['lifecycle_retire_skipped'] = [string[]]@(
+                $script:DefenseClawRetireSkipped
             )
         }
         $status['claude_effective_policy_stale_reason'] = $(

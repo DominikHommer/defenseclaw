@@ -1074,10 +1074,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		true,
 	); err != nil {
 		if !windowsEnterpriseStandaloneDeferredDataDirAccountCreated(validated.DataDir, target) {
-			return 0, fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 		accountCreated = true
 	}
@@ -1112,10 +1109,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 			true,
 			true,
 		); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 
 		hookDir := filepath.Join(validated.DataDir, "hooks")
@@ -1654,10 +1648,7 @@ func validateWindowsManagedRuntimeGenerationRoots(dataDir string, target *window
 	hookDir := filepath.Join(dataDir, "hooks")
 	for _, path := range []string{dataDir, hookDir} {
 		if err := validateWindowsUserPathElement(path, target, true, true, true); err != nil {
-			return fmt.Errorf(
-				"enterprise hooks: managed runtime generation directory is untrusted: %w",
-				err,
-			)
+			return fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 	}
 	return nil

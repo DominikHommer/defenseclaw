@@ -139,6 +139,10 @@ type windowsEnterpriseInstallerReport struct {
 	// SquattedRootNotes says what Install did with each standalone root a
 	// standard user created first: a link removed, a folder moved aside.
 	SquattedRootNotes []string `json:"squatted_root_notes"`
+	// LifecycleRetireSkipped names each account whose old managed runtime
+	// generations a retire left because the account's DefenseClaw folder has
+	// permissions DefenseClaw could not verify or apply (#1105, GAP-0781).
+	LifecycleRetireSkipped []string `json:"lifecycle_retire_skipped"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1320,11 +1324,25 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).
+		message := "Setup removed the stale committed managed-hook lifecycle journal " +
+			"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
+			windowsEnterpriseBoundedDiagnostic(removed)
+		if strings.Contains(removed, windowsEnterpriseUntrustedUserFolderText) {
+			// The installed release's retire stopped at a per-user folder
+			// it could not trust; the upgrade went on (#1105, GAP-0781).
+			message += "; " + windowsEnterpriseUntrustedUserFolderRemedy
+		}
 		warnings = append(warnings, enterprisestatus.Message{
-			Code: "stale_lifecycle_journal_removed",
-			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
-				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
-				windowsEnterpriseBoundedDiagnostic(removed),
+			Code:    "stale_lifecycle_journal_removed",
+			Message: message,
+		})
+	}
+	if skipped := windowsEnterpriseReportStringList(report.LifecycleRetireSkipped); len(skipped) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: windowsEnterpriseUntrustedUserFolderCode,
+			Message: fmt.Sprintf("the lifecycle left the old DefenseClaw hook runtime copies of %d account(s) in place and changed nothing in their folders, "+
+				"because DefenseClaw could not verify or apply the permissions of each account's DefenseClaw folder; ", len(skipped)) +
+				windowsEnterpriseUntrustedUserFolderRemedy + ": " + windowsEnterpriseBoundedLabels(skipped),
 		})
 	}
 	if removed := strings.TrimSpace(report.StaleTeardownJournalRemoved); removed != "" {
@@ -1393,6 +1411,28 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			result.AddWarning(warning.Code, warning.Message)
 		}
 	}
+}
+
+// The text of an account's DefenseClaw folder that a managed-hook retire
+// could not trust, the warning code that reports the skipped accounts, and
+// what the administrator does about it (#1105, GAP-0781). The copies left
+// there are inert: the protected selector names the generation in force.
+const (
+	windowsEnterpriseUntrustedUserFolderText   = "managed runtime generation directory is untrusted"
+	windowsEnterpriseUntrustedUserFolderCode   = "user_runtime_folder_untrusted"
+	windowsEnterpriseUntrustedUserFolderRemedy = "the deployment is not affected. Have an administrator inspect each folder named here, " +
+		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
+)
+
+// windowsEnterpriseReportStringList bounds a list the installer reported.
+func windowsEnterpriseReportStringList(values []string) []string {
+	var kept []string
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			kept = append(kept, windowsEnterpriseBoundedDiagnostic(value))
+		}
+	}
+	return kept
 }
 
 // windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of

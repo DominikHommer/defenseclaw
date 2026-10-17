@@ -7,6 +7,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -326,7 +327,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err := finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -350,7 +351,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, gcErr
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		true,
@@ -373,7 +374,7 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 		steps = append(steps, "gc")
 		return 0, nil
 	}
-	err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+	_, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
 		journal,
 		ctx,
 		false,
@@ -387,6 +388,71 @@ func TestFinalizeRetireCommittedWindowsManagedHooksLifecycleCollectsBeforeRename
 	}
 	if !slices.Equal(steps, []string{"gc"}) {
 		t.Fatalf("steps = %v, adopted crash prefix must re-run GC without rename", steps)
+	}
+}
+
+// #1105 (GAP-0781): an account whose DefenseClaw folder has permissions
+// DefenseClaw cannot verify or apply is reported and skipped, and every other
+// account is still collected, so a stale or foreign profile no longer fails
+// the retire and rolls back the upgrade. Any other GC failure still fails it,
+// and so does the adoption path's finalize.
+func TestWindowsManagedHooksLifecycleGenerationGCSkipsUntrustedFolders(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	journal := windowsManagedHooksLifecycleJournal{
+		Targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "codex", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+		HookBinary: `C:\Program Files\DefenseClaw\bin\old-hook.exe`,
+	}
+	untrusted := fmt.Errorf("%w: %s: access denied",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var collected []string
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		collected = append(collected, opts.TargetSID)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 1, nil
+	}
+	skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{})
+	if err != nil {
+		t.Fatalf("an untrusted per-user folder failed the retire: %v", err)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("collected %v, want both accounts", collected)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], "generation directory is untrusted") ||
+		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) {
+		t.Fatalf("skipped = %q, want the stale account, its folder and the reason", skipped)
+	}
+
+	renamed := false
+	skipped, err = finalizeRetireCommittedWindowsManagedHooksLifecycle(
+		journal, windowsManagedHooksLifecycleContext{}, true,
+		func() error { renamed = true; return nil },
+	)
+	if err != nil || !renamed || len(skipped) != 1 {
+		t.Fatalf("adoption finalize: skipped=%q renamed=%v err=%v", skipped, renamed, err)
+	}
+
+	other := errors.New("selector snapshot mismatch")
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		if opts.TargetSID == stale {
+			return 0, other
+		}
+		return 0, nil
+	}
+	if skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{}); !errors.Is(err, other) || skipped != nil {
+		t.Fatalf("another GC failure: skipped=%q err=%v, want the failure", skipped, err)
 	}
 }
 

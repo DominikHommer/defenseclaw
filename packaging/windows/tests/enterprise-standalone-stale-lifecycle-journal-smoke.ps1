@@ -11,8 +11,11 @@
 # exact journal, records why, and goes on; any other retire failure, a
 # pending transaction or the Secure Client profile keeps the error. The
 # teardown journal of a refused or rolled-back uninstall goes the same way
-# (GAP-1041). The gateway command is stubbed; runs in a disposable scratch
-# directory.
+# (GAP-1041). So does a journal whose retire stopped at a per-user folder the
+# installed gateway could not trust, which rolled back every later upgrade
+# with 1603 (#1105, GAP-0781); with a pending transaction that refusal keeps
+# naming the remedy. The gateway command is stubbed; runs in a disposable
+# scratch directory.
 
 [CmdletBinding()]
 param(
@@ -48,6 +51,7 @@ try {
             PendingPath = [IO.Path]::Combine($Root, 'pending.json')
         }
         $gcRefusal = 'managed-hook lifecycle snapshot retire failed: retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
+        $untrustedFolder = 'managed-hook lifecycle snapshot retire failed: retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
         $script:TestRetireError = ''
         function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action)
@@ -77,7 +81,8 @@ try {
             }
             catch {
                 $threw = $true
-                if ([string]$_.Exception.Message -cne $RetireError) {
+                # A refusal may name the remedy before the gateway's error.
+                if (-not ([string]$_.Exception.Message).Contains($RetireError)) {
                     $failures.Add("${Name}: error changed to '$($_.Exception.Message)'")
                 }
             }
@@ -102,6 +107,9 @@ try {
             & $run 'other retire failure' 'Standalone' 'managed-hook lifecycle snapshot retire failed: deployment managed-hook activation binding is invalid' $false $true $false
             & $run 'pending transaction' 'Standalone' $gcRefusal $true $true $false
             & $run 'Secure Client' 'SecureClient' $gcRefusal $false $true $false
+            & $run 'untrusted per-user folder' 'Standalone' $untrustedFolder $false $false $true
+            & $run 'untrusted per-user folder, pending transaction' 'Standalone' $untrustedFolder $true $true $false
+            & $run 'untrusted per-user folder, Secure Client' 'SecureClient' $untrustedFolder $false $true $false
 
             # GAP-1041: the teardown journal of a rolled-back uninstall goes
             # (and -Stale reports it); another phase, or a pending
