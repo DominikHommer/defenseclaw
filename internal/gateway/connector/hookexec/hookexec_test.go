@@ -138,6 +138,14 @@ func runWithContext(
 
 func ok(body string) *stubRT { return &stubRT{status: 200, body: body} }
 
+// claudeBlocked reports a Claude Code result that blocks: exit 2, or the
+// structured deny or block a per-user hook whose gateway is down answers
+// with (emitPerUserClaudeGatewayDown).
+func claudeBlocked(r runResult) bool {
+	return r.code == blockExit || (r.code == 0 &&
+		(strings.Contains(r.stdout, `"permissionDecision":"deny"`) || strings.Contains(r.stdout, `"decision":"block"`)))
+}
+
 func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		opts.Token = "generic-env"
@@ -990,7 +998,7 @@ func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
 			return nil
 		}
 	})
-	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
+	if !claudeBlocked(r) || recoveries != 1 || rt.requests != 2 {
 		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
 	}
 }
@@ -1027,7 +1035,7 @@ func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
 			return errors.New("foreign process owns gateway state")
 		}
 	})
-	if r.code != 2 || rt.requests != 1 {
+	if !claudeBlocked(r) || rt.requests != 1 {
 		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
 	}
 }
@@ -1046,7 +1054,7 @@ func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
 	}
-	if r.code != 2 {
+	if !claudeBlocked(r) {
 		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
 	}
 }
@@ -1177,6 +1185,9 @@ func TestMixedConnectorEffectiveFailModeResponseMatrix(t *testing.T) {
 		for _, connector := range connectors {
 			t.Run(failure.name+"/"+connector.name, func(t *testing.T) {
 				r := run(t, connector.name, failure.rt(), func(o *Options) { o.FailMode = connector.mode })
+				if connector.name == "claudecode" && claudeBlocked(r) {
+					return
+				}
 				if r.code != connector.code {
 					t.Fatalf("code = %d, want %d; stderr=%q", r.code, connector.code, r.stderr)
 				}

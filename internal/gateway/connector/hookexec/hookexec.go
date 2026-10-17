@@ -1491,17 +1491,37 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
-	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
-	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": the DefenseClaw gateway is not running or " +
-		"not answering (fail mode closed). Check it with `defenseclaw-gateway status`, start it with " +
-		"`defenseclaw-gateway start`, then try again."
+	lead := "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": "
+	switch {
+	case reason == "gateway unreachable":
+		return lead + "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+			"Check it with `defenseclaw-gateway status`, start it with `defenseclaw-gateway start`, then try again."
+	case strings.HasPrefix(reason, coldStartFailedReason) && fileExists(filepath.Join(opts.Home, gatewayStoppedMarker)):
+		// The hook does not start a gateway the user stopped (GAP-0486:
+		// the agent showed only the cold-start error).
+		return lead + "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+			"Start it with `defenseclaw-gateway start`, then try again."
+	case strings.HasPrefix(reason, coldStartFailedReason):
+		return lead + "the DefenseClaw gateway is not running and could not be started (fail mode closed). " +
+			"Run `defenseclaw-gateway start` to see why, then try again."
+	}
+	return ""
 }
+
+// gatewayStoppedMarker is the file `defenseclaw-gateway stop` leaves in the
+// data directory; while it exists hooks do not start the gateway
+// (internal/cli gatewayStoppedMarkerName).
+const gatewayStoppedMarker = "gateway.stopped"
 
 // emitPerUserGatewayDown renders perUserGatewayDownText in each connector's
 // fail-closed shape; connectors without a structured body keep theirs.
 func emitPerUserGatewayDown(opts Options, sp spec, text string) int {
+	if sp.connector == "claudecode" && !opts.SecureClient {
+		return emitPerUserClaudeGatewayDown(opts, text)
+	}
 	result := sp.unreachableStrict
 	if sp.connector == "codex" {
 		if result.exit == 0 {
@@ -1972,8 +1992,24 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 	return emitHookResult(opts, sp, result)
 }
 
+// emitPerUserClaudeGatewayDown delivers perUserGatewayDownText to Claude
+// Code. Claude Code shows a failed hook's stderr after the hook's whole
+// command line, and on Windows that line is the cmd.exe launcher guard with
+// its own "launcher is missing" sentence, so the user read reinstall advice
+// for a launcher that exists (rel-1-0-2 GAP-0486). A prompt or tool call
+// gets the structured block of a policy verdict, and a session start (which
+// cannot be blocked) a systemMessage, so only the text shows.
+func emitPerUserClaudeGatewayDown(opts Options, text string) int {
+	if strings.TrimSpace(opts.Event) == "SessionStart" {
+		fmt.Fprintln(opts.Stdout, `{"systemMessage":`+mustJSONString(text)+`}`)
+		return 0
+	}
+	return emitManagedClaudeBlock(opts, text)
+}
+
 // emitManagedClaudeBlock uses the same structured block shapes as a gateway
-// policy verdict, so Claude Code shows the reason without a hook-command prefix.
+// policy verdict, so Claude Code shows the reason without a hook-command
+// prefix (managed hooks, and per-user hooks whose gateway is down).
 func emitManagedClaudeBlock(opts Options, reason string) int {
 	encoded := mustJSONString(reason)
 	switch opts.Event {
