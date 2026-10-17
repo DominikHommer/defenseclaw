@@ -434,6 +434,7 @@ func Run(ctx context.Context, opts Options) int {
 		overflow = true
 	}
 	if overflow {
+		opts.Event = managedHermesPrefixEvent(opts, sp, payload)
 		return handleOversized(opts, sp, failMode, payload)
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") {
@@ -1234,9 +1235,13 @@ func decideHermes(opts Options, sp spec, fields map[string]json.RawMessage) int 
 	}
 	rawOutput, present := fields[sp.outputField]
 	if !present || strings.TrimSpace(string(rawOutput)) == "null" {
-		if action == "block" && managedHermesBlocks(opts, sp) {
-			// A managed block without its directive would let the call run.
-			return failResponse(opts, sp, "closed", "Hermes gateway block without a hook_output directive")
+		if managedHermesBlocks(opts, sp) && !managedHermesAnswerUsable(action) {
+			// A managed block without its directive, or an answer with no
+			// usable verdict, would let the call run.
+			if action == "block" {
+				return failResponse(opts, sp, "closed", "Hermes gateway block without a hook_output directive")
+			}
+			return failResponse(opts, sp, "closed", "invalid or missing action in Hermes gateway response")
 		}
 		return 0
 	}

@@ -15,6 +15,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,5 +156,110 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 				t.Fatalf("logged fail_mode = %q, want open", got)
 			}
 		})
+	}
+}
+
+// rel-1-0-3 B-20 review item 1: a managed Hermes tool call blocks on a
+// successful gateway answer that carries no usable verdict (no action, an
+// unknown one, a block without its directive or with one that does not
+// block). The allow and alert answers of observe mode still run.
+func TestManagedHermesUnusableSuccessfulAnswerBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		blocks     bool
+	}{
+		{"missing action", `{}`, true},
+		{"empty action", `{"action":""}`, true},
+		{"unknown action", `{"action":"proceed"}`, true},
+		{"non-string action", `{"action":1}`, true},
+		{"block without directive", `{"action":"block"}`, true},
+		{"block whose directive allows", `{"action":"block","hook_output":{"decision":"allow","reason":"x"}}`, true},
+		{"allow with a block directive", `{"action":"allow","hook_output":{"decision":"block","reason":"x"}}`, true},
+		{"observe allow", `{"action":"allow"}`, false},
+		{"observe alert", `{"action":"alert"}`, false},
+		{"block with directive", `{"action":"block","hook_output":{"decision":"block","reason":"policy"}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(t, "hermes", ok(tc.body), func(o *Options) {
+				o.Event = "pre_tool_call"
+				o.FailMode = "open"
+				o.ManagedEnterprise = true
+				o.ExplainUnenrolledAccount = true
+				o.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal"}`)
+			})
+			if result.code != 0 {
+				t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
+			}
+			if !tc.blocks {
+				if strings.TrimSpace(result.stdout) != "" {
+					t.Fatalf("stdout = %q, want the neutral result", result.stdout)
+				}
+				return
+			}
+			var body map[string]string
+			if err := json.Unmarshal(bytes.TrimSpace([]byte(result.stdout)), &body); err != nil ||
+				(body["action"] != "block" && body["decision"] != "block") {
+				t.Fatalf("stdout = %q, want a Hermes block directive", result.stdout)
+			}
+		})
+	}
+}
+
+type failingStdin struct{}
+
+func (failingStdin) Read([]byte) (int, error) { return 0, errors.New("stdin closed") }
+
+// rel-1-0-3 B-20 review item 2: the installed Windows Hermes command binds no
+// event (it is read from stdin). Input refused before the event is read, too
+// large or unreadable, blocks a managed invocation unless the bounded prefix
+// names an event that is no tool call.
+func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
+	const llmCall = `{"hook_event_name":"pre_llm_call","messages":["` + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + `"]}`
+	const toolCall = `{"hook_event_name":"pre_tool_call","tool_input":{"command":"` + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + `"}}`
+	const disagree = `{"hook_event_name":"pre_llm_call","event":"pre_tool_call","tool_input":"` + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + `"}`
+	for _, tc := range []struct {
+		name    string
+		stdin   func() io.Reader
+		maxBody int64
+		blocks  bool
+	}{
+		{"oversized before the event", func() io.Reader { return strings.NewReader(toolCall) }, 4, true},
+		{"oversized tool call", func() io.Reader { return strings.NewReader(toolCall) }, 40, true},
+		{"oversized with disagreeing events", func() io.Reader { return strings.NewReader(disagree) }, 60, true},
+		{"unreadable stdin", func() io.Reader { return failingStdin{} }, 0, true},
+		{"oversized llm call", func() io.Reader { return strings.NewReader(llmCall) }, 40, false},
+	} {
+		for _, managed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s managed=%v", tc.name, managed), func(t *testing.T) {
+				var home string
+				result := run(t, "hermes", ok(`{"action":"allow"}`), func(o *Options) {
+					o.Event = ""
+					o.FailMode = "open"
+					o.ManagedEnterprise = managed
+					o.ExplainUnenrolledAccount = managed
+					o.Stdin = tc.stdin()
+					if tc.maxBody > 0 {
+						o.MaxBody = tc.maxBody
+					}
+					home = o.Home
+				})
+				if result.code != 0 {
+					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
+				}
+				if managed && tc.blocks {
+					message := hermesBlockMessage(t, result.stdout)
+					if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") {
+						t.Fatalf("message %q, want a tool-call block", message)
+					}
+					if got := lastHookFailure(t, home)["fail_mode"]; got != "closed" {
+						t.Fatalf("logged fail_mode = %q, want closed", got)
+					}
+					return
+				}
+				if strings.Contains(result.stdout, `"block"`) {
+					t.Fatalf("stdout %q, want the neutral result", result.stdout)
+				}
+			})
+		}
 	}
 }

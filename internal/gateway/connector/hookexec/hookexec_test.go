@@ -2061,25 +2061,43 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}) {
 		t.Fatalf("refusal reports = %+v, want one codex PreToolUse shell refusal", reports)
 	}
-	// Hermes has no fail-closed contract: the same refusal allows, so the
-	// hook must not claim to block.
-	out.Reset()
-	errb.Reset()
-	code = Run(context.Background(), Options{
-		Connector:                "hermes",
-		APIAddr:                  "127.0.0.1:1",
-		Home:                     home,
-		HookDir:                  filepath.Join(home, "hooks"),
-		ManagedEnterprise:        true,
-		ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
-		ExplainUnenrolledAccount: true,
-		Stdin:                    strings.NewReader("{}"),
-		Stdout:                   &out,
-		Stderr:                   &errb,
-		HTTPClient:               &http.Client{Transport: rt},
-	})
-	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
-		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	// Hermes has no fail-closed contract: a Hermes event that cannot block
+	// gets the neutral result, and the hook must not claim to block. An
+	// invocation whose payload names no event may be a tool call (the
+	// installed command binds none), so the managed hook blocks it and names
+	// the enrollment (rel-1-0-3 B-20).
+	for _, tc := range []struct {
+		stdin  string
+		blocks bool
+	}{
+		{`{"hook_event_name":"pre_llm_call"}`, false},
+		{"{}", true},
+	} {
+		out.Reset()
+		errb.Reset()
+		code = Run(context.Background(), Options{
+			Connector:                "hermes",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    "enterprise_managed_sid_unregistered",
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader(tc.stdin),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		if tc.blocks {
+			if code != 0 || rt.requests != 0 || !strings.Contains(out.String(), `"action":"block"`) ||
+				!strings.Contains(out.String(), "this account is not enrolled") {
+				t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stdout = %q, want a block that names the enrollment", tc.stdin, code, rt.requests, out.String())
+			}
+			continue
+		}
+		if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") || strings.Contains(out.String(), "block") {
+			t.Fatalf("unenrolled Hermes %s: code = %d requests = %d stderr = %q, want an allow that does not claim a block", tc.stdin, code, rt.requests, errb.String())
+		}
 	}
 }
 
