@@ -226,7 +226,11 @@ What setup does, in order:
    configuration selects a compute driver DefenseClaw does not drive, such
    as `podman`, is switched to `docker` in the same plan when you agree
    (see [sandboxes on Linux](/docs/sandboxes/linux#understand-what-it-changed));
-   sandboxes made on the old driver cannot start after the switch.
+   sandboxes made on the old driver cannot start after the switch. Pull the
+   work you want to keep (`defenseclaw sandbox pull`) before you switch
+   drivers: OpenShell can drop a stopped sandbox of the previous driver from
+   its store a few minutes after the switch, and a switch back does not
+   restore it.
 
    On Linux, setup gives each per-user Docker gateway its own sandbox
    namespace, `defenseclaw-u<uid>`, when that account has no sandbox in

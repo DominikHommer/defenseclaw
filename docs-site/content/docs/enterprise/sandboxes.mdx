@@ -172,8 +172,10 @@ free for the next account. A stop, delete or list of a kept sandbox starts it
 again when it needs it. In `prerequisite` mode the unit runs the binary you installed
 (`/usr/bin`, or `/usr/local/bin` on macOS); in `setup` mode it runs the user's
 `~/.local/bin` copy. NVIDIA's [upstream user unit](https://github.com/NVIDIA/OpenShell/blob/main/deploy/deb/openshell-gateway.service)
-uses `UMask=0077`. DefenseClaw's Linux user unit uses `UMask=0022` so the
-MicroVM driver can start. New files and folders the gateway creates under
+uses `UMask=0077`, and DefenseClaw never runs that unit. The gateway runs only
+in DefenseClaw's own Linux user unit, whose start shim sets umask `0022`
+whatever the unit or a drop-in says, so the MicroVM driver can start. A
+`UMask` drop-in for NVIDIA's unit changes nothing. New files and folders the gateway creates under
 the user's home can therefore have group or other read access when the
 gateway does not set an explicit mode; existing home permissions are not
 changed. The unit's gateway never reads the user's own
@@ -1258,7 +1260,10 @@ instead. They show:
   `--user`, filtered with `--state pending|expired|live|stopped|revoked`, with
   `--json`. Each row shows the state now: a pending registration that no sandbox
   bound to within 30 minutes is `expired` (a run that never started), and a registration whose
-  sandbox is not running is `stopped`;
+  sandbox is not running is `stopped`. The list holds registrations only: a
+  sandbox DefenseClaw did not start has no registration, so it does not appear
+  in it. Foreign sandboxes are audit-only (`log.sandbox.foreign_sandbox`);
+  read them in the audit export;
 - `sandbox explain` shows one registration the way the person sees it, then the
   sources: organization (the floor for everyone) and profile;
 - `policy verify --user` adds the sandbox rows: each required agent, the

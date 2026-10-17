@@ -509,6 +509,14 @@ In the Secure Client profile, apply a change to it as shown in
 [Restart-required controls](#restart-required-controls); on macOS the gateway
 reloads the `openshell` block without a restart.
 
+## Known limits
+
+- **Per-user hooks on macOS and Linux do not yet check who owns the gateway
+  port.** A per-user hook sends its token to the loopback gateway. It does not
+  yet verify that the process listening on that exact port belongs to the
+  invoking user or to root before it sends the token. The hardening is tracked
+  in the DefenseClaw repository and has not landed in a release.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
