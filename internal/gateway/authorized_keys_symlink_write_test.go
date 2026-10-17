@@ -258,6 +258,76 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 	}
 }
 
+func TestR103B07BenignComputedRedirectRows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command rows")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{".ssh", "proj", "proj/build", "proj/docs", "proj/logs", "proj/out"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "report.txt"), []byte("result.txt\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"BEN-0409", `out="$(mktemp -d)"; printf ok > "$out/probe.txt"`},
+		{"BEN-0540", `out="$(mktemp)"; printf ok > "$out"`},
+		{"BEN-0541", `out="$PWD"; printf ok > "$out/v1.txt"`},
+		{"BEN-0542", `d=$(pwd); printf ok > "$d/v2.txt"`},
+		{"BEN-0543", `n=$(basename "$PWD"); echo ok > "logs/$n.log"`},
+		{"BEN-0544", `x=$(date +%s); echo ok > "build/$x.log"`},
+		{"BEN-0545", `top=$(git rev-parse --show-toplevel 2>/dev/null || pwd); echo ok > "$top/v3.txt"`},
+		{"BEN-0546", `read f < report.txt; printf ok > "out/$f"`},
+		{"BEN-0547", "out=$(mktemp -d); cat > \"$out/x\" <<EOF\nok\nEOF"},
+		{"BEN-0566", `out=$(mktemp -d); printf ok > "$out/report.txt"`},
+		{"BEN-0567", `d=$(pwd); echo ok > "$d/build/report.txt"`},
+		{"BEN-0568", `n=$(basename docs/guide.md); printf ok > "out/$n"`},
+		{"BEN-0569", `x=$(date +%Y%m%d); echo ok > "build/$x.log"`},
+		{"BEN-0570", `out=$(printf out); echo ok > "$out/result.txt"`},
+		{"BEN-0571", `p=$(realpath build); echo ok > "$p/result.txt"`},
+		{"BEN-0572", `read f <<< report.txt; echo ok > "out/$f"`},
+		{"BEN-0573", `read -r f <<< report.txt; echo ok > "out/$f"`},
+		{"BEN-0574", `mapfile -t files <<< report.txt; echo ok > "out/${files[0]}"`},
+		{"BEN-0575", `readarray -t names <<< result.txt; echo ok > "build/${names[0]}"`},
+		{"BEN-0576", `echo ok > "out/run-$RANDOM.log"`},
+		{"BEN-0577", `echo ok > "out/worker-$$.log"`},
+		{"BEN-0578", `name=$(printf result); echo ok > "build/${name}.txt"`},
+		{"BEN-0579", "out=`printf out`; echo ok > \"$out/result.txt\""},
+		{"BEN-0580", `read f < report.txt; echo ok > "out/$f"`},
+		{"BEN-0581", `out=$(mktemp -d); printf ok > "$out/x"`},
+		{"BEN-0582", "p=$(pwd); cat <<EOF > \"$p/build/generated.txt\"\nok\nEOF"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": tc.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok {
+				t.Fatal("resolver did not provide a decodable map")
+			}
+			input := actionfacts.Input{Tool: "Bash", Args: args, Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: true, ResolvedWriteTargets: targets}
+			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatalf("benign redirect classified as an SSH-key write; targets=%v", targets)
+			}
+		})
+	}
+}
+
 func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook write targets")

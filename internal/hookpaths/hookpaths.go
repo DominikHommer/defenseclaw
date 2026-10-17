@@ -172,7 +172,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 	}
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
-	candidates := shellVariableCandidates(file, home)
+	candidates := shellVariableCandidates(file, cwd, home)
 	seen := map[string]bool{}
 	add := func(name string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
@@ -205,15 +205,31 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 		if len(names) == 0 {
 			return true
 		}
-		for _, name := range names {
+		var expandCandidates func(int, shellVariables)
+		expandCandidates = func(index int, vars shellVariables) {
+			if index == len(names) {
+				value, ok := staticShellWordWithVars(redirect.Word, home, vars, shellVariablePoison{})
+				if !ok {
+					value, ok = shellArrayCandidateWord(redirect.Word, vars)
+				}
+				if !ok {
+					unknown = true
+				} else {
+					add(value)
+				}
+				return
+			}
+			name := names[index]
 			values := candidates.values[name]
-			if candidates.unknown[name] || len(values) == 0 {
+			if candidates.unknown[name] || len(values) == 0 || len(values) > 16 {
 				unknown = true
 			}
 			for _, value := range values {
-				add(value)
+				vars[name] = value
+				expandCandidates(index+1, vars)
 			}
 		}
+		expandCandidates(0, shellVariables{})
 		return true
 	})
 	return operands, unknown
@@ -722,7 +738,7 @@ type shellVariableCandidateSet struct {
 	allUnknown bool
 }
 
-func shellVariableCandidates(file *syntax.File, home string) shellVariableCandidateSet {
+func shellVariableCandidates(file *syntax.File, cwd, home string) shellVariableCandidateSet {
 	candidates := shellVariableCandidateSet{
 		values:  map[string][]string{},
 		seen:    map[string]map[string]bool{},
@@ -730,6 +746,21 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 	}
 	_, allowedUnsets := shellAllowedStraightMutations(file, home)
 	states := shellWordStates(file, home, shellVariablePoison{})
+	readCandidates := shellReadCandidates(file, cwd, home)
+	cwdStable := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			if node.Name != nil && node.Name.Value == "PWD" {
+				cwdStable = false
+			}
+		case *syntax.CallExpr:
+			if program, ok := shellStaticProgram(node, home); ok && slices.Contains([]string{"cd", "pushd", "popd"}, programBase(program)) {
+				cwdStable = false
+			}
+		}
+		return true
+	})
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.Assign:
@@ -737,9 +768,17 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 			if name == "" {
 				return true
 			}
-			value, ok := shellCandidateAssignValue(node, home, states)
+			value, ok := shellCandidateAssignValue(node, cwd, home, cwdStable, states)
 			if ok {
 				candidates.add(name, value)
+			} else if cwdStable {
+				if values, ok := shellGitTopAssignValues(node, cwd, home); ok {
+					for _, value := range values {
+						candidates.add(name, value)
+					}
+				} else {
+					candidates.unknown[name] = true
+				}
 			} else {
 				candidates.unknown[name] = true
 			}
@@ -790,6 +829,12 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 				candidates.unknown[name] = true
 			}
 		case *syntax.CallExpr:
+			if values, ok := readCandidates[node]; ok {
+				for name, value := range values {
+					candidates.add(name, value)
+				}
+				return true
+			}
 			if len(node.Args) == 0 || allowedUnsets[node] {
 				return true
 			}
@@ -805,8 +850,114 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 	return candidates
 }
 
+func shellReadCandidates(file *syntax.File, cwd, home string) map[*syntax.CallExpr]map[string]string {
+	result := map[*syntax.CallExpr]map[string]string{}
+	if !filepath.IsAbs(cwd) {
+		return result
+	}
+	for _, stmt := range file.Stmts {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 || len(stmt.Redirs) != 1 {
+			continue
+		}
+		words, ok := shellStaticWords(call.Args, home)
+		if !ok {
+			continue
+		}
+		program := programBase(words[0])
+		array := program == "mapfile" || program == "readarray"
+		if program != "read" && !array {
+			continue
+		}
+		name := ""
+		if array && len(words) == 3 && words[1] == "-t" {
+			name = words[2]
+		}
+		if program == "read" && len(words) == 2 {
+			name = words[1]
+		}
+		if program == "read" && len(words) == 3 && words[1] == "-r" {
+			name = words[2]
+		}
+		if !shellIdentifier(name) {
+			continue
+		}
+		redir := stmt.Redirs[0]
+		if redir.Word == nil {
+			continue
+		}
+		path, ok := StaticWord(redir.Word, home)
+		if !ok || path == "" {
+			continue
+		}
+		value := ""
+		switch redir.Op {
+		case syntax.WordHdoc:
+			value = path
+		case syntax.RdrIn:
+			info, err := os.Stat(OperandPath(path, cwd))
+			if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+				continue
+			}
+			data, err := os.ReadFile(OperandPath(path, cwd))
+			if err != nil {
+				continue
+			}
+			value = string(data)
+		default:
+			continue
+		}
+		value, _, _ = strings.Cut(value, "\n")
+		if value == "" || strings.ContainsAny(value, "\x00\r\t ") || program == "read" &&
+			words[1] != "-r" && strings.Contains(value, "\\") {
+			continue
+		}
+		if array {
+			name += "[0]"
+		}
+		result[call] = map[string]string{name: value}
+	}
+	return result
+}
+
+func shellArrayCandidateWord(word *syntax.Word, vars shellVariables) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok {
+		return "", false
+	}
+	var out strings.Builder
+	array := false
+	for _, part := range quoted.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(part.Value)
+		case *syntax.ParamExp:
+			if part.Exp != nil {
+				return "", false
+			}
+			name, ok := shellDynamicParamName(part, "")
+			if !ok {
+				return "", false
+			}
+			value, found := vars[name]
+			if !found {
+				return "", false
+			}
+			array = array || part.Index != nil
+			out.WriteString(value)
+		default:
+			return "", false
+		}
+	}
+	return out.String(), array
+}
+
 func (c *shellVariableCandidateSet) add(name, value string) {
-	if name == "" || !shellIdentifier(name) || strings.ContainsAny(value, "\x00\r\n") {
+	base := strings.TrimSuffix(name, "[0]")
+	if name == "" || !shellIdentifier(base) || strings.ContainsAny(value, "\x00\r\n") {
 		return
 	}
 	if c.seen[name] == nil {
@@ -819,7 +970,7 @@ func (c *shellVariableCandidateSet) add(name, value string) {
 	c.values[name] = append(c.values[name], value)
 }
 
-func shellCandidateAssignValue(assign *syntax.Assign, home string, states shellWordStateMap) (string, bool) {
+func shellCandidateAssignValue(assign *syntax.Assign, cwd, home string, cwdStable bool, states shellWordStateMap) (string, bool) {
 	if assign == nil || assign.Naked || assign.Name == nil || assign.Index != nil || assign.Array != nil {
 		return "", false
 	}
@@ -827,6 +978,9 @@ func shellCandidateAssignValue(assign *syntax.Assign, home string, states shellW
 	value, ok := "", true
 	if assign.Value != nil {
 		value, ok = staticShellWordWithVars(assign.Value, home, states.varsFor(assign.Value), shellVariablePoison{})
+		if !ok && cwdStable {
+			value, ok = shellComputedAssignValue(assign.Value, cwd, home)
+		}
 	}
 	if !ok {
 		return "", false
@@ -843,6 +997,112 @@ func shellCandidateAssignValue(assign *syntax.Assign, home string, states shellW
 		value = prefix + value
 	}
 	return value, true
+}
+
+// Evaluate a small set of side-effect-free substitutions. The hook uses its
+// authenticated cwd and physical directory state; it never runs the command.
+func shellComputedAssignValue(word *syntax.Word, cwd, home string) (string, bool) {
+	if word == nil || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	if value, ok := staticShellWordWithVars(word, home, shellVariables{"PWD": cwd}, shellVariablePoison{}); ok {
+		return value, true
+	}
+	parts := word.Parts
+	if len(parts) == 1 {
+		if quoted, ok := parts[0].(*syntax.DblQuoted); ok {
+			parts = quoted.Parts
+		}
+	}
+	if len(parts) != 1 {
+		return "", false
+	}
+	sub, ok := parts[0].(*syntax.CmdSubst)
+	if !ok || len(sub.Stmts) != 1 || sub.Stmts[0].Cmd == nil || len(sub.Stmts[0].Redirs) != 0 {
+		return "", false
+	}
+	call, ok := sub.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return "", false
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		words[i], ok = staticShellWordWithVars(arg, home, shellVariables{"PWD": cwd}, shellVariablePoison{})
+		if !ok {
+			return "", false
+		}
+	}
+	switch programBase(words[0]) {
+	case "pwd":
+		if len(words) == 1 {
+			return cwd, true
+		}
+	case "printf":
+		if len(words) == 2 && !strings.ContainsAny(words[1], "%\\") {
+			return words[1], true
+		}
+	case "basename":
+		if len(words) == 2 && words[1] != "" {
+			return filepath.Base(words[1]), true
+		}
+	case "realpath":
+		if len(words) == 2 && words[1] != "" {
+			return ResolveWriteTarget(OperandPath(words[1], cwd))
+		}
+	}
+	return "", false
+}
+
+func shellGitTopAssignValues(assign *syntax.Assign, cwd, home string) ([]string, bool) {
+	if assign == nil || assign.Append || assign.Value == nil || !filepath.IsAbs(cwd) ||
+		os.Getenv("GIT_DIR") != "" || os.Getenv("GIT_WORK_TREE") != "" {
+		return nil, false
+	}
+	parts := assign.Value.Parts
+	if len(parts) != 1 {
+		return nil, false
+	}
+	sub, ok := parts[0].(*syntax.CmdSubst)
+	if !ok || len(sub.Stmts) != 1 {
+		return nil, false
+	}
+	binary, ok := sub.Stmts[0].Cmd.(*syntax.BinaryCmd)
+	if !ok || binary.Op != syntax.OrStmt {
+		return nil, false
+	}
+	left, leftOK := binary.X.Cmd.(*syntax.CallExpr)
+	right, rightOK := binary.Y.Cmd.(*syntax.CallExpr)
+	if !leftOK || !rightOK || len(left.Assigns) != 0 || len(right.Assigns) != 0 ||
+		len(binary.Y.Redirs) != 0 || len(binary.X.Redirs) != 1 {
+		return nil, false
+	}
+	leftWords, leftOK := shellStaticWords(left.Args, home)
+	rightWords, rightOK := shellStaticWords(right.Args, home)
+	if !leftOK || !rightOK || !slices.Equal(leftWords, []string{"git", "rev-parse", "--show-toplevel"}) ||
+		!slices.Equal(rightWords, []string{"pwd"}) {
+		return nil, false
+	}
+	redirection := binary.X.Redirs[0]
+	if redirection.Op != syntax.RdrOut || redirection.Word == nil {
+		return nil, false
+	}
+	redirectionPath, ok := StaticWord(redirection.Word, home)
+	if !ok || redirectionPath != "/dev/null" {
+		return nil, false
+	}
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		if info, err := os.Lstat(filepath.Join(dir, ".git")); err == nil &&
+			(info.IsDir() || info.Mode().IsRegular()) {
+			if dir == cwd {
+				return []string{cwd}, true
+			}
+			return []string{cwd, dir}, true
+		}
+		if dir == filepath.Dir(dir) {
+			break
+		}
+	}
+	return []string{cwd}, true
 }
 
 func shellCandidateCallMutation(
@@ -1185,12 +1445,19 @@ func shellWordDynamicParamNames(word *syntax.Word, home string) ([]string, bool)
 func shellDynamicParamName(param *syntax.ParamExp, home string) (string, bool) {
 	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
 		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
-		param.Index != nil || len(param.Modifiers) != 0 || param.Slice != nil ||
+		len(param.Modifiers) != 0 || param.Slice != nil ||
 		param.Repl != nil || param.Names != 0 {
 		return "", false
 	}
 	name := param.Param.Value
-	if !shellIdentifier(name) || shellVolatileParam(name) {
+	if param.Index != nil {
+		index, ok := param.Index.(*syntax.Word)
+		if !ok || index.Lit() != "0" {
+			return "", false
+		}
+		name += "[0]"
+	}
+	if !shellIdentifier(param.Param.Value) || shellVolatileParam(param.Param.Value) {
 		return "", false
 	}
 	if param.Exp == nil {
@@ -1504,6 +1771,9 @@ func Resolve(payload []byte) string {
 				operands, parsed, dynamic = ShellWriteOperands(command, cwd, home)
 				if dynamic {
 					dynamicOperands, dynamicUnknown = ShellDynamicWriteOperands(command, cwd, home)
+					if dynamicUnknown && SafeDynamicRedirect(command, cwd, home) {
+						sourceFacts[SafeDynamicKey] = "1"
+					}
 				}
 				literalOperands = LiteralWriteOperands(command, cwd, home)
 				extraOperands = ShellExtraWriteOperands(command, cwd, home)
@@ -1665,9 +1935,10 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+4 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
-		(targets[OperandFactsKey] != "" && targets[OperandFactsKey] != "1") {
+		(targets[OperandFactsKey] != "" && targets[OperandFactsKey] != "1") ||
+		(targets[SafeDynamicKey] != "" && targets[SafeDynamicKey] != "1") {
 		return nil, false
 	}
 	for key, value := range targets {

@@ -117,3 +117,46 @@ func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 		})
 	}
 }
+
+func TestR103B07SafeDynamicRedirectProof(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX redirects")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for _, dir := range []string{"proj/build", "proj/out", ".ssh"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"fresh directory", `out=$(mktemp -d); echo ok > "$out/x"`, true},
+		{"fresh file", `out=$(mktemp); echo ok > "$out"`, true},
+		{"numeric date", `x=$(date +%s); echo ok > "build/$x.log"`, true},
+		{"numeric random", `echo ok > "out/run-$RANDOM.log"`, true},
+		{"extra link statement", `out=$(mktemp -d); ln -sf ~/.ssh/authorized_keys "$out/x"; echo ok > "$out/x"`, false},
+		{"extra protected redirect", `out=$(mktemp -d); echo ok > "$out/x" >> ~/.ssh/authorized_keys`, false},
+		{"arbitrary variable", `out="$HOME/.ssh"; echo ok > "$out/authorized_keys"`, false},
+		{"numeric without directory", `echo ok > "$RANDOM.log"`, false},
+		{"numeric directory escape", `echo ok > "out/../run-$RANDOM.log"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SafeDynamicRedirect(tc.command, cwd, home); got != tc.want {
+				t.Fatalf("safe dynamic proof=%v, want %v", got, tc.want)
+			}
+		})
+	}
+	if err := os.Symlink(keys, filepath.Join(cwd, "out", "run-1.log")); err != nil {
+		t.Fatal(err)
+	}
+	if SafeDynamicRedirect(`echo ok > "out/run-$RANDOM.log"`, cwd, home) {
+		t.Fatal("possible existing protected alias was treated as safe")
+	}
+}

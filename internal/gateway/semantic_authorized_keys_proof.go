@@ -858,6 +858,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	safeDynamic := request.ProtectedHomeHook && request.ResolvedWriteTargets[hookpaths.SafeDynamicKey] == "1" &&
+		hookpaths.SafeDynamicRedirectShape(input.Command, clientCWD, facts.ActiveHome)
 	// ProtectHome can make the gateway discard the event CWD before its
 	// first ActionFacts pass. Rebuild path facts with the authenticated
 	// client CWD so relative command destinations key the client's physical
@@ -883,11 +885,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// not a static word) and cannot resolve one itself, the protected-path
 		// decision is unknown: fail closed (GAP-1395). Every write redirect
 		// operator contains a greater-than sign.
-		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") &&
+		if truncated && cannotResolveLocally && !safeDynamic && strings.Contains(input.Command, ">") &&
 			(!parsed || dynamic && dynamicUnknown) {
 			return true
 		}
-		if dynamicUnknown && truncated {
+		if dynamicUnknown && truncated && !safeDynamic {
 			return true
 		}
 		for i, operand := range operands {
