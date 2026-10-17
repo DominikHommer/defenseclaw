@@ -160,7 +160,7 @@ def _build_fixture(
         (launchd / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
     payload = tmp_path / "payload"
     payload.mkdir()
-    for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"):
+    for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp"):
         (payload / name).write_text("#!/bin/sh\n", encoding="utf-8")
         (payload / name).chmod(0o755)
     compiler = payload / "edge-connector" / "tools" / "policy_compiler.py"
@@ -286,7 +286,8 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
     executable_dirs = (install_root / "bin", install_root / "share" / "e2fsprogs" / "sbin")
     executables = {path.name: path for directory in executable_dirs for path in directory.iterdir()}
     assert set(executables) == {
-        "defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", *E2FSPROGS_TOOLS
+        "defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp",
+        *E2FSPROGS_TOOLS,
     }
     calls = tmp_path / "codesign-calls"
     assert {path.name for path in calls.iterdir()} == set(executables)
