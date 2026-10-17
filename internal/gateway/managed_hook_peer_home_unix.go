@@ -43,9 +43,9 @@ const managedHookPeerLookupRetry = 15 * time.Second
 var errManagedHookPeerNoResolver = errors.New("no account resolver")
 
 // managedHookPeerAccountsStamp identifies the state of the local account
-// database (managedHookPeerAccountsSource: the account database file, or on
-// macOS, where the service account cannot read it, the listed local
-// accounts). When it changes, every cached account is looked up again at
+// database (managedHookPeerAccountsSource: /etc/passwd on Linux, the listed
+// local accounts on macOS, where the service account cannot read the
+// database). When it changes, every cached account is looked up again at
 // once, so a uid that was removed and handed to a new account inside
 // managedHookPeerHomeTTL never gets the removed account's name, home,
 // directory facts or agent identity (GAP-0947, GAP-0669). "" when no source
@@ -56,6 +56,16 @@ var managedHookPeerAccountsStamp = func() string { return managedHookPeerAccount
 // administrator view (explain) compares it, as a listed stamp a request
 // reads can be up to managedHookPeerListedStampInterval old.
 var managedHookPeerAccountsRefresh = func() { managedHookPeerAccounts.refresh() }
+
+// managedHookPeerAccountRecord is the listed record of the local account
+// name (macOS): another one under the same name, uid and home is another
+// account, deleted and created again (GAP-0669). "" where none is listed.
+var managedHookPeerAccountRecord = func(name string) string {
+	if ManagedEnterpriseActive() {
+		return ""
+	}
+	return managedHookPeerAccounts.record(name)
+}
 
 func managedHookPeerStamp() string {
 	if ManagedEnterpriseActive() {
@@ -133,6 +143,15 @@ type managedHookPeerHomeCache struct {
 type managedHookPeerHolder struct {
 	name, home string
 	stamp      string
+	record     string // managedHookPeerAccountRecord of name, "" when none was listed
+}
+
+// replacedBy reports whether record, the account's listed record now, is
+// another record than the one the holder's facts were cached for: the
+// account was deleted and created again under the same name and uid
+// (GAP-0669). A record unknown on either side is no change.
+func (h managedHookPeerHolder) replacedBy(record string) bool {
+	return h.record != "" && record != "" && h.record != record
 }
 
 // managedHookPeerHomesFileMax bounds the persisted homes file read at start.
@@ -329,10 +348,14 @@ func (c *managedHookPeerHomeCache) noteHolder(uid int, key string) {
 	if !ok {
 		return
 	}
-	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp()}
+	holder := managedHookPeerHolder{name: account.Name, home: account.Home, stamp: managedHookPeerStamp(),
+		record: managedHookPeerAccountRecord(account.Name)}
 	c.mu.Lock()
 	previous, known := c.holders[uid]
-	changed := known && (previous.name != holder.name || previous.home != holder.home)
+	changed := known && (previous.name != holder.name || previous.home != holder.home || previous.replacedBy(holder.record))
+	if known && !changed && holder.record == "" {
+		holder.record = previous.record // a failed listing forgets no record
+	}
 	if !known && len(c.holders) < managedHookPeerHomesMax || known {
 		if c.holders == nil {
 			c.holders = make(map[int]managedHookPeerHolder)
@@ -479,8 +502,12 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 		forgetFacts := false
 		if served && stamp != "" && stamp != holder.stamp {
 			account, ok := c.account(uid)
+			record := ""
+			if ok {
+				record = managedHookPeerAccountRecord(account.Name)
+			}
 			switch {
-			case ok && (account.Name != holder.name || account.Home != holder.home):
+			case ok && (account.Name != holder.name || account.Home != holder.home || holder.replacedBy(record)):
 				served, forgetFacts = false, true
 			case !ok && facts.Directory == useridentity.DirectoryLocal:
 				c.mu.Lock()
@@ -490,6 +517,9 @@ func (c *managedHookPeerHomeCache) liveHolders() map[int]managedHookPeerHolder {
 				served, forgetFacts = !missing, missing
 			case ok:
 				holder.stamp = stamp
+				if record != "" {
+					holder.record = record
+				}
 				c.mu.Lock()
 				if c.holders[uid] == holders[uid] {
 					c.holders[uid] = holder

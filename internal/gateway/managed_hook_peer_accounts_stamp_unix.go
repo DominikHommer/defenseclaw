@@ -39,39 +39,59 @@ const managedHookPeerListedStampInterval = 2 * time.Second
 const managedHookPeerListTimeout = 5 * time.Second
 
 // managedHookPeerAccountsSource is where managedHookPeerAccountsStamp comes
-// from. The account database file (stat) is the cheap source, but on macOS
-// only root can read the dslocal users directory, and the managed gateway
-// runs as _defenseclaw: there the stamp is a digest of the local accounts
-// as Open Directory lists them to any account (list). Without it the stamp
-// was always "" there, and only the home TTL applied (GAP-0669).
+// from. On Linux it is the stat of /etc/passwd, which useradd, userdel and
+// usermod replace. On macOS only root can read the dslocal users directory,
+// and the managed gateway runs as _defenseclaw, so the stamp is a digest of
+// the local accounts as Open Directory lists them to any account (list):
+// name, uid, the record's GeneratedUID, home and primary group (GAP-0669).
+// Open Directory gives every account it creates a new GeneratedUID, so an
+// account deleted and created again under the same name and uid changes the
+// stamp, and its record (record) tells it from the account whose facts were
+// cached.
 type managedHookPeerAccountsSource struct {
-	stat func() string          // "" when unreadable
-	list func() (string, error) // nil where the file is always readable
+	stat func() string                          // nil, or "" when unreadable
+	list func() (managedHookPeerListing, error) // nil where the file is the source
 	now  func() time.Time
 
 	mu         sync.Mutex
-	listed     string
+	listed     managedHookPeerListing
 	listedAt   time.Time
 	listedSeq  uint64 // the listing that set listed
 	nextSeq    uint64
 	refreshing bool
 }
 
+// managedHookPeerListing is one listing of the local accounts: its stamp
+// and each account's record by name.
+type managedHookPeerListing struct {
+	stamp   string
+	records map[string]string
+}
+
 func newManagedHookPeerAccountsSource() *managedHookPeerAccountsSource {
-	source := &managedHookPeerAccountsSource{stat: statLocalAccountsStamp, now: time.Now}
 	if runtime.GOOS == "darwin" {
-		source.list = listLocalAccountsStamp
+		return &managedHookPeerAccountsSource{list: listLocalAccountsStamp, now: time.Now}
 	}
-	return source
+	return &managedHookPeerAccountsSource{stat: statLocalAccountsStamp, now: time.Now}
 }
 
 var managedHookPeerAccounts = newManagedHookPeerAccountsSource()
+
+// fileStamped reports whether the stamp comes from the account database
+// file now.
+func (s *managedHookPeerAccountsSource) fileStamped() (string, bool) {
+	if s.stat == nil {
+		return "", false
+	}
+	stamp := s.stat()
+	return stamp, stamp != ""
+}
 
 // get returns the stamp a request reads: the file's, else the last listed
 // one, starting a listing in the background when it is older than the
 // interval. "" until the first listing ends, or when neither source works.
 func (s *managedHookPeerAccountsSource) get() string {
-	if stamp := s.stat(); stamp != "" {
+	if stamp, ok := s.fileStamped(); ok {
 		return stamp
 	}
 	if s.list == nil {
@@ -84,13 +104,31 @@ func (s *managedHookPeerAccountsSource) get() string {
 		seq := s.startLocked()
 		go s.listInto(seq, true)
 	}
-	return s.listed
+	return s.listed.stamp
+}
+
+// record returns the listed record of the local account name: "" where the
+// stamp comes from the file, before the first listing ends, after a failed
+// one, and for an account the local node does not hold.
+func (s *managedHookPeerAccountsSource) record(name string) string {
+	if s.list == nil {
+		return ""
+	}
+	if _, ok := s.fileStamped(); ok {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.listed.records[name]
 }
 
 // refresh lists the local accounts now, when the file stamp is unreadable,
 // so the next get returns the stamp of the account database as it is.
 func (s *managedHookPeerAccountsSource) refresh() {
-	if s.list == nil || s.stat() != "" {
+	if s.list == nil {
+		return
+	}
+	if _, ok := s.fileStamped(); ok {
 		return
 	}
 	s.mu.Lock()
@@ -104,13 +142,13 @@ func (s *managedHookPeerAccountsSource) startLocked() uint64 {
 	return s.nextSeq
 }
 
-// listInto stores the stamp of listing seq unless a later listing already
-// stored its own: a slow background listing started before an account
-// change must not put back the stamp from before it.
+// listInto stores the listing seq unless a later listing already stored
+// its own: a slow background listing started before an account change must
+// not put back the stamp from before it.
 func (s *managedHookPeerAccountsSource) listInto(seq uint64, background bool) {
-	stamp, err := s.list()
+	listing, err := s.list()
 	if err != nil {
-		stamp = ""
+		listing = managedHookPeerListing{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -118,20 +156,14 @@ func (s *managedHookPeerAccountsSource) listInto(seq uint64, background bool) {
 		s.refreshing = false
 	}
 	if seq > s.listedSeq {
-		s.listed, s.listedAt, s.listedSeq = stamp, s.now(), seq
+		s.listed, s.listedAt, s.listedSeq = listing, s.now(), seq
 	}
 }
 
-// statLocalAccountsStamp is the stamp of the account database file:
-// useradd, userdel and usermod replace /etc/passwd, and macOS keeps a local
-// account's record in the dslocal users directory. "" when it cannot be
-// read.
+// statLocalAccountsStamp is the stamp of /etc/passwd, which useradd,
+// userdel and usermod replace. "" when it cannot be read.
 func statLocalAccountsStamp() string {
-	path := "/etc/passwd"
-	if runtime.GOOS == "darwin" {
-		path = "/var/db/dslocal/nodes/Default/users"
-	}
-	info, err := os.Stat(path)
+	info, err := os.Stat("/etc/passwd")
 	if err != nil {
 		return ""
 	}
@@ -142,33 +174,37 @@ func statLocalAccountsStamp() string {
 	return stamp
 }
 
-// listLocalAccountsStamp is the stamp of the local accounts as the platform
-// lists them (dscl on macOS): any change of a name or uid changes it.
-func listLocalAccountsStamp() (string, error) {
+// listLocalAccountsStamp lists the local accounts with their records
+// (dscl on macOS).
+func listLocalAccountsStamp() (managedHookPeerListing, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), managedHookPeerListTimeout)
 	defer cancel()
-	accounts, err := unixidentity.LocalAccounts(ctx)
+	accounts, err := unixidentity.LocalAccountRecords(ctx)
 	if err != nil {
-		return "", err
+		return managedHookPeerListing{}, err
 	}
-	return localAccountsDigest(accounts)
+	return localAccountsListing(accounts)
 }
 
 var errNoLocalAccounts = errors.New("the local account list is empty")
 
-// localAccountsDigest is the order-independent digest of name to uid.
-func localAccountsDigest(accounts map[string]int) (string, error) {
+// localAccountsListing digests the accounts without regard to order: a
+// change of an account's name, uid, record, home or primary group changes
+// the stamp and that account's record.
+func localAccountsListing(accounts map[string]unixidentity.LocalAccountRecord) (managedHookPeerListing, error) {
 	if len(accounts) == 0 {
-		return "", errNoLocalAccounts
+		return managedHookPeerListing{}, errNoLocalAccounts
 	}
+	records := make(map[string]string, len(accounts))
 	names := make([]string, 0, len(accounts))
-	for name := range accounts {
+	for name, account := range accounts {
+		records[name] = fmt.Sprintf("%d\x00%s\x00%s\x00%s", account.UID, account.RecordID, account.Home, account.PrimaryGID)
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	sum := sha256.New()
 	for _, name := range names {
-		fmt.Fprintf(sum, "%s\x00%d\n", name, accounts[name])
+		fmt.Fprintf(sum, "%s\x00%s\n", name, records[name])
 	}
-	return "listed/" + hex.EncodeToString(sum.Sum(nil)[:16]), nil
+	return managedHookPeerListing{stamp: "listed/" + hex.EncodeToString(sum.Sum(nil)[:16]), records: records}, nil
 }
