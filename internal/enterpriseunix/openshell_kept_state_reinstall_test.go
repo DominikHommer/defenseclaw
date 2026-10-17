@@ -81,3 +81,41 @@ func TestKeptOpenShellSetupReinstallKeepsTheDefaultNamespaceBridge(t *testing.T)
 		}
 	})
 }
+
+// A fresh ensure after a non-purge uninstall that kept sandboxes can fail
+// activation and roll back. The retry adopts the kept state without
+// --adopt-existing, and the kept setup record with it (GAP-0631).
+func TestKeptOpenShellSetupRetryAfterRolledBackEnsure(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := keptDockerHost(t, goos, true)
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			homeRecord, store, key := retrySandboxPaths(h)
+			h.healthy = false
+			requireError(t, ensureKeptHost(t, h, keptDockerSettings), codeActivate)
+			if !physicalExists(h.env.openshellKeptStatePath()) || !physicalExists(store) || !physicalExists(key) || !physicalExists(homeRecord) {
+				t.Fatal("the rolled-back ensure lost the kept sandbox state")
+			}
+			if marker := retainedMarkerPath(h.env.P(h.env.Layout.DataDir)); !physicalExists(marker) {
+				t.Fatal("the rolled-back ensure removed the retained-state marker")
+			} else if uid, _, err := h.env.OwnerOf(marker); err != nil || uid != 0 {
+				t.Fatalf("the rolled-back ensure gave the retained-state marker to uid %d (%v)", uid, err)
+			}
+			h.healthy = true
+			r := ensureKeptHost(t, h, keptDockerSettings)
+			requireOK(t, r)
+			if !physicalExists(store) || !physicalExists(key) || !physicalExists(homeRecord) {
+				t.Fatalf("the retry lost the kept sandbox state: %v", r.Changes)
+			}
+			if physicalExists(h.env.openshellKeptStatePath()) {
+				t.Error("the retry did not adopt the kept setup record")
+			}
+			if goos == "linux" {
+				requireDefaultNamespaceBridge(t, h, r.Changes)
+			}
+			if physicalExists(h.env.retainedStatePath()) || physicalExists(retainedMarkerPath(h.env.P(h.env.Layout.DataDir))) {
+				t.Error("the committed retry kept the retained-state record")
+			}
+		})
+	}
+}

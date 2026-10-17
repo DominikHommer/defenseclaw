@@ -153,6 +153,13 @@ func (e *Env) stateTrees(account Account) []stateTree {
 			switch {
 			case dir:
 				return stateMode{mode: 0o700, owner: service}
+			case rel == retainedMarkerName:
+				// The marker a non-purge uninstall left (retained.go) proves
+				// the folder is the one it kept only while it is root's. A
+				// fresh ensure that rolled back gave it to the service account,
+				// and the retry refused the kept folder as an unmanaged layout
+				// until --adopt-existing (GAP-0631). The commit removes it.
+				return stateMode{mode: 0o600, owner: rootOwner()}
 			case rel == guardianStateFile:
 				return stateMode{mode: 0o640, owner: rootService} // the gateway reads it
 			case rel == guardianRepairsFile, rel == guardianRestoresFile, rel == guardianNoticesFile:
@@ -197,7 +204,7 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o750, owner: rootService}
 			case rel == managed.HookGuardianCredentialAttestationFile, rel == managed.HookGuardianCredentialTransactionFile,
 				rel == managed.HookGuardianReconcileLockFile, rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName,
-				rel == "unix_target_bindings.json":
+				rel == "unix_target_bindings.json", rel == retainedMarkerName:
 				return stateMode{mode: 0o600, owner: rootService} // root-only guardian records
 			case rel == managed.HookGuardianAuthorizationFile:
 				// The gateway reads the authorization ledger through its group:
