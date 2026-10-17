@@ -174,13 +174,19 @@ func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, hos
 	if err != nil {
 		return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 	}
+	// No image is current without the trusted CAs the configuration names
+	// (the manager refuses to build or use one).
+	trusted, err := image.TrustedCAsFor(cfg)
+	if err != nil {
+		return sandboxHarnessContract{}, false, nil
+	}
 	for _, microVM := range targets {
 		// The same BuildSpec the sandbox manager selects its image with
 		// (manager.Manager.image, sandboxcli builderImages.spec).
 		c, err := image.NewContext(image.BuildSpec{
 			Harness: spec, HarnessVersion: cfg.OpenShell.Image.HarnessVersions[spec.Name], BaseImage: cfg.OpenShell.Image.Base,
 			UID: host.UID, GID: host.GID, IngressPort: cfg.OpenShellIngressPort(), FailMode: connector.SandboxFailMode,
-			DefenseClawVersion: host.Release, Owner: owner, MicroVM: microVM,
+			DefenseClawVersion: host.Release, Owner: owner, MicroVM: microVM, TrustedCAs: trusted,
 		})
 		if err != nil {
 			// A pinned harness version without a reviewed sandbox contract, a

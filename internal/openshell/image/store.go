@@ -58,8 +58,12 @@ type Record struct {
 	Owner string `json:"owner"`
 	// MicroVM marks an image built for the MicroVM driver
 	// (BuildSpec.MicroVM).
-	MicroVM bool      `json:"microvm,omitempty"`
-	BuiltAt time.Time `json:"built_at"`
+	MicroVM bool `json:"microvm,omitempty"`
+	// TrustedCAs is the normalized PEM of the trusted CAs the image
+	// carries (BuildSpec.TrustedCAs), so its context renders again from
+	// the record (runimage.go baseDirs).
+	TrustedCAs string    `json:"trusted_cas,omitempty"`
+	BuiltAt    time.Time `json:"built_at"`
 	// Binaries maps the required commands to their in-image realpaths.
 	Binaries []Binary `json:"binaries"`
 	// NetworkBinaries are the realpaths LLM credential profiles pin.
@@ -193,7 +197,7 @@ func (s *Store) Get(tag string) (Record, bool, error) {
 // Current returns the image a sandbox built from want's spec must run: the
 // record of exactly want's tag and content hash, whose every recorded input
 // (connector, harness version, hook contract, base image, run-as identity,
-// ingress port, DefenseClaw version and fail mode) matches want, and whose
+// ingress port, DefenseClaw version, fail mode and trusted CAs) matches want, and whose
 // hooks were proven to fire (HookFireVerified). There is no fallback to an
 // older image: after an upgrade or a changed input the old image carries
 // stale hooks, so a missing or unverified exact match means build (or
@@ -229,7 +233,8 @@ func recordMatches(r Record, c *Context) bool {
 		r.DefenseClawVersion == c.Spec.DefenseClawVersion &&
 		r.FailMode == c.Spec.FailMode &&
 		r.Owner == c.Spec.Owner &&
-		r.MicroVM == c.Spec.MicroVM
+		r.MicroVM == c.Spec.MicroVM &&
+		r.TrustedCAs == string(c.TrustedCAs.PEM)
 }
 
 // Put inserts or replaces the record with r.Tag.

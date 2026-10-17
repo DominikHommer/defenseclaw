@@ -433,6 +433,8 @@ func (d *SandboxDaemon) buildConfigWith(floor *config.OpenShellAdminConfig) *con
 	o.Harnesses, o.Wrappers = op.Harnesses, op.Wrappers
 	o.TokenDelivery, o.Middleware.Enabled = op.TokenDelivery, op.Middleware
 	o.LLM, o.KeepHeadless, o.UpstreamTelemetry = op.LLM, op.KeepHeadless, op.UpstreamTelemetry
+	// Only the administrator's trusted CAs: the account names none.
+	o.TrustedCAPEM, o.TrustedCAError = op.TrustedCAs, op.TrustedCAError
 	o.Workdir.Mode = config.OpenShellWorkdirCopy
 	if s.Enterprise.Install == config.EnterpriseOpenShellInstallSetup {
 		if d.home != "" {

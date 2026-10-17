@@ -97,6 +97,30 @@ case "${` + openshell.EnvEgressURL + `:-}" in
 esac
 `
 
+// trustedCAScript points Node and Deno at the bundle that holds the
+// trusted CAs of openshell.trusted_ca_bundle, in an image that has them
+// (openshell.SandboxTrustedCADir exists only there). OpenShell sets
+// SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE and GIT_SSL_CAINFO to its
+// combined bundle (the image's system store, which holds those CAs, plus its
+// own CA), but NODE_EXTRA_CA_CERTS and DENO_CERT to its own CA alone, so
+// Node (Claude Code, Codex's and Copilot's launchers, npm), Bun (OpenCode)
+// and Deno still failed a TLS-inspecting proxy's certificates with "unable
+// to get local issuer certificate" (#1296). They take the combined bundle
+// instead, which still holds OpenShell's CA; without SSL_CERT_FILE the
+// image's system bundle. An image without trusted CAs is left alone. POSIX
+// sh, like egressEnvScript.
+const trustedCAScript = `# The trusted CAs of ` + openshell.TrustedCAKey + ` are in the system store and
+# so in OpenShell's combined bundle; Node and Deno read only the CA files named.
+if [ -d ` + openshell.SandboxTrustedCADir + ` ]; then
+  dc_ca="${SSL_CERT_FILE:-` + openshell.SandboxSystemCABundle + `}"
+  if [ -f "$dc_ca" ] && [ -r "$dc_ca" ]; then
+    NODE_EXTRA_CA_CERTS="$dc_ca"; DENO_CERT="$dc_ca"
+    export NODE_EXTRA_CA_CERTS DENO_CERT
+  fi
+  unset dc_ca
+fi
+`
+
 // timeZoneScript exports TZ from openshell.EnvHostTimeZone, the zone of
 // the machine the sandbox was created from, when TZ is not set already and
 // the image has that zone's file (without it, libc would show UTC under
@@ -132,10 +156,10 @@ esac
 func (s *Spec) profile() string {
 	return `# defenseclaw-sandbox-profile v1
 # DefenseClaw sandbox shell environment (OpenShell sandbox images,
-# root-owned). Login shells get the egress proxy settings and the time zone
-# every harness launcher exports, and the harness command starts its
-# launcher.
-` + egressEnvScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
+# root-owned). Login shells get the egress proxy settings, the trusted CA
+# bundle and the time zone every harness launcher exports, and the harness
+# command starts its launcher.
+` + egressEnvScript + trustedCAScript + timeZoneScript + shimPathScript + `if [ -n "${BASH_VERSION:-}" ] && ! shopt -oq posix 2>/dev/null; then
   eval '` + s.Command + `() { ` + s.ShimPath() + ` "$@"; }; export -f ` + s.Command + `' 2>/dev/null || true
 fi
 `

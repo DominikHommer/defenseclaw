@@ -112,6 +112,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 		FailMode:           c.Spec.FailMode,
 		Owner:              c.Spec.Owner,
 		MicroVM:            c.Spec.MicroVM,
+		TrustedCAs:         string(c.TrustedCAs.PEM),
 		BuiltAt:            b.now().UTC(),
 		NetworkBinaries:    res.NetworkBinary,
 	}
