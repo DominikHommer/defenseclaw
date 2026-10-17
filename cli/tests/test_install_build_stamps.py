@@ -31,7 +31,11 @@ def test_the_windows_enterprise_builds_stamp_the_commit_and_its_time() -> None:
         line = re.search(rf'^LDFLAGS_{name}="([^"]*)"$', bundle, re.M)
         assert line is not None and line.group(1).endswith("${STAMP}"), name
     setup = (ROOT / "packaging" / "windows" / "standalone" / "build-setup.sh").read_text(encoding="utf-8")
-    assert '-X main.commit=${SOURCE_COMMIT} -X main.date=$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd' in setup
+    assert '-X main.commit=${SOURCE_COMMIT} -X main.date=${build_date}' in setup
+    assert (
+        'build_date="$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"'
+        in setup
+    )
 
 
 def test_the_macos_bundle_stamps_the_commit_and_build_time() -> None:

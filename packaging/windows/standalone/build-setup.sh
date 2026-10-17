@@ -167,7 +167,9 @@ else
     build() {
         local output="$1" package="$2" component="$3" gui="$4"
         # main.date: the commit's UTC time, reproducible (#1249).
-        local ldflags="-s -w -buildid=defenseclaw-${component}-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+        local build_date ldflags
+        build_date="$(TZ=UTC git -C "${REPO_ROOT}" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)" || die "cannot read the commit date"
+        ldflags="-s -w -buildid=defenseclaw-${component}-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT} -X main.date=${build_date}"
         if [ "${gui}" = "gui" ]; then
             ldflags="${ldflags} -H=windowsgui"
         fi
