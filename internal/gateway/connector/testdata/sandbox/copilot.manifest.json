@@ -46,8 +46,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 69581,
-      "sha256": "e5f816e9668b0295ddfbb09f110423af1c219f7af56703416adf01ab54dba62d"
+      "size": 73044,
+      "sha256": "b21681ffb7aedbface5655fbc93fcc5917ae324ebb3a02f4be8d29cae3c8e959"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -58,8 +58,8 @@
     "/usr/local/lib/defenseclaw/hooks/copilot-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7679,
-      "sha256": "7b9a535434579bcf3c132b49c8f87a167ea24aa9b44ead0e2b5c13e1ffc840b6"
+      "size": 7876,
+      "sha256": "de7f8f4d381af009b06897cb2a2e8063762277a4f15545eaa1660ab0ba854023"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
