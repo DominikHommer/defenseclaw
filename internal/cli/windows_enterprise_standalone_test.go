@@ -709,6 +709,33 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	}
 }
 
+// #1201 (GAP-0564 on Windows): the warnings of the installed host a config
+// refusal reports, such as its security_incomplete advisory, are labelled as
+// the running deployment's, so they do not read as the refused file's.
+func TestWindowsEnterpriseConfigRefusalLabelsTheRunningDeploymentAdvisories(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	cause := fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, errors.New("the gateway cannot load the config"))
+	_ = writeWindowsEnterpriseStandaloneConfigRefusal(context.Background(), command, "ensure", ensureTestOptions(), `C:\stage\install-enterprise.ps1`, cause)
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	labelled := false
+	for _, warning := range result.Warnings {
+		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
+			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
+		}
+		labelled = labelled || warning.Code == "security_incomplete"
+	}
+	if !labelled || len(result.Errors) != 1 || strings.HasPrefix(result.Errors[0].Message, enterprisestatus.RunningDeploymentPrefix) {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 // GAP-1433: an ensure or upgrade whose config is refused first recovers a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.

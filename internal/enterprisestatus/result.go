@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -306,6 +307,28 @@ func (p *PolicyState) Line() string {
 		line += "; config.yaml was changed outside the lifecycle"
 	}
 	return line
+}
+
+// RunningDeploymentPrefix starts each warning of a run that refused the
+// submitted config before it changed anything: the warning is the running
+// deployment's, not the refused file's (GAP-0564, #1201).
+const RunningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// LabelRunningDeployment marks r as a run that refused the submitted config
+// (ConfigRefused) and labels each warning from index from on as the running
+// deployment's, except those whose code is in keep: they describe the
+// refused request itself. A warning already labelled stays as it is.
+func (r *Result) LabelRunningDeployment(from int, keep ...string) {
+	if r == nil {
+		return
+	}
+	r.ConfigRefused = true
+	for i := max(from, 0); i < len(r.Warnings); i++ {
+		if slices.Contains(keep, r.Warnings[i].Code) || strings.HasPrefix(r.Warnings[i].Message, RunningDeploymentPrefix) {
+			continue
+		}
+		r.Warnings[i].Message = RunningDeploymentPrefix + r.Warnings[i].Message
+	}
 }
 
 // PolicyLine is Policy.Line(), labelled as the running deployment's when the

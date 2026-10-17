@@ -1109,7 +1109,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
-const runningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+const runningDeploymentPrefix = enterprisestatus.RunningDeploymentPrefix
 
 // describeRunning is describe for a run that refused the submitted config
 // before it changed anything. The services, readiness, policy and advisories
@@ -1122,12 +1122,7 @@ func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
 	r := l.result
 	before := len(r.Warnings)
 	l.describe(ctx, record, false)
-	r.ConfigRefused = true
-	for i := before; i < len(r.Warnings); i++ {
-		if r.Warnings[i].Code != codeConfigRejected {
-			r.Warnings[i].Message = runningDeploymentPrefix + r.Warnings[i].Message
-		}
-	}
+	r.LabelRunningDeployment(before, codeConfigRejected)
 }
 
 // codeSandboxPackDir warns about a sandbox packs folder other accounts could

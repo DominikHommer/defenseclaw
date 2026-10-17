@@ -2290,7 +2290,10 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 // reports it: installed, version, services and readiness of the running
 // deployment. Reporting installed false with every readiness flag false made
 // an MDM compliance rule read a healthy host as uninstalled (GAP-0181). A
-// probe that cannot read the host leaves the recorded deployment.
+// probe that cannot read the host leaves the recorded deployment. Each
+// warning of that host, such as its security_incomplete advisory, is
+// labelled as the running deployment's, as on Linux and macOS, so it does
+// not read as a problem of the refused file (GAP-0564, #1201).
 func writeWindowsEnterpriseStandaloneConfigRefusal(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2300,6 +2303,8 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 	cause error,
 ) error {
 	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, func(result *enterprisestatus.Result) {
+		before := len(result.Warnings)
+		defer func() { result.LabelRunningDeployment(before, windowsEnterpriseHealthNotChecked) }()
 		status, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 			windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil || status.probeFailed {
