@@ -417,6 +417,53 @@ func TestBundleApplyConfirmsHotAndRestartBundles(t *testing.T) {
 	}
 }
 
+// The bundle block of an apply names the receipt it reports (receipt_id). A
+// fresh apply names the receipt it wrote, which is also the name of its
+// public receipt; a repeat of the current bundle writes no receipt and names
+// the current confirmed one (noop_reason is already_applied only when ensure
+// had nothing else to do); a bundle refused after its
+// receipt was written leaves the block on the confirmed receipt and names
+// its own receipt in last_refusal; a refusal before any receipt was written
+// reports no block.
+func TestBundleApplyResultNamesTheReceipt(t *testing.T) {
+	b := newBundleHost(t)
+	v1, v2, _ := bundleConfigs(b.testHost)
+	b.mapPromotedBundleOwners(1)
+	path := b.dir(1, v1)
+	r := b.apply(path)
+	requireOK(t, r)
+	rc := b.receipt(bundleID(1))
+	if r.Bundle == nil || r.Bundle.ReceiptID == "" || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("fresh apply: bundle block = %+v, receipt %s", r.Bundle, rc.ReceiptID)
+	}
+	public := filepath.Join(b.env.bundleStore().PublicReceiptEventsDir(), r.Bundle.ReceiptID+".json")
+	if _, err := os.Stat(public); err != nil {
+		t.Fatalf("no public receipt named by receipt_id: %v", err)
+	}
+
+	receipts, _ := b.env.bundleStore().Receipts()
+	r = b.apply(path)
+	requireOK(t, r)
+	after, _ := b.env.bundleStore().Receipts()
+	if len(after) != len(receipts) || r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID {
+		t.Fatalf("repeated delivery: receipts %d -> %d, bundle block = %+v", len(receipts), len(after), r.Bundle)
+	}
+
+	r = b.apply(b.dir(1, v2))
+	if r.OK || !hasMessageCode(r.Errors, string(enterprisebundle.CodeVersionNotNewer)) {
+		t.Fatalf("same version, other bytes: ok %v, errors %+v", r.OK, r.Errors)
+	}
+	if r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID || r.LastRefusal == nil || r.LastRefusal.ReceiptID == rc.ReceiptID {
+		t.Fatalf("refusal after the receipt: bundle block = %+v, last refusal = %+v", r.Bundle, r.LastRefusal)
+	}
+
+	fresh := newTestHost(t, "linux")
+	r = fresh.run(Options{Action: ActionEnsure, Bundle: path})
+	if r.OK || !hasMessageCode(r.Errors, codeNotInstalled) || r.Bundle != nil {
+		t.Fatalf("refusal before the receipt: ok %v, errors %+v, bundle block = %+v", r.OK, r.Errors, r.Bundle)
+	}
+}
+
 func TestBundlePolicyAssetChangeKeepsGatewayRunning(t *testing.T) {
 	b := newBundleHost(t)
 	stagePackage(t, b.testHost, "1.0.0")
