@@ -588,7 +588,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	scope := ""
 	view, sandboxed := sandboxHookView(ctx)
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
-		scope = binding.ID
+		scope = sandboxBindingScope(binding)
 	}
 	key, ok := validScopedActiveAgentContextKey(scope, connectorName, req.SessionID)
 	if !ok {

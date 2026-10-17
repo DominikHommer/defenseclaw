@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -509,6 +510,9 @@ type CurrentPolicy struct {
 	Revoked       bool       `json:"revoked,omitempty"`
 	RevokedReason string     `json:"revoked_reason,omitempty"`
 	Live          LiveFields `json:"live"`
+	// Floor is the complete gateway-owned policy floor. A managed daemon
+	// adopts it after confirmation instead of its user-writable cache.
+	Floor *config.OpenShellAdminConfig `json:"floor,omitempty"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
 	// Profile is the guardrail profile of the same match as Digest: after

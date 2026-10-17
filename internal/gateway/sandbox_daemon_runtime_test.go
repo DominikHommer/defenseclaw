@@ -778,6 +778,27 @@ func TestSandboxDaemonPollReportsTheSandboxState(t *testing.T) {
 	}
 }
 
+func TestSandboxDaemonConfirmationReplacesUserCachedFloor(t *testing.T) {
+	regs := &daemonRegistrations{path: filepath.Join(t.TempDir(), "registrations.json"),
+		byName: map[string]daemonRegistration{"sandbox": {
+			ID: "reg-one", Sandbox: "sandbox",
+			Floor: config.OpenShellAdminConfig{MinProfile: "open"},
+		}}}
+	if regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1}) {
+		t.Fatal("an answer without a full floor confirmed a user cached floor")
+	}
+	if got, _ := regs.get("sandbox"); got.Confirmed {
+		t.Fatal("a partial answer marked a registration confirmed")
+	}
+	strict := config.OpenShellAdminConfig{MinProfile: "strict"}
+	if !regs.applyLive("sandbox", sandboxrelay.CurrentPolicy{V: 1, Floor: &strict}) {
+		t.Fatal("a complete answer did not confirm the registration")
+	}
+	if got, _ := regs.get("sandbox"); !got.Confirmed || got.Floor.MinProfile != "strict" {
+		t.Fatalf("confirmed floor = %+v", got)
+	}
+}
+
 // GAP-0693: the policy poll never adopts the floor of a stopped sandbox's
 // registration. Its live fields follow each configuration change, so the
 // poll saw it changed and put the daemon, and a sandbox created since under

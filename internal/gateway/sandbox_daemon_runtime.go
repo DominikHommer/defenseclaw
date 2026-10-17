@@ -315,9 +315,8 @@ func NewSandboxDaemon(opts SandboxDaemonOptions) (*SandboxDaemon, error) {
 		d.openShell = newAccountOpenShell(runtime.GOOS, uid, d.home, opts.Logf)
 	}
 	d.settingsAt.Store(time.Now().UnixNano())
-	// The registrations file is the user's own: its floors are adopted only
-	// after the managed gateway confirmed the registration (Run's
-	// revalidate). Until then the manager reads the strictest floor.
+	// The registrations file is the user's own. Until the managed gateway
+	// confirms a complete floor, the manager reads the strictest floor.
 	d.cfg.Store(d.buildConfig())
 	d.touch()
 	if exe := opts.Executable; exe != "-" {
@@ -1211,9 +1210,8 @@ const revalidateTimeout = 15 * time.Second
 // file names and adopts the floor of the newest confirmed one whose sandbox
 // runs, or of the newest confirmed one when none runs (GAP-0693); it
 // returns the revoked ones. The file is the user's own: an edited floor is
-// never adopted for a registration the gateway does not answer for. The
-// non-live floor fields still come from the file (CurrentPolicy carries only
-// the live ones).
+// never adopted for a registration the gateway does not answer for. A
+// confirmation replaces the entire cached floor with the gateway's floor.
 func (d *SandboxDaemon) revalidate(ctx context.Context) []daemonRegistration {
 	ctx, cancel := context.WithTimeout(ctx, revalidateTimeout)
 	defer cancel()
@@ -2611,8 +2609,8 @@ func (r *daemonRegistrations) markRevoked(name, reason string) {
 	_ = r.saveLocked()
 }
 
-// applyLive switches the live fields of name's floor (plan §5.2 "live")
-// from a policy/current answer, marks the registration confirmed, and
+// applyLive replaces the floor from a policy/current answer, marks the
+// registration confirmed, and
 // reports whether anything changed (a first confirmation included). The
 // registration's UpdatedAt becomes the answer's policy time, so the status
 // shows when the policy last changed, also for a change of a field that is
@@ -2669,10 +2667,10 @@ func (r *daemonRegistrations) pruneApplied(regs []daemonRegistration) {
 // applyLiveLocked is applyLive under r.mu.
 func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.CurrentPolicy) bool {
 	reg, ok := r.byName[name]
-	if !ok {
+	if !ok || cp.Floor == nil {
 		return false
 	}
-	live, digest := cp.Live, cp.Digest
+	digest := cp.Digest
 	confirmed := !reg.Confirmed
 	reg.Confirmed = true
 	policyAt := cp.UpdatedAt.UTC()
@@ -2686,11 +2684,7 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 		reg.Generation, moved = cp.Generation, true
 	}
 	before := reg.Floor
-	f := &reg.Floor
-	f.EgressBlock, f.EgressAllowOnly, f.BlockLargeUploads = live.EgressBlock, live.EgressAllowOnly, live.BlockLargeUploads
-	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
-	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
-	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
+	reg.Floor = *cp.Floor
 	// The profile of the same match as the digest: a regroup re-matched the
 	// registration (#1199).
 	profile := strings.TrimSpace(cp.Profile)
