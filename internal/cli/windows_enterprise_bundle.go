@@ -106,20 +106,37 @@ func init() {
 // receipt and the confirmed state. The store lock excludes a live apply; an
 // active writer retains ownership and status reports its pending receipt.
 func settleWindowsBundleStatus(ctx context.Context) error {
+	_, err := settleWindowsBundleStatusReport(ctx)
+	return err
+}
+
+// settleWindowsBundleStatusReport is settleWindowsBundleStatus that also
+// returns the receipts still unsettled afterwards, read under the store
+// lock: no live apply owns them, a killed one left them (GAP-0028). nil
+// while a live apply holds the lock.
+func settleWindowsBundleStatusReport(ctx context.Context) ([]*enterprisebundle.Receipt, error) {
 	layout, err := windowsBundleLayout()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	unlock, err := lockWindowsBundleStore(layout.LifecycleDir)
 	if err != nil {
 		// A live apply may hold this lock. It will settle its own receipt.
 		if errors.Is(err, errWindowsBundleStoreBusy) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer unlock()
 	driver := newWindowsBundleDriver(layout)
+	if err := settleWindowsBundleStatusLocked(ctx, layout, driver); err != nil {
+		return nil, err
+	}
+	unsettled, _ := driver.Store.Unsettled()
+	return unsettled, nil
+}
+
+func settleWindowsBundleStatusLocked(ctx context.Context, layout managed.StandaloneLayout, driver *enterprisebundle.Driver) error {
 	receipts, err := driver.Store.Receipts()
 	if err != nil {
 		return err

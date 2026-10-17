@@ -216,7 +216,11 @@ or exit 1 `not_root`, `change_failed` or `state_invalid`).
   not see whether its restart worked: re-send it after the agent's restart
   (2.5). A killed child leaves an interrupted
   transaction; managed hooks fail closed until the next mutating run
-  recovers it.
+  recovers it. Status shows it: once no run holds the lock, `enterprise <os>
+  status` reports `transaction_pending: true`, and a bundle receipt the
+  killed apply left unfinished adds the warning `bundle_pending` (4.4). Run
+  4.6 ensure when status shows `transaction_pending: true` and no apply child
+  of the agent's own is still running (5.1).
 - One mutating call at a time per device is enough; the device serializes
   them anyway (section 6).
 
@@ -541,6 +545,14 @@ Exit 0.
   confirmed bundle), `last_refusal`, `inspection`, `readiness`, `services`,
   `coverage_complete` and `security_complete`. A pending transaction is
   `transaction_pending: true` with `errors[].code` `verify_failed`.
+  A bundle receipt no run finished (state `received`, `verified`, `staged`
+  or `applied`) while no run holds the lock is also `transaction_pending:
+  true`, with the warning `bundle_pending` that names the receipt and its
+  delivery id; `ok` can stay true, because the current or last good bundle
+  keeps enforcing. Status only reads the store; 4.6 ensure settles the
+  receipt (`failed` with `error_code` `interrupted`, or `confirmed`). While a
+  live apply holds the lock, Linux and macOS status is busy and Windows status
+  does not count that run's receipt.
 - Exit: 0; 1 / 1603; 75 (Linux, macOS busy); 5 (Windows, not elevated).
 
 ```sh
@@ -910,9 +922,12 @@ Later bundles go through 5.2.
 1. Run `--version-json` and pick the paths of section 3 (`management_contract`
    present or absent).
 2. Run `enterprise <os> status --json`. If `installed` is false, set the
-   device up (5.0). If `transaction_pending` is true, or the last apply the
-   agent started has no terminal receipt (`bundle.state` not `confirmed` or
-   `failed` for that bundle id), run 4.6 ensure, then status again. Retry 75 /
+   device up (5.0). If `transaction_pending` is true (an interrupted
+   transaction, or the warning `bundle_pending` for a receipt a killed apply
+   left), or the last apply the agent started has no terminal receipt
+   (`bundle.state` not `confirmed` or `failed` for that bundle id), and no
+   apply child of the agent's own is still running, run 4.6 ensure, then
+   status again. Retry 75 /
    1618 with backoff. After an unknown outcome of `bundle anchors install`,
    run the same install again: `unchanged` with the same `sha256` means the
    file is in place.

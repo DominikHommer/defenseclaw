@@ -401,6 +401,58 @@ func TestSettleEndsInterruptedRunsAndFinishesAConfirmCut(t *testing.T) {
 	}
 }
 
+// Unsettled lists, read-only, what Settle would finish: the receipts no
+// run finished. Status reports them as a pending transaction (GAP-0028).
+func TestUnsettledListsUnfinishedReceiptsWithoutSettling(t *testing.T) {
+	s := testStore(t)
+	if got, err := s.Unsettled(); err != nil || len(got) != 0 || UnsettledMessage(got, "ensure") != "" {
+		t.Fatalf("empty store: %v, %v", got, err)
+	}
+	applyThrough(t, s, 1, 2, StateConfirmed)
+	if got, err := s.Unsettled(); err != nil || len(got) != 0 {
+		t.Fatalf("confirmed only: %v, %v", got, err)
+	}
+	applied := applyThrough(t, s, 2, 3, StateApplied)
+	staged, err := s.Receive(testBundleID(3), 4, "agent:crash-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Unsettled()
+	if err != nil || len(got) != 2 || got[0].ReceiptID != staged.ReceiptID || got[1].ReceiptID != applied.ReceiptID {
+		t.Fatalf("unsettled = %+v, %v", got, err)
+	}
+	message := UnsettledMessage(got, "defenseclaw-gateway enterprise linux ensure")
+	for _, want := range []string{staged.ReceiptID, "delivery agent:crash-v4", "is received", "1 older unfinished", "enterprise linux ensure"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message %q lacks %q", message, want)
+		}
+	}
+	if rc := receiptByID(t, s, staged.ReceiptID); rc.State != StateReceived {
+		t.Fatalf("Unsettled changed the receipt: %+v", rc)
+	}
+	if _, err := s.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Unsettled(); err != nil || len(got) != 1 || got[0].ReceiptID != applied.ReceiptID {
+		t.Fatalf("after settle (applied stays for the caller): %+v, %v", got, err)
+	}
+}
+
+func receiptByID(t *testing.T, s *Store, id string) *Receipt {
+	t.Helper()
+	receipts, err := s.Receipts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range receipts {
+		if r.ReceiptID == id {
+			return r
+		}
+	}
+	t.Fatalf("no receipt %s", id)
+	return nil
+}
+
 func TestStoreRefusesAStateThatWouldLowerTheFloor(t *testing.T) {
 	s := testStore(t)
 	if err := os.MkdirAll(s.LifecycleDir, 0o700); err != nil {

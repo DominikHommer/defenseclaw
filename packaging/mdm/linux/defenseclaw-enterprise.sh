@@ -154,6 +154,7 @@ DC_ANCHORS_SOURCE=""   # the private copy of the anchor file that command reads
 DC_ANCHORS_RESULT=""   # its result: installed, replaced or unchanged
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
+DC_TRUST_ACL=""        # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
 
 dc_platform() {
     case "$(uname -s)" in
@@ -258,6 +259,11 @@ dc_stage_parent() {
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
+    if [ ! -e "$DC_STAGE_PARENT" ] && [ ! -L "$DC_STAGE_PARENT" ]; then
+        # The wrapper creates only its Linux default; a --staging-dir folder
+        # is the administrator's (GAP-0030: this read as a shell error).
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist; create it as a root-owned directory that only root can write (mkdir -m 0700), or leave out --staging-dir"
+    fi
     if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi

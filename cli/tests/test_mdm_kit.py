@@ -529,6 +529,54 @@ echo installed-ok
     assert "step 1.0.4101 -> 1.0.4101" in result.stdout, result.stdout
     assert log.read_text(encoding="utf-8").strip() == "rpm -U --replacepkgs"
 
+# GAP-0030: a --staging-dir folder that does not exist exited 1 with no
+# result and "DC_TRUST_ACL: unbound variable" (set -u): the check skipped
+# dc_trusted_path, which is what set the variable. Both twins run their own
+# settings and state block and the real dc_stage_parent; a stub stat makes an
+# existing folder read as another account's on either host.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+@pytest.mark.parametrize("case", ["missing", "untrusted"])
+def test_unix_wrapper_refuses_a_bad_custom_staging_dir_with_a_result(os_dir: str, shell: str, case: str, tmp_path: Path) -> None:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    validator = _schema_validator()
+    text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    header = text[text.index("set -eu\n"):text.index("dc_platform() {")]
+    functions = "\n".join(_shell_function(text, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_fail_result", "dc_log", "dc_stat_uid", "dc_stat_mode",
+        "dc_acl_write_entry", "dc_trusted_path", "dc_stage_parent"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stat = bin_dir / "stat"
+    stat.write_text("#!/bin/sh\necho 501\n", encoding="utf-8")  # owned by another account
+    stat.chmod(0o755)
+    staging = tmp_path / "mdm-stage"
+    if case == "untrusted":
+        staging.mkdir()
+    script = f"""{header}
+PATH='{bin_dir}':$PATH
+DC_STAGING_DIR='{staging}'
+{functions}
+dc_stage_parent
+echo staged
+"""
+    result = subprocess.run([shell, "-c", script], capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+    assert result.returncode == 1 and result.stderr == "", (result.stdout, result.stderr)
+    documents = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(documents) == 1, result.stdout
+    document = json.loads(documents[0])
+    assert not sorted(validator.iter_errors(document), key=str), document
+    assert document["exit_code"] == 1 and document["platform"] == ("darwin" if os_dir == "macos" else "linux")
+    assert [e["code"] for e in document["errors"]] == ["mdm_staging_untrusted"], document
+    message = document["errors"][0]["message"]
+    if case == "missing":
+        assert f"the staging folder {staging} does not exist" in message and "mkdir -m 0700" in message, message
+    else:
+        assert f"the staging folder {staging} is not a root-owned directory that only root can write" in message, message
+
+
 # GAP-0752: on a CIS host (/tmp and /var/tmp noexec) the payload's gateway
 # could not run from the wrapper's /var/tmp staging folder, and the result was
 # mdm_lifecycle_no_result with the shell's "Permission denied". The wrapper
