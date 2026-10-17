@@ -61,6 +61,19 @@ def _cfg(actives, *, modes=None, disabled=None):
     return cfg
 
 
+def test_json_roster_carries_healthy_manual_hook_state():
+    cfg = _cfg(["codex", "hermes"])
+    health = {"connectors": [
+        {"name": "codex", "state": "running", "source": "manual"},
+        {"name": "hermes", "state": "running", "source": "manual"},
+    ]}
+    with patch.object(cmd_status, "_agent_missing", return_value=False):
+        rows = cmd_status._connector_roster(cfg, health)
+    assert {row["name"]: row.get("state") for row in rows} == {
+        "codex": "running", "hermes": "running"
+    }
+
+
 def _render(cfg) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

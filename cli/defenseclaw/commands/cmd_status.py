@@ -1705,6 +1705,10 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     for name, row in rows.items():
+        # The text roster already uses this authenticated runtime state. Keep
+        # the JSON projection in agreement, including manual hook connectors.
+        if name in health_map and health_map[name].get("state"):
+            row["state"] = health_map[name]["state"]
         if row.get("enabled") and _agent_missing(cfg, name):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"

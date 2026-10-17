@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 
 import pytest
 import yaml
@@ -416,6 +417,23 @@ def test_prepared_write_is_deterministic_and_repr_is_content_safe() -> None:
     assert first.candidate_sha256 == hashlib.sha256(first.candidate).hexdigest()
     assert "do-not-print" not in repr(first)
     assert "30" not in repr(mutation)
+
+
+def test_config_float_round_trips_and_nonfinite_values_are_refused() -> None:
+    source = "config_version: 8\nguardrail:\n  judge:\n    timeout: 30.0\n"
+    value = {"timeout": 30.0}
+    prepared = prepare_v8_yaml_write(
+        source, [V8YAMLMutation.set(("guardrail", "judge"), value)], any_path=True
+    )
+    assert yaml.safe_load(prepared.candidate)["guardrail"]["judge"] == value
+    for nonfinite in (math.inf, -math.inf, math.nan):
+        with pytest.raises(V8YAMLMutationError) as caught:
+            prepare_v8_yaml_write(
+                source,
+                [V8YAMLMutation.set(("guardrail", "judge", "timeout"), nonfinite)],
+                any_path=True,
+            )
+        assert caught.value.code == "invalid_replacement_type"
 
 
 def test_first_destination_under_empty_flow_mapping_is_written_in_block_style() -> None:
