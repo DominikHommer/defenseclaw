@@ -1882,23 +1882,17 @@
       "fieldConfig": {
         "defaults": {
           "noValue": "No would-blocks in range",
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10
-          }
+          "unit": "short"
         }
       },
       "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "showUnfilled": true
       }
     },
     {
