@@ -45,6 +45,22 @@ func assertWindowsHookRestored(t *testing.T, target, want, damage string) {
 	}
 }
 
+// windowsLstatWithFileID returns an Lstat result whose file ID is already
+// loaded. Go on Windows reads the ID of an Lstat result lazily, by path, the
+// first time os.SameFile needs it, so a "before" snapshot taken ahead of a
+// restore would otherwise describe the restored file.
+func windowsLstatWithFileID(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(info, info) {
+		t.Fatalf("could not load the file ID of %s", path)
+	}
+	return info
+}
+
 func windowsSymlinkOrSkipPrivilege(t *testing.T, oldTarget, link string) {
 	t.Helper()
 	if err := os.Symlink(oldTarget, link); err != nil {
@@ -70,10 +86,7 @@ func TestKeepWindowsManagedFileCopyRestoresFileSymlink(t *testing.T) {
 	if body, err := os.ReadFile(pointed); err != nil || string(body) != "other bytes" {
 		t.Fatalf("link target changed: body %q, error %v", body, err)
 	}
-	before, err := os.Lstat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := windowsLstatWithFileID(t, target)
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
 		t.Fatalf("healthy second check: damage %q, error %v", damage, err)
 	}
@@ -191,10 +204,7 @@ func TestKeepWindowsManagedFileCopyRestoresIrregularLstatEntry(t *testing.T) {
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
 		t.Fatalf("keep protected copy: damage %q, error %v", damage, err)
 	}
-	before, err := os.Lstat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := windowsLstatWithFileID(t, target)
 	saved := windowsHookBinaryLstat
 	windowsHookBinaryLstat = func(path string) (os.FileInfo, error) {
 		info, err := os.Lstat(path)
@@ -217,10 +227,7 @@ func TestKeepWindowsManagedFileCopyRestoresIrregularLstatEntry(t *testing.T) {
 
 func TestKeepWindowsManagedFileCopyReportsOtherLstatError(t *testing.T) {
 	target, copyPath, want := writeWindowsHookBinaryFixture(t, "hook release")
-	before, err := os.Lstat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := windowsLstatWithFileID(t, target)
 	saved := windowsHookBinaryLstat
 	windowsHookBinaryLstat = func(path string) (os.FileInfo, error) {
 		if path == target {
