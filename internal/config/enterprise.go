@@ -1341,6 +1341,7 @@ func standaloneInlineSecrets(cfg *Config) []string {
 	var inline []string
 	for _, field := range []struct{ key, value string }{
 		{"llm.api_key", cfg.LLM.APIKey},
+		{"inspect_llm.api_key", cfg.InspectLLM.APIKey},
 		{"guardrail.llm.api_key", cfg.Guardrail.LLM.APIKey},
 		{"guardrail.judge.llm.api_key", cfg.Guardrail.Judge.LLM.APIKey},
 		{"scanners.mcp_scanner.llm.api_key", cfg.Scanners.MCPScanner.LLM.APIKey},
@@ -1353,7 +1354,31 @@ func standaloneInlineSecrets(cfg *Config) []string {
 			inline = append(inline, field.key)
 		}
 	}
+	for index, webhook := range cfg.Webhooks {
+		if strings.TrimSpace(webhook.URL) != "" {
+			inline = append(inline, fmt.Sprintf("webhooks[%d].url", index))
+		}
+	}
+	for name, value := range cfg.LLM.ExtraHeaders {
+		if managedCredentialHeader(name, value) {
+			inline = append(inline, "llm.extra_headers."+name)
+		}
+	}
+	slices.Sort(inline)
 	return inline
+}
+
+// managedCredentialHeader refuses literal authentication headers without
+// inspecting or repeating their values in an error or log.
+func managedCredentialHeader(name, value string) bool {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "_", "-"))
+	for _, part := range []string{"authorization", "api-key", "token", "secret", "password", "cookie", "auth"} {
+		if strings.Contains(normalized, part) {
+			return true
+		}
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "bearer ") || strings.HasPrefix(value, "basic ")
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
@@ -1414,7 +1439,8 @@ func validateEnterpriseConfig(cfg *Config) error {
 		return &V8SemanticError{
 			Path:    "$." + inline[0],
 			Summary: "a managed standalone config holds no secrets; remove " + strings.Join(inline, ", "),
-			Action: "store each key as a protected credential with `enterprise secret set --name <name>` and name it in " +
+			Action: "replace literal secrets with {credential: NAME} or {env: NAME} references where supported; " +
+				"store keys as protected credentials with `enterprise secret set --name <name>` and name them in " +
 				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential " +
 				"(the AI Defense key); the lifecycle provisions the gateway token",
 		}

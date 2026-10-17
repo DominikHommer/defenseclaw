@@ -896,3 +896,48 @@ func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
 		t.Fatalf("ValidateCandidate() error = %v, want guardrail.judge.llm.api_key refusal", err)
 	}
 }
+
+func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
+	base := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
+	for _, tc := range []struct {
+		name string
+		set  func(*Config)
+		path string
+	}{
+		{"legacy inspect key", func(c *Config) { c.InspectLLM.APIKey = "example-sensitive-value" }, "inspect_llm.api_key"},
+		{"webhook URL", func(c *Config) { c.Webhooks = []WebhookConfig{{URL: "https://example.test/hook"}} }, "webhooks[0].url"},
+		{"provider authorization", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"Authorization": "example-sensitive-value"} }, "llm.extra_headers.Authorization"},
+		{"provider bearer", func(c *Config) { c.LLM.ExtraHeaders = map[string]string{"X-Route": "Bearer example-sensitive-value"} }, "llm.extra_headers.X-Route"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.set(&cfg)
+			err := validateEnterpriseConfig(&cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.path) || strings.Contains(err.Error(), "example-sensitive-value") ||
+				!strings.Contains(err.Error(), "{credential: NAME}") {
+				t.Fatalf("validation = %v, want redacted %s refusal with credential guidance", err, tc.path)
+			}
+		})
+	}
+	perUser := base
+	perUser.DeploymentMode = ""
+	perUser.Enterprise.Profile = ""
+	perUser.LLM.ExtraHeaders = map[string]string{"Authorization": "literal"}
+	if len(standaloneInlineSecrets(&perUser)) == 0 {
+		t.Fatal("test did not set a literal header")
+	}
+}
+
+func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T) {
+	for _, header := range []string{"Authorization: example-sensitive-value", "X-Route: Bearer example-sensitive-value"} {
+		raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n" +
+			"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: true\n" +
+			"    endpoint: https://example.test/events\n    headers:\n      " + header + "\n")
+		_, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), raw,
+			ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err == nil || !strings.Contains(err.Error(), "observability.destinations[0].headers") ||
+			strings.Contains(err.Error(), "example-sensitive-value") || !strings.Contains(err.Error(), "{credential: NAME}") {
+			t.Fatalf("header %q: validation = %v", header, err)
+		}
+	}
+}
