@@ -74,7 +74,45 @@ enum TUIWizards {
         splunkDashboards,
         trustedPaths,
         guardrailActions,
+        acpGuard,
     ]
+
+    private static let acpGuard = WizardDefinition(
+        id: "acp-guard", title: "ACP Guard", icon: "lock.shield",
+        blurb: "Observe or enforce policy on editor-to-agent ACP traffic, or enroll with administrator-provisioned policy and token files.",
+        baseArgs: ["acp", "setup"], commandBuilder: acpCommands,
+        validation: acpValidation,
+        fields: [
+            WizardField(key: "client", label: "Client", kind: .choice(options: ["jetbrains", "zed"]), defaultValue: "zed"),
+            WizardField(key: "agent", label: "Agent", kind: .choice(options: ["copilot", "cursor", "devin", "hermes", "kiro", "opencode"]), defaultValue: "kiro"),
+            WizardField(key: "profile", label: "Profile", kind: .text(placeholder: "default"), defaultValue: "default"),
+            WizardField(key: "activate", label: "Action mode (block denied operations)", kind: .bool, defaultValue: "no"),
+            WizardField(key: "managed", label: "Managed enrollment", kind: .bool, defaultValue: "no"),
+            WizardField(key: "runtime-data-dir", label: "Runtime data directory", kind: .text(placeholder: "/absolute/path"), visibleWhen: (key: "managed", equals: ["yes"])),
+            WizardField(key: "token-file", label: "Administrator-provisioned token file", kind: .text(placeholder: "/absolute/path/acp/client-agent.token"), visibleWhen: (key: "managed", equals: ["yes"]), help: "Select a file path, never paste a token value."),
+        ]
+    )
+
+    static func acpCommands(_ values: [String: String], _ mask: Bool) -> [[String]] {
+        var args = ["acp", "setup", "--client", value(values, "client", "zed"),
+                    "--agent", value(values, "agent", "kiro"), "--profile", value(values, "profile", "default")]
+        if value(values, "activate", "no") == "yes" { args.append("--activate") }
+        if value(values, "managed", "no") == "yes" {
+            args += ["--managed", "--runtime-data-dir", value(values, "runtime-data-dir"),
+                     "--token-file", value(values, "token-file")]
+        }
+        return [args]
+    }
+
+    static func acpValidation(_ values: [String: String]) -> String? {
+        guard !value(values, "profile", "default").isEmpty else { return "Choose an ACP policy profile." }
+        if value(values, "managed", "no") == "yes" {
+            for key in ["runtime-data-dir", "token-file"] where !value(values, key).hasPrefix("/") {
+                return "Managed enrollment requires absolute runtime directory and token file paths."
+            }
+        }
+        return nil
+    }
 
     /// TUI connector wizard (setup / batch / remove). The argv builder mirrors
     /// `_build_connector_setup_args` byte-for-byte: `setup <alias> --yes …`,

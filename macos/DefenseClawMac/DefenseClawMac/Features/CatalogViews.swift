@@ -189,6 +189,7 @@ struct MCPsView: View {
     @State private var actionsAvailable = false
     @State private var invocation: CatalogInvocation?
     @State private var showingSetForm = false
+    @State private var auditHistoryUnavailable = false
 
     private var filtered: [MCPItem] {
         let scoped = items.filter { appState.connectorFilterAllows($0.connector) }
@@ -204,7 +205,9 @@ struct MCPsView: View {
             warning: $warning,
             isEmpty: loaded && error == nil && filtered.isEmpty,
             isUnavailable: loaded && error != nil && items.isEmpty,
-            emptyMessage: "No MCP servers were reported by `defenseclaw mcp list --json`.",
+            emptyMessage: warning != nil && !auditHistoryUnavailable
+                ? "No readable MCP entries were returned. Resolve the discovery warning and refresh."
+                : "No MCP servers were reported by `defenseclaw mcp list --json`.",
             searchPrompt: "Search MCPs",
             search: $search,
             load: load
@@ -256,8 +259,8 @@ struct MCPsView: View {
             actionsAvailable = !listing.auditHistoryUnavailable
             warning = listing.auditHistoryUnavailable
                 ? CatalogCLI.auditHistoryUnavailableMessage
-                : nil
-            if listing.auditHistoryUnavailable {
+                : listing.discoveryWarning
+            if !actionsAvailable {
                 invocation = nil
                 showingSetForm = false
             }
@@ -265,6 +268,7 @@ struct MCPsView: View {
         } catch {
             guard installationGeneration == appState.installationGeneration else { return }
             self.error = error.localizedDescription
+            auditHistoryUnavailable = false
             warning = nil
             actionsAvailable = false
             invocation = nil

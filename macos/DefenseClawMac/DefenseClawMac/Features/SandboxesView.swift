@@ -29,6 +29,7 @@ struct SandboxesView: View {
     @State private var confirmUndo: SandboxRow?
     @State private var confirmAlways: SandboxAsk?
     @State private var confirmAlwaysUnblock: SandboxActivity?
+    @State private var inspectedSandbox: SandboxRow?
 
     private var snapshot: SandboxSnapshot { appState.sandbox }
     private var selected: SandboxRow? {
@@ -60,6 +61,10 @@ struct SandboxesView: View {
         }
         .padding(16)
         .task { await appState.refreshSandboxes() }
+        .sheet(item: $inspectedSandbox) { row in
+            SandboxInspectorView(row: row, overview: AnyView(detail(row)))
+                .environment(appState)
+        }
         .confirmationDialog(
             "Stop \(confirmStop?.name ?? "")?",
             isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } }),
@@ -218,6 +223,7 @@ struct SandboxesView: View {
                     .foregroundStyle(Cisco.orange)
             }
             HStack {
+                Button("Inspect policy and events") { inspectedSandbox = row }
                 Button("Stop…") { confirmStop = row }
                     .disabled(!row.running)
                 if row.copyMode {

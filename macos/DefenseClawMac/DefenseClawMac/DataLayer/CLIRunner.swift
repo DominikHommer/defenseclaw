@@ -529,6 +529,19 @@ actor CLIRunner {
         case administrator(GatewayAdministratorOperation)
     }
 
+    private var exclusiveOperationID: UUID?
+
+    /// Runtime replacement must not race CLI commands using the same venv.
+    func beginExclusiveOperation(id: UUID) -> Bool {
+        guard exclusiveOperationID == nil, runStates.isEmpty else { return false }
+        exclusiveOperationID = id
+        return true
+    }
+
+    func endExclusiveOperation(id: UUID) {
+        if exclusiveOperationID == id { exclusiveOperationID = nil }
+    }
+
     private var cachedPaths: [String: String] = [:]
     private var runStates: [UUID: RunState] = [:]
     private var installationContext: InstallationContext
@@ -578,13 +591,14 @@ actor CLIRunner {
         return true
     }
 
+    func invalidateBinaryCache() { cachedPaths.removeAll() }
+
     func locateBinary() -> String? {
         locateBinary(named: "defenseclaw")
     }
 
-    /// Prefer the selected installation's interpreter, then the interpreter
-    /// adjacent to the resolved CLI. The second path covers source and PATH
-    /// installs whose venv does not live below DEFENSECLAW_HOME.
+    /// Keep catalog imports on the selected CLI's interpreter, including a
+    /// Settings CLI override. Fall back to the context for standalone launchers.
     func locateRuntimePython() -> String? {
         Self.runtimePythonCandidates(
             contextPythonPath: installationContext.runtimePythonURL.path,
@@ -596,7 +610,7 @@ actor CLIRunner {
         contextPythonPath: String,
         selectedCLIPath: String?
     ) -> [String] {
-        var candidates = [contextPythonPath]
+        var candidates: [String] = []
         if let selectedCLIPath, !selectedCLIPath.isEmpty {
             let resolvedCLI = URL(fileURLWithPath: selectedCLIPath)
                 .resolvingSymlinksInPath()
@@ -608,6 +622,7 @@ actor CLIRunner {
                 candidates.append(siblingPython)
             }
         }
+        if !candidates.contains(contextPythonPath) { candidates.append(contextPythonPath) }
         return candidates
     }
 
@@ -956,6 +971,9 @@ actor CLIRunner {
             case nil:
                 break
             }
+        }
+        if let exclusiveOperationID, exclusiveOperationID != executionID {
+            return CLIResult(exitCode: 75, output: "A runtime upgrade is in progress. Wait for it to finish before running another command.\n")
         }
         // The caller can cancel between Activity reservation and this actor's
         // dispatch. Consume the reservation above, then refuse before any
