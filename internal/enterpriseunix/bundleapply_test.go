@@ -910,8 +910,22 @@ func TestBundleApplyCrashPointMatrix(t *testing.T) {
 				b.apply(path)
 			}()
 			b.env.bundleFault = nil
+			// Before that run, status (read-only) reports the receipt no run
+			// owns as a pending transaction the management agent settles
+			// with ensure; it read transaction_pending false (GAP-0028).
+			before := b.receipt(bundleID(2))
+			status := b.run(Options{Action: ActionStatus})
+			if !status.TransactionPending || !hasWarning(status, enterprisebundle.WarnBundlePending) {
+				t.Fatalf("status after a crash at %s: transaction_pending=%v warnings=%+v", phase, status.TransactionPending, status.Warnings)
+			}
+			if after := b.receipt(bundleID(2)); after.State != before.State || len(after.Transitions) != len(before.Transitions) {
+				t.Fatalf("status changed the receipt: %+v -> %+v", before, after)
+			}
 			// The next lifecycle run (the verify timer or MDM ensure).
 			requireOK(t, b.run(Options{Action: ActionEnsure}))
+			if status := b.run(Options{Action: ActionStatus}); status.TransactionPending || hasWarning(status, enterprisebundle.WarnBundlePending) {
+				t.Fatalf("status after ensure settled a crash at %s: transaction_pending=%v warnings=%+v", phase, status.TransactionPending, status.Warnings)
+			}
 			st := b.state()
 			rc := b.receipt(bundleID(2))
 			if phase == "committed" {

@@ -34,6 +34,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -464,8 +465,10 @@ func runWindowsEnterpriseStandaloneAction(
 	script string,
 	args []string,
 ) error {
+	var unsettledBundles []*enterprisebundle.Receipt
 	if action == "status" && windowsEnterpriseIsElevated() && windowsEnterpriseStandaloneInstalled() {
-		if err := settleWindowsBundleStatus(ctx); err != nil {
+		var err error
+		if unsettledBundles, err = settleWindowsBundleStatusReport(ctx); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, fmt.Errorf("settle policy bundle receipt: %w", err))
 		}
 	}
@@ -561,6 +564,11 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	applyWindowsEnterprisePolicy(ctx, result)
+	if action == "status" && report.Installed && len(unsettledBundles) > 0 {
+		// A receipt no live apply owns: ensure settles it (GAP-0028).
+		result.TransactionPending = true
+		result.AddWarning(enterprisebundle.WarnBundlePending, enterprisebundle.UnsettledMessage(unsettledBundles, "enterprise windows ensure --profile standalone"))
+	}
 	if (action == "status" || action == "verify") && report.Installed {
 		if report.CursorTargetEnabled {
 			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")

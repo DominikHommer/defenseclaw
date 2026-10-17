@@ -100,6 +100,12 @@ func CheckTransition(from, to string) error {
 	return fmt.Errorf("bundle receipt cannot move from %s to %s", from, to)
 }
 
+// WarnBundlePending is the warning of a status that found a receipt no
+// run finished: bundle status for the last receipt, and lifecycle status for
+// any receipt left while no run holds the lifecycle lock (with
+// transaction_pending true).
+const WarnBundlePending = "bundle_pending"
+
 // Finished reports a final receipt state.
 func Finished(state string) bool { return state == StateConfirmed || state == StateFailed }
 
@@ -999,6 +1005,46 @@ func (s *Store) Settle(keep ...string) (SettleReport, error) {
 		}
 	}
 	return report, s.gc(st, kept)
+}
+
+// Unsettled returns the receipts no run finished (received, verified, staged
+// or applied), newest first. Read while no lifecycle run holds the lock that
+// serializes bundle runs, each one was left by a run that ended before it
+// settled the receipt (a killed child): the next mutating lifecycle run
+// settles it (Settle), and until then the current or last good bundle
+// enforces. Read-only: status reports them without settling.
+func (s *Store) Unsettled() ([]*Receipt, error) {
+	receipts, err := s.Receipts()
+	if err != nil {
+		return nil, err
+	}
+	var out []*Receipt
+	for _, r := range receipts {
+		if !Finished(r.State) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// UnsettledMessage is the WarnBundlePending message of a read-only lifecycle
+// status that found unsettled receipts and no run holding the lock. ensure is
+// the command that settles them.
+func UnsettledMessage(unsettled []*Receipt, ensure string) string {
+	if len(unsettled) == 0 {
+		return ""
+	}
+	newest := unsettled[0]
+	which := "receipt " + newest.ReceiptID
+	if newest.DeliveryID != "" {
+		which += " (delivery " + newest.DeliveryID + ")"
+	}
+	more := ""
+	if n := len(unsettled) - 1; n > 0 {
+		more = fmt.Sprintf(" and %d older unfinished receipt(s)", n)
+	}
+	return fmt.Sprintf("policy bundle %s is %s%s, and no lifecycle run is applying it: the run that received it ended before it finished (a killed apply), "+
+		"so the current or last good bundle keeps enforcing; run `%s` to recover and settle it", which, newest.State, more, ensure)
 }
 
 // Receipts returns every readable receipt, newest first. An unreadable
