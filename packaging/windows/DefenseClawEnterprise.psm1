@@ -18119,7 +18119,15 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             $probe.output
         }
         $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $detail
-        throw "managed-hook lifecycle snapshot $Action failed: $detail"
+        # The gateway's own error from its one validated report rides on the
+        # exception, apart from the message, so a caller can tell a refusal
+        # the gateway reported from any other failure (#1105, GAP-0781).
+        $exception = [Management.Automation.RuntimeException]::new(
+            "managed-hook lifecycle snapshot $Action failed: $detail"
+        )
+        $exception.Data['DefenseClawLifecycleAction'] = $Action
+        $exception.Data['DefenseClawLifecycleReportError'] = [string]$report.error
+        throw $exception
     }
     $journal = $report.PSObject.Properties['journal_path']
     if ($null -eq $journal -or
@@ -18716,20 +18724,62 @@ function Invoke-DefenseClawManagedHooksLifecycleRecoveryStep {
     return $report
 }
 
+function Get-DefenseClawCommittedRetireRefusal {
+    <#
+        Names the installed-gateway retire refusal a committed managed-hook
+        lifecycle journal may be removed for: 'invalid_bundle' (a release
+        before GAP-1322 refuses to collect the contractless Kiro bundles 1.0.1
+        wrote) or 'untrusted_folder' (a release before #1105 / GAP-0781 failed
+        the whole retire at the first per-user folder it could not trust);
+        '' for anything else. It reads only the error the gateway put in its
+        one validated retire report, which
+        Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand attaches to the
+        exception, never the exception text: a failure running the command,
+        reading its report, or any other step cannot match, nor can a report
+        of another phase. The error must also have the whole shape of that
+        release's generation-collection failure for one account.
+    #>
+    param([AllowNull()][Management.Automation.ErrorRecord]$Failure)
+    if ($null -eq $Failure -or $null -eq $Failure.Exception) {
+        return ''
+    }
+    $data = $Failure.Exception.Data
+    if ($null -eq $data -or
+        -not $data.Contains('DefenseClawLifecycleAction') -or
+        -not $data.Contains('DefenseClawLifecycleReportError') -or
+        [string]$data['DefenseClawLifecycleAction'] -cne 'retire') {
+        return ''
+    }
+    $reportError = [string]$data['DefenseClawLifecycleReportError']
+    $collection = '^retire [a-z0-9_-]+ managed runtime generations for SID S-1-[0-9]+(-[0-9]+)+( \([^\r\n]+?\))?: '
+    if ($reportError -cmatch ($collection +
+            'enterprise hooks: managed runtime generation directory is untrusted: \S')) {
+        return 'untrusted_folder'
+    }
+    if ($reportError -cmatch $collection -and
+        $reportError.IndexOf(
+            'refusing to collect an invalid managed runtime bundle',
+            [StringComparison]::Ordinal
+        ) -ge 0) {
+        return 'invalid_bundle'
+    }
+    return ''
+}
+
 function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
     <#
         Retires the managed-hook lifecycle journal an earlier, committed
         lifecycle left behind, with the installed gateway, before a new
         lifecycle opens its transaction. Standalone only: when that gateway
-        authenticated the journal but refused to collect an old runtime
-        generation (a release before GAP-1322 refuses the contractless Kiro
-        bundles 1.0.1 wrote), or stopped at a per-user folder it could not
-        trust (a release before #1105 / GAP-0781 failed the whole retire on
-        it), this removes the journal itself. No pending transaction depends
-        on it, and the replacement gateway's retire after the commit collects
-        the same generations, because collection covers every target of the
-        protected manifest; it skips and names an untrusted folder. Any other
-        failure is thrown.
+        authenticated the journal but reported one of the refusals
+        Get-DefenseClawCommittedRetireRefusal names (it refused to collect an
+        old runtime generation, or stopped at a per-user folder it could not
+        trust), this removes the journal itself. No pending transaction
+        depends on it, and the replacement gateway's retire after the commit
+        collects the same generations, because collection covers every target
+        of the protected manifest; it skips and names an untrusted folder.
+        With a pending transaction an untrusted folder is refused with the
+        remedy. Any other failure is thrown.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -18746,52 +18796,27 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         $failure = $_
     }
     $message = [string]$failure.Exception.Message
-    # An installed release whose retire stops at the first per-user folder it
-    # cannot trust (a stale or foreign profile) left the committed journal,
-    # and every later upgrade rolled back with 1603 (#1105, GAP-0781). The
-    # journal only lets that retire collect old generations, which are inert:
-    # remove it as below, and this release's retire after the commit collects
-    # every other account and names the skipped one.
-    $untrustedFolder = $message.IndexOf(
-        'managed runtime generation directory is untrusted',
-        [StringComparison]::OrdinalIgnoreCase
-    ) -ge 0
-    if ((Test-DefenseClawStandaloneProfile) -and $untrustedFolder -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
-        throw (
-            "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
-            'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
-            'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
-            $message
-        )
+    $refusal = ''
+    if (Test-DefenseClawStandaloneProfile) {
+        $refusal = Get-DefenseClawCommittedRetireRefusal -Failure $failure
     }
-    if ((Test-DefenseClawStandaloneProfile) -and $untrustedFolder) {
-        $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
-        Assert-DefenseClawNoReparsePath -Path $journalPath
-        Microsoft.PowerShell.Management\Remove-Item `
-            -LiteralPath $journalPath `
-            -Force
-        $script:DefenseClawStaleLifecycleJournalRemoved =
-            ConvertTo-DefenseClawBoundedDiagnostic -Value $message -MaxLength 1024
-        return
-    }
-    if (-not (Test-DefenseClawStandaloneProfile) -or
-        -not $message.StartsWith(
-            'managed-hook lifecycle snapshot retire failed: retire ',
-            [StringComparison]::Ordinal
-        ) -or
-        $message.IndexOf(
-            ' managed runtime generations for SID ',
-            [StringComparison]::Ordinal
-        ) -lt 0 -or
-        $message.IndexOf(
-            'refusing to collect an invalid managed runtime bundle',
-            [StringComparison]::Ordinal
-        ) -lt 0 -or
-        (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.PendingPath)) {
+    if ([string]::IsNullOrEmpty($refusal)) {
         throw $failure
     }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
+        if ($refusal -ceq 'untrusted_folder') {
+            throw (
+                "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
+                'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
+                'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
+                $message
+            )
+        }
+        throw $failure
+    }
+    # The journal only lets the installed release's retire collect old
+    # generations, which are inert: remove it, and this release's retire
+    # after the commit collects every account (naming any it skips).
     $journalPath = [string]$Layout.ManagedHooksLifecycleJournalPath
     Assert-DefenseClawNoReparsePath -Path $journalPath
     Microsoft.PowerShell.Management\Remove-Item `

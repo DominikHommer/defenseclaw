@@ -14,8 +14,10 @@
 # (GAP-1041). So does a journal whose retire stopped at a per-user folder the
 # installed gateway could not trust, which rolled back every later upgrade
 # with 1603 (#1105, GAP-0781); with a pending transaction that refusal keeps
-# naming the remedy. The gateway command is stubbed; runs in a disposable
-# scratch directory.
+# naming the remedy. Only the error in the gateway's own retire report counts:
+# the same text from another failure, another phase or another report error
+# keeps the journal and the error. The gateway command is stubbed; runs in a
+# disposable scratch directory.
 
 [CmdletBinding()]
 param(
@@ -50,22 +52,34 @@ try {
             ManagedHooksLifecycleJournalPath = [IO.Path]::Combine($Root, 'managed-hooks-lifecycle-journal.json')
             PendingPath = [IO.Path]::Combine($Root, 'pending.json')
         }
-        $gcRefusal = 'managed-hook lifecycle snapshot retire failed: retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
-        $untrustedFolder = 'managed-hook lifecycle snapshot retire failed: retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
+        # Each is the error the installed gateway puts in its retire report.
+        $gcRefusal = 'retire kiro managed runtime generations for SID S-1-5-21-1-2-3-1017: enterprise hooks: refusing to collect an invalid managed runtime bundle'
+        $untrustedFolder = 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103 (CONTOSO\stale): enterprise hooks: managed runtime generation directory is untrusted: C:\Users\stale\.defenseclaw\hooks: access denied'
         $script:TestRetireError = ''
+        $script:TestRetireShape = 'report'
         function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Action)
             if ($Action -cne 'retire') {
                 throw "unexpected action $Action"
             }
             if ($script:TestRetireError) {
-                throw $script:TestRetireError
+                $text = "managed-hook lifecycle snapshot retire failed: $($script:TestRetireError)"
+                if ($script:TestRetireShape -ceq 'plain') {
+                    # Not from a gateway report (running the command, reading
+                    # its output, another step).
+                    throw $text
+                }
+                $exception = [Management.Automation.RuntimeException]::new($text)
+                $exception.Data['DefenseClawLifecycleAction'] = if ($script:TestRetireShape -ceq 'phase') { 'capture' } else { 'retire' }
+                $exception.Data['DefenseClawLifecycleReportError'] = $script:TestRetireError
+                throw $exception
             }
             [IO.File]::Delete($Layout.ManagedHooksLifecycleJournalPath)
             return [pscustomobject]@{ ok = $true }
         }
         $run = {
-            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved)
+            param([string]$Name, [string]$EnterpriseProfile, [string]$RetireError, [bool]$Pending, [bool]$WantThrow, [bool]$WantRemoved, [string]$Shape = 'report')
+            $script:TestRetireShape = $Shape
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
             [IO.File]::WriteAllText($layout.ManagedHooksLifecycleJournalPath, '{"schema_version":4,"phase":"captured"}')
             if ($Pending) {
@@ -104,12 +118,18 @@ try {
         try {
             & $run 'retired' 'Standalone' '' $false $false $true
             & $run 'legacy bundle refused' 'Standalone' $gcRefusal $false $false $true
-            & $run 'other retire failure' 'Standalone' 'managed-hook lifecycle snapshot retire failed: deployment managed-hook activation binding is invalid' $false $true $false
+            & $run 'other retire failure' 'Standalone' 'deployment managed-hook activation binding is invalid' $false $true $false
             & $run 'pending transaction' 'Standalone' $gcRefusal $true $true $false
             & $run 'Secure Client' 'SecureClient' $gcRefusal $false $true $false
             & $run 'untrusted per-user folder' 'Standalone' $untrustedFolder $false $false $true
             & $run 'untrusted per-user folder, pending transaction' 'Standalone' $untrustedFolder $true $true $false
             & $run 'untrusted per-user folder, Secure Client' 'SecureClient' $untrustedFolder $false $true $false
+            # The same text, but not the gateway's retire-collection refusal.
+            & $run 'untrusted text outside a gateway report' 'Standalone' $untrustedFolder $false $true $false 'plain'
+            & $run 'untrusted text in another phase' 'Standalone' $untrustedFolder $false $true $false 'phase'
+            & $run 'untrusted text in another retire error' 'Standalone' 'deployment managed-hook activation binding is invalid: enterprise hooks: managed runtime generation directory is untrusted: C:\ProgramData\x' $false $true $false
+            & $run 'untrusted text after another collection error' 'Standalone' 'retire claudecode managed runtime generations for SID S-1-5-21-1-2-3-1103: open C:\Users\x: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\x' $false $true $false
+            & $run 'legacy bundle text outside a gateway report' 'Standalone' $gcRefusal $false $true $false 'plain'
 
             # GAP-1041: the teardown journal of a rolled-back uninstall goes
             # (and -Stale reports it); another phase, or a pending
@@ -137,6 +157,7 @@ try {
             }
         }
         finally {
+            $script:TestRetireShape = 'report'
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $originalProfile
             $script:DefenseClawStaleLifecycleJournalRemoved = ''
             $script:DefenseClawStaleTeardownJournalRemoved = ''
