@@ -18723,10 +18723,13 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         lifecycle opens its transaction. Standalone only: when that gateway
         authenticated the journal but refused to collect an old runtime
         generation (a release before GAP-1322 refuses the contractless Kiro
-        bundles 1.0.1 wrote), this removes the journal itself. No pending
-        transaction depends on it, and the replacement gateway's retire after
-        the commit collects the same generations, because collection covers
-        every target of the protected manifest. Any other failure is thrown.
+        bundles 1.0.1 wrote), or stopped at a per-user folder it could not
+        trust (a release before #1105 / GAP-0781 failed the whole retire on
+        it), this removes the journal itself. No pending transaction depends
+        on it, and the replacement gateway's retire after the commit collects
+        the same generations, because collection covers every target of the
+        protected manifest; it skips and names an untrusted folder. Any other
+        failure is thrown.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
