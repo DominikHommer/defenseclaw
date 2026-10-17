@@ -109,7 +109,7 @@ global=$(grep -n "^root systemctl --global disable defenseclaw-sandbox.socket\$"
 if [ "$system" -ge "$user" ] || [ "$user" -ge "$global" ]; then
     fail "wrong order: system=$system user=$user global=$global"
 fi
-dpkg -s defenseclaw-enterprise >/dev/null 2>&1 && fail "the package is still installed"
+[ "$(dpkg-query -W -f="\${db:Status-Status}" defenseclaw-enterprise 2>/dev/null)" = installed ] && fail "the package is still installed"
 echo "ok: dpkg -r stopped the user units as sample-user after the system units, then removed the enable link"
 
 dpkg -i /tmp/dc-1.0.4.deb >/dev/null
