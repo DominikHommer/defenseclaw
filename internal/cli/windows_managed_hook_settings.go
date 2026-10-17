@@ -5,7 +5,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -84,48 +86,86 @@ func removeWindowsManagedClaudeCommands(raw []byte, executable string) ([]byte, 
 	return append(out, '\n'), removed, err
 }
 
-// windowsClaudeCommandsNamingDefenseClaw lists, in file order, each hook
-// command in Claude Code settings that names a DefenseClaw launcher or binary
-// (defenseclaw-hook, defenseclaw.exe, defenseclaw-gateway), whatever its
-// shape. Settings it cannot read as Claude hooks have none: the removal
-// before it reports such a file.
-func windowsClaudeCommandsNamingDefenseClaw(raw []byte) []string {
-	var settings struct {
-		Hooks map[string][]struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		} `json:"hooks"`
+// windowsClaudeHooksNamingDefenseClaw describes, in a stable order, each
+// hook command in Claude Code settings that names a DefenseClaw launcher or
+// binary (defenseclaw-hook, defenseclaw-gateway, defenseclaw.exe), whatever
+// its shape, as "<event>: a hook command naming <launcher> (arguments not
+// shown)" (#1286). It never returns the command: a hand-written command can
+// carry credentials or other private arguments, and the description goes
+// into the uninstall result and the lifecycle log. Settings that are not a
+// JSON object are an error, so a caller never reports "none" for a file it
+// could not inspect.
+func windowsClaudeHooksNamingDefenseClaw(raw []byte) ([]string, error) {
+	var settings map[string]any
+	if err := json.Unmarshal(raw, &settings); err != nil || settings == nil {
+		return nil, errors.New("the Claude settings must be a JSON object")
 	}
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		return nil
+	events, _ := settings["hooks"].(map[string]any)
+	names := make([]string, 0, len(events))
+	for event := range events {
+		names = append(names, event)
 	}
-	events := make([]string, 0, len(settings.Hooks))
-	for event := range settings.Hooks {
-		events = append(events, event)
-	}
-	sort.Strings(events)
+	sort.Strings(names)
 	var found []string
-	for _, event := range events {
-		for _, group := range settings.Hooks[event] {
-			for _, hook := range group.Hooks {
-				if windowsCommandNamesDefenseClaw(hook.Command) {
-					found = append(found, event+": "+strings.TrimSpace(hook.Command))
-				}
+	for _, event := range names {
+		label := windowsClaudeHookEventLabel(event)
+		for _, launcher := range windowsClaudeHookLaunchers(events[event], nil) {
+			found = append(found, label+": a hook command naming "+launcher+" (arguments not shown)")
+		}
+	}
+	return found, nil
+}
+
+// windowsClaudeHookEventNamePattern is the shape of a Claude Code hook event
+// name. Another key is user text and is not repeated.
+var windowsClaudeHookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+
+func windowsClaudeHookEventLabel(event string) string {
+	if windowsClaudeHookEventNamePattern.MatchString(event) {
+		return event
+	}
+	return "an unrecognized hook event"
+}
+
+// windowsClaudeHookLaunchers walks one hook event's value and appends, in
+// file order (object keys sorted), the DefenseClaw launcher each "command"
+// string names.
+func windowsClaudeHookLaunchers(value any, found []string) []string {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			found = windowsClaudeHookLaunchers(item, found)
+		}
+	case map[string]any:
+		if command, ok := typed["command"].(string); ok {
+			if launcher := windowsDefenseClawLauncherNamed(command); launcher != "" {
+				found = append(found, launcher)
 			}
+		}
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if key != "command" {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			found = windowsClaudeHookLaunchers(typed[key], found)
 		}
 	}
 	return found
 }
 
-func windowsCommandNamesDefenseClaw(command string) bool {
+// windowsDefenseClawLauncherNamed returns the DefenseClaw launcher or binary
+// a command names, "" for none.
+func windowsDefenseClawLauncherNamed(command string) string {
 	lower := strings.ToLower(command)
-	for _, name := range []string{"defenseclaw-hook", "defenseclaw.exe", "defenseclaw-gateway"} {
+	for _, name := range []string{"defenseclaw-hook", "defenseclaw-gateway", "defenseclaw.exe"} {
 		if strings.Contains(lower, name) {
-			return true
+			return name
 		}
 	}
-	return false
+	return ""
 }
 
 func windowsManagedHookCommandIs(command, executable string) bool {

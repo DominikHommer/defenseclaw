@@ -2141,10 +2141,18 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 
 // #1290, #1286: an uninstall result lists each Claude settings file it
 // edited in changes, once, and warns about each DefenseClaw hook command
-// left in users' settings, without failing.
+// left in users' settings, without failing. The warning, the JSON result and
+// the lifecycle log name the file, the event and the launcher, never the
+// command's arguments (here a synthetic credential).
 func TestWindowsEnterpriseUninstallResultNamesEditedAndLeftoverClaudeSettings(t *testing.T) {
+	const secret = "SYNTHETIC-B13-ARGUMENT-VALUE"
 	edited := `removed 1 DefenseClaw hook command(s) from C:\Users\alice\.claude\settings.json`
-	left := `C:\Users\bob\.claude\settings.json: PreToolUse: C:\Users\bob\.local\bin\defenseclaw-hook.exe --wrapped`
+	described, err := windowsClaudeHooksNamingDefenseClaw([]byte(
+		`{"hooks":{"PreToolUse":[{"hooks":[{"command":"C:\\Users\\bob\\.local\\bin\\defenseclaw-hook.exe --token ` + secret + `"}]}]}}`))
+	if err != nil || len(described) != 1 {
+		t.Fatalf("described = %q (%v)", described, err)
+	}
+	left := `C:\Users\bob\.claude\settings.json: ` + described[0]
 	document, err := json.Marshal(map[string]any{
 		"schema_version": 1, "ok": true, "action": "uninstall", "installed": false, "transaction_pending": false,
 		"errors":                   []string{},
@@ -2167,6 +2175,23 @@ func TestWindowsEnterpriseUninstallResultNamesEditedAndLeftoverClaudeSettings(t 
 	if len(result.Warnings) != 1 || result.Warnings[0].Code != "claude_settings_hook_left" ||
 		!strings.Contains(result.Warnings[0].Message, left) || len(result.Errors) != 0 {
 		t.Fatalf("warnings = %+v errors = %+v", result.Warnings, result.Errors)
+	}
+	directory := t.TempDir()
+	path, err := writeWindowsEnterpriseLifecycleLog(directory, result, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	printed, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "claude_settings_hook_left") ||
+		strings.Contains(string(logged), secret) || strings.Contains(string(printed), secret) {
+		t.Fatalf("the hook command's arguments reached the result or log:\n%s", logged)
 	}
 }
 

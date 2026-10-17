@@ -110,7 +110,7 @@ $failures = & $module {
         '{"schema_version":4,"action":"finalize","ok":true,' +
         '"user_registrations_removed":1,' +
         '"user_settings_edited":["removed 1 DefenseClaw hook command(s) from C:\\Users\\alice\\.claude\\settings.json"],' +
-        '"user_settings_hooks_left":["C:\\Users\\alice\\.claude\\settings.json: PreToolUse: wrap.cmd defenseclaw-hook.exe"]}'
+        '"user_settings_hooks_left":["C:\\Users\\alice\\.claude\\settings.json: PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)"]}'
     ) | Microsoft.PowerShell.Utility\ConvertFrom-Json
     $settingsResult = Add-DefenseClawUserRegistrationCleanupResult `
         -Result (New-HarnessResult) `
@@ -121,7 +121,7 @@ $failures = & $module {
         $failures.Add("edited settings files were not carried: $(ConvertTo-HarnessJson $settingsResult)")
     }
     if (@($settingsResult.user_settings_hooks_left).Count -ne 1 -or
-        -not ([string]@($settingsResult.user_settings_hooks_left)[0]).EndsWith('wrap.cmd defenseclaw-hook.exe')) {
+        -not ([string]@($settingsResult.user_settings_hooks_left)[0]).EndsWith('PreToolUse: a hook command naming defenseclaw-hook (arguments not shown)')) {
         $failures.Add("leftover Claude hook commands were not carried: $(ConvertTo-HarnessJson $settingsResult)")
     }
 

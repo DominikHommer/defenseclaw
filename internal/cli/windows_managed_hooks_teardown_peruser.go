@@ -28,18 +28,23 @@ import (
 // root is checked against the recorded SID; the connector transaction then
 // pins the settings identity, converges unsafe protection for a foreign
 // enrolled owner, and preserves that owner and the converged DACL.
-func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, error) {
+//
+// It also returns, from the same transaction, each hook command the settings
+// it committed (or found unchanged) still hold that names a DefenseClaw
+// launcher, described without its arguments (#1286). A file it cannot
+// inspect fails the cleanup instead of reporting none.
+func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, []string, error) {
 	if _, err := enterprisehooks.ValidateWindowsEnterpriseHome(home, sid); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return 0, nil, nil
 		}
-		return 0, err
+		return 0, nil, err
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-		return 0, nil
+		return 0, nil, nil
 	} else if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
 	// The managed runtime is owned by Builtin Administrators, including after
@@ -49,11 +54,24 @@ func removeWindowsManagedClaudeUserSettings(home, sid, _ string) (int, error) {
 	// runtime directory, which uninstall may already have retired.
 	transactionDir, err := windowsManagedClaudeTransactionDir()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return connector.TransformWindowsClaudeSettingsForUninstall(path, transactionDir, sid, func(raw []byte) ([]byte, int, error) {
-		return removeWindowsManagedClaudeCommands(raw, launcher)
+	var left []string
+	removed, err := connector.TransformWindowsClaudeSettingsForUninstall(path, transactionDir, sid, func(raw []byte) ([]byte, int, error) {
+		left = nil
+		out, count, err := removeWindowsManagedClaudeCommands(raw, launcher)
+		if err != nil {
+			return nil, 0, err
+		}
+		if left, err = windowsClaudeHooksNamingDefenseClaw(out); err != nil {
+			return nil, 0, err
+		}
+		return out, count, nil
 	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return removed, left, nil
 }
 
 func windowsManagedClaudeTransactionDir() (string, error) {
@@ -80,23 +98,6 @@ func windowsManagedClaudeRegistrationPresent(home, sid string) (bool, error) {
 
 var windowsManagedClaudeRegistrationProbe = windowsManagedClaudeRegistrationPresent
 
-// windowsManagedClaudeLeftoverHooks returns each hook command in the
-// account's Claude Code user settings that still names a DefenseClaw launcher
-// once the exact per-user hook is gone: a hand-written or differently shaped
-// command the cleanup correctly keeps, but which Claude Code then runs
-// against a launcher this uninstall removed or no longer serves (#1286).
-// Claude's DefenseClaw enrollment is machine policy, so no such command in
-// user settings belongs to the deployment. An absent profile or settings
-// file has none. It runs only where the removal ran (LocalSystem, or the
-// administrator's own profile).
-func windowsManagedClaudeLeftoverHooks(home, sid string) ([]string, error) {
-	raw, err := readWindowsManagedClaudeUserSettings(home, sid)
-	if err != nil || raw == nil {
-		return nil, err
-	}
-	return windowsClaudeCommandsNamingDefenseClaw(raw), nil
-}
-
 // readWindowsManagedClaudeUserSettings reads the account's Claude Code user
 // settings after checking the profile against the recorded SID; nil, with no
 // error, when the profile or the file is absent.
@@ -114,8 +115,6 @@ func readWindowsManagedClaudeUserSettings(home, sid string) ([]byte, error) {
 	}
 	return raw, err
 }
-
-var windowsManagedClaudeLeftoverHookProbe = windowsManagedClaudeLeftoverHooks
 
 // An elevated Setup can edit its own Claude settings without impersonating
 // another account. All other user profiles still require LocalSystem.
@@ -473,21 +472,24 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 			}
 		}
 		settings := filepath.Join(target.UserHome, ".claude", "settings.json")
-		if n, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, runtimeDir); err != nil {
+		n, left, err := windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, runtimeDir)
+		if err != nil {
 			result.Failed = append(result.Failed, "claudecode/"+target.SID+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
 			continue
-		} else if n > 0 {
+		}
+		if n > 0 {
 			result.Removed = append(result.Removed, "claudecode/"+target.SID)
 			// The result named only the per-user data a purge removed, so an
 			// MDM report could not see that users' files were edited (#1290).
 			result.SettingsEdited = append(result.SettingsEdited, fmt.Sprintf(
 				"removed %d DefenseClaw hook command(s) from %s", n, settings))
 		}
-		// The check is a hint for the administrator: a read that fails here
-		// adds nothing, since the removal above already read the file.
-		left, _ := windowsManagedClaudeLeftoverHookProbe(target.UserHome, target.SID)
-		for _, command := range left {
-			result.SettingsLeft = append(result.SettingsLeft, settings+": "+boundedEnterpriseHookUserCleanupText(command))
+		// The leftovers come from the same settings transaction as the
+		// removal, so a later read failure or a concurrent change cannot
+		// hide one (#1286). Each names the hook event and the launcher, never
+		// the command's arguments.
+		for _, hook := range left {
+			result.SettingsLeft = append(result.SettingsLeft, settings+": "+boundedEnterpriseHookUserCleanupText(hook))
 		}
 	}
 	if identityErr != nil && blockedClaude && len(entries) == 0 {
