@@ -146,7 +146,7 @@ anchors between download and install. The check then fails closed
 | Exit | Linux / macOS | Windows | Class | Agent action |
 |---|---|---|---|---|
 | `0` | success or nothing to do | success | done | use the result |
-| `75` | another lifecycle run holds the lock (`lifecycle_busy`) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input |
+| `75` | another lifecycle run holds the lock (`lifecycle_busy`), or a `bundle apply` whose gateway stopped reporting the bundle's policy before the receipt was confirmed (`not_confirmed` with `bundle.state` `applied`, section 4.3) | — | **retry** | back off (30 s, doubling, at most 10 min) and resubmit the same input |
 | `1618` | — | `lifecycle_busy` (`bundle.lock` not free within `--lock-wait`, or the installer's `lifecycle.lock` not free within its fixed 30 s), or a verified bundle that did not finish applying (`bundle_apply_failed`, `bundle_policy_not_adopted`, `bundle_post_verify_failed`, `bundle_targets_refresh_failed`) | **retry** | as for 75 |
 | `1` | failure, already rolled back; or a refusal | builds without `management_contract` only: a flag error on `enterprise secret` (section 2.3) | **final** | read `errors[].code`; do not retry until the bundle, anchors, credential or device changes |
 | `1603` | — | failure, already rolled back; or a refusal | **final** | as for 1 |
@@ -177,23 +177,25 @@ stderr, and the exit code is the only signal.
 | `bundle apply` without `--bundle`; with both `--bundle` and `--inbox` (Linux, macOS); with `--inbox` (Windows) | 2 / 1639 |
 | `--lock-wait` outside 0 to 15m: every Linux and macOS verb but `bundle anchors install` (which prints a JSON `invalid_arguments` document), and Windows `bundle apply` | 2 / 1639 |
 | `bundle apply --delivery-id` empty, over 128 bytes, or with a byte outside `A-Z a-z 0-9 . _ : -` (2.6) | 2 / 1639 |
-| Linux and macOS `secret set` / `remove` not run as root | 1 |
-| Linux and macOS `secret set` with a bad `--name`, not exactly one of `--from-stdin` / `--from-file`, or an empty or multi-line value | 2 |
 | `--version --json` (the flag is `--version-json`) | 2 |
 | Windows `secret set` / `remove` / `status` on a build without `management_contract`: every failure (5, 1639, 1603), and `--lock-wait` on set or remove (an unknown flag there, exit 1) | 5 / 1639 / 1603 / 1 |
 
 `bundle verify` and `bundle anchors install` print JSON for their own
 argument errors (`errors[0].code` `invalid_arguments`, exit 2 / 1639);
 `bundle apply` does not (the rows above). With
-`management_contract` 1, Windows `secret set`, `remove` and `status` print a
-JSON document on every outcome (section 4.7).
+`management_contract` 1, `secret set`, `remove` and `status` print a JSON
+document on every outcome on every OS (section 4.7): on Linux and macOS a
+flag, argument, privilege, value or stdin read error prints the schema-1
+failure document of `secret-result.schema.json` (exit 2 `invalid_arguments`,
+or exit 1 `not_root`, `change_failed` or `state_invalid`).
 
 ### 2.4 Child process rules
 
 - Start the CLI directly as the agent's own child: no shell, `systemd-run`,
   `nohup`, double fork or other wrapper that exits before the CLI does.
   Linux and macOS `secret set` refuse to store a credential when their parent
-  changed while they waited for the lock (`errors[0].code` `change_failed`),
+  changed while they read the value or waited for the lock (`errors[0].code`
+  `change_failed`),
   and a wrapper that exits makes init the parent. Windows has no such rule.
 - Run long commands on a worker thread. An apply blocks for its lock wait plus
   the transaction and the confirm step (usually under 2 minutes, plus up to
@@ -205,8 +207,10 @@ JSON document on every outcome (section 4.7).
   and on Windows no job object with kill-on-close. Do not start children
   outside the agent's cgroup to get this (that needs a wrapper). When the
   agent stops, a running `bundle apply` finishes and writes its receipt; a
-  Linux or macOS `secret set` still waiting for the lock sees its parent gone
-  and refuses without storing (`change_failed`), and the agent re-sends the
+  Linux or macOS `secret set` still reading its value (the agent's end of the
+  pipe closes early) or waiting for the lock sees its parent gone and refuses
+  without storing (`change_failed`, exit 1, one JSON document), and the agent
+  re-sends the
   credential after its restart (section 5.2). A Windows `secret set` waiting
   for its locks stores the value after the agent stopped, and the agent does
   not see whether its restart worked: re-send it after the agent's restart
@@ -301,6 +305,7 @@ use these fallbacks on it:
 | `--delivery-id` | `bundle apply --delivery-id` records `delivery_id` (2.6) | an unknown flag: exit 2 / 1639 with no JSON; leave it out and match by `receipt_id` or as above |
 | Windows apply lock wait | Windows `bundle apply` waits up to `--lock-wait` for `bundle.lock` | the flag is accepted and ignored; a held `bundle.lock` returns 1618 at once, and the agent's backoff does the waiting |
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
+| Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
 
 On Windows the anchors call is the same on every build:
@@ -405,7 +410,18 @@ Exit 0.
   against the running gateway's digest, and recorded in a receipt. A failure
   or an interruption keeps or puts back the last good bundle. A gateway
   restart or crash during the apply is handled by the child: the confirm step
-  fails and the run rolls back (`not_confirmed` / `apply_failed`).
+  fails and the run rolls back (`not_confirmed` / `apply_failed`). On Linux
+  and macOS the confirm step asks the gateway again just before the receipt
+  is confirmed (waiting up to 20 s for a gateway its service manager starts
+  again): a gateway that crashed or was killed after the transaction
+  committed and does not report the bundle's digest in time is
+  `not_confirmed` with exit 75, `bundle.state` `applied` and the last good
+  bundle still current. Resubmit the same bundle (2.2): that run confirms it
+  once the gateway reports its policy (the warning
+  `bundle_confirmed_after_interrupt`, then the success test passes), or fails
+  it and puts the last good bundle back. Windows reads the gateway's policy
+  when it confirms and fails a receipt it does not report (`not_confirmed`,
+  rolled back).
 - Idempotency: the same bytes as the confirmed bundle are a success no-op;
   the repeated delivery's receipt is discarded and no new public receipt is
   written. `noop_reason` is `already_applied` only when ensure also changed
@@ -427,7 +443,11 @@ Exit 0.
   its `bundle` block is the current confirmed bundle and its confirmed
   receipt, also when a newer delivery failed after staging, so the same test
   holds. `confirmed` means the submitted bundle is the device policy and the
-  running gateway enforces its digest. It does not mean that agent sessions
+  running gateway enforces its digest: the gateway reported that digest when
+  the receipt was confirmed, so the result of the apply that confirmed it has
+  `policy.applied` true. There is no confirmation without a running gateway:
+  a gateway that is down (crashed, killed or stopped) never confirms a
+  bundle. It does not mean that agent sessions
   already running enforce it: read `bundle.sessions_restart_required` next
   (sessions that need a restart, below).
 - **Sessions that need a restart**: an agent (Claude Code, Codex and the
@@ -493,7 +513,8 @@ Exit 0.
 - Exit: 0; 1 / 1603 refused or failed (final): the bundle codes above plus
   `capability_loss`, `not_confirmed`, `apply_failed`, `interrupted`,
   `state_invalid`, `not_managed`, `not_root` / `not_admin`; 75 / 1618
-  `lifecycle_busy` (Windows also `bundle_apply_failed` and the codes in
+  `lifecycle_busy` (Linux and macOS also `not_confirmed` with `bundle.state`
+  `applied`; Windows also `bundle_apply_failed` and the codes in
   section 2.2: retry); 2 / 1639 invalid arguments (no JSON, section 2.3).
 
 ```sh
@@ -607,7 +628,7 @@ Exit 0.
   --json`; `enterprise secret remove --name <name> [--lock-wait 10m] --json`;
   `enterprise secret status --json`. On Windows pass `--lock-wait` only to a
   `management_contract` 1 build.
-- Privilege: root on Linux and macOS (checked first, no JSON); an elevated
+- Privilege: root on Linux and macOS (checked first: `not_root`, exit 1); an elevated
   administrator or SYSTEM on Windows (exit 5 `elevation_required` on a
   managed computer; exit 1603 with the same code on a computer without the
   standalone deployment marker).
@@ -634,8 +655,16 @@ Exit 0.
   that changed the store and then failed to restart is `restart_failed`,
   exit 1603: resubmit it, which writes and restarts again, even though
   `sha256_prefix` already shows the new value (2.2).
-- stdout: `secret-result.schema.json`. Linux and macOS print lifecycle result
-  v2 (`action: "ensure"`). Windows prints `{schema_version, ok, action, name,
+- stdout: `secret-result.schema.json`, exactly one document with `--json`.
+  Linux and macOS print lifecycle result v2 (`action: "ensure"`) once the
+  lifecycle ran, and `{schema_version: 1, ok: false, action, name,
+  gateway_restarted: false, errors[], exit_code}` for a failure before it:
+  `invalid_arguments` (exit 2: a flag or argument error, an untrusted
+  `--from-file`, an empty, multi-line or oversized value, or stdin that cannot
+  be read), `not_root` (exit 1), `change_failed` (exit 1: the agent that
+  started `secret set` exited while it sent the value, for example its end of
+  the pipe closed with nothing written; resend after the agent restarts) or
+  `state_invalid` (exit 1). Nothing is written in any of them. Windows prints `{schema_version, ok, action, name,
   gateway_restarted}` on success and `{schema_version, ok: false, action,
   name, gateway_restarted: false, errors[], exit_code}` on every failure,
   including elevation (5), argument and flag errors (1639), busy (1618) and
@@ -645,9 +674,10 @@ Exit 0.
   and no `name`: `elevation_required` (5 / 1603, as above),
   `invalid_arguments` (1639, a flag error) or `state_invalid` (1603, the
   store cannot be read).
-- Exit: 0; 1 (Linux and macOS failure, including `change_failed` in the
-  document; not root, no JSON); 2 (Linux and macOS argument or value error, no
-  JSON); 75 busy; Windows 5 / 1603 / 1618 / 1639 (with JSON).
+- Exit: 0; 1 (Linux and macOS failure: `change_failed`, `not_root`,
+  `state_invalid`); 2 (Linux and macOS argument or value error,
+  `invalid_arguments`); 75 busy; Windows 5 / 1603 / 1618 / 1639. Every one
+  prints its JSON document.
 - The value never appears in output, logs or audit; `status` shows only
   presence and a digest prefix. No audit event records a set or remove
   (section 0): the agent reports it.

@@ -317,52 +317,103 @@ func lifecycleErrorSummary(result *enterprisestatus.Result) string {
 	return result.Action + " failed: " + joinMessages(parts)
 }
 
+func init() {
+	// With --json every Linux and macOS secret verb prints one JSON
+	// document on stdout, a flag error too (mgmt-agent-api GAP-0031).
+	enterpriseSecretArgumentRefusal = func(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error) error {
+		return reportUnixSecretFailure(cmd, action, opts, err, opts.json || secretArgsRequestJSON(secretRawArgs()))
+	}
+}
+
+// reportUnixSecretFailure prints the secret-result failure document of a
+// secret command that failed before the lifecycle ran.
+func reportUnixSecretFailure(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, err error, asJSON bool) error {
+	return reportSecretFailure(cmd, action, opts, err, asJSON, enterprisestatus.UnixExitFailure, enterprisestatus.UnixExitInvalidArgs)
+}
+
+// runEnterpriseSecret implements `enterprise secret` on Linux and macOS.
+// set and remove print lifecycle result v2 once the lifecycle ran; a
+// failure before it (argument, flag, privilege, value or read errors) prints
+// the secret-result failure document with --json, never an empty stdout:
+// an agent stopped while secret set read its stdin got only "credential is
+// empty" on stderr (mgmt-agent-api GAP-0031).
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
+	// The caller is taken before stdin is read: a parent that exits while
+	// this command reads the value, or waits for the lock, stores nothing.
+	caller := secretCallerPID()
+	if action == "status" {
+		if err := runUnixSecretStatus(cmd, opts); err != nil {
+			return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
+		}
+		return nil
+	}
+	result, existed, err := changeUnixSecret(cmd, action, opts, caller)
+	if err != nil {
+		return reportUnixSecretFailure(cmd, action, opts, err, opts.json)
+	}
+	if !opts.json {
+		result = describeSecretChange(result, action, opts.name, existed)
+	}
+	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
+		return err
+	}
+	return lifecycleFailure(result, opts.json, "")
+}
+
+func runUnixSecretStatus(cmd *cobra.Command, opts *enterpriseSecretOptions) error {
 	goos := enterpriseunix.CurrentGOOS()
 	env, err := newUnixLifecycleEnv(goos)
 	if err != nil {
 		return withExitCode(err, enterprisestatus.UnixExitFailure)
 	}
-	if action != "status" && env.Geteuid() != 0 {
-		return withExitCode(errors.New("run this command as root"), enterprisestatus.UnixExitFailure)
+	states, err := env.SecretStatus()
+	if errors.Is(err, fs.ErrPermission) {
+		// The credentials directory is root-only (or root and the service
+		// account): a standard account cannot list it.
+		return secretFailed("not_root", enterprisestatus.UnixExitFailure, fmt.Errorf("listing the protected credentials requires administrator rights; run: sudo %s enterprise secret status",
+			filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")))
+	}
+	if err != nil {
+		return withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	if opts.json {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
+	}
+	if len(states) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "no protected credentials")
+	}
+	for _, state := range states {
+		fmt.Fprintf(cmd.OutOrStdout(), "%-32s sha256:%s… mode %s modified %s\n", state.Name, state.SHA256Prefix, state.Mode, state.ModifiedAt)
+	}
+	return nil
+}
+
+// changeUnixSecret checks the arguments, reads the value and runs the
+// write or removal and the ensure under one lifecycle lock. An error is a
+// failure before the lifecycle ran; the result can still be a failure.
+func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions, caller int) (*enterprisestatus.Result, bool, error) {
+	goos := enterpriseunix.CurrentGOOS()
+	env, err := newUnixLifecycleEnv(goos)
+	if err != nil {
+		return nil, false, withExitCode(err, enterprisestatus.UnixExitFailure)
+	}
+	if env.Geteuid() != 0 {
+		return nil, false, secretFailed("not_root", enterprisestatus.UnixExitFailure, errors.New("run this command as root"))
 	}
 	if err := checkLockWait(cmd, opts.lockWait); err != nil {
-		return err
+		return nil, false, err
 	}
 	if opts.lockWait > 0 {
 		env.LockTimeout = opts.lockWait
-	}
-	switch action {
-	case "status":
-		states, err := env.SecretStatus()
-		if errors.Is(err, fs.ErrPermission) {
-			// The credentials directory is root-only (or root and the
-			// service account): a standard account cannot list it.
-			return withExitCode(fmt.Errorf("listing the protected credentials requires administrator rights; run: sudo %s enterprise secret status",
-				filepath.Join(env.Layout.BinDir, "defenseclaw-gateway")), enterprisestatus.UnixExitFailure)
-		}
-		if err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitFailure)
-		}
-		if opts.json {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"schema_version": 1, "secrets": states})
-		}
-		if len(states) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "no protected credentials")
-		}
-		for _, state := range states {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-32s sha256:%s… mode %s modified %s\n", state.Name, state.SHA256Prefix, state.Mode, state.ModifiedAt)
-		}
-		return nil
 	}
 	// Argument errors are refused like a malformed flag, with the usage line
 	// and exit 2, before the value is read or the lifecycle lock is taken
 	// (GAP-2146, GAP-2147).
 	if !managed.ValidCredentialName(opts.name) {
-		return lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
+		return nil, false, lifecycleFlagError(cmd, fmt.Errorf("--name takes lowercase letters, digits and dashes, not %q", opts.name))
 	}
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
-		return lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
+		return nil, false, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
 	var mutate func(context.Context) error
 	existed := false
@@ -371,20 +422,26 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+				return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return nil, false, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, err)
 			}
 			defer file.Close()
 			source = file
 		}
 		value, err := enterpriseunix.ReadSecretValue(source)
 		if err != nil {
-			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			// A caller that exited while this command read the value (its
+			// end of the pipe closed early) is a change that did not
+			// happen, not a caller bug: the agent resends after its restart.
+			if goneErr := secretCallerGone(caller, secretCallerPID()); goneErr != nil {
+				return nil, false, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure,
+					errors.New("the process that started this command exited before it sent the credential, so the credential was not stored; run the command again"))
+			}
+			return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
-		caller := secretCallerPID()
 		mutate = func(ctx context.Context) error {
 			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
 				return err
@@ -407,14 +464,12 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	// Write and apply under one lifecycle lock. The apply watcher the write
 	// wakes then finds the change already applied instead of racing it.
 	result := enterpriseunix.Run(cmd.Context(), env, enterpriseunix.Options{Action: enterpriseunix.ActionEnsure, Reason: "secret", Mutate: mutate})
-	if !opts.json {
-		result = describeSecretChange(result, action, opts.name, existed)
-	}
-	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
-		return err
-	}
-	return lifecycleFailure(result, opts.json, "")
+	return result, existed, nil
 }
+
+// codeSecretChangeFailed is the code of a write or removal that did not
+// happen, as the lifecycle reports a failed protected-state change.
+const codeSecretChangeFailed = "change_failed"
 
 // secretCallerPID is the parent of this process. A seam for tests.
 var secretCallerPID = os.Getppid
