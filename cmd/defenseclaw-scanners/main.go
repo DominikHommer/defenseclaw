@@ -118,7 +118,9 @@ print(json.dumps(result))`
 	// mcpScanScript reads the config-derived scan input from stdin. Large
 	// pinned rule sets never enter either Windows process command line.
 	// The entry's cwd is the folder the gateway checked for the server's
-	// process (GAP-1317); the runtime itself keeps the gateway's folder.
+	// process (GAP-1317); the runtime itself keeps the gateway's folder. An
+	// enrolled user's server starts through as_user_relay, which the hook
+	// enumerator answers by starting it as that user (#1164).
 	mcpScanScript = `import json,os,sys
 from types import SimpleNamespace
 from defenseclaw.config import BedrockKeyConfig, CiscoAIDefenseConfig, LLMConfig, MCPServerEntry, _merge_mcp_scanner
@@ -140,8 +142,12 @@ e=os.environ.get
 llm=LLMConfig(model=e("DEFENSECLAW_SCANNER_LLM_MODEL",""), provider=e("DEFENSECLAW_SCANNER_LLM_PROVIDER",""), api_key=e("DEFENSECLAW_SCANNER_LLM_API_KEY",""), base_url=e("DEFENSECLAW_SCANNER_LLM_BASE_URL",""), region=e("DEFENSECLAW_SCANNER_LLM_REGION",""), bedrock=BedrockKeyConfig(auth_mode=m) if (m:=e("DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE","")) else None)
 aid=CiscoAIDefenseConfig(api_key=e("DEFENSECLAW_SCANNER_AID_API_KEY",""), endpoint=e("DEFENSECLAW_SCANNER_AID_ENDPOINT","") or CiscoAIDefenseConfig().endpoint)
 s=MCPScannerWrapper(c, None, aid, llm=llm)
+relay=payload.get("as_user_relay")
+if relay is not None and (entry is None or not isinstance(relay,list) or not relay or not all(isinstance(x,str) and x for x in relay)):
+    sys.exit("mcp-scan: invalid as-user relay")
 if entry is not None:
     s.stdio_cwd=entry.cwd
+    s.stdio_relay=tuple(relay or ())
 if rp is not None:
     from defenseclaw.scanner.rulepack import RulePackOverlayScanner, _layer_of, load_rule_pack
     layers=tuple(x for x in (_layer_of(SimpleNamespace(**r)) for r in rp.get("rules") or []) if x)

@@ -43,10 +43,10 @@ const maxClaudeMCPSpoolRecordBytes = 4 << 20
 type ClaudeMCPSpoolServer struct {
 	Server  config.MCPServerEntry `json:"server"`
 	Project string                `json:"project,omitempty"`
-	// WorkDir is the folder a local stdio server starts in, which the
-	// enumerator checked as LocalSystem, where the profile is readable; the
-	// gateway service account cannot read the profile and so cannot check it
-	// (GAP-1317). WorkDirRefused is the folder it did not accept and why.
+	// WorkDir and WorkDirRefused are only read, so a record a 1.0.2
+	// enumerator wrote still parses while an upgrade replaces it; nothing
+	// uses them. The enumerator now checks a server's folder as the user
+	// when it starts the server for a scan (#1164). Remove in 1.1.
 	WorkDir        string `json:"work_dir,omitempty"`
 	WorkDirRefused string `json:"work_dir_refused,omitempty"`
 }
@@ -105,7 +105,7 @@ func MarshalClaudeMCPSpoolRecord(sid string, servers []config.MCPServerEntry) ([
 	record := ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{}}
 	for _, server := range servers {
 		record.Servers = append(record.Servers, ClaudeMCPSpoolServer{
-			Server: server, Project: server.Project, WorkDir: server.WorkDir, WorkDirRefused: server.WorkDirRefused,
+			Server: server, Project: server.Project,
 		})
 	}
 	return json.Marshal(record)
@@ -179,11 +179,6 @@ func readMCPSpool(dir, sid, connector string, trust func(path, label string) err
 	for _, server := range record.Servers {
 		entry := server.Server
 		entry.Connector, entry.Project = connector, server.Project
-		// The working folder is the enumerator result only when trust has
-		// proved the record is the enumerator one.
-		if trust != nil {
-			entry.WorkDir, entry.WorkDirRefused = server.WorkDir, server.WorkDirRefused
-		}
 		out = append(out, entry)
 	}
 	return out, record.Unreadable, nil
@@ -211,7 +206,8 @@ func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
 }
 
 // claudeMCPWorkDirChecks are the file system checks of a server working
-// folder, made by the enumerator where the user profile is readable.
+// folder, made by the enumerator while it impersonates the user whose server
+// it starts for a scan (#1164).
 type claudeMCPWorkDirChecks struct {
 	// volume fails for a path that is not on a fixed local volume (UNC,
 	// device, mapped or substituted drive).
@@ -222,14 +218,6 @@ type claudeMCPWorkDirChecks struct {
 	// the path the system reports for it; it fails for a missing folder,
 	// a file and a folder that cannot be opened.
 	final func(path string) (string, error)
-}
-
-// vetClaudeMCPWorkDirs sets WorkDir and WorkDirRefused of each local stdio
-// server of the account whose profile is home (GAP-1317).
-func vetClaudeMCPWorkDirs(servers []config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) {
-	for i := range servers {
-		servers[i].WorkDir, servers[i].WorkDirRefused = vetClaudeMCPWorkDir(servers[i], home, otherHomes, checks)
-	}
 }
 
 // vetClaudeMCPWorkDir is the folder a local stdio server starts in, as its

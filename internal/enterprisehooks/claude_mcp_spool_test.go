@@ -14,8 +14,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// GAP-1317: the enumerator, which can read the profile, accepts a server
-// folder only inside the project or the user's own home, on a local volume,
+// GAP-1317, #1164: the enumerator, checking as the server's user, accepts a
+// server folder only inside the project or the user's own home, on a local volume,
 // with no link on the way and no alias; anything else is refused with the
 // reason, and the server's project is the fallback for a refused cwd.
 func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
@@ -77,35 +77,41 @@ func TestVetClaudeMCPWorkDirRefusesEscapes(t *testing.T) {
 	}
 }
 
-// GAP-1317: the gateway takes a verified folder only from the enumerator's
-// record, after its trust check; a record read without that check, or a
-// configuration file naming the field, sets nothing.
-func TestReadClaudeMCPSpoolTrustsWorkDirOnlyFromTrustedRecord(t *testing.T) {
+// #1164: a record a 1.0.2 enumerator wrote, with the folder it checked as
+// LocalSystem, still parses during an upgrade, and the folder is not used:
+// the enumerator checks the folder as the user when it starts the server.
+// A record that fails the trust check is not read, and no configuration
+// file can name the account a server starts as.
+func TestReadClaudeMCPSpoolIgnoresTheLegacyWorkDir(t *testing.T) {
 	dir := t.TempDir()
 	const sid = "S-1-5-21-1-1001"
 	project := filepath.Join(dir, "proj")
-	data, err := MarshalClaudeMCPSpoolRecord(sid, []config.MCPServerEntry{{
-		Name: "srv", Command: "npx", Project: project, WorkDir: project, WorkDirRefused: "x: refused",
-	}})
+	legacy, err := json.Marshal(ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{{
+		Server: config.MCPServerEntry{Name: "srv", Command: "npx", Args: []string{"-y", "pkg"}}, Project: project,
+		WorkDir: project, WorkDirRefused: "x: refused",
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, sid+".json"), data, 0o600); err != nil {
+	if !strings.Contains(string(legacy), `"work_dir"`) {
+		t.Fatalf("the legacy record has no work_dir: %s", legacy)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".json"), legacy, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	trusted, _, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return nil })
-	if err != nil || len(trusted) != 1 || trusted[0].WorkDir != project || trusted[0].WorkDirRefused != "x: refused" {
-		t.Fatalf("trusted record: %+v (%v)", trusted, err)
+	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return nil })
+	if err != nil || unreadable != nil || len(servers) != 1 || servers[0].Project != project || servers[0].Connector != "claudecode" {
+		t.Fatalf("legacy record: %+v %v (%v)", servers, unreadable, err)
 	}
-	untrusted, _, err := ReadClaudeMCPSpool(dir, sid, nil)
-	if err != nil || len(untrusted) != 1 || untrusted[0].WorkDir != "" || untrusted[0].WorkDirRefused != "" {
-		t.Fatalf("record read without trust kept the folder: %+v (%v)", untrusted, err)
+	fresh, err := MarshalClaudeMCPSpoolRecord(sid, servers)
+	if err != nil || strings.Contains(string(fresh), "work_dir") {
+		t.Fatalf("a new record still carries a folder: %s (%v)", fresh, err)
 	}
 	if _, _, err := ReadClaudeMCPSpool(dir, sid, func(string, string) error { return errors.New("not the enumerator") }); err == nil {
 		t.Fatal("a record that fails the trust check was read")
 	}
 	var forged config.MCPServerEntry
-	if err := json.Unmarshal([]byte(`{"name":"srv","command":"npx","WorkDir":"C:\\x","work_dir":"C:\\x"}`), &forged); err != nil || forged.WorkDir != "" {
-		t.Fatalf("a configuration entry set the verified folder: %+v (%v)", forged, err)
+	if err := json.Unmarshal([]byte(`{"name":"srv","command":"npx","RunAsSID":"S-1-5-18","run_as_sid":"S-1-5-18"}`), &forged); err != nil || forged.RunAsSID != "" {
+		t.Fatalf("a configuration entry named the account a server starts as: %+v (%v)", forged, err)
 	}
 }

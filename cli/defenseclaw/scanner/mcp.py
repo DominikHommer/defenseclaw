@@ -930,6 +930,35 @@ def _windows_stdio_launch_plan(entry: MCPServerEntry) -> _StdioLaunchPlan:
     )
 
 
+def _as_user_relay_plan(entry: MCPServerEntry, relay: tuple[str, ...]) -> _StdioLaunchPlan:
+    """The launch plan of an enrolled user's server on managed Windows (#1164).
+
+    The scanner keeps running as the gateway; only the server runs as its
+    user. The runtime starts the gateway's relay, which asks the hook
+    enumerator to start the definition it published for that user, in a
+    folder and with a launcher it resolves as the user. The launcher rules
+    still apply to the real definition first: mcp_scan_refusal has passed,
+    and only npx and uvx start this way.
+    """
+    command = (entry.command or "").strip()
+    launcher = _bare_stdio_launcher(command)
+    if launcher not in _SAFE_STDIO_LAUNCHERS:
+        raise MCPStdioLaunchError(
+            f"local MCP command {command!r} of an enrolled user starts only through npx or uvx"
+        )
+    if launcher == "npx":
+        _validate_windows_npx_arguments("npx", list(entry.args or []))
+    executable = relay[0] if relay else ""
+    if not executable or not os.path.isabs(executable) or not os.path.isfile(executable):
+        raise MCPStdioLaunchError("the MCP as-user relay is not an installed executable")
+    env = {
+        key: value
+        for key in ("SYSTEMROOT", "WINDIR")
+        if (value := os.environ.get(key, ""))
+    }
+    return _StdioLaunchPlan(executable, tuple(relay[1:]), env, launcher)
+
+
 def _exception_leaves(exc: BaseException) -> Iterator[BaseException]:
     """Yield leaf exceptions without depending on ExceptionGroup on Python 3.10."""
     children = getattr(exc, "exceptions", None)
@@ -1291,6 +1320,11 @@ class MCPScannerWrapper:
         # scanner runtime sets it, to the folder the gateway checked
         # (GAP-1317); otherwise the server starts in this process's folder.
         self.stdio_cwd = ""
+        # Command the managed Windows scanner runtime starts in place of an
+        # enrolled user's server: the gateway's relay, which the hook
+        # enumerator answers by starting the server as that user (#1164).
+        # Empty everywhere else.
+        self.stdio_relay: tuple[str, ...] = ()
 
     def name(self) -> str:
         return "mcp-scanner"
@@ -1553,9 +1587,12 @@ class MCPScannerWrapper:
         """Scan local stdio with the platform-appropriate SDK adapter."""
 
         if os.name == "nt":
-            plan = _windows_stdio_launch_plan(entry)
-            if self.stdio_cwd:
-                plan = replace(plan, cwd=self.stdio_cwd)
+            if self.stdio_relay:
+                plan = _as_user_relay_plan(entry, self.stdio_relay)
+            else:
+                plan = _windows_stdio_launch_plan(entry)
+                if self.stdio_cwd:
+                    plan = replace(plan, cwd=self.stdio_cwd)
             errors: list[tuple[str, str]] = []
             try:
                 with _capture_sdk_error_logs(errors):

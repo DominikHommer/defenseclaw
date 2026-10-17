@@ -3947,7 +3947,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	watcherDetail := ""
 	if skippedProfileRoots {
 		watcherState = StateDegraded
-		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
 	watcherDetails := func(details map[string]interface{}) map[string]interface{} {
 		if skippedProfileRoots {
@@ -4130,7 +4130,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	if skippedProfileRoots {
 		watcherState = StateDegraded
-		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
 	s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),

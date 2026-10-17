@@ -36,25 +36,18 @@ type windowsMCPSpoolSource struct {
 	// file is the file below the user home that holds the servers.
 	file string
 	// read returns the servers of the user whose profile is home, and the
-	// path of the file that failed when err is set; homes lists every
-	// enrolled profile.
-	read func(sid, home string, homes []string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error)
+	// path of the file that failed when err is set.
+	read func(sid, home string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error)
 }
 
 var windowsClaudeMCPSpoolSource = windowsMCPSpoolSource{
 	connector: "claudecode", label: "Claude Code", tmpPattern: ".claude-mcp-*", file: ".claude.json",
-	read: func(sid, home string, homes []string, logf func(string, ...any)) ([]config.MCPServerEntry, string, error) {
-		servers, path, err := windowsClaudeStateServers(sid, home, logf)
-		if err == nil {
-			vetClaudeMCPWorkDirs(servers, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
-		}
-		return servers, path, err
-	},
+	read: windowsClaudeStateServers,
 }
 
 var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 	connector: "kiro", label: "Kiro", tmpPattern: ".kiro-mcp-*", file: `.kiro\settings\mcp.json`,
-	read: func(_, home string, _ []string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+	read: func(_, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
 		path := filepath.Join(home, ".kiro", "settings", "mcp.json")
 		data, err := readWindowsProfileFile(home, `.kiro\settings\mcp.json`, maxKiroMCPBytes)
 		if err != nil {
@@ -103,12 +96,6 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		}
 	}
 	keep := map[string]bool{}
-	var homes []string
-	for _, target := range manifest.Targets {
-		if home := strings.TrimSpace(target.UserHome); filepath.IsAbs(home) {
-			homes = append(homes, filepath.Clean(home))
-		}
-	}
 	for _, target := range manifest.Targets {
 		if !strings.EqualFold(strings.TrimSpace(target.Connector), source.connector) || (target.Enabled != nil && !*target.Enabled) {
 			continue
@@ -120,7 +107,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			continue
 		}
 		keep[strings.ToLower(name)] = true
-		servers, unreadablePath, err := source.read(key, home, homes, logf)
+		servers, unreadablePath, err := source.read(key, home, logf)
 		var data []byte
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			if logf != nil {
@@ -308,8 +295,9 @@ func otherWindowsHomes(homes []string, home string) []string {
 	return out
 }
 
-// windowsClaudeMCPWorkDirChecks check a server working folder as the
-// enumerator, which runs as LocalSystem and can read every profile.
+// windowsClaudeMCPWorkDirChecks check a server working folder. The
+// enumerator runs them while it impersonates the server's user
+// (WindowsMCPAsUserStarter), so the user's own access decides.
 var windowsClaudeMCPWorkDirChecks = claudeMCPWorkDirChecks{
 	volume: func(path string) error {
 		_, err := winpath.ValidateFixedNTFSMountedPath(path)

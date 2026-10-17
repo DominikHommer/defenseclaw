@@ -2142,8 +2142,10 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		if entry, err := w.lookupMCPServer(evt); err == nil {
 			ms.ServerEntry = entry
 			// A project-scoped command server is found only from its project
-			// (GAP-0623).
-			if entry.Project != "" && entry.URL == "" {
+			// (GAP-0623). An enrolled user's server starts as that user, in
+			// a folder the hook enumerator checks as the user: the gateway
+			// does not look into the project (#1164).
+			if entry.Project != "" && entry.URL == "" && entry.RunAsSID == "" {
 				if info, statErr := os.Stat(entry.Project); statErr == nil && info.IsDir() {
 					ms.Project, ms.Connector = entry.Project, entry.Connector
 				}
