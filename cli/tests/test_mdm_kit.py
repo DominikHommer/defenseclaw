@@ -2056,3 +2056,52 @@ def test_standalone_installer_binds_native_output_to_the_process_deadline() -> N
     assert "native process output timed out" in native
     assert "DC_LIFECYCLE_PHASE:" in module
     assert "transaction quiesce stop services" in module
+
+
+# #1298: after a Linux MDM purge an empty root-only /var/lib/defenseclaw-mdm
+# (the wrapper's staging folder) stayed. A purge removes it when it is empty
+# and root's own directory; anything else stays.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize(
+    ("purge", "platform", "owner", "content", "removed"),
+    [
+        ("1", "linux", "0", "", True),
+        ("1", "linux", "0", "defenseclaw-mdm.abc123", False),
+        ("0", "linux", "0", "", False),
+        ("1", "darwin", "0", "", False),
+        ("1", "linux", "501", "", False),
+        ("1", "linux", "0", "symlink", False),
+    ],
+)
+def test_unix_uninstall_purge_removes_the_empty_staging_folder(
+    tmp_path: Path, purge: str, platform: str, owner: str, content: str, removed: bool
+) -> None:
+    function = _shell_function(_text(MDM / "linux" / "uninstall.sh"), "dc_remove_stage_parent")
+    parent = tmp_path / "defenseclaw-mdm"
+    if content == "symlink":
+        (tmp_path / "elsewhere").mkdir()
+        parent.symlink_to(tmp_path / "elsewhere")
+    else:
+        parent.mkdir(mode=0o700)
+        if content:
+            (parent / content).mkdir()
+    script = f"""DC_PURGE={purge}
+DC_SCRIPT_OS={platform}
+DC_LINUX_STAGE_PARENT="{parent}"
+dc_log() {{ :; }}
+dc_stat_uid() {{ echo {owner}; }}
+{function}
+dc_remove_stage_parent
+"""
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (not os.path.lexists(parent)) is removed
+    if content == "symlink":
+        assert (tmp_path / "elsewhere").is_dir()
+
+
+def test_unix_uninstall_removes_the_staging_folder_after_the_package_and_without_a_gateway() -> None:
+    text = _text(MDM / "linux" / "uninstall.sh")
+    assert text.count("\ndc_remove_stage_parent\n") + text.count("    dc_remove_stage_parent\n") == 2
+    assert 'DC_LINUX_STAGE_PARENT=/var/lib/defenseclaw-mdm' in text
+    assert "DC_STAGE_PARENT=/var/lib/defenseclaw-mdm" in _text(MDM / "linux" / "defenseclaw-enterprise.sh")
