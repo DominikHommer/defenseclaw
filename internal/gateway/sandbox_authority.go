@@ -139,11 +139,6 @@ func (s *sandboxAuthority) stopText(uid int, id string) string {
 	return run.StopText
 }
 
-// sandboxAuthorities holds each API server's authority, created on first
-// use. Package state rather than an APIServer field: the server type is
-// shared by every lane of this change.
-var sandboxAuthorities sync.Map // *APIServer -> *sandboxAuthorityHolder
-
 // sandboxAuthorityHolder creates an API server's authority once it can:
 // a failure (an unusable data directory, a key that can't be loaded yet)
 // is retried on the next call instead of answering 503 until a restart.
@@ -174,8 +169,7 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	if a == nil {
 		return nil, errors.New("no API server")
 	}
-	entry, _ := sandboxAuthorities.LoadOrStore(a, &sandboxAuthorityHolder{})
-	holder := entry.(*sandboxAuthorityHolder)
+	holder := &a.sandboxAuthority
 	if auth := holder.ready.Load(); auth != nil {
 		return auth, nil
 	}

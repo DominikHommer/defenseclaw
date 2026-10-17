@@ -168,7 +168,6 @@ func newRelayFixtureWith(t *testing.T, routes map[string]sandboxRelayRoute, muta
 		sandboxBudgetLimits[sandboxBudgetHook] = prevHook
 	})
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
 	auth, err := api.sandboxAuth()
 	if err != nil {
 		t.Fatal(err)
@@ -991,7 +990,6 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.OpenShell.Enabled = true
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api) })
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	api.bindOTLPObservabilityRuntime(newSidecarRuntimeFixture(t, true).runtime)
 	auth, err := api.sandboxAuth()

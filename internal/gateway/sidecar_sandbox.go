@@ -695,10 +695,6 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 	if current == nil {
 		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "configuration not available")
 	}
-	if managed.IsManagedEnterprise(current.DeploymentMode) {
-		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
-			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
-	}
 	if key != "openshell.egress.unblocked" && key != "openshell.egress.block" {
 		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
 	}

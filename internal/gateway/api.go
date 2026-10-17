@@ -73,6 +73,8 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// sandboxAuthority is owned by this server and initialized on first use.
+	sandboxAuthority sandboxAuthorityHolder
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).

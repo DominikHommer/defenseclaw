@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -106,10 +107,19 @@ func TestSandboxConfigPersisterRefusals(t *testing.T) {
 		t.Fatalf("without a config runtime: %v", err)
 	}
 	api.SetConfigRuntime(func(context.Context, string) error { return nil }, func() *config.Config {
-		return &config.Config{DeploymentMode: "managed_enterprise"}
+		return &config.Config{DeploymentMode: "managed_enterprise", DataDir: cfg.DataDir}
 	})
+	path := configFilePathForSnapshot(api.runtimeConfigSnapshot())
+	before := []byte("config_version: 9\ndeployment_mode: managed_enterprise\n")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := (sandboxConfigPersister{api: api}).AllowAlways(context.Background(), "a.example"); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
 		t.Fatalf("managed_enterprise: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("managed config changed: %v", err)
 	}
 }
 

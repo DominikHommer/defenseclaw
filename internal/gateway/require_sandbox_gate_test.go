@@ -324,7 +324,7 @@ func TestRequireSandboxRecordsCarryTheProfile(t *testing.T) {
 	}
 	cfg.Guardrail.DefaultProfile = "contractors"
 	api.initGuardrailProfiles(cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(api); managedSandboxRecorders.Delete(api) })
+	t.Cleanup(func() { managedSandboxRecorders.Delete(api) })
 	postRequireSandboxHook(t, api, requireSandboxHooks[0], requireSandboxProject(t), nil, nil)
 	if len(*records) != 1 {
 		t.Fatalf("records = %+v", *records)
