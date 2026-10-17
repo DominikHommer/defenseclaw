@@ -2920,7 +2920,7 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 'or start with "~/"; a relative pattern would never match'
             )
         for segment in p.split("/"):
-            if segment.count("[") != segment.count("]"):
+            if _sandbox_bad_glob_segment(segment):
                 return f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} has a malformed glob segment {_go_quote(segment)}"
     resources = section.get("max_resources") or {}
     if isinstance(resources, Mapping):
@@ -3008,6 +3008,46 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
             )
     return None
+
+
+def _sandbox_bad_glob_segment(segment: str) -> bool:
+    """Check the malformed character classes and escapes rejected by Go path.Match."""
+    def char_at(index: int) -> tuple[str | None, int]:
+        if index >= len(segment) or segment[index] in "-]":
+            return None, index
+        if segment[index] == "\\":
+            index += 1
+            if index >= len(segment):
+                return None, index
+        return segment[index], index + 1
+
+    i = 0
+    while i < len(segment):
+        if segment[i] == "\\":
+            i += 2
+            if i > len(segment):
+                return True
+            continue
+        if segment[i] != "[":
+            i += 1
+            continue
+        i += 1
+        if i < len(segment) and segment[i] == "^":
+            i += 1
+        count = 0
+        while True:
+            if i < len(segment) and segment[i] == "]" and count > 0:
+                i += 1
+                break
+            char, i = char_at(i)
+            if char is None:
+                return True
+            if i < len(segment) and segment[i] == "-":
+                char, i = char_at(i + 1)
+                if char is None:
+                    return True
+            count += 1
+    return False
 
 
 def _sandbox_egress_pattern_error(pattern: str) -> str | None:

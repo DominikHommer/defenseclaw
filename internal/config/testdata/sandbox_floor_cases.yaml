@@ -368,6 +368,16 @@ cases:
           contractors:
             sandbox: {require_copy_for: ['project/*']}
 
+  - name: profile-malformed-copy-glob
+    valid: false
+    error: 'sandbox.require_copy_for[0]: "/src/[]" has a malformed glob segment "[]"'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {require_copy_for: ['/src/[]']}
+
   - name: profile-invalid-resource-cpu
     valid: false
     error: 'sandbox.max_resources.cpu "many" must be cores ("2", "1.5") or millicores ("500m")'
