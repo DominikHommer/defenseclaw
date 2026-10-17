@@ -129,8 +129,11 @@ hermes_block_message() {
   case "$layer" in
     oversized) reason="it is too large for DefenseClaw to inspect. Make it smaller and try again." ;;
     response)
+      # The reason (an HTTP status, a refused token) goes to stderr and the
+      # hook-failures log; the message is the same for every one of them.
       case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
         1) reason="the DefenseClaw gateway returned an answer DefenseClaw could not use. Try again; if this continues, contact your administrator." ;;
+        *) reason="the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why." ;;
       esac
       ;;
     *)
