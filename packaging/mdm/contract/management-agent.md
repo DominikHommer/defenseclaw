@@ -622,8 +622,11 @@ enforcing.
 ### 4.9 Receipts for forwarding (files)
 
 - Read `<etc>/bundles/receipt-events/*.json` (one immutable file per terminal
-  receipt, mode 0644) and, as a fallback, `<etc>/bundles/receipt.json` (the
-  single latest receipt). Schema `bundle-receipt.schema.json`. Any account can
+  receipt, mode 0644, refusals included). `<etc>/bundles/receipt.json` is a
+  status summary, not a receipt log: the last finished receipt that reached
+  staging (the first refusal only while there is none), with a later
+  refusal named only in its `last_refusal` member. Forward refusals from
+  `receipt-events/`. Schema `bundle-receipt.schema.json`. Any account can
   read them; no lock. Writing them is best effort, so the authoritative
   outcome of an apply is its stdout, and `bundle status` is authoritative for
   state.
