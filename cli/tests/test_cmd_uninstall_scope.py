@@ -122,6 +122,27 @@ def test_all_binaries_removes_everything_and_leaves_no_dangling_link(per_user_in
 
 
 @posix_only
+def test_all_binaries_finishes_when_splunk_secret_is_no_longer_set(per_user_install) -> None:
+    data_dir = per_user_install.data_dir
+    (data_dir / "config.yaml").write_text(
+        "config_version: 8\n"
+        "observability:\n"
+        "  destinations:\n"
+        "    - name: splunk\n"
+        "      kind: splunk_hec\n"
+        "      endpoint: https://collector.example.test/services/collector/event\n"
+        "      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN\n",
+        encoding="utf-8",
+    )
+    with patch.dict(os.environ, {"DEFENSECLAW_SPLUNK_HEC_TOKEN": ""}):
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--binaries", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert not data_dir.exists()
+    assert _entries(per_user_install.bin_dir) == ["rg"]
+
+
+@posix_only
 def test_all_without_binaries_removes_data_and_dangling_links_only(per_user_install) -> None:
     result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
 
