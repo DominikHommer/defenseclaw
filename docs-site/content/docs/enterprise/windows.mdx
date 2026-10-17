@@ -1450,8 +1450,11 @@ other hooks, its owner and its permissions. `changes` lists each settings
 file it edited and how many commands it removed. A command that still names
 a DefenseClaw launcher in another shape (written by hand, or wrapped in a
 script) is kept, and a `claude_settings_hook_left` warning names the file,
-the hook event and the command, so the administrator can remove it as that
-user: Claude Code would otherwise keep running a launcher that is gone.
+the hook event and the DefenseClaw launcher the command names (never the
+command's arguments, which can hold private values), so the administrator
+can remove it as that user: Claude Code would otherwise keep running a
+launcher that is gone. If the uninstall cannot read or check a user's
+settings file, that account is listed as a failed cleanup instead.
 To clean every user, run the uninstall as LocalSystem while they are signed
 in (see [Run Setup as LocalSystem](#run-setup-as-localsystem)).
 
