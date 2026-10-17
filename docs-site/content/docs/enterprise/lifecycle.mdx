@@ -533,8 +533,16 @@ gateway, and on a managed host they refuse, also when you run them as root;
 run as root, the refusal names the commands below. Restart the managed
 gateway through the service manager instead. On Linux
 systemd keeps the hook and API sockets open while the gateway restarts, so a
-hook that connects meanwhile waits; on macOS a hook that runs during the
-restart fails closed.
+hook that connects meanwhile waits for the gateway that starts. On every OS a
+managed hook that meets a restarting gateway (a refused or dropped
+connection, a stopped service) sends its call again for up to about 3 seconds
+from the start of the hook, so a quick restart is not visible to the agent:
+the new gateway answers from the policy it loads, the last one applied. A
+restart that lasts longer blocks each call within those 3 seconds with
+`enterprise_managed_gateway_restarting` (or
+`enterprise_managed_gateway_not_running` when no gateway answered at all). A
+hook never allows a call because the gateway was restarting, and a gateway
+that is running and evaluating a call keeps the hook's whole time budget.
 
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |

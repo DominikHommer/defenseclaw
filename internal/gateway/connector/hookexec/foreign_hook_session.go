@@ -58,18 +58,31 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	if opts.ManagedStandalone && addr == "" {
 		addr = "127.0.0.1:1" // the Unix transport dials the socket
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+addr+foreignHookSessionPathPrefix+url.PathEscape(connector), bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	send := func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			"http://"+addr+foreignHookSessionPathPrefix+url.PathEscape(connector), bytes.NewReader(payload))
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errInvalidHookRequest, err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		setUserIdentityHeaders(req, opts)
+		return client.Do(req)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-DefenseClaw-Client", "foreign-hook-guard/1.0")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	// The session exchange meets a restarting gateway like the hook call
+	// after it does: it is sent again within the restart budget (#1278).
+	started := opts.StartedAt
+	if started.IsZero() {
+		started = time.Now()
 	}
-	setUserIdentityHeaders(req, opts)
-	response, err := client.Do(req)
+	restartDeadline := managedGatewayRestartDeadline(opts, started)
+	response, err := send()
+	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+		response, err = send()
+	}
 	if err != nil {
 		return nil, err
 	}

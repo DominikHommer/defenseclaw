@@ -361,6 +361,7 @@ func Run(ctx context.Context, opts Options) int {
 		startedAt = time.Now()
 	}
 	opts = withDefaults(opts)
+	opts.StartedAt = startedAt
 
 	sp, ok := specFor(opts.Connector)
 	if ok && copilotVSCodeLocal(opts) {
@@ -488,6 +489,17 @@ func Run(ctx context.Context, opts Options) int {
 					opts.ManagedUnixSocket,
 					opts.ManagedServiceUID,
 				)
+				// A gateway that binds its own hook socket (macOS) has none
+				// for a moment while it restarts: wait for it within the
+				// restart budget instead of failing closed at once.
+				restartDeadline := managedGatewayRestartDeadline(opts, startedAt)
+				for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+					opts.HTTPClient, err = managedStandaloneHTTPClient(
+						requestTimeout,
+						opts.ManagedUnixSocket,
+						opts.ManagedServiceUID,
+					)
+				}
 			} else {
 				opts.HTTPClient, err = managedEnterpriseHTTPClient(
 					requestTimeout,
@@ -670,9 +682,17 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
-	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts)
+	restartDeadline := managedGatewayRestartDeadline(opts, opts.StartedAt)
+	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	defer releaseWatch()
 	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
+	// A managed gateway that is restarting refuses the connection, or drops
+	// one it accepted as it exits: send the call again, to the gateway that
+	// starts, until the restart budget ends. Every try verifies the peer
+	// again, and a call that never gets an answer still fails closed below.
+	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+	}
 	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, failMode, err.Error())
@@ -729,8 +749,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	if err != nil {
 		reason := "gateway unreachable"
-		if errors.Is(context.Cause(ctx), errGatewayStartFailing) {
+		switch cause := context.Cause(ctx); {
+		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
+		case errors.Is(cause, errGatewayRestarting):
+			// Fail closed, never open, whatever the hook's fail mode.
+			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure must fail closed on the transport
@@ -1708,10 +1732,11 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 	if reason == managedUIDUnregisteredReason {
 		text = "DefenseClaw: " + unixUnenrolledAccountExplanation
 	}
-	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason {
+	if reason == managedGatewayNotRunningReason || reason == managedGatewayPortHeldReason ||
+		reason == managedGatewayRestartingReason {
 		// Only a standalone hook gets these reasons (managedPeerFailureReason,
 		// the foreign-hook guard); say the service is stopped and who starts
-		// it, or that another program holds its port.
+		// it, that it is restarting, or that another program holds its port.
 		text = managedStandaloneFailClosedText(opts.Event, "transport", reason)
 	}
 	message := mustJSONString(text)
@@ -1919,7 +1944,8 @@ func ManagedGatewayPortHeld(err error) bool {
 // caller that shows the guard's reason as is (the OpenCode plugin); ok is
 // false for any other reason.
 func ManagedTransportFailureText(event, reason string) (string, bool) {
-	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason {
+	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason &&
+		reason != managedGatewayRestartingReason {
 		return "", false
 	}
 	return managedStandaloneFailClosedText(event, "transport", reason), true
@@ -1993,6 +2019,10 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 				managedStatusCommand(runtime.GOOS)+"` names what to do."
 		// The documented refusal code goes last, as in the shell hooks'
 		// text, so an administrator can look it up (GAP-1179).
+		code = reason
+	case reason == managedGatewayRestartingReason:
+		cause, advice = "the DefenseClaw gateway is restarting to apply a change on this computer",
+			"Try again in a few seconds; if this continues, contact your administrator."
 		code = reason
 	case reason == managedGatewayPortHeldReason:
 		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
