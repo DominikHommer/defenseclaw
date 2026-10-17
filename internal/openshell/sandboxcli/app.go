@@ -183,6 +183,14 @@ type App struct {
 	// ManagedE2fsprogsDir reads the administrator's e2fsprogs_dir through
 	// the managed gateway settings call. ok is false if it did not answer.
 	ManagedE2fsprogsDir func(context.Context) (dir string, ok bool)
+	// ManagedTrustedCAs reads the administrator's trusted CAs
+	// (openshell.trusted_ca_bundle) through the managed gateway settings
+	// call: their PEM, or why the gateway could not use the file. ok is
+	// false if it did not answer.
+	ManagedTrustedCAs func(context.Context) (pem, problem string, ok bool)
+	// TLSTrust is what the Sandbox TLS trust doctor row reads (defaults:
+	// the network, the distribution's public roots, the system's trust).
+	TLSTrust TLSTrust
 	// ManagedAccountHome is the home path the managed gateway exec shim
 	// resolves for this account, including directory accounts.
 	ManagedAccountHome func() (string, error)
@@ -207,6 +215,10 @@ type App struct {
 	// asked is the last question ask showed, to the question mark: what a
 	// Ctrl-C there interrupted.
 	asked string
+	// tlsTrustOnce runs the Sandbox TLS trust probe once per command;
+	// tlsTrustRow is its row.
+	tlsTrustOnce sync.Once
+	tlsTrustRow  openshell.Check
 	// managedSeen is the managed part of the daemon's last status on a
 	// managed computer: the caller's profile and request-access contact a
 	// refusal names (ManagedError).
