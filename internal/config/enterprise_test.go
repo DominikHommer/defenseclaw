@@ -920,13 +920,6 @@ func TestManagedStandaloneRefusesAdditionalInlineSecrets(t *testing.T) {
 			}
 		})
 	}
-	perUser := base
-	perUser.DeploymentMode = ""
-	perUser.Enterprise.Profile = ""
-	perUser.LLM.ExtraHeaders = map[string]string{"Authorization": "literal"}
-	if len(standaloneInlineSecrets(&perUser)) == 0 {
-		t.Fatal("test did not set a literal header")
-	}
 }
 
 func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T) {
@@ -940,5 +933,14 @@ func TestManagedStandaloneRefusesLiteralDestinationCredentialHeader(t *testing.T
 			strings.Contains(err.Error(), "example-sensitive-value") || !strings.Contains(err.Error(), "{credential: NAME}") {
 			t.Fatalf("header %q: validation = %v", header, err)
 		}
+	}
+}
+
+func TestPerUserLiteralHeadersKeepTheirExistingValidation(t *testing.T) {
+	raw := []byte("config_version: 9\nllm:\n  extra_headers:\n    Authorization: example-sensitive-value\n" +
+		"observability:\n  destinations:\n  - name: archive\n    kind: http_jsonl\n    enabled: false\n" +
+		"    endpoint: https://example.test/events\n    headers:\n      Authorization: example-sensitive-value\n")
+	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err != nil {
+		t.Fatalf("per-user validation changed: %v", err)
 	}
 }
