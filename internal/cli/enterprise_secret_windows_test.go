@@ -71,9 +71,11 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	t.Helper()
 	previousLayout, previousInstalled, previousElevated, previousRestart := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, windowsSecretRawArgs
+	previousManaged := managedHostWindowsStandalone
 	t.Cleanup(func() {
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway = previousLayout, previousInstalled, previousElevated, previousRestart
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, windowsSecretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
+		managedHostWindowsStandalone = previousManaged
 	})
 	host := &windowsSecretLockEvents{}
 	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
@@ -100,6 +102,11 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 		return func() { host.events = append(host.events, "unlock lifecycle") }, nil
 	}
 	windowsSecretRawArgs = func() []string { return nil }
+	// The standalone marker of the computer the test runs on must not pick
+	// the refusal class: a managed test host turned the unmanaged 1603
+	// expectation into exit 5 (mgmt-agent-api GAP-0002). A test that wants
+	// a managed computer stubs the marker itself.
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	return host
 }
 
@@ -241,14 +248,14 @@ func TestWindowsSecretRefusals(t *testing.T) {
 		t.Fatal("set without a standalone deployment must be refused")
 	}
 	windowsSecretIsElevated = func() bool { return false }
+	// Without the standalone marker a standard account gets 1603
+	// elevation_required (management-agent.md 4.7).
 	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || commandExitCode(err) != windowsSecretExitFailure {
-		t.Fatalf("a non-elevated token must be refused, got %v", err)
+		t.Fatalf("a non-elevated token on a computer without the standalone marker must be refused with 1603, got %v (exit %d)", err, commandExitCode(err))
 	}
 	// GAP-0931: on a managed computer a standard account gets exit 5
 	// elevation_required and the command to ask for, like every other
 	// enterprise refusal there.
-	restoreManaged := managedHostWindowsStandalone
-	t.Cleanup(func() { managedHostWindowsStandalone = restoreManaged })
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
 	_, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, "")
 	var refusal *managedViewRefusal
@@ -486,6 +493,10 @@ func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
 			stored := filepath.Join(dir, "ai-defense-api-key")
 			if action == "remove" {
 				// The refused remove must leave a stored credential as it was.
+				// The refused set before it created no secrets folder.
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.WriteFile(stored, []byte("kept-value"), 0o600); err != nil {
 					t.Fatal(err)
 				}
