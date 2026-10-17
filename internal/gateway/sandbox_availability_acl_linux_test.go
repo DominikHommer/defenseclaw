@@ -57,4 +57,12 @@ func TestSandboxKVMNamedUserACL(t *testing.T) {
 	if got := sandboxDevicePathAccess(path, uid, true); got.State != sandboxDeviceDenied {
 		t.Fatalf("read-only ACL accepted: %+v", got)
 	}
+	binary.LittleEndian.PutUint16(acl[4+1*8+2:], 6)
+	binary.LittleEndian.PutUint16(acl[4+3*8+2:], 4)
+	if err := unix.Setxattr(path, "system.posix_acl_access", acl, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := sandboxDevicePathAccess(path, uid, true); got.State != sandboxDeviceDenied {
+		t.Fatalf("ACL mask without write accepted: %+v", got)
+	}
 }
