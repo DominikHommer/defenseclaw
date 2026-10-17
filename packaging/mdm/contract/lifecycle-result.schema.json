@@ -43,7 +43,16 @@
       "required": ["local", "ai_defense"],
       "properties": {
         "local": { "type": "string", "enum": ["active", "disabled", "unknown", ""] },
-        "ai_defense": { "type": "string", "pattern": "^(|disabled|ok|unknown|unavailable(:[A-Za-z0-9_.-]+)?)$" }
+        "ai_defense": {
+          "type": "string",
+          "enum": [
+            "", "disabled", "ok", "unknown",
+            "unavailable:auth_failed", "unavailable:credential_unavailable", "unavailable:unreachable",
+            "unavailable:proxy_auth_required", "unavailable:proxy_config", "unavailable:not_initialized",
+            "unavailable:error", "unavailable:gateway_not_ready"
+          ],
+          "description": "Cisco AI Defense inspection, from the gateway's /health (standaloneInspectionPosture). disabled: enterprise.inspection.ai_defense is off. ok: AI Defense answered a request with the stored key. unknown: no request has been answered since the key was stored or the gateway restarted, or the gateway did not report. unavailable:auth_failed: AI Defense rejected the stored key (HTTP 401 or 403) on the last request. unavailable:credential_unavailable: the credential is missing or fails its trust check. unavailable:unreachable: no answer (connection failure or timeout). unavailable:proxy_auth_required / proxy_config: the egress proxy wants credentials (HTTP 407) or its setting is invalid. unavailable:error: another failure, for example an HTTP 5xx. unavailable:not_initialized: the client was never built. unavailable:gateway_not_ready (Windows): the gateway is not ready. Every unavailable value also adds warning ai_defense_unavailable; the local policy engine keeps deciding. The value never carries the key or the response body."
+        }
       }
     },
     "machine_policy": {

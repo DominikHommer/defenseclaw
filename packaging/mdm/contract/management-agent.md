@@ -561,6 +561,25 @@ Exit 0.
 - The value never appears in output, logs or audit; `status` shows only
   presence and a digest prefix. No audit event records a set or remove
   (section 0): the agent reports it.
+- After pushing the Cisco AI Defense key, check that AI Defense accepts it.
+  `sha256_prefix` proves only what is stored. Read `inspection.ai_defense`
+  from `enterprise <os> status --json` (4.4); the Linux and macOS `set`
+  result carries the same field:
+
+  | Value | Meaning | Agent action |
+  |---|---|---|
+  | `ok` | AI Defense answered a request with the stored key | done |
+  | `unknown` | No request answered since the key was stored or the gateway restarted. DefenseClaw does not probe AI Defense on its own: the value changes on the first prompt a hook sends for inspection | not a failure; read status again later (at most every 60 s) |
+  | `unavailable:auth_failed` | AI Defense rejected the stored key: HTTP 401 or 403 on the last request (warning `ai_defense_unavailable`) | send the right key; the next answered request clears it |
+  | `unavailable:credential_unavailable` | The credential the config names is missing or fails its trust check | store it under the name `enterprise.inspection.ai_defense.credential` gives |
+  | `unavailable:unreachable`, `unavailable:proxy_auth_required`, `unavailable:proxy_config`, `unavailable:error`, `unavailable:not_initialized` | No answer (connection failure or timeout), the egress proxy wants credentials (HTTP 407) or is misconfigured, another failure such as HTTP 5xx, or no client was built | a network, proxy or service fault, not a key fault: do not rotate the key |
+  | `unavailable:gateway_not_ready` | Windows: the gateway is not ready | recover the device (4.6) |
+  | `disabled` | The config does not enable AI Defense | none |
+
+  The code comes from the HTTP status alone; the value and the warning never
+  carry the key or the response body. The local policy engine keeps deciding
+  in every case. A Windows build without `management_contract` reports `ok`
+  from gateway readiness alone, which does not prove the key.
 
 ```sh
 # The agent writes the value to the child's stdin and closes it; printf stands in for that here.
@@ -825,6 +844,9 @@ Per-user installs and Secure Client computers refuse every command.
   installed while Linux and macOS store it (4.7).
 - A busy Linux or macOS `status` is `ok: false`, `lifecycle_busy`, exit 75,
   after a fixed 5 s wait; it is not a device failure.
+- A rejected AI Defense key shows only after the gateway has sent a request
+  with it: until a hook sends a prompt for inspection, `inspection.ai_defense`
+  stays `unknown` (4.7).
 - Receipt files are written best effort (4.9); stdout and `bundle status` are
   authoritative.
 - `delivery_id` is caller-supplied and not authenticated, and no receipt
