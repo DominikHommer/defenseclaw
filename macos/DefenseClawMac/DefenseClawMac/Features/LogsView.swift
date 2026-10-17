@@ -166,6 +166,7 @@ struct LogsView: View {
                     Spacer()
                     Button("Redaction policy…") { showRedactionPolicy = true }
                         .controlSize(.small)
+                        .disabled(appState.runtimeSetupCommands?.contains("redaction") != true)
                         .help("Inspect or apply the v8 redaction policy")
                     ConnectorFilterChip(names: appState.activeConnectorNames, selection: $state.connectorFilter)
                 }
@@ -173,6 +174,7 @@ struct LogsView: View {
                     streamPicker.frame(maxWidth: .infinity)
                     Button("Redaction policy…") { showRedactionPolicy = true }
                         .controlSize(.small)
+                        .disabled(appState.runtimeSetupCommands?.contains("redaction") != true)
                         .help("Inspect or apply the v8 redaction policy")
                     ConnectorFilterChip(names: appState.activeConnectorNames, selection: $state.connectorFilter)
                 }
