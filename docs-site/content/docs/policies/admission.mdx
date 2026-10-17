@@ -397,23 +397,6 @@ Add `--severity` and `--findings` to simulate a scan result:
 defenseclaw-gateway policy evaluate --target-type skill --target-name new-skill --severity HIGH --findings 3
 ```
 
-On a managed Linux or macOS host, run the gateway command as an administrator;
-it reads the managed configuration. On a managed Windows standalone host, use
-an elevated PowerShell prompt and the installed CLI:
-
-```powershell
-& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy evaluate --target-type skill --target-name risky-skill
-```
-
-The managed command reads the administrator's policy. A standard account
-cannot use its own `~/.defenseclaw/config.yaml` to check the managed verdict.
-
-The `defenseclaw config get ... --effective` commands in this page are
-per-user commands. On a managed computer they are not available (the managed
-CLI has only `config migrate`, and `defenseclaw-gateway policy show` is
-refused). To check what a managed computer derives, run `policy evaluate` as
-shown above, or read the administrator config you delivered.
-
 ```text
 {
   "verdict": "rejected",
@@ -429,6 +412,26 @@ In the output, `runtime_action` uses the policy engine's spelling, `block` or
 and uses the path `/dry-run`, so rules scoped to a connector and allow rules
 pinned to a path do not match in it. `defenseclaw-gateway policy show` prints
 the whole compiled admission policy.
+
+The `defenseclaw config get ... --effective` reads above are per-user views;
+they do not show the managed verdict. On managed Linux and macOS, the Python
+`config get` command still exists and notes that the gateway enforces the
+administrator's configuration. The managed Windows CLI has no `config get`.
+A standard account is refused when it tries to read the managed policy with
+the gateway command. To check the managed policy, run `policy evaluate` for
+one asset or `policy show` for the compiled policy as root on Linux or macOS:
+
+```bash
+sudo defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill
+sudo defenseclaw-gateway policy show
+```
+
+On managed Windows, use an elevated PowerShell prompt and the installed CLI:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy evaluate --target-type skill --target-name risky-skill
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' policy show
+```
 
 ## The block/allow list
 

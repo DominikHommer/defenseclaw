@@ -435,7 +435,8 @@ the process and gives the `kill` command. `installer -pkg` exits with a
 failure (the postinstall step failed) and records no package receipt, so
 detection reports the computer as not installed, and `last-package-result.json`
 has the error. Stop that gateway, or move it to another port, then run
-`installer -pkg` again (or `defenseclaw-gateway enterprise macos ensure --from-package`).
+`installer -pkg` again (or `defenseclaw-gateway enterprise macos ensure --from-package`,
+which records no package receipt).
 A per-user gateway on another port keeps running until it is stopped. The
 install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.

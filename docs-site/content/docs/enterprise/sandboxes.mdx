@@ -1259,10 +1259,11 @@ instead. They show:
   `--user`, filtered with `--state pending|expired|live|stopped|revoked`, with
   `--json`. Each row shows the state now: a pending registration that no sandbox
   bound to within 30 minutes is `expired` (a run that never started), and a registration whose
-  sandbox is not running is `stopped`. The list holds registrations only: a
-  sandbox DefenseClaw did not start has no registration, so it does not appear
-  in it. Foreign sandboxes are audit-only (`log.sandbox.foreign_sandbox`);
-  read them in the audit export;
+  sandbox is not running is `stopped`. A foreign sandbox has no registration,
+  so it is absent from this list. Managed `foreign_sandboxes` controls whether
+  it is stopped or reported; see
+  [Foreign sandboxes, rules and containers](#foreign-sandboxes-rules-and-containers)
+  for the audit record;
 - `sandbox explain` shows one registration the way the person sees it, then the
   sources: organization (the floor for everyone) and profile;
 - `policy verify --user` adds the sandbox rows: each required agent, the
