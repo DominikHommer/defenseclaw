@@ -369,6 +369,9 @@ func TestLauncherJobControl(t *testing.T) {
 		// running; an echoed ^C can still target the launcher's group.
 		stub := stubState + "trap 'echo stub-got-INT; exit 9' INT; " +
 			"until state=$(st); [[ $state =~ pgrp=([0-9]+).*tpgid=([0-9]+) ]] && [[ ${BASH_REMATCH[1]} == ${BASH_REMATCH[2]} ]]; do :; done; " +
+			// The stub stands in for an interactive harness. Set the PTY's
+			// interrupt character and signal mode before announcing readiness.
+			"stty isig intr '^C' || exit 97; " +
 			"echo stub-up; for i in $(seq 1 100); do sleep 0.1; done; exit 0\n"
 		r, _ := run(t, stub)
 		r.waitOutput("stub-up")
