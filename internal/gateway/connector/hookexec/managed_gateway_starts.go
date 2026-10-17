@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"sync"
 	"syscall"
 	"time"
@@ -58,6 +59,38 @@ func managedGatewayRestartDeadline(opts Options, startedAt time.Time) time.Time 
 		return time.Time{}
 	}
 	return startedAt.Add(managedGatewayRestartBudget)
+}
+
+// ManagedGatewayRestartingReason is the reason code of a managed hook that
+// failed closed because its gateway was still restarting at the end of the
+// restart budget.
+const ManagedGatewayRestartingReason = managedGatewayRestartingReason
+
+// ErrManagedGatewayRestarting is wrapped by a managed hook transport error
+// that a gateway still restarting at the end of the restart budget ended.
+var ErrManagedGatewayRestarting = errGatewayRestarting
+
+// ManagedGatewayRestarting reports an error from a managed hook transport
+// (ExchangeForeignHookSession) that a gateway still stopping or starting at
+// the end of the restart budget ended.
+func ManagedGatewayRestarting(err error) bool {
+	return errors.Is(err, errGatewayRestarting)
+}
+
+// newManagedHookHTTPClient builds the verified transport of a managed hook.
+// A gateway that binds its own hook socket (macOS) has none for a moment
+// while it restarts, so the standalone transport is built again, the socket
+// checked again each time, until restartDeadline instead of failing closed
+// at once. The error left at the end is the caller's fail-closed result.
+func newManagedHookHTTPClient(ctx context.Context, opts Options, timeout time.Duration, restartDeadline time.Time) (*http.Client, error) {
+	if !opts.ManagedStandalone {
+		return managedEnterpriseHTTPClient(timeout, opts.APIAddr, opts.ManagedGatewayServiceName)
+	}
+	client, err := managedStandaloneHTTPClient(timeout, opts.ManagedUnixSocket, opts.ManagedServiceUID)
+	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+		client, err = managedStandaloneHTTPClient(timeout, opts.ManagedUnixSocket, opts.ManagedServiceUID)
+	}
+	return client, err
 }
 
 // gatewayRestartShaped reports a transport error that a gateway restart

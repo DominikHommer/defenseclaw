@@ -139,7 +139,7 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	if event == "" {
 		event = facts.event
 	}
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, startedAt, deadline)
 	if decision.Deny {
 		if name == "devin" {
 			host := opts.AgentHost
@@ -324,7 +324,7 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	}
 	opts := hookexec.Options{Connector: name, Stdin: stdin}
 	facts := captureHookPayloadFacts(&opts)
-	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt.Add(hookForeignGuardMaxScan))
+	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, facts.event, startedAt, startedAt.Add(hookForeignGuardMaxScan))
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
 		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
@@ -368,7 +368,7 @@ func hookForeignGuardScanBudget(connector, event string) time.Duration {
 // with the session's state in the gateway (a session that started with an
 // unapproved hook stays denied until the agent restarts), and the agent's config-location environment is
 // recorded for the guardian's cleanup.
-func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
+func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.PublicConnectorPolicy, facts hookPayloadFacts, event string, startedAt, deadline time.Time) (enterprisepolicy.GuardDecision, string) {
 	accountHome := hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
@@ -429,7 +429,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		})
 		return decision, accountHome
 	}
-	decision, err := hookForeignGuardExchange(name, event, deadline, update)
+	decision, err := hookForeignGuardExchange(name, event, startedAt, deadline, update)
 	if err != nil {
 		// The gateway holds the session record. Without its answer the call
 		// is blocked in every fail mode, and the reason must not suggest an
@@ -444,6 +444,10 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// says so in the words, and with the reason code, every other
 			// managed hook uses (GAP-0578, GAP-0639).
 			reason = hookexec.ManagedGatewayNotRunningReason
+		} else if hookexec.ManagedGatewayRestarting(err) {
+			// The gateway was still restarting at the end of the restart
+			// budget, counted from the invocation (#1278).
+			reason = hookexec.ManagedGatewayRestartingReason
 		} else if hookexec.ManagedGatewayPortHeld(err) {
 			// The gateway service runs but another process answers on its
 			// port: say so, not that the session record is unavailable
@@ -473,13 +477,16 @@ func foreignHookSessionLocal(name string) bool {
 	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
 }
 
-func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
 	// --foreign-hook-check exits before the ordinary hook preflight. Prepare
 	// its managed runtime here so this exchange uses the verified transport.
 	if prepareEnterpriseManagedHookRuntime(name) {
 		return enterprisepolicy.GuardDecision{}, fmt.Errorf("managed hook runtime has been retired")
 	}
 	opts := buildHookOptionsForRuntime(name, event, "", "closed", true)
+	// A restarting gateway is waited for within the restart budget of the
+	// invocation, not of the exchange: the scan before it counts.
+	opts.StartedAt = startedAt
 	deadline := scanDeadline.Add(hookForeignGuardScanBudget(name, event))
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()

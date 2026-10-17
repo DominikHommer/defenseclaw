@@ -483,30 +483,11 @@ func Run(ctx context.Context, opts Options) int {
 	if opts.HTTPClient == nil {
 		if opts.ManagedEnterprise {
 			var err error
-			if opts.ManagedStandalone {
-				opts.HTTPClient, err = managedStandaloneHTTPClient(
-					requestTimeout,
-					opts.ManagedUnixSocket,
-					opts.ManagedServiceUID,
-				)
-				// A gateway that binds its own hook socket (macOS) has none
-				// for a moment while it restarts: wait for it within the
-				// restart budget instead of failing closed at once.
-				restartDeadline := managedGatewayRestartDeadline(opts, startedAt)
-				for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
-					opts.HTTPClient, err = managedStandaloneHTTPClient(
-						requestTimeout,
-						opts.ManagedUnixSocket,
-						opts.ManagedServiceUID,
-					)
-				}
-			} else {
-				opts.HTTPClient, err = managedEnterpriseHTTPClient(
-					requestTimeout,
-					opts.APIAddr,
-					opts.ManagedGatewayServiceName,
-				)
-			}
+			// A gateway that binds its own hook socket (macOS) has none
+			// for a moment while it restarts: wait for it within the
+			// restart budget instead of failing closed at once.
+			opts.HTTPClient, err = newManagedHookHTTPClient(ctx, opts, requestTimeout,
+				managedGatewayRestartDeadline(opts, startedAt))
 			if err != nil {
 				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
 			}
