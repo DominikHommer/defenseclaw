@@ -122,21 +122,6 @@ func (u *unenrolledRefusalAuditor) writeAll(rows []unenrolledRefusalRow) {
 	}
 }
 
-// run flushes ended windows until ctx ends.
-func (u *unenrolledRefusalAuditor) run(ctx context.Context) {
-	ticker := time.NewTicker(unenrolledRefusalWindow / 4)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			u.flush()
-			return
-		case <-ticker.C:
-			u.flush()
-		}
-	}
-}
-
 // auditUnenrolledRefusal writes one refusal row for an account the pipe
 // client token identified.
 func (a *APIServer) auditUnenrolledRefusal(ctx context.Context, row unenrolledRefusalRow) {

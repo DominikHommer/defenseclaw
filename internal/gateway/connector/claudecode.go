@@ -134,10 +134,10 @@ func claudeCodeSettingsParseable(path string) error {
 	}
 	var settings map[string]interface{}
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return fmt.Errorf("Claude Code settings file %s is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
+		return fmt.Errorf("settings file %s for Claude Code is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
 	}
 	if settings == nil {
-		return fmt.Errorf("Claude Code settings file %s must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path)
+		return fmt.Errorf("settings file %s for Claude Code must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path)
 	}
 	return nil
 }
@@ -1427,7 +1427,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 				}
 			}
 			if settings == nil {
-				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
+				return atomicTransformResult{}, fmt.Errorf("settings file %s for Claude Code must contain a JSON object", settingsPath)
 			}
 
 			backup := baseBackup
@@ -1803,7 +1803,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				}
 			}
 			if settings == nil {
-				return atomicTransformResult{}, fmt.Errorf("Claude Code settings file %s must contain a JSON object", settingsPath)
+				return atomicTransformResult{}, fmt.Errorf("settings file %s for Claude Code must contain a JSON object", settingsPath)
 			}
 
 			existing := map[string]interface{}{}
@@ -2110,8 +2110,9 @@ func claudeCodeLoopbackGatewayEndpoint(value string) bool {
 	default:
 		return false
 	}
-	switch path := strings.TrimRight(parsed.Path, "/"); {
-	case path == "", path == "/v1/logs", path == "/v1/metrics", path == "/v1/traces":
+	path := strings.TrimRight(parsed.Path, "/")
+	switch path {
+	case "", "/v1/logs", "/v1/metrics", "/v1/traces":
 		return true
 	default:
 		return strings.HasPrefix(path, "/otlp/")

@@ -129,3 +129,9 @@ func TestEnrolledKiroMCPServersReachAdmissionThroughSpool(t *testing.T) {
 		t.Fatalf("bob: refused=%v decision %+v; want his Kiro MCP tool call refused", refused, decision)
 	}
 }
+
+// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
+// published for the account sid (enrolledSpoolMCPServers).
+func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
+	return enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, "claudecode"), "claudecode", sid)
+}

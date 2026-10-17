@@ -350,7 +350,7 @@ func (g *HookConfigGuard) Stop() {
 		g.mu.Unlock()
 		g.deactivate()
 		g.repairMu.Lock()
-		g.repairMu.Unlock()
+		g.repairMu.Unlock() //nolint:staticcheck // Wait for the active repair before retiring this guard.
 		return
 	}
 	g.retiring = true
@@ -362,7 +362,7 @@ func (g *HookConfigGuard) Stop() {
 	// through the retiring connector generation.
 	g.deactivate()
 	g.repairMu.Lock()
-	g.repairMu.Unlock()
+	g.repairMu.Unlock() //nolint:staticcheck // Wait for the active repair before cancellation.
 
 	if cancel != nil {
 		cancel()
@@ -452,7 +452,7 @@ func (g *HookConfigGuard) run() {
 		g.mu.Unlock()
 		g.deactivate()
 		g.repairMu.Lock()
-		g.repairMu.Unlock()
+		g.repairMu.Unlock() //nolint:staticcheck // Wait for the active repair before closing its watcher.
 		if watcher != nil {
 			_ = watcher.Close()
 		}

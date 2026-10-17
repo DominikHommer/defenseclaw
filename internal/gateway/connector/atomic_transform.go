@@ -301,7 +301,7 @@ func readAtomicFileSnapshot(path string) (atomicFileSnapshot, error) {
 			return snapshot, fmt.Errorf("inspect open config hard-link count %s: %w", writePath, linkCountErr)
 		}
 		if runtime.GOOS == "windows" && linkCount != 1 {
-			return snapshot, fmt.Errorf("Windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
+			return snapshot, fmt.Errorf("windows config %s has %d hard links; refusing ambiguous replacement", writePath, linkCount)
 		}
 		if identityErr != nil {
 			return snapshot, fmt.Errorf("identify open config %s: %w", writePath, identityErr)

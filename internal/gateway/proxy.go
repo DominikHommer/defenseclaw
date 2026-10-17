@@ -2156,7 +2156,7 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 	for i, c := range calls {
 		out2[i] = nestedCall{
 			Type:     "function",
-			Function: fnPart{Name: c.Name, Arguments: c.Arguments},
+			Function: fnPart(c),
 		}
 	}
 	encoded, err := json.Marshal(out2)

@@ -3814,9 +3814,10 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 		verifyMatcher := newCursorHookCommandMatcher(verifyCommands)
 		// Exercise the exact post-write scan twice. Setup performs the first check;
 		// the published-hook presence gate performs the same high-cardinality scan.
-		if !cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) ||
-			!cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) {
-			t.Fatal("high-cardinality Cursor contract did not retain one exact managed entry per event")
+		for scan := 0; scan < 2; scan++ {
+			if !cursorHookContractPresent(hooks, currentCommand, verifyMatcher, false) {
+				t.Fatal("high-cardinality Cursor contract did not retain one exact managed entry per event")
+			}
 		}
 	}
 	elapsed := time.Since(started)

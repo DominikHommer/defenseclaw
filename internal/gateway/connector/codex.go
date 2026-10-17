@@ -3575,30 +3575,6 @@ func isCodexManagedScriptCandidate(command string) bool {
 	return false
 }
 
-func verifyNoOwnedCodexHooks(document map[string]interface{}, hooksDir string) error {
-	rawHooks, exists := document["hooks"]
-	if !exists {
-		return nil
-	}
-	hooks, ok := rawHooks.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("hooks has unsupported type %T", rawHooks)
-	}
-	for eventType, rawGroups := range hooks {
-		if eventType == "state" {
-			continue
-		}
-		locations, err := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
-		if err != nil {
-			return fmt.Errorf("hooks.%s: %w", eventType, err)
-		}
-		if len(locations) > 0 {
-			return fmt.Errorf("hooks.%s still contains %d DefenseClaw handlers", eventType, len(locations))
-		}
-	}
-	return nil
-}
-
 // removeOwnedCodexHookState removes only a trust record whose positional key
 // points at a currently present DefenseClaw handler and whose hash matches that
 // handler. A state entry at the same key with an operator-edited hash is left

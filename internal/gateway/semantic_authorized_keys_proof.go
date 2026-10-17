@@ -436,9 +436,10 @@ func interpreterCallArgs(call string) []string {
 	for i := start; i < len(call)-1; i++ {
 		c := call[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue
@@ -465,9 +466,10 @@ func interpreterCodePosition(code string, position int) bool {
 	for i := 0; i < position; i++ {
 		c := code[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 		} else if c == '\'' || c == '"' {
@@ -505,9 +507,10 @@ func boundedInterpreterCall(code string, open int) (string, bool) {
 	for i := open; i < len(code); i++ {
 		c := code[i]
 		if quote != 0 {
-			if c == '\\' {
+			switch c {
+			case '\\':
 				i++
-			} else if c == quote {
+			case quote:
 				quote = 0
 			}
 			continue

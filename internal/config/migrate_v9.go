@@ -37,7 +37,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/ast" //nolint:staticcheck // The v8/v9 migration shares the legacy AST type with regodata until 1.1.
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 

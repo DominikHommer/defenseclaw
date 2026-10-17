@@ -614,7 +614,7 @@ func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("plainbox"))
 	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain, Changes: []workspace.TreeChange{
 		{Path: "edge/line\n  A forged.txt", Status: "A", Added: 1}, {Path: "edge/esc\x1b]2;title\a", Status: "A"},
-		{Path: "edge/rtl‮txt.sh", Status: "A"}, {Path: long, Status: "A"},
+		{Path: "edge/rtl\u202etxt.sh", Status: "A"}, {Path: long, Status: "A"},
 	}, Review: workspace.ReviewReport{FilesChanged: 4, Insertions: 1}}
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
 	has(t, ta.output(), `  A edge/line\n  A forged.txt`, `  A edge/esc\x1b]2;title\a`, "  A edge/rtl�txt.sh",

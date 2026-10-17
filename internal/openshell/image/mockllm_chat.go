@@ -178,8 +178,8 @@ func (m *mockLLM) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	message := map[string]interface{}{"role": "assistant", "content": mockAuxText}
 	finish := "stop"
 	if sc := m.pick(prompt); sc != nil {
-		switch {
-		case turn == 0:
+		switch turn {
+		case 0:
 			if name, ok := pickShellTool(schemas); ok {
 				args, _ := json.Marshal(shellToolArgs(schemas[name], sc.command))
 				message = map[string]interface{}{"role": "assistant", "content": nil, "tool_calls": []interface{}{map[string]interface{}{
@@ -343,8 +343,8 @@ func (m *mockLLM) geminiGenerate(w http.ResponseWriter, r *http.Request, stream 
 	prompt, turn := geminiPosition(req.Contents)
 	parts := []interface{}{map[string]interface{}{"text": mockAuxText}}
 	if sc := m.pick(prompt); sc != nil {
-		switch {
-		case turn == 0:
+		switch turn {
+		case 0:
 			if name, ok := pickShellTool(schemas); ok {
 				parts = []interface{}{map[string]interface{}{"functionCall": map[string]interface{}{"name": name, "args": shellToolArgs(schemas[name], sc.command)}}}
 				m.served(sc.match)

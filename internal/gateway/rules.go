@@ -374,7 +374,8 @@ func cloneRuleCategories(categories []ruleCategory) []ruleCategory {
 		for ruleIndex, rule := range category.Rules {
 			cloned[categoryIndex].Rules[ruleIndex] = rule
 			if rule.Pattern != nil {
-				cloned[categoryIndex].Rules[ruleIndex].Pattern = rule.Pattern.Copy()
+				// Keep Longest() mutations on the source from changing a published generation.
+				cloned[categoryIndex].Rules[ruleIndex].Pattern = rule.Pattern.Copy() //nolint:staticcheck // An independent regexp is required for immutable snapshots.
 			}
 			cloned[categoryIndex].Rules[ruleIndex].Tags = append(
 				[]string(nil),

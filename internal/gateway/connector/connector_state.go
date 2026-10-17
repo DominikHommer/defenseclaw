@@ -1471,9 +1471,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)

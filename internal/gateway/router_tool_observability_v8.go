@@ -482,9 +482,10 @@ func eventRouterToolFields(
 ) eventRouterToolLogFields {
 	severity := observability.SeverityInfo
 	level := observability.LogLevelInfo
-	if kind == eventRouterToolLogBlocked {
+	switch kind {
+	case eventRouterToolLogBlocked:
 		severity, level = observability.SeverityHigh, observability.LogLevelWarn
-	} else if kind == eventRouterToolLogFailed {
+	case eventRouterToolLogFailed:
 		severity, level = observability.SeverityHigh, observability.LogLevelError
 	}
 	return eventRouterToolLogFields{

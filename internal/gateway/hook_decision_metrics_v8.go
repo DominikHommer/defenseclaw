@@ -50,8 +50,8 @@ func (a *APIServer) emitHookDecisionLogV8(
 	meta llmEventMeta,
 	connectorName string,
 ) {
-	emitter, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
-	if !ok || emitter == nil {
+	emitter := a.observabilityV8RuntimeEmitter()
+	if emitter == nil {
 		return
 	}
 	connectorName = hookDecisionMetricConnector(connectorName)

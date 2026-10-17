@@ -385,12 +385,6 @@ func enrolledSpoolMCPServers(dir, connectorName, sid string) ([]config.MCPServer
 	return servers, unreadable
 }
 
-// enrolledClaudeMCPServers are the Claude Code MCP servers the enumerator
-// published for the account sid (enrolledSpoolMCPServers).
-func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
-	return enrolledSpoolMCPServers(enrolledMCPSpoolDir(cfg, "claudecode"), "claudecode", sid)
-}
-
 // EnrolledWatchRoot is a skill or plugin folder a managed Windows gateway
 // watches for an enrolled user, with that user's profile and SID.
 type EnrolledWatchRoot struct {

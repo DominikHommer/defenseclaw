@@ -3530,7 +3530,7 @@ func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 			"credential API on Windows, so any allowlist here would be silently "+
 			"discarded. Remove these keys from config.yaml; the socket DACL is "+
 			"the enforcement boundary until parity plan §4.4 lands the Windows "+
-			"peer-auth mechanism.",
+			"peer-auth mechanism",
 		strings.Join(offending, ", "),
 	)
 }

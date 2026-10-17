@@ -7,8 +7,10 @@ package connector
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -165,4 +167,28 @@ func assertCodexOperatorHookAndStatePreserved(
 	if len(state) != 1 || !codexValueMatches(state["operator-key"], operatorState) {
 		t.Fatalf("operator trust state changed: %#v", state)
 	}
+}
+
+func verifyNoOwnedCodexHooks(document map[string]interface{}, hooksDir string) error {
+	rawHooks, exists := document["hooks"]
+	if !exists {
+		return nil
+	}
+	hooks, ok := rawHooks.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("hooks has unsupported type %T", rawHooks)
+	}
+	for eventType, rawGroups := range hooks {
+		if eventType == "state" {
+			continue
+		}
+		locations, err := ownedCodexHookLocations(runtime.GOOS, codexHookEventKeyLabel(eventType), rawGroups, hooksDir)
+		if err != nil {
+			return fmt.Errorf("hooks.%s: %w", eventType, err)
+		}
+		if len(locations) > 0 {
+			return fmt.Errorf("hooks.%s still contains %d DefenseClaw handlers", eventType, len(locations))
+		}
+	}
+	return nil
 }

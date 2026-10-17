@@ -449,7 +449,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if isUnknownTerminalMCP(probe) &&
 		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
 		decision.RawAction == "block" &&
-		!(mcpAssetMode == config.AssetPolicyModeAction && mcpDefaultDeny) {
+		(mcpAssetMode != config.AssetPolicyModeAction || !mcpDefaultDeny) {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 		decision.WouldBlock = true
@@ -533,8 +533,8 @@ func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, conn
 	mode := config.AssetPolicyModeAction
 	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
 		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
-		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
-			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
+		if !gated || (!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) &&
+			!rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
 			return config.AssetPolicyDecision{}, false
 		}
 		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
@@ -1311,10 +1311,7 @@ func claudeCodeSlashCommandAssetName(targetType, commandName string) (string, st
 	if rawName == "" {
 		return "", ""
 	}
-	name := rawName
-	if strings.HasPrefix(name, "/") {
-		name = strings.TrimPrefix(name, "/")
-	}
+	name := strings.TrimPrefix(rawName, "/")
 	if !strings.EqualFold(strings.TrimSpace(targetType), "plugin") {
 		if !validNativeSkillSelectionName(name) {
 			return "", ""

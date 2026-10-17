@@ -211,7 +211,7 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		// new/changed/gone signal (see resolveSignalsPublish), so no
 		// lifecycle delta can be dropped here.
 		if (isDelta || (managedSnapshot && signal.State == inventory.AIStateSeen)) &&
-			!(managedSnapshot && !signalsPublish) {
+			(!managedSnapshot || signalsPublish) {
 			outcome, err := adapter.emitSignalLog(ctx, report.Summary, signal)
 			// Emit returns nil when the optional managed AI Defense projection fails,
 			// so the outcome — not the error — is what says whether the managed
