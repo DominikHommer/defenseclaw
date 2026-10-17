@@ -166,6 +166,15 @@ One 1603 is not final: Windows `secret set` / `remove` with `errors[0].code`
 gateway, which still runs with the old one. Resubmit the same call (it writes
 and restarts again) even though `sha256_prefix` now matches (section 2.5).
 
+One 1 is not final: Linux and macOS `secret set --from-stdin` with the
+schema-1 failure document and `errors[0].code` `change_failed` stored nothing
+because its value never arrived whole: the agent exited before it sent the
+complete value, or no value ended within 60 s (the agent stopped sending
+without closing stdin). Resubmit the same call once the agent runs again:
+after its restart, or once a stopped agent continues (section 2.4). It is
+not a busy retry, so no back-off: the call fails again only if the agent
+stops again before it sends the value.
+
 ### 2.3 When stdout carries no JSON
 
 These fail before a result document exists: stdout is empty, one line goes to
@@ -211,7 +220,9 @@ or exit 1 `not_root`, `change_failed` or `state_invalid`).
   pipe closes early) or waiting for the lock sees its parent gone and refuses
   without storing (`change_failed`, exit 1, one JSON document), and the agent
   re-sends the
-  credential after its restart (section 5.2). A Windows `secret set` waiting
+  credential after its restart (section 5.2). An agent that is stopped (for
+  example `SIGSTOP`) or leaves stdin open without sending does not hold
+  `secret set` forever: it gives up after 60 s with the same `change_failed`. A Windows `secret set` waiting
   for its locks stores the value after the agent stopped, and the agent does
   not see whether its restart worked: re-send it after the agent's restart
   (2.5). A killed child leaves an interrupted
@@ -230,8 +241,11 @@ Credentials go only through `enterprise secret set --name N --from-stdin`
 (section 4.7). Bundles carry no secrets: a bundle lists `secret_refs`, and
 apply refuses with `secret_ref_missing` until each named credential is
 stored. Send the value as one line without surrounding whitespace and close
-stdin. Linux and macOS strip one trailing `\n` or `\r\n` and keep other
-spaces; Windows trims all surrounding whitespace. At most 16 KiB. Names match
+stdin, within 60 s of starting the command on Linux and macOS
+(`change_failed` after that). Linux and macOS strip one trailing `\n` or `\r\n` and keep other
+spaces; Windows trims all surrounding whitespace. On Linux and macOS a value
+that ends without `\n` (`printf '%s'`) makes `secret set` wait up to 1 s to
+tell an agent that exited while it sent the value from one that is done. At most 16 KiB. Names match
 `^[a-z0-9][a-z0-9-]{0,62}$`.
 
 Send a credential **only when it changed**. Every Windows `set` restarts the
@@ -674,10 +688,14 @@ Exit 0.
   lifecycle ran, and `{schema_version: 1, ok: false, action, name,
   gateway_restarted: false, errors[], exit_code}` for a failure before it:
   `invalid_arguments` (exit 2: a flag or argument error, an untrusted
-  `--from-file`, an empty, multi-line or oversized value, or stdin that cannot
-  be read), `not_root` (exit 1), `change_failed` (exit 1: the agent that
-  started `secret set` exited while it sent the value, for example its end of
-  the pipe closed with nothing written; resend after the agent restarts) or
+  `--from-file`, an empty, multi-line or oversized value the agent sent in
+  full, or stdin that cannot be read while the agent runs; the same call fails
+  again), `not_root` (exit 1), `change_failed` (exit 1: the value never
+  arrived whole. The agent that started `secret set` exited before it sent
+  the complete value: its end of the pipe closed with nothing or part of the
+  value written, or a process it started still holds the pipe. Or no value
+  ended within 60 s: the agent stopped without closing stdin. Resubmit the
+  same call once the agent runs again, section 2.2) or
   `state_invalid` (exit 1). Nothing is written in any of them. Windows prints `{schema_version, ok, action, name,
   gateway_restarted}` on success and `{schema_version, ok: false, action,
   name, gateway_restarted: false, errors[], exit_code}` on every failure,

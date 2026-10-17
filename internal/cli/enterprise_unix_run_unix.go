@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -419,7 +420,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	existed := false
 	switch action {
 	case "set":
-		var source io.Reader = cmd.InOrStdin()
+		var value []byte
 		if opts.fromFile != "" {
 			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
 				return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
@@ -429,18 +430,11 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 				return nil, false, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, err)
 			}
 			defer file.Close()
-			source = file
-		}
-		value, err := enterpriseunix.ReadSecretValue(source)
-		if err != nil {
-			// A caller that exited while this command read the value (its
-			// end of the pipe closed early) is a change that did not
-			// happen, not a caller bug: the agent resends after its restart.
-			if goneErr := secretCallerGone(caller, secretCallerPID()); goneErr != nil {
-				return nil, false, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure,
-					errors.New("the process that started this command exited before it sent the credential, so the credential was not stored; run the command again"))
+			if value, err = enterpriseunix.ReadSecretValue(file); err != nil {
+				return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 			}
-			return nil, false, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
+			return nil, false, err
 		}
 		mutate = func(ctx context.Context) error {
 			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
@@ -473,6 +467,97 @@ const codeSecretChangeFailed = "change_failed"
 
 // secretCallerPID is the parent of this process. A seam for tests.
 var secretCallerPID = os.Getppid
+
+// secretStdinWait bounds how long secret set waits for its value on stdin.
+// A management agent writes the value and closes stdin right after it
+// starts the command; a sender that stopped (SIGSTOP) or that left stdin
+// open without writing hung the command forever (mgmt-agent-api GAP-0040).
+var secretStdinWait = 60 * time.Second
+
+// secretCallerSettle is how long secret set watches its parent after stdin
+// ended without a complete line. A process that exits closes its end of the
+// pipe before the kernel makes init the parent of its children (macOS shows
+// it every time), so the end of stdin arrives while the parent still looks
+// alive (mgmt-agent-api GAP-0040). A value ended by a newline does not wait.
+var secretCallerSettle = time.Second
+
+// secretCallerPoll is how often secret set looks at its parent while it
+// waits for the value or for a parent that exited to show.
+const secretCallerPoll = 10 * time.Millisecond
+
+// errSecretSenderExited is the change_failed message of a secret set whose
+// caller exited before it sent the whole value.
+var errSecretSenderExited = errors.New("the process that started this command exited before it sent the credential, so the credential was not stored; run the command again")
+
+// readUnixSecretStdin reads the value of secret set --from-stdin. It is
+// change_failed (exit 1: nothing stored, the agent sends the value again in
+// a new run) when the sender went away before it sent a complete value:
+// stdin ended without a complete line, or failed, and the parent exited;
+// the parent exited while stdin stayed open; or no value ended within
+// secretStdinWait. A value that ended (with or without a newline) while the
+// parent stayed is checked as given: empty, multi-line or oversized is
+// invalid_arguments (exit 2), as is a read error.
+func readUnixSecretStdin(source io.Reader, caller int) ([]byte, error) {
+	type delivery struct {
+		data []byte
+		err  error
+	}
+	done := make(chan delivery, 1)
+	go func() {
+		// Left blocked on a stdin that never ends: the command exits
+		// after it reports the timeout.
+		data, err := enterpriseunix.ReadSecretBytes(source)
+		done <- delivery{data, err}
+	}()
+	deadline := time.NewTimer(secretStdinWait)
+	defer deadline.Stop()
+	poll := time.NewTicker(secretCallerPoll)
+	defer poll.Stop()
+	var got delivery
+	for waiting := true; waiting; {
+		select {
+		case got = <-done:
+			waiting = false
+		case <-poll.C:
+			// A process the agent started can hold stdin open after the
+			// agent exited.
+			if secretCallerPID() != caller {
+				return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, errSecretSenderExited)
+			}
+		case <-deadline.C:
+			return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure,
+				fmt.Errorf("no credential arrived on stdin within %s (the process that started this command stopped sending and did not close stdin), so the credential was not stored; run the command again, write the value and close stdin", secretStdinWait))
+		}
+	}
+	if got.err != nil || !bytes.HasSuffix(got.data, []byte("\n")) {
+		if secretCallerExitsWithin(caller, secretCallerSettle) {
+			return nil, secretFailed(codeSecretChangeFailed, enterprisestatus.UnixExitFailure, errSecretSenderExited)
+		}
+	}
+	if got.err != nil {
+		return nil, withExitCode(got.err, enterprisestatus.UnixExitInvalidArgs)
+	}
+	value, err := enterpriseunix.ParseSecretValue(got.data)
+	if err != nil {
+		return nil, withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+	}
+	return value, nil
+}
+
+// secretCallerExitsWithin reports whether the parent of this process stops
+// being caller within settle.
+func secretCallerExitsWithin(caller int, settle time.Duration) bool {
+	deadline := time.Now().Add(settle)
+	for {
+		if secretCallerPID() != caller {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(secretCallerPoll)
+	}
+}
 
 // secretCallerGone refuses to store a credential once the process that ran
 // `secret set` has exited while the command waited for the lifecycle lock:
