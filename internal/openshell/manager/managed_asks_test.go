@@ -224,8 +224,8 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 // second sandbox in the same account has a different floor in force.
 func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {
 	e, _ := managedEnv(t, nil)
-	e.live(sandboxapi.CreateRequest{Name: "claudebox"})
-	e.live(sandboxapi.CreateRequest{Name: "codexbox"})
+	e.live(sandboxapi.CreateRequest{Name: "claudebox", Copy: true})
+	e.live(sandboxapi.CreateRequest{Name: "codexbox", Copy: true})
 	floors := map[string]string{"claudebox": "balanced", "codexbox": "strict"}
 	e.m.opts.ConfigForSandbox = func(name string) *config.Config {
 		profile, ok := floors[name]
