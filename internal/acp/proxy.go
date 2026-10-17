@@ -39,8 +39,10 @@ type ProxyOptions struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 	Evaluator Evaluator
-	// Managed marks the guard of a managed enrollment, whose user has no
-	// DefenseClaw command to run and is pointed at the administrator.
+	// Managed marks the guard of a standalone managed enrollment (never
+	// Secure Client), whose user has no DefenseClaw command to run and is
+	// pointed at the administrator. Such a guard refuses a frame it could
+	// not evaluate in observe mode too (managedObserveRefuses).
 	Managed bool
 	// SetupCommand writes this editor entry again ("" when unknown).
 	SetupCommand string
@@ -67,7 +69,8 @@ func (o ProxyOptions) setupCommandFor(profile string, mode Mode) string {
 
 // Run starts an ACP agent without a shell and mediates every NDJSON frame in
 // both directions. In action mode malformed frames and evaluator failures are
-// fail-closed. Observe mode records evaluations but preserves traffic.
+// fail-closed. Observe mode records evaluations but preserves traffic, except
+// that a standalone managed guard refuses a frame it could not evaluate.
 func Run(ctx context.Context, opts ProxyOptions) error {
 	if opts.Command == "" || opts.Stdin == nil || opts.Stdout == nil || opts.Stderr == nil {
 		return errors.New("ACP proxy requires command, stdin, stdout, and stderr")
@@ -592,6 +595,17 @@ func unavailableReason(err error) string {
 	return evaluationUnavailableReason
 }
 
+// managedObserveRefuses reports an observe-mode frame of a standalone managed
+// guard (Managed) whose evaluation failed. Outside Secure Client a step
+// DefenseClaw cannot check is never delivered unchecked, in observe mode too
+// (owner rule 2026-10-14; rel-1-0-3 GAP-0037): observe mode lets policy
+// verdicts through, not a missing verdict, as the managed hooks do. An
+// administrator who switched ACP checking off (ErrACPDisabled) gave an
+// answer, not a failure, so that frame goes through with the notice.
+func managedObserveRefuses(opts ProxyOptions, err error) bool {
+	return opts.Managed && opts.Mode == ModeObserve && !errors.Is(err, ErrACPDisabled)
+}
+
 // refusalReason is what the editor sees for a frame refused because it
 // could not be evaluated. A revoked credential used to read as a gateway
 // that did not answer, and a managed user was told to run commands the host
@@ -664,14 +678,11 @@ func (s *proxyState) noticeUnchecked(opts ProxyOptions, direction Direction, msg
 		why = "ACP checking is switched off"
 	case errors.Is(err, ErrCredentialOtherAccount):
 		why = "the ACP credential this editor entry uses was issued to another account"
-	case opts.Managed:
-		why = "the gateway did not accept this editor's ACP credential (your administrator may have revoked your access)"
 	}
+	// A standalone managed guard reaches this only for ErrACPDisabled: it
+	// refuses every other failed frame (managedObserveRefuses).
 	next := "Contact your administrator."
 	switch {
-	case opts.Managed && errors.Is(err, ErrCredentialRejected):
-		// Setup cannot restore a revoked credential (GAP-0905).
-		next = "Ask your administrator to enroll you again; running setup cannot restore a revoked credential."
 	case errors.Is(err, ErrCredentialOtherAccount):
 		next = "Ask your administrator to enroll you for this editor and agent."
 	case !opts.Managed && opts.SetupCommand != "":
@@ -905,10 +916,16 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
 			}
-			if opts.Mode == ModeAction {
+			if opts.Mode == ModeAction || managedObserveRefuses(opts, evalErr) {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				verdict = Verdict{Action: "block", Reason: state.refusalReason(opts, evalErr)}
+				if opts.Mode != ModeAction {
+					if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
+						return err
+					}
+					continue
+				}
 			} else {
 				logf(opts.Stderr, "[defenseclaw-acp] observe evaluation error: %v\n", evalErr)
 				verdict = Verdict{Action: "allow"}
