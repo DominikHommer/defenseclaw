@@ -681,10 +681,13 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     if any(getattr(change, "path", "") == "gateway.token_env" for change in changes):
         from defenseclaw.logger import keep_running_gateway_token
 
-        if app.cfg is not None:
-            keep_running_gateway_token(
-                getattr(app, "logger", None), app.cfg.data_dir, app.cfg.gateway.resolved_token(), ""
-            )
+        # The top-level `config` command skips the normal config load, so
+        # app.cfg is normally None. Capture the old token before the writer
+        # changes token_env; loading only afterward selects the new token.
+        before_cfg = app.cfg if app.cfg is not None else config_module.load()
+        keep_running_gateway_token(
+            getattr(app, "logger", None), before_cfg.data_dir, before_cfg.gateway.resolved_token(), ""
+        )
     try:
         result = config_writer.apply(
             changes,

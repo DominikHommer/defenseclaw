@@ -188,8 +188,8 @@ class ConfigSetTokenEnvTests(_RunningTokenCase):
         ):
             os.environ.pop("DEFENSECLAW_DEPLOYMENT_MODE", None)
             app = AppContext()
-            app.cfg = config_module.load()
-            app.logger = Logger.from_config(app.cfg)
+            # The real top-level config command skips AppContext config/load.
+            self.assertIsNone(app.cfg)
             result = CliRunner().invoke(config_cmd, ["set", "gateway.token_env", "DC_D10_NEW_TOKEN"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output + repr(result.exception))
         self.assertIn("token_env: DC_D10_NEW_TOKEN", path.read_text(encoding="utf-8"))
