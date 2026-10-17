@@ -107,10 +107,57 @@ func TestManagedStandaloneHermesHookBlockSaysWhy(t *testing.T) {
 	}
 }
 
-// runStandaloneHermesHook renders the Hermes hook for a standalone install
-// on f's socket and runs it for one tool call, with DEFENSECLAW_FAIL_MODE=open
-// in the environment.
+// rel-1-0-3 B-20 review item 1: a managed standalone shell hook blocks a
+// successful gateway answer that carries no usable verdict (no action, an
+// unknown one, a block without a directive or with one that does not deny),
+// with DEFENSECLAW_FAIL_MODE=open in the environment. The allow and alert
+// answers of observe mode still let the call run.
+func TestManagedStandaloneShellHooksBlockAnUnusableAnswer(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to run the shell hooks")
+	}
+	for _, conn := range []Connector{
+		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewOpenHandsConnector(),
+	} {
+		hook := hookArgvConnectorCase(t, conn.Name())
+		for _, answer := range []struct {
+			name   string
+			body   map[string]any
+			blocks bool
+		}{
+			{"missing action", map[string]any{}, true},
+			{"unknown action", map[string]any{"action": "proceed"}, true},
+			{"block without directive", map[string]any{"action": "block"}, true},
+			{"block whose directive allows", map[string]any{"action": "block", "hook_output": map[string]string{"decision": "allow"}}, true},
+			{"observe allow", map[string]any{"action": "allow"}, false},
+			{"observe alert", map[string]any{"action": "alert"}, false},
+		} {
+			t.Run(conn.Name()+" "+answer.name, func(t *testing.T) {
+				f := newHookSocketFixture(t, "dcua", answer.body)
+				code, stdout, stderr := runStandaloneShellHook(t, f, conn, hook.script, hook.args, hook.stdin)
+				blocked := code == 2 || strings.Contains(stdout, `"deny"`) ||
+					strings.Contains(stdout, `"block"`) || strings.Contains(stdout, `"continue":false`)
+				if blocked != answer.blocks {
+					t.Fatalf("exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, stdout, stderr, blocked, answer.blocks)
+				}
+			})
+		}
+	}
+}
+
+// runStandaloneHermesHook runs the standalone Hermes hook (runStandaloneShellHook)
+// for one tool call.
 func runStandaloneHermesHook(t *testing.T, f *hookSocketFixture) (int, string, string) {
+	t.Helper()
+	return runStandaloneShellHook(t, f, NewHermesConnector(), "hermes-hook.sh", nil,
+		`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo marker"}}`)
+}
+
+// runStandaloneShellHook renders conn's hooks for a standalone install in
+// observe mode on f's socket and runs script once with args and stdin, with
+// DEFENSECLAW_FAIL_MODE=open in the environment.
+func runStandaloneShellHook(t *testing.T, f *hookSocketFixture, conn Connector, script string, args []string, stdin string) (int, string, string) {
 	t.Helper()
 	curlPath, err := exec.LookPath("curl")
 	if err != nil {
@@ -129,16 +176,16 @@ func runStandaloneHermesHook(t *testing.T, f *hookSocketFixture) (int, string, s
 		ManagedHookSocket:  f.socket,
 		ManagedServiceUID:  os.Getuid(),
 	}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewHermesConnector()); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 		t.Fatal(err)
 	}
-	hookPath := filepath.Join(hookDir, "hermes-hook.sh")
+	hookPath := filepath.Join(hookDir, script)
 	bakeHookPathForTest(t, hookPath, filepath.Dir(curlPath)+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", hookPath)
+	cmd := exec.CommandContext(ctx, "bash", append([]string{hookPath}, args...)...)
 	cmd.Env = append(os.Environ(), "HOME="+filepath.Join(f.root, "home"), "DEFENSECLAW_FAIL_MODE=open")
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo marker"}}`)
+	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err = cmd.Run()

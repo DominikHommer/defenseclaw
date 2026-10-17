@@ -69,8 +69,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 7273,
-      "sha256": "22bc5e95363ba3642c4040fbba4bef5a0a5fcbd97c2ba83d9a2fe0c0cca9f96d"
+      "size": 8404,
+      "sha256": "9ddd0a16de8710f05e0a3c748a69ab205eef03b018e0ab9e9b6917ab57295b89"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1009,8 +1009,8 @@
     },
     "cursor-hook.sh": {
       "mode": "-rwx------",
-      "size": 8659,
-      "sha256": "45a2def413f4d582ad922e2c026acba81d934d899ea49871b13afc9056e9ea54"
+      "size": 9238,
+      "sha256": "8ac3af3eff10b067f2fed8ae774d8d4ddc159d631836e9d57b24c340f1410cd2"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1103,8 +1103,8 @@
     },
     "devin-hook.sh": {
       "mode": "-rwx------",
-      "size": 6696,
-      "sha256": "9d67801c149538ed8d0f8ec55f12429ffc4889867734a9ef465e2ef972f5016b"
+      "size": 7354,
+      "sha256": "fcdc0de3f6cf1b160ab2a5d23bd08c44e2430a0490b10f9a22b1e892539e2776"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1253,8 +1253,8 @@
     },
     "hermes-hook.sh": {
       "mode": "-rwx------",
-      "size": 9078,
-      "sha256": "a4bdb043dc1712dafb79fa76e155ab7e1aee5f6a694b4ee678af55019be2ea5b"
+      "size": 10217,
+      "sha256": "1a5d776d4a4aa92d6d04626f609a526e954a80828100ffe9d7e9df55035666eb"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",
@@ -1367,8 +1367,8 @@
     },
     "kiro-hook.sh": {
       "mode": "-rwx------",
-      "size": 7479,
-      "sha256": "b85d4a60bcfcbe4e67400df1d44abcb75867f06ad3533c679c69f2011f279739"
+      "size": 8069,
+      "sha256": "79637fb839e9e9e1c60da2e471b8f6ff7ce0dc297096c69f2ce1729fd0781684"
     }
   },
   "legacy/all-scripts": {
@@ -1635,8 +1635,8 @@
     },
     "openhands-hook.sh": {
       "mode": "-rwx------",
-      "size": 6366,
-      "sha256": "ce009498c91eb75b2b6f871d290956b214ebe99e6fa1627c0ae3c00065c3fec9"
+      "size": 7234,
+      "sha256": "5f2dab22f4c4392039164980437592326950ee72fc8b93f5de33fa06b9576efe"
     }
   },
   "plugin/amp-plugin.ts/managed=0/fail=closed": {

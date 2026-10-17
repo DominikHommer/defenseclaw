@@ -260,16 +260,21 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
-# reply the workload may have shaped, never an allow. A block without a
-# rendered directive still denies PreToolUse.
+{{if or .Sandbox (and .Managed (not .SecureClient))}}# Every DefenseClaw verdict names its action: an empty or unknown one is no
+# verdict, never an allow (a sandbox workload may have shaped it; a managed
+# hook outside Secure Client fails closed, rel-1-0-3 GAP-0037). A
+# block whose directive is missing or does not deny still denies PreToolUse.
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|alert|confirm) ;;
   block)
-    if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+    OUTPUT_DECISION=""
+    if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+      OUTPUT_DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || OUTPUT_DECISION=""
+    fi
+    if [ "$OUTPUT_DECISION" != "deny" ] && [ "$HOOK_EVENT" = "PreToolUse" ]; then
       REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
       if [ -z "$REASON" ]; then
         REASON="Blocked by DefenseClaw Antigravity policy."

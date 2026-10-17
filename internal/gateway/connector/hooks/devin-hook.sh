@@ -236,7 +236,9 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{if or .Sandbox (and .Managed (not .SecureClient))}}{{/* Every DefenseClaw verdict names its action: an empty or unknown one is no
+verdict, never an allow (a sandbox workload may have shaped it; a managed hook
+outside Secure Client fails closed, rel-1-0-3 GAP-0037). */}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 case "$ACTION" in
