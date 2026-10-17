@@ -1045,3 +1045,25 @@ Per-user installs and Secure Client computers refuse every command.
   `sessions_restart_required` counts it and `coverage_complete` stays false.
   The agent reports enforcement pending and gets those sessions restarted
   (4.3).
+- Windows standalone: rolling a device back to the published 1.0.2 Setup
+  after an uninstall by the installed `defenseclaw.exe` (`enterprise windows
+  uninstall`) of 1.0.2, or of a build without this fix, fails with
+  `lifecycle_error`, exit 1603, "PowerShell is in NonInteractive mode. Read
+  and Prompt functionality is not available.". That uninstall left the empty
+  folders `lib\defenseclaw` and `lib` in the retired install folder
+  `C:\Program Files\Cisco\DefenseClaw.retired-<32 hex>` together with its
+  cleanup receipt, and the 1.0.2 cleanup cannot delete them. An uninstall by
+  this version leaves nothing, and Setup of this version or later completes
+  the old cleanup itself. Before running the 1.0.2 Setup on such a device,
+  delete the two folders as LocalSystem; `Delete` refuses a folder that is
+  not empty:
+
+  ```powershell
+  Get-ChildItem -LiteralPath 'C:\Program Files\Cisco' -Directory -Filter 'DefenseClaw.retired-*' |
+      ForEach-Object {
+          foreach ($leaf in 'lib\defenseclaw', 'lib') {
+              $folder = Join-Path $_.FullName $leaf
+              if (Test-Path -LiteralPath $folder -PathType Container) { [IO.Directory]::Delete($folder) }
+          }
+      }
+  ```
