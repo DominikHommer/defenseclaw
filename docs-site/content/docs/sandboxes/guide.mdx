@@ -655,10 +655,10 @@ connected together with its parents when the tree identifies one process,
 including a refused connection. With the optional Linux sandbox kernel feed,
 this includes a long-running Python interpreter launched through a virtual
 environment or `uv`. If several matching interpreters were running, the row
-has no lineage. The TUI's sandbox details list the tree. The daemon samples
-every 5 seconds (every 15 seconds on a Mac when
+has no lineage. The TUI's sandbox details list the tree. Without the kernel
+feed, the daemon samples every 5 seconds (every 15 seconds on a Mac when
 sampling its MicroVM is slow), so a process that starts and ends between two
-samples is not seen; the agent chooses its processes' names and arguments, so
+samples is not seen. The agent chooses its processes' names and arguments, so
 the tree is a view of what ran, not a control.
 
 <TerminalAnimation
