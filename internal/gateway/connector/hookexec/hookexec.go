@@ -302,7 +302,7 @@ type Options struct {
 	// ManagedEnterprise mode. It is also set, with ManagedRuntimeFailure,
 	// when the standalone runtime failed its checks: no transport is then
 	// selected, and the failure gets the standalone profile's fail-closed
-	// results (managedStandaloneStopEvent).
+	// results.
 	ManagedStandalone bool
 	// ManagedUnixSocket is the standalone hook socket. The standalone hook
 	// dials only this socket and sends no bearer token: the gateway
@@ -1051,9 +1051,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 	action, ok := rawString(fields, "action")
 	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
-		// Only the managed standalone profiles keep a lifecycle event neutral
-		// here. Per-user and Secure Client hooks keep their fail path: a
-		// Claude Code or Codex Stop still fails with the fail mode it has.
+		// The managed standalone profiles treat a lifecycle event as an
+		// allow here. Per-user and Secure Client hooks take the fail path:
+		// there a fail-closed per-user stop event gets its neutral allow,
+		// logged (failClosedStopEvent), and Secure Client keeps its result.
 		lifecycle := managedNativeDecision(opts) && NeutralLifecycleEvent(sp.connector, opts.Event)
 		if !lifecycle &&
 			(sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr || managedNativeDecision(opts)) {
@@ -1299,11 +1300,15 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
+	closes := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
+	if closes && failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "transport")
+	}
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	if opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")) {
+	if closes {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
@@ -1317,10 +1322,14 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
+	closes := !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise)
+	if closes && failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "transport")
+	}
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	if !sp.failOpenOnly && (opts.StrictAvailability || opts.ManagedEnterprise) {
+	if closes {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr, "defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
@@ -1334,8 +1343,8 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
-	if !sp.failOpenOnly && failMode == "closed" && managedStandaloneStopEvent(opts, sp) {
-		return allowManagedStandaloneStop(opts, sp, "stdin body exceeded cap", "transport")
+	if !sp.failOpenOnly && failMode == "closed" && failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
 	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	closes := !sp.failOpenOnly && failMode == "closed"
@@ -1366,8 +1375,8 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
-	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && managedStandaloneStopEvent(opts, sp) {
-		return allowManagedStandaloneStop(opts, sp, reason, "transport")
+	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	logHookFailure(opts, sp, reason, "transport", failMode)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
@@ -1555,6 +1564,10 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
+	if !sp.failOpenOnly && failClosedStopEvent(opts, sp) {
+		// Nothing is refused, so no refusal is reported.
+		return allowFailClosedStop(opts, sp, reason, "transport")
+	}
 	reportUnenrolledRefusal(opts, sp, reason)
 	logHookFailure(opts, sp, reason, "transport", "closed")
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
@@ -1667,8 +1680,8 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		reason = responseFailureReason(reason)
 	}
 	closes := !sp.failOpenOnly && failMode != "open"
-	if closes && managedStandaloneStopEvent(opts, sp) {
-		return allowManagedStandaloneStop(opts, sp, reason, "response")
+	if closes && failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "response")
 	}
 	logHookFailure(opts, sp, reason, "response", failMode)
 	if closes && managedPlainFailClosed(opts, sp) {
@@ -1828,24 +1841,31 @@ func foreignHookCursorOpenEvent(connector, event string) bool {
 	return false
 }
 
-// managedStandaloneStopEvent reports a stop or session-end event
-// (NeutralLifecycleEvent) of a Unix standalone managed hook. Failing such an
-// event closed denies nothing; it keeps the agent running, and every later
-// turn fails closed and stops again, so the agent loops on model turns until
-// DefenseClaw is back. On the standalone profile every fail-closed reason
-// (gateway unreachable or unverified, missing hook socket, invalid runtime,
-// unusable response) therefore gives these events the connector's neutral
-// allow, as the foreign-hook guard does. Tool and prompt events still fail
-// closed. Per-user hooks and the Secure Client profile never set
-// ManagedStandalone and keep their results.
-func managedStandaloneStopEvent(opts Options, sp spec) bool {
-	return opts.ManagedEnterprise && opts.ManagedStandalone && NeutralLifecycleEvent(sp.connector, opts.Event)
+// failClosedStopEvent reports a stop or session-end event
+// (NeutralLifecycleEvent) of a hook that is about to fail closed. Failing
+// such an event closed denies nothing; it keeps the agent running (Codex,
+// Claude Code, Devin and Copilot continue the turn when a stop hook blocks,
+// Cursor submits the block as the next prompt), and every later turn fails
+// closed and stops again, so the agent loops on model turns until
+// DefenseClaw is back (#1140). Every fail-closed reason (gateway unreachable
+// or unverified, missing token, hook socket or home, invalid runtime,
+// unenrolled account, oversized payload, unusable response) therefore gives
+// these events the connector's neutral allow, as the foreign-hook guard
+// does, on the per-user hooks and on the Unix and Windows standalone
+// managed hooks. Tool, prompt and session-start events still fail closed.
+// The Secure Client profile keeps its results. The shell hooks apply the
+// same rule (defenseclaw_failed_stop_event in _hardening.sh).
+func failClosedStopEvent(opts Options, sp spec) bool {
+	if opts.SecureClient || secureClientHook(opts) {
+		return false
+	}
+	return NeutralLifecycleEvent(sp.connector, opts.Event)
 }
 
-// allowManagedStandaloneStop answers a managed standalone stop event that
-// would have failed closed with the connector's neutral allow; the failure is
-// still logged, with the fail mode it got.
-func allowManagedStandaloneStop(opts Options, sp spec, reason, category string) int {
+// allowFailClosedStop answers a stop event that would have failed closed
+// with the connector's neutral allow; the failure is still logged, with the
+// fail mode it got.
+func allowFailClosedStop(opts Options, sp spec, reason, category string) int {
 	logHookFailure(opts, sp, reason, category, "open")
 	fmt.Fprintf(opts.Stderr,
 		"DefenseClaw is not blocking the %s event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (%s)\n",
