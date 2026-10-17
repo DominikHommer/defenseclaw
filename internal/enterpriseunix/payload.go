@@ -90,7 +90,7 @@ func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 	version, err := e.binaryVersion(ctx, filepath.Join(clean, binGateway))
 	if err != nil {
 		if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
-			return nil, fmt.Errorf("payload gateway could not run: check application control trust and execute permission for %s: %w", clean, err)
+			return nil, fmt.Errorf("payload gateway could not run: check fapolicyd or SELinux policy, execute permission, and noexec mounts for %s: %w", clean, err)
 		}
 		return nil, err
 	}

@@ -38,7 +38,7 @@ the same config.
 | Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is the target platform (expected, not verified yet). See [Tetragon on a Linux fleet](/docs/enterprise/tetragon). |
 | Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
-If a payload install reports that the staged gateway could not run, check application control trust, execute permission, and the payload filesystem's mount options before retrying. The error preserves the operating system's refusal.
+If a payload install reports that the staged gateway could not run, check fapolicyd trust, SELinux policy, execute permission, and `noexec` mount options before retrying. The error preserves the operating system's refusal.
 
 The systemd version decides how the gateway reads secrets:
 
