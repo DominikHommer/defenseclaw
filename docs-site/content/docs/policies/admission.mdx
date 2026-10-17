@@ -408,6 +408,12 @@ an elevated PowerShell prompt and the installed CLI:
 The managed command reads the administrator's policy. A standard account
 cannot use its own `~/.defenseclaw/config.yaml` to check the managed verdict.
 
+The `defenseclaw config get ... --effective` commands in this page are
+per-user commands. On a managed computer they are not available (the managed
+CLI has only `config migrate`, and `defenseclaw-gateway policy show` is
+refused). To check what a managed computer derives, run `policy evaluate` as
+shown above, or read the administrator config you delivered.
+
 ```text
 {
   "verdict": "rejected",

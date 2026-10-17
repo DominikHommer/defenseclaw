@@ -431,9 +431,11 @@ other per-user commands exit `3` and name it instead of answering from it, and
 A per-user gateway that is still running holds the managed gateway port,
 `127.0.0.1:18970`, unless its user moved it to another port. The install then
 stops before it changes anything: it fails with `api_port_held`, which names
-the process and gives the `kill` command (the pkg install still completes, and
-`last-package-result.json` has the error). Stop that gateway, or move it to
-another port, then run `defenseclaw-gateway enterprise macos ensure --from-package`.
+the process and gives the `kill` command. `installer -pkg` exits with a
+failure (the postinstall step failed) and records no package receipt, so
+detection reports the computer as not installed, and `last-package-result.json`
+has the error. Stop that gateway, or move it to another port, then run
+`installer -pkg` again (or `defenseclaw-gateway enterprise macos ensure --from-package`).
 A per-user gateway on another port keeps running until it is stopped. The
 install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
