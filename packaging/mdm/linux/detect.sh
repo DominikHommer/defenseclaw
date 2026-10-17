@@ -466,23 +466,21 @@ dc_json_true "$status" installed || dc_report 0 not-installed "the managed deplo
 version=$(dc_json_field "$status" installed_version)
 [ -n "$version" ] || version=$(dc_json_field "$status" product_version)
 [ -n "$version" ] || dc_report 0 not-installed "the lifecycle status reports no installed version"
-if [ -n "$DC_MIN_VERSION" ] && ! dc_version_ge "$version" "$DC_MIN_VERSION"; then
-    dc_report 0 outdated "installed version $version is older than $DC_MIN_VERSION"
-fi
 if [ "$DC_REQUIRE_HEALTHY" = 1 ] || [ "$DC_FORMAT" = exit ]; then
-    if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
-        package_problem=$(dc_package_interrupted)
-        [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
-    fi
     if verify=$("$gateway" enterprise "$group" verify --json 2>/dev/null </dev/null); then
         verify_status=0
     else
         verify_status=$?
     fi
     [ "$verify_status" != 75 ] && [ "$(printf '%s' "$verify" | grep -c '"code": "lifecycle_busy"' || true)" = 0 ] || dc_report 0 busy "lifecycle is busy"
-    if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
-        dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
-    fi
+fi
+if [ -n "$DC_MIN_VERSION" ] && ! dc_version_ge "$version" "$DC_MIN_VERSION"; then
+    dc_report 0 outdated "installed version $version is older than $DC_MIN_VERSION"
+fi
+if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
+    package_problem=$(dc_package_interrupted)
+    [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
+    dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 [ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"

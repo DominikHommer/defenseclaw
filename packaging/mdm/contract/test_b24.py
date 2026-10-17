@@ -109,7 +109,7 @@ esac
         source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', hook + '[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', 1)
         script = root / "detect.sh"
         script.write_text(source)
-        for args, code, text in [([], 75, 'lifecycle is busy'), (['--require-healthy', '--format', 'value'], 0, 'busy'), (['--format', 'value'], 0, '1.0.3')]:
+        for args, code, text in [([], 75, 'lifecycle is busy'), (['--min-version', '1.0.4'], 75, 'lifecycle is busy'), (['--require-healthy', '--format', 'value'], 0, 'busy'), (['--format', 'value'], 0, '1.0.3')]:
             result = subprocess.run(['sh', str(script), *args], text=True, capture_output=True, timeout=10, env={**os.environ, 'LC_ALL': 'C'})
             assert result.returncode == code, (args, result.stdout, result.stderr)
             assert text in result.stdout + result.stderr
