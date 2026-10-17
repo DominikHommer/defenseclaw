@@ -85,7 +85,13 @@ func ParseCompileObservabilityV8(
 	}
 	if standaloneManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document)) {
 		for index, destination := range source.Destinations {
-			for name, header := range destination.Headers {
+			names := make([]string, 0, len(destination.Headers))
+			for name := range destination.Headers {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				header := destination.Headers[name]
 				if header.Static != nil && managedCredentialHeader(name, *header.Static) {
 					return nil, annotateObservabilityV8SemanticError(document, &V8SemanticError{
 						Path:    fmt.Sprintf("$.observability.destinations[%d].headers.%s", index, name),
