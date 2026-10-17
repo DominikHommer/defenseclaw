@@ -245,8 +245,9 @@ code-signing certificate is configured and otherwise ships the hash-pinned
 flavor. Every release dry run proves the signed build with a throwaway
 self-signed certificate (`packaging/windows/standalone/prove-signing-path.sh`).
 
-Every build links the payload binding (the flavor and the SHA-256 of each
-inner file) into the outer Setup, and the Setup stages only that payload.
+Every build links the payload binding (the flavor, version and source commit
+of the payload manifest and the SHA-256 of each inner file) into the outer
+Setup, and the Setup stages only that payload under that identity.
 
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only

@@ -69,6 +69,7 @@ const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.
 var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
 
 // standalonePayloadBinding is the setuppayload.PayloadBinding of the payload
+// and manifest identity (flavor, version, source commit)
 // this Setup image was built with. packaging/windows/standalone/build-setup.sh
 // links it in (-X main.standalonePayloadBinding=<hex>), so it lives in the
 // running image, which no other process can change. The Setup stages a
@@ -738,7 +739,10 @@ func loadBoundEnterprisePayload(result setuppayload.ReadResult, binding string) 
 
 // requireEnterprisePayloadBinding refuses a payload this Setup image was not
 // built with. A stamped image (the standalone build) takes only the payload
-// whose flavor and file digests produce its binding, of any flavor. An image
+// whose flavor, version, source commit and file digests produce its
+// binding, of any flavor: the lifecycle acts on the manifest version
+// (upgrade, compliant or downgrade refusal, and the recorded version), so a
+// trailer with the same bytes but another identity is refused too. An image
 // with no binding takes no standalone payload, since only the standalone
 // build produces one; the Secure Client flavors keep their own checks.
 func requireEnterprisePayloadBinding(payload enterprisePayload, binding string) error {
@@ -753,7 +757,12 @@ func requireEnterprisePayloadBinding(payload enterprisePayload, binding string) 
 	for name, file := range payload.Files {
 		digests[name] = file.SHA256
 	}
-	if !strings.EqualFold(setuppayload.PayloadBinding(payload.Manifest.DistributionFlavor, digests), binding) {
+	identity := setuppayload.PayloadIdentity{
+		DistributionFlavor: payload.Manifest.DistributionFlavor,
+		Version:            payload.Manifest.Version,
+		SourceCommit:       payload.Manifest.SourceCommit,
+	}
+	if !strings.EqualFold(setuppayload.PayloadBinding(identity, digests), binding) {
 		return errors.New("the payload this Setup read is not the payload its image was built with, so nothing was staged; " +
 			"copy the Setup file your MDM delivered to a folder only administrators can change and run it again")
 	}

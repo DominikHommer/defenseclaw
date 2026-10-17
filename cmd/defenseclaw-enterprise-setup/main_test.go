@@ -171,7 +171,11 @@ func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
 		for _, file := range manifest.Files {
 			digests[file.Name] = file.SHA256
 		}
-		return setuppayload.PayloadBinding(manifest.DistributionFlavor, digests)
+		return setuppayload.PayloadBinding(setuppayload.PayloadIdentity{
+			DistributionFlavor: manifest.DistributionFlavor,
+			Version:            manifest.Version,
+			SourceCommit:       manifest.SourceCommit,
+		}, digests)
 	}
 	built, builtManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
 	stamp := binding(builtManifest)
@@ -196,8 +200,30 @@ func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
 	if _, err := loadEnterprisePayload(swapped); err != nil {
 		t.Fatalf("fixture: the swapped payload is not otherwise valid: %v", err)
 	}
+	// The same payload bytes under another manifest identity: a replacement
+	// trailer that changes only the version (which the lifecycle compares
+	// and records) or the source commit.
+	relabeled := func(t *testing.T, change func(*enterprisePayloadManifest)) fstest.MapFS {
+		t.Helper()
+		payloadFS := fstest.MapFS{}
+		for name, file := range built {
+			payloadFS[name] = &fstest.MapFile{Data: append([]byte(nil), file.Data...), Mode: file.Mode}
+		}
+		manifest := builtManifest
+		manifest.Files = append([]enterprisePayloadManifestFile(nil), builtManifest.Files...)
+		change(&manifest)
+		writeEnterprisePayloadManifest(t, payloadFS, manifest)
+		if _, err := loadEnterprisePayload(payloadFS); err != nil {
+			t.Fatalf("fixture: the relabeled payload is not otherwise valid: %v", err)
+		}
+		return payloadFS
+	}
 	for name, other := range map[string]fstest.MapFS{
 		"swapped file": swapped,
+		"version only": relabeled(t, func(manifest *enterprisePayloadManifest) { manifest.Version = "99.0.0" }),
+		"source commit only": relabeled(t, func(manifest *enterprisePayloadManifest) {
+			manifest.SourceCommit = strings.Repeat("e", 40)
+		}),
 		"signed flavor": func() fstest.MapFS {
 			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
 			return payloadFS

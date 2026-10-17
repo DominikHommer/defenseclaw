@@ -14,11 +14,14 @@ import (
 // runPayloadBinding prints the setuppayload.PayloadBinding of a payload
 // directory: the value build-setup.sh links into the outer standalone Setup
 // image (-X main.standalonePayloadBinding) so the Setup stages only the
-// payload it was built with. --distribution-flavor must be the flavor the
-// assembler records in the trailer manifest.
+// payload, and acts only on the manifest identity, it was built with.
+// --distribution-flavor, --version and --source-commit must be the values
+// the assembler records in the trailer manifest.
 func runPayloadBinding(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("payload-binding", flag.ContinueOnError)
 	flavor := fs.String("distribution-flavor", "", "distribution flavor the trailer manifest records")
+	version := fs.String("version", "", "release version the trailer manifest records")
+	sourceCommit := fs.String("source-commit", "", "source commit the trailer manifest records")
 	payloadDir := fs.String("payload-dir", "", "directory whose regular-file children are the payload")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -28,8 +31,13 @@ func runPayloadBinding(args []string, stdout io.Writer) error {
 	}
 	if err := requireFlags(map[string]string{
 		"distribution-flavor": *flavor,
+		"version":             *version,
+		"source-commit":       *sourceCommit,
 		"payload-dir":         *payloadDir,
 	}); err != nil {
+		return err
+	}
+	if err := validateSourceCommit(*sourceCommit); err != nil {
 		return err
 	}
 	files, err := hashPayloadDir(*payloadDir)
@@ -43,6 +51,7 @@ func runPayloadBinding(args []string, stdout io.Writer) error {
 	for _, file := range files {
 		digests[file.name] = file.sha256
 	}
-	_, err = fmt.Fprintln(stdout, setuppayload.PayloadBinding(*flavor, digests))
+	identity := setuppayload.PayloadIdentity{DistributionFlavor: *flavor, Version: *version, SourceCommit: *sourceCommit}
+	_, err = fmt.Fprintln(stdout, setuppayload.PayloadBinding(identity, digests))
 	return err
 }

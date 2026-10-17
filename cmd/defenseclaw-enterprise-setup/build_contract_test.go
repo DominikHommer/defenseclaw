@@ -74,7 +74,10 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 func TestStandaloneBuildLinksThePayloadBinding(t *testing.T) {
 	script := readEnterpriseSetupContractFile(t, "packaging/windows/standalone/build-setup.sh")
 	for _, required := range []string{
-		`PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}")"`,
+		`PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}" \
+    --version "${VERSION}" --source-commit "${SOURCE_COMMIT}")"`,
+		`-SourceCommit "${SOURCE_COMMIT}"`,
+		`-Version "${VERSION}"`,
 		`-X main.standalonePayloadBinding=${PAYLOAD_BINDING}`,
 		`-PayloadDir "${PAYLOAD_ONLY}"`,
 	} {

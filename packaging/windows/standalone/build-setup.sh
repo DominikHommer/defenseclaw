@@ -44,9 +44,9 @@
 #   a chain to a root the host trusts; DEV also accepts a chain that ends at
 #   a certificate the signature carries (a test or self-signed certificate).
 #
-#   Every channel links the payload binding (the flavor and the SHA-256 of
-#   each payload file) into the outer Setup, which then stages only that
-#   payload.
+#   Every channel links the payload binding (the flavor, version and source
+#   commit of the trailer manifest and the SHA-256 of each payload file) into
+#   the outer Setup, which then stages only that payload under that identity.
 #
 # Usage:
 #   packaging/windows/standalone/build-setup.sh --version 1.4.0 \
@@ -223,9 +223,12 @@ echo "==> emitting the ${FLAVOR} payload manifest"
     --distribution-flavor "${FLAVOR}" \
     --out "${STAGE_DIR}/payload-manifest.json" \
     ${UNSIGNED_FLAG[@]+"${UNSIGNED_FLAG[@]}"}
-# The outer Setup stages only the payload whose flavor and file digests
-# produce this binding, so the binding is linked into the image itself.
-PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}")"
+# The outer Setup stages only the payload whose flavor, version, source
+# commit and file digests produce this binding, so the binding is linked
+# into the image itself. The version and commit are the ones the assembler
+# writes into the trailer manifest below.
+PAYLOAD_BINDING="$("${EMITTER}" payload-binding --payload-dir "${PAYLOAD_ONLY}" --distribution-flavor "${FLAVOR}" \
+    --version "${VERSION}" --source-commit "${SOURCE_COMMIT}")"
 [[ "${PAYLOAD_BINDING}" =~ ^[0-9a-f]{64}$ ]] || die "cannot compute the payload binding"
 
 SETUP="${OUT_DIR}/DefenseClawSetup-Enterprise-Standalone-x64.exe"

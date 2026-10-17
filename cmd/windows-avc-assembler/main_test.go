@@ -306,9 +306,10 @@ func TestSignatureVerifySkippedOnAllowUnsigned(t *testing.T) {
 
 // TestStandaloneTrailerProducesTheLinkedPayloadBinding pins the build-time
 // and run-time halves of #1281 together: the binding build-setup.sh links
-// into the outer Setup (from the payload directory and its flavor) is the
-// binding the Setup computes from the trailer manifest this assembler
-// writes for the same directory.
+// into the outer Setup (from the payload directory, its flavor and the
+// version and source commit it hands the assembler) is the binding the
+// Setup computes from the trailer manifest this assembler writes for the
+// same directory.
 func TestStandaloneTrailerProducesTheLinkedPayloadBinding(t *testing.T) {
 	opts := baseOpts(t)
 	opts.Flavor = flavorStandalone
@@ -331,6 +332,8 @@ func TestStandaloneTrailerProducesTheLinkedPayloadBinding(t *testing.T) {
 	}
 	var manifest struct {
 		DistributionFlavor string `json:"distribution_flavor"`
+		Version            string `json:"version"`
+		SourceCommit       string `json:"source_commit"`
 		Files              []struct {
 			Name   string `json:"name"`
 			SHA256 string `json:"sha256"`
@@ -344,9 +347,16 @@ func TestStandaloneTrailerProducesTheLinkedPayloadBinding(t *testing.T) {
 		fromTrailer[file.Name] = file.SHA256
 	}
 	// build-setup.sh passes FLAVOR=standalone-unsigned for an -AllowUnsigned build.
+	fromManifest := setuppayload.PayloadIdentity{
+		DistributionFlavor: manifest.DistributionFlavor, Version: manifest.Version, SourceCommit: manifest.SourceCommit,
+	}
+	atBuild := setuppayload.PayloadIdentity{
+		DistributionFlavor: "standalone-unsigned", Version: opts.Version, SourceCommit: opts.SourceCommit,
+	}
 	if manifest.DistributionFlavor != "standalone-unsigned" ||
-		setuppayload.PayloadBinding(manifest.DistributionFlavor, fromTrailer) != setuppayload.PayloadBinding("standalone-unsigned", built) {
-		t.Fatalf("the trailer (flavor %q) does not reproduce the build-time payload binding", manifest.DistributionFlavor)
+		setuppayload.PayloadBinding(fromManifest, fromTrailer) != setuppayload.PayloadBinding(atBuild, built) {
+		t.Fatalf("the trailer (flavor %q, version %q) does not reproduce the build-time payload binding",
+			manifest.DistributionFlavor, manifest.Version)
 	}
 }
 

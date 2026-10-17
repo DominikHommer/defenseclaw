@@ -25,18 +25,26 @@ func TestPayloadBindingHashesThePayloadDirectory(t *testing.T) {
 		digest := sha256.Sum256([]byte(body))
 		want[name] = hex.EncodeToString(digest[:])
 	}
+	commit := strings.Repeat("ab", 20)
+	identity := []string{"--distribution-flavor", "standalone-unsigned", "--version", "1.0.3", "--source-commit", commit}
 	var out bytes.Buffer
-	if err := runPayloadBinding([]string{"--payload-dir", dir, "--distribution-flavor", "standalone-unsigned"}, &out); err != nil {
+	if err := runPayloadBinding(append([]string{"--payload-dir", dir}, identity...), &out); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(out.String()); got != setuppayload.PayloadBinding("standalone-unsigned", want) {
+	expected := setuppayload.PayloadBinding(setuppayload.PayloadIdentity{
+		DistributionFlavor: "standalone-unsigned", Version: "1.0.3", SourceCommit: commit,
+	}, want)
+	if got := strings.TrimSpace(out.String()); got != expected {
 		t.Fatalf("payload-binding printed %q", got)
 	}
 	for _, args := range [][]string{
-		{"--payload-dir", dir},
-		{"--distribution-flavor", "standalone"},
-		{"--payload-dir", t.TempDir(), "--distribution-flavor", "standalone"},
-		{"--payload-dir", dir, "--distribution-flavor", "standalone", "extra"},
+		identity,
+		{"--payload-dir", dir, "--version", "1.0.3", "--source-commit", commit},
+		{"--payload-dir", dir, "--distribution-flavor", "standalone", "--source-commit", commit},
+		{"--payload-dir", dir, "--distribution-flavor", "standalone", "--version", "1.0.3"},
+		{"--payload-dir", dir, "--distribution-flavor", "standalone", "--version", "1.0.3", "--source-commit", "HEAD"},
+		append([]string{"--payload-dir", t.TempDir()}, identity...),
+		append(append([]string{"--payload-dir", dir}, identity...), "extra"),
 	} {
 		if err := runPayloadBinding(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("payload-binding %v succeeded", args)
