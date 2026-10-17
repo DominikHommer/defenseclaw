@@ -87,9 +87,7 @@ func setupFixup2CodexCase(t *testing.T, seed string, move bool) *fixup2CodexCase
 	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 		response, err := runEnterpriseHookWorker(ctx, account, request)
 		if err == nil {
-			for _, result := range response.Targets {
-				c.workerRemoveResponses = append(c.workerRemoveResponses, result)
-			}
+			c.workerRemoveResponses = append(c.workerRemoveResponses, response.Targets...)
 		}
 		return response, err
 	}

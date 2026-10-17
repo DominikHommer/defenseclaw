@@ -56,7 +56,7 @@ func CleanupConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 	case *hookOnlyConnector:
 		paths = append(paths, c.configPath(opts))
 	case *AMPConnector:
-		paths = append(paths, c.hookOnlyConnector.configPath(opts))
+		paths = append(paths, c.configPath(opts))
 	}
 	return uniqueNonEmptyStrings(paths)
 }
