@@ -35,6 +35,15 @@ func TestWindowsEnterpriseAdminViewCommandNamesItsOwnPath(t *testing.T) {
 		args != "enterprise windows sandbox list --user dcw-std1" {
 		t.Fatalf("sandbox list = %q, %q, %q", what, view, args)
 	}
+	if err := list.Flags().Set("user", `DCLAB\o'brien smith`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, args := windowsEnterpriseAdminViewCommand(list); args != `enterprise windows sandbox list --user 'DCLAB\o''brien smith'` {
+		t.Fatalf("quoted user = %q", args)
+	}
+	if got := windowsPowerShellArgument(`DCLAB\ent-bob`); got != `DCLAB\ent-bob` {
+		t.Fatalf("plain user = %q", got)
+	}
 	what, view, args = windowsEnterpriseAdminViewCommand(identity)
 	if what != "the identity views" || view != "enterprise windows profile-explain" || args != view {
 		t.Fatalf("identity view = %q, %q, %q", what, view, args)
