@@ -21,8 +21,11 @@ gateway.
   (root, an elevated administrator, SYSTEM). Policy content is trusted only
   through the tenant signature, which the device checks against its installed
   trust anchors. A management agent is as trusted as an MDM agent:
-  DefenseClaw guarantees signed policy and fail-closed enforcement, not least
-  privilege for the agent.
+  DefenseClaw guarantees signed policy and fail-closed enforcement for the
+  agent sessions that loaded its hooks, not least privilege for the agent. An
+  agent session already running when a bundle enables or changes its
+  connector is not enforced until it restarts (4.3, sessions that need a
+  restart).
 - **No audit of trust anchor and credential changes.** DefenseClaw records
   bundle applies (receipts, the `config.bundle.receipt` audit event and
   OTel). It does not audit trust anchor installs (by the MDM kit, by Windows
@@ -417,7 +420,38 @@ Exit 0.
   4.2 result. A repeated delivery of the current bundle writes no receipt:
   its `bundle` block is the current confirmed bundle and its confirmed
   receipt, also when a newer delivery failed after staging, so the same test
-  holds.
+  holds. `confirmed` means the submitted bundle is the device policy and the
+  running gateway enforces its digest. It does not mean that agent sessions
+  already running enforce it: read `bundle.sessions_restart_required` next
+  (sessions that need a restart, below).
+- **Sessions that need a restart**: an agent (Claude Code, Codex and the
+  other connectors) reads its hooks when it starts. DefenseClaw does not stop
+  or restart agent sessions, so a session that was already running when a
+  bundle enabled or changed its connector keeps the hooks it loaded, or none:
+  its tool calls are **not enforced** until it restarts, although the apply
+  is `confirmed`. The live scan in `bundle.sessions_restart_required` (also in
+  `bundle status`, 4.5) counts them. The apply result then warns
+  `sessions_need_restart` (`sessions_scan_unknown` when the scan could not
+  run) and reports `coverage_complete` and `security_complete` false;
+  `bundle status` warns with the same codes. After
+  any apply, and on any `bundle status`, whose `sessions_restart_required` has
+  `count` above 0 or `state` `unknown`, the agent:
+  - MUST report it upstream with the receipt as "enforcement pending for N
+    sessions" (N is `count`; for `unknown`, "enforcement pending, session
+    count unknown" with `reason`);
+  - MUST NOT report the device as fully enforcing while the count is above 0
+    or unknown;
+  - MUST either ask the users to restart the listed agents or restart them
+    itself in a maintenance window, then read `bundle status` (4.5) again
+    until `count` is 0 with `state` `known`.
+
+  Forward only `count` and the distinct `entries[].agent` values (connector
+  names). `entries[].user` is the account name (a numeric id when the name
+  cannot be resolved), which is personal data; `pid` and `started_at` are for
+  local use. Do not forward them. `entries` lists at most 20 sessions, so the
+  connector names can be incomplete when `count` is above 20. The integer
+  `sessions_restart_required` of a receipt file (4.9) is the count at
+  confirmation, not a live value.
 - **The agent's own receipt id** (for its list, section 2.6):
   `bundle.receipt_id` when `bundle.bundle_id` is the submitted id and the
   apply was not a repeat of the current bundle (a confirmed or failed
@@ -516,7 +550,9 @@ Exit 0.
   `bundle_failed`, `bundle_pending`, `anchor_missing`, `key_unknown` /
   `key_revoked` (the confirmed bundle's signer, as the bundle state records
   it, is no longer trusted; checked also after its receipt was pruned),
-  `policy_reload_rejected`, `gateway_unchecked`.
+  `policy_reload_rejected`, `gateway_unchecked`, `sessions_need_restart` /
+  `sessions_scan_unknown` (agent sessions not yet enforced: report and
+  restart them as in 4.3, sessions that need a restart).
 - Exit: 0; 1 / 1603.
 
 ```sh
@@ -863,8 +899,10 @@ Later bundles go through 5.2.
    a worker thread, with that new `--delivery-id` and
    `--refuse-capability-loss` (every apply after the first bundle). Apply the success test of 4.3 and the retry
    classes of section 2.2. Record the agent's own receipt id (4.3).
-5. Forward the receipt (4.9). Report anchor and credential changes yourself
-   (section 0).
+5. Forward the receipt (4.9). When `bundle.sessions_restart_required` has
+   `count` above 0 or `state` `unknown`, report enforcement pending and get
+   the sessions restarted (4.3, sessions that need a restart). Report anchor
+   and credential changes yourself (section 0).
 
 ## 6. Locks
 
@@ -921,3 +959,9 @@ Per-user installs and Secure Client computers refuse every command.
   (section 0).
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
+- DefenseClaw does not stop or restart agent sessions. A session already
+  running when a bundle enables or changes its connector is not enforced
+  until it restarts, although the apply is `confirmed`;
+  `sessions_restart_required` counts it and `coverage_complete` stays false.
+  The agent reports enforcement pending and gets those sessions restarted
+  (4.3).
