@@ -2848,6 +2848,10 @@ func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerRepo
 	return "the installed deployment failed verification without a diagnostic"
 }
 
+// windowsEnterpriseCodexTargetTransactionReason is how the ensure result
+// says why a config change ran the upgrade transaction.
+const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
+
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
 	cmd *cobra.Command,

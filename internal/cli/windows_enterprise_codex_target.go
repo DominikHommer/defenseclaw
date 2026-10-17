@@ -36,10 +36,6 @@ import (
 // ("Claude-only deployment retains stale DefenseClaw Codex ownership state")
 // and the bundle failed (GAP-0033).
 
-// windowsEnterpriseCodexTargetTransactionReason is how the ensure result
-// says why a config change ran the upgrade transaction.
-const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
-
 // windowsConfigCodexTargetChanged reports whether exactly one of the
 // installed and the supplied config protects Codex. A config either side
 // cannot parse counts as a change: the transaction validates it and refuses
