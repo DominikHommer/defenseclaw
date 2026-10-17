@@ -1,0 +1,108 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package enterpriseunix
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
+
+// #1299: the purge names the backup it made of an account's own per-user
+// install from before the managed deployment.
+func TestUninstallPurgeNamesTheBackupOfAPerUserInstall(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"purged":["alice","bob"],` +
+					`"purged_detail":{"alice":{"data":true,"backup":true,"binaries":true},"bob":{"data":true}}}`)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
+			var alice, bob string
+			for _, change := range done.Changes {
+				switch {
+				case strings.Contains(change, "of user alice "):
+					alice = change
+				case strings.Contains(change, "of user bob "):
+					bob = change
+				}
+			}
+			if !strings.Contains(alice, "was moved to ~/.defenseclaw-backup-<UTC time> in its home first") {
+				t.Fatalf("the purge does not name alice's backup: %q", alice)
+			}
+			if bob == "" || strings.Contains(bob, "backup-") {
+				t.Fatalf("bob had no per-user install to back up: %q", bob)
+			}
+		})
+	}
+}
+
+// GAP-0582: a purge that keeps an account's per-user state (its pending
+// cleanup still needs it) also keeps that account's session-facts cache;
+// the other accounts' caches go.
+func TestUninstallPurgeKeepsTheSessionCacheOfAnAccountWhoseStateStays(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	uid := os.Getuid()
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"alice","uid":%d,"home":"/home/alice"},{"user":"kept","uid":%d,"home":"/home/kept"}]}`, uid, uid))
+	writeHostFile(t, h, "/home/alice/.defenseclaw/session-facts.json", "{}")
+	writeHostFile(t, h, "/home/kept/.defenseclaw/session-facts.json", "{}")
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true,"state_failed":["kept: its recorded home may still hold a hook registration; the state stays while cleanup is unresolved"]}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if exists(h.env.P("/home/alice/.defenseclaw/session-facts.json")) {
+		t.Fatalf("the purge left alice's session cache; changes %v", done.Changes)
+	}
+	if !exists(h.env.P("/home/kept/.defenseclaw/session-facts.json")) {
+		t.Fatalf("the purge removed the session cache of an account whose state stays; changes %v", done.Changes)
+	}
+	if got := messagesOf(done.Warnings, codePerUserState); !strings.Contains(got, "user kept were not removed") {
+		t.Fatalf("the kept state is not named: %q", got)
+	}
+}
+
+// #1287: an enrolled account whose home folder is gone (a macOS mobile
+// account's home moved away, say) does not stop a purge: remove-all
+// reports it already clean, the uninstall warns with that reason and
+// removes the deployment.
+func TestUninstallPurgeGoesOnForAnAccountWhoseHomeIsGone(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			reason := "its home /Users/ctr1 no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the codex config in it"
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				return CommandResult{Stdout: []byte(`{"ok":true,"pending":["ctr1/codex: ` + reason + `"]}`)}, nil
+			}}
+			done := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireOK(t, done)
+			if got := messagesOf(done.Warnings, codePerUserHooks); !strings.Contains(got, "codex hooks for user ctr1 were not removed: "+reason) {
+				t.Fatalf("the uninstall does not warn with the gone home: %q", got)
+			}
+			if messagesOf(done.Errors, codePerUserHooks) != "" || messagesOf(done.Errors, codeUninstallIncomplete) != "" {
+				t.Fatalf("a gone home must not stop the purge: %+v", done.Errors)
+			}
+			if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) || exists(h.env.deploymentPath()) {
+				t.Fatal("the purge did not remove the binaries and the deployment record")
+			}
+		})
+	}
+}
