@@ -134,10 +134,10 @@ func claudeCodeSettingsParseable(path string) error {
 	}
 	var settings map[string]interface{}
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return fmt.Errorf("settings file %s for Claude Code is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err))
+		return fmt.Errorf("Claude Code settings file %s is not valid JSON (%s); fix the file, then run: defenseclaw-gateway restart", path, jsonErrorPosition(data, err)) //nolint:staticcheck // Preserve the CLI remediation prefix.
 	}
 	if settings == nil {
-		return fmt.Errorf("settings file %s for Claude Code must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path)
+		return fmt.Errorf("Claude Code settings file %s must contain a JSON object; fix the file, then run: defenseclaw-gateway restart", path) //nolint:staticcheck // Preserve the CLI remediation prefix.
 	}
 	return nil
 }
