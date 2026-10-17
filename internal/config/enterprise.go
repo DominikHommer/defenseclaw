@@ -1359,10 +1359,11 @@ func standaloneInlineSecrets(cfg *Config) []string {
 			inline = append(inline, fmt.Sprintf("webhooks[%d].url", index))
 		}
 	}
-	for name, value := range cfg.LLM.ExtraHeaders {
-		if managedCredentialHeader(name, value) {
-			inline = append(inline, "llm.extra_headers."+name)
-		}
+	// Provider extra_headers has only scalar values today, with no reference
+	// form. A benign-looking name can still carry a credential, so a managed
+	// config cannot safely accept any of these literal values.
+	for name := range cfg.LLM.ExtraHeaders {
+		inline = append(inline, "llm.extra_headers."+name)
 	}
 	slices.Sort(inline)
 	return inline

@@ -252,8 +252,9 @@ this release, so:
   `guardrail.llm.api_key`, `guardrail.judge.llm.api_key`,
   `scanners.mcp_scanner.llm.api_key`, `scanners.skill_scanner.llm.api_key`,
   `scanners.plugin_llm.api_key`, `cisco_ai_defense.api_key` and
-  `gateway.token`. It also refuses literal webhook URLs and credential-bearing
-  provider or observability destination headers. Use a protected credential
+  `gateway.token`. It also refuses literal webhook URLs, all provider
+  `llm.extra_headers` values, and credential-bearing observability destination
+  headers. Use a protected credential
   reference such as `{credential: NAME}` for destination headers. Managed
   webhooks cannot use a literal URL; use a credential-backed observability
   destination instead.
