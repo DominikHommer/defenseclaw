@@ -488,6 +488,12 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
 		t.Fatalf("hook on a cold cache: %d %s", rec.Code, rec.Body.String())
 	}
+	// policy/current carries the match's provisional flag with its profile,
+	// so the daemon's status follows a re-match (#1199).
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || !*cur.Provisional ||
+		cur.Profile != "offline-floor" {
+		t.Fatalf("current on a cold cache: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
+	}
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil)
 	if rec.Code != http.StatusOK || rec.Header().Get(sandboxrelay.ProfileHeader) != "contractors" {
@@ -497,6 +503,10 @@ func TestSandboxAuthorityColdCacheRematch(t *testing.T) {
 	reg, _, _ := auth.store.Get(sbxAlice.UID, resp.Registration.ID)
 	if reg.Provisional || reg.Profile != "contractors" || reg.ProfileMatch != sandboxreg.MatchGroup || reg.State != sandboxreg.StateLive {
 		t.Fatalf("re-matched registration: %+v", reg)
+	}
+	if code, cur := f.current(sbxAlice, resp.Registration.ID); code != http.StatusOK || cur.Provisional == nil || *cur.Provisional ||
+		cur.Profile != "contractors" {
+		t.Fatalf("current after the re-match: %d profile %q provisional %v", code, cur.Profile, cur.Provisional)
 	}
 	f.mu.Lock()
 	rematched := strings.Join(f.rematched, ";")

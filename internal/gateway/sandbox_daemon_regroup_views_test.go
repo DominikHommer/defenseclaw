@@ -56,6 +56,53 @@ func TestSandboxViewsNameTheRematchedProfile(t *testing.T) {
 	}
 }
 
+// #1199 review: the views copied the provisional flag the registration got
+// at create, while the profile and digest followed the current match, so a
+// sandbox created during a directory outage kept saying the organization's
+// default applies after a re-match had verified it under its group's
+// profile. The flag now follows the gateway's current match both ways, and
+// an answer that does not carry it (an older gateway) leaves it as it is.
+func TestSandboxViewsFollowTheProvisionalMatch(t *testing.T) {
+	c := newClosedFloorFixture(t)
+	ctx := context.Background()
+	if err := c.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", Profile: "offline-floor", Digest: "sha256:floor",
+		Provisional: true, Floor: closedFloorRegFloor, UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	answer := func(profile, digest string, provisional *bool) {
+		c.sandboxDaemonFixture.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: digest, Profile: profile, Provisional: provisional}, nil
+		}
+		c.d.pollOnce(ctx)
+	}
+	want := func(step, profile, digest string, provisional bool) {
+		t.Helper()
+		for _, v := range c.statusAndList(t, "dc-a") {
+			if v.OrganizationProfile != profile || v.PolicyDigest != digest || v.Provisional != provisional {
+				t.Fatalf("%s: profile %q digest %q provisional %v, want %q %q %v", step, v.OrganizationProfile, v.PolicyDigest,
+					v.Provisional, profile, digest, provisional)
+			}
+		}
+		again, err := loadDaemonRegistrations(c.d.regs.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r, _ := again.get("dc-a"); r.Provisional != provisional {
+			t.Fatalf("%s: saved provisional %v, want %v", step, r.Provisional, provisional)
+		}
+	}
+	verified, provisional := false, true
+	answer("contractors", "sha256:contractors", &verified)
+	want("the directory answered again", "contractors", "sha256:contractors", false)
+	answer("offline-floor", "sha256:floor", &provisional)
+	want("a later match is provisional", "offline-floor", "sha256:floor", true)
+	answer("offline-floor", "sha256:floor", nil)
+	want("an answer without the flag", "offline-floor", "sha256:floor", true)
+	// Only the flag moves (same profile and digest): still applied.
+	answer("offline-floor", "sha256:floor", &verified)
+	want("only the flag moved", "offline-floor", "sha256:floor", false)
+}
+
 // #1199 (GAP-0560, rel GAP-0417): a stop a re-match asked for (the profile
 // no longer allows host ports) ended the session with "stopped from outside
 // this session" and the activity feed with a 403 hook line. The daemon keeps

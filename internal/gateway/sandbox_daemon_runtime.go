@@ -2753,13 +2753,20 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
 	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
 	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
-	// The profile of the same match as the digest: a regroup re-matched the
-	// registration (#1199).
+	// The profile and provisional state of the same match as the digest: a
+	// regroup re-matched the registration, or the directory answered again
+	// after a provisional create (#1199).
 	profile := strings.TrimSpace(cp.Profile)
-	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile)
+	provisional := reg.Provisional
+	if cp.Provisional != nil {
+		provisional = *cp.Provisional
+	}
+	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile) ||
+		provisional != reg.Provisional
 	if profile != "" {
 		reg.Profile = profile
 	}
+	reg.Provisional = provisional
 	if !changed {
 		r.byName[name] = reg
 		if moved {
