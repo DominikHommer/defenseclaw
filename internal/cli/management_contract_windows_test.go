@@ -59,7 +59,10 @@ func TestManagementContractWindowsBundleStatusDeliveryID(t *testing.T) {
 		t.Fatalf("record installed bundle config: %v", err)
 	}
 	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	// finishWindowsEnterpriseBundle consumes opts.bundle, so keep what the
+	// checks below need from the prepared receipt.
 	expected := opts.bundle.prepared.Receipt.ExpectedDigest
+	receiptID := opts.bundle.prepared.Receipt.ReceiptID
 	result.Policy = &enterprisestatus.PolicyState{EffectiveDigest: expected, GatewayReportedDigest: expected, ConfigGeneration: 3, Applied: true}
 	finishWindowsEnterpriseBundle(cmd, opts, result)
 	if len(result.Errors) != 0 || result.Bundle == nil || result.Bundle.State != enterprisebundle.StateConfirmed || result.Bundle.DeliveryID != "agent-7:d.1" {
@@ -82,7 +85,7 @@ func TestManagementContractWindowsBundleStatusDeliveryID(t *testing.T) {
 			t.Fatalf("%s.delivery_id = %v, want agent-7:d.1: %s", block, member["delivery_id"], status)
 		}
 	}
-	for _, file := range []string{filepath.Join(store.PublicReceiptEventsDir(), opts.bundle.prepared.Receipt.ReceiptID+".json"), store.PublicReceiptPath()} {
+	for _, file := range []string{filepath.Join(store.PublicReceiptEventsDir(), receiptID+".json"), store.PublicReceiptPath()} {
 		raw, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
