@@ -335,6 +335,9 @@ func printStatusText(w io.Writer, res *bundleStatusResult) {
 			line += " at " + r.Transitions[n-1].At
 		}
 		fmt.Fprintln(w, line)
+		if r.RollbackOf != "" {
+			fmt.Fprintf(w, "Rollback of: %s\n", r.RollbackOf)
+		}
 	}
 	if r := res.LastRefusal; r != nil {
 		fmt.Fprintf(w, "Last refusal: %s version %d: %s at %s\n", r.BundleID, r.Version, r.ErrorCode, r.Time)

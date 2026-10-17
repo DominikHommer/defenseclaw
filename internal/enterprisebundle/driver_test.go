@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -59,6 +60,57 @@ func driverFor(t *testing.T, f *fixture) *enterprisebundle.Driver {
 
 func enforcing(digest string) enterprisebundle.GatewayPolicy {
 	return enterprisebundle.GatewayPolicy{EffectiveDigest: digest, Digest: digest, Generation: 4, Applied: true}
+}
+
+func TestDriverConfirmedRollbackRecordsSignedProvenance(t *testing.T) {
+	const earlier = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z29"
+	f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+		in.RollbackOf = earlier
+	})
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Receipt.RollbackOf != earlier {
+		t.Fatalf("verified receipt rollback_of = %q", p.Receipt.RollbackOf)
+	}
+	if _, err := d.Finish(p, p.ConfigSHA256, nil, enforcing(p.Receipt.ExpectedDigest), false, nil); err != nil {
+		t.Fatal(err)
+	}
+	last, _, err := d.Store.Latest()
+	if err != nil || last == nil || last.RollbackOf != earlier {
+		t.Fatalf("stored receipt = %+v, %v", last, err)
+	}
+	raw, err := os.ReadFile(d.Store.PublicReceiptPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public struct {
+		RollbackOf string `json:"rollback_of"`
+	}
+	if err := json.Unmarshal(raw, &public); err != nil || public.RollbackOf != earlier {
+		t.Fatalf("public receipt rollback_of = %q, %v", public.RollbackOf, err)
+	}
+}
+
+func TestDriverRefusesDeviceKeyMoveBeforePromotion(t *testing.T) {
+	for _, platform := range enterprisebundle.Platforms {
+		t.Run(platform, func(t *testing.T) {
+			f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) { in.HostPlatform = platform })
+			d := driverFor(t, f)
+			d.Platform = platform
+			d.EnforcedConfig = []byte("gateway:\n  device_key_file: /old/device.key\n")
+			p, err := d.Prepare(t.Context(), f.bundle, nil)
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeInvalidArguments || p == nil || p.Receipt.State != enterprisebundle.StateFailed {
+				t.Fatalf("Prepare = %+v, %v", p, err)
+			}
+			version := d.Store.VersionDir(enterprisebundle.VersionDirNameForReceipt(p.Receipt.Version, p.Receipt.BundleID, p.Receipt.ReceiptID))
+			if _, err := os.Stat(version); !os.IsNotExist(err) {
+				t.Fatalf("bundle promoted before refusal: %v", err)
+			}
+		})
+	}
 }
 
 const gatewayDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"

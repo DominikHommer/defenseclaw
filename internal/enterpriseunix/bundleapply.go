@@ -443,7 +443,7 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	m := res.Manifest
 	if err := store.Advance(receipt, enterprisebundle.StateVerified, func(rc *enterprisebundle.Receipt) {
 		rc.TenantID, rc.DeviceGroup, rc.Principal = m.TenantID, m.Target.DeviceGroup, m.CreatedBy
-		rc.ChangeSummary = m.ChangeSummary
+		rc.ChangeSummary, rc.RollbackOf = m.ChangeSummary, m.RollbackOf
 		rc.SignerKeyID, rc.ManifestSHA256, rc.ExpectedDigest = res.Signature.KeyID, sha256Bytes(staged.Manifest), res.ExpectedDigest
 		rc.SetDigestComparison(res.DigestVerified, res.DigestUnverifiable, res.DigestLayoutUnverifiable)
 	}); err != nil {
@@ -460,6 +460,10 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 	current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
 	if err != nil {
 		return refuse(&enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: "cannot read the enforced config: " + err.Error()})
+	}
+	deviceLayout := enterprisebundle.DeviceLayoutFromManaged(env.Layout)
+	if err := enterprisebundle.RefuseDeviceKeyMove(current, rendered, env.GOOS, &deviceLayout); err != nil {
+		return refuse(err)
 	}
 	loss, err := enterprisebundle.DisabledByBundle(current, rendered)
 	if err != nil {

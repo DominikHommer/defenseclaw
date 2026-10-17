@@ -180,7 +180,9 @@ type Receipt struct {
 	// Actor is the local OS account that received this bundle.
 	Actor string `json:"actor,omitempty"`
 	// ChangeSummary is the manifest change_summary, set at verified.
-	ChangeSummary  string       `json:"change_summary,omitempty"`
+	ChangeSummary string `json:"change_summary,omitempty"`
+	// RollbackOf is copied only from a verified, signed manifest.
+	RollbackOf     string       `json:"rollback_of,omitempty"`
 	ManifestSHA256 string       `json:"manifest_sha256,omitempty"`
 	State          string       `json:"state"`
 	Transitions    []Transition `json:"transitions"`
@@ -495,7 +497,7 @@ func (s *Store) writePublicReceipt(r *Receipt) error {
 	out := enterprisestatus.PublicReceipt{
 		SchemaVersion: enterprisestatus.PublicReceiptSchemaVersion, ReceiptID: r.ReceiptID,
 		BundleID: r.BundleID, Version: r.Version, SignerKeyID: r.SignerKeyID, Principal: r.Principal, Actor: r.Actor,
-		ChangeSummary: r.ChangeSummary, State: r.State, ErrorCode: string(r.ErrorCode),
+		ChangeSummary: r.ChangeSummary, RollbackOf: r.RollbackOf, State: r.State, ErrorCode: string(r.ErrorCode),
 		EffectivePolicyDigest: r.EffectivePolicyDigest, EnforcingDigest: r.EnforcingDigest,
 		WarningCodes:     append([]string(nil), r.WarningCodes...),
 		DisabledByBundle: append([]string(nil), r.DisabledByBundle...),
