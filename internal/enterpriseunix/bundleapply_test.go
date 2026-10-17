@@ -453,7 +453,8 @@ func TestBundleApplyResultNamesTheReceipt(t *testing.T) {
 	if r.OK || !hasMessageCode(r.Errors, string(enterprisebundle.CodeVersionNotNewer)) {
 		t.Fatalf("same version, other bytes: ok %v, errors %+v", r.OK, r.Errors)
 	}
-	if r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID || r.LastRefusal == nil || r.LastRefusal.ReceiptID == rc.ReceiptID {
+	if r.Bundle == nil || r.Bundle.ReceiptID != rc.ReceiptID || r.LastRefusal == nil ||
+		r.LastRefusal.ReceiptID == "" || r.LastRefusal.ReceiptID == rc.ReceiptID {
 		t.Fatalf("refusal after the receipt: bundle block = %+v, last refusal = %+v", r.Bundle, r.LastRefusal)
 	}
 

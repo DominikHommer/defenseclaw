@@ -17,8 +17,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/santhosh-tekuri/jsonschema/v5"
-
+	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -29,73 +28,6 @@ import (
 // seams and validate what they print, so an output change the schema does
 // not describe fails here. The lifecycle results of a managed device are
 // checked the same way in internal/enterpriseunix.
-
-const managementContractDir = "../../packaging/mdm/contract"
-
-type contractSchemas map[string]*jsonschema.Schema
-
-// compileManagementContract compiles every schema of the contract folder
-// under its $id, so the cross-file $refs resolve without a network loader.
-func compileManagementContract(t *testing.T) contractSchemas {
-	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(filepath.FromSlash(managementContractDir), "*.schema.json"))
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("contract schemas: %v (%d found)", err, len(paths))
-	}
-	compiler := jsonschema.NewCompiler()
-	compiler.Draft = jsonschema.Draft2020
-	compiler.AssertFormat = true
-	ids := map[string]string{}
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var head struct {
-			ID string `json:"$id"`
-		}
-		if err := json.Unmarshal(data, &head); err != nil || head.ID == "" {
-			t.Fatalf("%s: no $id (%v)", path, err)
-		}
-		if err := compiler.AddResource(head.ID, bytes.NewReader(data)); err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		ids[filepath.Base(path)] = head.ID
-	}
-	schemas := contractSchemas{}
-	for name, id := range ids {
-		schema, err := compiler.Compile(id)
-		if err != nil {
-			t.Fatalf("compile %s: %v", name, err)
-		}
-		schemas[name] = schema
-	}
-	return schemas
-}
-
-// validate requires document to be exactly one JSON value that schema name
-// accepts, and returns it decoded.
-func (c contractSchemas) validate(t *testing.T, name string, document []byte) map[string]any {
-	t.Helper()
-	schema, ok := c[name]
-	if !ok {
-		t.Fatalf("no contract schema %s", name)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		t.Fatalf("%s: stdout is not JSON: %v\n%s", name, err, document)
-	}
-	if decoder.More() {
-		t.Fatalf("%s: stdout holds more than one JSON document:\n%s", name, document)
-	}
-	if err := schema.Validate(value); err != nil {
-		t.Fatalf("%s rejects real output: %v\n%s", name, err, document)
-	}
-	object, _ := value.(map[string]any)
-	return object
-}
 
 // runExit is the exit status a command run ends with: 0 for success, else
 // the code its failure asked for (commandExitCode only labels failures).
@@ -119,7 +51,7 @@ func requireExit(t *testing.T, doc map[string]any, got, want int) {
 }
 
 func TestManagementContractVersionJSON(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	savedVersion, savedCommit, savedBuilt := appVersion, appCommit, appBuildDate
 	t.Cleanup(func() { appVersion, appCommit, appBuildDate = savedVersion, savedCommit, savedBuilt })
 	appVersion, appCommit, appBuildDate = "1.0.3", "0123456789", "2026-10-30T18:00:00Z"
@@ -130,14 +62,14 @@ func TestManagementContractVersionJSON(t *testing.T) {
 	if strings.Count(out.String(), "\n") != 1 {
 		t.Fatalf("--version-json must print one line: %q", out.String())
 	}
-	doc := schemas.validate(t, "version.schema.json", out.Bytes())
+	doc := schemas.Validate(t, "version.schema.json", out.Bytes())
 	if doc["management_contract"] != json.Number("1") {
 		t.Fatalf("management_contract = %v, want 1", doc["management_contract"])
 	}
 }
 
 func TestManagementContractBundleVerify(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	signed := filepath.Join(e.dir, "v5.dcbundle")
@@ -145,7 +77,7 @@ func TestManagementContractBundleVerify(t *testing.T) {
 		t.Fatalf("sign exit %d:\n%s", code, out)
 	}
 	out, code := runBundle(t, "verify", "--bundle", signed, "--anchors", e.anchors, "--platform", "linux", "--json")
-	doc := schemas.validate(t, "bundle-verify.schema.json", []byte(out))
+	doc := schemas.Validate(t, "bundle-verify.schema.json", []byte(out))
 	requireExit(t, doc, code, 0)
 	if doc["result"] != "verified" {
 		t.Fatalf("verify result %v", doc["result"])
@@ -156,7 +88,7 @@ func TestManagementContractBundleVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemas.validate(t, "bundle-anchors.schema.json", raw)
+	schemas.Validate(t, "bundle-anchors.schema.json", raw)
 
 	b, err := readBundleInput(signed)
 	if err != nil {
@@ -168,22 +100,22 @@ func TestManagementContractBundleVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, code = runBundle(t, "verify", "--bundle", tampered, "--anchors", e.anchors, "--platform", "linux", "--json")
-	doc = schemas.validate(t, "bundle-verify.schema.json", []byte(out))
+	doc = schemas.Validate(t, "bundle-verify.schema.json", []byte(out))
 	requireExit(t, doc, code, bundleFailureExitCode())
 
 	out, code = runBundle(t, "verify", "--bundle", signed, "--anchors", filepath.Join(e.dir, "missing.json"), "--json")
-	doc = schemas.validate(t, "bundle-verify.schema.json", []byte(out))
+	doc = schemas.Validate(t, "bundle-verify.schema.json", []byte(out))
 	requireExit(t, doc, code, bundleFailureExitCode())
 
 	out, code = runBundle(t, "verify", "--json")
-	doc = schemas.validate(t, "bundle-verify.schema.json", []byte(out))
+	doc = schemas.Validate(t, "bundle-verify.schema.json", []byte(out))
 	requireExit(t, doc, code, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))
 }
 
 // TestManagementContractBundleApplyRefusals validates the short document an
 // apply prints when it refuses before the lifecycle runs.
 func TestManagementContractBundleApplyRefusals(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	for name, setup := range map[string]func(){
 		"not managed":   func() { bundleManagedDevice = func() bool { return false } },
@@ -194,7 +126,7 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 			t.Cleanup(func() { bundleManagedDevice, bundleSecureClient = savedDevice, savedSC })
 			setup()
 			out, code := runBundle(t, "apply", "--bundle", filepath.Join(e.dir, "v1.dcbundle"), "--json")
-			doc := schemas.validate(t, "bundle-refused.schema.json", []byte(out))
+			doc := schemas.Validate(t, "bundle-refused.schema.json", []byte(out))
 			requireExit(t, doc, code, bundleFailureExitCode())
 		})
 	}
@@ -204,7 +136,7 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 // a confirmed bundle and a later failed delivery, the public receipt files
 // those deliveries wrote, and the refusals.
 func TestManagementContractBundleStatus(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	store := bundleDevice(t, e)
@@ -222,7 +154,7 @@ func TestManagementContractBundleStatus(t *testing.T) {
 	}
 
 	out, code := runBundle(t, "status", "--json")
-	doc := schemas.validate(t, "bundle-status.schema.json", []byte(out))
+	doc := schemas.Validate(t, "bundle-status.schema.json", []byte(out))
 	requireExit(t, doc, code, 0)
 	if doc["applied"] != true || doc["last_receipt"].(map[string]any)["state"] != "confirmed" ||
 		doc["last_refusal"].(map[string]any)["error_code"] != "secret_ref_missing" {
@@ -239,7 +171,7 @@ func TestManagementContractBundleStatus(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		receipt := schemas.validate(t, "bundle-receipt.schema.json", raw)
+		receipt := schemas.Validate(t, "bundle-receipt.schema.json", raw)
 		states[receipt["state"]]++
 		if base := filepath.Base(file); base != receipt["receipt_id"].(string)+".json" {
 			t.Fatalf("receipt event %s holds receipt_id %v", base, receipt["receipt_id"])
@@ -252,7 +184,7 @@ func TestManagementContractBundleStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemas.validate(t, "bundle-receipt.schema.json", raw)
+	schemas.Validate(t, "bundle-receipt.schema.json", raw)
 
 	t.Run("not_admin", func(t *testing.T) {
 		saved := bundlePrivilege
@@ -261,9 +193,9 @@ func TestManagementContractBundleStatus(t *testing.T) {
 			return &enterprisebundle.Error{Code: enterprisebundle.CodeNotAdmin, Detail: "administrator required"}
 		}
 		out, code := runBundle(t, "status", "--json")
-		doc := schemas.validate(t, "bundle-status.schema.json", []byte(out))
+		doc := schemas.Validate(t, "bundle-status.schema.json", []byte(out))
 		requireExit(t, doc, code, bundleFailureExitCode())
-		schemas.validate(t, "bundle-refused.schema.json", []byte(out))
+		schemas.Validate(t, "bundle-refused.schema.json", []byte(out))
 	})
 	t.Run("refused before the session scan", func(t *testing.T) {
 		for name, setup := range map[string]func(){
@@ -275,13 +207,28 @@ func TestManagementContractBundleStatus(t *testing.T) {
 				}
 			},
 		} {
-			setup()
-			out, code := runBundle(t, "status", "--json")
-			doc := schemas.validate(t, "bundle-status.schema.json", []byte(out))
-			requireExit(t, doc, code, bundleFailureExitCode())
-			if doc["ok"] != false {
-				t.Fatalf("%s: status = %s", name, out)
-			}
+			t.Run(name, func(t *testing.T) {
+				savedDevice, savedSC := bundleManagedDevice, bundleSecureClient
+				savedState, readErr := os.ReadFile(store.StatePath())
+				t.Cleanup(func() {
+					bundleManagedDevice, bundleSecureClient = savedDevice, savedSC
+					if readErr == nil {
+						_ = os.WriteFile(store.StatePath(), savedState, 0o600)
+					} else {
+						_ = os.Remove(store.StatePath())
+					}
+				})
+				setup()
+				out, code := runBundle(t, "status", "--json")
+				doc := schemas.Validate(t, "bundle-status.schema.json", []byte(out))
+				requireExit(t, doc, code, bundleFailureExitCode())
+				if doc["ok"] != false {
+					t.Fatalf("status = %s", out)
+				}
+				if name == "state invalid" && !strings.Contains(out, "state_invalid") {
+					t.Fatalf("an invalid state is not reported state_invalid: %s", out)
+				}
+			})
 		}
 	})
 }
@@ -289,7 +236,7 @@ func TestManagementContractBundleStatus(t *testing.T) {
 // TestManagementContractWindowsElevationResult validates the lifecycle
 // result a Windows status or verify prints for a standard account: exit 5.
 func TestManagementContractWindowsElevationResult(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	result := enterprisestatus.New("status", "standalone", "windows", "1.0.3")
 	result.AddError("elevation_required", "run this command from an elevated administrator or SYSTEM session")
 	result.Finish("windows", enterprisestatus.WindowsExitAccessDenied)
@@ -297,6 +244,6 @@ func TestManagementContractWindowsElevationResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := schemas.validate(t, "lifecycle-result.schema.json", document)
+	doc := schemas.Validate(t, "lifecycle-result.schema.json", document)
 	requireExit(t, doc, enterprisestatus.WindowsExitAccessDenied, enterprisestatus.WindowsExitAccessDenied)
 }

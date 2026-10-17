@@ -637,6 +637,41 @@ func TestCurrentSummaryReportsTheConfirmedReceiptPastANewerFailure(t *testing.T)
 	}
 }
 
+// The state's record of the confirmed bundle keeps the delivery_id and
+// restart_required its receipt reported, so a repeated delivery reports them
+// also after that receipt was pruned.
+func TestCurrentSummaryAfterPruneKeepsDeliveryIDAndRestartRequired(t *testing.T) {
+	s := testStore(t)
+	v1 := applyThrough(t, s, 1, 1, StateApplied)
+	v1.DeliveryID, v1.RestartRequired = "acme-agent:d-000913", true
+	if _, err := s.Confirm(v1); err != nil {
+		t.Fatal(err)
+	}
+	for _, stage := range []string{"confirmed receipt", "after prune"} {
+		if stage == "after prune" {
+			if err := os.Remove(s.receiptPath(v1.ReceiptID)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := s.CurrentSummary()
+		if err != nil || got == nil || got.ReceiptID != v1.ReceiptID || got.DeliveryID != v1.DeliveryID || !got.RestartRequired {
+			t.Fatalf("%s: current summary = %+v, %v; want receipt %s, delivery_id %s, restart_required", stage, got, err, v1.ReceiptID, v1.DeliveryID)
+		}
+	}
+
+	st, err := s.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Current.DeliveryID = "agent 7"
+	if err := s.saveState(st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadState(); err == nil || !strings.Contains(err.Error(), "delivery_id") {
+		t.Fatalf("a state with a bad current delivery_id loaded: %v", err)
+	}
+}
+
 // A process killed while it rewrites bundle-state.json leaves either the old
 // or the new state, never a torn or empty one; settle removes the temp file.
 func TestBundleStateSurvivesAKillDuringTheWrite(t *testing.T) {

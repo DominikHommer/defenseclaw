@@ -22,8 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/santhosh-tekuri/jsonschema/v5"
-
+	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -34,87 +33,11 @@ import (
 // and the public receipt files against those schemas. The CLI prints these
 // results unchanged with --json.
 
-const managementContractDir = "../../packaging/mdm/contract"
-
-type contractSchemas map[string]*jsonschema.Schema
-
-// compileManagementContract compiles every schema of the contract folder
-// under its $id, so the cross-file $refs resolve without a network loader.
-func compileManagementContract(t *testing.T) contractSchemas {
-	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(filepath.FromSlash(managementContractDir), "*.schema.json"))
-	if err != nil || len(paths) == 0 {
-		t.Fatalf("contract schemas: %v (%d found)", err, len(paths))
-	}
-	compiler := jsonschema.NewCompiler()
-	compiler.Draft = jsonschema.Draft2020
-	compiler.AssertFormat = true
-	ids := map[string]string{}
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var head struct {
-			ID string `json:"$id"`
-		}
-		if err := json.Unmarshal(data, &head); err != nil || head.ID == "" {
-			t.Fatalf("%s: no $id (%v)", path, err)
-		}
-		if err := compiler.AddResource(head.ID, bytes.NewReader(data)); err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
-		ids[filepath.Base(path)] = head.ID
-	}
-	schemas := contractSchemas{}
-	for name, id := range ids {
-		schema, err := compiler.Compile(id)
-		if err != nil {
-			t.Fatalf("compile %s: %v", name, err)
-		}
-		schemas[name] = schema
-	}
-	return schemas
-}
-
-// validate requires document to be exactly one JSON value that schema name
-// accepts, and returns it decoded.
-func (c contractSchemas) validate(t *testing.T, name string, document []byte) map[string]any {
-	t.Helper()
-	schema, ok := c[name]
-	if !ok {
-		t.Fatalf("no contract schema %s", name)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(document))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
-		t.Fatalf("%s: not JSON: %v\n%s", name, err, document)
-	}
-	if decoder.More() {
-		t.Fatalf("%s: more than one JSON document:\n%s", name, document)
-	}
-	if err := schema.Validate(value); err != nil {
-		t.Fatalf("%s rejects a real result: %v\n%s", name, err, document)
-	}
-	object, _ := value.(map[string]any)
-	return object
-}
-
-func (c contractSchemas) validateResult(t *testing.T, name string, result *enterprisestatus.Result) map[string]any {
-	t.Helper()
-	document, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c.validate(t, name, document)
-}
-
 // TestManagementContractBundleApplyResults validates the apply results a
 // management agent acts on (confirmed, already_applied, refused), the device
 // status after them and the public receipt files.
 func TestManagementContractBundleApplyResults(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			b := newBundleHost(t, goos)
@@ -122,13 +45,13 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 			b.mapPromotedBundleOwners(1)
 			first := b.apply(b.dir(1, v1))
 			requireOK(t, first)
-			schemas.validateResult(t, "lifecycle-result.schema.json", first)
+			schemas.ValidateValue(t, "lifecycle-result.schema.json", first)
 			b.mapPromotedBundleOwners(2)
 			path := b.dir(2, v2)
 
 			applied := b.apply(path)
 			requireOK(t, applied)
-			doc := schemas.validateResult(t, "lifecycle-result.schema.json", applied)
+			doc := schemas.ValidateValue(t, "lifecycle-result.schema.json", applied)
 			if applied.Bundle == nil || applied.Bundle.State != enterprisebundle.StateConfirmed || applied.Bundle.BundleID != bundleID(2) {
 				t.Fatalf("apply did not confirm: %+v", applied.Bundle)
 			}
@@ -144,7 +67,7 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				receipt := schemas.validate(t, "bundle-receipt.schema.json", raw)
+				receipt := schemas.Validate(t, "bundle-receipt.schema.json", raw)
 				if receipt["state"] != "confirmed" {
 					t.Fatalf("%s: %s", file, raw)
 				}
@@ -162,7 +85,7 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 			// and reports the confirmed receipt.
 			again := b.apply(path)
 			requireOK(t, again)
-			doc = schemas.validateResult(t, "lifecycle-result.schema.json", again)
+			doc = schemas.ValidateValue(t, "lifecycle-result.schema.json", again)
 			if !again.Noop || again.NoopReason != "already_applied" {
 				t.Fatalf("repeated delivery: noop=%v reason=%q", again.Noop, again.NoopReason)
 			}
@@ -175,7 +98,7 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 			// Other bytes at the same version: refused, final.
 			refused := b.apply(b.dir(2, v1))
 			requireError(t, refused, string(enterprisebundle.CodeVersionNotNewer))
-			schemas.validateResult(t, "lifecycle-result.schema.json", refused)
+			schemas.ValidateValue(t, "lifecycle-result.schema.json", refused)
 			if refused.ExitCode != enterprisestatus.UnixExitFailure {
 				t.Fatalf("refusal exit %d", refused.ExitCode)
 			}
@@ -185,14 +108,14 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 			unmanaged := newTestHost(t, goos)
 			early := unmanaged.run(Options{Action: ActionEnsure, Bundle: path})
 			requireError(t, early, codeNotInstalled)
-			doc = schemas.validateResult(t, "lifecycle-result.schema.json", early)
+			doc = schemas.ValidateValue(t, "lifecycle-result.schema.json", early)
 			if _, present := doc["bundle"]; present {
 				t.Fatalf("refusal before the receipt has a bundle block: %v", doc["bundle"])
 			}
 
 			status := b.run(Options{Action: ActionStatus})
 			requireOK(t, status)
-			schemas.validateResult(t, "lifecycle-result.schema.json", status)
+			schemas.ValidateValue(t, "lifecycle-result.schema.json", status)
 			if status.Bundle == nil || status.Bundle.BundleID != bundleID(2) || status.Bundle.State != enterprisebundle.StateConfirmed {
 				t.Fatalf("status bundle block = %+v", status.Bundle)
 			}
@@ -204,7 +127,7 @@ func TestManagementContractBundleApplyResults(t *testing.T) {
 // `enterprise secret set` print (lifecycle result v2 through
 // secret-result.schema.json) and the busy result an agent retries.
 func TestManagementContractSecretAndBusyResults(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
@@ -222,13 +145,13 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 			if bytes.Contains(document, []byte(value)) {
 				t.Fatalf("the credential value is in the result: %s", document)
 			}
-			schemas.validate(t, "secret-result.schema.json", document)
+			schemas.Validate(t, "secret-result.schema.json", document)
 
 			failed := h.run(Options{Action: ActionEnsure, Reason: "secret", Mutate: func(context.Context) error {
 				return errors.New("the credential could not be written")
 			}})
 			requireError(t, failed, codeChange)
-			schemas.validateResult(t, "secret-result.schema.json", failed)
+			schemas.ValidateValue(t, "secret-result.schema.json", failed)
 
 			states, err := h.env.SecretStatus()
 			if err != nil {
@@ -238,7 +161,7 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			schemas.validate(t, "secret-result.schema.json", listing)
+			schemas.Validate(t, "secret-result.schema.json", listing)
 
 			held, err := h.env.acquireLock(context.Background())
 			if err != nil {
@@ -252,7 +175,7 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 				if busy.ExitCode != enterprisestatus.UnixExitBusy {
 					t.Fatalf("%s busy exit %d, want %d", action, busy.ExitCode, enterprisestatus.UnixExitBusy)
 				}
-				schemas.validateResult(t, "lifecycle-result.schema.json", busy)
+				schemas.ValidateValue(t, "lifecycle-result.schema.json", busy)
 			}
 		})
 	}
@@ -264,7 +187,7 @@ func TestManagementContractSecretAndBusyResults(t *testing.T) {
 // confirmed receipt (and its delivery id), not its own; an invalid id or one
 // without a bundle is invalid_arguments, exit 2, before any receipt.
 func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			b := newBundleHost(t, goos)
@@ -279,7 +202,7 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 
 			first := b.run(Options{Action: ActionEnsure, Bundle: path, DeliveryID: "agent-7:d.1"})
 			requireOK(t, first)
-			doc := schemas.validateResult(t, "lifecycle-result.schema.json", first)
+			doc := schemas.ValidateValue(t, "lifecycle-result.schema.json", first)
 			if got := deliveryOf(doc, "bundle"); got != "agent-7:d.1" {
 				t.Fatalf("bundle.delivery_id = %v, want agent-7:d.1", got)
 			}
@@ -289,14 +212,14 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if receipt := schemas.validate(t, "bundle-receipt.schema.json", raw); receipt["delivery_id"] != "agent-7:d.1" {
+				if receipt := schemas.Validate(t, "bundle-receipt.schema.json", raw); receipt["delivery_id"] != "agent-7:d.1" {
 					t.Fatalf("%s: %s", file, raw)
 				}
 			}
 
 			again := b.run(Options{Action: ActionEnsure, Bundle: path, DeliveryID: "agent-7:d.2"})
 			requireOK(t, again)
-			doc = schemas.validateResult(t, "lifecycle-result.schema.json", again)
+			doc = schemas.ValidateValue(t, "lifecycle-result.schema.json", again)
 			// noop_reason is already_applied only when ensure repaired
 			// nothing else (guide 4.3), so the test reads the block alone.
 			if deliveryOf(doc, "bundle") != "agent-7:d.1" || doc["bundle"].(map[string]any)["receipt_id"] != bundleID(1) {
@@ -308,7 +231,7 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 
 			refused := b.run(Options{Action: ActionEnsure, Bundle: b.dir(1, v2), DeliveryID: "agent-7:d.3"})
 			requireError(t, refused, string(enterprisebundle.CodeVersionNotNewer))
-			doc = schemas.validateResult(t, "lifecycle-result.schema.json", refused)
+			doc = schemas.ValidateValue(t, "lifecycle-result.schema.json", refused)
 			if got := deliveryOf(doc, "last_refusal"); got != "agent-7:d.3" {
 				t.Fatalf("last_refusal.delivery_id = %v, want agent-7:d.3 (%v)", got, doc["last_refusal"])
 			}
@@ -324,7 +247,7 @@ func TestManagementContractBundleApplyDeliveryID(t *testing.T) {
 				if bad.ExitCode != enterprisestatus.UnixExitInvalidArgs {
 					t.Fatalf("%s: exit %d", name, bad.ExitCode)
 				}
-				schemas.validateResult(t, "lifecycle-result.schema.json", bad)
+				schemas.ValidateValue(t, "lifecycle-result.schema.json", bad)
 			}
 			if after, _ := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json")); len(after) != len(events) {
 				t.Fatalf("an invalid delivery id wrote a receipt: %v -> %v", events, after)

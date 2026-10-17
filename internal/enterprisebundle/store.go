@@ -116,6 +116,10 @@ type Ref struct {
 	ConfigGeneration      uint64 `json:"config_generation,omitempty"`
 	ConfirmedAt           string `json:"confirmed_at,omitempty"`
 	RestartRequired       bool   `json:"restart_required,omitempty"`
+	// DeliveryID is the --delivery-id of the receipt that confirmed this
+	// bundle ("" for none), so the bundle block keeps it once that receipt
+	// is pruned.
+	DeliveryID string `json:"delivery_id,omitempty"`
 }
 
 func (r *Ref) validate() error {
@@ -128,6 +132,8 @@ func (r *Ref) validate() error {
 		return errors.New("manifest_sha256 is not a SHA-256 digest")
 	case !validVersionDir(r.Dir, r.Version, r.BundleID):
 		return errors.New("dir does not name the bundle version directory")
+	case r.DeliveryID != "" && !enterprisestatus.ValidDeliveryID(r.DeliveryID):
+		return errors.New("delivery_id is not a delivery id")
 	}
 	return nil
 }
@@ -896,7 +902,7 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	}
 	ref := &Ref{BundleID: r.BundleID, Version: r.Version, ManifestSHA256: r.ManifestSHA256, Dir: r.Dir,
 		SignerKeyID: r.SignerKeyID, EffectivePolicyDigest: r.EffectivePolicyDigest, ConfigGeneration: r.ConfigGeneration,
-		RestartRequired: r.RestartRequired}
+		RestartRequired: r.RestartRequired, DeliveryID: r.DeliveryID}
 	if err := ref.validate(); err != nil {
 		return State{}, fmt.Errorf("bundle receipt %s: %w", r.ReceiptID, err)
 	}
@@ -1077,11 +1083,13 @@ func (s *Store) CurrentSummary() (*enterprisestatus.BundleState, error) {
 
 // currentBundleState is the bundle block of the current bundle from the
 // store state alone. The receipt that promoted it named its version
-// directory, so its id survives the receipt being pruned.
+// directory, so its id survives the receipt being pruned; Confirm copied its
+// delivery_id and restart_required into the state.
 func currentBundleState(c *Ref) *enterprisestatus.BundleState {
-	return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID),
+	return &enterprisestatus.BundleState{ReceiptID: receiptIDOfVersionDir(c.Dir, c.Version, c.BundleID), DeliveryID: c.DeliveryID,
 		BundleID: c.BundleID, Version: c.Version, State: StateConfirmed,
-		EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt}
+		EffectivePolicyDigest: c.EffectivePolicyDigest, ConfigGeneration: c.ConfigGeneration, ConfirmedAt: c.ConfirmedAt,
+		RestartRequired: c.RestartRequired}
 }
 
 // prune keeps the MaxReceipts newest receipts; an unfinished one is never

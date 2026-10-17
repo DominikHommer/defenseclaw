@@ -483,11 +483,23 @@ func TestWindowsSecretRechecksTheDeploymentUnderTheLocks(t *testing.T) {
 				host.events = append(host.events, "lock lifecycle")
 				return func() { host.events = append(host.events, "unlock lifecycle") }, nil
 			}
+			stored := filepath.Join(dir, "ai-defense-api-key")
+			if action == "remove" {
+				// The refused remove must leave a stored credential as it was.
+				if err := os.WriteFile(stored, []byte("kept-value"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(stored) })
+			}
 			opts := enterpriseSecretOptions{name: "ai-defense-api-key", json: true, fromStdin: action == "set"}
 			out, err := runWindowsSecretCommand(t, action, opts, "late-value")
 			windowsSecretFailureDoc(t, out, err, action, "not_installed")
-			if _, statErr := os.Stat(filepath.Join(dir, "ai-defense-api-key")); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("stored after the deployment was removed: %v", statErr)
+			kept, readErr := os.ReadFile(stored)
+			if action == "set" && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("stored after the deployment was removed: %v", readErr)
+			}
+			if action == "remove" && (readErr != nil || string(kept) != "kept-value") {
+				t.Fatalf("remove changed the credential after the deployment was removed: %q, %v", kept, readErr)
 			}
 			if want := "lock bundle,lock lifecycle,unlock lifecycle,unlock bundle"; strings.Join(host.events, ",") != want {
 				t.Fatalf("events %v, want %s (no restart)", host.events, want)

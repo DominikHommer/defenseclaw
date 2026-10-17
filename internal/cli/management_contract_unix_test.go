@@ -20,17 +20,25 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // contractHostCommands answers `systemctl --version` as a supported systemd
-// host does and runs no other host command.
+// host does, and the service account lookups as a device the package has not
+// installed yet does (getent exit 2, dscl eDSRecordNotFound). It runs no
+// other host command.
 type contractHostCommands struct{ noHostCommands }
 
 func (c contractHostCommands) Run(ctx context.Context, name string, args ...string) (enterpriseunix.CommandResult, error) {
-	if name == "systemctl" && len(args) == 1 && args[0] == "--version" {
+	switch {
+	case name == "systemctl" && len(args) == 1 && args[0] == "--version":
 		return enterpriseunix.CommandResult{Stdout: []byte("systemd 252 (252-46.el9)\n")}, nil
+	case name == "getent" && len(args) == 2 && args[0] == "passwd":
+		return enterpriseunix.CommandResult{ExitCode: 2}, errors.New("exit status 2")
+	case name == "dscl" && len(args) == 4 && args[1] == "-read":
+		return enterpriseunix.CommandResult{ExitCode: 56}, errors.New("eDSRecordNotFound")
 	}
 	return c.noHostCommands.Run(ctx, name, args...)
 }
@@ -54,7 +62,10 @@ func contractUnixEnv(t *testing.T) (root string, layout managed.StandaloneLayout
 	}
 	previous := newUnixLifecycleEnv
 	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: contractHostCommands{}}, nil
+		// The test runs unprivileged: ownership changes are no-ops, as root
+		// on a real device makes them succeed.
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: contractHostCommands{},
+			Lchown: func(string, int, int) error { return nil }, Fchown: func(*os.File, int, int) error { return nil }}, nil
 	}
 	t.Cleanup(func() { newUnixLifecycleEnv = previous })
 	return root, layout
@@ -71,7 +82,7 @@ func contractUnixPlatform() string {
 // status`, `enterprise secret status` and `enterprise secret set` as a root
 // caller prints them on a device that is not installed yet (contract 5.0).
 func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	root, layout := contractUnixEnv(t)
 
 	cmd := &cobra.Command{}
@@ -79,7 +90,7 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	err := runUnixLifecycle(cmd, contractUnixPlatform(), "status", &unixLifecycleOptions{json: true})
-	doc := schemas.validate(t, "lifecycle-result.schema.json", out.Bytes())
+	doc := schemas.Validate(t, "lifecycle-result.schema.json", out.Bytes())
 	requireExit(t, doc, runExit(err), 0)
 	if doc["ok"] != true || doc["installed"] != false {
 		t.Fatalf("status of an empty device = %s", out.String())
@@ -95,8 +106,8 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 	if strings.Contains(out.String(), value) {
 		t.Fatalf("the credential value was printed: %s", out.String())
 	}
-	doc = schemas.validate(t, "secret-result.schema.json", out.Bytes())
-	requireExit(t, doc, runExit(err), runExit(err))
+	doc = schemas.Validate(t, "secret-result.schema.json", out.Bytes())
+	requireExit(t, doc, runExit(err), 0)
 
 	secrets := root + layout.SecretsDir
 	if err := os.MkdirAll(secrets, 0o700); err != nil {
@@ -114,7 +125,7 @@ func TestManagementContractUnixStatusAndSecrets(t *testing.T) {
 	if strings.Contains(out.String(), "contract-status-value") {
 		t.Fatalf("secret status printed a value: %s", out.String())
 	}
-	schemas.validate(t, "secret-result.schema.json", out.Bytes())
+	schemas.Validate(t, "secret-result.schema.json", out.Bytes())
 }
 
 // TestManagementContractBundleApplyArgumentErrorsPrintNoJSON pins guide
@@ -157,7 +168,7 @@ func TestManagementContractBundleApplyArgumentErrorsPrintNoJSON(t *testing.T) {
 // TestManagementContractAnchorsInstallRefusals validates the refusals of
 // `enterprise bundle anchors install` before it reads the source.
 func TestManagementContractAnchorsInstallRefusals(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})
 	for name, setup := range map[string]func(){
@@ -169,7 +180,7 @@ func TestManagementContractAnchorsInstallRefusals(t *testing.T) {
 			t.Cleanup(func() { bundleManagedDevice, bundleSecureClient = savedDevice, savedSC })
 			setup()
 			out, code := runBundle(t, "anchors", "install", "--file", e.anchors, "--json")
-			doc := schemas.validate(t, "anchors-install.schema.json", []byte(out))
+			doc := schemas.Validate(t, "anchors-install.schema.json", []byte(out))
 			requireExit(t, doc, code, bundleFailureExitCode())
 		})
 	}
@@ -180,12 +191,12 @@ func TestManagementContractAnchorsInstallRefusals(t *testing.T) {
 // unchanged, replaced, and the refusals an agent acts on (insecure or
 // invalid source, usage, busy, not root).
 func TestManagementContractAnchorsInstallResults(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	root, layout, euid := anchorsInstallDevice(t)
 	install := func(want int, args ...string) map[string]any {
 		t.Helper()
 		out, code := runBundle(t, append([]string{"anchors", "install"}, args...)...)
-		doc := schemas.validate(t, "anchors-install.schema.json", []byte(out))
+		doc := schemas.Validate(t, "anchors-install.schema.json", []byte(out))
 		requireExit(t, doc, code, want)
 		return doc
 	}

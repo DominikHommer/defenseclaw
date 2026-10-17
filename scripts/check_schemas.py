@@ -910,14 +910,25 @@ def check_management_contract() -> bool:
             if name not in schemas:
                 ok = False
                 continue
-            found = problems(name, build(schemas))
+            try:
+                document = build(schemas)
+            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+                # A rule edits a fixed schema example: a removed example or
+                # nested member is drift of that rule; the others still run.
+                print(
+                    f"check_schemas: {name} rule {label!r} cannot be built from the schema examples: {exc!r}",
+                    file=sys.stderr,
+                )
+                ok = False
+                continue
+            found = problems(name, document)
             if want_valid and found:
                 print(f"check_schemas: {name} must accept {label}: {found[0]}", file=sys.stderr)
                 ok = False
             elif not want_valid and not found:
                 print(f"check_schemas: {name} must reject {label}", file=sys.stderr)
                 ok = False
-    except (jsonschema.exceptions.SchemaError, Unresolvable, KeyError) as exc:
+    except (jsonschema.exceptions.SchemaError, Unresolvable) as exc:
         # An unresolvable $ref between contract schemas is drift too.
         print(f"check_schemas: packaging/mdm/contract: {exc}", file=sys.stderr)
         return False

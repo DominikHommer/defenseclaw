@@ -407,6 +407,27 @@ class TestManagementContractSchemas(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("bundle-verify.schema.json examples[0]", result.stderr)
 
+    def test_missing_example_is_drift_not_a_crash(self) -> None:
+        # The rules build their documents from fixed examples. Removing one,
+        # or emptying a nested list a rule edits, is reported for that rule,
+        # and the other rules still run.
+        def drop_examples(contract_dir: Path) -> None:
+            self._edit_schema(
+                contract_dir, "anchors-install.schema.json", lambda s: s.update(examples=s["examples"][:1])
+            )
+            self._edit_schema(
+                contract_dir, "secret-result.schema.json", lambda s: s["examples"][2].update(secrets=[])
+            )
+            self._edit_schema(contract_dir, "version.schema.json", lambda s: s.pop("additionalProperties"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._tampered(tmp, drop_examples)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("anchors-install.schema.json rule 'anchors install", result.stderr)
+        self.assertIn("secret-result.schema.json rule 'secret status that carries a value'", result.stderr)
+        self.assertIn("must reject version with a features list", result.stderr)
+
     def test_unlisted_schema_and_undescribed_schema_are_caught(self) -> None:
         def add_and_hide(contract_dir: Path) -> None:
             (contract_dir / "extra.schema.json").write_text(

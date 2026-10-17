@@ -12,13 +12,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // TestManagementContractWindowsSecret validates what Windows
 // `enterprise secret set`, `status` and `remove` print with --json.
 func TestManagementContractWindowsSecret(t *testing.T) {
-	schemas := compileManagementContract(t)
+	schemas := contracttest.Compile(t)
 	windowsSecretTestHarness(t)
 	const value = "contract-test-credential-value"
 
@@ -29,7 +30,7 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	if strings.Contains(out, value) {
 		t.Fatal("the credential value was printed")
 	}
-	if doc := schemas.validate(t, "secret-result.schema.json", []byte(out)); doc["ok"] != true || doc["action"] != "set" {
+	if doc := schemas.Validate(t, "secret-result.schema.json", []byte(out)); doc["ok"] != true || doc["action"] != "set" {
 		t.Fatalf("set result %s", out)
 	}
 
@@ -40,13 +41,13 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	if strings.Contains(out, value) {
 		t.Fatal("the credential value was printed")
 	}
-	schemas.validate(t, "secret-result.schema.json", []byte(out))
+	schemas.Validate(t, "secret-result.schema.json", []byte(out))
 
 	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: "ai-defense-api-key", json: true}, "")
 	if err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	schemas.validate(t, "secret-result.schema.json", []byte(out))
+	schemas.Validate(t, "secret-result.schema.json", []byte(out))
 
 	t.Run("failures print one document", func(t *testing.T) {
 		opts := enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}
@@ -79,7 +80,7 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 				})
 				tc.setup()
 				out, err := runWindowsSecretCommand(t, "set", tc.opts, value+"\r\n")
-				doc := schemas.validate(t, "secret-result.schema.json", []byte(out))
+				doc := schemas.Validate(t, "secret-result.schema.json", []byte(out))
 				requireExit(t, doc, commandExitCode(err), tc.exit)
 				if strings.Contains(out, value) {
 					t.Fatal("the credential value was printed")
