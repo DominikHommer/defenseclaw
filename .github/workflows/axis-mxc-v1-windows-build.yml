@@ -132,15 +132,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
           # These SDK tests call only the pure pre-creation validator. The
           # hosted image never executes PSEC or either contributor payload.
-          # Dependency packages reject CLI feature flags; the contributor
-          # manifest already disables the SDK's default features.
+          # Cargo requires the SDK's own workspace for its dev-dependencies.
+          # Keep its reviewed upstream lock separate from the contributor lock.
           @'
           import prepare_build as build
+          sdk_workspace = build.ROOT / 'mxc-source' / 'src'
+          sdk_lock = sdk_workspace / 'Cargo.lock'
+          expected_sdk_lock = '2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0'
+          if build.digest(sdk_lock) != expected_sdk_lock:
+              raise RuntimeError('SDK regression tests require the unchanged upstream lock')
           build.command([
               'cargo', '+' + build.TOOLCHAIN, 'test', '--locked', '--release',
-              '-p', 'mxc-sdk', '--lib',
+              '-p', 'mxc-sdk', '--lib', '--no-default-features',
               'strict_psec_tests', '--', '--test-threads=1',
-          ])
+          ], cwd=sdk_workspace)
+          if build.digest(sdk_lock) != expected_sdk_lock:
+              raise RuntimeError('SDK regression tests changed the upstream lock')
+          build.verify_build_sources(build.ROOT / 'axis-source', build.ROOT / 'mxc-source')
           '@ | python -
           if ($LASTEXITCODE -ne 0) { throw 'Pure SDK native-admission regression tests failed' }
           @'
