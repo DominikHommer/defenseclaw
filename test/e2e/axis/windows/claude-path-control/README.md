@@ -3,11 +3,13 @@
 
 # Fixed native application-path control
 
-This is source-only contributor code. It has not launched Claude. No customer
-provider, SDK, PSEC object, AXIS process, policy fallback or network rule is used.
-Any later run is **uncontained** and requires independent source/build review and
-one concrete root-owned invocation. This is a compatibility measurement, not an
-agent or sandbox qualification.
+One separately reviewed native run completed this contributor measurement. The
+volume-GUID and GLOBALROOT application spellings failed at creation; the ordinary
+DOS spelling ran the pinned Claude `--version` successfully. All three Jobs ended
+empty. See the [actual results](../mxc-v1/manual-results.md#uncontained-application-path-control-dos-starts-the-fixed-image).
+No customer provider, SDK, PSEC object, AXIS process, policy fallback or network
+rule was used. The run was **uncontained** and establishes no agent or sandbox
+qualification. Any new execution requires a separately reviewed concrete scope.
 
 The only selector is `--run-fixed`. The executable's already protected private
 directory must contain `claude-2.1.292-root-image-review.json` with the exact
@@ -103,4 +105,10 @@ Capture, cleanup, close or deadline errors prevent a completed observation.
 `supervision_completed` means that the measurement helper exited successfully;
 the root controller must inspect each of its three case outcomes separately.
 Neither a completed measurement nor a passing version check qualifies a sandbox.
-This supervisor source has not been executed.
+The one recorded run used helper source `17ebe67f` and supervisor source
+`b00149e1`. Its retained result SHA256 is
+`f38e14ee23f64a46d5e1a6950efac46b6311b0beea7479e8293cbb69881cce53`.
+The outer observation reported Job-at-creation membership, image binding before
+resume, empty Job/zero active processes, joined/closed readers and no deadline,
+overflow or error. Successful version output was observed only for the DOS case;
+realized Claude environment, authentication, hooks and model use were untested.

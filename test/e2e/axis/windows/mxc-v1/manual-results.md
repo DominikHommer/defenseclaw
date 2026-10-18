@@ -670,3 +670,77 @@ this downstream adapter. It does not establish the cause, exclude every effect
 of PSEC object construction, or reproduce a defect on unmodified MXC. No customer
 runtime or Claude qualification follows. The compatibility investigation is
 tracked in [MXC issue 1523](https://github.com/microsoft/mxc/issues/1523).
+
+## Uncontained application-path control: DOS starts the fixed image
+
+One separately reviewed native run used the fixed Go
+[application-path control](../claude-path-control/README.md), with no SDK, PSEC
+object, AXIS process or sandbox policy. The image was the same independently
+reviewed signed Claude Code 2.1.292, SHA256
+`eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23`,
+254,858,400 bytes. Helper source `17ebe67f727b66900d9b922d5a8e53ad5c428c1c`
+and supervisor source `b00149e1d728a3da73c18dcdf08f84738cdc1e27` were independently
+reviewed before their local Go 1.26.5 Windows/amd64, CGO-disabled builds. The
+compiled source closure contained nineteen exact local Git source files and
+twenty-two selected files from the reviewed `golang.org/x/sys` v0.47.0 module.
+The source/build checks did not execute the binaries.
+
+The one-shot native driver admitted the two exact helper images and local-image
+receipt into a fresh private fixture. It enforced a 30-second outer cutoff.
+The supervisor created the helper in its owned kill-on-close Job using JOB_LIST,
+sampled membership through the retained process handle, and verified that
+handle's image identity before resuming its retained primary thread. The helper
+held the copied Claude image and its ancestors, then required each application
+spelling to resolve to the same volume and full 128-bit file ID before creating
+any child. No PID reopening or changes to existing host namespaces, policies or
+ACLs were used.
+
+| Application spelling | Creation | Immediate Win32 error | Sampled NTSTATUS | Version observation |
+| --- | --- | --- | --- | --- |
+| Volume GUID | refused | 87 | `0xc000000d` | child was not created |
+| GLOBALROOT plus native device path | refused | 87 | `0xc000000d` | child was not created |
+| Ordinary DOS | succeeded | 0 | no failure sample | exit 0, exact fixed version stdout, empty stderr |
+
+The NTSTATUS samples may be stale and do not establish a failing parameter or
+cause. For the successful DOS case, the child remained suspended until assigned
+to its owned Job and the image queried through that same retained process handle
+matched the pinned image's full file ID. It then resumed, exited 0 and produced
+the exact 22-byte `2.1.292 (Claude Code)` line including LF. Stdout SHA256 was
+`46ef67828dfb9d34aef4d5df24d529825edb3cfa334f333e445fe5d0f1b14cc2`;
+stderr was empty. Its output readers joined and their handles closed.
+
+The literal command buffer, eight supplied environment values, cwd, creation
+flags and startup/stdio shape were held constant across the three calls.
+Command/environment/cwd lengths were respectively 166/922/138 UTF-16 units;
+application lengths were 194/183/148 in table order. Lengths include terminating
+NULs. Flags were `134743044` (SUSPENDED, UNICODE_ENVIRONMENT,
+EXTENDED_STARTUPINFO_PRESENT and NO_WINDOW). One HANDLE_LIST attribute carried
+three anonymous-pipe handles, with stdin at EOF. Fresh pipe handle values and
+mutable command buffers were necessarily per-case allocations; this is
+structural consistency, not equality of their numeric handle values or of
+earlier runs' differently named fixtures. No raw path, environment value,
+handle or file ID was printed by the measurement.
+
+All three child Jobs reported empty with zero active processes. The supervisor
+also reported empty Job/zero active processes and joined/closed output readers.
+The driver returned in 6.031 seconds, the supervisor in 4.2482648 seconds and the
+helper in 2.8581524 seconds. Case durations were 0.9126255, 0.5417824 and 0.5944191
+seconds in table order. There was no deadline, overflow, stream-read or driver
+error. The fresh fixture was retained; no retry or old-fixture removal occurred.
+
+| Input or observation | SHA256 |
+| --- | --- |
+| Fixed local image review receipt | `a9c38cec7b47197f04e6016eada1e9743e218f3b0ee8d77c1c913a5d2351fa3a` |
+| Measurement helper | `a78aef62fd7f1b98293cf570a87e672fc3cb7b20d922748d7f34931b34adf823` |
+| Outer supervisor | `dfec8f3c7f93181df30c9748031dc664bf89b4079f6733cec6dbf09e2891e119` |
+| One-shot driver | `821dc630262e386a1ed673fa9c0f488faef4c30e7e7614f102c76de5862067f2` |
+| Actual retained outer result | `f38e14ee23f64a46d5e1a6950efac46b6311b0beea7479e8293cbb69881cce53` |
+
+The measurement completed, while `all_version_paths_passed` was false because
+only one spelling started successfully. It supports a narrowly scoped change to
+the downstream application-path selection, followed by a new reviewed SDK build
+and contained attempt. It does not establish an unmodified MXC defect, general
+CreateProcess compatibility, PSEC enforcement, realized Claude environment or
+working authentication, hooks, model access or customer provider integration.
+This successful version observation was **uncontained** and cannot be used as a
+runtime fallback or sandbox qualification.
