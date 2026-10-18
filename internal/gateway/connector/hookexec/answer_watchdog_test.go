@@ -239,4 +239,3 @@ func TestManagedRetryEndsAtTheRestartBudgetWhenItCannotConnect(t *testing.T) {
 		t.Fatalf("stdout %q, want the not-running deny", result.stdout)
 	}
 }
-
