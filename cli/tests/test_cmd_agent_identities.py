@@ -188,6 +188,8 @@ def test_windows_account_lookup_answers_only_a_definite_unknown() -> None:
 
 
 def test_identity_filter_with_a_real_account_or_id_keeps_the_no_match_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    account_known = cmd_agent._account_known
+
     class EmptyClient:
         def agent_identities_all(self, **_kwargs: Any) -> dict[str, Any]:
             return {"enabled": True, "identities": [], "total": 0}
@@ -208,5 +210,5 @@ def test_identity_filter_with_a_real_account_or_id_keeps_the_no_match_text(monke
         import pwd
 
         current = pwd.getpwuid(os.getuid())
-        assert cmd_agent._account_known(str(os.getuid())) is True
-        assert cmd_agent._account_known(current.pw_name) is True
+        assert account_known(str(os.getuid())) is True
+        assert account_known(current.pw_name) is True

@@ -712,7 +712,7 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
         "_check_hermes_hooks",
         lambda _cfg, result: cmd_doctor._emit(
             "pass",
-            "Hermes hooks (fail-open)",
+            cmd_doctor._HERMES_HOOKS_LABEL,
             "healthy: registered",
             r=result,
         ),
