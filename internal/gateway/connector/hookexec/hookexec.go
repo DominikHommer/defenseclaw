@@ -2007,10 +2007,17 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 // its own "launcher is missing" sentence, so the user read reinstall advice
 // for a launcher that exists (rel-1-0-2 GAP-0486). A prompt or tool call
 // gets the structured block of a policy verdict, and a session start (which
-// cannot be blocked) a systemMessage, so only the text shows.
+// cannot be blocked) a systemMessage, so only the text shows. A session end
+// or subagent start cannot be blocked either and has nothing to show: it
+// exits 0 with no output (as Codex's do, emitCodexBlock), so Claude Code
+// does not print that hook's command line after the prompt's block
+// (rel-1-0-3 GAP-0203). The failure is in hook-failures.jsonl.
 func emitPerUserClaudeGatewayDown(opts Options, text string) int {
-	if strings.TrimSpace(opts.Event) == "SessionStart" {
+	switch strings.TrimSpace(opts.Event) {
+	case "SessionStart":
 		fmt.Fprintln(opts.Stdout, `{"systemMessage":`+mustJSONString(text)+`}`)
+		return 0
+	case "SessionEnd", "SubagentStart":
 		return 0
 	}
 	return emitManagedClaudeBlock(opts, text)

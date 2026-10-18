@@ -90,3 +90,36 @@ func TestPerUserClaudeCodeGatewayDownShowsOnlyTheText(t *testing.T) {
 		})
 	}
 }
+
+// rel-1-0-3 GAP-0203: a per-user Claude Code session end (or subagent
+// start) whose gateway is down cannot be blocked and has nothing to show:
+// it exits 0 with no output, so Claude Code prints no hook command line
+// (the Windows launcher guard) after the prompt's block. The failure is
+// still logged.
+func TestPerUserClaudeCodeGatewayDownQuietForUnblockableEvents(t *testing.T) {
+	refused := &stubRT{err: fmt.Errorf("dial: %w", syscall.ECONNREFUSED)}
+	for _, event := range []string{"SessionEnd", "SubagentStart"} {
+		for _, recovery := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s cold start=%v", event, recovery), func(t *testing.T) {
+				var home string
+				result := run(t, "claudecode", refused, func(o *Options) {
+					o.Event = event
+					o.FailMode = "closed"
+					o.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `"}`)
+					if recovery {
+						o.GatewayRecovery = func(context.Context, error) error {
+							return errors.New("hook cold start skipped")
+						}
+					}
+					home = o.Home
+				})
+				if result.code != 0 || strings.TrimSpace(result.stdout) != "" {
+					t.Fatalf("code %d, stdout %q: want exit 0 and no output", result.code, result.stdout)
+				}
+				if _, err := os.Stat(filepath.Join(home, "logs", "hook-failures.jsonl")); err != nil {
+					t.Fatalf("hook failure not logged: %v", err)
+				}
+			})
+		}
+	}
+}
