@@ -507,6 +507,102 @@ func TestBundleRuntimeDigestUsesReceiptSpecificInstalledRoot(t *testing.T) {
 	}
 }
 
+// A settings-only bundle names no file under its version directory, so the
+// gateway cannot find its root in config.yaml. It still digests the bundle in
+// the bundle scope (without the device's rule packs and the other assets
+// outside the bundle), so the digest it reports equals the signed one and the
+// apply confirms (GAP-0158). A bundle that names a bundle file already agreed;
+// a config with no bundle record keeps every rule pack in its digest.
+func TestBundleRuntimeDigestScopesSettingsOnlyBundle(t *testing.T) {
+	_, here, _, _ := runtime.Caller(0)
+	srcPack := filepath.Join(filepath.Dir(here), "..", "..", "policies", "guardrail", "default")
+	const bundleID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A"
+	for _, namesFile := range []bool{false, true} {
+		name := "settings_only"
+		if namesFile {
+			name = "names_bundle_file"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			configPath := filepath.Join(root, "config.yaml")
+			bundleRoot := filepath.Join(root, "bundles", enterprisebundle.VersionDirNameForReceipt(101, bundleID, bundleID))
+			signRoot := t.TempDir()
+			for _, r := range []string{bundleRoot, signRoot} {
+				if err := os.MkdirAll(filepath.Join(r, "discovery"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(r, "discovery", "confidence.yaml"), []byte("version: 1\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.CopyFS(filepath.Join(root, "runtime", "policies", "guardrail", "default"), os.DirFS(srcPack)); err != nil {
+				t.Fatal(err)
+			}
+			body := func(r string) []byte {
+				extra := ""
+				if namesFile {
+					extra = "ai_discovery:\n  confidence_policy_path: " + filepath.Join(r, "discovery", "confidence.yaml") + "\n"
+				}
+				return []byte("config_version: 9\ndata_dir: " + filepath.Join(root, "runtime") + "\n" + extra +
+					"guardrail:\n  enabled: true\n  mode: action\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n    claudecode: {}\n")
+			}
+			rawDevice, rawSigner := body(bundleRoot), body(signRoot)
+			if err := os.WriteFile(configPath, rawDevice, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeRecord := func(bundle bool) {
+				t.Helper()
+				sum := sha256.Sum256(rawDevice)
+				fields := `"actor":"operator:alice"`
+				if bundle {
+					fields = fmt.Sprintf(`"actor":"bundle:%s","bundle_id":%q,"bundle_version":101,"signer_key_id":"k1"`, bundleID, bundleID)
+				}
+				record := fmt.Sprintf(`{"generation":35,"config_sha256":"%x","written_at":"2026-10-18T00:00:00Z",%s}`, sum, fields)
+				if err := os.WriteFile(filepath.Join(root, "config.generation.json"), []byte(record), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeRecord(true)
+			load := func(raw []byte) *config.Config {
+				t.Helper()
+				cfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, raw)
+				if err != nil {
+					t.Fatalf("load: %v", err)
+				}
+				return cfg
+			}
+			signed, err := ComputeEffectivePolicyFor(context.Background(), load(rawSigner), EffectivePolicyOptions{BundleRoot: signRoot, Raw: rawSigner})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The running gateway and `policy digest` pass no bundle root.
+			gw, err := ComputeEffectivePolicyFor(context.Background(), load(rawDevice), EffectivePolicyOptions{Raw: rawDevice})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signed.Digest != gw.Digest {
+				t.Fatalf("signed digest %s != gateway digest %s\nsigned=%v\ngateway=%v", signed.Digest, gw.Digest, signed.Components, gw.Components)
+			}
+			for key := range gw.Components {
+				if strings.HasPrefix(key, "rule_pack:") {
+					t.Fatalf("bundle digest kept the device rule pack %s: %v", key, gw.Components)
+				}
+			}
+			if namesFile {
+				return
+			}
+			writeRecord(false)
+			plain, err := ComputeEffectivePolicyFor(context.Background(), load(rawDevice), EffectivePolicyOptions{Raw: rawDevice})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := plain.Components["rule_pack:global"]; !ok || plain.Digest == gw.Digest {
+				t.Fatalf("a config with no bundle record lost its rule packs: digest=%s components=%v", plain.Digest, plain.Components)
+			}
+		})
+	}
+}
+
 // A rebuild with the live digest is unchanged only while the Rego policy
 // fails (or loads) the same way; a new load failure is published (GAP-0043).
 func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
