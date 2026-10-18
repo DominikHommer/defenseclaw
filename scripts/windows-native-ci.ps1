@@ -4837,6 +4837,11 @@ function Assert-WizardHookRegistration(
                 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
                 'PostCompact', 'Stop'
             )
+            'codex-hooks-v3-generic' = @(
+                'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
+                'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
+                'PostCompact', 'Stop'
+            )
             'codex-hooks-v4' = @(
                 'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
                 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
