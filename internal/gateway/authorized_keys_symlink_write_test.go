@@ -174,6 +174,66 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	}
 }
 
+func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("proc cwd links are Linux operands")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := "printf marker >> /proc/self/cwd/../.ssh/authorized_keys"
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	if !hookpaths.ProcCWDWriteOperand("/proc/123/cwd/../.ssh/authorized_keys") ||
+		hookpaths.ProcCWDWriteOperand("/proc/other/cwd/file") {
+		t.Fatal("proc cwd alias classification changed")
+	}
+	if _, ok := hookpaths.ResolveWriteTarget("/proc/self/cwd/../.ssh/authorized_keys"); ok {
+		t.Fatal("hook proved a process-dependent cwd target")
+	}
+	for _, mode := range []string{"per-user", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("proc cwd alias was treated as an ordinary write")
+			}
+		})
+	}
+}
+
+func TestR103B36DynamicCopyOptionRemainsUnknown(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	command := `read X <<< "--target-directory=$HOME/.ssh"; printf marker > authorized_keys; cp "$X" authorized_keys`
+	args, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := actionfacts.Input{Tool: "Bash", Args: args, Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	if !hookpaths.DynamicCopyProtectedBasename(command, home) ||
+		hookpaths.DynamicCopyProtectedBasename(`cp "$F" out.txt`, home) {
+		t.Fatal("dynamic copy option classification changed")
+	}
+	for _, mode := range []string{"per-user", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("dynamic copy option was treated as a fixed destination")
+			}
+		})
+	}
+}
+
 func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook write targets")

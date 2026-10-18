@@ -748,6 +748,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
+		// The hook and gateway have different proc cwd link targets.
+		if hookpaths.ProcCWDWriteOperand(target) {
+			return true
+		}
 		if isProtected(target) {
 			return true
 		}
@@ -833,6 +837,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if json.Unmarshal(input.Args, &args) == nil {
 			input.Command = args.Cmd
 		}
+	}
+	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
+		return true
 	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)

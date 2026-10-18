@@ -263,6 +263,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 			}
 			unknown := os.IsNotExist(err)
 			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				// The cwd proc link is interpreted by the process opening the
+				// operand. Resolving it in the hook would prove a different path.
+				if ProcCWDWriteOperand(candidate) {
+					return "", nil, linkDepth, false
+				}
 				link, err := os.Readlink(candidate)
 				if err != nil {
 					return "", nil, linkDepth, false
@@ -1232,6 +1237,66 @@ func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
 		return true
 	})
 	return destinations
+}
+
+// DynamicCopyProtectedBasename reports a copy whose source can expand to an
+// option that selects a directory while the final fixed word names a key file.
+func DynamicCopyProtectedBasename(command, home string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 || found {
+			return !found
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static || !slices.Contains(copyPrograms, programBase(program)) {
+			return true
+		}
+		last, static := StaticWord(call.Args[len(call.Args)-1], home)
+		if !static {
+			return true
+		}
+		base := filepath.Base(last)
+		if base != "authorized_keys" && base != "authorized_keys2" {
+			return true
+		}
+		for _, arg := range call.Args[1 : len(call.Args)-1] {
+			if _, static := StaticWord(arg, home); !static {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// ProcCWDWriteOperand identifies proc cwd aliases whose meaning depends on
+// the process opening the path.
+func ProcCWDWriteOperand(path string) bool {
+	if !strings.HasPrefix(path, "/proc/") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, "/proc/"), "/")
+	if len(parts) < 2 || parts[1] != "cwd" {
+		return false
+	}
+	if parts[0] == "self" {
+		return true
+	}
+	if parts[0] == "" {
+		return false
+	}
+	for _, ch := range parts[0] {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func copyDestination(args []string, static []bool, cwd string) string {
