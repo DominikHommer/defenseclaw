@@ -2818,7 +2818,7 @@ func applyRuntimeV8DataDirDefaultsForPlatform(candidate *Config, document *V8YAM
 			standaloneRulePackDefault(candidate, dataDir, goos)
 		}
 	}
-	if !has("openshell", "pack_dir") && !(candidate.Sandbox != nil && has("sandbox", "pack_dir")) {
+	if !has("openshell", "pack_dir") && (candidate.Sandbox == nil || !has("sandbox", "pack_dir")) {
 		candidate.OpenShell.PackDir = join(dataDir, "policies", DefaultOpenShellPackDirName)
 		if candidate.StandaloneEnterprise() {
 			standaloneOpenShellPackDirDefault(candidate, dataDir)
@@ -3138,10 +3138,10 @@ func loadConfigSourceCheckedWithLayout(
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
 	if err := cfg.ValidateSandbox(); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
+		return nil, fmt.Errorf("config: %w", sandboxSettingError("sandbox", err))
 	}
 	if err := cfg.applySandboxPolicy(); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
+		return nil, fmt.Errorf("config: %w", sandboxSettingError("sandbox", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI

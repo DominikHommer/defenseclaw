@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -242,5 +243,41 @@ sandbox: {runtime: openshell}
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("loaded YAML round-trip changed sandbox policy:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestSandboxCommonLoaderErrorsIdentifySettingsWithoutValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, source, path, rule string
+	}{
+		{"axis_unavailable", "sandbox: {enabled: true, runtime: axis}\n", "sandbox.runtime", "AXIS runtime is not available"},
+		{"explicit_overlap", "openshell: {workdir: {masks: [private-left-canary]}}\nsandbox: {workdir: {masks: [private-right-canary]}}\n", "sandbox.workdir.masks", "conflicts"},
+		{"profile_floor", "sandbox: {admin: {allowed_harnesses: [codex]}}\nguardrail: {profiles: {developers: {sandbox: {required_for: [claudecode]}}}}\n", `guardrail.profiles["developers"]`, "outside allowed_harnesses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), DefaultConfigName), []byte("config_version: 9\n"+tc.source))
+			var setting *SettingError
+			if !errors.As(err, &setting) || setting.Path != tc.path || !strings.Contains(setting.Detail(), tc.rule) {
+				t.Fatalf("loader error=%v, setting=%+v; want path=%s rule=%s", err, setting, tc.path, tc.rule)
+			}
+			if strings.Contains(setting.Detail(), "private-left-canary") || strings.Contains(setting.Detail(), "private-right-canary") {
+				t.Fatal("conflicting source values leaked into the diagnostic rule")
+			}
+		})
+	}
+}
+
+func TestSandboxCommonTypedErrorsDoNotReplaceSchemaOrYAMLDiagnostics(t *testing.T) {
+	for _, source := range []string{
+		"config_version: 9\nsandbox: {runtime: unknown}\n",
+		"config_version: 9\nsandbox: {enabled: [unterminated\n",
+	} {
+		err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), []byte(source))
+		var setting *SettingError
+		var schemaError *V8SchemaError
+		var yamlError *V8YAMLError
+		if errors.As(err, &setting) || (!errors.As(err, &schemaError) && !errors.As(err, &yamlError)) {
+			t.Fatalf("source diagnostic replaced by common semantic error: %v", err)
+		}
 	}
 }

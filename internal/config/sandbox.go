@@ -111,13 +111,14 @@ func (c *Config) EffectiveSandboxPolicy() (OpenShellConfig, error) {
 		{"required_pack_digest", o.Admin.RequiredPackDigest, s.Admin.RequiredPackDigest},
 	} {
 		if pair.old != "" && pair.next != "" && pair.old != pair.next {
-			return OpenShellConfig{}, fmt.Errorf("sandbox.admin.%s conflicts with openshell.admin.%s", pair.key, pair.key)
+			path := "sandbox.admin." + pair.key
+			return OpenShellConfig{}, settingErrorAt(path, fmt.Errorf("%s conflicts with openshell.admin.%s", path, pair.key))
 		}
 	}
 	var err error
 	o.Admin, err = TightenOpenShellAdmin(o.Admin, &s.Admin)
 	if err != nil {
-		return OpenShellConfig{}, fmt.Errorf("sandbox.admin: %w", err)
+		return OpenShellConfig{}, sandboxSettingError("sandbox.admin", fmt.Errorf("sandbox.admin: %w", err))
 	}
 	return o, nil
 }
@@ -137,7 +138,7 @@ func restoreSandboxConfig(c *Config, raw []byte, dataDir string) error {
 		return nil
 	}
 	if node.Kind != yaml.MappingNode {
-		return errors.New("sandbox: expected a configuration mapping")
+		return settingErrorAt("sandbox", errors.New("sandbox: expected a configuration mapping"))
 	}
 	if err := sandboxSourceConflicts(v8YAMLMapValue(root, "openshell"), node, ""); err != nil {
 		return err
@@ -247,7 +248,8 @@ func sandboxSourceConflicts(old, next *yaml.Node, prefix string) error {
 		return err
 	}
 	if !reflect.DeepEqual(a, b) {
-		return fmt.Errorf("sandbox.%s conflicts with explicitly configured openshell.%s; use one common policy source", prefix, prefix)
+		path := "sandbox." + prefix
+		return settingErrorAt(path, fmt.Errorf("%s conflicts with explicitly configured openshell.%s; use one common policy source", path, prefix))
 	}
 	return nil
 }
@@ -257,13 +259,13 @@ func (c *Config) ValidateSandbox() error {
 		return nil
 	}
 	if c.SecureClientIntegration() {
-		return errors.New("sandbox: common runtime configuration is not supported with the Secure Client integration")
+		return settingErrorAt("sandbox", errors.New("sandbox: common runtime configuration is not supported with the Secure Client integration"))
 	}
 	if err := validateOpenShellEnum("sandbox.runtime", c.Sandbox.Runtime, true, "auto", "openshell", "axis"); err != nil {
-		return err
+		return settingErrorAt("sandbox.runtime", errors.New("sandbox.runtime: select auto, openshell or axis"))
 	}
 	if c.Sandbox.Enabled && c.SandboxDefaultRuntime() == "axis" {
-		return errors.New("sandbox.runtime: AXIS runtime is not available in this build; keep sandbox.enabled false until its containment and execution gates are qualified")
+		return settingErrorAt("sandbox.runtime", errors.New("sandbox.runtime: AXIS runtime is not available in this build; keep sandbox.enabled false until its containment and execution gates are qualified"))
 	}
 	policy, err := c.EffectiveSandboxPolicy()
 	if err != nil {
@@ -273,7 +275,10 @@ func (c *Config) ValidateSandbox() error {
 	view.OpenShell = policy
 	view.OpenShell.Enabled = c.SandboxRuntimeEnabled("openshell") && c.SandboxDefaultRuntime() != "axis"
 	if err := view.ValidateOpenShell(); err != nil {
-		return fmt.Errorf("sandbox: %s", strings.ReplaceAll(err.Error(), "openshell.", "sandbox."))
+		if sandboxErrorIsTyped(err) {
+			return err
+		}
+		return sandboxSettingError("sandbox", fmt.Errorf("sandbox: %s", strings.ReplaceAll(err.Error(), "openshell.", "sandbox.")))
 	}
 	return view.validateSandboxProfiles()
 }
@@ -292,4 +297,24 @@ func (c *Config) applySandboxPolicy() error {
 	policy.Enabled = c.SandboxRuntimeEnabled("openshell") && c.SandboxDefaultRuntime() != "axis"
 	c.OpenShell = policy
 	return nil
+}
+
+// Keep the original typed source/profile error when one exists. Only common
+// loader semantic refusals need a SettingError for field-level diagnostics.
+func sandboxErrorIsTyped(err error) bool {
+	var setting *SettingError
+	var yamlError *V8YAMLError
+	var schemaError *V8SchemaError
+	var semanticError *V8SemanticError
+	var profileError *UnknownGuardrailProfileError
+	var pathError *V8ConfigPathError
+	return errors.As(err, &setting) || errors.As(err, &yamlError) || errors.As(err, &schemaError) ||
+		errors.As(err, &semanticError) || errors.As(err, &profileError) || errors.As(err, &pathError)
+}
+
+func sandboxSettingError(path string, err error) error {
+	if err == nil || sandboxErrorIsTyped(err) {
+		return err
+	}
+	return settingErrorAt(path, err)
 }
