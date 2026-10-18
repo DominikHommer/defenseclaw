@@ -17,10 +17,14 @@
 package gateway
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -155,5 +159,87 @@ observability: {}
 		if value.Field(i).IsZero() {
 			t.Errorf("registry openai entry lost %s", name)
 		}
+	}
+}
+
+// GAP-0361 / #1099 criterion "a connector call through the proxy for that
+// provider is still allowed": after a 1.0.1 or 1.0.2 config_version 9
+// config names a built-in provider again in llm_providers.custom, a
+// passthrough call to that entry's domain is classified known and forwarded,
+// a call to the built-in's own domain is still known, and the provider the
+// proxy builds for the instance carries the entry's extra_headers. Before the
+// registry carries the entry, the same call is refused (fail closed).
+func TestProxyCallToASameNameCustomProviderIsStillAllowed(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_same_name","object":"response"}`))
+	}))
+	defer upstream.Close()
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", filepath.Join(dir, "custom-providers.json"))
+	t.Cleanup(func() { _ = ReloadProviderRegistry() })
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatal(err)
+	}
+
+	proxy := newPassthroughProxy(t)
+	body := mustJSON(t, map[string]interface{}{"model": "gpt-4.1", "input": "hi"})
+	if rec := postPassthrough(t, proxy, upstream.URL, "/v1/responses", nil, body); rec.Code != http.StatusForbidden {
+		t.Fatalf("before the custom entry the call = %d, want 403 (unknown domain): %s", rec.Code, rec.Body.String())
+	}
+
+	raw := []byte(`config_version: 9
+data_dir: ` + dir + `
+llm_providers:
+  custom:
+  - name: OpenAI
+    domains: [` + u.Hostname() + `]
+    env_keys: [TEAM_OPENAI_KEY]
+    base_provider_type: openai
+    base_url: ` + upstream.URL + `/v1
+    extra_headers: {X-Team: sec}
+observability: {}
+`)
+	cfg, err := config.LoadRuntimeV8FromBytes(filepath.Join(dir, "config.yaml"), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := buildGenerationProviders(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyGenerationProviders(providers)
+
+	rec := postPassthrough(t, proxy, upstream.URL, "/v1/responses", nil, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("call through the proxy to the same-name entry = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+	if !isKnownProviderDomain("https://api.openai.com/v1/responses") {
+		t.Fatal("the built-in openai domain is no longer known after the same-name merge")
+	}
+
+	registry, _, _ := providerRegistrySnapshot()
+	built, err := NewProviderForInstance("OpenAI", "openai/gpt-4.1", "sk-test", registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bp, ok := built.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("provider = %T, want *bifrostProvider", built)
+	}
+	if bp.baseURL != upstream.URL+"/v1" {
+		t.Errorf("baseURL = %q, want the custom entry's", bp.baseURL)
+	}
+	if bp.extraHeaders["X-Team"] != "sec" {
+		t.Errorf("extra_headers = %v, want X-Team from the custom entry", bp.extraHeaders)
 	}
 }
