@@ -8,6 +8,7 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,6 +285,31 @@ func TestSandboxStatusNamesTheCurrentProfileAndThePolicyStop(t *testing.T) {
 	has(t, ta.output(), "Stopped", "your profile no longer allows host ports")
 	if strings.Contains(ta.output(), "Your policy") {
 		t.Fatalf("a revoked sandbox names a current profile:\n%s", ta.output())
+	}
+}
+
+// GAP-0080: `sandbox status NAME` asks the daemon to confirm the running
+// sandbox's policy with the organization's gateway first; the other reads of
+// a sandbox do not.
+func TestSandboxStatusAsksForTheConfirmedPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.add(sandboxapi.Sandbox{Name: "dc-a", Harness: "claudecode", Phase: "ready", Pack: "balanced",
+		Profile: "balanced", NetworkMode: "allowlist", Approvals: "triage", WorkdirMode: "copy", OrganizationProfile: "contractors"})
+	if err := ta.Status(context.Background(), "dc-a", OutputText); err != nil {
+		t.Fatal(err)
+	}
+	calls := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if len(calls) == 0 || calls[0].Query != sandboxapi.QueryConfirm+"="+sandboxapi.ConfirmPolicy {
+		t.Fatalf("status reads = %+v, want the confirmed policy asked for", calls)
+	}
+	has(t, ta.output(), "organization profile contractors")
+	ta.fresh()
+	if _, err := ta.daemon.client().Get(context.Background(), "dc-a"); err != nil {
+		t.Fatal(err)
+	}
+	all := ta.daemon.callsTo(http.MethodGet, sandboxapi.PathSandboxes+"/dc-a")
+	if last := all[len(all)-1]; last.Query != "" {
+		t.Fatalf("a plain read asked for the confirmed policy: %+v", last)
 	}
 }
 

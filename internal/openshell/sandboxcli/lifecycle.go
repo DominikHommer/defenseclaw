@@ -198,7 +198,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		a.printStatus(st)
 		return nil
 	}
-	sb, err := api.Get(ctx, name)
+	sb, err := api.GetConfirmed(ctx, name)
 	if err != nil {
 		return apiError(err)
 	}

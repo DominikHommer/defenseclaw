@@ -235,3 +235,158 @@ func TestColdStoppedSandboxKeepsItsRequiredPack(t *testing.T) {
 			v.OrganizationProfile, v.Warnings)
 	}
 }
+
+// GAP-0079: a re-match stopped a sandbox created under balanced (allowlist)
+// for its host ports; after the daemon restarted, its list entry and status
+// read profile strict and network deny, the closed start-up floor's, which
+// stays closed because a revoked registration's floor is never adopted. The
+// views now show the policy it was created with, next to the organization's
+// words for the stop, and the floor stays closed.
+func TestColdRevokedSandboxShowsThePolicyItHad(t *testing.T) {
+	stop := sandboxapi.ProfileStop("host ports", "claudecode", "it-help@example.com")
+	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "dc-a", created)
+		o.listPhases = func(context.Context) (map[string]string, bool) { return map[string]string{"dc-a": "stopped"}, true }
+		doc := map[string]any{"v": 1, "registrations": []daemonRegistration{{ID: "reg-1", Sandbox: "dc-a", Profile: "noports",
+			Digest: "sha256:noports", Floor: closedFloorRegFloor, Confirmed: true, Revoked: true,
+			RevokedReason: stop, StopText: stop, UpdatedAt: time.Now().UTC()}}}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(o.StateDir, sandboxDaemonRegistrationsFile), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: stop}, nil
+	}
+	runPastRevalidate(t, f)
+	f.d.rt.manager.RefreshPolicies()
+	ctl := &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+	ctx := context.Background()
+	list, err := ctl.List(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
+	sb, err := ctl.Get(ctx, "dc-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []sandboxapi.Sandbox{list[0], *sb} {
+		if v.Pack != "balanced" || v.Profile != "balanced" || v.NetworkMode != "allowlist" || v.StopReason != stop ||
+			slices.ContainsFunc(v.Violations, closedFloorDeny) || slices.Contains(v.Warnings, sandboxConfirmingNote) {
+			t.Fatalf("cold view: pack %q profile %q network %q stop %q violations %+v warnings %q", v.Pack, v.Profile,
+				v.NetworkMode, v.StopReason, v.Violations, v.Warnings)
+		}
+	}
+	if !f.d.floorClosed() {
+		t.Fatal("a revoked registration's floor was adopted")
+	}
+}
+
+// newRunningRegroupFixture is a daemon restarted with the sandbox dc-a
+// (created balanced, allowlist) and its registration reg-1 under
+// engineering on file, whose policy/current answer is answer (counted in
+// calls); the start-up confirmation has run.
+func newRunningRegroupFixture(t *testing.T, answer *atomic.Pointer[sandboxrelay.CurrentPolicy], calls *atomic.Int32) (*sandboxDaemonFixture, *managedSandboxController) {
+	t.Helper()
+	created := map[string]any{"pack": "balanced", "profile": "balanced", "network_mode": "allowlist", "approvals": "triage"}
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "dc-a", created)
+		o.listPhases = func(context.Context) (map[string]string, bool) { return map[string]string{"dc-a": "ready"}, true }
+		doc := map[string]any{"v": 1, "registrations": []daemonRegistration{{ID: "reg-1", Sandbox: "dc-a", Profile: "engineering",
+			Digest: "sha256:engineering", Floor: closedFloorRegFloor, UpdatedAt: time.Now().UTC()}}}
+		raw, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(o.StateDir, sandboxDaemonRegistrationsFile), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		calls.Add(1)
+		return *answer.Load(), nil
+	}
+	runPastRevalidate(t, f)
+	if r, _ := f.d.regs.get("dc-a"); !r.Confirmed || r.Profile != "engineering" {
+		t.Fatalf("the start-up confirmation: %+v", r)
+	}
+	return f, &managedSandboxController{Manager: f.d.rt.manager, d: f.d}
+}
+
+// GAP-0080: after a verified regroup `sandbox policy explain` named the new
+// profile, but `sandbox status NAME` of the running sandbox kept the old one
+// until the daemon's next poll (up to a minute). A status now asks the
+// managed gateway for the registration's current policy first; other views
+// of the sandbox (the session's own reads, list) do not.
+func TestSandboxStatusConfirmsTheRegroupedProfile(t *testing.T) {
+	var answer atomic.Pointer[sandboxrelay.CurrentPolicy]
+	var calls atomic.Int32
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering"})
+	f, ctl := newRunningRegroupFixture(t, &answer, &calls)
+	ctx := context.Background()
+
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors"})
+	before := calls.Load()
+	if sb, err := ctl.Get(ctx, "dc-a"); err != nil || sb.OrganizationProfile != "engineering" || calls.Load() != before {
+		t.Fatalf("a plain Get asked the gateway or moved: %+v %v (calls %d -> %d)", sb, err, before, calls.Load())
+	}
+	sb, err := ctl.Get(withSandboxPolicyConfirm(ctx), "dc-a")
+	if err != nil || sb.OrganizationProfile != "contractors" || sb.PolicyDigest != "sha256:contractors" || calls.Load() != before+1 {
+		t.Fatalf("status after the regroup: %+v %v (calls %d -> %d)", sb, err, before, calls.Load())
+	}
+	if r, _ := f.d.regs.get("dc-a"); r.Profile != "contractors" || r.Revoked {
+		t.Fatalf("registration = %+v", r)
+	}
+
+	// A gateway that does not answer leaves the status as the daemon has it.
+	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
+		return sandboxrelay.CurrentPolicy{}, errors.New("connect: connection refused")
+	}
+	if sb, err := ctl.Get(withSandboxPolicyConfirm(ctx), "dc-a"); err != nil || sb.OrganizationProfile != "contractors" || sb.StopReason != "" {
+		t.Fatalf("status with the gateway away: %+v %v", sb, err)
+	}
+}
+
+// GAP-0080: when the regroup's profile no longer allows the sandbox's
+// settings, the status shows the stop and its words instead of the old
+// profile: the confirmation marks the registration revoked and stops the
+// sandbox, as the poll does, once.
+func TestSandboxStatusShowsTheRegroupStop(t *testing.T) {
+	var answer atomic.Pointer[sandboxrelay.CurrentPolicy]
+	var calls atomic.Int32
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:engineering", Profile: "engineering"})
+	f, ctl := newRunningRegroupFixture(t, &answer, &calls)
+	ctx := context.Background()
+	stop := sandboxapi.ProfileStop("host ports", "codex", "it-help@example.com")
+	answer.Store(&sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: stop})
+	sb, err := ctl.Get(withSandboxPolicyConfirm(ctx), "dc-a")
+	if err != nil || sb.StopReason != stop || sb.OrganizationProfile == "engineering" {
+		t.Fatalf("status after the regroup stop: %+v %v", sb, err)
+	}
+	if r, _ := f.d.regs.get("dc-a"); !r.Revoked || r.StopText != stop {
+		t.Fatalf("registration = %+v", r)
+	}
+	// The poll that comes next does not stop it again.
+	if revoked := f.d.pollRegistrations(ctx, false); len(revoked) != 0 {
+		t.Fatalf("the poll stopped it again: %+v", revoked)
+	}
+	stops := 0
+	for _, e := range f.d.rt.manager.ActivitySince(0, "dc-a") {
+		if e.Reason == sandboxPolicyStopReason && e.Message == stop {
+			stops++
+		}
+	}
+	if stops > 1 {
+		t.Fatalf("%d policy stops in the feed", stops)
+	}
+}
