@@ -5,10 +5,10 @@
 
 This is source for a separate Linux amd64 experiment. Its compiled registry
 admits only receipt SHA256
-`4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621`
-for the four fixed contributor cases and the exact reviewed e054 peer/static
-Bubblewrap and d074 payload artifacts. No peer, Bubblewrap or payload execution
-has been performed by this harness. Nothing here activates a customer runtime.
+`9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`
+for the four fixed contributor cases and the exact reviewed aa215 peer,
+unchanged e054 static Bubblewrap closure, and d074 payload artifacts. No peer,
+Bubblewrap or payload execution has been performed by this harness. Nothing here activates a customer runtime.
 
 The separate `axis-native-harness-build.yml` workflow builds this fixed wrapper
 twice with Go1.26.5, `CGO_ENABLED=0` and independent build caches. It verifies the

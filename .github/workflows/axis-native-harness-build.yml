@@ -119,9 +119,9 @@ jobs:
               target.write_bytes(raw)
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           registry = Path('test/e2e/axis/native-peer/harness/artifact.go').read_bytes()
-          receipt_sha = '4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621'
+          receipt_sha = '9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db'
           registry_sha = hashlib.sha256(registry).hexdigest()
-          if registry_sha != '93a7d05a293ed5c9ad034e346ada3ed8c601a431714f24d1d75212b4f00ebfea' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
+          if registry_sha != '538a63391349e6eba6c689170ed86e7b78836167c21022373a54bc355425f971' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
               raise SystemExit('exact reviewed fixed-contributor registry source required')
           (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY

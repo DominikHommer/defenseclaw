@@ -61,7 +61,7 @@ type reviewedRegistry struct {
 // This entry admits only the four fixed contributor cases and these exact
 // independently reviewed artifacts. It grants no production/provider authority.
 // No CLI, environment, discovery or caller digest may replace these pins.
-const fixedContributorReceiptSHA = "4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621"
+const fixedContributorReceiptSHA = "9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db"
 
 var liveRegistry = fixedContributorRegistry()
 
@@ -82,11 +82,11 @@ func fixedContributorRegistry() reviewedRegistry {
 			StaticClosureSHA:        "a28d984758b82397f371e4b7bb785d274005404d2546d606e2319dc0aaf33e56",
 			PayloadSourceSHA:        "40e6e1bccb635385cdab82e0969de893cb9e5c9d1aeb1499a2446623a9cca986",
 			Builds: []buildIdentity{
-				{Role: "peer_and_static_bwrap", Commit: "e054b7c6f3eacd49135a59f6d0abcd623be3955f", Run: 39137571404, Artifact: 12140317596, ArchiveSHA: "4796180dca73d873c04132b7bc715d7c28dfc5168fb22a44002088f194853a7a", ProvenanceSHA: "494dfe47b485bbe7246b0c0e3ac5fbb828191c8f88c8bf76fc766b1e839f264a"},
+				{Role: "peer_and_static_bwrap", Commit: "aa21514cf1a1ce7c17ddd4a06d76efc001c7d5d7", Run: 39148188923, Artifact: 12144198239, ArchiveSHA: "14752d1506e9f206b5f2c0c5f227efe0fdccee5594530e9e0b7e3b06ba5405a3", ProvenanceSHA: "2223dd9576928daabfa41288c38810568215faf000cd161ec2a5bbf680d6a3e3"},
 				{Role: "fixed_payload", Commit: "d07485c4cc8ecf8ab7db1a0121ac61a6a8b636f3", Run: 39134453264, Artifact: 12138953410, ArchiveSHA: "251779fc9462ca8f49014dceb6c86b633c86712b488d009a4a61e9095df9c401", ProvenanceSHA: "ae7d3700b3a8f20236cbef90e249f2c529103747e79d8c3473042b9fd5259a98"},
 			},
 			Images: []imageIdentity{
-				{Role: "peer", Path: "images/peer", SHA: "03672f6c94a05a29f640d0f9d40181eeafdd75af691e95023fa9a236e63fe70b", Size: 2706904},
+				{Role: "peer", Path: "images/peer", SHA: "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665", Size: 2722752},
 				{Role: "static_musl_bwrap", Path: "images/bwrap-static-musl", SHA: "da4b55953dbc5843e712edf8f1603637926cfb1cd64e6fcb9a69d914b347e9e9", Size: 194488},
 				{Role: "fixed_payload", Path: "images/fixed-payload", SHA: "d2d2ac02859541bbc03eaae305a8b1f833338a7783f8b31e57046e5dd4e4533c", Size: 1929342},
 			},
