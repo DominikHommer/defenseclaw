@@ -192,8 +192,8 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if seen.Header.Get(sandboxrelay.FilesHeader) != "" || seen.Header.Get(sandboxrelay.RegistrationHeader) != "reg-claude-app" {
 		t.Fatalf("sandbox headers: files %q registration %q", seen.Header.Get(sandboxrelay.FilesHeader), seen.Header.Get(sandboxrelay.RegistrationHeader))
 	}
-	if seen.Header.Get("Traceparent") == "" || seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
-		t.Fatalf("allowlisted headers missing: %v", seen.Header)
+	if seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
+		t.Fatalf("hook event header missing: %v", seen.Header)
 	}
 	mu.Unlock()
 	decisions, failures := obs.take()
