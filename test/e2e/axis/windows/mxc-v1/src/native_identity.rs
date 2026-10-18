@@ -13,7 +13,7 @@ use std::path::Path;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::NtOpenFile;
 use windows::Win32::Foundation::{
-    HANDLE, HLOCAL, LocalFree, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING,
+    ERROR_NO_TOKEN, HANDLE, HLOCAL, LocalFree, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::GetAppContainerFolderPath;
@@ -27,8 +27,19 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
-use windows::Win32::System::Threading::OpenProcessToken;
-use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::System::Threading::{GetCurrentThread, OpenProcessToken, OpenThreadToken};
+use windows::core::{GUID, HRESULT, PCWSTR, PWSTR};
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    #[link_name = "SHGetKnownFolderPath"]
+    fn known_folder_path(
+        identifier: *const GUID,
+        flags: u32,
+        token: HANDLE,
+        result: *mut PWSTR,
+    ) -> HRESULT;
+}
 
 #[link(name = "ntdll")]
 unsafe extern "system" {
@@ -102,7 +113,48 @@ fn sid_range(bytes: &[u8], address: usize) -> Result<std::ops::Range<usize>> {
     Ok(offset..end)
 }
 
+fn require_process_identity_context() -> Result<()> {
+    let mut token = HANDLE::default();
+    match unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) } {
+        Ok(()) => {
+            let _token = owned(token)?;
+            anyhow::bail!("native folder query thread has an unexpected token");
+        }
+        Err(error) => ensure!(
+            error.code() == HRESULT::from_win32(ERROR_NO_TOKEN.0),
+            "native folder query thread identity is unknown"
+        ),
+    }
+    Ok(())
+}
+
+fn caller_local_app_data() -> Result<OsString> {
+    require_process_identity_context()?;
+    // Knownfolders.h FOLDERID_LocalAppData. Query only: DONT_VERIFY avoids
+    // opening/verifying a host profile directory; NO_PACKAGE_REDIRECTION gets
+    // the caller's unredirected base. No CREATE, INIT, default-path assumption,
+    // environment-derived base, thread impersonation or filesystem fallback.
+    const LOCAL_APP_DATA: GUID = GUID::from_u128(0xf1b32785_6fba_4fcf_9d55_7b8e7f157091);
+    const QUERY_FLAGS: u32 = 0x0000_4000 | 0x0001_0000;
+    let mut result = PWSTR::null();
+    let status =
+        unsafe { known_folder_path(&LOCAL_APP_DATA, QUERY_FLAGS, HANDLE::default(), &mut result) };
+    let units = if status.is_ok() {
+        unsafe { bounded_wide(result, 2048) }
+    } else {
+        Err(anyhow::anyhow!("caller native known-folder query refused"))
+    };
+    // The API requires freeing a nonnull out-pointer even on failure. Use the
+    // exact native ABI rather than losing that pointer in Result<PWSTR>.
+    if !result.is_null() {
+        unsafe { CoTaskMemFree(Some(result.0.cast())) };
+    }
+    require_process_identity_context()?;
+    Ok(OsString::from_wide(&units?))
+}
+
 fn native_folder(process: &OwnedHandle) -> Result<OsString> {
+    require_process_identity_context()?;
     let mut raw_token = HANDLE::default();
     unsafe { OpenProcessToken(handle(process), TOKEN_QUERY, &mut raw_token) }
         .map_err(|_| anyhow::anyhow!("same-child token query refused"))?;
@@ -148,6 +200,7 @@ fn native_folder(process: &OwnedHandle) -> Result<OsString> {
         .map_err(|_| anyhow::anyhow!("native AppContainer folder query refused"))?;
     let units = unsafe { bounded_wide(folder, 2048) };
     unsafe { CoTaskMemFree(Some(folder.0.cast())) };
+    require_process_identity_context()?;
     Ok(OsString::from_wide(&units?))
 }
 
@@ -336,8 +389,9 @@ pub(super) fn expected_from_child(
     fixture: &FixtureCustody,
     root: &Path,
 ) -> Result<NativeEnvironmentCustody> {
+    let caller_base = caller_local_app_data()?;
     let folder = native_folder(process)?;
-    let expected = ExpectedEnvironment::from_native_folder(root, &folder)?;
+    let expected = ExpectedEnvironment::from_caller_profile(root, &caller_base, &folder)?;
     let directories = pin_private_directories(fixture, &expected)?;
     Ok(NativeEnvironmentCustody {
         expected,

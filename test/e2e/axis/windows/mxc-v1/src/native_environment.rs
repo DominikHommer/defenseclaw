@@ -49,26 +49,54 @@ fn disk_units(value: &OsStr) -> io::Result<Vec<u16>> {
     Ok(value.to_vec())
 }
 
+fn profile_component(remainder: &[u16]) -> io::Result<&[u16]> {
+    let parts: Vec<_> = remainder.split(|unit| *unit == 92).collect();
+    if parts.len() != 2
+        || parts[1] != [65, 67]
+        || parts[0].is_empty()
+        || parts[0].len() > 128
+        || !parts[0].iter().all(|unit| {
+            (48..=57).contains(unit)
+                || (65..=90).contains(unit)
+                || (97..=122).contains(unit)
+                || [45, 46, 95].contains(unit)
+        })
+    {
+        return Err(io::Error::other("native profile component shape refused"));
+    }
+    Ok(parts[0])
+}
+
 impl ExpectedEnvironment {
+    // GetAppContainerFolderPath binds the same-child SID to the CALLER's user
+    // profile. Require that exact trusted known-folder base; carry only its
+    // one validated profile component into the already held fresh fixture.
+    // Neither source path is opened here or accepted from a child environment.
+    pub(super) fn from_caller_profile(
+        root: &Path,
+        caller_local_app_data: &OsStr,
+        native_folder: &OsStr,
+    ) -> io::Result<Self> {
+        let mut prefix = disk_units(caller_local_app_data)?;
+        prefix.extend(r"\Packages\".encode_utf16());
+        let native = disk_units(native_folder)?;
+        let remainder = native
+            .strip_prefix(prefix.as_slice())
+            .ok_or_else(|| io::Error::other("native profile caller known-folder base differs"))?;
+        let profile = profile_component(remainder)?;
+        let mapped = root
+            .join(r"home\AppData\Local\Packages")
+            .join(OsString::from_wide(profile))
+            .join("AC");
+        Self::from_native_folder(root, mapped.as_os_str())
+    }
+
     pub(super) fn from_native_folder(root: &Path, folder: &OsStr) -> io::Result<Self> {
         let mut prefix = disk_units(root.as_os_str())?;
         prefix.extend(r"\home\AppData\Local\Packages\".encode_utf16());
         let value = disk_units(folder)?;
         let remainder = value.strip_prefix(prefix.as_slice()).ok_or_else(refused)?;
-        let parts: Vec<_> = remainder.split(|unit| *unit == 92).collect();
-        if parts.len() != 2
-            || parts[1] != [65, 67]
-            || parts[0].is_empty()
-            || parts[0].len() > 128
-            || !parts[0].iter().all(|unit| {
-                (48..=57).contains(unit)
-                    || (65..=90).contains(unit)
-                    || (97..=122).contains(unit)
-                    || [45, 46, 95].contains(unit)
-            })
-        {
-            return Err(refused());
-        }
+        profile_component(remainder)?;
         let local_app_data = PathBuf::from(folder);
         let temporary = local_app_data.join("Temp");
         disk_units(temporary.as_os_str())?;
@@ -159,6 +187,68 @@ mod tests {
         ] {
             assert!(ExpectedEnvironment::from_native_folder(root, OsStr::new(folder)).is_err());
         }
+        // Same native profile authority, different caller/private user roots.
+        // Only the SID-derived component transfers; host paths never do.
+        let caller = OsStr::new(r"C:\Users\fixed-caller\AppData\Local");
+        let native =
+            OsStr::new(r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\AC");
+        let mapped = ExpectedEnvironment::from_caller_profile(root, caller, native).unwrap();
+        assert_eq!(
+            mapped.local_app_data,
+            root.join(r"home\AppData\Local\Packages\native-profile_1\AC")
+        );
+        assert_eq!(mapped.temporary, mapped.local_app_data.join("Temp"));
+        assert_eq!(mapped.temporary_alias, mapped.temporary);
+        // A different mounted caller base is permissible only when BOTH
+        // independently queried native values match it exactly.
+        let unicode_base = OsStr::new(r"\\?\D:\fixed-λ-雪\local");
+        let unicode_native = OsStr::new(r"D:\fixed-λ-雪\local\Packages\native-profile_1\AC");
+        assert_eq!(
+            ExpectedEnvironment::from_caller_profile(root, unicode_base, unicode_native).unwrap(),
+            mapped
+        );
+        for candidate in [
+            r"C:\Users\other-caller\AppData\Local\Packages\native-profile_1\AC",
+            r"C:\Users\fixed-caller\AppData\Local-extra\Packages\native-profile_1\AC",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\extra\AC",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile_1\LocalCache",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\..\AC",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\native:ads\AC",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\native-profile.\AC",
+            r"C:\Users\fixed-caller\AppData\Local\Packages\λ-雪\AC",
+            r"\\server\share\Packages\native-profile_1\AC",
+        ] {
+            assert!(
+                ExpectedEnvironment::from_caller_profile(root, caller, OsStr::new(candidate))
+                    .is_err()
+            );
+        }
+        assert!(
+            ExpectedEnvironment::from_caller_profile(Path::new(r"\\server\share"), caller, native)
+                .is_err()
+        );
+        assert!(
+            ExpectedEnvironment::from_caller_profile(
+                root,
+                OsStr::new(r"C:\Users\fixed-caller\AppData\Local\.."),
+                native
+            )
+            .is_err()
+        );
+        let oversize_profile = format!(
+            r"C:\Users\fixed-caller\AppData\Local\Packages\{}\AC",
+            "x".repeat(129)
+        );
+        assert!(
+            ExpectedEnvironment::from_caller_profile(root, caller, OsStr::new(&oversize_profile))
+                .is_err()
+        );
+        let mut frame = Vec::new();
+        mapped.write_to(&mut frame).unwrap();
+        assert_eq!(
+            ExpectedEnvironment::read_from(frame.as_slice(), root).unwrap(),
+            mapped
+        );
     }
 
     #[test]
