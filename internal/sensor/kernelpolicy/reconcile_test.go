@@ -178,7 +178,7 @@ func TestReadyUsersEnforceAndTheRestBurnIn(t *testing.T) {
 	for _, u := range h.status().UIDs {
 		states[u.UID] = u.State
 	}
-	if states[1001] != UIDEnforcing || states[1002] != UIDBurnIn {
+	if !Enforced(states[1001]) || states[1002] != UIDBurnIn {
 		t.Fatalf("states = %v", states)
 	}
 	// Each policy carries only its own users.
@@ -691,7 +691,7 @@ func TestOnlyActionConnectorsAreAnchoredForEnforcement(t *testing.T) {
 	for _, u := range state.UIDs {
 		states[u.UID] = u
 	}
-	if states[1001].State != UIDEnforcing {
+	if !Enforced(states[1001].State) {
 		t.Fatalf("alice has an action connector: %+v", states[1001])
 	}
 	if states[1002].State != UIDInactive || states[1002].Reason != ReasonGuardrailObserve {
@@ -804,7 +804,9 @@ func TestApprovedUserWithNothingToAnchorIsInactive(t *testing.T) {
 	if p, ok := h.tg.find(FamilyControls); !ok || !p.Mode.Enforcing() {
 		t.Fatalf("controls after an install appeared: %+v", p)
 	}
-	if u := uidStatus(h.status(), 1003); u.State != UIDEnforcing {
+	// No session of carol's runs yet: enforce is loaded for her, nothing is
+	// denied, so she is armed (GAP-0166).
+	if u := uidStatus(h.status(), 1003); u.State != UIDArmed {
 		t.Fatalf("carol = %+v", u)
 	}
 }
