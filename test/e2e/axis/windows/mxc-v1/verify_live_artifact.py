@@ -124,6 +124,7 @@ PURE_STARTUP_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-probe": [
         "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
         "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
+        "probe::native_environment::tests::native_profile_refusal_classifier_reports_bounded_relationships",
     ],
 }
 
@@ -134,6 +135,8 @@ def pure_environment_tests(mode: str) -> dict[str, list[str]]:
         for binary, names in PURE_STARTUP_ENVIRONMENT_TESTS.items():
             tests[binary].extend(names)
     return tests
+
+
 PURE_DLL_TESTS = {
     "defenseclaw-axis-windows-psec-dll-child": [
         "dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",

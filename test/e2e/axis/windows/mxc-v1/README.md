@@ -3,7 +3,7 @@
 
 # Native Windows current-MXC PSEC contributor probe
 
-## Pending boundary startup-context correction
+## Boundary startup context and refusal-only diagnostics
 
 The closed `standalone-boundary` build slice preserves the existing three-image
 native-identity boundary contract. Its new source validates and freezes the
@@ -20,16 +20,33 @@ mapping, held NT-relative private directories and frame-plus-EOF assertions are
 retained. Original startup values are rechecked around the native queries and
 directory binding. No extra native prefix, observed-child environment value,
 host profile grant, namespace change or fallback is accepted. This removes a
-parent context change after DLL imports; it does not establish why Case10's
-native folder comparison refused, or guarantee that the new attempt will pass.
+parent context change after DLL imports. The separately reviewed d838 build
+passed its twenty-seven selected Rust tests, but one fresh Case11 still refused
+with `native profile caller known-folder base differs` after its argv case.
+The outer Job ended empty; the failed fixture was retained. The startup checks
+did not resolve this comparison or establish its cause. See
+[the actual result](manual-results.md#boundary-startup-context-kept-stable-comparison-still-refuses).
 
-Two new pure snapshot/validation tests are mandatory only for this boundary
-slice. Its build runs twenty-seven exact Rust tests and packages three PEs plus
+The two snapshot/validation tests are mandatory only for this boundary
+slice. Its recorded build ran twenty-seven exact Rust tests and packaged three PEs plus
 the existing DLL protocol/child source used by compile and pure-test gates.
 Ordinary DLL/Claude builds retain twenty-five tests; the separate uncontained
 control retains twenty-six. Dependency locks and all SDK overlay fingerprints
-are unchanged. This source has not received Rust compilation or a new native
-boundary result; source and artifact review must precede any fresh run.
+are unchanged.
+
+The next source adds refusal-only classification of the already returned caller
+and same-child native folder strings. It emits only fixed categories and
+booleans: optional verbatim-disk prefix, exact/Windows ordinal case-insensitive
+prefix relationships, exact native suffix shape, and derived-base equality to
+the frozen caller base and startup LOCALAPPDATA, including caller-to-startup
+equality. Invalid shape and failed
+ordinal comparison remain unknown. No raw strings, path hashes, lengths or
+identity values are printed. These are string relationships, without alias or
+object-identity equivalence. Diagnostics never feed admission: the exact
+prefix, same-child authority and held-directory requirements remain unchanged.
+A new pure callback test brings the boundary build requirement to twenty-eight
+Rust tests. This diagnostic source has not been compiled or run; independent
+source and artifact review must precede another fresh attempt.
 
 ## Literal DOS application and held-image gate
 

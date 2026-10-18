@@ -804,3 +804,50 @@ provider and does not reproduce or establish a fix to unmodified MXC. The
 earlier environment-binding refusal remains a separate qualification gate.
 The compatibility chronology is tracked in
 [MXC issue 1523](https://github.com/microsoft/mxc/issues/1523).
+
+## Boundary startup context kept stable: comparison still refuses
+
+[Locked build 39165501746](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39165501746)
+at `d83888d0340aecf7c312a513def41f9e97d00ce1` built the closed three-image
+`standalone-boundary` slice. Independent inert reviews verified twenty-nine
+unique ZIP members, twenty-five manifest hashes, seventeen exact Git sources,
+unchanged combined/upstream locks and all sixteen SDK overlay fingerprints.
+The actual CI log reports all twenty-seven selected Rust tests passing exactly
+once, including both new startup snapshot tests. CI did not execute PSEC or the
+contributor workload.
+
+One separately reviewed Case11 then failed. Its literal argv case emitted
+`FIXED_ARGV_PASS`, exited zero and signaled its retained direct handle. The next
+case refused with `native profile caller known-folder base differs`. By the
+frozen source's error ordering, the original eight startup values passed their
+shape and unchanged checks, the caller known-folder query succeeded, and the
+same held child's SID/folder query succeeded. The following exact normalized
+UTF-16 prefix comparison failed. Profile-component admission, private profile
+directory binding, the stdin expectation frame and the boundary child's first
+environment/write/socket assertions were not reached.
+
+The driver returned in 3.469 seconds; the probe observation took 3.3969189
+seconds. The outer Job was assigned before resume and ended empty with zero
+active processes. No outer deadline, output overflow, stream-read error or
+driver error was reported. The fresh failed fixture was retained. Case10 and
+earlier failures remain preserved; Case09 was never executed, and Case11 was
+not retried.
+
+| Input or observation | SHA256 |
+| --- | --- |
+| ZIP, artifact `12151285606` | `67016cd1dbfa1fbd66120735e69a8ab62f9720deb987e627fb39311e69089d60` |
+| Provenance | `3e42961dbd1f8de73ae0c7a3a970af4e3630146fd9d18d0b65a300876dfc1324` |
+| Root verification receipt | `b762183a422f9badf92728f85790fa5d02dfebfff73867d6f5e101ec9e40e9cb` |
+| Native probe image | `69b0f1b6bd35985c3cd9d7d62b385b0cae5203eb6ea6e0fcdc16667add26e8bb` |
+| Go custody image | `32f21133e5037b4408fe6df89128e5b4e98014f4b4e5a7bb66ae130a9f13de77` |
+| One-shot driver | `0e4a8bb220af922f9f822ca4feb61ac7d8f15a816a5202f223da57c02aa71424` |
+| Actual live result | `b0b6cc3a2b3c386bccec1736ec56446a0e7cf04c47febbfdb1ac2317512a4898` |
+
+The parent kept its original eight path values across these native queries,
+but that change did not resolve the refusal. The comparison already removes a
+recognized optional verbatim-disk prefix; its remaining exact comparison is
+case-sensitive. The evidence contains neither returned path, so it cannot
+distinguish casing, a different native base or another suffix/shape mismatch.
+No cache cause, alternate admitted prefix, filesystem/network enforcement,
+resource-cleanup completion or customer-provider qualification follows from
+this result. No comparison, grant or policy was relaxed after this attempt.

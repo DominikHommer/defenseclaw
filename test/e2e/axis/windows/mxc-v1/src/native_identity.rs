@@ -3,7 +3,9 @@
 
 // Parent-only, read/query operations. No profile/namespace creation, token
 // adjustment, impersonation, ACL mutation or child environment lookup.
-use super::native_environment::{ExpectedEnvironment, StartupEnvironment};
+use super::native_environment::{
+    ExpectedEnvironment, StartupEnvironment, classify_profile_refusal,
+};
 use anyhow::{Context, Result, ensure};
 use std::ffi::OsString;
 use std::mem::size_of;
@@ -39,6 +41,39 @@ unsafe extern "system" {
         token: HANDLE,
         result: *mut PWSTR,
     ) -> HRESULT;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "CompareStringOrdinal"]
+    fn compare_string_ordinal(
+        first: *const u16,
+        first_count: i32,
+        second: *const u16,
+        second_count: i32,
+        ignore_case: i32,
+    ) -> i32;
+}
+
+fn ordinal_equal(first: &[u16], second: &[u16]) -> Option<bool> {
+    // Diagnostic only, never used by admission. Fixed explicit lengths avoid
+    // native NUL scanning; zero/unknown native return remains unknown.
+    if first.is_empty() || second.is_empty() || first.len() > 2060 || second.len() > 2060 {
+        return None;
+    }
+    match unsafe {
+        compare_string_ordinal(
+            first.as_ptr(),
+            first.len() as i32,
+            second.as_ptr(),
+            second.len() as i32,
+            1,
+        )
+    } {
+        1 | 3 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
 }
 
 #[link(name = "ntdll")]
@@ -425,7 +460,22 @@ pub(super) fn expected_from_child(
     caller.require_unchanged()?;
     let folder = native_folder(process)?;
     caller.require_unchanged()?;
-    let expected = ExpectedEnvironment::from_caller_profile(root, &caller.local_app_data, &folder)?;
+    let expected =
+        match ExpectedEnvironment::from_caller_profile(root, &caller.local_app_data, &folder) {
+            Ok(expected) => expected,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    classify_profile_refusal(
+                        &caller.local_app_data,
+                        &folder,
+                        caller.startup.local_app_data(),
+                        ordinal_equal,
+                    )
+                );
+                return Err(error.into());
+            }
+        };
     let directories = pin_private_directories(fixture, &expected)?;
     caller.require_unchanged()?;
     Ok(NativeEnvironmentCustody {

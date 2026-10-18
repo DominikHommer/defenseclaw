@@ -121,6 +121,124 @@ impl StartupEnvironment {
         }
         Ok(())
     }
+
+    pub(super) fn local_app_data(&self) -> &OsStr {
+        &self.values["LOCALAPPDATA"]
+    }
+}
+
+// Refusal-only evidence. These relationships never authorize a path or alter
+// the exact mapper below. No input string, hash, length or identity is retained.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ProfileRefusalClassification {
+    category: &'static str,
+    caller_verbatim_disk: bool,
+    native_verbatim_disk: bool,
+    exact_prefix: Option<bool>,
+    ordinal_prefix: Option<bool>,
+    native_suffix_shape: bool,
+    native_base_exact_caller: Option<bool>,
+    native_base_ordinal_caller: Option<bool>,
+    native_base_exact_startup: Option<bool>,
+    native_base_ordinal_startup: Option<bool>,
+    caller_base_exact_startup: Option<bool>,
+    caller_base_ordinal_startup: Option<bool>,
+}
+
+impl std::fmt::Display for ProfileRefusalClassification {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "native profile refusal classification: category={} caller_verbatim_disk={} native_verbatim_disk={} exact_prefix={:?} ordinal_prefix={:?} native_suffix_shape={} native_base_exact_caller={:?} native_base_ordinal_caller={:?} native_base_exact_startup={:?} native_base_ordinal_startup={:?} caller_base_exact_startup={:?} caller_base_ordinal_startup={:?}",
+            self.category,
+            self.caller_verbatim_disk,
+            self.native_verbatim_disk,
+            self.exact_prefix,
+            self.ordinal_prefix,
+            self.native_suffix_shape,
+            self.native_base_exact_caller,
+            self.native_base_ordinal_caller,
+            self.native_base_exact_startup,
+            self.native_base_ordinal_startup,
+            self.caller_base_exact_startup,
+            self.caller_base_ordinal_startup,
+        )
+    }
+}
+
+pub(super) fn classify_profile_refusal(
+    caller: &OsStr,
+    native: &OsStr,
+    startup: &OsStr,
+    ordinal_equal: impl Fn(&[u16], &[u16]) -> Option<bool>,
+) -> ProfileRefusalClassification {
+    let verbatim = |value: &OsStr| {
+        let head: Vec<_> = value.encode_wide().take(7).collect();
+        head.len() == 7
+            && head[..4] == [92, 92, 63, 92]
+            && ((65..=90).contains(&head[4]) || (97..=122).contains(&head[4]))
+            && head[5..] == [58, 92]
+    };
+    let mut result = ProfileRefusalClassification {
+        category: "invalid_path_shape",
+        caller_verbatim_disk: verbatim(caller),
+        native_verbatim_disk: verbatim(native),
+        exact_prefix: None,
+        ordinal_prefix: None,
+        native_suffix_shape: false,
+        native_base_exact_caller: None,
+        native_base_ordinal_caller: None,
+        native_base_exact_startup: None,
+        native_base_ordinal_startup: None,
+        caller_base_exact_startup: None,
+        caller_base_ordinal_startup: None,
+    };
+    let (Ok(caller), Ok(native), Ok(startup)) =
+        (disk_units(caller), disk_units(native), disk_units(startup))
+    else {
+        return result;
+    };
+    result.caller_base_exact_startup = Some(caller == startup);
+    result.caller_base_ordinal_startup = ordinal_equal(&caller, &startup);
+    let mut prefix = caller.clone();
+    prefix.extend(r"\Packages\".encode_utf16());
+    result.exact_prefix = Some(native.starts_with(&prefix));
+    result.ordinal_prefix = native
+        .get(..prefix.len())
+        .map_or(Some(false), |head| ordinal_equal(head, &prefix));
+
+    // Derive a base only from the exact component-boundary suffix accepted by
+    // the existing grammar. A malformed suffix remains unclassified, even if
+    // its leading bytes happen to match the expected caller prefix.
+    let parts: Vec<_> = native.rsplitn(4, |unit| *unit == 92).collect();
+    result.category = "unrecognized_suffix";
+    if parts.len() != 4 || parts[2] != [80, 97, 99, 107, 97, 103, 101, 115] {
+        return result;
+    }
+    let mut tail = parts[1].to_vec();
+    tail.push(92);
+    tail.extend_from_slice(parts[0]);
+    if profile_component(&tail).is_err() || parts[3].len() < 3 {
+        return result;
+    }
+    result.native_suffix_shape = true;
+    let base = parts[3];
+    result.native_base_exact_caller = Some(base == caller.as_slice());
+    result.native_base_ordinal_caller = ordinal_equal(base, &caller);
+    result.native_base_exact_startup = Some(base == startup.as_slice());
+    result.native_base_ordinal_startup = ordinal_equal(base, &startup);
+    result.category = if result.exact_prefix == Some(true) {
+        "exact_prefix"
+    } else if result.ordinal_prefix == Some(true) {
+        "case_only_prefix"
+    } else if result.ordinal_prefix == Some(false)
+        && result.native_base_ordinal_caller == Some(false)
+    {
+        "different_base_string"
+    } else {
+        "ordinal_comparison_unknown"
+    };
+    result
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -276,6 +394,106 @@ impl ExpectedEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_profile_refusal_classifier_reports_bounded_relationships() {
+        // Pure callback model: ASCII ordinal examples are deterministic here;
+        // non-ASCII/native API failure remains unknown rather than guessed.
+        let ordinal = |first: &[u16], second: &[u16]| {
+            if !first.iter().chain(second).all(|unit| *unit <= 127) {
+                return None;
+            }
+            Some(
+                first
+                    .iter()
+                    .map(|unit| (*unit as u8).to_ascii_uppercase())
+                    .eq(second.iter().map(|unit| (*unit as u8).to_ascii_uppercase())),
+            )
+        };
+        let caller = OsStr::new(r"C:\fixed-caller\AppData\Local");
+        let startup = OsStr::new(r"C:\fixed-private\psec-headless-01\home\AppData\Local");
+        let exact = OsStr::new(r"C:\fixed-caller\AppData\Local\Packages\native-profile_1\AC");
+        let same = classify_profile_refusal(caller, exact, startup, ordinal);
+        assert_eq!(same.category, "exact_prefix");
+        assert_eq!(same.exact_prefix, Some(true));
+        assert_eq!(same.ordinal_prefix, Some(true));
+        assert_eq!(same.native_base_exact_caller, Some(true));
+        assert_eq!(same.native_base_ordinal_startup, Some(false));
+        assert_eq!(same.caller_base_exact_startup, Some(false));
+        let prefixed = classify_profile_refusal(
+            caller,
+            OsStr::new(r"\\?\C:\fixed-caller\AppData\Local\Packages\native-profile_1\AC"),
+            startup,
+            ordinal,
+        );
+        assert_eq!(prefixed.category, "exact_prefix");
+        assert!(!prefixed.caller_verbatim_disk && prefixed.native_verbatim_disk);
+        let case = classify_profile_refusal(
+            caller,
+            OsStr::new(r"c:\FIXED-CALLER\appdata\local\Packages\native-profile_1\AC"),
+            startup,
+            ordinal,
+        );
+        assert_eq!(case.category, "case_only_prefix");
+        assert_eq!(case.exact_prefix, Some(false));
+        assert_eq!(case.ordinal_prefix, Some(true));
+        assert_eq!(case.native_base_exact_caller, Some(false));
+        assert_eq!(case.native_base_ordinal_caller, Some(true));
+        let different = classify_profile_refusal(
+            caller,
+            OsStr::new(r"D:\other-caller\AppData\Local\Packages\native-profile_1\AC"),
+            startup,
+            ordinal,
+        );
+        assert_eq!(different.category, "different_base_string");
+        assert_eq!(different.native_base_ordinal_caller, Some(false));
+        let startup_folder = Path::new(startup).join(r"Packages\native-profile_1\AC");
+        let private =
+            classify_profile_refusal(caller, startup_folder.as_os_str(), startup, ordinal);
+        assert_eq!(private.category, "different_base_string");
+        assert_eq!(private.native_base_exact_startup, Some(true));
+        let private_caller = classify_profile_refusal(startup, exact, startup, ordinal);
+        assert_eq!(private_caller.caller_base_exact_startup, Some(true));
+        assert_eq!(private_caller.native_base_exact_caller, Some(false));
+        for malformed in [
+            r"C:\fixed-caller\AppData\Local\Packages\native-profile_1\extra\AC",
+            r"C:\fixed-caller\AppData\Local\Packages\..\AC",
+            r"C:\fixed-caller\AppData\Local\Packages\native-profile_1\LocalCache",
+        ] {
+            let result = classify_profile_refusal(caller, OsStr::new(malformed), startup, ordinal);
+            assert!(!result.native_suffix_shape);
+            assert_eq!(result.native_base_exact_caller, None);
+            assert!(matches!(
+                result.category,
+                "unrecognized_suffix" | "invalid_path_shape"
+            ));
+        }
+        let unknown = classify_profile_refusal(caller, exact, startup, |_, _| None);
+        assert_eq!(unknown.category, "exact_prefix"); // exact bytes remain known
+        assert_eq!(unknown.ordinal_prefix, None);
+        let unknown = classify_profile_refusal(
+            caller,
+            OsStr::new(r"C:\fixed-λ\AppData\Local\Packages\native-profile_1\AC"),
+            startup,
+            ordinal,
+        );
+        assert_eq!(unknown.category, "ordinal_comparison_unknown");
+        let text = different.to_string();
+        assert!(text.len() < 1024);
+        assert!(!text.contains("fixed-caller") && !text.contains("other-caller"));
+        assert!(!text.contains("C:") && !text.contains("D:") && !text.contains("native-profile"));
+        // Diagnostic classification never changes exact admission.
+        let root = Path::new(r"C:\fixed-private\dc-axis-windows-psec-fixed");
+        assert!(ExpectedEnvironment::from_caller_profile(root, caller, exact).is_ok());
+        assert!(
+            ExpectedEnvironment::from_caller_profile(
+                root,
+                caller,
+                OsStr::new(r"c:\FIXED-CALLER\appdata\local\Packages\native-profile_1\AC")
+            )
+            .is_err()
+        );
+    }
 
     fn fixed_startup() -> (Vec<(OsString, OsString)>, PathBuf, PathBuf) {
         let root = Path::new(r"C:\fixed-private\psec-headless-01");

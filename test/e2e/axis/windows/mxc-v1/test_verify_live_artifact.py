@@ -366,6 +366,17 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             self.assertEqual(self.provenance["pure_native_environment_tests"], verify.PURE_ENVIRONMENT_TESTS)
             return
         original = self.provenance["pure_native_environment_tests"]
+        self.provenance["pure_native_environment_tests"] = {
+            binary: [
+                name
+                for name in names
+                if not name.endswith("native_profile_refusal_classifier_reports_bounded_relationships")
+            ]
+            for binary, names in original.items()
+        }
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
+            self.run_verify()
         self.provenance["pure_native_environment_tests"] = verify.PURE_ENVIRONMENT_TESTS
         self.write_artifact()
         with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
