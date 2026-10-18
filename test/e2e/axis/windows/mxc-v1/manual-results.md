@@ -455,3 +455,35 @@ The next investigation must establish the relationship between the native
 profile API's result and the child's explicitly supplied private USERPROFILE.
 No native path values were logged. Full Windows and real Claude acceptance
 remain incomplete.
+
+## Caller-context mapping: known-folder base differs
+
+[Locked build 39144717621](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39144717621)
+at `fcd356d70f19016aa84da6bc96b0efea005319d9` passed six exact pure Rust
+tests, the separate native directory filesystem regression and eleven exact
+SDK tests. Two independent artifact reviews checked all 27 archive members,
+source/lock identity, sixteen reconstructed SDK LF fingerprints and child PE
+imports. The superseded a7 artifact was not executed; planned case09 was held.
+
+Exactly one fresh case10 used frozen reviewed helpers and the corrected build.
+Literal argv passed. The next case refused with `native profile caller
+known-folder base differs`, before the child received its expected environment
+frame or reached credential, write or socket checks. This establishes that the
+queried native path did not match the mapper's exact caller-base prefix; it does
+not establish either actual path, its spelling, or a valid alternate mapping.
+No raw native path values were logged and no expected-path assertion was relaxed.
+
+The driver finished in 3.363 seconds, with a 3.255-second probe observation.
+The owned Job was assigned before resume and ended empty with zero active
+processes. No deadline, overflow or stream-read error was reported. The owned
+synthetic fixture remains under the private case10 evidence directory.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12143247367` | `9d07a3789b6218601eb56a382a15809a95bc266bc661918ee53ade982e4a66bf` |
+| Provenance | `bc06c949c666871f4a38b9b3abda7d85f136f62bac70a4047fb43171c1737ae7` |
+| Root verification receipt | `f5627a068f45a5d25903c750d484556b1094b2c8e5173e2dc2bae401d9c4b3d2` |
+| Actual live result | `6f59697bb5bad56c6afa78a3975c1431c4f8e25dacdb4267e8114d0dc5044b9a` |
+
+Windows boundary and full Claude qualification remain incomplete. A separate
+fixed Claude version slice is source work; it has not executed under current PSEC.

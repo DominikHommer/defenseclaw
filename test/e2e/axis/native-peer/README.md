@@ -78,3 +78,27 @@ Both independent reviews checked the evidence without executing an image.
 Next work is bounded stage/errno diagnostics and a new reviewed build before a
 separate attempt. This failure qualifies neither the payload boundary nor the
 complete provider, Claude, terminal, hooks, model traffic or credentials.
+
+## Diagnostic attempt: pre-exec refusal and a different proc PID view
+
+The separately reviewed diagnostic recipe at
+`8b46c7055b4bc6d61940f3e646d64e7f884bb0b7` ran once in
+[Actions run 39145905366](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39145905366).
+It used the newly reviewed d056 wrapper and c8d4 driver. No earlier artifact
+was retried, and this attempt also failed before the fixed payload started.
+
+The retained wrapper record distinguishes `worker_start_stage=exec_start_refused`
+and `worker_start_errno=eacces`. There was no started child wait, exit status was
+`-1`, and both worker streams were empty. The bounded `/proc/self` observation
+was available and did not match `getpid`. This establishes a different procfs
+PID view inside the wrapper's namespace. It does not prove which syscall failed
+or that the PID-view mismatch caused the refusal; Go's parent-side ID-map writes
+are a source-supported hypothesis.
+
+Both cleanup owners reported success with zero pending owners; there was no
+output truncation. The disposable runner setting again recorded original `1`
+and current `1` after restoration. No fixture was copied because none was created.
+Evidence artifact `12143636345` has 22,001 ZIP bytes and SHA256
+`4ddaab4d1ee5856a1b1e54d95bf17bd74fb20711730d77bff7bdc01f7f192626`.
+The next change must supply a reviewed coherent namespace/procfs bootstrap and
+preserve unprivileged host operation, native custody and policy enforcement.
