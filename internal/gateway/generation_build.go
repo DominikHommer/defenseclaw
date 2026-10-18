@@ -142,12 +142,24 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
-	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
+	dir := strings.TrimSpace(cfg.PolicyDir)
+	if in.offline && dir != "" && !newDigestScope(cfg, in.goos, in.bundleRoot).bundleFile(dir) {
+		// An offline digest (bundle sign and verify) loads Rego only from
+		// the bundle. A policy_dir outside it names the target device's
+		// folder, which the signer need not have, and its Rego is never
+		// digested (the "rego" component below), so it is not read
+		// (GAP-0239).
+		dir = ""
+	}
+	if dir != "" {
 		// A module a standard user could change since the config was
 		// loaded is not loaded as managed policy: the build fails, so a
-		// reload keeps the previous generation (GAP-1499).
-		if err := managedPolicyTreeTrust(cfg, dir); err != nil && !in.offline {
-			return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+		// reload keeps the previous generation (GAP-1499). An offline
+		// digest loads no policy into a gateway.
+		if !in.offline {
+			if err := managedPolicyTreeTrust(cfg, dir); err != nil {
+				return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+			}
 		}
 		prepared, err := policy.Prepare(ctx, dir)
 		switch {

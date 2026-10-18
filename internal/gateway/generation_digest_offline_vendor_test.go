@@ -36,7 +36,14 @@ func TestOfflineSignShippedTemplateMatchesDeviceDigest(t *testing.T) {
 	} {
 		t.Run(tc.goos, func(t *testing.T) {
 			b := shippedTemplateBundle(t, tc.template, false)
-			signed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), b, t.TempDir(), []string{tc.goos}, offlineTestDigester)
+			var signed map[string]string
+			var err error
+			stderr := captureStderr(t, func() {
+				signed, err = enterprisebundle.EffectivePolicyDigests(context.Background(), b, t.TempDir(), []string{tc.goos}, offlineTestDigester)
+			})
+			if strings.Contains(stderr, "OPA policy unavailable") {
+				t.Fatalf("sign %s printed an OPA warning for the target policy_dir (GAP-0239): %s", tc.goos, stderr)
+			}
 			if err != nil {
 				t.Fatalf("sign %s from %s: %v", tc.goos, tc.template, err)
 			}
@@ -58,7 +65,14 @@ func TestOfflineSignShippedTemplateMatchesDeviceDigest(t *testing.T) {
 		}
 	}
 	portable := shippedTemplateBundle(t, "linux-standalone.yaml", true)
-	signed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), portable, t.TempDir(), []string{"linux", "darwin", "windows"}, offlineTestDigester)
+	var signed map[string]string
+	var err error
+	stderr := captureStderr(t, func() {
+		signed, err = enterprisebundle.EffectivePolicyDigests(context.Background(), portable, t.TempDir(), []string{"linux", "darwin", "windows"}, offlineTestDigester)
+	})
+	if strings.Contains(stderr, "OPA policy unavailable") {
+		t.Fatalf("sign the portable settings printed an OPA warning for the target policy_dir (GAP-0239): %s", stderr)
+	}
 	if err != nil {
 		t.Fatalf("sign the portable settings for three platforms: %v", err)
 	}
@@ -66,6 +80,71 @@ func TestOfflineSignShippedTemplateMatchesDeviceDigest(t *testing.T) {
 		if device := deviceBundleDigest(t, portable, goos); device != signed[goos] {
 			t.Fatalf("%s device digest %s != signed %s", goos, device, signed[goos])
 		}
+	}
+}
+
+// An offline bundle digest (sign and verify) does not read a policy_dir
+// outside the bundle: that folder is the target device's, the signer need
+// not have it, and its Rego is not digested. A missing folder and one with
+// Rego that does not compile give the same digest and no OPA warning on
+// stderr. Rego the bundle ships is still loaded and digested (GAP-0239).
+func TestOfflineBundleDigestDoesNotReadTargetPolicyDir(t *testing.T) {
+	root, dataDir := t.TempDir(), t.TempDir()
+	digest := func(policyDir string) (EffectivePolicy, string) {
+		t.Helper()
+		cfg := &config.Config{DataDir: dataDir, PolicyDir: policyDir}
+		var got EffectivePolicy
+		var err error
+		stderr := captureStderr(t, func() {
+			got, err = ComputeEffectivePolicyFor(context.Background(), cfg, EffectivePolicyOptions{GOOS: "linux", BundleRoot: root, Raw: []byte("config_version: 9\n")})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got, stderr
+	}
+	writeRego := func(dir string, files map[string][]byte) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, "rego"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for name, body := range files {
+			if err := os.WriteFile(filepath.Join(dir, "rego", name), body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	target := filepath.Join(t.TempDir(), "policies")
+	missing, stderr := digest(target)
+	if strings.Contains(stderr, "OPA policy unavailable") {
+		t.Fatalf("missing target policy_dir printed an OPA warning: %s", stderr)
+	}
+	writeRego(target, map[string][]byte{"broken.rego": []byte("package defenseclaw.broken\nthis is not rego\n")})
+	broken, stderr := digest(target)
+	if strings.Contains(stderr, "OPA policy unavailable") {
+		t.Fatalf("target policy_dir Rego was read offline: %s", stderr)
+	}
+	if missing.Digest != broken.Digest {
+		t.Fatalf("target policy_dir contents changed the bundle digest: %s != %s", missing.Digest, broken.Digest)
+	}
+	if _, ok := broken.Components["rego"]; ok {
+		t.Fatal("target policy_dir Rego entered the bundle components")
+	}
+
+	bundled := filepath.Join(root, "policies")
+	shipped := map[string][]byte{}
+	for _, name := range []string{"admission.rego", "guardrail.rego"} {
+		body, err := os.ReadFile(filepath.Join(repoPolicyDir(t), "rego", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		shipped[name] = body
+	}
+	writeRego(bundled, shipped)
+	inBundle, _ := digest(bundled)
+	if inBundle.Components["rego"] == "" {
+		t.Fatalf("bundled Rego was not digested: %v", inBundle.Components)
 	}
 }
 
