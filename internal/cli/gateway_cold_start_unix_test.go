@@ -37,6 +37,13 @@ func TestHookColdStartRefusesAfterStopDuringInstallAndAfterAFailure(t *testing.T
 	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") {
 		t.Fatalf("during install = %v, want the install refusal", err)
 	}
+	// GAP-0196: an install stops the gateway with the stop marker; the
+	// refusal names the install, not an operator stop.
+	markGatewayStopped(dataDir)
+	if err := hookColdStartRefusal(dataDir, now); err == nil || !strings.Contains(err.Error(), "install") || strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("during install with the stop marker = %v, want the install refusal", err)
+	}
+	clearGatewayColdStartState(dataDir)
 	if err := os.Remove(lock); err != nil {
 		t.Fatal(err)
 	}
