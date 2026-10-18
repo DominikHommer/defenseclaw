@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/fsnotify/fsnotify"
@@ -13,10 +14,10 @@ import (
 // GAP-0117: a pass started by an in-place overwrite names the Write even
 // when the truncation's Chmod came first (macOS kqueue order).
 func TestEnterpriseHookWatchNoteTriggerJoinsTheOpsOfTheTriggerPath(t *testing.T) {
-	const token = "/Users/u/.defenseclaw/hooks/.hook-hermes.token"
+	token := filepath.FromSlash("/Users/u/.defenseclaw/hooks/.hook-hermes.token")
 	path, op := enterpriseHookWatchNoteTrigger("", 0, fsnotify.Event{Name: token, Op: fsnotify.Chmod})
-	path, op = enterpriseHookWatchNoteTrigger(path, op, fsnotify.Event{Name: "/Users/u/.defenseclaw/hooks/.hookcfg.hermes", Op: fsnotify.Remove})
-	path, op = enterpriseHookWatchNoteTrigger(path, op, fsnotify.Event{Name: token + "/", Op: fsnotify.Write})
+	path, op = enterpriseHookWatchNoteTrigger(path, op, fsnotify.Event{Name: filepath.FromSlash("/Users/u/.defenseclaw/hooks/.hookcfg.hermes"), Op: fsnotify.Remove})
+	path, op = enterpriseHookWatchNoteTrigger(path, op, fsnotify.Event{Name: token + string(filepath.Separator), Op: fsnotify.Write})
 	if path != token || !op.Has(fsnotify.Write) || !op.Has(fsnotify.Chmod) || op.Has(fsnotify.Remove) {
 		t.Fatalf("trigger = %s %s, want %s WRITE|CHMOD", path, op, token)
 	}

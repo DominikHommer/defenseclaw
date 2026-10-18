@@ -77,9 +77,10 @@ func TestWindowsEnterpriseGuardianTargetGapsClearSecurityComplete(t *testing.T) 
 }
 
 func TestWindowsEnterpriseGuardianRowHookFilesListsEachFileOnce(t *testing.T) {
-	row := enterpriseHookReconcileRow{Result: &enterprisehooks.InstallResult{HookConfigPaths: []string{"/b/config.json", "/a/hooks.json", " "}}}
-	got := windowsEnterpriseGuardianRowHookFiles(row, []string{"/a/hooks.json", "/c/extra.json"})
-	want := []string{"/a/hooks.json", "/b/config.json", "/c/extra.json"}
+	a, b, c := filepath.FromSlash("/a/hooks.json"), filepath.FromSlash("/b/config.json"), filepath.FromSlash("/c/extra.json")
+	row := enterpriseHookReconcileRow{Result: &enterprisehooks.InstallResult{HookConfigPaths: []string{b, a, " "}}}
+	got := windowsEnterpriseGuardianRowHookFiles(row, []string{a, c})
+	want := []string{a, b, c}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("files = %v, want %v", got, want)
 	}
