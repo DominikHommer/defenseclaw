@@ -141,6 +141,24 @@ class ClosureAdmissionTests(unittest.TestCase):
                         with self.assertRaises(RuntimeError):
                             packages.finish()
 
+    def test_exact_runner_mirror_file_requires_only_reviewed_ubuntu_urls(self):
+        policy = (
+            "fixed:\n  Version table:\n *** 1.0 500\n"
+            "        500 mirror+file:/etc/apt/apt-mirrors.txt noble-updates/main amd64 Packages\n"
+        )
+        mapping = b"http://azure.archive.ubuntu.com/ubuntu/\nhttp://security.ubuntu.com/ubuntu/\n"
+        self.assertEqual(len(build.ubuntu_origins(policy, "1.0", mapping)), 2)
+        for candidate in (
+            None,
+            b"https://unreviewed.invalid/ubuntu\n",
+            b"http://archive.ubuntu.com/other\n",
+            b"http://archive.ubuntu.com/ubuntu extra\n",
+        ):
+            with self.subTest(candidate=candidate), self.assertRaises(RuntimeError):
+                build.ubuntu_origins(policy, "1.0", candidate)
+        with self.assertRaises(RuntimeError):
+            build.ubuntu_origins(policy.replace("apt-mirrors.txt", "arbitrary.txt"), "1.0", mapping)
+
 
 if __name__ == "__main__":
     unittest.main()

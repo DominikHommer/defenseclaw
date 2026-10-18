@@ -110,7 +110,13 @@ impl Active {
     }
 
     fn input(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if self.input_eof || self.pipes.input.is_none() {
+        // Conversation has already checked host InputEof ordering. A native
+        // reader can close before its exit is observed; admitted late input is
+        // then discarded without turning an ordinary EPIPE into protocol loss.
+        if self.pipes.input.is_none() {
+            return Ok(());
+        }
+        if self.input_eof {
             return Err(ProtocolError);
         }
         if bytes.len() > INPUT_LIMIT.saturating_sub(self.input_bytes) {
@@ -220,13 +226,15 @@ impl Active {
         self.status.is_some() && self.pipes.output.is_none() && self.pipes.error.is_none()
     }
 
-    fn poll_descriptors(&self) -> Vec<(i32, i16)> {
+    fn poll_descriptors(&self, read_output: bool) -> Vec<(i32, i16)> {
         let mut descriptors = Vec::with_capacity(3);
-        for file in [&self.pipes.output, &self.pipes.error]
-            .into_iter()
-            .flatten()
-        {
-            descriptors.push((file.as_raw_fd(), libc::POLLIN));
+        if read_output {
+            for file in [&self.pipes.output, &self.pipes.error]
+                .into_iter()
+                .flatten()
+            {
+                descriptors.push((file.as_raw_fd(), libc::POLLIN));
+            }
         }
         if !self.input.is_empty() {
             if let Some(file) = &self.pipes.input {
@@ -249,6 +257,7 @@ pub struct Owner<E> {
     destroy_request: Option<u64>,
     idle_deadline: Instant,
     finished: bool,
+    read_stderr_next: bool,
 }
 
 impl<E: Engine> Owner<E> {
@@ -265,6 +274,7 @@ impl<E: Engine> Owner<E> {
             destroy_request: None,
             idle_deadline: Instant::now() + CONTROL_IDLE,
             finished: false,
+            read_stderr_next: false,
         }
     }
 
@@ -373,12 +383,19 @@ impl<E: Engine> Owner<E> {
         if let Some(active) = &mut self.active {
             active.tick(now)?;
         }
-        for stderr in [false, true] {
-            if let Some(active) = &mut self.active {
-                if let Some(data) = active.read(stderr, now)? {
-                    let mut reply = self.frame(Kind::Output, self.launch_request)?;
-                    reply.data = Some(data);
-                    self.emit(reply)?;
+        // Pending host frames propagate backpressure to the native pipe, rather
+        // than filling eight frames before the transport's 500ms stall bound.
+        // Alternate successful reads so a busy stdout cannot starve stderr.
+        if self.transport.flushed() {
+            for stderr in [self.read_stderr_next, !self.read_stderr_next] {
+                if let Some(active) = &mut self.active {
+                    if let Some(data) = active.read(stderr, now)? {
+                        self.read_stderr_next = !stderr;
+                        let mut reply = self.frame(Kind::Output, self.launch_request)?;
+                        reply.data = Some(data);
+                        self.emit(reply)?;
+                        break;
+                    }
                 }
             }
         }
@@ -432,7 +449,7 @@ impl<E: Engine> Owner<E> {
                 return Err(ProtocolError);
             }
             self.transport
-                .poll(&active.poll_descriptors(), Duration::from_millis(10))?;
+                .poll(&active.poll_descriptors(true), Duration::from_millis(10))?;
         }
     }
 
@@ -462,7 +479,7 @@ impl<E: Engine> Owner<E> {
                 let descriptors = self
                     .active
                     .as_ref()
-                    .map(Active::poll_descriptors)
+                    .map(|active| active.poll_descriptors(self.transport.flushed()))
                     .unwrap_or_default();
                 self.transport
                     .poll(&descriptors, Duration::from_millis(10))?;
@@ -710,5 +727,73 @@ mod tests {
         assert_eq!(active.status, Some(23));
         assert!(active.timed_out);
         assert_eq!(counts.stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn native_closed_stdin_discards_admitted_input_but_host_eof_stays_strict() {
+        let counts = Arc::new(Counts::default());
+        let process = FakeProcess::new(counts.clone());
+        process._reader.shutdown(std::net::Shutdown::Read).unwrap();
+        let now = Instant::now();
+        let mut active = Active::new(Box::new(process), &plan(1024), now).unwrap();
+        active.input(b"before native close".to_vec()).unwrap();
+        active.flush_input().unwrap();
+        assert!(active.pipes.input.is_none());
+        active.input(b"after native close".to_vec()).unwrap();
+        assert_eq!(active.input_bytes, 0);
+        assert!(active.input.is_empty());
+
+        let (mut owner, _writer, _reader, _) = owner(&[], 1024);
+        let mut frames = commands(
+            plan(1024),
+            &[Kind::Prepare, Kind::Launch, Kind::InputEof, Kind::Input],
+        );
+        owner.command(frames.remove(0), now).unwrap();
+        owner.command(frames.remove(0), now).unwrap();
+        owner.command(frames.remove(0), now).unwrap();
+        let mut late = frames.remove(0);
+        late.data = Some(Data {
+            stream: "stdin".into(),
+            bytes: b"after host EOF".to_vec(),
+        });
+        assert!(owner.command(late, now).is_err());
+        assert_eq!(owner.conversation.as_ref().unwrap().phase(), Phase::Closed);
+    }
+
+    #[test]
+    fn pending_host_output_backpressures_native_reads_without_poll_spin_and_resumes_fairly() {
+        let (mut owner, _writer, reader, _) = owner(&[], 1024);
+        let now = Instant::now();
+        for frame in commands(plan(1024), &[Kind::Prepare, Kind::Launch]) {
+            owner.command(frame, now).unwrap();
+        }
+        let (stderr, mut producer) = UnixStream::pair().unwrap();
+        producer.write_all(b"fixed stderr").unwrap();
+        drop(producer);
+        let active = owner.active.as_mut().unwrap();
+        active.pipes.error = Some(file(stderr));
+        nonblocking(active.pipes.error.as_ref().unwrap()).unwrap();
+        for index in 0..100 {
+            owner.tick(now + Duration::from_millis(index)).unwrap();
+            let active = owner.active.as_ref().unwrap();
+            assert_eq!(active.emitted, 0);
+            assert!(active.poll_descriptors(false).is_empty());
+            assert_eq!(active.poll_descriptors(true).len(), 2);
+        }
+        owner.transport.flush(now).unwrap();
+        assert!(owner.transport.flushed());
+        owner.tick(now).unwrap();
+        let stdout_bytes = owner.active.as_ref().unwrap().emitted;
+        assert_eq!(stdout_bytes, b"fixed synthetic output".len() as u64);
+        owner.tick(now).unwrap();
+        assert_eq!(owner.active.as_ref().unwrap().emitted, stdout_bytes);
+        owner.transport.flush(now).unwrap();
+        owner.tick(now).unwrap();
+        owner.transport.flush(now).unwrap();
+        let mut decoder = Decoder::new(reader);
+        let frames: Vec<_> = (0..4).map(|_| decoder.decode().unwrap()).collect();
+        assert_eq!(frames[2].data.as_ref().unwrap().stream, "stdout");
+        assert_eq!(frames[3].data.as_ref().unwrap().stream, "stderr");
+        assert_eq!(frames[3].data.as_ref().unwrap().bytes, b"fixed stderr");
     }
 }

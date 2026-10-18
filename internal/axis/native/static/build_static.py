@@ -245,7 +245,19 @@ def admit_link_map(text: str, expected: set[Path]) -> list[str]:
     return sorted(map(str, seen))
 
 
-def ubuntu_origins(policy: str, version: str) -> list[str]:
+def ubuntu_url(value: str) -> bool:
+    parsed = urllib.parse.urlsplit(value)
+    return (
+        parsed.scheme in {"https", "http"}
+        and parsed.hostname in {"azure.archive.ubuntu.com", "archive.ubuntu.com", "security.ubuntu.com"}
+        and parsed.netloc == parsed.hostname
+        and parsed.path.rstrip("/") == "/ubuntu"
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def ubuntu_origins(policy: str, version: str, mirrors: bytes | None = None) -> list[str]:
     selected = False
     sources = []
     for line in policy.splitlines():
@@ -255,18 +267,25 @@ def ubuntu_origins(policy: str, version: str) -> list[str]:
             continue
         if not selected:
             continue
-        entry = re.fullmatch(r"\s+\d+ (https?://\S+) (\S+) (?:amd64|all) Packages", line)
+        entry = re.fullmatch(r"\s+\d+ (\S+) (\S+) (?:amd64|all) Packages", line)
         if entry:
-            parsed = urllib.parse.urlsplit(entry[1])
-            if (
-                parsed.hostname not in {"azure.archive.ubuntu.com", "archive.ubuntu.com", "security.ubuntu.com"}
-                or parsed.path.rstrip("/") != "/ubuntu"
-                or parsed.username
-                or parsed.password
-                or not entry[2].startswith(("noble/", "noble-updates/", "noble-security/"))
-            ):
+            if not entry[2].startswith(("noble/", "noble-updates/", "noble-security/")):
                 raise RuntimeError("compiler input uses an unreviewed package origin")
-            sources.append(entry[1] + " " + entry[2])
+            urls = [entry[1]]
+            if entry[1] == "mirror+file:/etc/apt/apt-mirrors.txt":
+                if not mirrors or len(mirrors) > 16 << 10:
+                    raise RuntimeError("exact Ubuntu runner mirror mapping is required")
+                urls = []
+                for mirror in mirrors.decode("ascii").splitlines():
+                    fields = mirror.split("#", 1)[0].split()
+                    if not fields:
+                        continue
+                    if len(fields) != 1:
+                        raise RuntimeError("unexpected Ubuntu runner mirror syntax")
+                    urls.append(fields[0])
+            if not urls or any(not ubuntu_url(url) for url in urls):
+                raise RuntimeError("compiler input uses an unreviewed package origin")
+            sources.extend(url + " " + entry[2] for url in urls)
     if not sources:
         raise RuntimeError("installed compiler input has no exact Ubuntu24.04 APT origin")
     return sorted(set(sources))
@@ -322,7 +341,11 @@ class Packages:
             if len(hashes) != 1 or not re.fullmatch(r"[a-f0-9]{64}", next(iter(hashes), "")):
                 raise RuntimeError("exact installed package lacks authenticated APT SHA256 metadata")
             policy = self.commands.run(["/usr/bin/apt-cache", "policy", f"{identity}:{arch}"], self.directory)
-            origins = ubuntu_origins(policy, version)
+            mirrors = None
+            if "mirror+file:/etc/apt/apt-mirrors.txt" in policy:
+                mirrors = raw(Path("/etc/apt/apt-mirrors.txt"), 16 << 10)
+                (self.evidence / "APT-MIRRORS.txt").write_bytes(mirrors)
+            origins = ubuntu_origins(policy, version, mirrors)
             work = self.directory / package.replace(":", "_")
             work.mkdir()
             self.commands.run(["/usr/bin/apt-get", "download", f"{identity}:{arch}={version}"], work)
