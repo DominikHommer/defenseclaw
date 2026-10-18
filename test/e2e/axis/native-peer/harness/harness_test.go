@@ -283,3 +283,83 @@ func TestUnexpectedBindingExitTruncationOrBytesRefuse(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedExitRetainsBoundedStreamsAndClosedDiagnostic(t *testing.T) {
+	plan, _ := fixedPlan("argv", "")
+	binding, _ := fixedBinding("fixed-session", "held-id", plan, syntheticRegistry(t).Receipt)
+	message := "bwrap: Owned source mount cloning failed: Operation not permitted\n"
+	chunks := []string{message[:17], message[17:]}
+	owner := &fakeOwner{binding: binding, mode: "argv", mutate: func(frame *bridgeproto.Frame) {
+		if frame.Kind == bridgeproto.Output {
+			frame.Data.Stream = "stderr"
+			frame.Data.Bytes = []byte(chunks[0])
+			chunks = chunks[1:]
+		}
+		if frame.Kind == bridgeproto.Exited {
+			frame.Result.ExitCode = 1
+		}
+	}}
+	result, err := exercise(context.Background(), owner, binding, plan, "argv")
+	if err == nil || result.ExitCode != 1 || !result.Prepared || !result.Started || result.Destroyed || result.PayloadMarker || result.Passed {
+		t.Fatalf("failed exit evidence changed: %+v %v", result, err)
+	}
+	if result.OutputBytes != 0 || result.StderrBytes != len(message) || result.StderrReason != "bwrap_owned_clone" || result.StderrErrno != "eperm" {
+		t.Fatalf("pre-exit buffered diagnostic lost: %+v", result)
+	}
+	data, err := json.Marshal(result)
+	if err != nil || strings.Contains(string(data), message) || strings.Contains(string(data), "Operation not permitted") {
+		t.Fatal("raw diagnostic leaked into fixed evidence")
+	}
+}
+
+func TestProtocolFailureRetainsOnlyPreviouslyValidatedBoundedOutput(t *testing.T) {
+	plan, _ := fixedPlan("exit23", "")
+	binding, _ := fixedBinding("fixed-session", "held-id", plan, syntheticRegistry(t).Receipt)
+	owner := &fakeOwner{binding: binding, mode: "exit23", mutate: func(frame *bridgeproto.Frame) {
+		if frame.Kind == bridgeproto.Exited {
+			frame.Binding.PolicyDigest = "sha256:" + strings.Repeat("0", 64)
+		}
+	}}
+	result, err := exercise(context.Background(), owner, binding, plan, "exit23")
+	if err == nil || result.OutputBytes != len("FIXED_NATIVE_EXIT23\n") || result.StderrBytes != 0 || result.StderrReason != "none" || result.StderrErrno != "none" {
+		t.Fatalf("binding failure lost prior bounded output: %+v %v", result, err)
+	}
+	owner = &fakeOwner{binding: binding, mode: "exit23", mutate: func(frame *bridgeproto.Frame) {
+		if frame.Kind == bridgeproto.Output {
+			frame.Binding.PolicyDigest = "sha256:" + strings.Repeat("0", 64)
+			frame.Data.Bytes = []byte("FIXED_NATIVE_FAILURE fixture\n")
+			frame.Data.Stream = "stderr"
+		}
+	}}
+	result, err = exercise(context.Background(), owner, binding, plan, "exit23")
+	if err == nil || result.OutputBytes != 0 || result.StderrBytes != 0 || result.StderrReason != "none" {
+		t.Fatal("unvalidated frame contributed to diagnostic evidence")
+	}
+}
+
+func TestFixedStderrReasonIsBoundedClosedVocabulary(t *testing.T) {
+	for _, test := range []struct{ data, reason, errno string }{
+		{"", "none", "none"},
+		{"FIXED_NATIVE_STDERR\n", "unclassified", "none"},
+		{"FIXED_NATIVE_FAILURE fixture\n", "payload_fixture", "none"},
+		{"FIXED_NATIVE_FAILURE /private/path\n", "payload_unclassified", "none"},
+		{"runtime: failed to create new OS thread (have 2 already; errno=1)\n", "go_runtime_thread", "none"},
+		{"fatal error: private diagnostic\n", "go_runtime_failure", "none"},
+		{"panic: private diagnostic\n", "go_runtime_failure", "none"},
+		{"bwrap: setting up uid map: Permission denied\n", "bwrap_uid_map", "eacces"},
+		{"bwrap: open /proc/42/ns failed: No such file or directory\n", "bwrap_proc_lookup", "enoent"},
+		{"bwrap: Namespace-local owned source identity or topology differs\n", "bwrap_owned_local_source", "none"},
+		{"bwrap: Owned image requires an immutable bounded sealed source\n", "bwrap_owned_image", "none"},
+		{"bwrap: Can't mount proc on /proc: Operation not permitted\n", "bwrap_setup", "eperm"},
+		{"bwrap: prctl(PR_SET_SECCOMP): Invalid argument\n", "bwrap_seccomp", "einval"},
+		{"bwrap: unknown /private/path\n", "bwrap_unclassified", "none"},
+		{"/private/runtime: failed\n", "unclassified", "none"},
+		{"ordinary line\nbwrap: setting up uid map: Permission denied\n", "unclassified", "none"},
+		{strings.Repeat("x", 4096) + "bwrap: setting up uid map: Permission denied\n", "unclassified", "none"},
+	} {
+		reason, errno := fixedStderrReason([]byte(test.data))
+		if reason != test.reason || errno != test.errno {
+			t.Fatalf("closed category mismatch: %q/%q wanted %q/%q", reason, errno, test.reason, test.errno)
+		}
+	}
+}
