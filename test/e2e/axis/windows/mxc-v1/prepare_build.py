@@ -200,6 +200,29 @@ def main() -> None:
     command(["cargo", f"+{TOOLCHAIN}", "build", "--locked", "--release"])
     # Compile the probe's test target without executing any newly built code.
     command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--no-run"])
+    # Run only this exact pure spelling test outside a sandbox. It performs no
+    # filesystem query, environment lookup, process creation or PSEC operation.
+    spelling_test = "tests::private_environment_only_accepts_exact_local_disk_prefix_difference"
+    spelling_output = command(
+        [
+            "cargo",
+            f"+{TOOLCHAIN}",
+            "test",
+            "--locked",
+            "--release",
+            "--bin",
+            "defenseclaw-axis-windows-psec-boundary-child",
+            spelling_test,
+            "--",
+            "--exact",
+        ],
+        capture=True,
+    )
+    if (
+        f"test {spelling_test} ... ok" not in spelling_output
+        or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in spelling_output
+    ):
+        raise RuntimeError("fixed private environment spelling test did not pass exactly once")
     if digest(lock) != lock_before:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
@@ -254,6 +277,7 @@ def main() -> None:
         "upstream_lock_sha256": upstream_locks,
         "build_mode": args.mode,
         "probe_executed": False,
+        "pure_private_environment_spelling_test_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
         "scope": "fixed_windows_native_psec_boundary_literal_argv",

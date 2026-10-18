@@ -210,3 +210,34 @@ shape, private environment and seal assertions remain mandatory. This is a
 test correction, not broader filesystem permission or application support;
 applications requiring the denied DOS query remain unqualified. A new locked
 build, independent artifact review and native run are still required.
+
+## Direct canary iteration: private environment spelling refused
+
+[Locked build 39125660254](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39125660254)
+at `830eb041671ebc2f6e685ab4d13847101643961f` passed its ten SDK admission
+tests and two independent source/artifact reviews. One fresh fixed native
+attempt passed literal argv and the same directory-open, NT-query and seal-read
+controls. Both DOS queries again returned Win32 5. The child then refused its
+private environment equality check before either permitted write. It was not
+retried and no remaining boundary check is qualified.
+
+The parent derives its environment from a canonicalized verbatim-disk path;
+the revised child derives its expectation from `GetCurrentDirectoryW`. A
+prefix spelling mismatch is the source-based explanation to test next, not a
+measured environment leak. The next assertion accepts only an optional `\\?\`
+prefix with every remaining UTF-16 unit identical. A pure build test preserves
+refusals for different homes/drives/case, dot/slash rewrites and UNC/device
+paths. Sandbox grants and native policy remain unchanged.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12136312656` | `6b2e97352fa0b1f49d41b06c78ec2194238d924b336abfd648d19a4e52c17cce` |
+| Provenance | `b8f99453c9cdfa958c2f90a2bfd1cbc2f130361c92c2c1b30023041b526c513c` |
+| Root verification receipt | `44382c550f1e44d2e89862f8d244108091449a6084d142e1a3c818f5ce4f2026` |
+| Actual live result | `1949b49c8e530f17d29cd2f0bc3c5ba85643ddc915285a18ee674865fd85de8d` |
+
+The wrapper exited 1 in 12.781 seconds, without deadline, overflow or reader
+error. The owned outer Job ended empty with zero active processes. The exact
+failed fixture `dc-axis-windows-psec-NUZsHW` remains under private evidence
+`windows-current-psec-boundary-max-04`. No host ACL, firewall, UI restriction,
+policy or SDK change was made. Customer Windows AXIS remains unavailable.

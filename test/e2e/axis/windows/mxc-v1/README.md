@@ -120,7 +120,7 @@ mxc-v1/
 
 Run `python prepare_build.py generate-lock`. It verifies source identities,
 applies the three reviewed MXC overlays in order, generates a combined lock, builds with
-`--locked`, compiles probe tests without running them, and packages the
+`--locked`, compiles probe tests, runs one selected pure path-spelling test, and packages the
 three binaries, source, patches, licenses, locks, compiler identity and SHA256
 provenance. It fingerprints the 12 modified and three added SDK files before
 and after the build; an unstaged Git diff alone cannot detect changes to added
@@ -197,3 +197,10 @@ checks remain mandatory. This preserves the DOS-query compatibility limitation
 without confusing it with denial of a granted file operation; no grant or SDK
 policy is broadened. A passing canary run would not qualify applications that
 require the denied query.
+
+The fixed private-environment assertion accepts only the optional `\\?\`
+prefix on an otherwise byte-for-byte identical local drive path. The parent
+canonicalizes the fixture, while Windows can return its current directory
+without that prefix. Case folding, slash changes, dot components, other drives,
+UNC/device paths and a different home remain refused. A selected pure Rust
+test exercises these cases during the build; it performs no sandbox operation.

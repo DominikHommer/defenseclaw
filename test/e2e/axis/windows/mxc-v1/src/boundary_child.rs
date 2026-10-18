@@ -3,11 +3,11 @@
 
 // Fixed contributor payload: std only, no SDK or AXIS imports. It accepts no
 // caller executable, script, host credential, destination or filesystem path.
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
-use std::path::PathBuf;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -145,6 +145,35 @@ fn fixed_io<T>(operation: &'static str, result: io::Result<T>) -> io::Result<T> 
     result.map_err(|error| io::Error::new(error.kind(), format!("{operation}: {error}")))
 }
 
+fn fixed_private_environment_path(actual: &OsStr, expected: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn disk_spelling(value: &OsStr) -> Option<Vec<u16>> {
+        let raw: Vec<u16> = value.encode_wide().take(32_769).collect();
+        if raw.len() > 32_768 {
+            return None;
+        }
+        // The parent canonicalizes its fixed local fixture; Windows can return
+        // the same cwd without the verbatim-disk prefix. Accept only that exact
+        // spelling difference. No case folding, slash/dot/UNC/device/drive-map
+        // normalization or filesystem lookup belongs in this test assertion.
+        let path = raw.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&raw);
+        if path.len() < 3
+            || !((b'A' as u16..=b'Z' as u16).contains(&path[0])
+                || (b'a' as u16..=b'z' as u16).contains(&path[0]))
+            || path[1..3] != [58, 92]
+        {
+            return None;
+        }
+        Some(path.to_vec())
+    }
+
+    match (disk_spelling(actual), disk_spelling(expected.as_os_str())) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
 fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
     require(
         args.first().is_some_and(|arg| arg == "--fixed-child"),
@@ -247,9 +276,10 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         ),
     ] {
         require(
-            PathBuf::from(
-                std::env::var_os(key).ok_or_else(|| io::Error::other("private env missing"))?,
-            ) == expected,
+            fixed_private_environment_path(
+                &std::env::var_os(key).ok_or_else(|| io::Error::other("private env missing"))?,
+                &expected,
+            ),
             "private environment differs",
         )?;
     }
@@ -319,4 +349,39 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
 
 fn permission_denied(error: io::Error) -> bool {
     error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(10013)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_environment_only_accepts_exact_local_disk_prefix_difference() {
+        let expected = Path::new(r"C:\fixed-private\home");
+        for actual in [r"C:\fixed-private\home", r"\\?\C:\fixed-private\home"] {
+            assert!(fixed_private_environment_path(OsStr::new(actual), expected));
+            assert!(fixed_private_environment_path(
+                expected.as_os_str(),
+                Path::new(r"\\?\C:\fixed-private\home")
+            ));
+        }
+        for actual in [
+            r"C:\real-home",
+            r"D:\fixed-private\home",
+            r"c:\fixed-private\home",
+            r"C:/fixed-private/home",
+            r"C:\fixed-private\.\home",
+            r"C:\fixed-private\other\..\home",
+            r"C:fixed-private\home",
+            r"\\server\share\fixed-private\home",
+            r"\\?\UNC\server\share\home",
+            r"\\.\C:\fixed-private\home",
+            r"\\?\GLOBALROOT\Device\fixed-private\home",
+        ] {
+            assert!(!fixed_private_environment_path(
+                OsStr::new(actual),
+                expected
+            ));
+        }
+    }
 }
