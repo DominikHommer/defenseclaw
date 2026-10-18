@@ -69,7 +69,13 @@ class R103B22DocsTest(unittest.TestCase):
             "A home moved by copying it and then emptying the old folder counts as moved",
             "An agent config that is a symlink to a file in the same home is checked through the link",
             "Uninstall runs this cleanup also when a `targets.yaml` row still names the re-homed account",
+            # rel-1-0-3:GAP-0200, GAP-0205, GAP-0206
+            "the copied receipts act on the files in the current home only, and a cleanup that fails keeps them for the retry",
+            "the per-user install writes DefenseClaw's entries into that file and keeps the link",
+            "A link out of the home (the config, a folder on the way, or a link to a missing file) is never changed through",
+            "DefenseClaw changes neither the link nor that file",
         )
+        self.assertNotIn("a link out of the home keeps the record until you clean the file it names", page("enterprise/enrollment.mdx"))
 
     def test_sandboxes_bridge_needs_no_managed_sandbox(self):
         # rel-1-0-3:GAP-0164, rel-1-0-2:GAP-0675
@@ -79,6 +85,8 @@ class R103B22DocsTest(unittest.TestCase):
             "starts in `defenseclaw-managed`, because one gateway serves one namespace",
             "the gateway's log names the cause, and they start again once no sandbox is left in `defenseclaw-managed`",
             "the sandboxes kept under 1.0.1 included, on the bridge's terms above",
+            # rel-1-0-3:GAP-0195
+            "Pull and delete the sandboxes in `defenseclaw-managed` before a downgrade to 1.0.1",
         )
 
 

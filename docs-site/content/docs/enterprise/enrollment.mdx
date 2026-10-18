@@ -589,9 +589,16 @@ the named receipt is corrected or removed. An operator-edited
 plugin left in the recorded home is left for the operator and does not alone
 keep the record after the current home is verified clean. A home moved by
 copying it and then emptying the old folder counts as moved: the copied
-receipts follow it. An agent config that is a symlink to a file in the same
-home is checked through the link; a link out of the home keeps the record
-until you clean the file it names. Uninstall runs this cleanup also when a
+receipts follow it. A home copied while the old one stays keeps its own
+copies: the copied receipts act on the files in the current home only, and
+a cleanup that fails keeps them for the retry. An agent config that is a
+symlink to a file in the same home is checked through the link, and the
+per-user install writes DefenseClaw's entries into that file and keeps the
+link. A link out of the home (the config, a folder on the way, or a link to
+a missing file) is never changed through: while the file it names still
+holds DefenseClaw's entries, the removal fails, DefenseClaw changes neither
+the link nor that file, and the record stays until you remove those entries
+from that file or replace the link with it. Uninstall runs this cleanup also when a
 `targets.yaml` row still names the re-homed account, and fails a removal that
 leaves a DefenseClaw entry the agent still loads. The guardian logs
 both homes once when cleanup completes. If the recorded
