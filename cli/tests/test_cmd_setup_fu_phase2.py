@@ -298,6 +298,9 @@ def _guardrail_judge_secret_wizard(
 class _BaseSetup(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
         # Lightweight save shim: tests assert on the in-memory config object.
         self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
@@ -3930,6 +3933,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
                     return_value={"hermes": "action"},
                 ), \
                 patch.object(cmd_setup.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_setup.agent_discovery, "_write_cache", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix") as add_mock, \
                 patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
                 patch(
