@@ -36,7 +36,7 @@ SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/mxc-owned-bubblewrap.patch": "bce13ce7c12f9c398382f1feaa9729b265feea26832115d933c1c54cbfe7cabb",
-    "patches/bwrap-owned-fds.patch": "d44bf2890299d1701ae8ea22424c16b945ef0ffe2f1ec47ddac078643f591b2d",
+    "patches/bwrap-owned-fds.patch": "c595239be76f5cb4f614ca051956c7bbc7b010d12a0c175b7d25bb45d0e1363e",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
 SOURCE = {

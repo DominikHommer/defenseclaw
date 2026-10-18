@@ -31,7 +31,7 @@
   "bubblewrap": {
     "version": "0.9.0",
     "commit": "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
-    "overlay_sha256": "d44bf2890299d1701ae8ea22424c16b945ef0ffe2f1ec47ddac078643f591b2d",
+    "overlay_sha256": "c595239be76f5cb4f614ca051956c7bbc7b010d12a0c175b7d25bb45d0e1363e",
     "license": "LGPL-2.0-or-later",
     "license_sha256": "b7993225104d90ddd8024fd838faf300bea5e83d91203eab98e29512acebd69c"
   },
