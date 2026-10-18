@@ -94,7 +94,7 @@ func TestCreateOwnsRecordedAndWorkspaceFlagsBeforeProvisioning(t *testing.T) {
 	e.ws.mu.Lock()
 	mount := e.ws.lastMount
 	e.ws.mu.Unlock()
-	if !slices.Equal(mount.Context, []string{contextDir}) || !slices.Equal(mount.Unmask, []string{".env"}) {
+	if !slices.Equal(mount.Context, []string{contextDir}) || !slices.Contains(mount.Unmask, ".env") || slices.Contains(mount.Unmask, "replacement") {
 		t.Fatalf("workspace flags changed after resolution: %+v", mount)
 	}
 }

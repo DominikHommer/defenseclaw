@@ -160,7 +160,8 @@ func TestHostStageAssetsUncertainLeaseCloseRemainsSticky(t *testing.T) {
 	failure := errors.New("fixed lease close uncertainty")
 	release := &hostStageRelease{closeLease: func() error { calls++; return failure }, closeStage: func() error { stageCalls++; return nil }}
 	assets := &Assets{cleanupOnly: true, releaseStage: release.close}
-	if !errors.Is(assets.Close(), failure) || !errors.Is(assets.Close(), failure) || calls != 1 || stageCalls != 0 {
+	first, second := assets.Close(), assets.Close()
+	if !errors.Is(first, failure) || !errors.Is(second, failure) || calls != 1 || stageCalls != 0 {
 		t.Fatal("uncertain lease release admitted stage deletion or repeated native close")
 	}
 }
