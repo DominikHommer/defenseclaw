@@ -84,8 +84,12 @@ guardrail:
 // <data_dir>/policies/sandbox keeps reading them there while
 // <policy_dir>/sandbox does not exist, and is told to move them; the new
 // folder wins once it exists. Per-user installs and explicit values are
-// unchanged.
+// unchanged. The old folder is probed only on the device itself, so the
+// target is this host's OS; sandbox packs are a Linux and macOS feature.
 func TestStandaloneSandboxPackDirKeepsAPackStagedAtTheOldDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sandbox packs are read on Linux and macOS devices only")
+	}
 	dataDir := t.TempDir()
 	policyDir := t.TempDir()
 	legacy := filepath.Join(dataDir, "policies", DefaultOpenShellPackDirName)
@@ -98,7 +102,7 @@ func TestStandaloneSandboxPackDirKeepsAPackStagedAtTheOldDefault(t *testing.T) {
 		}
 		cfg.OpenShell.PackDir = packDir
 		cfg.openShellPackDirDeclared = declared
-		if err := resolveEnterpriseConfig(cfg, "linux", ""); err != nil {
+		if err := resolveEnterpriseConfig(cfg, runtime.GOOS, ""); err != nil {
 			t.Fatal(err)
 		}
 		return cfg
