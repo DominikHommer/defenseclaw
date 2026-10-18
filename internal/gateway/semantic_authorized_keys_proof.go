@@ -755,7 +755,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		incompleteHeader := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
 		home := filepath.Clean(facts.ActiveHome)
 		external := func(target string) bool {
-			return filepath.IsAbs(target) && target != home &&
+			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
 				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
 		}
 		preserveTruncated := len(request.ResolvedWriteTargets) <= 2

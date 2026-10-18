@@ -281,6 +281,17 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 	if trustedExistingAuthorizedKeysSymlinkWrite(incompleteRequest, actionfacts.Analyze(incompleteInput)) {
 		t.Fatal("incomplete header blocked an ordinary external diagnostic redirect")
 	}
+	temporaryInput := actionfacts.Input{Tool: "Bash",
+		Command: "out=$(mktemp -d /tmp/report.XXXXXX); printf marker > \"$out/result\" 2>/dev/null",
+		CWD:     cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	temporaryRequest := trustedActionRequest{Input: temporaryInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
+			hookpaths.TruncatedKey: "1", os.DevNull: os.DevNull,
+		}}
+	if trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
+		t.Fatal("device redirect made an unrelated dynamic output unsafe")
+	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
 	}
