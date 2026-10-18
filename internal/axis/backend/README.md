@@ -30,10 +30,30 @@ The policy compiler refuses all incomplete components and emits no partial
 common policy, administrative authority, workspace provenance, managed hooks,
 MCP or a credential broker. Runtime/harness qualification and each complete
 component translation must be added explicitly before the catalog can open.
-The initial native mechanism is Linux MXC Bubblewrap. Other platforms, interactive
-execution, repeated execution and production streaming remain unavailable here.
+The initial native mechanism is Linux MXC Bubblewrap. Other platforms,
+interactive execution and repeated execution remain unavailable here.
 The generic `Backend.Exec` refuses rather than starting an unqualified process
 or creating an uncancellable worker around a caller's arbitrary stream.
+
+`OpenAttachment` implements the bounded headless transport for one already
+launched concrete session. The default unavailable catalog refuses admission.
+The existing manager must verify current policy and the complete owned identity
+before calling it; a client name or session ID is insufficient. One immutable
+session admits one consumer for its lifetime. Attachment input is literal binary
+stdin, EOF or cancellation, bounded to 64MiB and 8,192 successful input frames;
+resize remains refused. It cannot start a command,
+change environment or extend the original execution deadline. The HTTP admission
+context detaches on success; the manager lifetime and requested shorter timeout
+still cancel the owned native session. Output and exit are correlated to the
+original Launch request and complete bridge binding, with aggregate output bounds.
+
+Send and Receive use the existing cancellable protocol owner directly. They do
+not hold the entry lifecycle token during stream I/O, so Stop/Close can terminate
+a blocked receiver. Disconnect/Close uses the same retained native custody and
+independent wait as every other teardown. Failed cleanup retains assets; retry
+does not erase the attachment's original failure. A peer exit event alone never
+releases assets. This source implementation does not qualify production streaming
+or activate a gateway manager route.
 
 Tests use private function injection over the existing concrete session and
 inert held files. They never execute images, clone namespaces, mount, change

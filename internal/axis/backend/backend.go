@@ -74,17 +74,22 @@ func observeCleanup(ctx context.Context, closeProtocol, waitNative func(context.
 }
 
 type entry struct {
-	operation chan struct{} // one bounded, context-aware lifecycle operation
-	assets    *Assets
-	spec      sandboxruntime.Spec
-	binding   bridgeproto.Binding
-	native    *bridgeprocess.Session
-	cancelMu  sync.Mutex
-	cancel    context.CancelFunc
-	closing   bool
-	phase     string
-	consumed  bool
-	created   time.Time
+	operation         chan struct{} // one bounded, context-aware lifecycle operation
+	assets            *Assets
+	spec              sandboxruntime.Spec
+	binding           bridgeproto.Binding
+	native            *bridgeprocess.Session
+	cancelMu          sync.Mutex
+	cancel            context.CancelFunc
+	closing           bool
+	phase             string
+	consumed          bool
+	created           time.Time
+	launchRequest     uint64
+	executionTimeout  time.Duration
+	executionDeadline time.Time
+	outputLimit       uint32
+	attached          bool
 }
 
 type Backend struct {
@@ -251,6 +256,8 @@ func (b *Backend) Prepare(ctx context.Context, policy *sandboxruntime.ExecutionP
 		return nil, sandboxruntime.PolicyReceipt{}, err
 	}
 	e.phase, e.spec, e.binding = "preparing", spec, binding
+	e.executionTimeout = time.Duration(plan.TimeoutMS) * time.Millisecond
+	e.outputLimit = plan.OutputLimit
 	lifetime, cancel := context.WithCancel(b.owner)
 	if !e.attachLifetime(cancel) {
 		cancel()
@@ -430,9 +437,19 @@ func (p *prepared) Launch(ctx context.Context, spec sandboxruntime.Spec) (sandbo
 		return sandboxruntime.Instance{}, ErrSession
 	}
 	e.consumed = true
+	deadline := time.Now().Add(e.executionTimeout)
+	if parent, ok := b.owner.Deadline(); ok && parent.Before(deadline) {
+		deadline = parent
+	}
 	request, err := b.calls.send(ctx, e.native, bridgeowner.Command{Kind: bridgeproto.Launch})
 	if err == nil {
 		err = b.reply(ctx, e, request, bridgeproto.Started)
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err == nil && (!b.active() || e.isClosing()) {
+		err = ErrSession
 	}
 	if err != nil {
 		cleanup, cancel := cleanupContext(ctx)
@@ -440,6 +457,7 @@ func (p *prepared) Launch(ctx context.Context, spec sandboxruntime.Spec) (sandbo
 		return sandboxruntime.Instance{}, errors.Join(err, b.closeEntry(cleanup, e))
 	}
 	e.phase = "started"
+	e.launchRequest, e.executionDeadline = request, deadline
 	return instance(e), nil
 }
 
