@@ -35,7 +35,7 @@ type policyDigestRunner struct {
 func (r *policyDigestRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
 	if strings.Join(args, " ") == "policy digest --json" {
 		if r.refusal != "" {
-			return CommandResult{Stderr: []byte("Error: policy digest: " + r.refusal + "\n"), ExitCode: 1}, nil
+			return CommandResult{Stderr: []byte("Error: policy digest: " + r.refusal + "\n"), ExitCode: 1}, errors.New("exit status 1")
 		}
 		if r.digest == "" {
 			return CommandResult{Stderr: []byte("policy digest: pack digest mismatch"), ExitCode: 1}, nil

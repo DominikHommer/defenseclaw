@@ -174,7 +174,7 @@ func gatewayOutputExcerpt(output string) string {
 // or cannot be asked (an earlier release, an unreadable input).
 func (l *lifecycle) configRefusal(ctx context.Context) string {
 	out, err := l.env.runGatewayCLI(ctx, "policy", "digest", "--json")
-	if err == nil {
+	if err == nil && out.ExitCode == 0 {
 		return ""
 	}
 	for _, line := range strings.Split(string(out.Stderr), "\n") {
