@@ -24,14 +24,16 @@ var procSetThreadPriority = windows.NewLazySystemDLL("kernel32.dll").NewProc("Se
 // Windows scheduler wakes it on time on a host whose CPU ordinary-priority
 // work fills (an attestation repair, GAP-0155). The thread only writes the
 // prepared answer and ends the process, so it cannot take the CPU from
-// anything else.
+// anything else. The deadline only moves later (extendTo, after the gateway
+// reported that it waits on a remote scanner).
 type answerDeadlineWaiter struct {
 	once sync.Once
 	done chan struct{}
 
-	mu     sync.Mutex
-	event  windows.Handle // zero: the Go timer alone
-	closed bool
+	mu       sync.Mutex
+	deadline time.Time
+	event    windows.Handle // zero: the Go timer alone
+	closed   bool
 }
 
 func newAnswerDeadlineWaiter() *answerDeadlineWaiter {
@@ -53,33 +55,53 @@ func (w *answerDeadlineWaiter) cancel() {
 	})
 }
 
-// wait reports whether deadline came before a cancel.
+// extendTo moves the deadline to t when t is later.
+func (w *answerDeadlineWaiter) extendTo(t time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if t.After(w.deadline) {
+		w.deadline = t
+	}
+}
+
+func (w *answerDeadlineWaiter) current() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.deadline
+}
+
+// wait reports whether the deadline came before a cancel.
 func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
 	// The thread ends with this goroutine; it is never handed back to the
 	// scheduler at the raised priority.
 	runtime.LockOSThread()
 	_, _, _ = procSetThreadPriority.Call(uintptr(windows.CurrentThread()), uintptr(threadPriorityTimeCritical))
+	w.extendTo(deadline)
 	if w.event != 0 {
-		w.waitEvent(deadline)
+		w.waitEvent()
 	}
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-	select {
-	case <-w.done:
-		return false
-	case <-timer.C:
-	}
-	select {
-	case <-w.done:
-		return false
-	default:
-		return true
+	for {
+		timer := time.NewTimer(time.Until(w.current()))
+		select {
+		case <-w.done:
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		select {
+		case <-w.done:
+			return false
+		default:
+		}
+		if !time.Now().Before(w.current()) {
+			return true
+		}
 	}
 }
 
-// waitEvent blocks in the kernel until deadline or a cancel, then releases
-// the event.
-func (w *answerDeadlineWaiter) waitEvent(deadline time.Time) {
+// waitEvent blocks in the kernel until the (current) deadline or a cancel,
+// then releases the event.
+func (w *answerDeadlineWaiter) waitEvent() {
 	defer func() {
 		w.mu.Lock()
 		w.closed = true
@@ -87,7 +109,7 @@ func (w *answerDeadlineWaiter) waitEvent(deadline time.Time) {
 		w.mu.Unlock()
 	}()
 	for {
-		left := time.Until(deadline)
+		left := time.Until(w.current())
 		if left <= 0 {
 			return
 		}

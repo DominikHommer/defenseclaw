@@ -11,10 +11,14 @@ import (
 )
 
 // answerDeadlineWaiter waits for a tool call's answer deadline unless it is
-// cancelled first.
+// cancelled first. The deadline only moves later (extendTo, after the
+// gateway reported that it waits on a remote scanner).
 type answerDeadlineWaiter struct {
 	once sync.Once
 	done chan struct{}
+
+	mu       sync.Mutex
+	deadline time.Time
 }
 
 func newAnswerDeadlineWaiter() *answerDeadlineWaiter {
@@ -23,19 +27,39 @@ func newAnswerDeadlineWaiter() *answerDeadlineWaiter {
 
 func (w *answerDeadlineWaiter) cancel() { w.once.Do(func() { close(w.done) }) }
 
-// wait reports whether deadline came before a cancel.
-func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-	select {
-	case <-w.done:
-		return false
-	case <-timer.C:
+// extendTo moves the deadline to t when t is later.
+func (w *answerDeadlineWaiter) extendTo(t time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if t.After(w.deadline) {
+		w.deadline = t
 	}
-	select {
-	case <-w.done:
-		return false
-	default:
-		return true
+}
+
+func (w *answerDeadlineWaiter) current() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.deadline
+}
+
+// wait reports whether the deadline came before a cancel.
+func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
+	w.extendTo(deadline)
+	for {
+		timer := time.NewTimer(time.Until(w.current()))
+		select {
+		case <-w.done:
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		select {
+		case <-w.done:
+			return false
+		default:
+		}
+		if !time.Now().Before(w.current()) {
+			return true
+		}
 	}
 }

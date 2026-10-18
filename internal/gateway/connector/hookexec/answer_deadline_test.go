@@ -101,8 +101,9 @@ func TestALateAllowIsNotTakenAfterTheAnswerBudget(t *testing.T) {
 }
 
 // A gateway that waits on a remote scanner (the LLM judge, Cisco AI
-// Defense) reports it with 102 Processing, and the call keeps the hook's
-// whole budget for the scanner's answer.
+// Defense) reports it with 102 Processing, and the call waits past the
+// answer budget for the scanner's answer, up to the progress ceiling
+// (TestProgressReportWaitsNoLongerThanTheCeiling).
 func TestToolCallKeepsItsBudgetWhileTheGatewayWaitsOnARemoteScanner(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	var asked atomic.Bool

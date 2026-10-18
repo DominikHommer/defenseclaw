@@ -61,6 +61,10 @@ const blockExit = 2
 // and silently truncating it would yield a confusing downstream parse error.
 const defaultMaxBody int64 = 1 << 20
 
+// DefaultMaxBody is defaultMaxBody for the hook command, which reads the
+// payload before Run (ArmAnswerWatchdog).
+const DefaultMaxBody = defaultMaxBody
+
 const (
 	defaultHookRequestTimeout = 10 * time.Second
 	hookResponseGrace         = time.Second
@@ -242,6 +246,11 @@ type Options struct {
 	// (startAnswerWatchdog); doRequest stands it down once the gateway's
 	// decision is in.
 	answerWatch *answerWatchdog
+	// AnswerWatchdog is the answer watchdog the hook command armed for this
+	// call before Run (ArmAnswerWatchdog). Run adopts it: it holds all of
+	// Run's output and gives the call's fail-closed answer at the answer
+	// deadline, rendered again for the call Run resolved.
+	AnswerWatchdog *AnswerWatchdog
 	// requestFacts are the headers of a call that cost work to compute,
 	// computed once for all of its tries (doRequest).
 	requestFacts *hookRequestFacts
@@ -376,6 +385,19 @@ type Options struct {
 // by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
 // behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
+	if watchdog := opts.AnswerWatchdog; watchdog != nil {
+		// The hook command armed the watchdog before it resolved the
+		// runtime (GAP-0155): every answer of the call, the early ones
+		// included, goes through it.
+		opts.AnswerWatchdog = nil
+		watchdog.hold(&opts)
+		return watchdog.finish(runHook(ctx, opts))
+	}
+	return runHook(ctx, opts)
+}
+
+// runHook is Run once the answer watchdog (if any) holds the output.
+func runHook(ctx context.Context, opts Options) int {
 	startedAt := opts.StartedAt
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -487,10 +509,18 @@ func Run(ctx context.Context, opts Options) int {
 		// receive its documented fail-open result.
 		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
 	}
-	if deadline := answerDeadline(opts, startedAt); !deadline.IsZero() {
+	deadline := answerDeadline(opts, startedAt)
+	switch {
+	case opts.answerWatch != nil && deadline.IsZero():
+		// The hook command armed the watchdog for an event that is not a
+		// tool call after all: it stands down.
+		opts.answerWatch.answered()
+	case opts.answerWatch != nil:
+		opts.answerWatch.adopt(opts, sp, failMode)
+	case !deadline.IsZero():
 		// A tool call is answered by its answer deadline even when this
 		// process runs late (GAP-0155, GAP-0167).
-		watchdog := startAnswerWatchdog(&opts, sp, failMode, deadline)
+		watchdog := startAnswerWatchdog(&opts, sp, failMode, deadline, progressCeiling(opts, startedAt))
 		return watchdog.finish(sendToGateway(ctx, opts, sp, failMode, payload, startedAt))
 	}
 	return sendToGateway(ctx, opts, sp, failMode, payload, startedAt)
@@ -700,7 +730,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// dials, a gateway that accepted the call but does not answer, and the
 	// resends below (hookAnswerBudget).
 	opts.answerBy = answerDeadline(opts, opts.StartedAt)
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, opts.answerWatch.answered)
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	defer releaseAnswer()
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	defer releaseWatch()

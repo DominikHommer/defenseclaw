@@ -28,9 +28,18 @@ import (
 //
 // A gateway that waits on a remote scanner for the call (Cisco AI Defense,
 // the LLM judge) says so with an informational 102 response
-// (HookProgressHeader); the call then keeps the hook's whole budget, since
-// such a scanner may take several seconds.
+// (HookProgressHeader); the call then waits up to hookProgressCeiling.
 var hookAnswerBudget = 4 * time.Second
+
+// hookProgressCeiling is how long, from the start of the hook process, a
+// tool call whose gateway reported (102) that it waits on a remote scanner
+// may wait for the decision. The 102 only moves the answer deadline to it:
+// a scanner that answers later is not waited for, the call fails (closed for
+// a managed hook) and the agent's tool call still waits at most about five
+// seconds for DefenseClaw. The scanner's late verdict is discarded, like any
+// late answer. Before it the 102 lifted the deadline altogether, so a judge
+// that took longer held the call to the agent's own hook timeout (GAP-0255).
+var hookProgressCeiling = 4500 * time.Millisecond
 
 // HookProgressHeader asks the gateway to answer 102 Processing as soon as a
 // tool call it evaluates waits on a remote scanner. Only hooks that bound
@@ -80,6 +89,16 @@ func answerDeadline(opts Options, startedAt time.Time) time.Time {
 	return startedAt.Add(hookAnswerBudget)
 }
 
+// progressCeiling is the latest answer deadline of a tool call that started
+// at startedAt, after its gateway reported that it waits on a remote
+// scanner; zero when the call has no answer deadline.
+func progressCeiling(opts Options, startedAt time.Time) time.Time {
+	if answerDeadline(opts, startedAt).IsZero() {
+		return time.Time{}
+	}
+	return startedAt.Add(max(hookProgressCeiling, hookAnswerBudget))
+}
+
 // toolGateEvent reports a hook event that runs before a tool call (or asks
 // for its permission) and blocks it until the hook answers.
 func toolGateEvent(connector, event string) bool {
@@ -105,29 +124,35 @@ func toolGateEvent(connector, event string) bool {
 }
 
 // awaitAnswerBy returns ctx for the hook request of a tool call, ended with
-// errGatewayNoAnswer at deadline unless the gateway answered (stop) or
-// reported that it waits on a remote scanner (a 102 response) by then. Call
-// stop once the final response headers are in, before reading the body, and
-// release when the request is done. onAnswer, when set, runs once with the
-// first stop (the answer watchdog stands down). A zero deadline returns ctx
+// errGatewayNoAnswer at deadline unless the gateway answered (stop) by then.
+// A report that the gateway waits on a remote scanner (a 102 response) moves
+// the deadline to ceiling, never further (GAP-0255). Call stop once the final
+// response headers are in, before reading the body, and release when the
+// request is done. watch, when set, follows both: it stands down at the
+// first stop and takes the ceiling at the 102. A zero deadline returns ctx
 // unchanged.
-func awaitAnswerBy(ctx context.Context, deadline time.Time, onAnswer func()) (watched context.Context, stop, release func()) {
+func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, release func()) {
 	if deadline.IsZero() {
 		return ctx, func() {}, func() {}
 	}
+	if ceiling.Before(deadline) {
+		ceiling = deadline
+	}
 	answered := make(chan struct{})
-	var once sync.Once
+	progressed := make(chan struct{})
+	var answerOnce, progressOnce sync.Once
 	stop = func() {
-		once.Do(func() {
+		answerOnce.Do(func() {
 			close(answered)
-			if onAnswer != nil {
-				onAnswer()
-			}
+			watch.answered()
 		})
 	}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
-			stop()
+			progressOnce.Do(func() {
+				close(progressed)
+				watch.progressed()
+			})
 		}
 		return nil
 	}}
@@ -135,15 +160,25 @@ func awaitAnswerBy(ctx context.Context, deadline time.Time, onAnswer func()) (wa
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))
 		defer timer.Stop()
-		select {
-		case <-timer.C:
+		progress := progressed
+		for {
 			select {
 			case <-answered:
-			default:
-				cancel(errGatewayNoAnswer)
+				return
+			case <-watched.Done():
+				return
+			case <-progress:
+				// The scanner may answer up to the ceiling, not longer.
+				progress = nil
+				timer.Reset(time.Until(ceiling))
+			case <-timer.C:
+				select {
+				case <-answered:
+				default:
+					cancel(errGatewayNoAnswer)
+				}
+				return
 			}
-		case <-answered:
-		case <-watched.Done():
 		}
 	}()
 	return watched, stop, func() { stop(); cancel(nil) }
