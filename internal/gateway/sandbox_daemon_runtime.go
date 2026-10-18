@@ -239,8 +239,8 @@ type SandboxDaemon struct {
 	home      string
 	openShell daemonOpenShell
 
-	// lastDriver is the compute driver the last create chose and why
-	// (status before the registrations say).
+	// lastDriver is the compute driver the last create chose and why. It
+	// supplies a reason only when a running gateway reports that driver.
 	lastDriver atomic.Pointer[openshell.DriverChoice]
 
 	// starting holds the names of the sandboxes a Start is starting (name
@@ -1680,13 +1680,11 @@ func (d *SandboxDaemon) managedStatus(ctx context.Context) *sandboxapi.ManagedSt
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
 	}
-	// The driver: the newest sandbox's, else this daemon's last create's,
-	// else the managed gateway's view of the account (never a probe here:
-	// the probe runs at sandbox start).
+	// A running sandbox keeps its driver. Without one, report the managed
+	// gateway's refreshed choice for the next run. The last create's choice
+	// may be stale after device access changes without a policy generation.
 	if r, ok := d.regs.newest(); ok && r.Driver != "" {
 		out.Driver, out.DriverReason = r.Driver, r.DriverReason
-	} else if c := d.lastDriver.Load(); c != nil {
-		out.Driver, out.DriverReason = string(c.Driver), c.Reason
 	} else if s.SelectedDriver != "" {
 		out.Driver, out.DriverReason = s.SelectedDriver, s.DriverReason
 	}
@@ -1853,22 +1851,25 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 }
 
 // driverInForce makes m name the compute driver the connected gateway runs
-// (live), not the one the newest sandbox registered or the setup asked for:
+// (live) while a sandbox remains registered, not the one its record or setup
+// asked for:
 // after the organization switched drivers, the gateway restarts on the new
 // one once the account's sandboxes stopped, while the registrations of the
 // old driver's sandboxes still name the old one, and status, doctor and the
 // run banner said so (GAP-0455). The reason stays while it is of that driver.
 func (d *SandboxDaemon) driverInForce(m *sandboxapi.ManagedStatus, live string) {
-	if live == "" || m.Driver == live {
+	// An idle gateway may still be on the last sandbox's driver. For the
+	// next run, the refreshed account availability is authoritative.
+	if _, registered := d.regs.newest(); !registered || live == "" || m.Driver == live {
 		return
 	}
 	s := d.currentSettings()
 	reason := ""
 	switch c := d.lastDriver.Load(); {
-	case c != nil && string(c.Driver) == live:
-		reason = c.Reason
 	case s.SelectedDriver == live:
 		reason = s.DriverReason
+	case c != nil && string(c.Driver) == live:
+		reason = c.Reason
 	case s.Enterprise.Driver == live:
 		reason = openshell.DriverReasonConfigured
 	}

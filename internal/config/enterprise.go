@@ -983,7 +983,7 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 
 // SandboxDriver is the compute driver managed sandboxes want on goos:
 // enterprise.openshell.driver, else vm on macOS and docker on Linux. macOS
-// runs the MicroVM driver only, so auto is vm there; on Linux auto stays
+// resolves auto to vm; an explicit docker setting remains docker. On Linux auto stays
 // auto (the per-user KVM probe at sandbox start decides).
 func (o EnterpriseOpenShellConfig) SandboxDriver(goos string) string {
 	driver := strings.ToLower(strings.TrimSpace(o.Driver))
@@ -1000,7 +1000,7 @@ func (o EnterpriseOpenShellConfig) SandboxDriver(goos string) string {
 // when the MicroVM driver is wanted and KVM is not available for them:
 // docker or none, the stricter of enterprise.openshell.driver_fallback
 // (default docker) and F's driver_fallback (a profile may only tighten it to
-// none). It is "" where no fallback applies: macOS (MicroVM only) and the
+// none). It is "" where no fallback applies: macOS and the
 // docker driver.
 func (o EnterpriseOpenShellConfig) SandboxDriverFallback(goos string, floor OpenShellAdminConfig) string {
 	if goos == "darwin" || o.SandboxDriver(goos) == EnterpriseOpenShellDriverDocker {

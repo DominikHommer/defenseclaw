@@ -208,11 +208,21 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		}
 	}
 	if goos == "darwin" {
-		e2fs, err := openShellE2fsprogs(settings.E2fsprogsDir, home)
+		data, err := os.ReadFile(configPath)
 		if err != nil {
-			return openShellExecPlan{}, err
+			return openShellExecPlan{}, fmt.Errorf("%w: read the administrator's rendered gateway configuration: %v", errOpenShellPrerequisiteMissing, err)
 		}
-		path = append([]string{e2fs}, path...)
+		rendered, err := openshell.ParseRenderedGateway(data, nil)
+		if err != nil || rendered.Validate() != nil {
+			return openShellExecPlan{}, fmt.Errorf("%w: invalid administrator's rendered gateway configuration", errOpenShellPrerequisiteMissing)
+		}
+		if rendered.ComputeDriver == openshell.DriverVM {
+			e2fs, err := openShellE2fsprogs(settings.E2fsprogsDir, home)
+			if err != nil {
+				return openShellExecPlan{}, err
+			}
+			path = append([]string{e2fs}, path...)
+		}
 	}
 	tlsDir := filepath.Join(home, ".local", "state", "openshell", "tls")
 	env := []string{

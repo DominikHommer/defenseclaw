@@ -1152,7 +1152,7 @@ func TestSandboxGroupsRowMicroVM(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = h.run(Options{Action: ActionStatus})
-	if state, _ := rowState(r, "sandbox groups kvm"); !strings.Contains(state, "1 of 2 accounts that used sandboxes are not in the kvm group (bob)") ||
+	if state, _ := rowState(r, "sandbox groups kvm"); !strings.Contains(state, "1 of 2 accounts that used sandboxes lack /dev/kvm read-write access (bob)") ||
 		!strings.Contains(state, "they get the docker fallback") {
 		t.Errorf("groups kvm row = %q", state)
 	}

@@ -102,3 +102,13 @@ func TestCheckE2fsprogsFollowsTheGatewayRule(t *testing.T) {
 		t.Errorf("a folder named mke2fs passes: %+v", row)
 	}
 }
+
+func TestDockerDriverDoesNotRequireE2fsprogs(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	rows := h.env.checkDriver(context.Background(), openshellSettings{Driver: "docker", E2fsprogsDir: "/missing/e2fsprogs"})
+	for _, row := range rows {
+		if row.Name == "e2fsprogs" {
+			t.Fatalf("Docker driver has MicroVM prerequisite: %+v", row)
+		}
+	}
+}
