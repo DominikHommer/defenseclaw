@@ -1883,6 +1883,13 @@ programs all trust them. Only the CAs in that file are added: DefenseClaw
 never imports your computer's whole trust store. On a managed computer your
 administrator sets the key in the managed configuration.
 
+DefenseClaw 1.0.2 does not have this key. `defenseclaw upgrade --version 1.0.2`
+sets it aside in `~/.defenseclaw/config-set-aside.json` before it installs
+1.0.2, and upgrading again to a release that has it puts it back (after a
+`defenseclaw rollback`, run `defenseclaw migrate`). If you run the 1.0.2
+installer yourself, remove the key first with
+`defenseclaw config unset openshell.trusted_ca_bundle`.
+
 ### No gateway service installed
 
 **You see:** the **Gateway** check's fix is
