@@ -3743,7 +3743,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
     named with the command that sets it, and the upgrade goes on.
     """
 
-    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, ConfigWriteError, apply, plain_error
+    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
     from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
 
     path = os.path.join(data_dir, SET_ASIDE_FILE)
@@ -3778,7 +3778,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
                 f"put back after the downgrade to {record.get('for') or 'an older release'}",
                 path=config_path,
             )
-        except ConfigWriteError as exc:
+        except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
             commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in put.items())
             ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
             return
