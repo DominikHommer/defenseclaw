@@ -1660,7 +1660,7 @@
       },
       "targets": [
         {
-          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_hook_seen=\"false\")[$__range])) or vector(0)",
+          "expr": "count(sum by (host_name, activity_key) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_hook_seen=\"false\" | label_format activity_key=\"{{if .body_defenseclaw_ai_runtime_finding_id}}finding:{{.body_defenseclaw_ai_runtime_finding_id}}{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}\")[$__range]))) or vector(0)",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1868,7 +1868,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (control) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\")[$__interval]))",
+          "expr": "count by (control) (sum by (control, host_name, activity_key) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | host_name=~\"$host\" | event_name=\"ai.runtime.activity\" | body_user_id=~\"$user\" | body_defenseclaw_ai_runtime_kernel_outcome=\"would_block\" | label_format control=\"{{.body_defenseclaw_ai_runtime_kernel_control}}\" | label_format activity_key=\"{{if .body_defenseclaw_ai_runtime_finding_id}}finding:{{.body_defenseclaw_ai_runtime_finding_id}}{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}\")[$__interval])))",
           "refId": "A",
           "datasource": {
             "type": "loki",

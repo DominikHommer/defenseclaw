@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -1280,6 +1281,112 @@ def test_sandboxes_board_scopes_to_one_computer() -> None:
     health = [target["expr"] for target in _panel(board, "Health degraded")["targets"]]
     assert ['body_defenseclaw_sandbox_name=~"$sandbox"' in e for e in health] == [True, False]
     assert ['body_defenseclaw_sandbox_name=""' in e for e in health] == [False, True]
+
+
+# The shipped Loki (docker-compose.yml) takes OTLP natively and indexes only
+# its default resource attributes; every other resource or record attribute,
+# deployment.environment.name included, is structured metadata. A stream
+# selector on structured metadata matches nothing, so a shipped panel must
+# filter on it after the selector (GAP-0168). This is Loki 3.2's default
+# list, with dots read as underscores.
+SHIPPED_LOKI_IMAGE = "grafana/loki:3.2.0"
+SHIPPED_LOKI_INDEX_LABELS = frozenset(
+    {
+        "cloud_availability_zone",
+        "cloud_region",
+        "container_name",
+        "deployment_environment",
+        "k8s_cluster_name",
+        "k8s_container_name",
+        "k8s_cronjob_name",
+        "k8s_daemonset_name",
+        "k8s_deployment_name",
+        "k8s_job_name",
+        "k8s_namespace_name",
+        "k8s_pod_name",
+        "k8s_replicaset_name",
+        "k8s_statefulset_name",
+        "service_instance_id",
+        "service_name",
+        "service_namespace",
+    }
+)
+_STREAM_SELECTOR = re.compile(r"(?<![{\w$])\{(?!\{)([^{}]*)\}(?!\})")
+_MATCHER = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=~|!~|!=|=)")
+
+
+def _loki_queries(node: object, datasource: object = None):
+    """Yield (where, query) for every Loki panel target and variable query."""
+    if isinstance(node, dict):
+        datasource = node.get("datasource", datasource)
+        is_loki = isinstance(datasource, dict) and datasource.get("type") == "loki"
+        for key, value in node.items():
+            if key == "expr" and isinstance(value, str) and is_loki:
+                yield node.get("refId", "?"), value
+            elif key == "query" and isinstance(value, dict) and is_loki and isinstance(value.get("query"), str):
+                yield node.get("name", "?"), value["query"]
+            else:
+                yield from _loki_queries(value, datasource)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _loki_queries(item, datasource)
+
+
+def test_shipped_loki_indexes_only_its_default_labels() -> None:
+    stack = ROOT / "bundles/local_observability_stack"
+    compose = (stack / "docker-compose.yml").read_text(encoding="utf-8")
+    assert f"image: {SHIPPED_LOKI_IMAGE}" in compose, "update SHIPPED_LOKI_INDEX_LABELS with the Loki image"
+    loki = (stack / "loki/loki.yaml").read_text(encoding="utf-8")
+    assert "otlp_config" not in loki, "add the configured index labels to SHIPPED_LOKI_INDEX_LABELS"
+    assert "deployment_environment_name" not in SHIPPED_LOKI_INDEX_LABELS
+
+
+def test_loki_stream_selectors_use_only_shipped_index_labels() -> None:
+    checked = 0
+    for path in sorted(DASHBOARD_DIR.glob("*.json")):
+        board = json.loads(path.read_text(encoding="utf-8"))
+        for where, query in _loki_queries(board):
+            for selector in _STREAM_SELECTOR.findall(query):
+                labels = set(_MATCHER.findall(selector))
+                assert labels, f"{path.name} {where}: empty selector in {query}"
+                assert labels <= SHIPPED_LOKI_INDEX_LABELS, (
+                    f"{path.name} {where}: {sorted(labels - SHIPPED_LOKI_INDEX_LABELS)} is not a Loki index label; "
+                    "filter on it after the stream selector"
+                )
+                checked += 1
+    assert checked > 250
+
+
+def test_sandbox_board_filters_environment_after_the_selector() -> None:
+    board = _dashboard("defenseclaw-sandboxes.json")
+    queries = list(_loki_queries(board))
+    assert queries
+    for where, query in queries:
+        if "deployment_environment_name" in query:
+            assert '{service_name="defenseclaw"} | deployment_environment_name' in query, where
+    environment = board["templating"]["list"][0]
+    assert environment["query"]["query"] == (
+        'label_values({service_name="defenseclaw"} | deployment_environment_name!="", deployment_environment_name)'
+    )
+
+
+def test_ai_runtime_activity_panels_count_one_finding_once() -> None:
+    # GAP-0169: a finding is emitted again at each chain stage. The panels
+    # count distinct (host, finding id), as the Splunk app does, and keep a
+    # record without a finding id as its own row instead of folding them.
+    board = _dashboard("defenseclaw-ai-runtime.json")
+    panels = {panel.get("title"): panel for panel in _all_panels(board["panels"])}
+    key = (
+        '| label_format activity_key="{{if .body_defenseclaw_ai_runtime_finding_id}}'
+        "finding:{{.body_defenseclaw_ai_runtime_finding_id}}"
+        '{{else}}event:{{ __timestamp__ | unixEpochNanos }}{{end}}")'
+    )
+    no_hook = panels["Agent activity with no hook decision"]["targets"][0]["expr"]
+    assert no_hook.startswith("count(sum by (host_name, activity_key) (count_over_time((")
+    assert key in no_hook
+    by_control = panels["Would-block in monitor mode, by control"]["targets"][0]["expr"]
+    assert by_control.startswith("count by (control) (sum by (control, host_name, activity_key) (count_over_time((")
+    assert key in by_control
 
 
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
