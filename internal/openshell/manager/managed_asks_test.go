@@ -1380,3 +1380,40 @@ func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
 		t.Fatal("wildcard decision was accepted")
 	}
 }
+
+func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, pack string
+		edit             func(*config.Config)
+		requestAccess    bool
+	}{
+		{name: "metadata address", host: "169.254.169.254"},
+		{name: "pack block list", host: "a.paste.example", pack: "team"},
+		{name: "network deny", host: "example.org", pack: "strict"},
+		{name: "unblocks disabled", host: "webhook.site", edit: func(c *config.Config) {
+			c.OpenShell.Admin.AllowUnblock = boolPtr(false)
+		}, requestAccess: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, auth := managedEnv(t, tc.edit)
+			req := sandboxapi.CreateRequest{Name: "allowbox", Pack: tc.pack}
+			if tc.pack == "strict" {
+				req.Project = e.otherProject("strict")
+			}
+			e.live(req)
+			e.register("allowbox")
+			_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{
+				Host: tc.host, Kind: "allow", Sandbox: "allowbox",
+			})
+			if !sandboxapi.IsCode(err, sandboxapi.CodePolicyViolation) && !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+				t.Fatalf("allow %s = %v, want a policy refusal", tc.host, err)
+			}
+			if tc.requestAccess && !strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("refusal has no request-access guidance: %v", err)
+			}
+			if got := auth.decisions(); len(got) != 0 {
+				t.Fatalf("refused allow reached the decision store: %+v", got)
+			}
+		})
+	}
+}

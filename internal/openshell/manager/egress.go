@@ -660,6 +660,22 @@ func (m *Manager) PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecis
 	kind := sandboxrelay.DecisionEgressAllow
 	if req.Kind == "block" {
 		kind = sandboxrelay.DecisionEgressBlock
+	} else {
+		eff, err := m.resolveBox(b)
+		if err != nil {
+			return nil, err
+		}
+		if err := triage.CheckUnblock(eff, host); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		if err := triage.CheckApproval(eff, host, 0, true); err != nil {
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+		}
+		floor := m.floor(eff)
+		if err := sandboxreg.CheckApprovals(floor, kind, sandboxrelay.DecisionScopeAlways); err != nil {
+			m.recordAdminRefusal(ctx, name, audit.SandboxEgressUnblock, host)
+			return nil, m.decisionRefusal(err, b, floor, host)
+		}
 	}
 	stored, err := m.keepDecision(ctx, b, kind, host, sandboxrelay.DecisionScopeAlways, "")
 	if err != nil {

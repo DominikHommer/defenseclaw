@@ -99,8 +99,6 @@ const (
 // AgentSurfaceHeader itself.
 var ForwardHeaders = [...]string{
 	"Content-Type",
-	"Traceparent",
-	"Tracestate",
 	"Idempotency-Key",
 	"X-Defenseclaw-Hook-Event",
 	"X-Defenseclaw-Hook-Contract",
@@ -117,6 +115,8 @@ var ForwardHeaders = [...]string{
 // them; the list exists so tests can assert each one, together with every
 // header under SandboxHeaderPrefix.
 var DroppedHeaders = [...]string{
+	"Traceparent",
+	"Tracestate",
 	"Authorization",
 	"X-Defenseclaw-Token",
 	"X-Dc-Auth",

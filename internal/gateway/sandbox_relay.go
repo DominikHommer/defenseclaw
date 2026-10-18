@@ -52,7 +52,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
-	"go.opentelemetry.io/otel/propagation"
 )
 
 // sandboxRelayRoute is one relayed route: its class, the connector its path
@@ -312,12 +311,6 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			return
 		}
 		ctx, binding, state := sandboxRelayContext(ctx, reg, route.class)
-		// The hook socket has admitted the peer and registration. The daemon
-		// forwards trace context for this authenticated call; extract it here,
-		// after auth, rather than in the outer middleware.
-		if route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify {
-			ctx = hookTraceV6Propagator.Extract(ctx, propagation.HeaderCarrier(r.Header))
-		}
 		if route.class == sandboxauth.RouteHook {
 			// Read before the scrub drops every sandbox relay header.
 			state.egressRefusals = sandboxRelayEgressRefusals(r.Header)
