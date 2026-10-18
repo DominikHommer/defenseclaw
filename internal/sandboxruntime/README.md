@@ -46,6 +46,8 @@ or serialized handle cannot grant a second dispatch. The host controller must
 reserve session identities uniquely, abort abandoned preparations and own all
 successful workloads. These helpers do not yet wire a production AXIS adapter,
 establish private workspace custody or qualify a provider's actual enforcement.
+The optional backend contract uses this same prepare/receipt flow for both
+create and restart; it exposes no direct provision/start bypass around the gate.
 
 A receipt checks structural consistency. It grants no process launch,
 credential, workspace path or lifecycle authority. The controller must still

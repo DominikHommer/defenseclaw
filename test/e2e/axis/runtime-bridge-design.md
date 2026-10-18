@@ -29,10 +29,11 @@ authorized broker traffic; explicit offline execution is a separate posture.
 
 ## Prepare, admit, then launch
 
-The currently inert `Backend.Provision(ctx, Spec)` contract has no frozen
-policy or prepared-plan/receipt parameter. It is insufficient as a production
-launch API. Before its first implementation, change or supplement that
-optional contract so policy custody is explicit; do not implement launch by
+The optional `Backend` now prepares from the private resolved policy and full
+host-owned specification, returning a prepared resource handle and complete
+translation receipt. Create and restart both dispatch that handle through
+`LaunchGate`; there is no direct provision/start method on this lower-level
+contract. It has no production implementation yet. Never implement launch by
 deserializing a `Spec` or accepting its runtime identity as admission.
 
 The concrete flow should be:

@@ -163,11 +163,14 @@ type ExecResult struct {
 // verify owned identity on every operation, enforce admitted policy, and bound
 // cancellation to the contained workload. These declarations start no runtime.
 // The existing OpenShell manager need not implement this lower-level contract.
+// Create and restart both prepare without untrusted execution or credentials,
+// then dispatch the returned handle only through the owner's LaunchGate.
+// On preparation error the adapter retains responsibility for partial resources;
+// on success the host must register/abort the handle and own its lifecycle.
 type Backend interface {
 	Info(context.Context) (RuntimeInfo, error)
-	Provision(context.Context, Spec) (Instance, error)
+	Prepare(context.Context, *ExecutionPolicy, Spec) (PreparedProcess, PolicyReceipt, error)
 	Inspect(context.Context, SessionIdentity) (Instance, error)
-	Start(context.Context, SessionIdentity) (Instance, error)
 	Stop(context.Context, SessionIdentity) (Instance, error)
 	Delete(context.Context, SessionIdentity) error
 	Exec(context.Context, SessionIdentity, Command, ProcessIO) (ExecResult, error)
