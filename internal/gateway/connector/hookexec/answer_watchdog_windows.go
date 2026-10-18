@@ -58,9 +58,7 @@ func (w *answerDeadlineWaiter) wait(deadline time.Time) bool {
 	// The thread ends with this goroutine; it is never handed back to the
 	// scheduler at the raised priority.
 	runtime.LockOSThread()
-	if thread, err := windows.GetCurrentThread(); err == nil {
-		_, _, _ = procSetThreadPriority.Call(uintptr(thread), uintptr(threadPriorityTimeCritical))
-	}
+	_, _, _ = procSetThreadPriority.Call(uintptr(windows.CurrentThread()), uintptr(threadPriorityTimeCritical))
 	if w.event != 0 {
 		w.waitEvent(deadline)
 	}
