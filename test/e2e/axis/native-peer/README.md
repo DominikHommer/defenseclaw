@@ -40,3 +40,10 @@ support require separate tests. Old Landlock/MXC probe pass results do not
 qualify this new mount and process-custody posture.
 
 No payload has been executed, and these files do not enable AXIS.
+
+The separate [fixed host harness](harness/README.md) now supplies contributor-only
+artifact admission, held synthetic grants and actual factory/protocol wiring
+for the first argv/stdio/exit/boundary slice. Its source-controlled artifact
+registry is closed pending independent peer/static-musl/payload artifact review;
+default or explicit invocation cannot execute while it is closed. Its fake and
+inert tests establish no native runtime or production launch-gate qualification.
