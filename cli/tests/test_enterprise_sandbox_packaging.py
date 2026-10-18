@@ -191,7 +191,8 @@ def _build_fixture(
         bin_dir,
         "codesign",
         'for target; do :; done\n'
-        f'printf "%s\\n" "$@" > {shlex.quote(str(codesign_calls))}/"$(basename "$target")"',
+        f'printf "%s\\n" "$@" > {shlex.quote(str(codesign_calls))}/"$(basename "$target")"\n'
+        'printf "signed fixture\\n" >> "$target"',
     )
     return repo, payload, bin_dir, captured
 
@@ -306,6 +307,11 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
             "--identifier", f"com.cisco.defenseclaw.{name}",
         ]
         assert args[-1].endswith("/" + executable.relative_to(root).as_posix())
+    gateway = install_root / "bin" / "defenseclaw-gateway"
+    digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+    agent_binary = install_root / "bin" / "launch-agents" / digest / "defenseclaw-gateway"
+    assert agent_binary.read_bytes() == gateway.read_bytes()
+    assert gateway.read_bytes().endswith(b"signed fixture\n")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
