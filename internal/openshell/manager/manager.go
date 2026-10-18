@@ -894,7 +894,11 @@ func (m *Manager) config() *config.Config {
 // (openshell.workdir.undo_ignored): the directory names and the cap on the
 // copies, or nothing while the key is off.
 func (m *Manager) keepIgnored() ([]string, int64) {
-	u := m.config().OpenShell.Workdir.UndoIgnored
+	return keepIgnoredConfig(m.config())
+}
+
+func keepIgnoredConfig(cfg *config.Config) ([]string, int64) {
+	u := cfg.OpenShell.Workdir.UndoIgnored
 	if !u.Enabled {
 		return nil, 0
 	}

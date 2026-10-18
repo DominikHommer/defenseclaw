@@ -52,10 +52,14 @@ import (
 func (m *Manager) resolve(cfg *config.Config, flags packs.Flags) (*packs.Effective, []packs.Violation, error) {
 	eff, violations, err := packs.Resolve(cfg, flags)
 	if err != nil {
-		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
-		return nil, nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid, Message: "the sandbox policy pack is invalid", Detail: err.Error()}
+		return nil, nil, m.invalidPack(err)
 	}
 	return eff, violations, nil
+}
+
+func (m *Manager) invalidPack(err error) error {
+	m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+	return &sandboxapi.Error{Code: sandboxapi.CodePackInvalid, Message: "the sandbox policy pack is invalid", Detail: err.Error()}
 }
 
 // resolveBox re-resolves a sandbox's policy against the current config, so

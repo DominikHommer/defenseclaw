@@ -21,8 +21,11 @@ must still capture the config and authority together under its launch/rotation
 transaction. Neither this handoff nor its planning copy qualifies a provider.
 The existing immutable egress decider is shared; its process-wide local-address
 guard retains its existing refresh behavior rather than becoming a frozen
-address snapshot. The current manager's deliberate policy re-resolution remains
-unchanged; it is not yet wired to this native handoff.
+address snapshot. OpenShell `Manager.Create` now uses `packs.ResolveRun` for one
+owned policy/configuration tuple through image selection, token delivery,
+workspace planning and initial undo setup. Later live-policy refresh and start
+still deliberately resolve current policy. Native authority capture from the
+gateway's real generation and its rotation transaction remain unwired.
 
 The private resolver remains the egress authority. Inspection JSON omits its
 private evaluator state and cannot reconstruct an executable policy. It still

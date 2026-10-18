@@ -85,6 +85,11 @@ func (r *rollback) run(m *Manager, sandbox string) {
 // Create creates a sandbox, waits until it is ready and returns it. Every
 // step it completed is rolled back when a later one fails.
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
+	// These request slices also reach workspace planning and durable run flags.
+	// Own them before a provisioning callback can mutate caller-backed storage.
+	req.Unmask = slices.Clone(req.Unmask)
+	req.HostPorts = slices.Clone(req.HostPorts)
+	req.Context = slices.Clone(req.Context)
 	cfg := m.config()
 	selected, err := sandboxruntime.Select(sandboxruntime.ID(req.Runtime), sandboxruntime.ID(cfg.SandboxDefaultRuntime()))
 	if err != nil {
@@ -134,10 +139,17 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
 		RepoPolicy: repo,
 	}
-	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
+	resolved, _, err := packs.ResolveRun(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
-		return nil, err
+		return nil, m.invalidPack(err)
 	}
+	// Planning and provisioning use one owned resolution. A config publication
+	// during a gateway/image operation must not mix new settings with old policy.
+	cfg, resolvedFlags, eff, violations, err := resolved.ExecutionInputs()
+	if err != nil {
+		return nil, m.invalidPack(err)
+	}
+	flags.Unmask, flags.HostPorts, flags.RepoPolicy = resolvedFlags.Unmask, resolvedFlags.HostPorts, resolvedFlags.RepoPolicy
 	if v := packs.FirstFatal(violations); v != nil {
 		return nil, m.violationError(ctx, v, req.Name)
 	}
@@ -223,7 +235,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	defer rb.run(m, name)
 	view, err := m.create(ctx, gw, b, createInput{
 		name: name, project: project, harness: spec, flags: flags, eff: eff, violations: violations, mode: mode, req: req,
-		resources: resources,
+		resources: resources, config: cfg,
 	}, rb)
 	if err != nil {
 		rb.run(m, name)
@@ -238,6 +250,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 }
 
 type createInput struct {
+	config     *config.Config // owned by the same host resolution as eff
 	name       string
 	project    string
 	harness    *harness.Spec
@@ -251,7 +264,7 @@ type createInput struct {
 }
 
 func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInput, rb *rollback) (*sandboxapi.Sandbox, error) {
-	cfg := m.config()
+	cfg := in.config
 	eff, spec, name := in.eff, in.harness, in.name
 	egressDec, err := m.egressDecider(cfg, eff)
 	if err != nil {
@@ -396,7 +409,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			}
 		}
 		if !in.req.NoSnapshot {
-			keep, keepBytes := m.keepIgnored()
+			keep, keepBytes := keepIgnoredConfig(cfg)
 			snap, err := m.ws.Snapshot(ctx, workspace.SnapshotOptions{
 				Project: in.project, Name: name, DataDir: m.opts.DataDir, Skip: plan.MaskedRels(), Replace: true,
 				Protected: eff.PolicySources(), KeepIgnored: keep, KeepIgnoredBytes: keepBytes,
