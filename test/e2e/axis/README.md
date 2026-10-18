@@ -1,8 +1,9 @@
-# AXIS offline feasibility prototype
+# AXIS contributor feasibility probes
 
 This contributor-only prototype starts the approved integration plan's Stage 2.
 It adds no production AXIS adapter, command, configuration, installation path,
-or support claim. All Go code is in test files. Ordinary package tests need no
+or support claim. Explicit contributor payloads are separate from the ordinary
+Go package tests, which need no
 AXIS, network, Claude account, Docker, or WSL installation.
 
 The source reference is AXIS
@@ -25,6 +26,11 @@ The integration targets AXIS through MXC on each native host:
 These are requested support targets, not current product availability. Each
 requires independent live qualification under the same DefenseClaw security
 contract. No AXIS platform is enabled by this prototype.
+
+The `mxc-runner` experiment uses a separately pinned MXC V1 API with AXIS child
+guards. Its first CI stage only builds code and generates a combined dependency
+lock. Review and commit that lock, then rebuild with `--locked` before any live
+execution. It is not a replacement for the product adapter or acceptance gates.
 
 ## Ordinary offline tests
 

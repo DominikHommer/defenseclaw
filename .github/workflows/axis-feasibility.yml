@@ -11,6 +11,7 @@ on:
     paths:
       - .github/workflows/axis-feasibility.yml
       - test/e2e/axis/runner/**
+      - test/e2e/axis/windows/**
   workflow_dispatch:
 
 permissions:
@@ -187,15 +188,25 @@ jobs:
           compression-level: 0
 
   windows-source-artifact:
-    name: Build pinned native Windows contributor artifacts
+    name: Build native Windows inherited-console contributor artifacts
     runs-on: windows-2022
     timeout-minutes: 45
     env:
       MXC_SOURCE_COMMIT: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
+      AXIS_CONSOLE_OVERLAY_SHA256: 2dae4716da9581632fe9f19929a78902df71a2d828ea726b3545c7387686b8c4
     defaults:
       run:
         shell: pwsh
     steps:
+      - name: Check out the reviewed Windows contributor overlay
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/windows
+
       - name: Check out the reviewed AXIS source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -229,6 +240,21 @@ jobs:
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --no-self-update
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Rust toolchain installation failed' }
 
+      - name: Apply the reviewed inherited-console experiment
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Read exact committed bytes, independent of Windows checkout EOLs.
+          python -c "import os,pathlib,subprocess; pathlib.Path('AXIS_INHERITED_CONSOLE.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/axis-inherited-console.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed contributor overlay' }
+          $overlay = (Resolve-Path -LiteralPath AXIS_INHERITED_CONSOLE.patch).Path
+          if ((Get-FileHash -LiteralPath $overlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:AXIS_CONSOLE_OVERLAY_SHA256) { throw 'Contributor overlay digest mismatch' }
+          git -C axis-source apply --check --whitespace=error $overlay
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay did not match pinned AXIS source' }
+          git -C axis-source apply --whitespace=error $overlay
+          if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay application failed' }
+          $changed = @(git -C axis-source diff --name-only | Sort-Object)
+          if ($LASTEXITCODE -ne 0 -or ($changed -join ',') -ne 'crates/axis-sandbox/Cargo.toml,crates/axis-sandbox/src/windows/mxc.rs') { throw 'Unexpected AXIS source modifications' }
+
       - name: Apply the reviewed AXIS compatibility patches to MXC
         run: |
           $ErrorActionPreference = 'Stop'
@@ -248,6 +274,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'AXIS Windows source build failed' }
           git -C axis-source diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
           if ($LASTEXITCODE -ne 0) { throw 'AXIS dependency or toolchain source changed during build' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --manifest-path axis-source/Cargo.toml -p axis-sandbox inherited_console_requires_every_standard_handle
+          if ($LASTEXITCODE -ne 0) { throw 'Inherited-console admission unit test failed' }
           cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Patched MXC Windows executor build failed' }
           git -C mxc-source diff --exit-code -- src/Cargo.lock
@@ -261,7 +289,7 @@ jobs:
           BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $payloadName = "axis-source-windows-x86_64-$env:AXIS_SOURCE_COMMIT"
+          $payloadName = "axis-source-windows-inherited-console-x86_64-$env:AXIS_SOURCE_COMMIT"
           $dist = Join-Path $env:GITHUB_WORKSPACE 'windows-dist'
           $payload = Join-Path $dist $payloadName
           $bin = Join-Path $payload 'bin'
@@ -280,6 +308,7 @@ jobs:
           foreach ($name in @('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'LICENSE')) {
             Copy-Item -LiteralPath "axis-source/$name" -Destination $axisMetadata
           }
+          Copy-Item -LiteralPath AXIS_INHERITED_CONSOLE.patch -Destination $payload
           Copy-Item -LiteralPath mxc-source/src/Cargo.lock -Destination $mxcMetadata
           Copy-Item -LiteralPath mxc-source/LICENSE.md -Destination $mxcMetadata
           Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' |
@@ -300,11 +329,17 @@ jobs:
             schema_version = 1
             purpose = 'contributor_source_build_only'
             support_certification = $false
+            variant = 'inherited-console'
             axis_source = [ordered]@{
               repository = 'https://github.com/ROCm/axis'
               commit = $env:AXIS_SOURCE_COMMIT
               cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
               toolchain_file_sha256 = (Get-FileHash -LiteralPath (Join-Path $axisMetadata 'rust-toolchain.toml') -Algorithm SHA256).Hash.ToLowerInvariant()
+              contributor_overlay = [ordered]@{
+                path = 'AXIS_INHERITED_CONSOLE.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'AXIS_INHERITED_CONSOLE.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_inherited_console_experiment'
+              }
             }
             mxc_source = [ordered]@{
               repository = 'https://github.com/microsoft/mxc'
@@ -329,7 +364,8 @@ jobs:
               'Build only: no live sandbox, Claude, daemon, helper or broker execution.'
               'No installation, administrator actions, service registration or firewall changes.'
               'Windows BaseContainer availability and isolation require separate host qualification.'
-              'Interactive BaseContainer ConPTY is explicitly unsupported by the pinned AXIS source.'
+              'Stock AXIS refuses interactive Windows MXC; this reviewed contributor overlay tests inherited-console admission only.'
+              'Direct BaseContainer pseudoconsole startup attributes remain unsupported; real console input, resize, signals and cleanup need manual proof.'
               'Strict proxy networking requires an explicitly installed privileged AXIS WFP broker.'
               'This manifest and checksums are evidence, not signed production provenance.'
             )
@@ -351,7 +387,7 @@ jobs:
       - name: Upload the native Windows source-bound contributor artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: axis-source-windows-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          name: axis-source-windows-inherited-console-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
           path: |
             windows-dist/*.zip
             windows-dist/*.zip.sha256
