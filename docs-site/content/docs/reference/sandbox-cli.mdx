@@ -872,8 +872,8 @@ A few rules the flags follow:
   of an image the driver has not prepared yet says it takes about a minute.
   That start prepares a disk of about the image's size in the driver's image
   cache: before anything is copied, `run` refuses it when the volume has less
-  free space than the image's size plus 1 GiB (at least 6 GiB), and warns
-  below twice that (at least 12 GiB), naming what is free and
+  free space than the measured first-start use of about 11 GiB (at least 12 GiB), and warns
+  below twice that (at least 22 GiB), naming what is free and
   `sandbox image prune`. The daemon refuses such a create from any client the
   same way.
 
