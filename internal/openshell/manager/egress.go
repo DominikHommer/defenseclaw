@@ -482,6 +482,9 @@ func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, ap
 	// second must not be decided, and reported done, against the block
 	// list from before the write (GAP-0173).
 	m.syncConfig(ctx)
+	if req.Sandbox != "" {
+		m.confirmPolicy(ctx, req.Sandbox)
+	}
 	var (
 		b   *box
 		eff *packs.Effective
@@ -667,6 +670,14 @@ func (m *Manager) syncConfig(ctx context.Context) {
 	}
 	if err := m.opts.SyncConfig(ctx); err != nil {
 		m.logf("load config.yaml before the decision: %v", err)
+	}
+}
+
+// confirmPolicy brings sandbox's policy up to date before a decision for it
+// (Options.ConfirmPolicy).
+func (m *Manager) confirmPolicy(ctx context.Context, sandbox string) {
+	if m.opts.ConfirmPolicy != nil {
+		m.opts.ConfirmPolicy(ctx, sandbox)
 	}
 }
 

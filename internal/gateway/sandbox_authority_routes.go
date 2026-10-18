@@ -301,8 +301,17 @@ func (a *APIServer) handleSandboxSettings(w http.ResponseWriter, r *http.Request
 		V: sandboxrelay.WireVersion, Enabled: cfg.OpenShell.Enabled, Available: available, Unavailable: why,
 		Operational: sandboxOperational(cfg, floor), Enterprise: sandboxEnterprise(cfg, floor),
 		Generation: a.sandboxViewGeneration(cfg, view), RequestAccess: sandboxRequestAccess(floor),
-		SelectedDriver: avail.Driver, DriverReason: avail.DriverReason,
+		SelectedDriver: avail.Driver, DriverReason: avail.DriverReason, ForeignSandboxes: sandboxForeignAction(floor),
 	})
+}
+
+// sandboxForeignAction is floor F's foreign_sandboxes: alert only when F
+// says so, else stop (an empty value is stop on a managed computer).
+func sandboxForeignAction(f config.OpenShellAdminConfig) string {
+	if strings.EqualFold(strings.TrimSpace(f.ForeignSandboxes), config.OpenShellForeignSandboxesAlert) {
+		return config.OpenShellForeignSandboxesAlert
+	}
+	return config.OpenShellForeignSandboxesStop
 }
 
 // sandboxResolveInput is what a resolve asked for; its run inputs are kept
@@ -808,10 +817,47 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
 		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
+	current.Floor, current.RequiredPack, err = sandboxCurrentFloor(cfg, peer, floor)
+	if err != nil {
+		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+		return
+	}
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
 	}
 	a.writeJSON(w, http.StatusOK, current)
+}
+
+// sandboxCurrentFloor is floor F in the wire form of policy/current and,
+// when F names a custom required pack, that pack as the managed gateway loads
+// it for peer (the daemon cannot read the administrator's pack folder). A
+// required pack that does not load or misses its pin is left out: a daemon
+// that has not confirmed the registration yet keeps it on the closed floor
+// (confirmedFloor), and one that has keeps the pack its create was given.
+func sandboxCurrentFloor(cfg *config.Config, peer managedHookPeer, floor config.OpenShellAdminConfig) (json.RawMessage, json.RawMessage, error) {
+	rawFloor, err := json.Marshal(floor)
+	if err != nil {
+		return nil, nil, err
+	}
+	ref := strings.TrimSpace(floor.RequiredPack)
+	if ref == "" || packs.IsBuiltin(ref) {
+		return rawFloor, nil, nil
+	}
+	pack, err := packs.LoadRequired(sandboxSubject(peer), ref, cfg.OpenShell.PackDir, true)
+	if err == nil {
+		if pin := strings.TrimSpace(floor.RequiredPackDigest); pin != "" && pack.Digest != pin {
+			err = fmt.Errorf("required pack %s has digest %s, not the pinned %s", pack.Name, pack.Digest, pin)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] policy/current uid=%d: the required pack is left out: %v\n", peer.UID, err)
+		return rawFloor, nil, nil
+	}
+	rawPack, err := json.Marshal(pack)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rawFloor, rawPack, nil
 }
 
 // sandboxRegistrationEffective resolves a registered sandbox's policy

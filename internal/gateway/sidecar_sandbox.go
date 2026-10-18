@@ -212,6 +212,9 @@ type sandboxRuntimeDeps struct {
 	// persist keeps "always" decisions; nil refuses them.
 	persist    triage.Persister
 	syncConfig func(context.Context) error
+	// confirmPolicy is a managed daemon's manager.Options.ConfirmPolicy;
+	// nil for the per-user gateway, whose policy is local.
+	confirmPolicy func(context.Context, string)
 	// hostUser is the account sandboxes run as; nil is this process's.
 	hostUser         *manager.HostUser
 	discoveryRemoved func(string)
@@ -288,6 +291,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		Telemetry:          telemetry,
 		Persist:            deps.persist,
 		SyncConfig:         deps.syncConfig,
+		ConfirmPolicy:      deps.confirmPolicy,
 		Quiesce:            inflight,
 		ForgetBinding:      api.ForgetSandboxBinding,
 		IngressPort:        ingressPort,

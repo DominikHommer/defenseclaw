@@ -396,6 +396,24 @@ func (d *SandboxDaemon) confirmEgressPolicy(ctx context.Context, pr egress.Princ
 	return changed || adopted, nil
 }
 
+// confirmSandboxPolicy is the manager's ConfirmPolicy: before an unblock or
+// an ask's answer for sandbox name is judged, the policy of its registration
+// is confirmed as for a new connection (confirmLease, adoptApplied), so the
+// decision uses the profile `sandbox policy explain` shows. A registration
+// the daemon does not hold, or one revoked, keeps the closed floor; a
+// managed gateway that does not answer keeps the policy in force, and it
+// checks the decision against the person's floor itself (GAP-0132).
+func (d *SandboxDaemon) confirmSandboxPolicy(ctx context.Context, name string) {
+	r, ok := d.regs.get(name)
+	if !ok || r.ID == "" || r.Revoked {
+		return
+	}
+	if _, off := d.confirmLease(ctx, r); off != nil {
+		return
+	}
+	_, _ = d.adoptApplied(ctx, false)
+}
+
 // confirmLease is confirmEgressPolicy's lease: fresh, the outcome of the
 // confirmation under way or of the last failed one, or a new confirmation
 // (confirmOnce). A connection whose request ends while it waits is refused.

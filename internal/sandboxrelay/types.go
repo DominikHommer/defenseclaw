@@ -431,6 +431,10 @@ type DaemonSettings struct {
 	// decides. Not part of Enterprise: a change never restarts a daemon.
 	SelectedDriver string `json:"selected_driver,omitempty"`
 	DriverReason   string `json:"driver_reason,omitempty"`
+	// ForeignSandboxes is the caller's own foreign_sandboxes (alert or
+	// stop), which the daemon applies to sandboxes DefenseClaw did not start
+	// while none of the caller's registrations names a floor yet (GAP-0058).
+	ForeignSandboxes string `json:"foreign_sandboxes,omitempty"`
 }
 
 // EnterpriseOpenShell is enterprise.openshell plus the rendered OpenShell
@@ -518,6 +522,14 @@ type CurrentPolicy struct {
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
+	// Floor is the registration's whole floor F (a config.OpenShellAdminConfig)
+	// as the managed gateway resolves it now, and RequiredPack F's custom
+	// required pack (a packs.Pack) when it names one. A daemon takes both
+	// in place of what its registrations file holds when it first confirms
+	// a registration it loaded from that file: the file is the person's own,
+	// so a floor field or a pack edited there never decides (GAP-0028).
+	Floor        json.RawMessage `json:"floor,omitempty"`
+	RequiredPack json.RawMessage `json:"required_pack,omitempty"`
 }
 
 // LiveFields are the floor fields that switch on a running sandbox at once

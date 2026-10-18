@@ -974,6 +974,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 			m.mu.Unlock()
 		}
 	}()
+	m.confirmPolicy(ctx, a.sandbox)
 	eff, err := m.resolveBox(b)
 	if err != nil {
 		return nil, err

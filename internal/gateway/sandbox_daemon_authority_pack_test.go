@@ -60,8 +60,9 @@ func requiredPackAnswer(t *testing.T, dir, name string) (sandboxrelay.ResolveRes
 
 // The daemon resolves a required-pack run with the pack the managed
 // gateway's answer carries, never the root-only file, and installs it again
-// from its registrations after a restart; a pack off the floor's pin fails
-// closed (GAP-0440).
+// from the managed gateway's first answer after a restart, never from the
+// registrations file; a pack off the floor's pin fails closed (GAP-0440,
+// GAP-0028).
 func TestSandboxDaemonUsesTheGatewaysRequiredPack(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
 	resp, file := requiredPackAnswer(t, t.TempDir(), "contractors")
@@ -106,8 +107,26 @@ func TestSandboxDaemonUsesTheGatewaysRequiredPack(t *testing.T) {
 	if err := regs.put(daemonRegistration{ID: "reg-vendors", Sandbox: "dc-claude-v", Floor: floor, RequiredPack: wire.Pack}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadDaemonRegistrations(path); err != nil {
+	loaded, err := loadDaemonRegistrations(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The file is the account's own: a pack in it is never installed
+	// (GAP-0028).
+	if _, _, err := packs.Resolve(f.d.configWithFloor(floor), packs.Flags{}); err == nil {
+		t.Fatal("a restarted daemon resolved the required pack from its registrations file")
+	}
+	// The managed gateway's first answer hands the floor and the pack over.
+	rawFloor, err := json.Marshal(floor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawPack, err := json.Marshal(wire.Pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.applyLive("dc-claude-v", sandboxrelay.CurrentPolicy{V: 1, Floor: rawFloor, RequiredPack: rawPack}) {
+		t.Fatal("the gateway's answer did not confirm the registration")
 	}
 	if eff, _, err := packs.Resolve(f.d.configWithFloor(floor), packs.Flags{}); err != nil || eff.Pack.Name != "vendors" || eff.Pack.Source != file {
 		t.Fatalf("resolve after a restart: %v", err)

@@ -1445,3 +1445,86 @@ func TestManagedCreateUsesPinnedFloorAfterDefaultChanges(t *testing.T) {
 		t.Fatalf("create under the pinned floor: %v", err)
 	}
 }
+
+// GAP-0132: after an administrator moved the person back to a looser
+// profile, `sandbox policy explain` named it at once while an unblock in the
+// same sandbox was still refused under the stricter profile until the
+// minute's poll. An unblock and an ask's answer now have the sandbox's policy
+// confirmed first (Options.ConfirmPolicy) and are judged under the policy
+// that confirmation put in force, looser or tighter.
+func TestManagedDecisionsConfirmTheSandboxPolicyFirst(t *testing.T) {
+	no := boolPtr(false)
+	e, _ := managedEnv(t, func(c *config.Config) {
+		c.OpenShell.Profile = config.OpenShellProfileBalanced
+		c.OpenShell.Admin.AllowUnblock = no
+		c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsSession
+	})
+	e.live(sandboxapi.CreateRequest{Name: "pinbox"})
+	e.register("pinbox")
+	var confirmed []string
+	confirmTo := func(unblock *bool, approvals string) {
+		e.m.opts.ConfirmPolicy = func(_ context.Context, name string) {
+			confirmed = append(confirmed, name)
+			e.setConfig(func(c *config.Config) {
+				c.OpenShell.Admin.AllowUnblock, c.OpenShell.Admin.UserApprovals = unblock, approvals
+			})
+		}
+	}
+
+	confirmTo(nil, "")
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "pinbox"}); err != nil {
+		t.Fatalf("unblock under the confirmed looser profile: %v", err)
+	}
+	confirmTo(no, config.OpenShellUserApprovalsSession)
+	_, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "pinbox", Always: true})
+	wantCode(t, err, sandboxapi.CodeAdminViolation)
+	if !slices.Equal(confirmed, []string{"pinbox", "pinbox"}) {
+		t.Fatalf("confirmed before the unblocks: %v", confirmed)
+	}
+
+	// An ask answered always: refused under session-only approvals, the
+	// confirmation lifts that first.
+	confirmTo(nil, "")
+	e.propose("pinbox", "hz.example.org")
+	e.draft("pinbox")
+	asks := e.waitAsks("pinbox", 1)
+	must(t, e.decide(asks[0].ID, sandboxapi.ApprovalDecision{Decision: "approve", Always: true}))
+	e.waitAsks("pinbox", 0)
+	if len(confirmed) != 3 || confirmed[2] != "pinbox" {
+		t.Fatalf("confirmed before the answer: %v", confirmed)
+	}
+}
+
+// GAP-0058: foreign_sandboxes alert in the floor of the person's registered
+// sandbox reports a sandbox DefenseClaw did not start and leaves it running,
+// even while the daemon's own floor for new runs says stop: the registration
+// floor of the sandbox in force decides, not the closed floor.
+func TestManagedForeignAlertUnderTheRegistrationFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	alert := e.config().OpenShell.Admin
+	alert.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+	auth.profile.Store(&alert)
+	if e.config().OpenShell.Admin.ForeignSandboxes == config.OpenShellForeignSandboxesAlert {
+		t.Fatal("the daemon's own floor must say stop for this test")
+	}
+	e.live(sandboxapi.CreateRequest{Name: "mine"})
+	e.register("mine")
+	_, err := e.client.CreateSandbox(t.Context(), "devbox", &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{})
+	must(t, err)
+	must(t, e.m.Reconcile(t.Context()))
+	must(t, e.m.Reconcile(t.Context()))
+	sb, err := e.client.GetSandbox(t.Context(), "devbox")
+	must(t, err)
+	if p := auditPhase(sb.Status.Phase); p == audit.SandboxPhaseStopped || p == audit.SandboxPhaseStopping {
+		t.Fatal("alert in the registration floor stopped the foreign sandbox")
+	}
+	if got := auth.eventsOf(sandboxrelay.EventForeignSandbox); len(got) != 1 || !strings.Contains(string(got[0].Payload), `"action":"alert"`) {
+		t.Fatalf("foreign sandbox events = %+v", got)
+	}
+	if !e.m.ForeignSandboxesRunning() {
+		t.Fatal("the alerted foreign sandbox left running is not reported")
+	}
+	if p := e.get("mine").Phase; p != string(audit.SandboxPhaseReady) {
+		t.Fatalf("the registered sandbox is %s", p)
+	}
+}

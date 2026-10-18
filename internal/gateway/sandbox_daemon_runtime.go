@@ -367,6 +367,9 @@ func newSandboxDaemonRuntime(d *SandboxDaemon) (*sandboxRuntime, error) {
 		// Every new connection of a sandbox's egress proxy is decided with
 		// the policy the managed gateway confirmed (GAP-0172).
 		egressRefresh: d.egressRefresh,
+		// An unblock or an ask's answer is judged under the policy the
+		// managed gateway confirmed within the last second (GAP-0132).
+		confirmPolicy: d.confirmSandboxPolicy,
 	}, d.opts.RuntimeOptions)
 }
 
@@ -461,6 +464,13 @@ func (d *SandboxDaemon) buildConfigWith(floor *config.OpenShellAdminConfig) *con
 		o.Admin = *floor
 	} else {
 		o.Admin = closedSandboxFloor()
+		// No registration names a floor yet: a sandbox DefenseClaw did not
+		// start is judged under the person's own foreign_sandboxes, which
+		// the managed gateway's settings carry, and stopped without them
+		// (GAP-0058).
+		if strings.EqualFold(s.ForeignSandboxes, config.OpenShellForeignSandboxesAlert) {
+			o.Admin.ForeignSandboxes = config.OpenShellForeignSandboxesAlert
+		}
 	}
 	off := false
 	o.Admin.AllowMount = &off
@@ -2426,9 +2436,11 @@ type daemonRegistration struct {
 	Generation  uint64                      `json:"generation,omitempty"`
 	Floor       config.OpenShellAdminConfig `json:"floor"`
 	// RequiredPack is the floor's required pack as the managed gateway's
-	// answer carried it, which a restarted daemon installs again
-	// (packs.UseAuthorityPack): the account cannot read the pack's file.
-	RequiredPack *packs.Pack `json:"required_pack,omitempty"`
+	// answer carried it (packs.UseAuthorityPack): the account cannot read the
+	// pack's file. It is never read from the registrations file, which the
+	// account can write: a restarted daemon takes it, with the whole floor,
+	// from the managed gateway's first policy/current answer (GAP-0028).
+	RequiredPack *packs.Pack `json:"-"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
 	Driver        string    `json:"driver,omitempty"`
@@ -2476,10 +2488,10 @@ func loadDaemonRegistrations(path string) (*daemonRegistrations, error) {
 	}
 	for _, reg := range doc.Registrations {
 		if reg.ID != "" && reg.Sandbox != "" {
+			// The floor is the file's until the managed gateway confirms the
+			// registration (applyLiveLocked), and an unconfirmed registration
+			// resolves under the closed floor.
 			r.byName[reg.Sandbox] = reg
-			// A pack off the floor's pin is not installed: the resolve then
-			// fails closed.
-			_ = packs.UseAuthorityPack(reg.Floor, reg.RequiredPack)
 		}
 	}
 	return r, nil
@@ -2646,6 +2658,20 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	}
 	live, digest := cp.Live, cp.Digest
 	confirmed := !reg.Confirmed
+	if confirmed {
+		// The first confirmation in this daemon's lifetime of a registration
+		// the registrations file named: that file is the account's own, so
+		// none of its floor fields or its required pack decides anything.
+		// The whole floor, and the required pack it names, are the managed
+		// gateway's. An answer without them (a managed gateway of an earlier
+		// release) leaves the registration unconfirmed, on the closed floor
+		// (GAP-0028).
+		floor, pack, ok := confirmedFloor(cp)
+		if !ok {
+			return false
+		}
+		reg.Floor, reg.RequiredPack = floor, pack
+	}
 	reg.Confirmed = true
 	policyAt := cp.UpdatedAt.UTC()
 	moved := !cp.UpdatedAt.IsZero() && !policyAt.Equal(reg.UpdatedAt)
@@ -2690,6 +2716,30 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	_ = r.saveLocked()
 	r.changes.Add(1)
 	return true
+}
+
+// confirmedFloor is the floor and required pack of a policy/current answer
+// (CurrentPolicy.Floor, RequiredPack). ok is false when the answer carries
+// no floor, or names a custom required pack it does not carry or that
+// misses the floor's pin. A pack it carries is installed for this
+// process's resolves (packs.UseAuthorityPack).
+func confirmedFloor(cp sandboxrelay.CurrentPolicy) (config.OpenShellAdminConfig, *packs.Pack, bool) {
+	var floor config.OpenShellAdminConfig
+	if len(cp.Floor) == 0 || json.Unmarshal(cp.Floor, &floor) != nil {
+		return config.OpenShellAdminConfig{}, nil, false
+	}
+	ref := strings.TrimSpace(floor.RequiredPack)
+	if ref == "" || packs.IsBuiltin(ref) {
+		return floor, nil, true
+	}
+	if len(cp.RequiredPack) == 0 {
+		return config.OpenShellAdminConfig{}, nil, false
+	}
+	pack, err := packs.AuthorityPack(nil, cp.RequiredPack, floor)
+	if err != nil || pack == nil || packs.UseAuthorityPack(floor, pack) != nil {
+		return config.OpenShellAdminConfig{}, nil, false
+	}
+	return floor, pack, true
 }
 
 func (r *daemonRegistrations) saveLocked() error {

@@ -1084,6 +1084,10 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context) {
 		// sandbox went to error with its gateway and no foreign_sandbox
 		// record reached the administrator (GAP-0263). One the policy leaves
 		// running (alert) keeps its gateway.
+		// The person's foreign_sandboxes in the managed settings decides
+		// while no registration names a floor (GAP-0058): read them again
+		// when they are stale.
+		d.refreshStaleSettings(ctx)
 		sweep, cancel := context.WithTimeout(ctx, foreignSweepTimeout)
 		err := d.rt.manager.Reconcile(sweep)
 		cancel()

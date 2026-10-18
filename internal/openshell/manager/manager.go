@@ -137,6 +137,14 @@ type Options struct {
 	// a decision that must see the user's latest write (the reload watcher
 	// follows the file a second or so later); nil decides on the snapshot.
 	SyncConfig func(context.Context) error
+	// ConfirmPolicy brings an existing sandbox's policy up to date before a
+	// decision its person makes for it is judged (an unblock, an answer to
+	// an ask): a managed daemon confirms the sandbox's registration with the
+	// managed gateway, as its egress proxy does before a new connection, so
+	// the decision and `sandbox policy explain` name the same profile after
+	// an administrator's change (GAP-0132). nil decides on the policy in
+	// force.
+	ConfirmPolicy func(ctx context.Context, sandbox string)
 	// Quiesce is the ingress in-flight tracker approvals wait on.
 	Quiesce triage.Quiescer
 	// ForgetBinding drops the ingress's per-binding state after a revoke.
