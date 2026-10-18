@@ -214,7 +214,9 @@ decides the domain of an SSSD account from its uid, not from its name:
   profile with `default_lookup_failed` (a new sandbox starts provisional), and
   `status` and `verify` warn `directory_lookups_failing`. An account whose
   memberships SSSD cached keeps them. When SSSD is online again, the guardian
-  runs `sss_cache -E` once (its memory cache included), and the account's
+  runs `sss_cache -E` once (its memory cache included; the guardian unit may
+  write only `/var/lib/sss/db` and `/var/lib/sss/mc` of SSSD's files for it),
+  and the account's
   groups apply at its next lookup, within about 30 seconds. An account SSSD
   lists in its primary group only is also looked up again every 2 minutes. A
   host where InfoPipe does not answer is not put in an outage by this check.
