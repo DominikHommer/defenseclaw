@@ -925,6 +925,9 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		TTL:       60, // 60 minutes default TTL
 		ServerTS:  uint32(time.Now().Unix()),
 	}
+	if action == verdict.ActionBlock {
+		resp.Reason = ReasonCloudBlock
+	}
 
 	// Compute the HMAC tag matching the C-side verdict_protocol.c scheme.
 	// The session ID on the C side comes from dclaw_mqtt_get_session_id()
@@ -1008,6 +1011,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 		Action:    uint8(verdict.ActionBlock),
 		Severity:  0,
 		TTL:       0,
+		Reason:    ReasonCloudBlock,
 		ServerTS:  uint32(time.Now().Unix()),
 	}
 

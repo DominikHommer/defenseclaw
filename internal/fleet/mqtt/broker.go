@@ -222,6 +222,10 @@ type VerdictRequest struct {
 	RequestNonce [4]byte
 }
 
+// ReasonCloudBlock is DCLAW_REASON_CLOUD_BLOCK in edge-connector/include/defenseclaw.h:
+// the gateway decided BLOCK. Devices report it on held replies and cache hits.
+const ReasonCloudBlock uint8 = 0x06
+
 // VerdictResponse is the 44-byte binary response sent back to the device.
 // Wire layout (HMAC extended to full 32-byte SHA-256):
 //

@@ -575,6 +575,9 @@ func TestBridgeVerdictRequestRouting(t *testing.T) {
 	if respPayload[3] != 3 { // Severity = High
 		t.Errorf("response severity = %d, want 3 (High)", respPayload[3])
 	}
+	if respPayload[6] != ReasonCloudBlock {
+		t.Errorf("response reason = %d, want %d (CLOUD_BLOCK)", respPayload[6], ReasonCloudBlock)
+	}
 
 	cancel()
 	<-errCh
