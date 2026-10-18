@@ -1980,7 +1980,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 
-	if !l.opts.NoStart && l.testFaultAfterServicesRequested() {
+	if !l.opts.NoStart && l.testFaultRequested(testFaultAfterServices) {
 		return failAndRollback(codeLifecycleTestFault, errors.New("the lifecycle test fault asked this run to fail after its services started"))
 	}
 	if !l.opts.NoStart {
@@ -2000,6 +2000,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	if err := env.saveDeployment(newRecord); err != nil {
 		return failAndRollback(codeApply, err)
+	}
+	if l.bundle != nil {
+		// The commit point of the bundle: the gateway reported its policy
+		// above. A step below that fails does not undo it (finishBundle).
+		l.bundle.committed = true
 	}
 	_ = env.clearPending()
 	_ = removeFile(env.rolledBackUpgradePath())
@@ -2029,6 +2034,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 	l.describe(ctx, newRecord, false)
+	if !l.opts.NoStart && l.testFaultRequested(testFaultAfterCommit) {
+		r.AddError(codeLifecycleTestFault, "the lifecycle test fault asked this run to fail after its deployment committed")
+	}
 	// The change that leaves the eligible users without a connector says so
 	// at once, as on Windows, not only at the next status (GAP-0266).
 	l.warnNoConnectorsEnabled(p.config)
