@@ -32,6 +32,16 @@ Keep the resolver snapshot and provider credentials out of helper/child plans.
 Enforce native path custody, elapsed deadlines and owned teardown in the actual
 supervisor. A clean codec/state test is not a contained-process qualification.
 
+`internal/axis/bridgeowner` owns private parent pipe endpoints and protocol
+ordering under absolute deadlines. Require already-established native custody,
+distinct pipe objects, bounded writes/output queues, and cancellation checks
+before queued events are delivered. Windows parent endpoints must support
+overlapped deadlines; anonymous pipes refuse. Closing pipes or receiving
+Destroyed is never process-tree cleanup proof: independently terminate/wait the
+owned native resources, retain failed cleanup responsibility and keep admission
+closed. This package starts no helper or runtime; fake-custody tests qualify only
+the actual pipe/state behavior they exercise.
+
 `internal/openshell/sandboxcli/session_transport.go` (`@sym:SessionTransport`)
 separates command execution from session orchestration. Bind the transport
 explicitly to the recorded target; pass literal argv without shell rendering.

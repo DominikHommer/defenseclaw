@@ -128,8 +128,18 @@ messages, exact correlation digests and a one-session state machine. Strict
 JSON validation refuses ambiguous keys/encodings; monotonic sequences,
 phase checks and aggregate output accounting close on invalid peer behavior.
 An independent binary preparation digest avoids Go/Rust JSON serializer drift.
-The Rust peer and actual native process supervisor are still required. Do not introduce a
-long-running listener or an unbounded queue. Closing the owner channel must
+`internal/axis/bridgeowner` implements the Go pipe side with serialized command
+admission/encoding, absolute parent and per-write deadlines, a fixed event queue,
+discarded bounded diagnostics and cancellation checks before queued delivery.
+Windows uses immediately connected owner-only local pipes with overlapped parent
+ends; anonymous pipes refuse. Duplicate kernel objects refuse even under
+different handle values. Native pipe tests exercise these mechanics with fake
+custody. The actual launcher must supply independent native `StopAndWait`
+custody, and callers must require its successful completion after Destroyed.
+This is not an implemented adapter or contained-process qualification.
+
+The Rust peer and actual native process supervisor are still required. Do not
+introduce a long-running listener or an unbounded queue. Closing the owner channel must
 revoke grants, kill and wait the owned SDK handle; helper/descendant behavior
 still needs separate platform qualification.
 
