@@ -246,9 +246,11 @@ try {
             [void][IO.Directory]::CreateDirectory($linkedTarget)
             [IO.File]::WriteAllText([IO.Path]::Combine($linkedTarget, 'policy_compiler.py'), 'print("outside")')
             if (New-TestLink ([IO.Path]::Combine((Get-RetiredLib $linked), 'defenseclaw')) $linkedTarget) {
+                # lib holding a link is not empty, so the walk refuses lib
+                # itself before it reaches the link.
                 Test-Refused 'linked retired lib\defenseclaw (walk)' {
                     Assert-DefenseClawManagedInstallTree -Layout $linked
-                } 'reparse point'
+                } 'unexpected directory from managed install root: .*\\lib$'
                 Test-Refused 'linked retired lib\defenseclaw (retire)' {
                     Remove-DefenseClawRetiredStandaloneCompiler -Layout $linked
                 } 'reparse point'
