@@ -3461,6 +3461,8 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         if blocked:
             ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
         _note_unscannable_mcp(ctx, config_path, set(blocked))
+    # GAP-0163: a legacy overlay that disagrees with llm_providers stays a live input.
+    _report_providers_fold(ctx, result, refusal_only=True)
 
 
 def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
@@ -3548,6 +3550,72 @@ def _note_unscannable_mcp(ctx: MigrationContext, config_path: str, blocked: set[
 
 CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}
 _V9_STEP_NAME = "config_version 8 → 9"
+_PROVIDERS_FOLD_STEP_NAME = "fold the legacy custom-providers.json into config.yaml"
+
+
+def _legacy_providers_overlay_pending(config_path: str, data_dir: str) -> bool:
+    """Whether a config_version 9 home still has a legacy (operator-written)
+    custom-providers.json for ``config migrate`` to fold into config.yaml
+    (GAP-0163). A managed host keeps its admin's providers, and a file that
+    sets request_overrides stays a live input, so neither is pending."""
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None or _guardrail_runtime_migration_is_managed(text):
+        return False
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    configured = str(raw.get("data_dir") or "").strip() if isinstance(raw, dict) else ""
+    path = os.path.join(os.path.expanduser(configured) if configured else data_dir, "custom-providers.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            overlay = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(overlay, dict) or overlay.get("_derived_from"):
+        return False
+    providers = overlay.get("providers")
+    providers = providers if isinstance(providers, list) else []
+    if any(isinstance(p, dict) and p.get("request_overrides") for p in providers):
+        return False
+    return bool(providers or overlay.get("ollama_ports"))
+
+
+def _fold_legacy_providers_overlay(ctx: MigrationContext) -> None:
+    """Fold a legacy custom-providers.json into llm_providers of a config
+    that is already config_version 9 (GAP-0163). The one implementation is
+    Go (``defenseclaw-gateway config migrate --to 9``): the lists are unioned,
+    config.yaml keeps its values, and a field both set to different values
+    folds nothing. That refusal is a warning, not a failure: config.yaml and
+    the file stay as they are and the gateway keeps merging the file."""
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    try:
+        result = migrate_config_v9(config_path=config_path)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"folding the legacy custom-providers.json into config.yaml failed: {exc}") from exc
+    _report_providers_fold(ctx, result)
+
+
+def _report_providers_fold(ctx: MigrationContext, result: dict, *, refusal_only: bool = False) -> None:
+    """Report what ``config migrate`` did with a legacy custom-providers.json."""
+    fold = result.get("providers_fold")
+    if not isinstance(fold, dict):
+        return
+    refused = fold.get("refused")
+    if isinstance(refused, str) and refused and refused.isprintable():
+        ux.warn(refused, indent="    ")
+        return
+    if refusal_only:
+        return
+    folded = [name for name in fold.get("folded") or [] if isinstance(name, str) and name.isprintable()]
+    overlay, retired = str(fold.get("overlay") or ""), str(fold.get("retired") or "")
+    if folded:
+        line = f"moved provider(s) {', '.join(folded)} from {overlay} into config.yaml llm_providers.custom"
+        ctx.changes.append(line + (f"; the file is kept as {retired}" if retired else ""))
+    elif retired:
+        ctx.changes.append(f"{overlay} held nothing config.yaml lacked; it is kept as {retired}")
 
 
 def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
@@ -4038,6 +4106,8 @@ def _pending_migration_steps(
         if step is None:
             raise MigrationError(f"no migration from config_version {number} to {number + 1}")
         steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
+    if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
+        steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps

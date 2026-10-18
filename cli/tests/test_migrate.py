@@ -707,3 +707,100 @@ def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_tar
     assert "not a release version" in result.output
     ok = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "1.0.1.dev3"])
     assert ok.exit_code == 0, ok.output
+
+
+# GAP-0163: a legacy custom-providers.json next to a config_version 9 file.
+
+
+def _legacy_overlay(data_dir: Path, payload: dict) -> Path:
+    path = data_dir / "custom-providers.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("config", "overlay", "pending"),
+    [
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]}, True),
+        ("config_version: 9\n", {"providers": [], "ollama_ports": [11500]}, True),
+        ("config_version: 9\n", {"_derived_from": "sha256:x", "providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": [{"name": "acme-gw", "request_overrides": {"x": 1}}]}, False),
+        ("config_version: 9\ndeployment_mode: managed_enterprise\n", {"providers": [{"name": "acme-gw"}]}, False),
+        ("config_version: 9\n", {"providers": []}, False),
+    ],
+)
+def test_a_v9_config_with_a_legacy_provider_overlay_has_the_fold_step_pending(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, config: str, overlay: dict, pending: bool
+) -> None:
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    _write_config(data_dir, config)
+    _legacy_overlay(data_dir, overlay)
+
+    result = migrate(str(data_dir), check=True)
+
+    assert (migrations._PROVIDERS_FOLD_STEP_NAME in result.applied) is pending
+
+
+def test_the_fold_step_warns_and_changes_nothing_when_fields_disagree(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    config = _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "base_url": "https://legacy.test"}]})
+    refusal = (
+        f"{overlay} and llm_providers.custom in config.yaml set different values for acme-gw (base_url); "
+        "config.yaml's values are the ones in use. Neither file was changed"
+    )
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, dry_run: bool = False, ack: bool = False, gateway_binary=None) -> dict:
+        calls.append(config_path)
+        return {"migrated": False, "dry_run": False, "written": [], "record": {"from_version": 9},
+                "providers_fold": {"overlay": str(overlay), "refused": refusal,
+                                   "conflicts": [{"provider": "acme-gw", "fields": ["base_url"]}]}}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+
+    result = migrate(str(data_dir))
+
+    assert calls == [str(config)]
+    assert result.applied == [migrations._PROVIDERS_FOLD_STEP_NAME]
+    out = capsys.readouterr().out
+    assert "acme-gw (base_url)" in out
+    assert "Neither file was changed" in out
+    assert "moved provider(s)" not in out
+
+
+def test_the_fold_step_reports_the_providers_config_yaml_took(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from defenseclaw import config_inspect
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(migrations, "_connector_roster_pending", lambda *_args: False)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_guardrail_profiles", lambda *_args: None)
+    monkeypatch.setattr(migrations, "_refresh_rego_policies", lambda *_args: None)
+    _write_config(data_dir, "config_version: 9\n")
+    overlay = _legacy_overlay(data_dir, {"providers": [{"name": "acme-gw", "domains": ["alt.acme.test"]}]})
+    retired = f"{overlay}.migrated-v9"
+    monkeypatch.setattr(
+        config_inspect,
+        "migrate_config_v9",
+        lambda **_kwargs: {"migrated": False, "dry_run": False, "written": [retired], "record": {"from_version": 9},
+                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired}},
+    )
+
+    result = migrate(str(data_dir))
+
+    assert result.changed
+    out = capsys.readouterr().out
+    assert f"moved provider(s) acme-gw from {overlay} into config.yaml llm_providers.custom" in out
+    assert retired in out
