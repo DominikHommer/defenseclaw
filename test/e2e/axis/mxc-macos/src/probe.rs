@@ -21,7 +21,7 @@ use mxc_sdk::v1::{
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -63,6 +63,23 @@ const MXC_SYSTEM_READS: &[&str] = &[
 ];
 const MXC_SYSTEM_RW_DEVICES: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
+fn private_fixture() -> Result<tempfile::TempDir> {
+    // Create the owner-only directory before placing any private payload in it.
+    let owned = tempfile::Builder::new()
+        .prefix(PREFIX)
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in("/private/tmp")?;
+    let metadata = fs::symlink_metadata(owned.path())?;
+    // SAFETY: geteuid is a read-only identity query.
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700,
+        "private fixture ownership or mode differs before payload creation"
+    );
+    Ok(owned)
+}
+
 pub fn run() -> Result<i32> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 2 && args[0] == "--fixed-child" {
@@ -87,9 +104,7 @@ pub fn run() -> Result<i32> {
         "run as an unprivileged user"
     );
     let executable = std::env::current_exe()?.canonicalize()?;
-    let owned = tempfile::Builder::new()
-        .prefix(PREFIX)
-        .tempdir_in("/private/tmp")?;
+    let owned = private_fixture()?;
     let paths = Paths::create(&owned.path().canonicalize()?)?;
     // A host-side positive control is necessary: a refused connection to an
     // absent listener would not show sandbox network enforcement.
@@ -978,4 +993,23 @@ fn fixed_child_diagnostic(bytes: &[u8]) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_fixture_is_owner_only_before_payload_creation() {
+        let owned = private_fixture().unwrap();
+        let root = owned.path().to_owned();
+        let metadata = fs::symlink_metadata(&root).unwrap();
+        assert!(metadata.is_dir());
+        // SAFETY: geteuid is a read-only identity query.
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        owned.close().unwrap();
+        assert!(!root.exists());
+    }
 }

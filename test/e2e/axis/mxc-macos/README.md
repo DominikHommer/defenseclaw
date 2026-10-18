@@ -128,8 +128,25 @@ generator tests, not a sandboxed workload. A separate disposable macOS
 Actions live job should run only the reviewed locked artifact as an
 unprivileged user, with an outer process-group watchdog and a 60-second
 deadline. It should record the artifact provenance and hashes with the exact
-macOS version/architecture and the probe's fixed JSON outcome for both the
-default and `--strict-fixed` selectors. A failed
+macOS version/architecture and the probe's fixed JSON outcome for the explicit
+`--strict-fixed` selector. Default-profile characterization remains separate. A failed
 admission, unavailable Seatbelt, wrong errno, missing acknowledgement, wait
 error or teardown failure is a failed experiment; no alternate backend is
 used.
+
+`verify_live_artifact.py` requires an independently reviewed provenance SHA256,
+the exact build commit/run and a clean checkout of that commit. It verifies all
+13 packaged files, source bytes, the committed combined lock, both upstream
+locks and workflow attribution before writing a verification-only receipt.
+Its tests use inert synthetic files and execute no artifact.
+
+The separate native live driver requires explicitly provisioned GNU coreutils
+`gtimeout` as its outer watchdog. This is a contributor testing requirement;
+the product gains no dependency. Precreate a private evidence directory, then
+run `run_live.py --artifact <download>/build-artifact --receipt <verified.json>
+--evidence <directory> --gtimeout <absolute-path-to-gtimeout>
+--provenance-sha256 <reviewed-digest> --build-commit <commit> --build-run <run>`.
+It accepts only the fixed strict workload, clears inherited environment,
+bounds output, records failures, and inspects newly owned fixtures and own-UID
+commands naming the exact artifact. That inspection is limited evidence and
+does not certify arbitrary descendants or complete helper custody.

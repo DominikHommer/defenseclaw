@@ -12,7 +12,7 @@ use mxc_sdk::v1::{
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -50,7 +50,7 @@ pub fn run() -> Result<i32> {
     );
     let abi = landlock_abi()?;
     let executable = std::env::current_exe()?.canonicalize()?;
-    let owned = tempfile::Builder::new().prefix(PREFIX).tempdir_in("/tmp")?;
+    let owned = private_fixture()?;
     let paths = Paths::create(&owned.path().canonicalize()?)?;
 
     // Before invoking any SDK code or creating threads, remove credentials,
@@ -124,6 +124,24 @@ struct Paths {
     temporary: PathBuf,
     readonly: PathBuf,
     ungranted: PathBuf,
+}
+
+fn private_fixture() -> Result<tempfile::TempDir> {
+    // tempfile directories otherwise inherit the default 0777-and-umask mode.
+    // Set the owner-only mode in mkdir itself, before creating any payload.
+    let owned = tempfile::Builder::new()
+        .prefix(PREFIX)
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")?;
+    let metadata = fs::symlink_metadata(owned.path())?;
+    // SAFETY: geteuid is a read-only identity query.
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o7777 == 0o700,
+        "private fixture ownership or mode differs before payload creation"
+    );
+    Ok(owned)
 }
 
 impl Paths {
@@ -875,6 +893,20 @@ fn shell_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_fixture_is_owner_only_before_payload_creation() {
+        let owned = private_fixture().unwrap();
+        let root = owned.path().to_owned();
+        let metadata = fs::symlink_metadata(&root).unwrap();
+        assert!(metadata.is_dir());
+        // SAFETY: geteuid is a read-only identity query.
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        assert_eq!(metadata.mode() & 0o7777, 0o700);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        owned.close().unwrap();
+        assert!(!root.exists());
+    }
 
     #[test]
     fn fixed_command_quotes_literal_shell_characters() {

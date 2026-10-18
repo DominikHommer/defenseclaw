@@ -104,10 +104,10 @@ jobs:
           }, indent=2) + "\n", encoding="utf-8")
           PY
 
-      - name: Test bounded fixed-child diagnostic formatting
+      - name: Test fixed Linux policy and fixture helpers without launching a sandbox
         working-directory: probe
         shell: bash
-        run: cargo +"$RUST_TOOLCHAIN" test --locked --release fixed_child_diagnostics_are_bounded_and_json_escaped
+        run: cargo +"$RUST_TOOLCHAIN" test --locked --release probe::tests -- --test-threads=1
 
       - name: Upload build evidence and the combined lock for review
         if: ${{ always() }}
@@ -201,7 +201,10 @@ jobs:
       - name: Test the fixed Seatbelt profile generator without launching a sandbox
         working-directory: probe
         shell: bash
-        run: cargo +"$RUST_TOOLCHAIN" test --locked --release strict_profile::tests -- --test-threads=1
+        run: |
+          set -euo pipefail
+          cargo +"$RUST_TOOLCHAIN" test --locked --release strict_profile::tests -- --test-threads=1
+          cargo +"$RUST_TOOLCHAIN" test --locked --release private_fixture_is_owner_only_before_payload_creation
 
       - name: Upload build evidence and the combined lock for review
         if: ${{ always() }}
