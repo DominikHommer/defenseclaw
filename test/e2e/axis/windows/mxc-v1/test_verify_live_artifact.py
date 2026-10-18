@@ -212,7 +212,7 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             pure_native_environment_tests=verify.pure_environment_tests(self.mode),
             pure_dll_startup_tests=verify.PURE_DLL_TESTS,
             pure_dll_startup_tests_passed=True,
-            native_directory_custody_tests=verify.NATIVE_DIRECTORY_CUSTODY_TESTS,
+            native_directory_custody_tests=verify.native_directory_custody_tests(self.mode),
             native_directory_custody_tests_passed=True,
         )
         self.admission = {
@@ -328,6 +328,12 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
                     self.run_verify()
                 self.provenance[field] = original
 
+        if self.mode == "standalone-boundary":
+            self.provenance["native_directory_custody_tests"] = verify.NATIVE_DIRECTORY_CUSTODY_TESTS
+            self.write_artifact()
+            with self.assertRaisesRegex(ValueError, "native directory custody test evidence"):
+                self.run_verify()
+
     def test_forged_added_source_fingerprint_is_refused(self) -> None:
         self.provenance["mxc_overlay_file_sha256"][sorted(verify.BOUNDARY_ADDED_PATHS)[0]] = "0" * 64
         self.write_artifact()
@@ -357,9 +363,23 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         self.assertEqual(build.PURE_STARTUP_ENVIRONMENT_TESTS, verify.PURE_STARTUP_ENVIRONMENT_TESTS)
         for mode in build.PROBE_SLICE_CONTRACTS:
             self.assertEqual(build.pure_environment_tests(mode), verify.pure_environment_tests(mode))
+            self.assertEqual(build.native_directory_custody_tests(mode), verify.native_directory_custody_tests(mode))
         self.assertEqual(build.NATIVE_DIRECTORY_CUSTODY_TESTS, verify.NATIVE_DIRECTORY_CUSTODY_TESTS)
         self.assertEqual(sum(map(len, verify.NATIVE_DIRECTORY_CUSTODY_TESTS.values())), 1)
         self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 6)
+
+    def test_private_native_record_cannot_enter_an_admitted_artifact(self) -> None:
+        private = "native-folder-refusal.private.bin"
+        for mode in ("standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"):
+            self.assertFalse(any(name.endswith(private) for name in verify.artifact_contract(mode)["all_files"]))
+        self.files[private] = b"fixed public synthetic private record marker"
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "provenance inventory differs"):
+            self.run_verify()
+        self.provenance["files"].pop(private)
+        (self.artifact / "PROVENANCE.json").write_text(json.dumps(self.provenance), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unreviewed artifact entry"):
+            self.run_verify()
 
     def test_boundary_requires_startup_snapshot_gates_and_its_closed_slice(self) -> None:
         if self.mode != "standalone-boundary":
@@ -410,6 +430,7 @@ class DLLArtifactVerificationTests(BoundaryArtifactVerificationTests):
             pure_native_environment_tests=verify.pure_environment_tests(self.mode),
             pure_dll_startup_tests=verify.PURE_DLL_TESTS,
             pure_dll_startup_tests_passed=True,
+            native_directory_custody_tests=verify.native_directory_custody_tests(self.mode),
         )
         self.write_artifact()
 

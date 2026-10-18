@@ -107,6 +107,16 @@ NATIVE_DIRECTORY_CUSTODY_TESTS = {
     ],
 }
 
+
+def native_directory_custody_tests(mode: str) -> dict[str, list[str]]:
+    tests = {binary: list(names) for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items()}
+    if mode == "standalone-boundary":
+        tests["defenseclaw-axis-windows-psec-probe"].append(
+            "probe::native_identity::private_native_record::tests::private_record_create_is_exclusive_nonfollowing_and_owner_system_only"
+        )
+    return tests
+
+
 PURE_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-boundary-child": [
         "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
@@ -125,6 +135,7 @@ PURE_STARTUP_ENVIRONMENT_TESTS = {
         "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
         "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
         "probe::native_environment::tests::native_profile_refusal_classifier_reports_bounded_relationships",
+        "probe::native_identity::private_native_record::tests::fixed_private_record_is_lossless_bounded_complete_and_not_authority",
     ],
 }
 
@@ -236,6 +247,7 @@ def artifact_contract(mode: str = "loader-only") -> dict:
             "src/boundary_child.rs",
             "src/native_environment.rs",
             "src/native_identity.rs",
+            "src/private_native_record.rs",
             "src/dll_startup_child.rs",
             "src/dll_startup_protocol.rs",
             "patches/mxc-windows-literal-argv.patch",
@@ -525,7 +537,7 @@ def verify(
         require(provenance.get("mxc_added_paths") == sorted(BOUNDARY_ADDED_PATHS), "added SDK paths differ")
         require(
             provenance.get("native_directory_custody_tests_passed") is True
-            and provenance.get("native_directory_custody_tests") == NATIVE_DIRECTORY_CUSTODY_TESTS,
+            and provenance.get("native_directory_custody_tests") == native_directory_custody_tests(mode),
             "native directory custody test evidence differs",
         )
         fingerprints = provenance.get("mxc_overlay_file_sha256")

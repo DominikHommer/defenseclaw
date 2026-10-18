@@ -851,3 +851,64 @@ distinguish casing, a different native base or another suffix/shape mismatch.
 No cache cause, alternate admitted prefix, filesystem/network enforcement,
 resource-cleanup completion or customer-provider qualification follows from
 this result. No comparison, grant or policy was relaxed after this attempt.
+
+## Refusal classification: caller context matches, native suffix unrecognized
+
+[Locked build 39168385401](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39168385401)
+at `3bebfd10ee9537241e222e27708ec6aba34ac063` added only refusal-side string
+classification and its mandatory pure callback test. Independent inert reviews
+verified twenty-nine ZIP members, twenty-five manifest hashes, seventeen exact
+Git sources, the unchanged locks and all sixteen reconstructed SDK fingerprints.
+All twenty-eight selected Rust tests passed exactly once in the actual CI log.
+The three x64 console images passed static import review. The supervisor's
+fifteen added API-set import names contain functions already named in the prior
+image's IAT; this static observation does not itself prove runtime compatibility.
+The boundary child's GUI/Userenv exclusion remained unchanged.
+
+One separately reviewed Case12 ran once and failed. The literal argv case
+again passed and signaled its retained direct handle. The refusal-side record
+reported these bounded relationships before preserving the original
+`native profile caller known-folder base differs` error:
+
+| Relationship | Observed value |
+| --- | --- |
+| Classification | `unrecognized_suffix` |
+| Recognized verbatim-disk prefix, caller/native | false / false |
+| Native exact/ordinal case-insensitive caller prefix | false / false |
+| Expected native suffix shape | false |
+| Native base comparisons | unknown; no base derived |
+| Caller known-folder base vs startup LOCALAPPDATA, exact/ordinal | true / true |
+
+The caller query therefore matched the frozen private startup value in this
+attempt. A different caller/startup base and a case-only caller-prefix difference
+do not explain this observation. The native result did not satisfy this probe's
+assumed `Packages/<one allowed profile>/AC` suffix, and its actual shape remains
+unknown. Microsoft's [GetAppContainerFolderPath reference](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getappcontainerfolderpath)
+promises a local-app-data path with thread/process identity context; it does not
+guarantee that textual grammar. The classifier is diagnostic only and did not
+broaden admission or supply an expected child environment.
+
+The driver returned in 4.078 seconds; the probe observation took 3.7780166
+seconds. The outer Job was assigned before resume and ended empty with zero
+active processes. No deadline, overflow, stream-read error or driver error was
+reported. The failed owned fixture was retained. A bounded read-only metadata
+inspection found the outer and inner private AppData Local/Roaming directories,
+and the inner tmp directory, ordinary and empty. It recovered no native profile
+path. No host profile contents, environment change or ACL mutation was needed.
+The expectation frame and boundary assertions were not reached. Prior failures
+were preserved, with no retry or cleanup of the failed fixtures.
+
+| Input or observation | SHA256 |
+| --- | --- |
+| ZIP, artifact `12151877206` | `03c8d000a7444c06297b488e0c3512b0a7d840a000d09661ec28e97cce16d875` |
+| Provenance | `8d9e8574c762fbf6768314f3ff6a84e7c5c32df5fad04ec5cbdcc2d3141ba74d` |
+| Root verification receipt | `5dbab5961647d558c6494c401a0fad7e4009ce6549cc5fc88bb0d6465deb9fba` |
+| Native probe image | `3923f1d16d17b9d88da251b7b24928909f18170a83e6ff8ccdb05ccd64e8b5b6` |
+| Go custody image | `32f21133e5037b4408fe6df89128e5b4e98014f4b4e5a7bb66ae130a9f13de77` |
+| One-shot driver | `905c5556f52aea8d306736ac8f82137a3bf79fe18b7d1cf571ad1899e5999724` |
+| Actual live result | `d2ef6cf8819145b5aa92a4c5772d58ca1be70c0f2d871a81164a8757df9c9e2b` |
+
+This records a failed boundary qualification and narrower diagnostic facts.
+It establishes no new mapper, supported suffix, enforcement, full resource
+cleanup or customer-provider qualification. No native rerun or changed build is
+authorized by this record.

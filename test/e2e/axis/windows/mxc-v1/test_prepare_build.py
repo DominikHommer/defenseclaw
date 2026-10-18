@@ -61,10 +61,12 @@ class BuildGuardTests(TestCase):
     def test_boundary_packages_three_images_and_adds_only_its_startup_test_gates(self) -> None:
         boundary = build.artifact_binaries("standalone-boundary")
         self.assertEqual(boundary, (build.BINARY, build.LOADER_BINARY, build.BOUNDARY_BINARY))
-        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 9)
+        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 10)
+        self.assertEqual(sum(map(len, build.native_directory_custody_tests("standalone-boundary").values())), 2)
         for mode in ("dll-startup-only", "claude-version-only", "claude-create-control-only"):
             self.assertEqual(build.artifact_binaries(mode), boundary + (build.DLL_BINARY,))
             self.assertEqual(build.pure_environment_tests(mode), build.PURE_ENVIRONMENT_TESTS)
+            self.assertEqual(build.native_directory_custody_tests(mode), build.NATIVE_DIRECTORY_CUSTODY_TESTS)
         self.assertEqual(sum(map(len, build.PURE_ENVIRONMENT_TESTS.values())), 6)
         with self.assertRaises(ValueError):
             build.artifact_binaries("unreviewed")
@@ -73,9 +75,15 @@ class BuildGuardTests(TestCase):
 
     def test_boundary_startup_gates_name_real_pure_tests(self) -> None:
         root = Path(__file__).resolve().parent
-        source = (root / "src/native_environment.rs").read_text(encoding="utf-8")
+        source = "\n".join(
+            (root / name).read_text(encoding="utf-8")
+            for name in ("src/native_environment.rs", "src/private_native_record.rs")
+        )
         for names in build.PURE_STARTUP_ENVIRONMENT_TESTS.values():
             for name in names:
+                self.assertRegex(source, r"#\[test\]\s*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(")
+        for name in build.native_directory_custody_tests("standalone-boundary")["defenseclaw-axis-windows-psec-probe"]:
+            if "private_native_record" in name:
                 self.assertRegex(source, r"#\[test\]\s*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(")
 
     def test_source_identity_must_match_exact_commit(self) -> None:

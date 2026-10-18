@@ -32,6 +32,9 @@ use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::Threading::{GetCurrentThread, OpenProcessToken, OpenThreadToken};
 use windows::core::{GUID, HRESULT, PCWSTR, PWSTR};
 
+#[path = "private_native_record.rs"]
+mod private_native_record;
+
 #[link(name = "shell32")]
 unsafe extern "system" {
     #[link_name = "SHGetKnownFolderPath"]
@@ -464,6 +467,12 @@ pub(super) fn expected_from_child(
         match ExpectedEnvironment::from_caller_profile(root, &caller.local_app_data, &folder) {
             Ok(expected) => expected,
             Err(error) => {
+                eprintln!(
+                    "native private path record available={}",
+                    fixture.directories.last().is_some_and(|root| {
+                        private_native_record::capture(root, &caller.local_app_data, &folder)
+                    })
+                );
                 eprintln!(
                     "{}",
                     classify_profile_refusal(

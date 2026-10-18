@@ -93,6 +93,18 @@ NATIVE_DIRECTORY_CUSTODY_TESTS = {
     ],
 }
 
+
+def native_directory_custody_tests(probe_slice: str) -> dict[str, list[str]]:
+    if probe_slice not in PROBE_SLICE_CONTRACTS:
+        raise ValueError("unknown fixed contributor slice")
+    tests = {binary: list(names) for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items()}
+    if probe_slice == "standalone-boundary":
+        tests["defenseclaw-axis-windows-psec-probe"].append(
+            "probe::native_identity::private_native_record::tests::private_record_create_is_exclusive_nonfollowing_and_owner_system_only"
+        )
+    return tests
+
+
 PURE_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-boundary-child": [
         "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
@@ -121,6 +133,7 @@ PURE_STARTUP_ENVIRONMENT_TESTS = {
         "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
         "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
         "probe::native_environment::tests::native_profile_refusal_classifier_reports_bounded_relationships",
+        "probe::native_identity::private_native_record::tests::fixed_private_record_is_lossless_bounded_complete_and_not_authority",
     ],
 }
 
@@ -349,9 +362,10 @@ def main() -> None:
                 or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in output
             ):
                 raise RuntimeError("fixed pure contributor test did not pass exactly once")
-    # A separate filesystem-only gate opens fresh synthetic directories. It
-    # queries no token/profile, creates no child and performs no PSEC operation.
-    for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items():
+    # Separate synthetic filesystem gates create no child/profile/PSEC. The
+    # boundary-only private-file gate reads current TokenUser for its new DACL.
+    native_tests = native_directory_custody_tests(args.probe_slice)
+    for binary, names in native_tests.items():
         for name in names:
             output = command(
                 [
@@ -396,6 +410,7 @@ def main() -> None:
         Path("src/boundary_child.rs"),
         Path("src/native_environment.rs"),
         Path("src/native_identity.rs"),
+        Path("src/private_native_record.rs"),
         Path("src/dll_startup_child.rs"),
         Path("src/dll_startup_protocol.rs"),
         Path("patches/mxc-strict-windows-psec.patch"),
@@ -443,7 +458,7 @@ def main() -> None:
         "pure_native_environment_tests_passed": True,
         "pure_dll_startup_tests": PURE_DLL_TESTS,
         "pure_dll_startup_tests_passed": True,
-        "native_directory_custody_tests": NATIVE_DIRECTORY_CUSTODY_TESTS,
+        "native_directory_custody_tests": native_tests,
         "native_directory_custody_tests_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",

@@ -404,6 +404,13 @@ class CustodyPinTests(unittest.TestCase):
 
     @unittest.skipUnless(live.sys.platform == "win32", "native Windows file sharing fixture")
     def test_mocked_launch_and_wait_keep_the_verified_wrapper_pinned(self) -> None:
+        self.assert_mocked_launch_and_wait(keep_private_record=False)
+
+    @unittest.skipUnless(live.sys.platform == "win32", "native Windows file sharing fixture")
+    def test_failed_retained_private_record_contents_do_not_enter_result(self) -> None:
+        self.assert_mocked_launch_and_wait(keep_private_record=True)
+
+    def assert_mocked_launch_and_wait(self, keep_private_record: bool) -> None:
         # This is an inert byte file. Popen is mocked: no PE or process executes.
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -421,8 +428,15 @@ class CustodyPinTests(unittest.TestCase):
             ).encode()
             receipt.write_bytes(raw)
             process = mock.Mock(stdout=io.BytesIO(b"{}"), stderr=io.BytesIO(b""))
+            private = (
+                root / "evidence/psec-headless-01/tmp/dc-axis-windows-psec-fixed/native-folder-refusal.private.bin"
+            )
+            marker = b"fixed-public-synthetic-private-path-record-marker"
 
             def held(*_args, **_kwargs):
+                if keep_private_record and not private.exists():
+                    private.parent.mkdir(parents=True)
+                    private.write_bytes(marker)
                 with self.assertRaises(PermissionError):
                     custody.write_bytes(b"replacement")
                 with self.assertRaises(PermissionError):
@@ -456,12 +470,23 @@ class CustodyPinTests(unittest.TestCase):
                 mock.patch.object(live, "valid_observations", return_value=True),
                 mock.patch("builtins.print"),
             ):
-                live.main()
+                if keep_private_record:
+                    with self.assertRaises(SystemExit) as refusal:
+                        live.main()
+                    self.assertEqual(refusal.exception.code, 1)
+                else:
+                    live.main()
             launch.assert_called_once()
             process.wait.assert_called_once_with(timeout=55)
             custody.write_bytes(b"pin released after bounded wait")
             result = json.loads((root / "evidence" / "live-result.json").read_text())
-            self.assertTrue(result["passed"])
+            self.assertEqual(result["passed"], not keep_private_record)
+            self.assertNotIn(marker.decode(), json.dumps(result))
+            if keep_private_record:
+                self.assertEqual(private.read_bytes(), marker)
+                self.assertEqual(result["retained_owned_fixtures"], [str(private.parent)])
+            else:
+                self.assertEqual(result["retained_owned_fixtures"], [])
 
 
 class FixedControlObservationTests(unittest.TestCase):

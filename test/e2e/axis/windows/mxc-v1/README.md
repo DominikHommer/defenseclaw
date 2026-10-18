@@ -34,7 +34,7 @@ Ordinary DLL/Claude builds retain twenty-five tests; the separate uncontained
 control retains twenty-six. Dependency locks and all SDK overlay fingerprints
 are unchanged.
 
-The next source adds refusal-only classification of the already returned caller
+The changed source adds refusal-only classification of the already returned caller
 and same-child native folder strings. It emits only fixed categories and
 booleans: optional verbatim-disk prefix, exact/Windows ordinal case-insensitive
 prefix relationships, exact native suffix shape, and derived-base equality to
@@ -45,8 +45,36 @@ identity values are printed. These are string relationships, without alias or
 object-identity equivalence. Diagnostics never feed admission: the exact
 prefix, same-child authority and held-directory requirements remain unchanged.
 A new pure callback test brings the boundary build requirement to twenty-eight
-Rust tests. This diagnostic source has not been compiled or run; independent
-source and artifact review must precede another fresh attempt.
+Rust tests. The separately reviewed 3beb build passed all twenty-eight. One fresh
+Case12 then reported `unrecognized_suffix`, with exact and ordinal prefix
+relationships both false. The caller known-folder base matched startup
+LOCALAPPDATA exactly; no native base could be derived under the assumed suffix
+grammar. Admission still refused before the boundary assertions. The API
+[reference](https://learn.microsoft.com/en-us/windows/win32/api/userenv/nf-userenv-getappcontainerfolderpath)
+does not guarantee that textual suffix. The actual returned shape remains
+unknown; no extra prefix or suffix is admitted. See
+[the recorded diagnostic](manual-results.md#refusal-classification-caller-context-matches-native-suffix-unrecognized).
+
+The next source-only diagnostic records both returned API strings only after
+that same strict mapping refusal. It creates the fixed
+`native-folder-refusal.private.bin` once, relative to the already held private
+fixture root, with a protected current-user and SYSTEM DACL at creation. The
+writer verifies that DACL before any data, refuses links and collisions, and
+checks writes and close. The bounded binary format stores two lossless UTF16
+fields, each at most 2,048 units, with a versioned header, explicit counts and
+final completion marker; a complete record is at most 8,216 bytes. Embedded NUL,
+incomplete records and trailing bytes are invalid. It grants no authority and
+never changes the original mapping refusal.
+
+Only a fixed availability boolean can enter stderr. Raw record contents are
+excluded from logs, result JSON, receipts and every admitted artifact inventory;
+the outer runner retains only the fixture pathname. The record remains in that
+owned private fixture for separate private inspection, with no automated upload.
+The boundary build now requires thirty exact Rust tests, including a pure binary
+format test and a separate synthetic NT-relative creation/DACL/link/collision
+test. The link test is mandatory: an unsupported host refuses the gate rather
+than skipping it. Ordinary DLL/Claude and control test counts remain unchanged.
+This source has not yet been compiled or used to capture native API paths.
 
 ## Literal DOS application and held-image gate
 
@@ -108,7 +136,7 @@ default to Unsupported, and a warning wrapper only delegates the same native
 object. The parent never reopens an integer PID. It queries TokenAppContainerSid
 from that same duplicate, bounds and validates the returned SID buffer, then
 uses GetAppContainerFolderPath. No child environment observation supplies an
-expectation. The returned folder must match the caller's independently queried,
+expectation. The probe currently requires the returned folder to match the caller's independently queried,
 unredirected `LocalAppData\Packages\<one bounded native-profile component>\AC`
 exactly. Only that same-SID profile component is re-rooted into the held fresh
 fixture; no caller profile directory is opened or mutated. A missing native
