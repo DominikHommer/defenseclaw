@@ -13,7 +13,7 @@ use axis_core::process_backend::{
     ProcessBackendNetworkMode, ProcessLaunchOptions, build_process_backend_execution_spec,
 };
 use mxc_sdk::v1::{
-    self, Containment, ContainerRequest, FilesystemPolicy, MxcProcess, MxcPtyProcess, MxcPtySize,
+    self, ContainerRequest, Containment, FilesystemPolicy, MxcProcess, MxcPtyProcess, MxcPtySize,
     NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, SpawnOptions,
     SpawnWithPtyOptions, StreamCloser, TelemetryConfig, UiPolicy, WaitResult,
     configs::SeatbeltConfig,
@@ -44,9 +44,19 @@ const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
 // and possibly the active Xcode bundle; those residual grants remain a parity
 // gap and are documented in README.md.
 const MXC_SYSTEM_READS: &[&str] = &[
-    "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/libexec", "/usr/share",
-    "/System", "/Library", "/private/var/db/timezone", "/private/var/db/dyld",
-    "/private/var/select", "/private/etc",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/share",
+    "/System",
+    "/Library",
+    "/private/var/db/timezone",
+    "/private/var/db/dyld",
+    "/private/var/select",
+    "/private/etc",
 ];
 const MXC_SYSTEM_RW_DEVICES: &[&str] = &["/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"];
 
@@ -62,11 +72,19 @@ pub fn run() -> Result<i32> {
             _ => bail!("unknown fixed child case"),
         };
     }
-    ensure!(args.is_empty(), "the probe accepts no command, path or policy arguments");
+    ensure!(
+        args.is_empty(),
+        "the probe accepts no command, path or policy arguments"
+    );
     // SAFETY: geteuid is a read-only identity query with no pointer arguments.
-    ensure!(unsafe { libc::geteuid() } != 0, "run as an unprivileged user");
+    ensure!(
+        unsafe { libc::geteuid() } != 0,
+        "run as an unprivileged user"
+    );
     let executable = std::env::current_exe()?.canonicalize()?;
-    let owned = tempfile::Builder::new().prefix(PREFIX).tempdir_in("/private/tmp")?;
+    let owned = tempfile::Builder::new()
+        .prefix(PREFIX)
+        .tempdir_in("/private/tmp")?;
     let paths = Paths::create(&owned.path().canonicalize()?)?;
     // A host-side positive control is necessary: a refused connection to an
     // absent listener would not show sandbox network enforcement.
@@ -75,7 +93,9 @@ pub fn run() -> Result<i32> {
     let _positive = std::net::TcpStream::connect(("127.0.0.1", port))?;
     private_supervisor_environment(&paths, port)?;
     ensure!(
-        v1::available_backends().iter().any(|backend| backend.backend == "seatbelt"),
+        v1::available_backends()
+            .iter()
+            .any(|backend| backend.backend == "seatbelt"),
         "MXC Seatbelt is unavailable on this host"
     );
     run_piped(&paths, &executable, Case::Boundaries, port)?;
@@ -83,39 +103,74 @@ pub fn run() -> Result<i32> {
     run_pty(&paths, &executable, port)?;
     run_piped(&paths, &executable, Case::Timeout, port)?;
     thread::sleep(Duration::from_secs(3));
-    ensure!(!paths.late_marker.exists(), "a descendant survived the MXC timeout");
-    ensure!(fs::read(&paths.readonly)? == READONLY, "readonly canary changed");
-    ensure!(fs::read(&paths.denied_home)? == DENIED, "HOME denied canary changed");
-    ensure!(fs::read(&paths.denied_work)? == DENIED, "CWD denied canary changed");
-    ensure!(fs::read(&paths.ungranted)? == UNGRANTED, "ungranted canary changed");
-    ensure!(fs::read(paths.work.join("allowed-write"))? == b"fixed-benign-write\n", "CWD write missing");
-    ensure!(fs::read(paths.home.join("allowed-write"))? == b"fixed-benign-write\n", "HOME write missing");
+    ensure!(
+        !paths.late_marker.exists(),
+        "a descendant survived the MXC timeout"
+    );
+    ensure!(
+        fs::read(&paths.readonly)? == READONLY,
+        "readonly canary changed"
+    );
+    ensure!(
+        fs::read(&paths.denied_home)? == DENIED,
+        "HOME denied canary changed"
+    );
+    ensure!(
+        fs::read(&paths.denied_work)? == DENIED,
+        "CWD denied canary changed"
+    );
+    ensure!(
+        fs::read(&paths.ungranted)? == UNGRANTED,
+        "ungranted canary changed"
+    );
+    ensure!(
+        fs::read(paths.work.join("allowed-write"))? == b"fixed-benign-write\n",
+        "CWD write missing"
+    );
+    ensure!(
+        fs::read(paths.home.join("allowed-write"))? == b"fixed-benign-write\n",
+        "HOME write missing"
+    );
     drop(listener);
     let root = owned.path().to_owned();
-    owned.close().context("remove owned fixture after all SDK handles returned")?;
+    owned
+        .close()
+        .context("remove owned fixture after all SDK handles returned")?;
     ensure!(!root.exists(), "owned fixture cleanup was incomplete");
-    println!("{}", serde_json::json!({
-        "axis_commit": AXIS_COMMIT, "mxc_commit": MXC_COMMIT,
-        "containment": "mxc_sdk_v1_seatbelt", "bridge": "axis_policy_and_old_wire_admission_to_typed_mxc_v1",
-        "checks": ["explicit_footprint_admission", "private_home_and_cwd", "denied_read_write_metadata",
-            "readonly_write_denied", "ungranted_read_denied", "loopback_network_denied_with_host_positive_control",
-            "pipe_echo_exit_23", "pty_echo_resize_exit_23", "typed_timeout", "descendant_marker_absent",
-            "owned_fixture_removed"],
-        "scope": "fixed_benign_composite_contributor_experiment",
-        "production_or_defenseclaw_provider_qualification": false,
-        "exact_system_read_or_general_metadata_parity": false
-    }));
+    println!(
+        "{}",
+        serde_json::json!({
+            "axis_commit": AXIS_COMMIT, "mxc_commit": MXC_COMMIT,
+            "containment": "mxc_sdk_v1_seatbelt", "bridge": "axis_policy_and_old_wire_admission_to_typed_mxc_v1",
+            "checks": ["explicit_footprint_admission", "private_home_and_cwd", "denied_read_write_metadata",
+                "readonly_write_denied", "ungranted_read_denied", "loopback_network_denied_with_host_positive_control",
+                "pipe_echo_exit_23", "pty_echo_resize_exit_23", "typed_timeout", "descendant_marker_absent",
+                "owned_fixture_removed"],
+            "scope": "fixed_benign_composite_contributor_experiment",
+            "production_or_defenseclaw_provider_qualification": false,
+            "exact_system_read_or_general_metadata_parity": false
+        })
+    );
     Ok(0)
 }
 
 #[derive(Clone, Copy)]
-enum Case { Boundaries, Pipe, Pty, Timeout, Delayed }
+enum Case {
+    Boundaries,
+    Pipe,
+    Pty,
+    Timeout,
+    Delayed,
+}
 
 impl Case {
     fn argument(self) -> &'static str {
         match self {
-            Self::Boundaries => "boundaries", Self::Pipe => "pipe", Self::Pty => "pty",
-            Self::Timeout => "timeout", Self::Delayed => "delayed",
+            Self::Boundaries => "boundaries",
+            Self::Pipe => "pipe",
+            Self::Pty => "pty",
+            Self::Timeout => "timeout",
+            Self::Delayed => "delayed",
         }
     }
 }
@@ -137,10 +192,15 @@ impl Paths {
         let work = root.join("work");
         let home = root.join("home");
         Self {
-            root: root.to_owned(), readonly: work.join("readonly"),
-            denied_work: work.join("denied"), denied_home: home.join("denied"),
-            ungranted: root.join("ungranted"), late_marker: work.join("late-marker"),
-            temporary: root.join("tmp"), work, home,
+            root: root.to_owned(),
+            readonly: work.join("readonly"),
+            denied_work: work.join("denied"),
+            denied_home: home.join("denied"),
+            ungranted: root.join("ungranted"),
+            late_marker: work.join("late-marker"),
+            temporary: root.join("tmp"),
+            work,
+            home,
         }
     }
 
@@ -159,16 +219,34 @@ impl Paths {
 
     fn from_child() -> Result<Self> {
         let work = std::env::current_dir()?.canonicalize()?;
-        ensure!(work.file_name().is_some_and(|name| name == "work"), "unexpected child cwd");
+        ensure!(
+            work.file_name().is_some_and(|name| name == "work"),
+            "unexpected child cwd"
+        );
         let root = work.parent().context("missing fixture parent")?;
-        ensure!(root.parent() == Some(fs::canonicalize("/private/tmp")?.as_path()), "fixture is outside private temp parent");
-        ensure!(root.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(PREFIX)), "unexpected fixture name");
+        ensure!(
+            root.parent() == Some(fs::canonicalize("/private/tmp")?.as_path()),
+            "fixture is outside private temp parent"
+        );
+        ensure!(
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(PREFIX)),
+            "unexpected fixture name"
+        );
         let metadata = fs::symlink_metadata(root)?;
         // SAFETY: geteuid is a read-only identity query.
-        ensure!(metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o777 == 0o700,
-            "fixture ownership or mode differs");
+        ensure!(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o777 == 0o700,
+            "fixture ownership or mode differs"
+        );
         let paths = Self::at(root);
-        ensure!(fs::read(paths.work.join("fixture-seal"))? == SEAL, "fixture seal differs");
+        ensure!(
+            fs::read(paths.work.join("fixture-seal"))? == SEAL,
+            "fixture seal differs"
+        );
         Ok(paths)
     }
 
@@ -186,29 +264,48 @@ impl Paths {
     fn axis_policy(&self, executable: &Path) -> Result<Policy> {
         // Parse the fixed AXIS document first; dynamic fixture paths are
         // assigned as typed fields, never interpolated into YAML or Seatbelt.
-        let mut policy = Policy::from_yaml("\
+        let mut policy = Policy::from_yaml(
+            "\
 version: 1
 name: dc-mxc-macos-contributor
 runtime: { containment: process, provider: mxc }
 filesystem: { compatibility: hard_requirement }
 process: { max_processes: 0, max_memory_mb: 0, cpu_rate_percent: 0 }
 network: { mode: block }
-")?;
+",
+        )?;
         policy.filesystem.read_only = MXC_SYSTEM_READS.iter().map(|path| (*path).into()).collect();
         policy.filesystem.read_only.push(text(executable)?.into());
-        policy.filesystem.read_only.push(text(&self.readonly)?.into());
+        policy
+            .filesystem
+            .read_only
+            .push(text(&self.readonly)?.into());
         policy.filesystem.read_write = [&self.work, &self.home, &self.temporary]
-            .iter().map(|path| text(path).map(str::to_owned)).collect::<Result<_>>()?;
-        policy.filesystem.read_write.extend(MXC_SYSTEM_RW_DEVICES.iter().map(|path| (*path).into()));
+            .iter()
+            .map(|path| text(path).map(str::to_owned))
+            .collect::<Result<_>>()?;
+        policy
+            .filesystem
+            .read_write
+            .extend(MXC_SYSTEM_RW_DEVICES.iter().map(|path| (*path).into()));
         policy.filesystem.deny = [&self.denied_home, &self.denied_work]
-            .iter().map(|path| text(path).map(str::to_owned)).collect::<Result<_>>()?;
+            .iter()
+            .map(|path| text(path).map(str::to_owned))
+            .collect::<Result<_>>()?;
         policy.validate()?;
         Ok(policy)
     }
 
     fn request(&self, executable: &Path, case: Case, port: u16) -> Result<ContainerRequest> {
-        ensure!(!matches!(case, Case::Delayed), "delayed child is never launched as a standalone request");
-        let command = format!("exec {} --fixed-child {}", shell_quote(text(executable)?), case.argument());
+        ensure!(
+            !matches!(case, Case::Delayed),
+            "delayed child is never launched as a standalone request"
+        );
+        let command = format!(
+            "exec {} --fixed-child {}",
+            shell_quote(text(executable)?),
+            case.argument()
+        );
         let policy = self.axis_policy(executable)?;
         let environment: BTreeMap<_, _> = self.environment(port)?.into_iter().collect();
         // Host evidence is taken from MXC's read-only Seatbelt availability
@@ -217,34 +314,65 @@ network: { mode: block }
             .with_dependency(host_dependency::MXC_EXECUTOR, DependencyState::Present)
             .with_dependency(host_dependency::MACOS_SEATBELT, DependencyState::Present);
         let launch = ProcessLaunchOptions {
-            command: command.clone(), args: Vec::new(), working_dir: Some(text(&self.work)?.into()),
-            environment, capture_output: true,
+            command: command.clone(),
+            args: Vec::new(),
+            working_dir: Some(text(&self.work)?.into()),
+            environment,
+            capture_output: true,
             timeout_sec: Some(if matches!(case, Case::Timeout) { 1 } else { 10 }),
         };
         let spec = build_process_backend_execution_spec(
-            &policy, BackendCapabilityMapId::MxcMacosSeatbelt, launch,
-            &runtime, &PlannerOptions::new(),
-        ).context("AXIS rejected fixed MXC Seatbelt policy")?;
-        ensure!(spec.network.mode == ProcessBackendNetworkMode::Block, "AXIS network posture changed");
-        ensure!(spec.resources.max_processes == 0 && spec.resources.max_memory_mb == 0
-            && spec.resources.cpu_rate_percent == 0, "resource claims are outside this experiment");
+            &policy,
+            BackendCapabilityMapId::MxcMacosSeatbelt,
+            launch,
+            &runtime,
+            &PlannerOptions::new(),
+        )
+        .context("AXIS rejected fixed MXC Seatbelt policy")?;
+        ensure!(
+            spec.network.mode == ProcessBackendNetworkMode::Block,
+            "AXIS network posture changed"
+        );
+        ensure!(
+            spec.resources.max_processes == 0
+                && spec.resources.max_memory_mb == 0
+                && spec.resources.cpu_rate_percent == 0,
+            "resource claims are outside this experiment"
+        );
         // AXIS fb5 emits an older 0.6 JSON shape. Use its validation and
         // normalized plan, but never submit that wire document to MXC 1.0.1.
         let wire = build_mxc_process_config(command, &spec, MxcProcessConfigOptions::default())
             .context("AXIS MXC process config admission refused")?;
-        ensure!(wire.containment == MxcContainment::Seatbelt && wire.platform == MxcPlatform::Macos,
-            "AXIS selected a different containment or platform");
-        ensure!(wire.network.default_policy == MxcNetworkDefaultPolicy::Block && wire.network.proxy.is_none(),
-            "AXIS emitted non-blocked network");
-        ensure!(wire.process.timeout.is_some(), "AXIS dropped the fixed timeout");
-        ensure!(wire.filesystem.readwrite_paths == spec.filesystem.read_write
-            && wire.filesystem.readonly_paths == spec.filesystem.read_only
-            && wire.filesystem.denied_paths == spec.filesystem.deny,
-            "AXIS changed filesystem grants during config generation");
-        let env = wire.process.env.iter().map(|entry| {
-            let (name, value) = entry.split_once('=').context("AXIS emitted malformed environment")?;
-            Ok((name.to_owned(), value.to_owned()))
-        }).collect::<Result<Vec<_>>>()?;
+        ensure!(
+            wire.containment == MxcContainment::Seatbelt && wire.platform == MxcPlatform::Macos,
+            "AXIS selected a different containment or platform"
+        );
+        ensure!(
+            wire.network.default_policy == MxcNetworkDefaultPolicy::Block
+                && wire.network.proxy.is_none(),
+            "AXIS emitted non-blocked network"
+        );
+        ensure!(
+            wire.process.timeout.is_some(),
+            "AXIS dropped the fixed timeout"
+        );
+        ensure!(
+            wire.filesystem.readwrite_paths == spec.filesystem.read_write
+                && wire.filesystem.readonly_paths == spec.filesystem.read_only
+                && wire.filesystem.denied_paths == spec.filesystem.deny,
+            "AXIS changed filesystem grants during config generation"
+        );
+        let env = wire
+            .process
+            .env
+            .iter()
+            .map(|entry| {
+                let (name, value) = entry
+                    .split_once('=')
+                    .context("AXIS emitted malformed environment")?;
+                Ok((name.to_owned(), value.to_owned()))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut seatbelt = SeatbeltConfig::default();
         seatbelt.profile_override = None;
         seatbelt.gui_access = false;
@@ -260,8 +388,14 @@ network: { mode: block }
             clear_policy_on_exit: Some(true),
         });
         request.network = Some(NetworkPolicy {
-            egress: Some(NetworkEgressPolicy { default: Some(NetworkAction::Deny), ..Default::default() }),
-            ingress: Some(NetworkIngressPolicy { default: Some(NetworkAction::Deny), host_loopback: Some(NetworkAction::Deny) }),
+            egress: Some(NetworkEgressPolicy {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressPolicy {
+                default: Some(NetworkAction::Deny),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
             runtime_config: None,
         });
         request.ui = Some(UiPolicy::default());
@@ -278,8 +412,12 @@ fn private_supervisor_environment(paths: &Paths, port: u16) -> Result<()> {
     // SAFETY: called once before any SDK API or thread is started. The owned
     // fixture and host positive control have already been constructed.
     unsafe {
-        for name in names { std::env::remove_var(name); }
-        for (name, value) in paths.environment(port)? { std::env::set_var(name, value); }
+        for name in names {
+            std::env::remove_var(name);
+        }
+        for (name, value) in paths.environment(port)? {
+            std::env::set_var(name, value);
+        }
     }
     Ok(())
 }
@@ -288,16 +426,26 @@ fn verify_environment(paths: &Paths) -> Result<u16> {
     let port: u16 = std::env::var("DC_MACOS_CANARY_PORT")?.parse()?;
     let expected = paths.environment(port)?;
     for (name, value) in &expected {
-        ensure!(std::env::var(name).ok().as_ref() == Some(value), "private environment value differs for {name}");
+        ensure!(
+            std::env::var(name).ok().as_ref() == Some(value),
+            "private environment value differs for {name}"
+        );
     }
     for (name, value) in std::env::vars_os() {
         let key = name.to_str().context("non-UTF8 environment key")?;
-        if expected.iter().any(|(allowed, _)| key == allowed) { continue; }
+        if expected.iter().any(|(allowed, _)| key == allowed) {
+            continue;
+        }
         // /bin/sh may synthesize these after MXC clears the inherited block.
         match key {
             "PWD" => ensure!(value == paths.work.as_os_str(), "shell cwd differs"),
-            "SHLVL" => ensure!(value.to_str().is_some_and(|level| matches!(level, "0" | "1" | "2")), "shell nesting differs"),
-            "_" => {},
+            "SHLVL" => ensure!(
+                value
+                    .to_str()
+                    .is_some_and(|level| matches!(level, "0" | "1" | "2")),
+                "shell nesting differs"
+            ),
+            "_" => {}
             _ => bail!("unexpected child environment key"),
         }
     }
@@ -309,23 +457,42 @@ fn fixed_child(case: Case) -> Result<i32> {
     let port = verify_environment(&paths)?;
     match case {
         Case::Boundaries => {
-            ensure!(fs::read(&paths.readonly)? == READONLY, "readonly canary unreadable");
+            ensure!(
+                fs::read(&paths.readonly)? == READONLY,
+                "readonly canary unreadable"
+            );
             for dir in [&paths.work, &paths.home] {
                 write_new(&dir.join("allowed-write"), b"fixed-benign-write\n")?;
             }
             denied_errno(fs::read(&paths.denied_home), "read denied HOME canary")?;
             denied_errno(fs::read(&paths.denied_work), "read denied CWD canary")?;
-            denied_errno(fs::metadata(&paths.denied_home), "metadata denied HOME canary")?;
-            denied_errno(fs::metadata(&paths.denied_work), "metadata denied CWD canary")?;
+            denied_errno(
+                fs::metadata(&paths.denied_home),
+                "metadata denied HOME canary",
+            )?;
+            denied_errno(
+                fs::metadata(&paths.denied_work),
+                "metadata denied CWD canary",
+            )?;
             for path in [&paths.denied_home, &paths.denied_work, &paths.readonly] {
-                denied_errno(OpenOptions::new().write(true).open(path), "write protected canary")?;
+                denied_errno(
+                    OpenOptions::new().write(true).open(path),
+                    "write protected canary",
+                )?;
             }
             denied_errno(fs::read(&paths.ungranted), "read ungranted canary")?;
-            denied_errno(OpenOptions::new().write(true).create_new(true)
-                .open(paths.root.join("ungranted-write")), "write ungranted sibling")?;
+            denied_errno(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(paths.root.join("ungranted-write")),
+                "write ungranted sibling",
+            )?;
             let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-            denied_errno(std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1)),
-                "connect to ready loopback listener")?;
+            denied_errno(
+                std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1)),
+                "connect to ready loopback listener",
+            )?;
             println!("BOUNDARIES_OK");
             Ok(23)
         }
@@ -350,7 +517,8 @@ fn fixed_child(case: Case) -> Result<i32> {
         }
         Case::Timeout => {
             std::process::Command::new(std::env::current_exe()?)
-                .args(["--fixed-child", "delayed"]).spawn()?;
+                .args(["--fixed-child", "delayed"])
+                .spawn()?;
             println!("TIMEOUT_READY");
             io::stdout().flush()?;
             thread::sleep(Duration::from_secs(30));
@@ -370,21 +538,40 @@ fn terminal_state(rows: u16, cols: u16) -> Result<()> {
     // SAFETY: POSIX identity/terminal queries use valid pointers and fd 0.
     unsafe {
         ensure!(libc::isatty(0) == 1, "child stdin is not a PTY");
-        ensure!(libc::tcgetpgrp(0) == libc::getpgrp(), "child is not PTY foreground group");
+        ensure!(
+            libc::tcgetpgrp(0) == libc::getpgrp(),
+            "child is not PTY foreground group"
+        );
         let mut size: libc::winsize = std::mem::zeroed();
-        ensure!(libc::ioctl(0, libc::TIOCGWINSZ, &mut size) == 0, "PTY size query failed");
-        ensure!(size.ws_row == rows && size.ws_col == cols, "child PTY dimensions differ");
+        ensure!(
+            libc::ioctl(0, libc::TIOCGWINSZ, &mut size) == 0,
+            "PTY size query failed"
+        );
+        ensure!(
+            size.ws_row == rows && size.ws_col == cols,
+            "child PTY dimensions differ"
+        );
     }
     Ok(())
 }
 
 fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<()> {
-    let mut process = v1::spawn(paths.request(executable, case, port)?, SpawnOptions {
-        telemetry: disabled_telemetry(),
-    }).context("explicit MXC Seatbelt pipe spawn refused")?;
+    let mut process = v1::spawn(
+        paths.request(executable, case, port)?,
+        SpawnOptions {
+            telemetry: disabled_telemetry(),
+        },
+    )
+    .context("explicit MXC Seatbelt pipe spawn refused")?;
     let result = (|| {
-        let stdout = Capture::start(process.take_stdout().context("missing SDK stdout pipe")?, process.stdout_closer());
-        let stderr = Capture::start(process.take_stderr().context("missing SDK stderr pipe")?, process.stderr_closer());
+        let stdout = Capture::start(
+            process.take_stdout().context("missing SDK stdout pipe")?,
+            process.stdout_closer(),
+        );
+        let stderr = Capture::start(
+            process.take_stderr().context("missing SDK stderr pipe")?,
+            process.stderr_closer(),
+        );
         if matches!(case, Case::Pipe) {
             let mut input = process.take_stdin().context("missing SDK stdin pipe")?;
             input.write_all(b"fixed-benign-input\n")?;
@@ -397,18 +584,34 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
         let errors = stderr.finish()?;
         match case {
             Case::Boundaries => {
-                ensure!(outcome == WaitResult::Exited(23), "boundary child did not exit 23");
-                ensure!(contains(&output, b"BOUNDARIES_OK") && errors.is_empty(), "boundary acknowledgement missing");
+                ensure!(
+                    outcome == WaitResult::Exited(23),
+                    "boundary child did not exit 23"
+                );
+                ensure!(
+                    contains(&output, b"BOUNDARIES_OK") && errors.is_empty(),
+                    "boundary acknowledgement missing"
+                );
             }
             Case::Pipe => {
-                ensure!(outcome == WaitResult::Exited(23), "pipe child did not exit 23");
-                ensure!(contains(&output, b"PIPE_ECHO_OK") && contains(&errors, b"PIPE_STDERR_OK"),
-                    "pipe echo or stderr missing");
+                ensure!(
+                    outcome == WaitResult::Exited(23),
+                    "pipe child did not exit 23"
+                );
+                ensure!(
+                    contains(&output, b"PIPE_ECHO_OK") && contains(&errors, b"PIPE_STDERR_OK"),
+                    "pipe echo or stderr missing"
+                );
             }
             Case::Timeout => {
-                ensure!(outcome == WaitResult::TimedOut, "MXC did not report a typed timeout");
-                ensure!(contains(&output, b"TIMEOUT_READY") && contains(&output, b"DELAYED_READY"),
-                    "timeout did not reach both live process stages");
+                ensure!(
+                    outcome == WaitResult::TimedOut,
+                    "MXC did not report a typed timeout"
+                );
+                ensure!(
+                    contains(&output, b"TIMEOUT_READY") && contains(&output, b"DELAYED_READY"),
+                    "timeout did not reach both live process stages"
+                );
                 ensure!(errors.is_empty(), "timeout child wrote stderr");
             }
             Case::Pty | Case::Delayed => bail!("invalid pipe case"),
@@ -420,15 +623,23 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
     if result.is_err() {
         let killed = process.kill();
         let waited = process.wait();
-        ensure!(killed.is_ok() && waited.is_ok(), "failed probe also failed SDK cleanup");
+        ensure!(
+            killed.is_ok() && waited.is_ok(),
+            "failed probe also failed SDK cleanup"
+        );
     }
     result.with_context(|| format!("fixed {} experiment", case.argument()))
 }
 
 fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
-    let terminal = v1::spawn_with_pty(paths.request(executable, Case::Pty, port)?, SpawnWithPtyOptions {
-        telemetry: disabled_telemetry(), size: terminal_size(30, 100),
-    }).context("explicit MXC Seatbelt PTY spawn refused")?;
+    let terminal = v1::spawn_with_pty(
+        paths.request(executable, Case::Pty, port)?,
+        SpawnWithPtyOptions {
+            telemetry: disabled_telemetry(),
+            size: terminal_size(30, 100),
+        },
+    )
+    .context("explicit MXC Seatbelt PTY spawn refused")?;
     let result = (|| {
         let reader = terminal.try_clone_reader()?;
         let output = Capture::start(reader, terminal.stdout_closer());
@@ -436,13 +647,22 @@ fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
         output.require_marker(b"PTY_READY rows=30 cols=100", Duration::from_secs(5))?;
         terminal.resize(terminal_size(40, 120))?;
         let size = terminal.size()?;
-        ensure!(size.rows == 40 && size.cols == 120, "SDK PTY resize readback differs");
+        ensure!(
+            size.rows == 40 && size.cols == 120,
+            "SDK PTY resize readback differs"
+        );
         input.write_all(b"fixed-benign-input\n")?;
         input.flush()?;
         drop(input);
-        ensure!(wait_terminal(&terminal)? == WaitResult::Exited(23), "PTY child did not exit 23");
+        ensure!(
+            wait_terminal(&terminal)? == WaitResult::Exited(23),
+            "PTY child did not exit 23"
+        );
         let bytes = output.finish()?;
-        ensure!(contains(&bytes, b"PTY_ECHO_OK rows=40 cols=120"), "PTY input/resize acknowledgement missing");
+        ensure!(
+            contains(&bytes, b"PTY_ECHO_OK rows=40 cols=120"),
+            "PTY input/resize acknowledgement missing"
+        );
         terminal.kill()?;
         terminal.kill()?;
         Ok(())
@@ -450,7 +670,10 @@ fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
     if result.is_err() {
         let killed = terminal.kill();
         let waited = terminal.wait();
-        ensure!(killed.is_ok() && waited.is_ok(), "failed PTY probe also failed SDK cleanup");
+        ensure!(
+            killed.is_ok() && waited.is_ok(),
+            "failed PTY probe also failed SDK cleanup"
+        );
     }
     result.context("fixed MXC-owned PTY experiment")
 }
@@ -462,7 +685,7 @@ fn wait_process(process: &mut MxcProcess) -> Result<WaitResult> {
             Ok(Some(_)) => return Ok(process.wait()?),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(process.wait()?),
             Err(error) => return Err(error.into()),
-            Ok(None) => {},
+            Ok(None) => {}
         }
         if start.elapsed() >= SUPERVISOR_LIMIT {
             process.kill_for_timeout()?;
@@ -480,7 +703,7 @@ fn wait_terminal(terminal: &MxcPtyProcess) -> Result<WaitResult> {
             Ok(Some(_)) => return Ok(terminal.wait()?),
             Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(terminal.wait()?),
             Err(error) => return Err(error.into()),
-            Ok(None) => {},
+            Ok(None) => {}
         }
         if start.elapsed() >= SUPERVISOR_LIMIT {
             terminal.kill_for_timeout()?;
@@ -511,7 +734,9 @@ impl Capture {
                     match stream.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(count) => {
-                            let mut output = captured.lock().map_err(|_| io::Error::other("capture mutex poisoned"))?;
+                            let mut output = captured
+                                .lock()
+                                .map_err(|_| io::Error::other("capture mutex poisoned"))?;
                             let remaining = OUTPUT_LIMIT.saturating_sub(output.len());
                             output.extend_from_slice(&buffer[..count.min(remaining)]);
                             overflow |= count > remaining;
@@ -521,18 +746,31 @@ impl Capture {
                         Err(error) => return Err(error),
                     }
                 }
-                if overflow { return Err(io::Error::other("fixed child exceeded output limit")); }
+                if overflow {
+                    return Err(io::Error::other("fixed child exceeded output limit"));
+                }
                 Ok(())
             })();
             let _ = sender.send(result);
         });
-        Self { bytes, completed, reader: Some(reader), closer }
+        Self {
+            bytes,
+            completed,
+            reader: Some(reader),
+            closer,
+        }
     }
 
     fn require_marker(&self, marker: &[u8], limit: Duration) -> Result<()> {
         let start = Instant::now();
         while start.elapsed() < limit {
-            if contains(&self.bytes.lock().map_err(|_| anyhow!("capture mutex poisoned"))?, marker) {
+            if contains(
+                &self
+                    .bytes
+                    .lock()
+                    .map_err(|_| anyhow!("capture mutex poisoned"))?,
+                marker,
+            ) {
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(10));
@@ -544,34 +782,55 @@ impl Capture {
         let result = match self.completed.recv_timeout(Duration::from_millis(500)) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(closer) = &self.closer { closer.close(); }
-                self.completed.recv_timeout(Duration::from_secs(2))
+                if let Some(closer) = &self.closer {
+                    closer.close();
+                }
+                self.completed
+                    .recv_timeout(Duration::from_secs(2))
                     .context("SDK stream close did not unblock capture")?
             }
             Err(error) => return Err(error.into()),
         };
         if let Some(reader) = self.reader.take() {
-            reader.join().map_err(|_| anyhow!("capture thread panicked"))?;
+            reader
+                .join()
+                .map_err(|_| anyhow!("capture thread panicked"))?;
         }
         result.context("bounded fixed child capture")?;
-        let output = self.bytes.lock().map_err(|_| anyhow!("capture mutex poisoned"))?.clone();
+        let output = self
+            .bytes
+            .lock()
+            .map_err(|_| anyhow!("capture mutex poisoned"))?
+            .clone();
         Ok(output)
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        if let Some(closer) = &self.closer { closer.close(); }
+        if let Some(closer) = &self.closer {
+            closer.close();
+        }
         if self.reader.as_ref().is_some_and(JoinHandle::is_finished) {
-            if let Some(reader) = self.reader.take() { let _ = reader.join(); }
+            if let Some(reader) = self.reader.take() {
+                let _ = reader.join();
+            }
         }
     }
 }
 
-fn disabled_telemetry() -> Option<TelemetryConfig> { Some(TelemetryConfig { enabled: Some(false) }) }
+fn disabled_telemetry() -> Option<TelemetryConfig> {
+    Some(TelemetryConfig {
+        enabled: Some(false),
+    })
+}
 
 fn terminal_size(rows: u16, cols: u16) -> MxcPtySize {
-    MxcPtySize { rows, cols, ..MxcPtySize::default() }
+    MxcPtySize {
+        rows,
+        cols,
+        ..MxcPtySize::default()
+    }
 }
 
 fn denied_errno<T>(result: io::Result<T>, action: &str) -> Result<()> {
@@ -583,14 +842,23 @@ fn denied_errno<T>(result: io::Result<T>, action: &str) -> Result<()> {
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?.write_all(bytes)?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?
+        .write_all(bytes)?;
     Ok(())
 }
 
-fn text(path: &Path) -> Result<&str> { path.to_str().context("probe path is not UTF-8") }
+fn text(path: &Path) -> Result<&str> {
+    path.to_str().context("probe path is not UTF-8")
+}
 
 fn contains(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|part| part == needle)
 }
 
-fn shell_quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
