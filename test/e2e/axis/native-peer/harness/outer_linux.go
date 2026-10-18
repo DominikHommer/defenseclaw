@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -49,6 +50,60 @@ type outerCustodian struct {
 	done                      chan struct{}
 	waitErr                   error
 	exit                      int
+	startStage, startErrno    string
+}
+
+// The start-error classification contains only fixed vocabulary. Separately
+// retained bounded private worker streams may contain synthetic paths or runtime
+// diagnostics; they do not inherit credentials from the empty child environment.
+func startErrnoClass(err error) string {
+	if err == nil {
+		return "none"
+	}
+	for _, item := range []struct {
+		err  error
+		name string
+	}{{unix.EPERM, "eperm"}, {unix.EACCES, "eacces"}, {unix.EINVAL, "einval"}, {unix.ENOENT, "enoent"},
+		{unix.ENOSYS, "enosys"}, {unix.EAGAIN, "eagain"}, {unix.ENOMEM, "enomem"}, {unix.EIO, "eio"}, {context.Canceled, "cancelled"}} {
+		if errors.Is(err, item.err) {
+			return item.name
+		}
+	}
+	return "other"
+}
+
+func procSelfPIDView(link string, pid int, readErr error) (available, matches bool) {
+	if readErr != nil || pid <= 0 || len(link) == 0 || len(link) > 10 {
+		return false, false
+	}
+	value, err := strconv.Atoi(link)
+	if err != nil || value <= 0 || strconv.Itoa(value) != link {
+		return false, false
+	}
+	return true, value == pid
+}
+
+func observeProcPIDView(record map[string]any) {
+	// Read-only diagnostic, never authority for mappings, mounts or cleanup.
+	// Distinguish an unavailable observation from an actual PID-view mismatch;
+	// neither the raw link target nor the process ID enters evidence.
+	var target [11]byte
+	n, err := unix.Readlink("/proc/self", target[:])
+	if n < 0 || n >= len(target) {
+		n, err = 0, errors.New("fixed proc link unavailable")
+	}
+	record["proc_self_pid_view_available"], record["proc_self_pid_matches_getpid"] = procSelfPIDView(string(target[:n]), os.Getpid(), err)
+}
+
+func retainWorkerObservation(record map[string]any, owner *outerCustodian, stdout, stderr *boundedCapture) {
+	owner.mu.Lock()
+	record["worker_start_stage"], record["worker_start_errno"] = owner.startStage, owner.startErrno
+	record["worker_native_wait_complete"], record["owned_worker_exit_code"] = owner.started && owner.complete, owner.exit
+	owner.mu.Unlock()
+	data, overflow := stdout.snapshot()
+	diagnostics, stderrOverflow := stderr.snapshot()
+	record["owned_worker_stdout"], record["owned_worker_stderr"] = string(data), string(diagnostics)
+	record["owned_worker_stdout_truncated"], record["owned_worker_stderr_truncated"] = overflow, stderrOverflow
 }
 
 func (o *outerCustodian) signalLocked() error {
@@ -93,6 +148,7 @@ func (o *outerCustodian) StopAndWait(ctx context.Context) error { return o.stopA
 func (o *outerCustodian) start(ctx context.Context, command *exec.Cmd, pidfd *int, childFiles []*os.File) error {
 	o.mu.Lock()
 	o.starting = true
+	o.startStage, o.startErrno = "start_pending", "none"
 	o.mu.Unlock()
 	result := make(chan error, 1)
 	go func() {
@@ -116,6 +172,10 @@ func (o *outerCustodian) start(ctx context.Context, command *exec.Cmd, pidfd *in
 		o.mu.Lock()
 		o.starting = false
 		if startErr != nil {
+			o.startStage, o.startErrno = "exec_start_refused", startErrnoClass(startErr)
+			if abort {
+				o.startStage = "start_cancelled_before_exec"
+			}
 			o.closed, o.complete, o.waitErr = true, true, closeErr
 			close(o.done)
 			o.mu.Unlock()
@@ -123,7 +183,16 @@ func (o *outerCustodian) start(ctx context.Context, command *exec.Cmd, pidfd *in
 			return
 		}
 		o.started, o.pidfd, o.command = true, *pidfd, command
+		o.startStage, o.startErrno = "started", "none"
 		if *pidfd < 0 || o.closed || ctx.Err() != nil || closeErr != nil {
+			switch {
+			case *pidfd < 0:
+				o.startStage = "atomic_pidfd_refused"
+			case o.closed || ctx.Err() != nil:
+				o.startStage = "start_cancelled_after_exec"
+			default:
+				o.startStage, o.startErrno = "child_descriptor_release_failed", startErrnoClass(closeErr)
+			}
 			o.closed = true
 			startErr = errors.Join(errors.New("fixed outer atomic custody refused"), closeErr, o.signalLocked())
 		}
@@ -229,6 +298,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	if runtime.GOARCH != "amd64" || os.Geteuid() == 0 || os.Getuid() != os.Geteuid() || os.Getgid() != os.Getegid() {
 		return errors.New("native unprivileged Linux amd64 required")
 	}
+	observeProcPIDView(record)
 	image, hash, err := sealedRunningImage()
 	if image != nil {
 		defer func() { resultErr = errors.Join(resultErr, image.Close()) }()
@@ -268,6 +338,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	owner := &outerCustodian{pidfd: -1, done: make(chan struct{}), exit: -1}
 	defer func() {
 		cleanupErr := retained.close(owner)
+		retainWorkerObservation(record, owner, stdout, stderr)
 		record["outer_namespace_cleanup_observed"] = cleanupErr == nil
 		record["pending_outer_cleanup"] = len(retained.pending)
 		resultErr = errors.Join(resultErr, cleanupErr)
@@ -329,15 +400,20 @@ func executeWorker(args []string) (map[string]any, *cleanupOwner, error) {
 func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[string]any, *cleanupOwner, error) {
 	record := map[string]any{"scope": harnessScope, "passed": false, "execution_performed": false, "production_certification": false, "common_launch_gate_qualified": false}
 	owner := &cleanupOwner{}
+	record["worker_admission_stage"] = "registry"
 	if registry.validate() != nil {
 		return record, owner, errUnreviewed
 	}
+	record["worker_admission_stage"] = "metadata"
 	if len(args) != 4 || args[0] != "--receipt" || args[2] != "--evidence" || len(args[1]) == 0 || len(args[1]) > 4096 || len(args[3]) == 0 || len(args[3]) > 4096 {
 		return record, owner, errors.New("fixed worker metadata refused")
 	}
+	record["worker_admission_stage"] = "namespace_identity"
 	if os.Getpid() != 1 || os.Getppid() != 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed worker requires its owned PID namespace")
 	}
+	observeProcPIDView(record)
+	record["worker_admission_stage"] = "private_channels"
 	grant, ready, self := os.NewFile(3, "fixed-worker-grant"), os.NewFile(4, "fixed-worker-ready"), os.NewFile(5, "fixed-worker-self")
 	defer grant.Close()
 	defer ready.Close()
@@ -353,10 +429,12 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 			return record, owner, errors.New("fixed worker private channel refused")
 		}
 	}
+	record["worker_admission_stage"] = "sealed_self"
 	seals, err := unix.FcntlInt(self.Fd(), unix.F_GET_SEALS, 0)
 	if err != nil || seals != unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL {
 		return record, owner, errors.New("fixed worker sealed self image refused")
 	}
+	record["worker_admission_stage"] = "self_identity"
 	current, err := os.Open("/proc/self/exe")
 	if err != nil {
 		return record, owner, err
@@ -367,6 +445,7 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 	if errors.Join(currentErr, selfErr, closeErr) != nil || d != sd || i != si {
 		return record, owner, errors.New("fixed worker self image identity differs")
 	}
+	record["worker_admission_stage"] = "parent_death_guard"
 	// Install before READY; the parent never queues GRANT before READY. If the
 	// parent dies earlier, EOF refuses before runNative. Afterwards SIGKILL of
 	// namespace init also kills all its descendants. Avoid pre-exec getppid.
@@ -374,9 +453,11 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0); err != nil {
 		return record, owner, errors.New("fixed worker parent death guard refused")
 	}
+	record["worker_admission_stage"] = "ready_and_grant"
 	if err := readyThenGrant(ready, grant); err != nil {
 		return record, owner, err
 	}
+	record["worker_admission_stage"] = "native_fixed_cases"
 	record["owned_guardian_grant_observed"] = true
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

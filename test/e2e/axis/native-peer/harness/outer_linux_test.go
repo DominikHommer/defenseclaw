@@ -10,8 +10,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type failReady struct{}
@@ -58,8 +61,15 @@ func (r *orderedGrant) Read(p []byte) (int, error) {
 
 func TestUnreviewedWorkerRegistryRefusesBeforeNativeDescriptors(t *testing.T) {
 	record, owner, err := executeWorkerWithRegistry([]string{"--receipt", "missing", "--evidence", "missing"}, reviewedRegistry{})
-	if !errors.Is(err, errUnreviewed) || record["execution_performed"] != false || len(owner.pending) != 0 {
+	if !errors.Is(err, errUnreviewed) || record["execution_performed"] != false || len(owner.pending) != 0 || record["worker_admission_stage"] != "registry" {
 		t.Fatal("unreviewed worker reached a native capability")
+	}
+}
+
+func TestSyntheticWorkerMetadataStageRefusesBeforeNativeDescriptors(t *testing.T) {
+	record, owner, err := executeWorkerWithRegistry(nil, syntheticRegistry(t))
+	if err == nil || record["worker_admission_stage"] != "metadata" || record["execution_performed"] != false || len(owner.pending) != 0 {
+		t.Fatal("invalid synthetic worker metadata reached native descriptors")
 	}
 }
 
@@ -89,5 +99,55 @@ func TestOuterCaptureBoundsBytesWithoutExecutingImage(t *testing.T) {
 	data, overflow := b.snapshot()
 	if len(data) != outputLimit || !overflow {
 		t.Fatal("bounded capture observation differs")
+	}
+}
+
+func TestNativeStartErrnoEvidenceUsesOnlyFixedClassification(t *testing.T) {
+	for _, item := range []struct {
+		err  error
+		want string
+	}{{nil, "none"}, {&os.PathError{Op: "private", Path: "/synthetic/private-path", Err: unix.EPERM}, "eperm"},
+		{errors.Join(errors.New("private details"), unix.EACCES), "eacces"}, {context.Canceled, "cancelled"},
+		{errors.New("arbitrary exception details"), "other"}} {
+		if got := startErrnoClass(item.err); got != item.want {
+			t.Fatalf("fixed classification differs: %q", got)
+		}
+	}
+}
+
+func TestProcPIDViewDistinguishesMismatchFromUnavailableWithoutNativeCalls(t *testing.T) {
+	for _, item := range []struct {
+		link               string
+		pid                int
+		err                error
+		available, matches bool
+	}{{"1", 1, nil, true, true}, {"41", 1, nil, true, false}, {"", 1, nil, false, false},
+		{"1", 1, errors.New("fixed read error"), false, false}, {"01", 1, nil, false, false},
+		{"12345678901", 1, nil, false, false}, {"/synthetic/private-path", 1, nil, false, false}} {
+		available, matches := procSelfPIDView(item.link, item.pid, item.err)
+		if available != item.available || matches != item.matches {
+			t.Fatal("proc PID view classification differs")
+		}
+	}
+}
+
+func TestEarlyWorkerFailureRetainsBoundedDiagnosticsAfterObservation(t *testing.T) {
+	owner := &outerCustodian{pidfd: -1, complete: true, exit: 1, startStage: "exec_start_refused", startErrno: "eperm"}
+	stdout, stderr := &boundedCapture{}, &boundedCapture{}
+	_, _ = stdout.Write([]byte("fixed worker admission JSON\n"))
+	_, _ = stderr.Write(bytes.Repeat([]byte{'x'}, outputLimit))
+	_, _ = stderr.Write([]byte("overflow"))
+	record := map[string]any{"passed": false, "execution_performed": false}
+	retainWorkerObservation(record, owner, stdout, stderr)
+	if record["worker_start_stage"] != "exec_start_refused" || record["worker_start_errno"] != "eperm" ||
+		record["worker_native_wait_complete"] != false || record["owned_worker_exit_code"] != 1 ||
+		record["owned_worker_stdout"] != "fixed worker admission JSON\n" || record["owned_worker_stderr_truncated"] != true ||
+		len(record["owned_worker_stderr"].(string)) != outputLimit || record["passed"] != false || record["execution_performed"] != false {
+		t.Fatal("early failure evidence was lost or became success")
+	}
+	owner.started = true
+	retainWorkerObservation(record, owner, stdout, stderr)
+	if record["worker_native_wait_complete"] != true {
+		t.Fatal("completed owned native wait was not distinguished from pre-exec refusal")
 	}
 }
