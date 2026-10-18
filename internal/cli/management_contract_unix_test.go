@@ -46,15 +46,6 @@ func (c contractHostCommands) Run(ctx context.Context, name string, args ...stri
 	return c.noHostCommands.Run(ctx, name, args...)
 }
 
-// runExit is the exit status a command run ends with: 0 for success, else
-// the code its failure asked for (commandExitCode only labels failures).
-func runExit(err error) int {
-	if err == nil {
-		return 0
-	}
-	return commandExitCode(err)
-}
-
 // contractUnixEnv points the Linux and macOS lifecycle at an empty device
 // tree that a root caller runs against. On Linux the tree and the host
 // commands show systemd as the running init system, as on a supported host,

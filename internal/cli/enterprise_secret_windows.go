@@ -514,10 +514,20 @@ func applyWindowsSDDL(path, sddl string) error {
 }
 
 func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	// The same check ensureWindowsSecretsDir makes before a write. On
+	// Windows os.ReadDir of a regular file can return no entries and no
+	// error, so a file or a link where the folder belongs would list as
+	// an empty store instead of a state the administrator must repair.
+	info, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		return []windowsSecretState{}, nil
+	case err != nil:
+		return nil, err
+	case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+		return nil, fmt.Errorf("%s is not a real directory", dir)
 	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}

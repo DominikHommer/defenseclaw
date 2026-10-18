@@ -161,7 +161,7 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 				tc.setup()
 				out, err := runWindowsSecretCommand(t, "set", tc.opts, value+"\r\n")
 				doc := schemas.Validate(t, "secret-result.schema.json", []byte(out))
-				requireExit(t, doc, commandExitCode(err), tc.exit)
+				requireExit(t, doc, runExit(err), tc.exit)
 				if strings.Contains(out, value) {
 					t.Fatal("the credential value was printed")
 				}
@@ -279,7 +279,7 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 					t.Fatal("the credential value was printed")
 				}
 				doc := schemas.Validate(t, "secret-result.schema.json", stdout.Bytes())
-				requireExit(t, doc, commandExitCode(err), want.exit)
+				requireExit(t, doc, runExit(err), want.exit)
 				if want.code == "" {
 					if err != nil || doc["secrets"] == nil {
 						t.Fatalf("%v: want the status listing, got %v %s", args, err, stdout.String())
