@@ -23,6 +23,11 @@ import (
 func TestStatusReportsHookFilesChangedSinceTheGuardianPass(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ledger, err := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 1, "success_count": 1, "failure_count": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.publishLedger(ledger)
 	if before := h.run(Options{Action: ActionStatus}); !before.SecurityComplete || hasWarning(before, codeGuardianRepairPending) {
 		t.Fatalf("baseline without a record: security_complete=%v warnings=%v", before.SecurityComplete, before.Warnings)
 	}
