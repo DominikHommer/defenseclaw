@@ -567,20 +567,22 @@ func TestStandaloneCleanupHandlesEmptyDirectoryHome(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// remove-all already dropped the rows it finished (rel-1-0-3
+			// GAP-0204): the guardian has nothing left to run for them.
 			switch kind {
 			case "recorded-home-kept-trusted":
-				if len(remaining) != 0 || strings.Count(guardianLog.String(), "no longer enrolled; per-user cleanup done") != 1 ||
-					len(f.requests) != 3 || f.requests[2].Targets[0].Options.UserHome != oldHome {
-					t.Fatalf("trusted recorded home did not finish: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+				if len(remaining) != 0 || strings.Contains(guardianLog.String(), "per-user cleanup") ||
+					len(f.requests) != 2 || f.requests[1].Targets[0].Options.UserHome != oldHome {
+					t.Fatalf("trusted recorded home did not finish in remove-all: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			case "recorded-home-kept-untrusted":
 				if len(remaining) != 1 || !strings.Contains(guardianLog.String(), "will retry") || len(f.requests) != 0 {
 					t.Fatalf("untrusted recorded home was retired: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			case "recorded-home-gone":
-				if len(remaining) != 0 || strings.Count(guardianLog.String(), "home gone:") != 1 ||
+				if len(remaining) != 0 || strings.Contains(guardianLog.String(), "home gone:") ||
 					strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") || len(f.requests) != 0 {
-					t.Fatalf("gone recorded home was not retired once: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
+					t.Fatalf("gone recorded home was not retired once, by remove-all: %+v, log %q, workers %+v", remaining, guardianLog.String(), f.requests)
 				}
 			}
 		})
