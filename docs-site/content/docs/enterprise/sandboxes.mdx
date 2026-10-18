@@ -247,12 +247,22 @@ this release, so:
 - Credential and environment references keep secrets out of `config.yaml`, but
   they do not protect them from members of the group: the LLM and AI Defense
   keys are within their reach too.
-- A managed config refuses inline values only for `llm.api_key`,
+- A managed config refuses inline values for `llm.api_key`,
+  `inspect_llm.api_key`,
   `guardrail.llm.api_key`, `guardrail.judge.llm.api_key`,
   `scanners.mcp_scanner.llm.api_key`, `scanners.skill_scanner.llm.api_key`,
   `scanners.plugin_llm.api_key`, `cisco_ai_defense.api_key` and
-  `gateway.token`. Webhook URLs and provider or destination headers are
-  accepted as literals, and anyone who can read the config can read them.
+  `gateway.token`. New administrator input also refuses credential-bearing
+  provider headers in every `llm.extra_headers` block and literal credential
+  headers on observability destinations. Routing and version headers without
+  credentials remain valid. Use `{credential: NAME}` for destination headers.
+  Webhook URLs remain supported because they have no URL reference form; keep
+  their secrets in `secret_env` where the notifier supports it. An installed
+  1.0.2 config with literals still loads. `status` and `verify` name the
+  paths to review and advise `{credential: NAME}` where supported.
+  `defenseclaw-gateway config validate <file>` applies the same rule to a
+  candidate file as `ensure --config`; on the installed config it prints the
+  same advisory instead.
 - `ensure`, `status` and `verify` count the enrolled accounts in the group
   (`docker_group_members`, a number, no names), and
   `defenseclaw sandbox doctor` tells such a person what the membership means.

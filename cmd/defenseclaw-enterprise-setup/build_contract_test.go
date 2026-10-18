@@ -90,7 +90,7 @@ func TestStandaloneBuildLinksThePayloadBinding(t *testing.T) {
 	}
 }
 
-func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T) {
+func TestManagedSetupOmitsFleetCompiler(t *testing.T) {
 	contains := func(files []string, name string) bool {
 		for _, file := range files {
 			if file == name {
@@ -99,19 +99,17 @@ func TestStandaloneSetupCarriesFleetCompilerOnlyInStandalonePayload(t *testing.T
 		}
 		return false
 	}
-	if !contains(standalonePayloadFiles, "policy_compiler.py") {
-		t.Fatal("standalone Setup payload omits the Fleet policy compiler")
+	if contains(standalonePayloadFiles, "policy_compiler.py") {
+		t.Fatal("standalone Setup payload includes the Fleet policy compiler")
 	}
 	if contains(requiredPayloadFiles, "policy_compiler.py") {
 		t.Fatal("Secure Client payload unexpectedly includes standalone Fleet compiler")
 	}
-	for _, path := range []string{
-		"packaging/windows/standalone/build-setup.sh",
-		"cmd/windows-avc-assembler/main.go",
-	} {
-		if !strings.Contains(readEnterpriseSetupContractFile(t, path), "policy_compiler.py") {
-			t.Errorf("%s does not carry the standalone compiler", path)
-		}
+	if strings.Contains(readEnterpriseSetupContractFile(t, "packaging/windows/standalone/build-setup.sh"), "policy_compiler.py") {
+		t.Fatal("standalone build recipe includes the Fleet compiler")
+	}
+	if strings.Contains(readEnterpriseSetupContractFile(t, "cmd/windows-avc-assembler/main.go"), "policy_compiler.py") {
+		t.Fatal("signed standalone assembler includes the Fleet compiler")
 	}
 	compiler, err := os.ReadFile(filepath.Join(enterpriseSetupRepositoryRoot(t), "edge-connector", "tools", "policy_compiler.py"))
 	if err != nil {
