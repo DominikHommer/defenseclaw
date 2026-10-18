@@ -174,6 +174,43 @@ fn fixed_private_environment_path(actual: &OsStr, expected: &Path) -> bool {
     }
 }
 
+fn fixed_environment_comparison(actual: &OsStr, expected: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+
+    // Diagnostic metadata only. Never include an environment value or a path.
+    // Bound iteration even if a corrupted environment exceeds Windows' limit.
+    let actual: Vec<u16> = actual.encode_wide().take(32_769).collect();
+    let expected: Vec<u16> = expected.as_os_str().encode_wide().take(32_769).collect();
+    let prefix = [92, 92, 63, 92];
+    let a = actual.strip_prefix(&prefix).unwrap_or(&actual);
+    let b = expected.strip_prefix(&prefix).unwrap_or(&expected);
+    let fold_ascii = |unit: u16| {
+        if (65..=90).contains(&unit) {
+            unit + 32
+        } else {
+            unit
+        }
+    };
+    let ascii_case_only = a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(left, right)| fold_ascii(*left) == fold_ascii(*right));
+    let first_difference = a
+        .iter()
+        .zip(b)
+        .position(|(left, right)| left != right)
+        .unwrap_or(a.len().min(b.len()));
+    format!(
+        "actual_units={} expected_units={} actual_verbatim={} expected_verbatim={} ascii_case_only={} first_difference={}",
+        actual.len(),
+        expected.len(),
+        actual.starts_with(&prefix),
+        expected.starts_with(&prefix),
+        ascii_case_only,
+        first_difference,
+    )
+}
+
 fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
     require(
         args.first().is_some_and(|arg| arg == "--fixed-child"),
@@ -275,13 +312,15 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
             root.join("home").join("AppData").join("Local"),
         ),
     ] {
-        require(
-            fixed_private_environment_path(
-                &std::env::var_os(key).ok_or_else(|| io::Error::other("private env missing"))?,
-                &expected,
-            ),
-            "private environment differs",
-        )?;
+        let actual =
+            std::env::var_os(key).ok_or_else(|| io::Error::other("private env missing"))?;
+        if !fixed_private_environment_path(&actual, &expected) {
+            eprintln!(
+                "FIXED_PRIVATE_ENV_MISMATCH key={key} {}",
+                fixed_environment_comparison(&actual, &expected),
+            );
+            return Err(io::Error::other("private environment differs").into());
+        }
     }
     require(
         std::env::var_os("OPENAI_API_KEY").is_none()
@@ -383,5 +422,13 @@ mod tests {
                 expected
             ));
         }
+        let diagnostic =
+            fixed_environment_comparison(OsStr::new(r"\\?\C:\fixed-private\HOME"), expected);
+        assert!(
+            diagnostic
+                .contains("actual_verbatim=true expected_verbatim=false ascii_case_only=true")
+        );
+        assert!(!diagnostic.contains("fixed-private"));
+        assert!(!diagnostic.contains("HOME"));
     }
 }

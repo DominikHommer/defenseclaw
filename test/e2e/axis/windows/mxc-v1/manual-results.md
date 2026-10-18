@@ -241,3 +241,34 @@ error. The owned outer Job ended empty with zero active processes. The exact
 failed fixture `dc-axis-windows-psec-NUZsHW` remains under private evidence
 `windows-current-psec-boundary-max-04`. No host ACL, firewall, UI restriction,
 policy or SDK change was made. Customer Windows AXIS remains unavailable.
+
+## Narrow prefix comparison: mismatch remains
+
+[Locked build 39127497805](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39127497805)
+at `53281811a4fc41c099a756cf575de26e99d995cc` passed the ten selected SDK
+admission tests and one exact pure private-path comparison test. Two
+independent reviews checked its 24 archive entries, 20 manifest hashes, source
+and locks, all 15 reconstructed SDK files and unchanged PE import DLL lists.
+One fresh fixed native attempt passed literal argv and direct seal read, then
+refused the private environment comparison again. The optional verbatim-disk
+prefix correction did not resolve the mismatch. The generic six-key assertion
+does not identify the differing key or value; no environment leak or precise
+cause is established by this result.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12137236542` | `c0d511dcbd215aac30b703f9f7b12b0e5e127e3dcb25f15cd851ab9330c45b77` |
+| Provenance | `686e475c338927b67d1bdc44ae02bc60f527624bd6bbd8f5261d8208e3dbd64d` |
+| Root verification receipt | `00e55fcc6dca641f737596ad605ddb72ca664819eac7b3b5ab0459d41847ac7d` |
+| Actual live result | `239adb07ff169ab30944cab743017c0b123b16d4be5297e90d54fc042173ae05` |
+
+The wrapper exited 1 in 5.016 seconds with no deadline, overflow or reader
+error. The owned outer Job was assigned before resume and ended empty. The
+exact failed fixture `dc-axis-windows-psec-m6U12J` remains under private
+evidence `windows-current-psec-boundary-max-05`. The artifact was not retried.
+No policy, grant, ACL, firewall, UI restriction or SDK overlay changed.
+
+The next source retains the same exact assertion and adds only a fixed failing
+key, bounded UTF-16 lengths, prefix flags, ASCII-case comparison flag and
+first-difference index. It never logs path or environment contents. A fresh
+locked build and independent review precede further native testing.
