@@ -748,9 +748,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = hookpaths.OperandPath(target, clientCWD)
-		// The hook and gateway have different proc cwd link targets.
+		// Only the event cwd can interpret the process-dependent alias.
 		if hookpaths.ProcCWDWriteOperand(target) {
-			return true
+			if !strings.HasPrefix(target, "/proc/self/cwd/") {
+				return true
+			}
+			if resolved, present := request.ResolvedWriteTargets[target]; present {
+				return resolved == "" || isProtected(resolved)
+			}
+			if cannotResolveLocally {
+				return true
+			}
+			mapped, ok := hookpaths.ResolveProcSelfCWDTarget(target, clientCWD)
+			if !ok {
+				return true
+			}
+			target = mapped
 		}
 		if isProtected(target) {
 			return true

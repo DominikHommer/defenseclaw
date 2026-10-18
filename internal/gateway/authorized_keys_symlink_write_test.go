@@ -180,12 +180,12 @@ func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
 	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "proj")
-	if err := os.MkdirAll(cwd, 0o700); err != nil {
-		t.Fatal(err)
+	for _, dir := range []string{filepath.Join(cwd, "out"), filepath.Join(home, ".ssh")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	command := "printf marker >> /proc/self/cwd/../.ssh/authorized_keys"
-	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
-		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	t.Setenv("HOME", home)
 	if !hookpaths.ProcCWDWriteOperand("/proc/123/cwd/../.ssh/authorized_keys") ||
 		hookpaths.ProcCWDWriteOperand("/proc/other/cwd/file") {
 		t.Fatal("proc cwd alias classification changed")
@@ -193,11 +193,36 @@ func TestR103B36ProcCWDAliasRemainsUnknown(t *testing.T) {
 	if _, ok := hookpaths.ResolveWriteTarget("/proc/self/cwd/../.ssh/authorized_keys"); ok {
 		t.Fatal("hook proved a process-dependent cwd target")
 	}
-	for _, mode := range []string{"per-user", "managed"} {
-		t.Run(mode, func(t *testing.T) {
-			request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
-			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
-				t.Fatal("proc cwd alias was treated as an ordinary write")
+	for _, tc := range []struct {
+		name, command, path, resolved string
+		blocked                       bool
+	}{
+		{"parent traversal", "printf marker >> /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"ordinary descendant", "printf marker >> /proc/self/cwd/out/log", "/proc/self/cwd/out/log", filepath.Join(cwd, "out", "log"), false},
+		{"ordinary dot descendant", "printf marker >> /proc/self/cwd/./out/log", "/proc/self/cwd/out/log", filepath.Join(cwd, "out", "log"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok || targets[tc.path] != tc.resolved {
+				t.Fatalf("hook target = %q, want %q", targets[tc.path], tc.resolved)
+			}
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			for _, mode := range []string{"per-user", "managed"} {
+				t.Run(mode, func(t *testing.T) {
+					request := trustedActionRequest{Input: input, ProtectedHomeHook: mode == "managed"}
+					if mode == "managed" {
+						request.ResolvedWriteTargets = targets
+					}
+					if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != tc.blocked {
+						t.Fatalf("block = %v, want %v", got, tc.blocked)
+					}
+				})
 			}
 		})
 	}

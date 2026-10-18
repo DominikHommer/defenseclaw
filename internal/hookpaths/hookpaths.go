@@ -330,6 +330,21 @@ func ResolveWriteTarget(path string) (string, bool) {
 	return resolveWritePath(path, 0)
 }
 
+// ResolveProcSelfCWDTarget interprets the cwd alias using the event cwd, not
+// the hook or gateway process cwd. The suffix is walked before dot-dot is
+// removed so directory links keep their physical meaning.
+func ResolveProcSelfCWDTarget(path, cwd string) (string, bool) {
+	const prefix = "/proc/self/cwd/"
+	if !strings.HasPrefix(path, prefix) || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	physicalCWD, ok := ResolveWriteTarget(cwd)
+	if !ok {
+		return "", false
+	}
+	return ResolveWriteTarget(physicalCWD + "/" + strings.TrimPrefix(path, prefix))
+}
+
 // protectedFile is the identity of one of the user's authorized-keys files. A
 // hard link elsewhere names the same file under another path, so a target is
 // compared by file identity (device and inode on Unix, volume serial and file
@@ -510,14 +525,19 @@ func Resolve(payload []byte) string {
 			return
 		}
 		resolved, ok := "", false
-		if links.known {
-			resolved, ok = links.resolve(path, protected)
-		} else if safeRedirect {
-			if direct, directOK := resolveWritePath(path, 0); directOK {
+		resolutionPath := path
+		aliasKnown := true
+		if strings.HasPrefix(path, "/proc/self/cwd/") {
+			resolutionPath, aliasKnown = ResolveProcSelfCWDTarget(path, cwd)
+		}
+		if aliasKnown && links.known {
+			resolved, ok = links.resolve(resolutionPath, protected)
+		} else if aliasKnown && safeRedirect {
+			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if links.opaque && (!links.opaqueTarget(path) || !links.opaqueTargetExceptCopy(path, path) && slices.Contains(links.copyDestinations, path)) {
-			resolved, ok = links.resolve(path, protected)
+		} else if aliasKnown && links.opaque && (!links.opaqueTarget(resolutionPath) || !links.opaqueTargetExceptCopy(resolutionPath, resolutionPath) && slices.Contains(links.copyDestinations, resolutionPath)) {
+			resolved, ok = links.resolve(resolutionPath, protected)
 		}
 		if !ok {
 			resolved = ""
