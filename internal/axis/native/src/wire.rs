@@ -295,7 +295,14 @@ impl Preparation {
         }
         bytes.extend_from_slice(&self.timeout_ms.to_be_bytes());
         bytes.extend_from_slice(&self.output_limit.to_be_bytes());
-        Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(71);
+        encoded.push_str("sha256:");
+        for byte in Sha256::digest(bytes).iter().copied() {
+            encoded.push(HEX[usize::from(byte >> 4)] as char);
+            encoded.push(HEX[usize::from(byte & 15)] as char);
+        }
+        Ok(encoded)
     }
 }
 
