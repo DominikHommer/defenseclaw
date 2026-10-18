@@ -82,13 +82,12 @@ func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
 
 // A stop or delete of a kept sandbox starts the account's gateway the daemon
 // stopped; one that listens is used as it is; another account's is refused
-// with the one-account-at-a-time text (GAP-0492). Status says that text too,
+// with the one-account-at-a-time text (GAP-0492), except for a delete of a
+// name the account has no sandbox of, which says so (GAP-0126). Status says that text too,
 // not certificates and CAs, and shows no sandbox port the daemon does not
 // hold (GAP-0461).
 func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
-	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
-		seedSandboxRecord(t, o.StateDir, "kept1", map[string]any{})
-	})
+	f := newSandboxDaemonFixture(t)
 	f.run(t)
 	ctx := context.Background()
 	c := sandboxapi.NewUnixClient(f.socket)
@@ -102,16 +101,14 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 		t.Fatal("readied a gateway that listens")
 	}
 	f.os.holder.Store(4242)
+	// kept1 is a name the account has no sandbox of: that is the answer,
+	// whoever holds the port (GAP-0126).
 	_, err := c.Delete(ctx, "kept1", sandboxapi.DeleteRequest{})
-	if err == nil || !strings.Contains(err.Error(), "one account at a time") || f.os.prepared.Load() != 2 {
-		t.Fatalf("delete while another account holds the port: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no DefenseClaw sandbox named") || f.os.prepared.Load() != 2 {
+		t.Fatalf("delete of an absent name while another account holds the port: %v", err)
 	}
 	if _, err := c.Stop(ctx, "kept1"); err == nil || !strings.Contains(err.Error(), "one account at a time") {
 		t.Fatalf("stop while another account holds the port: %v", err)
-	}
-	// A name with no sandbox says so whoever holds the port (GAP-0126).
-	if _, err := c.Delete(ctx, "never-made", sandboxapi.DeleteRequest{}); err == nil || !strings.Contains(err.Error(), "no DefenseClaw sandbox named") {
-		t.Fatalf("delete of an absent name while another account holds the port: %v", err)
 	}
 	st, err := c.Status(ctx)
 	if err != nil || st.Available || st.GatewayElsewhere != "another account" || st.Reason != sandboxAccountBusyMessage ||
