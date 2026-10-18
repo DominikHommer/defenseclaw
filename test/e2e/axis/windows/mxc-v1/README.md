@@ -83,6 +83,17 @@ changed lock is a refusal. Neither upstream lock is a substitute for this
 combined lock. No live execution is allowed before the reviewed locked rebuild
 and independent source/artifact verification.
 
+The committed combined lock is SHA256
+`3b29ecb06dd2a81266c84712f8d6e088605290f386e87498bb7a7472a005af69`
+(223 packages). Review matched 150 registry checksums to the two upstream
+locks and checked the other 70 versions against the official crates.io index
+for checksum, non-yanked status and Rust 1.95 compatibility. The only path
+packages are this fixed probe, AXIS core 0.3.5 and MXC SDK 1.0.1. This lock
+review is independent of the still-pending native build and live gates.
+The disposable Windows build initializes its installed Visual Studio x64
+developer environment and verifies that `link.exe` belongs to that exact
+installation; Git for Windows' Unix linker is not a compatible MSVC linker.
+
 ## Fixed live scope, after review
 
 The probe accepts no caller command, path, policy or environment flags. Its

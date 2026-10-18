@@ -148,3 +148,9 @@ egress, streaming, resource limits, terminal signals, descendant/helper
 custody, copied-workspace workflows, cross-user and managed behavior,
 packaging, installation and upgrade. No customer runtime is enabled by these
 contributor results.
+
+## Stronger foreground gate
+
+The independently verified locked artifact from build `39111547034` at `b2e1461dc9f35ed0cad9a2cae718ff28f99335c5` was run in [native Linux experiment 39112173778](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39112173778). The stronger check refused: `isatty=1`, but both the foreground and process group IDs were `0` inside the PID namespace. The earlier equality check therefore did not establish a valid foreground group. The receipt recorded exit 1, no remaining matching artifact processes and no new owned fixtures; the disposable runner restored its namespace sysctl.
+
+The next bootstrap establishes a positive process group and assigns the existing controlling PTY to it inside the PID namespace before AXIS guards. It preserves PID isolation, blocks SIGTTOU only for setup, restores the prior mask, and still requires positive matching IDs. This source also adds a parent-only public environment canary and verifies the outer MXC canary read/write grant before Landlock removes access. A new reviewed locked artifact and live run are required; no success is claimed for this iteration yet.

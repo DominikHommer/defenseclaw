@@ -12,11 +12,18 @@ use axis_core::policy::{
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 const FIXED_POLICY_NAME: &str = "dc-mxc-macos-contributor";
-const REQUIRED_RUNTIME_READS: &[&str] = &["/bin/sh", "/usr/lib", "/System/Library"];
 const REQUIRED_SHELL_SELECTOR: &str = "/private/var/select/sh";
+const REQUIRED_SHELL_TARGET: &str = "/bin/bash";
+const REQUIRED_RUNTIME_READS: &[&str] = &[
+    "/bin/sh",
+    REQUIRED_SHELL_TARGET,
+    "/usr/lib",
+    "/System/Library",
+];
 const OPTIONAL_RUNTIME_READS: &[&str] = &["/private/var/db/dyld"];
 const REQUIRED_RUNTIME_READWRITE: &[&str] = &["/dev/null"];
 const REQUIRED_RUNTIME_READONLY: &[&str] = &["/dev/urandom"];
@@ -33,18 +40,7 @@ pub fn runtime_read_paths() -> Result<Vec<String>> {
         );
         result.push((*path).into());
     }
-    let selector = Path::new(REQUIRED_SHELL_SELECTOR);
-    let metadata = fs::symlink_metadata(selector).context("inspect fixed shell selector")?;
-    ensure!(
-        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
-        "fixed shell selector is not an ordinary file"
-    );
-    let canonical_selector =
-        fs::canonicalize(selector).context("canonicalize fixed shell selector")?;
-    ensure!(
-        canonical_selector.as_path() == selector,
-        "fixed shell selector has an aliased path"
-    );
+    validate_fixed_shell_selector()?;
     result.push(REQUIRED_SHELL_SELECTOR.into());
     for path in OPTIONAL_RUNTIME_READS {
         if Path::new(path).exists() {
@@ -53,6 +49,51 @@ pub fn runtime_read_paths() -> Result<Vec<String>> {
     }
     result.extend(REQUIRED_RUNTIME_READONLY.iter().map(|path| (*path).into()));
     Ok(result)
+}
+
+fn validate_fixed_shell_selector() -> Result<()> {
+    let selector = Path::new(REQUIRED_SHELL_SELECTOR);
+    for ancestor in selector.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(ancestor).context("inspect shell selector ancestor")?;
+        ensure!(
+            metadata.file_type().is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+            "shell selector ancestor is not a root-owned nonwritable directory"
+        );
+    }
+    let selector_metadata =
+        fs::symlink_metadata(selector).context("inspect fixed shell selector")?;
+    ensure!(
+        selector_metadata.file_type().is_symlink() && selector_metadata.uid() == 0,
+        "fixed shell selector is not a root-owned symlink"
+    );
+    ensure!(
+        fs::read_link(selector)
+            .context("read fixed shell selector")?
+            .as_path()
+            == Path::new(REQUIRED_SHELL_TARGET),
+        "fixed shell selector names an unreviewed target"
+    );
+    let target = Path::new(REQUIRED_SHELL_TARGET);
+    let target_metadata = fs::symlink_metadata(target).context("inspect fixed shell target")?;
+    ensure!(
+        target_metadata.file_type().is_file()
+            && target_metadata.uid() == 0
+            && target_metadata.mode() & 0o022 == 0
+            && target_metadata.mode() & 0o005 == 0o005,
+        "fixed shell target is not a root-owned ordinary readable executable"
+    );
+    ensure!(
+        fs::canonicalize(selector)
+            .context("canonicalize fixed shell selector")?
+            .as_path()
+            == target
+            && fs::canonicalize(target)
+                .context("canonicalize fixed shell target")?
+                .as_path()
+                == target,
+        "fixed shell selector or target resolves through an unreviewed alias"
+    );
+    Ok(())
 }
 
 /// Compile only the owned fixture and the fixed runtime subset admitted by
@@ -246,6 +287,13 @@ pub fn build_profile(policy: &Policy, fixture_root: &Path, executable: &Path) ->
             metadata.insert(ancestor.to_path_buf());
         }
     }
+    // The fixed selector is a symlink. It needs exact metadata access on the
+    // link and its ancestors in addition to read access on the selected shell.
+    metadata.extend(
+        Path::new(REQUIRED_SHELL_SELECTOR)
+            .ancestors()
+            .map(Path::to_path_buf),
+    );
     for path in metadata {
         writeln!(
             profile,
@@ -261,6 +309,11 @@ pub fn build_profile(policy: &Policy, fixture_root: &Path, executable: &Path) ->
             path_literal(&path)?
         )?;
     }
+    writeln!(
+        profile,
+        "(allow file-read* (literal {}))",
+        scheme_literal(REQUIRED_SHELL_SELECTOR)?
+    )?;
     for path in readwrite {
         let kind = if path.is_dir() { "subpath" } else { "literal" };
         writeln!(
@@ -426,7 +479,9 @@ network: { mode: block }
         assert!(profile.contains("(deny network-bind network-outbound)"));
         assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
         assert!(profile.contains("(allow file-read* (literal \"/private/var/select/sh\"))"));
+        assert!(profile.contains("(allow file-read* (literal \"/bin/bash\"))"));
         assert!(!profile.contains("(allow file-read* (subpath \"/private/var/select/sh\"))"));
+        assert!(!profile.contains("(allow file-read* (subpath \"/bin\"))"));
         assert!(profile.contains("(regex #\"^/dev/ttys[0-9]+$\")"));
         assert!(!profile.contains("(allow file-read* (subpath \"/\"))"));
         assert!(!profile.contains("(allow file-read-metadata)"));
@@ -444,6 +499,15 @@ network: { mode: block }
             .filesystem
             .read_only
             .push(REQUIRED_SHELL_SELECTOR.into());
+        policy
+            .filesystem
+            .read_only
+            .retain(|path| path != REQUIRED_SHELL_TARGET);
+        assert!(build_profile(&policy, &root, &root.join("probe")).is_err());
+        policy
+            .filesystem
+            .read_only
+            .push(REQUIRED_SHELL_TARGET.into());
         policy.filesystem.read_only.push("/private/etc".into());
         assert!(build_profile(&policy, &root, &root.join("probe")).is_err());
         policy.filesystem.read_only.pop();

@@ -128,7 +128,7 @@ impl Paths {
             workspace: root.join("workspace"),
             home: root.join("home"),
             temporary: root.join("tmp"),
-            outside: root.join("outside-parent/outside.txt"),
+            outside: root.join("outside-parent").join("outside.txt"),
             outside_parent: root.join("outside-parent"),
             readonly: root.join("readonly.txt"),
             system: system.into(),
@@ -142,8 +142,8 @@ impl Paths {
             fs::create_dir(directory)?;
         }
         for directory in [
-            result.home.join("AppData/Roaming"),
-            result.home.join("AppData/Local"),
+            result.home.join("AppData").join("Roaming"),
+            result.home.join("AppData").join("Local"),
         ] {
             fs::create_dir_all(directory)?;
         }
@@ -159,8 +159,8 @@ impl Paths {
             ("WINDIR", self.system.clone()),
             ("HOME", self.home.clone()),
             ("USERPROFILE", self.home.clone()),
-            ("APPDATA", self.home.join("AppData/Roaming")),
-            ("LOCALAPPDATA", self.home.join("AppData/Local")),
+            ("APPDATA", self.home.join("AppData").join("Roaming")),
+            ("LOCALAPPDATA", self.home.join("AppData").join("Local")),
             ("TEMP", self.temporary.clone()),
             ("TMP", self.temporary.clone()),
         ]
@@ -376,16 +376,19 @@ fn child(args: &[String]) -> Result<i32> {
     );
     fs::write(workspace.join("allowed-write"), b"fixed write")?;
     fs::write(
-        root.join("outside-parent/allowed-sibling"),
+        root.join("outside-parent").join("allowed-sibling"),
         b"fixed parent-grant write",
     )?;
     ensure!(
-        fs::read(root.join("outside-parent/outside.txt")).is_err_and(permission_denied),
+        fs::read(root.join("outside-parent").join("outside.txt")).is_err_and(permission_denied),
         "outside read was not denied"
     );
     ensure!(
-        fs::write(root.join("outside-parent/outside.txt"), b"unexpected")
-            .is_err_and(permission_denied),
+        fs::write(
+            root.join("outside-parent").join("outside.txt"),
+            b"unexpected"
+        )
+        .is_err_and(permission_denied),
         "outside write was not denied"
     );
     ensure!(

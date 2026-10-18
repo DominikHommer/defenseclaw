@@ -99,6 +99,31 @@ jobs:
         working-directory: probe
         run: |
           $ErrorActionPreference = 'Stop'
+          # Initialize installed native tools in this same process. Otherwise
+          # Rust can find Git's unrelated link.exe before the MSVC linker.
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            throw 'The installed Visual Studio discovery tool is missing'
+          }
+          $installations = @(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
+          if ($LASTEXITCODE -ne 0 -or $installations.Count -ne 1) {
+            throw 'Exactly one installed native Visual Studio toolchain is required'
+          }
+          $visualStudioRoot = (Resolve-Path -LiteralPath $installations[0]).Path
+          $developerShell = Join-Path $visualStudioRoot 'Common7\Tools\Launch-VsDevShell.ps1'
+          if (-not (Test-Path -LiteralPath $developerShell -PathType Leaf)) {
+            throw 'The installed Visual Studio developer shell is missing'
+          }
+          & $developerShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $nativeLinker = (Get-Command link.exe -CommandType Application -ErrorAction Stop).Source
+          $nativeLinker = (Resolve-Path -LiteralPath $nativeLinker).Path
+          if (-not $nativeLinker.StartsWith($visualStudioRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'link.exe does not resolve beneath the selected Visual Studio installation'
+          }
+          if (-not $env:LIB -or -not $env:INCLUDE) {
+            throw 'The native MSVC and Windows SDK include/library environment is missing'
+          }
+          Write-Host "Using native MSVC linker: $nativeLinker"
           if (Test-Path -LiteralPath Cargo.lock -PathType Leaf) {
             python prepare_build.py build-locked
           } else {

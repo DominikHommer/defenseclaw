@@ -36,6 +36,7 @@ const SEAL: &[u8] = b"fixed-benign-macos-fixture-v1\n";
 const READONLY: &[u8] = b"synthetic-readonly\n";
 const DENIED: &[u8] = b"synthetic-denied\n";
 const UNGRANTED: &[u8] = b"synthetic-ungranted\n";
+const SUPERVISOR_ONLY_ENV: &str = "DC_AXIS_PARENT_ONLY_CANARY";
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const DIAGNOSTIC_INPUT_LIMIT: usize = 1200;
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
@@ -491,11 +492,19 @@ fn private_supervisor_environment(paths: &Paths, port: u16) -> Result<()> {
         for (name, value) in paths.environment(port)? {
             std::env::set_var(name, value);
         }
+        // A benign parent-only value makes inherited-environment isolation
+        // observable even though the supervisor otherwise uses the same
+        // minimal environment as the requested child.
+        std::env::set_var(SUPERVISOR_ONLY_ENV, "fixed-public-parent-only");
     }
     Ok(())
 }
 
 fn verify_environment(paths: &Paths) -> Result<u16> {
+    ensure!(
+        std::env::var_os(SUPERVISOR_ONLY_ENV).is_none(),
+        "supervisor-only environment reached the child"
+    );
     let port: u16 = std::env::var("DC_MACOS_CANARY_PORT")?.parse()?;
     let expected = paths.environment(port)?;
     for (name, value) in &expected {

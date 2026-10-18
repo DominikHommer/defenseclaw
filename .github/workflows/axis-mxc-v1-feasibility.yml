@@ -172,6 +172,35 @@ jobs:
           clang --version
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
 
+      - name: Inventory the exact macOS shell selector and fixed target
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import stat
+
+          selector = "/private/var/select/sh"
+          for path in ("/", "/private", "/private/var", "/private/var/select", selector, "/bin/bash"):
+              try:
+                  metadata = os.lstat(path)
+              except FileNotFoundError:
+                  print(json.dumps({"path": path, "type": "missing"}, sort_keys=True))
+                  continue
+              kind = "symlink" if stat.S_ISLNK(metadata.st_mode) else (
+                  "directory" if stat.S_ISDIR(metadata.st_mode) else (
+                      "regular" if stat.S_ISREG(metadata.st_mode) else "other"
+                  )
+              )
+              print(json.dumps({
+                  "path": path, "type": kind, "uid": metadata.st_uid,
+                  "mode": oct(stat.S_IMODE(metadata.st_mode)),
+                  "link_target": os.readlink(path) if path == selector and kind == "symlink" else None,
+              }, sort_keys=True))
+          print(json.dumps({"selector_canonical": os.path.realpath(selector)}, sort_keys=True))
+          PY
+
       - name: Build without executing the contributor probe
         timeout-minutes: 35
         working-directory: probe

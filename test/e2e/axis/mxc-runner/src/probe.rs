@@ -91,7 +91,7 @@ pub fn run() -> Result<i32> {
             "containment": "mxc_sdk_v1_bubblewrap", "axis_child_guards": "landlock_and_offline_seccomp",
             "landlock_abi": abi, "filesystem": "hard_requirement", "network": "block",
             "pty_groups": pty_groups,
-            "checks": ["private_home_and_environment", "allowed_writes", "ungranted_read_and_write_eacces",
+            "checks": ["private_home_and_environment", "allowed_writes", "outer_mxc_canary_visible_before_guards", "ungranted_read_and_write_eacces",
                 "readonly_write_denied", "ipv4_ipv6_tcp_udp_socket_eperm", "exit_23", "pty_isatty_and_foreground",
                 "pty_input_ack_and_resize", "typed_timeout", "direct_child_pidfd_exited",
                 "handle_kill_after_wait_idempotent", "owned_fixture_removed"],
@@ -346,11 +346,16 @@ fn private_supervisor_environment(paths: &Paths) -> Result<()> {
         for (name, value) in paths.environment()? {
             std::env::set_var(name, value);
         }
+        std::env::set_var("DC_AXIS_INHERIT_CANARY", "fixed-public");
     }
     Ok(())
 }
 
 fn verify_environment(paths: &Paths) -> Result<()> {
+    ensure!(
+        std::env::var_os("DC_AXIS_INHERIT_CANARY").is_none(),
+        "parent-only inheritance canary reached child"
+    );
     let expected = paths.environment()?;
     for (name, value) in &expected {
         ensure!(
@@ -385,6 +390,19 @@ fn fixed_child(case: Case) -> Result<i32> {
     let executable = std::env::current_exe()?.canonicalize()?;
     let policy = paths.axis_policy(&executable)?;
     landlock_abi()?;
+    if matches!(case, Case::Boundaries) {
+        // Prove the outer MXC grant is present before AXIS removes access.
+        ensure!(
+            fs::read(paths.ungranted.join("canary"))? == UNGRANTED,
+            "outer MXC canary read differs before AXIS guards"
+        );
+        let control = paths.ungranted.join("pre-guard-write-control");
+        write_new(&control, b"fixed-public-control\n")?;
+        fs::remove_file(control)?;
+    }
+    if matches!(case, Case::Pty) {
+        establish_namespace_foreground_group()?;
+    }
     // SAFETY: PR_SET_NO_NEW_PRIVS has an integer value and unused zero args.
     // It affects only this already-contained fixed child and is irreversible.
     ensure!(
@@ -463,6 +481,59 @@ fn fixed_child(case: Case) -> Result<i32> {
                 thread::sleep(Duration::from_millis(50));
             }
         }
+    }
+}
+
+fn establish_namespace_foreground_group() -> Result<()> {
+    // MXC attaches the controlling PTY before Bubblewrap enters its PID
+    // namespace. Establish a visible foreground group inside that namespace,
+    // without detaching the session or dropping PID isolation. Block SIGTTOU
+    // only for this trusted bootstrap operation and restore the prior mask.
+    // SAFETY: all signal sets are initialized and pointers stay valid; this
+    // fresh fixed child has not started any threads or untrusted code.
+    unsafe {
+        let mut blocked: libc::sigset_t = std::mem::zeroed();
+        let mut previous: libc::sigset_t = std::mem::zeroed();
+        ensure!(
+            libc::sigemptyset(&mut blocked) == 0,
+            "initialize signal mask"
+        );
+        ensure!(
+            libc::sigaddset(&mut blocked, libc::SIGTTOU) == 0,
+            "add terminal signal to bootstrap mask"
+        );
+        let status = libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous);
+        ensure!(
+            status == 0,
+            "block bootstrap SIGTTOU: {}",
+            io::Error::from_raw_os_error(status)
+        );
+        let configured = (|| -> Result<()> {
+            ensure!(
+                libc::setpgid(0, 0) == 0,
+                "establish namespace process group: {}",
+                io::Error::last_os_error()
+            );
+            let group = libc::getpgrp();
+            ensure!(group > 0, "namespace process group must be positive");
+            ensure!(
+                libc::tcsetpgrp(0, group) == 0,
+                "set namespace foreground group: {}",
+                io::Error::last_os_error()
+            );
+            ensure!(
+                libc::tcgetpgrp(0) == group,
+                "namespace foreground group differs"
+            );
+            Ok(())
+        })();
+        let restored = libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut());
+        ensure!(
+            restored == 0,
+            "restore bootstrap signal mask: {}",
+            io::Error::from_raw_os_error(restored)
+        );
+        configured
     }
 }
 
