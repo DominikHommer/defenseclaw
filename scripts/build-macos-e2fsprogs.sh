@@ -32,6 +32,13 @@ mkdir -p "$work/build" "$out/sbin" "$out/licenses"
     "$work/e2fsprogs-$version/configure" --disable-nls --enable-libuuid --enable-libblkid --disable-rpath
     make -j "$(sysctl -n hw.ncpu)"
 )
+# The upstream build embeds its default mke2fs profile. Exercise file
+# population across the 2 GiB boundary with the actual binary before it is
+# packaged; a version banner or a dry-run format cannot detect this failure.
+mkdir "$work/large-file-probe"
+dd if=/dev/zero of="$work/large-file-probe/source-rootfs.tar" bs=1 count=1 seek=2147483648 2>/dev/null
+dd if=/dev/zero of="$work/large-file-probe.ext4" bs=1 count=1 seek=3221225471 2>/dev/null
+"$work/build/misc/mke2fs" -q -F -t ext4 -d "$work/large-file-probe" "$work/large-file-probe.ext4"
 for row in misc/mke2fs debugfs/debugfs e2fsck/e2fsck; do
     tool=${row##*/}
     install -m 0755 "$work/build/$row" "$out/sbin/$tool"

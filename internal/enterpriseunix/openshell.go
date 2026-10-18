@@ -295,8 +295,11 @@ func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 		}
 		gateway := filepath.Join(e.Layout.BinDir, binGateway)
 		digest, err := sha256File(e.P(gateway))
-		if err != nil {
+		if os.IsNotExist(err) {
 			return data, nil // A fresh non-package payload has not installed the gateway yet.
+		}
+		if err != nil {
+			return nil, fmt.Errorf("identify the LaunchAgent gateway: %w", err)
 		}
 		program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
 		copyDigest, err := sha256File(e.P(program))
