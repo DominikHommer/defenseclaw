@@ -27,7 +27,7 @@ const preToolUsePayload = `{"hook_event_name":"PreToolUse","tool_name":"Bash","t
 func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 	const budget = 300 * time.Millisecond
 	shortAnswerBudget(t, budget)
-	stdout := &firstWriteRecorder{}
+	answer := &firstWriteRecorder{}
 	exited := make(chan int, 1)
 	started := time.Now()
 	watchdog := ArmAnswerWatchdog(Options{
@@ -35,8 +35,8 @@ func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 		ManagedEnterprise: true,
 		FailMode:          "open",
 		StartedAt:         started,
-		Stdout:            stdout,
-		Stderr:            &firstWriteRecorder{},
+		Stdout:            answer,
+		Stderr:            answer,
 		Exit:              func(code int) { exited <- code },
 	}, []byte(preToolUsePayload))
 	if watchdog == nil {
@@ -48,12 +48,12 @@ func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no answer while the work before Run was held")
 	}
-	out, first := stdout.read()
+	out, first := answer.read()
 	if late := first.Sub(started); late > budget+500*time.Millisecond {
 		t.Fatalf("the answer came %s after the call started, want by the %s budget", late, budget)
 	}
-	if code != 0 || !strings.Contains(out, `"permissionDecision":"deny"`) || !strings.Contains(out, managedGatewayNoAnswerReason) {
-		t.Fatalf("exit %d stdout %q, want the managed deny naming %s (closed although the flag says open)", code, out, managedGatewayNoAnswerReason)
+	if code != blockExit || !strings.Contains(out, managedGatewayNoAnswerReason) {
+		t.Fatalf("exit %d output %q, want the managed block naming %s (closed although the flag says open)", code, out, managedGatewayNoAnswerReason)
 	}
 	// The held work ends and Run answers allow: discarded.
 	result := run(t, "claudecode", &stubRT{status: http.StatusOK, body: `{"action":"allow"}`}, func(opts *Options) {
@@ -62,11 +62,11 @@ func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 		opts.Stdin = strings.NewReader(preToolUsePayload)
 		opts.AnswerWatchdog = watchdog
 	})
-	if result.code != 0 || result.stdout != "" {
-		t.Fatalf("Run after the watchdog answered: code %d stdout %q, want nothing more", result.code, result.stdout)
+	if result.code != code || result.stdout != "" || result.stderr != "" {
+		t.Fatalf("Run after the watchdog answered: code %d stdout %q stderr %q, want the watchdog's %d and nothing more", result.code, result.stdout, result.stderr, code)
 	}
-	if out, _ := stdout.read(); strings.Count(out, `"permissionDecision":"`) != 1 {
-		t.Fatalf("stdout %q, want exactly one answer", out)
+	if after, _ := answer.read(); after != out {
+		t.Fatalf("output %q after Run, want the watchdog's answer alone %q", after, out)
 	}
 }
 
@@ -75,12 +75,12 @@ func TestEarlyAnswerWatchdogAnswersWhileTheWorkBeforeRunIsHeld(t *testing.T) {
 func TestEarlyAnswerWatchdogIsAdoptedByRun(t *testing.T) {
 	shortAnswerBudget(t, 400*time.Millisecond)
 	for _, body := range []string{`{"action":"allow"}`, `{"action":"block","reason":"policy rule"}`} {
-		stdout := &firstWriteRecorder{}
+		answer := &firstWriteRecorder{}
 		exited := make(chan int, 1)
 		started := time.Now()
 		watchdog := ArmAnswerWatchdog(Options{
 			Connector: "claudecode", ManagedEnterprise: true, StartedAt: started,
-			Stdout: stdout, Stderr: &firstWriteRecorder{}, Exit: func(code int) { exited <- code },
+			Stdout: answer, Stderr: answer, Exit: func(code int) { exited <- code },
 		}, []byte(preToolUsePayload))
 		result := run(t, "claudecode", &stubRT{status: http.StatusOK, body: body}, func(opts *Options) {
 			managedCodex(opts)
@@ -94,12 +94,12 @@ func TestEarlyAnswerWatchdogIsAdoptedByRun(t *testing.T) {
 			t.Fatalf("%s: the watchdog ended the process (%d) after the call was answered", body, code)
 		default:
 		}
-		out, _ := stdout.read()
-		if strings.Contains(out, managedGatewayNoAnswerReason) || result.stdout != "" {
-			t.Fatalf("%s: watchdog stdout %q, test buffer %q: the answer must go through the watchdog's writer alone", body, out, result.stdout)
+		out, _ := answer.read()
+		if strings.Contains(out, managedGatewayNoAnswerReason) || result.stdout != "" || result.stderr != "" {
+			t.Fatalf("%s: watchdog output %q, test buffers %q %q: the answer must go through the watchdog's writers alone", body, out, result.stdout, result.stderr)
 		}
-		if denied := strings.Contains(out, `"permissionDecision":"deny"`); denied != strings.Contains(body, "block") {
-			t.Fatalf("%s: stdout %q does not carry the gateway's decision", body, out)
+		if strings.Contains(body, "block") != (result.code == blockExit && strings.Contains(out, "policy rule")) {
+			t.Fatalf("%s: code %d output %q does not carry the gateway's decision", body, result.code, out)
 		}
 	}
 }
@@ -128,7 +128,7 @@ func TestEarlyAnswerWatchdogOnlyForToolCalls(t *testing.T) {
 	// event: Run stands the watchdog down.
 	stdout := &firstWriteRecorder{}
 	opts := base
-	opts.Event, opts.Stdout, opts.Stderr = "PreToolUse", stdout, &firstWriteRecorder{}
+	opts.Event, opts.Stdout, opts.Stderr = "PreToolUse", stdout, stdout
 	watchdog := ArmAnswerWatchdog(opts, []byte(`{}`))
 	if watchdog == nil {
 		t.Fatal("no watchdog for --event PreToolUse")
@@ -161,7 +161,7 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 		select {
 		case <-release:
 		case <-r.Context().Done():
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 		}
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 	})
@@ -177,7 +177,7 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 	}
 
 	// The watchdog follows the ceiling too: the process ends there.
-	stdout := &firstWriteRecorder{}
+	answer := &firstWriteRecorder{}
 	exited := make(chan int, 1)
 	started := time.Now()
 	returned := make(chan struct{})
@@ -188,7 +188,7 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 			opts.APIAddr = addr
 			opts.HTTPClient = &http.Client{}
 			opts.StartedAt = started
-			opts.Stdout = stdout
+			opts.Stdout, opts.Stderr = answer, answer
 			opts.Exit = func(code int) { exited <- code }
 		})
 	}()
@@ -198,11 +198,11 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the watchdog did not end the call at the ceiling")
 	}
-	out, first := stdout.read()
+	out, first := answer.read()
 	if late := first.Sub(started); late < ceiling-100*time.Millisecond || late > ceiling+500*time.Millisecond {
 		t.Fatalf("the watchdog answered %s after the start, want at the %s ceiling", late, ceiling)
 	}
 	if !strings.Contains(out, managedGatewayNoAnswerReason) {
-		t.Fatalf("stdout %q, want the managed no-answer deny", out)
+		t.Fatalf("output %q, want the managed no-answer block", out)
 	}
 }
