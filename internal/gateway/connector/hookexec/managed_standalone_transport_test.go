@@ -15,6 +15,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -25,6 +26,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // shortSocketDir returns a directory whose paths fit the 104-byte macOS
@@ -108,9 +111,13 @@ func rawRecordingListener(t *testing.T, network, address string) (net.Listener, 
 	}
 }
 
-func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
+func standaloneRun(t *testing.T, socket string, serviceUID int, payload ...string) runResult {
 	t.Helper()
 	home := t.TempDir()
+	stdin := `{"hook_event_name":"PreToolUse","tool_name":"Bash"}`
+	if len(payload) != 0 {
+		stdin = payload[0]
+	}
 	var out, errb bytes.Buffer
 	opts := Options{
 		Connector:          "claudecode",
@@ -119,7 +126,7 @@ func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
 		FailMode:           "closed",
 		Home:               home,
 		HookDir:            filepath.Join(home, "hooks"),
-		Stdin:              strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`),
+		Stdin:              strings.NewReader(stdin),
 		Stdout:             &out,
 		Stderr:             &errb,
 		ManagedEnterprise:  true,
@@ -132,6 +139,35 @@ func standaloneRun(t *testing.T, socket string, serviceUID int) runResult {
 	}
 	code := Run(t.Context(), opts)
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code}
+}
+
+func TestR103B07ManagedNativeRedirectOnlyDoesNotPanic(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	server := startStandaloneHookServer(t, socket, `{"action":"allow"}`)
+	cwd := t.TempDir()
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": "> out/build.log"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := standaloneRun(t, socket, os.Getuid(), string(payload))
+	if result.code != 0 {
+		t.Fatalf("native redirect-only hook exit %d: %s", result.code, result.stderr)
+	}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if len(server.requests) != 1 {
+		t.Fatalf("native hook sent %d requests, want 1", len(server.requests))
+	}
+	targets, ok := hookpaths.Decode(server.requests[0].Header.Get(hookpaths.Header))
+	if !ok {
+		t.Fatal("native hook sent no decodable write proof")
+	}
+	if _, ok := targets[filepath.Join(cwd, "out", "build.log")]; !ok {
+		t.Fatalf("redirect-only write missing from native proof: %v", targets)
+	}
 }
 
 func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
