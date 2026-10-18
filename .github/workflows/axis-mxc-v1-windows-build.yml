@@ -76,9 +76,10 @@ jobs:
                    'src/native_environment.rs', 'src/native_identity.rs',
                    'src/dll_startup_child.rs', 'src/dll_startup_protocol.rs',
                    'patches/mxc-strict-windows-psec.patch', 'patches/mxc-windows-literal-argv.patch',
-                   'patches/mxc-windows-process-identity.patch']
-          if fixed_slice == 'claude-create-control-only':
-              files.append('patches/mxc-fixed-claude-create-control.patch')
+                   'patches/mxc-windows-process-identity.patch',
+                   'patches/mxc-fixed-claude-create-control.patch']
+          # Inert source-hash tests inspect every registered overlay. The build
+          # helper still applies the control overlay only for its selected slice.
           if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')
           root = Path('probe')
           root.mkdir()
