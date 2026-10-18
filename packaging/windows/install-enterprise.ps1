@@ -3592,6 +3592,13 @@ try {
         if ($Action -eq 'Uninstall' -and $forcedUninstallRequest -ceq '1') {
             $arguments['Force'] = $true
         }
+        # An ensure that found the deployment compliant asks its Verify, the
+        # same way, to collect old managed runtime generations (GAP-0211).
+        $collectRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS', $null, 'Process')
+        if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {
+            $arguments['CollectRuntimeGenerations'] = $true
+        }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {

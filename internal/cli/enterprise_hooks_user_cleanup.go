@@ -79,6 +79,11 @@ type enterpriseHookUserCleanupResult struct {
 	Removed []string
 	Pending []string
 	Failed  []string
+	// Windows only: each user settings file the cleanup edited, as a change
+	// line (#1290), and each hook command left in a user's Claude Code
+	// settings that still names a DefenseClaw launcher (#1286).
+	SettingsEdited []string
+	SettingsLeft   []string
 }
 
 func enterpriseHookUserCleanupKey(connectorName, sid string) string {

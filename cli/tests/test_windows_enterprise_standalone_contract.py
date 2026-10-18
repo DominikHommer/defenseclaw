@@ -322,6 +322,51 @@ def test_standalone_purge_keeps_the_launching_cli_powershell_temp() -> None:
     )
 
 
+def test_compliant_ensure_verify_collects_old_runtime_generations() -> None:
+    """GAP-0211: a compliant ensure runs no retire, so its Verify collects the
+    old runtime copies a retire left in a per-user folder it could not trust
+    and names each folder still untrusted. The CLI asks through the strict
+    environment (not a parameter of the Secure Client command line), only a
+    standalone Verify accepts it, the collect runs under the lifecycle lock
+    between transactions, and a failure is reported in the result instead of
+    failing the Verify."""
+
+    installer = _text(INSTALLER)
+    standalone = installer[installer.index("if ($EnterpriseProfile -ceq 'Standalone') {") :]
+    standalone = standalone[: standalone.index("Invoke-DefenseClawEnterpriseLifecycle @arguments")]
+    variable = "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS"
+    assert f"[Environment]::SetEnvironmentVariable('{variable}', $null, 'Process')" in standalone
+    assert "if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {" in standalone
+    assert "$arguments['CollectRuntimeGenerations'] = $true" in standalone
+
+    module = _text(MODULE)
+    lifecycle = _function_body(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    assert "throw '-CollectRuntimeGenerations is valid only with a standalone Verify'" in lifecycle
+    verify = lifecycle[lifecycle.index("if ($Action -eq 'Verify') {") :]
+    verify = verify[: verify.index("return Get-DefenseClawLifecycleStatus")]
+    assert "Invoke-DefenseClawStandaloneRuntimeGenerationCollect" in verify
+
+    collect = _function_body(module, "Invoke-DefenseClawStandaloneRuntimeGenerationCollect")
+    assert "Test-DefenseClawStandaloneProfile" in collect and "Test-DefenseClawAdministrator" in collect
+    assert collect.index("Enter-DefenseClawLifecycleLock") < collect.index("-Action collect")
+    assert "$Layout.PendingPath" in collect and "Exit-DefenseClawLifecycleLock" in collect
+    assert "$script:DefenseClawRuntimeGenerationCollectError = ConvertTo-DefenseClawBoundedDiagnostic" in collect
+
+    snapshot = _function_body(module, "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand")
+    assert "'collect'," in snapshot and "'collect' { 'collected' }" in snapshot
+    assert "$report.PSObject.Properties['collected']" in snapshot
+
+    status = _function_body(module, "Get-DefenseClawLifecycleStatus")
+    assert "$status['lifecycle_retire_skipped']" in status
+    assert "$status['lifecycle_generations_collected']" in status
+    assert "$status['lifecycle_collect_error']" in status
+
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert f'windowsEnterpriseCollectGenerationsVariable = "{variable}"' in go
+    lifecycle_go = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
+    assert '"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",' in lifecycle_go
+
+
 def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:
     """GAP-0561: the first run of a new gateway on a cold device took more
     than the default 300 seconds and the install failed with only "native
