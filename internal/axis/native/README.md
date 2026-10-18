@@ -13,8 +13,8 @@ native process custody. Correlation digests do not grant authority.
 Preparation consumes the trusted **unprivileged** factory's inherited table:
 fd3 = immutable sealed static-musl Bubblewrap image, fd4 = sealed ELF payload,
 fd5 = held cwd directory, then read and write object descriptors in exact plan
-order. Every fd is close-on-exec before library preparation. No guest path label
-reopens a host source path. The cwd must be an exact grant naming the same held
+order. Every fd is close-on-exec before library preparation. A guest path label
+never authorizes a host source lookup. The cwd must be an exact grant naming the same held
 object. Images and grant objects stay held until their single-use launch.
 
 The initial sparse filesystem contract accepts explicit Bubblewrap, offline
@@ -28,7 +28,22 @@ The adapter validates an AXIS policy projection, exports AXIS's default-deny
 seccomp BPF with all socket creation denied (including Unix sockets), seals the
 filter and passes it to Bubblewrap. Bubblewrap applies it before executing the
 payload. Read/write mounts originate from owned descriptors through the new
-detached-mount seam; there is no host-root mount or path-source fallback. Payload
+detached-mount seam; there is no host-root mount or path-source fallback. The
+seam captures a reachable source locator while comparing it with the held
+original object and mount identity. In a distinct recursively private mount
+namespace, it reopens that locator using cached lookup without symlink or magic-link traversal and
+rechecks object, filesystem, restrictive flags and complete mount topology.
+Both namespace views must have no nested mounts within a grant. Deleted,
+renamed, ambiguous, unsupported or changing views refuse. An inode comparison
+alone is insufficient. Source roots covering Bubblewrap's `/tmp` staging mount
+also refuse. This first implementation does not support submounted grant trees.
+
+The sealed payload takes a separate fixed route: a new exclusive private-tmpfs
+file receives at most 512MiB, followed by a complete byte comparison against the
+same held sealed source, size/identity/seal checks and a readonly mount. It does
+not copy mutable grant files. After setup, the held private root mount becomes
+readonly nonrecursively, preserving explicit writable submounts. Synthetic
+`/dev` remains its separate private device mount. Payload
 dynamic interpreters/libraries must exist only within the explicitly admitted
 guest read mounts. No additional child plan contains host policy or bindings.
 
@@ -69,9 +84,12 @@ requirements on a disposable runner. Nothing installs an AXIS service/runtime.
 CI compiles the Rust peer and runs protocol/fake-process/owned inert-FD tests.
 It separately compiles the C extension using ordinary dynamic host libraries,
 without running it; that output is not an admitted runtime and is not packaged
-as one. Four selected dependency unit gates separately exercise the AXIS BPF
-export and MXC inert-image/guest-path admission against unchanged upstream
-workspace locks; these tests never install a filter or spawn a backend. The
+as one. Five selected dependency unit gates separately exercise the AXIS BPF
+export and MXC inert-image/guest-path/compiled-image admission against unchanged
+upstream workspace locks; these tests never install a filter or spawn a backend.
+Four separately compiled C unit tests exercise topology parsing, locator
+validation, restrictive flags and an owned inert sealed-byte copy. Their entry
+point never calls Bubblewrap's main, namespace/mount setup or workload launch. The
 explicit `--static-musl` build-only extension uses pinned musl/libcap sources,
 the exact GCC13/Ubuntu package byte inventory, an allowlisted static link closure
 and two independent staging roots. It never executes either Bubblewrap image.
@@ -81,8 +99,9 @@ combined locks, toolchain, checksums and explicit unqualified scope. A discovery
 artifact, green unit tests or a C compile do not authorize native execution.
 
 Before runtime use: independent source/artifact/lock review; reviewed static-musl
-Bubblewrap/libcap closure; native held-memfd mounting; no-host-root read and
-read/write boundaries; recursive submount attributes; source rename/replacement;
+Bubblewrap/libcap closure; native sealed-image copy/mounting; no-host-root read,
+readonly private root and read/write boundaries; refusal of nested mounts
+(including same-filesystem aliases); source rename/replacement;
 no foreign namespace/source mutations; namespace/syscall refusal; complete
 nonstdio-FD closure; actual binary stdio/exit; parent EOF/death, timeout and
 descendant cleanup. This is a new enforcement posture and inherits none of the

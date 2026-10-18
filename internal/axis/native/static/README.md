@@ -7,8 +7,10 @@ This is a reviewed-source candidate recipe, not an admitted runtime. The private
 peer build workflow explicitly selects `prepare_build.py locked --static-musl`
 (or discovery before a lock is committed). It also retains the existing dynamic
 C compile check. Neither Bubblewrap output, the peer nor a contained workload
-is executed. The only generated C helper executed is libcap's fixed `_makenames`
-build tool. Unit gates execute fake/inert tests only.
+is executed. The static recipe executes libcap's fixed `_makenames` build tool;
+the parent build also executes the separately described inert C unit entry
+point, which never calls Bubblewrap's main or namespace/mount/workload setup.
+Unit gates execute fake/inert tests only.
 
 `sources.json` records exact official sources and SHA256 values. Inert local
 review matched every musl archive file to all 2660 blobs at the pinned commit;
@@ -84,8 +86,10 @@ The fixed build sequence is:
    fixed object names using the staged musl wrapper, the source-controlled C
    overlay, `-D_GNU_SOURCE -O2 -fno-pie -fstack-protector-strong`, the reviewed
    upstream warning set, and mapped build paths. `config.h` contains only the
-   pinned package string, with SELinux disabled. Include only staged musl,
-   source libcap headers and the staged UAPI headers.
+   pinned package string, with SELinux disabled. A retained `mount-compat.h`
+   verifies the three overlapping musl mount constants before selecting their
+   equivalent UAPI spellings; warnings remain errors. Include only staged
+   musl, source libcap headers and the staged UAPI headers.
 7. Link the four fixed objects and literal source-built `libcap.a` with the
    staged musl wrapper using `-static -no-pie -Wl,--build-id=none`, a full link
    map/cross-reference and linker input trace. Retain the unstripped output

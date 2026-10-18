@@ -60,11 +60,18 @@ class BuildAdmissionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 build.ordinary(path)
 
-    def test_dependency_unit_gate_inventory_is_four_fixed_nonspawning_tests(self):
-        self.assertEqual(sum(len(value["tests"]) for value in build.DEPENDENCY_TESTS.values()), 4)
+    def test_dependency_unit_gate_inventory_is_five_fixed_nonspawning_tests(self):
+        self.assertEqual(sum(len(value["tests"]) for value in build.DEPENDENCY_TESTS.values()), 5)
         for value in build.DEPENDENCY_TESTS.values():
-            self.assertEqual(len(value["tests"]), 2)
+            self.assertEqual(len(value["tests"]), 2 if value["package"] == "axis-sandbox" else 3)
             self.assertTrue(all(name.startswith(value["prefix"]) for name in value["tests"]))
+
+    def test_inert_c_evidence_refuses_missing_extra_reordered_or_incomplete_results(self):
+        lines = [*build.C_TESTS, build.C_TEST_SUMMARY]
+        build.admit_c_test_output("\n".join(lines) + "\n")
+        for bad in (lines[:-1], lines[1:], [*lines, "extra"], [*reversed(lines[:-1]), lines[-1]]):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                build.admit_c_test_output("\n".join(bad) + "\n")
 
     def test_patch_path_traversal_refuses(self):
         self.assertEqual(build.patch_paths(b"+++ b/src/fixed.rs\n"), {"src/fixed.rs"})

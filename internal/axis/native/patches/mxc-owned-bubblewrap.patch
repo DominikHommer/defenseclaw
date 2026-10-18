@@ -1,6 +1,8 @@
+diff --git a/src/mxc-sdk/src/lib.rs b/src/mxc-sdk/src/lib.rs
+index 95d3b27..88ad51c 100644
 --- a/src/mxc-sdk/src/lib.rs
 +++ b/src/mxc-sdk/src/lib.rs
-@@ -206,6 +206,8 @@
+@@ -206,6 +206,8 @@ mod literal_argv;
  mod options;
  mod policy;
  mod sandbox;
@@ -9,7 +11,7 @@
  mod state_aware_sdk;
  
  mod telemetry;
-@@ -309,6 +311,10 @@
+@@ -309,6 +311,10 @@ pub mod v1 {
          NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
          NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
      };
@@ -20,9 +22,12 @@
      pub use crate::sandbox::{
          CaptureDenialsError, CaptureDenialsResult, ExecutionMetadata, ExecutionResult, MxcProcess,
          MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult,
+diff --git a/src/mxc-sdk/src/owned_bubblewrap.rs b/src/mxc-sdk/src/owned_bubblewrap.rs
+new file mode 100644
+index 0000000..1b7b155
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_bubblewrap.rs
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,556 @@
 +// Copyright 2026 Cisco Systems, Inc. and its affiliates
 +// SPDX-License-Identifier: MIT
 +
@@ -266,8 +271,10 @@
 +            inherited.push(object);
 +        }
 +        let payload = retain(&payload)?;
++        // Anonymous sealed images have no namespace-local pathname. The C seam
++        // creates and verifies a private copy, with no mutable-source fallback.
 +        args.extend([
-+            "--dc-ro-bind-fd".into(),
++            "--dc-ro-image-fd".into(),
 +            payload.as_raw_fd().to_string().into(),
 +            PAYLOAD.into(),
 +        ]);
@@ -539,5 +546,41 @@
 +            assert!(guest_path(path));
 +            assert!(!reserved(path));
 +        }
++    }
++
++    #[test]
++    fn fixed_image_uses_verified_copy_route_without_path_or_legacy_data_options() {
++        let prepared = PreparedOwnedBubblewrap::new(
++            inert_image(1, true),
++            inert_image(1, true),
++            inert_image(1, true),
++            vec![OwnedMount::new(
++                File::open(std::env::temp_dir()).unwrap(),
++                "/work".into(),
++                false,
++            )
++            .unwrap()],
++            vec![PAYLOAD.into()],
++            vec![],
++            "/work".into(),
++        )
++        .unwrap();
++        let arguments: Vec<_> = prepared
++            .argv
++            .iter()
++            .map(|value| value.to_str().unwrap())
++            .collect();
++        assert_eq!(
++            arguments
++                .iter()
++                .filter(|value| **value == "--dc-ro-image-fd")
++                .count(),
++            1
++        );
++        assert!(!arguments.iter().any(|value| matches!(
++            *value,
++            "--ro-bind-data" | "--bind-data" | "--bind" | "--ro-bind"
++        )));
++        assert_eq!(arguments.last().copied(), Some(PAYLOAD));
 +    }
 +}

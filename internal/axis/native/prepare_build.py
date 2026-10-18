@@ -25,11 +25,18 @@ MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
 NATIVE_TEST_COUNT = 18
+C_TESTS = (
+    "topology_refuses_nested_bind_mounts_and_malformed_inventory",
+    "locator_refuses_deleted_traversal_and_unrepresentable_names",
+    "immutable_copy_preserves_seals_size_and_every_byte",
+    "readonly_root_is_nonrecursive_and_source_noexec_is_preserved",
+)
+C_TEST_SUMMARY = "PASS 4 inert owned-FD tests; no namespace, mount or workload execution"
 SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
-    "patches/mxc-owned-bubblewrap.patch": "d50f8b1e464a0b123b2a75ade47cafa9aa7f5e5a03b3e1d8193973166dba705b",
-    "patches/bwrap-owned-fds.patch": "35d31d956b4924798e86e98e1d8f345cc2afbfe8dd7df0277c096afb7f20aad8",
+    "patches/mxc-owned-bubblewrap.patch": "bce13ce7c12f9c398382f1feaa9729b265feea26832115d933c1c54cbfe7cabb",
+    "patches/bwrap-owned-fds.patch": "d44bf2890299d1701ae8ea22424c16b945ef0ffe2f1ec47ddac078643f591b2d",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
 SOURCE = {
@@ -47,6 +54,7 @@ SOURCE = {
     "src/wire.rs",
     "patches/README.md",
     "patches/bwrap-COPYING",
+    "patches/bwrap-owned-fd-tests.c",
     "static/README.md",
     "static/sources.json",
     "static/build_static.py",
@@ -77,6 +85,11 @@ def sha(path: Path) -> str:
     return hashlib.sha256(ordinary(path, 512 << 20, allow_empty=True)).hexdigest()
 
 
+def admit_c_test_output(output: str) -> None:
+    if output.splitlines() != [*C_TESTS, C_TEST_SUMMARY]:
+        raise RuntimeError("inert C unit-test inventory/pass output differs")
+
+
 DEPENDENCY_TESTS = {
     "axis": {
         "workspace": "axis-source",
@@ -94,6 +107,7 @@ DEPENDENCY_TESTS = {
         "tests": {
             "owned_bubblewrap::tests::static_structure_refuses_interpreter_dynamic_and_mutable_images",
             "owned_bubblewrap::tests::guest_destinations_refuse_alias_components_and_synthetic_roots",
+            "owned_bubblewrap::tests::fixed_image_uses_verified_copy_route_without_path_or_legacy_data_options",
         },
     },
 }
@@ -123,7 +137,7 @@ def dependency_unit_gates(artifact: Path) -> None:
             raise RuntimeError("pure dependency unit-test inventory differs")
         output = command([*base, "--test-threads=1"], cwd=workspace, capture=True)
         passed = set(re.findall(r"^test (\S+) \.\.\. ok$", output, re.MULTILINE))
-        if passed != listed or "test result: ok. 2 passed; 0 failed; 0 ignored;" not in output:
+        if passed != listed or f"test result: ok. {len(listed)} passed; 0 failed; 0 ignored;" not in output:
             raise RuntimeError("pure dependency unit-test pass inventory differs")
         if ordinary(workspace / "Cargo.lock") != lock:
             raise RuntimeError("dependency unit tests changed pinned upstream workspace lock")
@@ -241,7 +255,7 @@ def main() -> None:
     parser.add_argument("mode", choices=("discover", "locked"))
     parser.add_argument("--static-musl", action="store_true", help="build two unexecuted static C closure candidates")
     parser.add_argument(
-        "--dependency-unit-gates", action="store_true", help="run four selected nonspawning dependency tests"
+        "--dependency-unit-gates", action="store_true", help="run selected nonspawning dependency tests"
     )
     options = parser.parse_args()
     mode = options.mode
@@ -375,6 +389,45 @@ def main() -> None:
         cwd=bwrap,
     )
     command(["ninja", "-C", "compile-check", "bwrap"], cwd=bwrap)
+    # A separate host unit executable includes the C source with main renamed
+    # and uncalled. Only fixed parsers, flag predicates and owned inert byte-copy
+    # fixtures run; neither bwrap, namespace setup nor a payload is launched.
+    unit = bwrap / "compile-check/owned-fd-inert-unit"
+    command(
+        [
+            "/usr/bin/x86_64-linux-gnu-gcc-13",
+            "-D_GNU_SOURCE",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            f"-I{bwrap}",
+            f"-I{bwrap / 'compile-check'}",
+            str(ROOT / "patches/bwrap-owned-fd-tests.c"),
+            *[str(bwrap / f"compile-check/bwrap.p/{name}.c.o") for name in ("bind-mount", "network", "utils")],
+            "-lcap",
+            "-o",
+            str(unit),
+        ]
+    )
+    c_output = command([str(unit)], capture=True)
+    admit_c_test_output(c_output)
+    (artifact / "BWRAP-INERT-UNIT-TESTS.json").write_text(
+        json.dumps(
+            {
+                "tests": C_TESTS,
+                "passed": len(C_TESTS),
+                "scope": "parsers_flags_and_owned_inert_copy_only",
+                "unit_execution_performed": True,
+                "bubblewrap_main_called": False,
+                "namespace_or_mount_or_workload_execution": False,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (artifact / "BWRAP-INERT-UNIT-TESTS.txt").write_text(c_output, encoding="utf-8")
     c_binary = bwrap / "compile-check/bwrap"
     (artifact / "BWRAP-COMPILE-ONLY.json").write_text(
         json.dumps(
@@ -416,6 +469,7 @@ def main() -> None:
         "static_bwrap_runtime_supplied": False,
         "static_bwrap_build_candidate": static_candidate,
         "unit_scope": "protocol_fake_processes_and_owned_inert_fds_only",
+        "c_unit_scope": "separate_parsers_flags_and_owned_inert_copy_executable_only",
         "overlay_files": overlays,
         "patch_sha256": PATCHES,
         "files": inventory,
