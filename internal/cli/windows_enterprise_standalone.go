@@ -1099,6 +1099,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
+			applyWindowsEnterpriseGuardianTargets(result)
 		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 	}
