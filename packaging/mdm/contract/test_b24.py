@@ -68,7 +68,40 @@ dc_stop_child
 
 
 @pytest.mark.parametrize("platform", ["linux", "macos"])
-def test_failed_anchor_restore_removes_new_anchor_and_keeps_backup(platform):
+@pytest.mark.parametrize("anchor_present", [False, True])
+def test_failed_anchor_restore_keeps_bundle_mode_and_backup(platform, anchor_present):
+    source = (MDM / platform / "defenseclaw-enterprise.sh").read_text()
+    source = source.rsplit('dc_main "$@"', 1)[0]
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        stage = root / "stage"
+        stage.mkdir()
+        anchor = root / "bundle-anchors.json"
+        previous = stage / "bundle-anchors.previous.json"
+        if anchor_present:
+            anchor.write_text("new-anchor\n")
+        previous.write_text("old-anchor\n")
+        harness = f'''
+DC_STAGE={shlex.quote(str(stage))}
+DC_ANCHORS={shlex.quote(str(anchor))}
+DC_ANCHORS_PREVIOUS={shlex.quote(str(previous))}
+DC_ANCHORS_CHANGED=1
+DC_LOG=""
+dc_put_anchors() {{ return 1; }}
+dc_cleanup
+'''
+        script = root / "restore-failure.sh"
+        script.write_text(source + harness)
+        result = subprocess.run(["sh", str(script)], text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert anchor.exists()
+        assert anchor.read_text() != "new-anchor\n"
+        assert anchor.read_text() == ""
+        assert previous.read_text() == "old-anchor\n"
+
+
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_failed_anchor_restore_after_write_keeps_previous_anchor_and_backup(platform):
     source = (MDM / platform / "defenseclaw-enterprise.sh").read_text()
     source = source.rsplit('dc_main "$@"', 1)[0]
     with tempfile.TemporaryDirectory() as folder:
@@ -85,14 +118,15 @@ DC_ANCHORS={shlex.quote(str(anchor))}
 DC_ANCHORS_PREVIOUS={shlex.quote(str(previous))}
 DC_ANCHORS_CHANGED=1
 DC_LOG=""
-dc_put_anchors() {{ return 1; }}
+dc_trusted_path() {{ return 1; }}
+dc_put_anchors() {{ cp "$1" "$DC_ANCHORS" && dc_trusted_path "$DC_ANCHORS"; }}
 dc_cleanup
 '''
-        script = root / "restore-failure.sh"
+        script = root / "restore-trust-failure.sh"
         script.write_text(source + harness)
         result = subprocess.run(["sh", str(script)], text=True, capture_output=True, timeout=10)
         assert result.returncode == 0, result.stderr
-        assert not anchor.exists()
+        assert anchor.read_text() == "old-anchor\n"
         assert previous.read_text() == "old-anchor\n"
 
 

@@ -1374,8 +1374,14 @@ dc_restore_anchors() {
     if [ -n "$DC_ANCHORS_PREVIOUS" ]; then
         ( dc_put_anchors "$DC_ANCHORS_PREVIOUS" ) >/dev/null || {
             dc_log "could not restore the previous trust anchor file $DC_ANCHORS"
-            # The new anchor must not stay trusted after a failed apply.
-            rm -f "$DC_ANCHORS" || true
+            # The final trust check can fail after the previous file was put
+            # back. Otherwise invalidate the new file without removing the
+            # path: its presence keeps bundle mode on and refuses the file.
+            if [ ! -L "$DC_ANCHORS" ] &&
+                ! cmp -s "$DC_ANCHORS_PREVIOUS" "$DC_ANCHORS"; then
+                ( : >"$DC_ANCHORS" ) 2>/dev/null ||
+                    dc_log "could not invalidate the trust anchor file $DC_ANCHORS"
+            fi
             return 1
         }
     else
