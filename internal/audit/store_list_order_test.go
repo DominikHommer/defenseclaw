@@ -164,6 +164,10 @@ func TestActivityAndScanReadersUseExactTimeAndInsertTies(t *testing.T) {
 func TestRecentSessionFindingsUseExactTimeAndInsertTies(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
+	if _, err := store.db.Exec(`INSERT INTO scan_results (id, scanner, target, timestamp)
+		VALUES ('scan', 'hook', 'target', '2026-10-13T12:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
 	for _, row := range []struct{ id, stamp string }{
 		{"short", "2026-10-13T12:00:00.12345Z"},
 		{"long", "2026-10-13T12:00:00.123451Z"},
