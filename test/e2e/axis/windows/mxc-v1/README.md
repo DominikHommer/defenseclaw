@@ -113,6 +113,8 @@ read-only handle opened for the returned direct-child identity before wait,
 checks it becomes signaled, and never signals an inferred PID. General process
 tree and parent-death qualification require additional controlled live cases.
 The verified owned fixture path is removed only after handles have stopped.
+Errors retain the fixture for inspection, including an SDK Job-empty failure;
+the retained direct-child handle closes through RAII even on an early pipe error.
 
 This host's read-only query on 2026-10-18 reported PSEC major 1/minor 0 and
 support flags `0x3`: native filesystem deny is present, enumeration and ingress
