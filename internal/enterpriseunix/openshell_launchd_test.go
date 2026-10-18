@@ -189,6 +189,7 @@ func replaceMacOSPackageBinaries(t *testing.T, h *osHost, version string) {
 
 func TestMacOSPackageLaunchAgentUsesContentAddressedGateway(t *testing.T) {
 	h, _, _ := newLaunchdTestHost(t)
+	h.env.UserUnitSource = nil
 	unit := h.env.userUnits()[0]
 	canonical := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
 	digest, err := sha256File(canonical)

@@ -293,7 +293,7 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
 
     install_root = root / "opt" / "cisco" / "defenseclaw"
     executable_dirs = (install_root / "bin", install_root / "share" / "e2fsprogs" / "sbin")
-    executables = {path.name: path for directory in executable_dirs for path in directory.iterdir()}
+    executables = {path.name: path for directory in executable_dirs for path in directory.iterdir() if path.is_file()}
     assert set(executables) == {
         "defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp",
         *E2FSPROGS_TOOLS,
