@@ -31,6 +31,11 @@ import (
 // relayed call. A revocation, a stopped report, a deletion and the settings
 // still reach it, and a current daemon is unaffected (GAP-0182).
 func TestSandboxAuthorityRefusesOutdatedDaemon(t *testing.T) {
+	// One account makes many policy calls here; the per-account budget is
+	// not under test.
+	prevBudget := sandboxBudgetLimits[sandboxBudgetPolicy]
+	sandboxBudgetLimits[sandboxBudgetPolicy] = sandboxBudgetLimit{Rate: 1000, Burst: 1000, InFlight: 8}
+	t.Cleanup(func() { sandboxBudgetLimits[sandboxBudgetPolicy] = prevBudget })
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
 	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	var mu sync.Mutex
@@ -85,10 +90,8 @@ func TestSandboxAuthorityRefusesOutdatedDaemon(t *testing.T) {
 			sandboxrelay.StateReport{V: 1, Running: true}, old))
 		isOutdated("policy/current", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyCurrent+"?registration="+running.Registration.ID, nil, old))
 		isOutdated("relayed hook", f.hook(sbxAlice, running.Registration.ID, "claudecode", old))
+		isOutdated("packs", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyPacks, nil, with(old, sandboxrelay.ConnectorHeader, "claudecode")))
 	}
-	// The packs route has a small budget of its own: one call.
-	isOutdated("packs", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyPacks, nil,
-		map[string]string{sandboxrelay.DaemonContractHeader: "", sandboxrelay.ConnectorHeader: "claudecode"}))
 	mu.Lock()
 	if len(refused) != 3 || refused[0] != "contractors:"+sandboxrelay.ReasonDaemonOutdated {
 		t.Fatalf("recorded resolve refusals: %v", refused)
