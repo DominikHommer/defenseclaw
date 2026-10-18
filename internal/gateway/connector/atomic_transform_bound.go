@@ -344,7 +344,7 @@ func atomicTransformBoundPublishBootstrap(
 		return atomicTransformArtifactState{}, err
 	}
 	file, err := createAtomicTransformBoundDeleteOnCloseFilePlatform(dir.file, tempName, perm)
-	if err != nil {
+	if err != nil { //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
 		return atomicTransformArtifactState{}, err
 	}
 	closed := false
@@ -406,7 +406,7 @@ func atomicTransformBoundPublishBootstrap(
 			return nil
 		}
 		return progress("namespace-linked-before-flush")
-	}); err != nil {
+	}); err != nil { //nolint:staticcheck // The Windows implementation can succeed; the Unix platform stub always returns an error.
 		return atomicTransformArtifactState{}, err
 	}
 	if links, err := atomicTransformBoundLinkCountPlatform(file); err != nil || links != 2 {
