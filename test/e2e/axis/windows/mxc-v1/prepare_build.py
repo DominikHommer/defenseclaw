@@ -25,6 +25,10 @@ LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
 BOUNDARY_BINARY = "defenseclaw-axis-windows-psec-boundary-child.exe"
 DLL_BINARY = "defenseclaw-axis-windows-psec-dll-child.exe"
 PROBE_SLICE_CONTRACTS = {
+    "standalone-boundary": (
+        "standalone_std_boundary_native_identity_environment",
+        "fixed_windows_native_psec_boundary_native_identity_environment",
+    ),
     "claude-create-control-only": (
         "standalone_std_fixed_signed_claude_create_control",
         "fixed_windows_uncontained_claude_create_control",
@@ -111,6 +115,30 @@ PURE_DLL_TESTS = {
         "probe::dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
     ],
 }
+
+PURE_STARTUP_ENVIRONMENT_TESTS = {
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
+        "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
+    ],
+}
+
+
+def pure_environment_tests(probe_slice: str) -> dict[str, list[str]]:
+    if probe_slice not in PROBE_SLICE_CONTRACTS:
+        raise ValueError("unknown fixed contributor slice")
+    tests = {binary: list(names) for binary, names in PURE_ENVIRONMENT_TESTS.items()}
+    if probe_slice == "standalone-boundary":
+        for binary, names in PURE_STARTUP_ENVIRONMENT_TESTS.items():
+            tests[binary].extend(names)
+    return tests
+
+
+def artifact_binaries(probe_slice: str) -> tuple[str, ...]:
+    if probe_slice not in PROBE_SLICE_CONTRACTS:
+        raise ValueError("unknown fixed contributor slice")
+    binaries = (BINARY, LOADER_BINARY, BOUNDARY_BINARY)
+    return binaries if probe_slice == "standalone-boundary" else binaries + (DLL_BINARY,)
 
 
 def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -295,7 +323,7 @@ def main() -> None:
     command(["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", *feature_args, "--no-run"])
     # Run only these exact pure parser/spelling/buffer tests. They perform no
     # filesystem query, environment lookup, process creation or PSEC operation.
-    pure_tests = PURE_ENVIRONMENT_TESTS
+    pure_tests = pure_environment_tests(args.probe_slice)
     for binary, names in [*pure_tests.items(), *PURE_DLL_TESTS.items()]:
         for name in names:
             output = command(
@@ -380,7 +408,7 @@ def main() -> None:
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    for binary in (BINARY, LOADER_BINARY, BOUNDARY_BINARY, DLL_BINARY):
+    for binary in artifact_binaries(args.probe_slice):
         shutil.copyfile(ROOT / "target" / "release" / binary, artifact / "bin" / binary)
         (artifact / "bin" / binary).chmod(0o755)
     (artifact / "upstream").mkdir()

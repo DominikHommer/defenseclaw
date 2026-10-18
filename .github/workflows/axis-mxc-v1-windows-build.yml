@@ -19,6 +19,7 @@ on:
         required: true
         default: dll-startup-only
         options:
+          - standalone-boundary
           - dll-startup-only
           - claude-version-only
           - claude-create-control-only
@@ -66,7 +67,7 @@ jobs:
           import subprocess
           head = os.environ['GITHUB_SHA']
           fixed_slice = os.environ['AXIS_WINDOWS_FIXED_PROBE_SLICE']
-          assert fixed_slice in ('dll-startup-only', 'claude-version-only', 'claude-create-control-only')
+          assert fixed_slice in ('standalone-boundary', 'dll-startup-only', 'claude-version-only', 'claude-create-control-only')
           checkout = Path('defenseclaw-source')
           assert subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip() == head
           assert not subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain'], text=True).strip()
@@ -128,7 +129,7 @@ jobs:
           AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('dll-startup-only', 'claude-version-only', 'claude-create-control-only')) {
+          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('standalone-boundary', 'dll-startup-only', 'claude-version-only', 'claude-create-control-only')) {
             throw 'Unknown fixed contributor probe slice'
           }
           # Initialize installed native tools in this same process. Otherwise

@@ -3,6 +3,34 @@
 
 # Native Windows current-MXC PSEC contributor probe
 
+## Pending boundary startup-context correction
+
+The closed `standalone-boundary` build slice preserves the existing three-image
+native-identity boundary contract. Its new source validates and freezes the
+supervisor's eight original private startup values before the caller known-folder
+query, fixture setup, SDK work or Rust worker threads. It verifies their exact
+names, fixed private path relationships, system directory and startup cwd. The
+boundary supervisor keeps those values unchanged; only the existing fixed public
+inheritance canary is added. Loader, DLL and Claude selectors retain their prior
+supervisor environment behavior.
+
+The child still receives the existing inner fixture's exact eight explicit
+values. Same-child SID/folder lookup, exact frozen caller-prefix/one-profile
+mapping, held NT-relative private directories and frame-plus-EOF assertions are
+retained. Original startup values are rechecked around the native queries and
+directory binding. No extra native prefix, observed-child environment value,
+host profile grant, namespace change or fallback is accepted. This removes a
+parent context change after DLL imports; it does not establish why Case10's
+native folder comparison refused, or guarantee that the new attempt will pass.
+
+Two new pure snapshot/validation tests are mandatory only for this boundary
+slice. Its build runs twenty-seven exact Rust tests and packages three PEs plus
+the existing DLL protocol/child source used by compile and pure-test gates.
+Ordinary DLL/Claude builds retain twenty-five tests; the separate uncontained
+control retains twenty-six. Dependency locks and all SDK overlay fingerprints
+are unchanged. This source has not received Rust compilation or a new native
+boundary result; source and artifact review must precede any fresh run.
+
 ## Literal DOS application and held-image gate
 
 The Windows literal overlay now selects an ordinary DOS `lpApplicationName`

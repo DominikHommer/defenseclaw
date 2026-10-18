@@ -45,6 +45,11 @@ pub fn run() -> Result<i32> {
         "fixed build feature and contributor selector differ"
     );
     let system = PathBuf::from(std::env::var("SystemRoot")?).canonicalize()?;
+    let caller = if args.is_empty() {
+        Some(native_identity::CallerEnvironment::capture(&system)?)
+    } else {
+        None
+    };
     let executable = std::env::current_exe()?.canonicalize()?;
     let temp_parent = std::env::temp_dir().canonicalize()?;
     let owned = tempfile::Builder::new()
@@ -56,18 +61,28 @@ pub fn run() -> Result<i32> {
     verify_fixture_root(&root, &temp_parent)?;
     eprintln!("owned contributor fixture: {}", root.display());
     let paths = Paths::create(&root, &system)?;
-    // This synchronous entry point has not started threads or called the SDK.
-    // Remove raw caller secrets and overrides before either becomes possible.
-    let names: Vec<_> = std::env::vars_os().map(|(name, _)| name).collect();
-    // SAFETY: process environment mutation is confined to this pre-thread stage.
+    if caller.is_none() {
+        // Preserve the existing loader/DLL/Claude supervisor behavior. The
+        // boundary mode instead validates and retains its exact private startup
+        // values, avoiding a second path context after native DLL imports.
+        let names: Vec<_> = std::env::vars_os().map(|(name, _)| name).collect();
+        // SAFETY: environment mutation remains confined to this pre-thread stage.
+        unsafe {
+            for name in names {
+                std::env::remove_var(name);
+            }
+            for (name, value) in paths.environment() {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+    // SAFETY: this Windows-only public marker is set before our Rust workers.
+    // In boundary mode it is the only addition to the original eight values.
     unsafe {
-        for name in names {
-            std::env::remove_var(name);
-        }
-        for (name, value) in paths.environment() {
-            std::env::set_var(name, value);
-        }
         std::env::set_var("DC_AXIS_INHERIT_CANARY", "fixed-public");
+    }
+    if let Some(caller) = &caller {
+        caller.require_unchanged()?;
     }
     std::env::set_current_dir(&paths.workspace)?;
     thread::spawn(|| {
@@ -87,7 +102,7 @@ pub fn run() -> Result<i32> {
             fs::metadata(&payload)?.len() == 254_858_400,
             "fixed local image size differs"
         );
-        run_case(&paths, &payload, "claude-version", &[0; 4])?;
+        run_case(&paths, &payload, "claude-version", &[0; 4], None)?;
     } else if dll_only {
         let payload = executable
             .with_file_name("defenseclaw-axis-windows-psec-dll-child.exe")
@@ -96,7 +111,7 @@ pub fn run() -> Result<i32> {
         dll_initialization_all_succeeded = true;
         for case in dll_startup_protocol::CASES {
             let mode = format!("dll-{}", case.label());
-            match run_case(&paths, &payload, &mode, &[0; 4]) {
+            match run_case(&paths, &payload, &mode, &[0; 4], None) {
                 Ok(loaded) => dll_initialization_all_succeeded &= loaded,
                 Err(error) => {
                     completed = false;
@@ -116,18 +131,18 @@ pub fn run() -> Result<i32> {
         let payload = executable
             .with_file_name("defenseclaw-axis-windows-psec-loader-child.exe")
             .canonicalize()?;
-        run_case(&paths, &payload, "loader", &[0; 4])?;
+        run_case(&paths, &payload, "loader", &[0; 4], None)?;
     } else {
         let payload = executable
             .with_file_name("defenseclaw-axis-windows-psec-boundary-child.exe")
             .canonicalize()?;
         let endpoints = Endpoints::new()?;
         let ports = endpoints.ports();
-        run_case(&paths, &payload, "argv", &ports)?;
-        run_case(&paths, &payload, "boundary", &ports)?;
+        run_case(&paths, &payload, "argv", &ports, caller.as_ref())?;
+        run_case(&paths, &payload, "boundary", &ports, caller.as_ref())?;
         endpoints.require_no_contained_delivery()?;
-        run_case(&paths, &payload, "exit23", &ports)?;
-        run_case(&paths, &payload, "timeout", &ports)?;
+        run_case(&paths, &payload, "exit23", &ports, caller.as_ref())?;
+        run_case(&paths, &payload, "timeout", &ports, caller.as_ref())?;
     }
     ensure!(
         fs::read(&paths.outside)? == SENTINEL,
@@ -295,7 +310,16 @@ impl Paths {
     }
 }
 
-fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> Result<bool> {
+fn run_case(
+    paths: &Paths,
+    executable: &Path,
+    mode: &str,
+    ports: &[u16; 4],
+    caller: Option<&native_identity::CallerEnvironment>,
+) -> Result<bool> {
+    if let Some(caller) = caller {
+        caller.require_unchanged()?;
+    }
     let timeout = match mode {
         "timeout" => 1,
         "claude-version" => 10,
@@ -418,7 +442,10 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         .context("same retained native process observation unavailable")?;
     let native = if let Some(fixture) = &fixture_custody {
         Some(native_identity::expected_from_child(
-            &observed, fixture, fixed_root,
+            &observed,
+            fixture,
+            fixed_root,
+            caller.context("original private caller environment absent")?,
         )?)
     } else {
         None

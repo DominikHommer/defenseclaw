@@ -119,6 +119,21 @@ PURE_ENVIRONMENT_TESTS = {
         "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
     ],
 }
+
+PURE_STARTUP_ENVIRONMENT_TESTS = {
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_environment::tests::startup_environment_requires_exact_eight_private_values",
+        "probe::native_environment::tests::startup_environment_snapshot_refuses_drift_and_canary_misuse",
+    ],
+}
+
+
+def pure_environment_tests(mode: str) -> dict[str, list[str]]:
+    tests = {binary: list(names) for binary, names in PURE_ENVIRONMENT_TESTS.items()}
+    if mode == "standalone-boundary":
+        for binary, names in PURE_STARTUP_ENVIRONMENT_TESTS.items():
+            tests[binary].extend(names)
+    return tests
 PURE_DLL_TESTS = {
     "defenseclaw-axis-windows-psec-dll-child": [
         "dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",
@@ -218,6 +233,8 @@ def artifact_contract(mode: str = "loader-only") -> dict:
             "src/boundary_child.rs",
             "src/native_environment.rs",
             "src/native_identity.rs",
+            "src/dll_startup_child.rs",
+            "src/dll_startup_protocol.rs",
             "patches/mxc-windows-literal-argv.patch",
             "patches/mxc-windows-process-identity.patch",
         ):
@@ -498,7 +515,7 @@ def verify(
     if mode in {"standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"}:
         require(
             provenance.get("pure_native_environment_tests_passed") is True
-            and provenance.get("pure_native_environment_tests") == PURE_ENVIRONMENT_TESTS,
+            and provenance.get("pure_native_environment_tests") == pure_environment_tests(mode),
             "fixed pure native environment test evidence differs",
         )
         require(upstream_hashes["mxc"] == SDK_LOCK_SHA256, "SDK admission upstream lock differs")
@@ -557,9 +574,9 @@ def verify(
             },
             "exact SDK admission test evidence differs",
         )
-    if mode in {"claude-version-only", "claude-create-control-only"}:
+    if mode in {"standalone-boundary", "claude-version-only", "claude-create-control-only"}:
         require(provenance.get("probe_slice") == mode, "fixed Claude build slice differs")
-    if mode in {"dll-startup-only", "claude-version-only", "claude-create-control-only"}:
+    if mode in {"standalone-boundary", "dll-startup-only", "claude-version-only", "claude-create-control-only"}:
         require(
             provenance.get("pure_dll_startup_tests_passed") is True
             and provenance.get("pure_dll_startup_tests") == PURE_DLL_TESTS,

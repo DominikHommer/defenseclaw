@@ -200,6 +200,7 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         self.provenance.update(
             variant=verify.BOUNDARY_VARIANT,
             scope=verify.BOUNDARY_SCOPE,
+            probe_slice=self.mode,
             mxc_patched_paths=sorted(verify.BOUNDARY_MODIFIED_PATHS),
             mxc_added_paths=sorted(verify.BOUNDARY_ADDED_PATHS),
             mxc_overlay_file_sha256=dict(verify.BOUNDARY_OVERLAY_FILES),
@@ -208,7 +209,9 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             mxc_windows_argv_patch_sha256=windows,
             mxc_windows_process_identity_patch_sha256=identity,
             pure_native_environment_tests_passed=True,
-            pure_native_environment_tests=verify.PURE_ENVIRONMENT_TESTS,
+            pure_native_environment_tests=verify.pure_environment_tests(self.mode),
+            pure_dll_startup_tests=verify.PURE_DLL_TESTS,
+            pure_dll_startup_tests_passed=True,
             native_directory_custody_tests=verify.NATIVE_DIRECTORY_CUSTODY_TESTS,
             native_directory_custody_tests_passed=True,
         )
@@ -351,9 +354,27 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
         self.assertEqual(build.PURE_ENVIRONMENT_TESTS, verify.PURE_ENVIRONMENT_TESTS)
+        self.assertEqual(build.PURE_STARTUP_ENVIRONMENT_TESTS, verify.PURE_STARTUP_ENVIRONMENT_TESTS)
+        for mode in build.PROBE_SLICE_CONTRACTS:
+            self.assertEqual(build.pure_environment_tests(mode), verify.pure_environment_tests(mode))
         self.assertEqual(build.NATIVE_DIRECTORY_CUSTODY_TESTS, verify.NATIVE_DIRECTORY_CUSTODY_TESTS)
         self.assertEqual(sum(map(len, verify.NATIVE_DIRECTORY_CUSTODY_TESTS.values())), 1)
         self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 6)
+
+    def test_boundary_requires_startup_snapshot_gates_and_its_closed_slice(self) -> None:
+        if self.mode != "standalone-boundary":
+            self.assertEqual(self.provenance["pure_native_environment_tests"], verify.PURE_ENVIRONMENT_TESTS)
+            return
+        original = self.provenance["pure_native_environment_tests"]
+        self.provenance["pure_native_environment_tests"] = verify.PURE_ENVIRONMENT_TESTS
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "pure native environment test evidence"):
+            self.run_verify()
+        self.provenance["pure_native_environment_tests"] = original
+        self.provenance["probe_slice"] = "dll-startup-only"
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "build slice"):
+            self.run_verify()
 
     def test_third_image_change_is_refused(self) -> None:
         (self.artifact / verify.BOUNDARY_BINARY).write_bytes(b"changed third image")
@@ -374,6 +395,8 @@ class DLLArtifactVerificationTests(BoundaryArtifactVerificationTests):
         self.provenance.update(
             variant=verify.DLL_VARIANT,
             scope=verify.DLL_SCOPE,
+            probe_slice=self.mode,
+            pure_native_environment_tests=verify.pure_environment_tests(self.mode),
             pure_dll_startup_tests=verify.PURE_DLL_TESTS,
             pure_dll_startup_tests_passed=True,
         )
@@ -463,6 +486,14 @@ class BoundedFileTests(unittest.TestCase):
 
 
 class GitHubBuildAdmissionTests(unittest.TestCase):
+    def test_workflow_exposes_only_the_closed_boundary_choice(self) -> None:
+        workflow = Path(__file__).resolve().parents[5] / ".github/workflows/axis-mxc-v1-windows-build.yml"
+        source = workflow.read_text(encoding="utf-8")
+        self.assertIn("          - standalone-boundary", source)
+        self.assertIn(
+            "'standalone-boundary', 'dll-startup-only', 'claude-version-only', 'claude-create-control-only'", source
+        )
+
     def test_exact_sdk_test_inventory_matches_build_workflow(self) -> None:
         workflow = Path(__file__).resolve().parents[5] / ".github/workflows/axis-mxc-v1-windows-build.yml"
         source = workflow.read_text(encoding="utf-8")

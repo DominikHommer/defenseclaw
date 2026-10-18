@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -27,6 +28,10 @@ class BuildGuardTests(TestCase):
         self.assertEqual(
             build.PROBE_SLICE_CONTRACTS,
             {
+                "standalone-boundary": (
+                    "standalone_std_boundary_native_identity_environment",
+                    "fixed_windows_native_psec_boundary_native_identity_environment",
+                ),
                 "dll-startup-only": (
                     "standalone_std_fixed_dll_startup_diagnostic",
                     "fixed_windows_native_psec_dll_startup_diagnostic",
@@ -52,6 +57,26 @@ class BuildGuardTests(TestCase):
         self.assertEqual(failure.exception.code, 2)
         command.assert_not_called()
         source.assert_not_called()
+
+    def test_boundary_packages_three_images_and_adds_only_its_startup_test_gates(self) -> None:
+        boundary = build.artifact_binaries("standalone-boundary")
+        self.assertEqual(boundary, (build.BINARY, build.LOADER_BINARY, build.BOUNDARY_BINARY))
+        self.assertEqual(sum(map(len, build.pure_environment_tests("standalone-boundary").values())), 8)
+        for mode in ("dll-startup-only", "claude-version-only", "claude-create-control-only"):
+            self.assertEqual(build.artifact_binaries(mode), boundary + (build.DLL_BINARY,))
+            self.assertEqual(build.pure_environment_tests(mode), build.PURE_ENVIRONMENT_TESTS)
+        self.assertEqual(sum(map(len, build.PURE_ENVIRONMENT_TESTS.values())), 6)
+        with self.assertRaises(ValueError):
+            build.artifact_binaries("unreviewed")
+        with self.assertRaises(ValueError):
+            build.pure_environment_tests("unreviewed")
+
+    def test_boundary_startup_gates_name_real_pure_tests(self) -> None:
+        root = Path(__file__).resolve().parent
+        source = (root / "src/native_environment.rs").read_text(encoding="utf-8")
+        for names in build.PURE_STARTUP_ENVIRONMENT_TESTS.values():
+            for name in names:
+                self.assertRegex(source, r"#\[test\]\s*fn " + re.escape(name.rsplit("::", 1)[-1]) + r"\(")
 
     def test_source_identity_must_match_exact_commit(self) -> None:
         with (

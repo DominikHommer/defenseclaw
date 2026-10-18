@@ -3,6 +3,7 @@
 
 // Fixed contributor metadata only. No native call, environment lookup or path
 // opening belongs here; the parent's held native identity supplies the folder.
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -10,6 +11,117 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"DCENV1\r\n";
 const MAX_UNITS: usize = 2048;
+
+// The parent must keep the original private startup paths stable across native
+// known-folder/SID queries. Child-request paths are a separate inner fixture.
+pub(super) struct StartupEnvironment {
+    values: BTreeMap<String, OsString>,
+}
+
+impl StartupEnvironment {
+    fn entries(
+        entries: impl IntoIterator<Item = (OsString, OsString)>,
+        canary_required: bool,
+    ) -> io::Result<BTreeMap<String, OsString>> {
+        const NAMES: [&str; 8] = [
+            "SYSTEMROOT",
+            "WINDIR",
+            "HOME",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+        ];
+        let mut values = BTreeMap::new();
+        let mut count = 0;
+        let mut canary_seen = false;
+        for (name, value) in entries {
+            count += 1;
+            if count > 9 {
+                return Err(refused());
+            }
+            let name = name
+                .to_str()
+                .filter(|name| name.len() <= 32)
+                .ok_or_else(refused)?;
+            let name = name.to_ascii_uppercase();
+            if name == "DC_AXIS_INHERIT_CANARY" {
+                if !canary_required || canary_seen || value != "fixed-public" {
+                    return Err(refused());
+                }
+                canary_seen = true;
+            } else if !NAMES.contains(&name.as_str()) || values.insert(name, value).is_some() {
+                return Err(refused());
+            }
+        }
+        if values.len() != NAMES.len() || canary_seen != canary_required {
+            return Err(refused());
+        }
+        Ok(values)
+    }
+
+    pub(super) fn from_startup_entries(
+        entries: impl IntoIterator<Item = (OsString, OsString)>,
+        system: &Path,
+        cwd: &Path,
+    ) -> io::Result<Self> {
+        let values = Self::entries(entries, false)?;
+        for value in values.values() {
+            disk_units(value)?;
+        }
+        if disk_units(&values["SYSTEMROOT"])? != disk_units(system.as_os_str())?
+            || disk_units(&values["WINDIR"])? != disk_units(system.as_os_str())?
+        {
+            return Err(refused());
+        }
+        let home = PathBuf::from(OsString::from_wide(&disk_units(&values["HOME"])?));
+        if home.file_name() != Some(OsStr::new("home")) {
+            return Err(refused());
+        }
+        let root = home.parent().ok_or_else(refused)?;
+        let suffix = root
+            .file_name()
+            .and_then(OsStr::to_str)
+            .and_then(|name| name.strip_prefix("psec-headless-"))
+            .filter(|suffix| !suffix.is_empty())
+            .ok_or_else(refused)?;
+        if !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(refused());
+        }
+        for (name, expected) in [
+            ("USERPROFILE", home.clone()),
+            ("APPDATA", home.join(r"AppData\Roaming")),
+            ("LOCALAPPDATA", home.join(r"AppData\Local")),
+            ("TEMP", root.join("tmp")),
+            ("TMP", root.join("tmp")),
+        ] {
+            if disk_units(&values[name])? != disk_units(expected.as_os_str())? {
+                return Err(refused());
+            }
+        }
+        if disk_units(cwd.as_os_str())? != disk_units(root.join("workspace").as_os_str())? {
+            return Err(refused());
+        }
+        Ok(Self { values })
+    }
+
+    pub(super) fn require_unchanged(
+        &self,
+        entries: impl IntoIterator<Item = (OsString, OsString)>,
+        canary_required: bool,
+    ) -> io::Result<()> {
+        if Self::entries(entries, canary_required)? != self.values {
+            return Err(io::Error::other(
+                "original private startup environment changed",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ExpectedEnvironment {
@@ -164,6 +276,137 @@ impl ExpectedEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixed_startup() -> (Vec<(OsString, OsString)>, PathBuf, PathBuf) {
+        let root = Path::new(r"C:\fixed-private\psec-headless-01");
+        let home = root.join("home");
+        let system = PathBuf::from(r"C:\Windows");
+        let values = [
+            ("SYSTEMROOT", system.clone()),
+            ("WINDIR", system.clone()),
+            ("HOME", home.clone()),
+            ("USERPROFILE", home.clone()),
+            ("APPDATA", home.join(r"AppData\Roaming")),
+            ("LOCALAPPDATA", home.join(r"AppData\Local")),
+            ("TEMP", root.join("tmp")),
+            ("TMP", root.join("tmp")),
+        ]
+        .into_iter()
+        .map(|(name, path)| (OsString::from(name), path.into_os_string()))
+        .collect();
+        (values, system, root.join("workspace"))
+    }
+
+    #[test]
+    fn startup_environment_requires_exact_eight_private_values() {
+        let (entries, system, cwd) = fixed_startup();
+        assert!(StartupEnvironment::from_startup_entries(entries.clone(), &system, &cwd).is_ok());
+        let mut prefixed = entries.clone();
+        prefixed[2].1 = OsString::from(r"\\?\C:\fixed-private\psec-headless-01\home");
+        assert!(StartupEnvironment::from_startup_entries(prefixed, &system, &cwd).is_ok());
+        let mut invalid = Vec::new();
+        let mut missing = entries.clone();
+        missing.pop();
+        invalid.push(missing);
+        let mut unexpected = entries.clone();
+        unexpected.push(("PATH".into(), r"C:\unrelated".into()));
+        invalid.push(unexpected);
+        let mut duplicate = entries.clone();
+        duplicate.push(("home".into(), entries[2].1.clone()));
+        invalid.push(duplicate);
+        let mut bad_name = entries.clone();
+        bad_name[0].0 = OsString::from_wide(&[0xd800]);
+        invalid.push(bad_name);
+        for (index, value) in [
+            (0, r"D:\other-system"),
+            (1, r"D:\other-system"),
+            (2, r"C:\fixed-private\psec-headless-01\home\..\home"),
+            (3, r"C:\unrelated\home"),
+            (4, r"C:\fixed-private\psec-headless-01\home\AppData\Local"),
+            (5, r"C:\fixed-private\psec-headless-01\home\AppData\Roaming"),
+            (6, r"C:\unrelated\tmp"),
+            (7, r"C:\unrelated\tmp"),
+            (7, ""),
+            (7, "C:\\fixed\0hidden"),
+        ] {
+            let mut changed = entries.clone();
+            changed[index].1 = value.into();
+            invalid.push(changed);
+        }
+        for changed in invalid {
+            assert!(StartupEnvironment::from_startup_entries(changed, &system, &cwd).is_err());
+        }
+        for basename in ["unrelated-stage", "psec-headless-", "psec-headless-unsafe."] {
+            let renamed: Vec<_> = entries
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        OsString::from(
+                            value
+                                .to_str()
+                                .unwrap()
+                                .replace("psec-headless-01", basename),
+                        ),
+                    )
+                })
+                .collect();
+            let renamed_cwd =
+                PathBuf::from(cwd.to_str().unwrap().replace("psec-headless-01", basename));
+            assert!(
+                StartupEnvironment::from_startup_entries(renamed, &system, &renamed_cwd).is_err()
+            );
+        }
+        let mut oversized = entries.clone();
+        oversized[7].1 = OsString::from(format!(r"C:\{}", "x".repeat(MAX_UNITS)));
+        assert!(StartupEnvironment::from_startup_entries(oversized, &system, &cwd).is_err());
+        assert!(
+            StartupEnvironment::from_startup_entries(
+                entries,
+                &system,
+                Path::new(r"C:\unrelated\workspace")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_environment_snapshot_refuses_drift_and_canary_misuse() {
+        let (entries, system, cwd) = fixed_startup();
+        let snapshot =
+            StartupEnvironment::from_startup_entries(entries.clone(), &system, &cwd).unwrap();
+        assert!(snapshot.require_unchanged(entries.clone(), false).is_ok());
+        assert!(snapshot.require_unchanged(entries.clone(), true).is_err());
+        let mut with_canary = entries.clone();
+        with_canary.push(("DC_AXIS_INHERIT_CANARY".into(), "fixed-public".into()));
+        assert!(
+            snapshot
+                .require_unchanged(with_canary.clone(), true)
+                .is_ok()
+        );
+        assert!(
+            snapshot
+                .require_unchanged(with_canary.clone(), false)
+                .is_err()
+        );
+        assert!(
+            StartupEnvironment::from_startup_entries(with_canary.clone(), &system, &cwd).is_err()
+        );
+        for index in 0..entries.len() {
+            let mut changed = with_canary.clone();
+            changed[index].1.push("-changed");
+            assert!(snapshot.require_unchanged(changed, true).is_err());
+        }
+        let mut wrong = with_canary.clone();
+        wrong.last_mut().unwrap().1 = "different".into();
+        assert!(snapshot.require_unchanged(wrong, true).is_err());
+        let mut duplicate = with_canary.clone();
+        duplicate.push(("dc_axis_inherit_canary".into(), "fixed-public".into()));
+        assert!(snapshot.require_unchanged(duplicate, true).is_err());
+        let mut unexpected = with_canary;
+        unexpected.push(("FIXED_UNEXPECTED_MARKER".into(), "fixed-public".into()));
+        assert!(snapshot.require_unchanged(unexpected, true).is_err());
+    }
 
     #[test]
     fn native_folder_requires_exact_private_branch_and_one_profile_component() {

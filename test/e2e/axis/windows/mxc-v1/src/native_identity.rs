@@ -3,8 +3,8 @@
 
 // Parent-only, read/query operations. No profile/namespace creation, token
 // adjustment, impersonation, ACL mutation or child environment lookup.
-use super::native_environment::ExpectedEnvironment;
-use anyhow::{Result, ensure};
+use super::native_environment::{ExpectedEnvironment, StartupEnvironment};
+use anyhow::{Context, Result, ensure};
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -63,6 +63,36 @@ pub(super) struct FixtureCustody {
     drive: u16,
     volume: Vec<u16>,
     root_units: Vec<u16>,
+}
+
+pub(super) struct CallerEnvironment {
+    startup: StartupEnvironment,
+    local_app_data: OsString,
+}
+
+impl CallerEnvironment {
+    pub(super) fn capture(system: &Path) -> Result<Self> {
+        let startup = StartupEnvironment::from_startup_entries(
+            std::env::vars_os(),
+            system,
+            &std::env::current_dir()?,
+        )
+        .context("original private startup environment shape refused")?;
+        // Freeze before fixture setup, SDK calls or worker threads. Both native
+        // folder queries later run under these same original eight path values.
+        startup.require_unchanged(std::env::vars_os(), false)?;
+        let local_app_data = caller_local_app_data()?;
+        startup.require_unchanged(std::env::vars_os(), false)?;
+        Ok(Self {
+            startup,
+            local_app_data,
+        })
+    }
+
+    pub(super) fn require_unchanged(&self) -> Result<()> {
+        self.startup.require_unchanged(std::env::vars_os(), true)?;
+        Ok(())
+    }
 }
 
 fn owned(handle: HANDLE) -> Result<OwnedHandle> {
@@ -390,11 +420,14 @@ pub(super) fn expected_from_child(
     process: &OwnedHandle,
     fixture: &FixtureCustody,
     root: &Path,
+    caller: &CallerEnvironment,
 ) -> Result<NativeEnvironmentCustody> {
-    let caller_base = caller_local_app_data()?;
+    caller.require_unchanged()?;
     let folder = native_folder(process)?;
-    let expected = ExpectedEnvironment::from_caller_profile(root, &caller_base, &folder)?;
+    caller.require_unchanged()?;
+    let expected = ExpectedEnvironment::from_caller_profile(root, &caller.local_app_data, &folder)?;
     let directories = pin_private_directories(fixture, &expected)?;
+    caller.require_unchanged()?;
     Ok(NativeEnvironmentCustody {
         expected,
         _directories: directories,
