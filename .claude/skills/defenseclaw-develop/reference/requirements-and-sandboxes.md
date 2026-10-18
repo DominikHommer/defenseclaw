@@ -4,6 +4,15 @@ Open this when: your change adds or depends on something outside the Python whee
 
 Heavy requirements stay optional, off by default and never installed silently. With no common `sandbox` namespace, sandboxes remain off until `openshell.enabled` is set by `defenseclaw sandbox setup`. An explicitly present common namespace owns the master switch and runtime-lane enablement; preserve legacy restrictions for missing common policy leaves. Active AXIS configuration is refused until its execution and containment gates are qualified; configuration enablement alone is never availability evidence.
 
+`internal/sandboxruntime.ResolveExecutionPolicy` freezes the projected common
+policy through the existing pack resolver. Keep its private host evaluator as
+the broker authority; inspection JSON and a flattened provider allowlist cannot
+replace it. Rotate the host authority snapshot identity or generation when
+broker routing or host facts change. Adapter admission needs exact runtime,
+harness, policy and complete component receipts plus independently qualified
+capabilities. A structural receipt grants no launch, credential or session
+ownership authority. The contract starts nothing and does not enable AXIS.
+
 ## Requirements: disclosure
 
 IDs live only in `reference/checklist.md`. These rows add detail and carry no IDs.
