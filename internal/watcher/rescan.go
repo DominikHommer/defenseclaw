@@ -937,6 +937,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
+		if evt.Type == InstallMCP {
+			fmt.Fprintf(os.Stderr, "[rescan] mcp %s is no longer listed; skipped\n", evt.Name)
+		}
 		return rescanSkipped
 	}
 	if errors.Is(err, errLinkedAssetOutsideRoots) {
@@ -1188,7 +1191,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 	if res.Interrupted || res.ScanID == "" || moved {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
@@ -1219,7 +1222,7 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 		w.markInterruptedAdmission(evt, snap, fingerprint)
 	case res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt):
 	default:
-		if _, err := os.Lstat(evt.Path); err == nil {
+		if w.targetStillPresent(evt) {
 			scanID := res.ScanID
 			if scanID == "" {
 				// Decided before a scan (a list match): keep the last
@@ -1268,7 +1271,7 @@ func (w *InstallWatcher) readmitInterrupted(ctx context.Context, evt InstallEven
 	if res.Interrupted || res.Verdict == VerdictScanError || strings.HasPrefix(res.Reason, scanFailureReason) || w.movedByAdmission(evt) {
 		return rescanScanned
 	}
-	if _, err := os.Lstat(evt.Path); err == nil {
+	if w.targetStillPresent(evt) {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 	}
 	return rescanScanned
@@ -1967,12 +1970,10 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 		return nil, err
 	}
 
-	raw, err := json.Marshal(entry)
+	hash, err := mcpDefinitionHash(*entry)
 	if err != nil {
 		return nil, fmt.Errorf("marshal mcp server %s: %w", name, err)
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
 
 	snap := &TargetSnapshot{
 		ContentHash:      hash,
@@ -1986,6 +1987,32 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 		snap.NetworkEndpoints = []string{entry.URL}
 	}
 	return snap, nil
+}
+
+// mcpDefinitionHash is the content hash of an MCP server's baseline: every
+// field of its definition (command, arguments, folder, environment, URL,
+// account and project), so a verdict is for one definition, not a name.
+func mcpDefinitionHash(entry config.MCPServerEntry) (string, error) {
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// targetStillPresent reports whether the target of evt is still there after
+// its admission: an MCP server still listed under its key, a skill or plugin
+// still at its path. An MCP event path is a key, not a file, so the Lstat
+// the readmissions used always failed for a server: an edited server never
+// got its new baseline and was admitted again on every cycle.
+func (w *InstallWatcher) targetStillPresent(evt InstallEvent) bool {
+	if evt.Type == InstallMCP {
+		_, err := w.lookupMCPServer(evt)
+		return err == nil
+	}
+	_, err := os.Lstat(evt.Path)
+	return err == nil
 }
 
 // MCPEventPath is the key of an MCP server in the watcher: its event Path

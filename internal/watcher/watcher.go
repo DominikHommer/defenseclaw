@@ -494,8 +494,9 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 }
 
 func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
-	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err == nil {
+		w.readmitChangedMCPServer(ctx, evt, baseline)
 		return // admitted or baselined already
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -505,7 +506,11 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 	}
 	snap, err := w.snapshotForEvent(evt)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) {
+			// Said, not skipped in silence: a server that never reached
+			// admission left no row at all (GAP-0219).
+			fmt.Fprintf(os.Stderr, "[watch] mcp %s was added but is no longer listed; admission waits for the next listing\n", evt.Name)
+		} else {
 			fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; reading its definition failed: %v\n", evt.Name, err)
 		}
 		return
@@ -516,6 +521,24 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.cachedFingerprint(evt, nil)))
 	}
+}
+
+// readmitChangedMCPServer admits again, now, a queued MCP server whose
+// definition changed since its baseline (command, arguments, folder or
+// environment under the same name). Its verdict was for the old definition,
+// and the hook refuses its calls until admission has run on the new one
+// (MCPAdmissionPending); the rescan cycle would admit it only at its next
+// pass (GAP-0216). An unchanged server is left as it is. Secure Client keeps
+// main (issue #1092).
+func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow) {
+	if baseline == nil || w.secureClientActive() {
+		return
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil || snap.ContentHash == baseline.ContentHash {
+		return
+	}
+	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil))
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.
@@ -616,6 +639,16 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 	servers, err := w.readMCPServers()
 	if err != nil {
 		return
+	}
+	if !firstCycle {
+		// The issue of a server no longer configured is forgotten: only
+		// admission cleared one, so a removed project left status and
+		// verify warning about it (GAP-0134).
+		listed := make(map[string]bool, len(servers))
+		for _, server := range servers {
+			listed[MCPEventPath(server)] = true
+		}
+		w.state.forgetMCPIssuesNotListed(listed)
 	}
 	var added []string
 	for _, server := range servers {
@@ -2029,9 +2062,9 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 			scope := w.journalScope(w.eventConnector(evt))
 
 			if installAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", blockReason)
 			}
-			_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
+			_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
 
 			enforcement := map[string]string{
 				"source_path": evt.Path,
@@ -2042,10 +2075,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 
 			secureClient := w.secureClientActive()
 			if fileAction == "quarantine" && !retainRestored && secureClient {
-				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
 			}
 			if runtimeAction == "block" {
-				_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", blockReason)
+				_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", blockReason)
 			}
 
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
@@ -2062,11 +2095,11 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, out *poli
 					// and the block and runtime disable stay (GAP-0394).
 					switch {
 					case err == nil:
-						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "file", "quarantine", blockReason)
+						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "file", "quarantine", blockReason)
 					case errors.Is(err, errLinkRemoved):
-						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", err.Error())
+						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", err.Error())
 					default:
-						_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block",
+						_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block",
 							quarantineFailedReason+err.Error())
 					}
 				}
@@ -2142,8 +2175,10 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		if entry, err := w.lookupMCPServer(evt); err == nil {
 			ms.ServerEntry = entry
 			// A project-scoped command server is found only from its project
-			// (GAP-0623).
-			if entry.Project != "" && entry.URL == "" {
+			// (GAP-0623). An enrolled user's server starts as that user, in
+			// a folder the hook enumerator checks as the user: the gateway
+			// does not look into the project (#1164).
+			if entry.Project != "" && entry.URL == "" && entry.RunAsSID == "" {
 				if info, statErr := os.Stat(entry.Project); statErr == nil && info.IsDir() {
 					ms.Project, ms.Connector = entry.Project, entry.Connector
 				}
@@ -2339,9 +2374,9 @@ func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, re
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", reason)
-	_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", reason)
-	_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
+	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+	_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
+	_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
 }
 
 // releaseScanFailureBlock clears the block and runtime disable a failed scan
@@ -2352,13 +2387,13 @@ func (w *InstallWatcher) releaseScanFailureBlock(evt InstallEvent, targetType st
 		return
 	}
 	scope := w.journalScope(w.eventConnector(evt))
-	entry, err := w.store.GetActionForConnector(targetType, evt.Name, scope)
+	entry, err := w.store.GetActionForConnector(targetType, journalName(evt), scope)
 	if err != nil || entry == nil || !strings.HasPrefix(entry.Reason, scanFailureReason) ||
 		(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 		return
 	}
 	for _, field := range []string{"runtime", "install"} {
-		_ = w.store.ClearActionFieldForConnector(targetType, evt.Name, scope, field)
+		_ = w.store.ClearActionFieldForConnector(targetType, journalName(evt), scope, field)
 	}
 }
 

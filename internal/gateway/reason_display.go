@@ -180,6 +180,11 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
+	if action == "block" {
+		if sentence := agentMCPAdmissionPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
+	}
 	subject := agentBlockListSubject(sourceReason)
 	if subject == "" {
 		subject = agentAssetPolicySubject(sourceReason)
@@ -391,27 +396,19 @@ var reasonDisplayGOOS = runtime.GOOS
 // broken hook and hid the server name (GAP-2423). Every field must be a known
 // key with a plain value; anything else stays redacted.
 func agentAssetPolicySubject(reason string) string {
-	fields := strings.Split(reason, " ")
-	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok {
 		return ""
-	}
-	values := make(map[string]string, len(fields)-1)
-	for _, field := range fields[1:] {
-		key, value, ok := strings.Cut(field, "=")
-		pattern := agentAssetPolicyValuePattern
-		if key == "asset_name" {
-			pattern = agentAssetPolicyNamePattern
-		}
-		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
-			return ""
-		}
-		values[key] = value
 	}
 	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
 	if kind == "" || name == "" {
 		return ""
 	}
 	switch values["reason_code"] {
+	case "mcp-admission-pending":
+		if values["asset_type"] == "mcp" {
+			return kind + " " + name + " is not scanned yet; try the call again in about a minute"
+		}
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
 	case "registry-required-but-empty":
@@ -438,6 +435,44 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is disabled by security policy"
 	}
 	return ""
+}
+
+// agentAssetPolicyFields are the fields of an asset-policy reason
+// (assetPolicyResponseReason), when every field is a known key with a plain
+// value; anything else stays redacted.
+func agentAssetPolicyFields(reason string) (map[string]string, bool) {
+	fields := strings.Split(reason, " ")
+	if len(fields) < 2 || fields[0] != "ASSET-POLICY" {
+		return nil, false
+	}
+	values := make(map[string]string, len(fields)-1)
+	for _, field := range fields[1:] {
+		key, value, ok := strings.Cut(field, "=")
+		pattern := agentAssetPolicyValuePattern
+		if key == "asset_name" {
+			pattern = agentAssetPolicyNamePattern
+		}
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
+			return nil, false
+		}
+		values[key] = value
+	}
+	return values, true
+}
+
+// agentMCPAdmissionPendingSentence words the refusal of a tool call to an MCP
+// server whose install admission has not finished (GAP-0112) as a wait: the
+// scan is running and the same call can be tried again in about a minute.
+// The block sentence says the opposite ("Do not retry it"), and the raw
+// key=value reason read like a registry error (GAP-0210). "" for any other
+// reason.
+func agentMCPAdmissionPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["reason_code"] != "mcp-admission-pending" || values["asset_type"] != "mcp" || values["asset_name"] == "" {
+		return ""
+	}
+	return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ", so its tools are blocked until the scan finishes. " +
+		"Try the same call again in about a minute. If the scan rejects the server, its calls stay blocked."
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match
