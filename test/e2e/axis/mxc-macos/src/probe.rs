@@ -427,7 +427,9 @@ network: { mode: block }
             .collect::<Result<Vec<_>>>()?;
         let mut seatbelt = SeatbeltConfig::default();
         seatbelt.profile_override = if strict {
-            Some(strict_profile::build_profile(&policy, &self.root, executable)?)
+            Some(strict_profile::build_profile(
+                &policy, &self.root, executable,
+            )?)
         } else {
             None
         };
@@ -538,7 +540,10 @@ fn fixed_child(case: Case) -> Result<i32> {
             }
             denied_errno(fs::read(&paths.ungranted), "read ungranted canary")?;
             if matches!(case, Case::StrictBoundaries) {
-                denied_errno(fs::File::open("/private/etc/hosts"), "open fixed host canary")?;
+                denied_errno(
+                    fs::File::open("/private/etc/hosts"),
+                    "open fixed host canary",
+                )?;
             }
             denied_errno(
                 OpenOptions::new()
@@ -654,47 +659,47 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bo
         let errors = errors?;
         (|| -> Result<()> {
             match case {
-            Case::Boundaries => {
-                ensure!(
-                    outcome == WaitResult::Exited(23),
-                    "boundary child did not exit 23"
-                );
-                ensure!(
-                    contains(&output, b"BOUNDARIES_OK") && errors.is_empty(),
-                    "boundary acknowledgement missing"
-                );
-            }
-            Case::StrictBoundaries => {
-                ensure!(
-                    outcome == WaitResult::Exited(23),
-                    "strict boundary child did not exit 23"
-                );
-                ensure!(
-                    contains(&output, b"STRICT_BOUNDARIES_OK") && errors.is_empty(),
-                    "strict boundary acknowledgement missing"
-                );
-            }
-            Case::Pipe => {
-                ensure!(
-                    outcome == WaitResult::Exited(23),
-                    "pipe child did not exit 23"
-                );
-                ensure!(
-                    contains(&output, b"PIPE_ECHO_OK") && contains(&errors, b"PIPE_STDERR_OK"),
-                    "pipe echo or stderr missing"
-                );
-            }
-            Case::Timeout => {
-                ensure!(
-                    outcome == WaitResult::TimedOut,
-                    "MXC did not report a typed timeout"
-                );
-                ensure!(
-                    contains(&output, b"TIMEOUT_READY") && contains(&output, b"DELAYED_READY"),
-                    "timeout did not reach both live process stages"
-                );
-                ensure!(errors.is_empty(), "timeout child wrote stderr");
-            }
+                Case::Boundaries => {
+                    ensure!(
+                        outcome == WaitResult::Exited(23),
+                        "boundary child did not exit 23"
+                    );
+                    ensure!(
+                        contains(&output, b"BOUNDARIES_OK") && errors.is_empty(),
+                        "boundary acknowledgement missing"
+                    );
+                }
+                Case::StrictBoundaries => {
+                    ensure!(
+                        outcome == WaitResult::Exited(23),
+                        "strict boundary child did not exit 23"
+                    );
+                    ensure!(
+                        contains(&output, b"STRICT_BOUNDARIES_OK") && errors.is_empty(),
+                        "strict boundary acknowledgement missing"
+                    );
+                }
+                Case::Pipe => {
+                    ensure!(
+                        outcome == WaitResult::Exited(23),
+                        "pipe child did not exit 23"
+                    );
+                    ensure!(
+                        contains(&output, b"PIPE_ECHO_OK") && contains(&errors, b"PIPE_STDERR_OK"),
+                        "pipe echo or stderr missing"
+                    );
+                }
+                Case::Timeout => {
+                    ensure!(
+                        outcome == WaitResult::TimedOut,
+                        "MXC did not report a typed timeout"
+                    );
+                    ensure!(
+                        contains(&output, b"TIMEOUT_READY") && contains(&output, b"DELAYED_READY"),
+                        "timeout did not reach both live process stages"
+                    );
+                    ensure!(errors.is_empty(), "timeout child wrote stderr");
+                }
                 Case::Pty | Case::Delayed => bail!("invalid pipe case"),
             }
             Ok(())

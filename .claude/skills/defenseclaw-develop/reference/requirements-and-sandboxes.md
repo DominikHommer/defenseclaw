@@ -4,7 +4,7 @@ Open this when: your change adds or depends on something outside the Python whee
 
 Heavy requirements stay optional, off by default and never installed silently. With no common `sandbox` namespace, sandboxes remain off until `openshell.enabled` is set by `defenseclaw sandbox setup`. An explicitly present common namespace owns the master switch and runtime-lane enablement; preserve legacy restrictions for missing common policy leaves. Active AXIS configuration is refused until its execution and containment gates are qualified; configuration enablement alone is never availability evidence.
 
-`internal/sandboxruntime.ResolveExecutionPolicy` freezes the projected common
+`internal/sandboxruntime/policy.go` (`@sym:ResolveExecutionPolicy`) freezes the projected common
 policy through the existing pack resolver. Keep its private host evaluator as
 the broker authority; inspection JSON and a flattened provider allowlist cannot
 replace it. Rotate the host authority snapshot identity or generation when
