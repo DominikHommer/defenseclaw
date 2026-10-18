@@ -1875,13 +1875,22 @@ defenseclaw config set openshell.trusted_ca_bundle ~/certs/proxy-root-ca.pem
 defenseclaw sandbox doctor        # passes once the provider hosts are exempt
 ```
 
-The next run rebuilds the harness image with the CA in its system store,
-and each sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+The next run rebuilds the harness image with the CA in its system store.
+The build's own downloads (the agent's npm or Python package, curl) trust
+the CA too. Each sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
 `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at
 OpenShell's CA bundle plus your CAs, so Node, Python, Go, Rust, curl and git
 programs all trust them. Only the CAs in that file are added: DefenseClaw
 never imports your computer's whole trust store. On a managed computer your
 administrator sets the key in the managed configuration.
+
+A sandbox's model provider host is its model channel. OpenShell opens it
+only to the agent's own programs, for the model calls (for an npm or Python
+agent, its `node` or `python`), so other programs in the sandbox, such as a
+`curl` you run, cannot reach that host whatever the egress policy says.
+`defenseclaw sandbox unblock` and allow entries do not change that, and the
+unblock message says so. Every other host follows the egress policy and
+trusts the CAs above.
 
 DefenseClaw 1.0.2 does not have this key. `defenseclaw upgrade --version 1.0.2`
 sets it aside in `~/.defenseclaw/config-set-aside.json` before it installs

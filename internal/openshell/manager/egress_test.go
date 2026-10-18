@@ -1371,6 +1371,32 @@ func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
 	}
 }
 
+// GAP-0178, GAP-0183: an unblock of the sandbox's own model host said only
+// "unblocked", and the next fetch by another program was refused again by
+// the model host's provider rule, which opens the host to the agent's own
+// programs only. The unblock still lifts DefenseClaw's refusal, and says
+// that the other programs still cannot reach the model host; an unblock of
+// another host, or of the host for a sandbox without that model, does not.
+func TestAnUnblockOfTheModelHostSaysOtherProgramsStillCannotReachIt(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "mubox", Profile: "balanced", LLM: llm})
+	e.create(sandboxapi.CreateRequest{Name: "nomodel", Profile: "balanced", Project: e.otherProject("nomodel")})
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "api.anthropic.com", Sandbox: "mubox"})
+	must(t, err)
+	want := "unblocked api.anthropic.com for sandbox mubox" + modelHostUnblockNote("api.anthropic.com")
+	if resp.Message != want || !strings.Contains(resp.Message, "still refuses the other programs in the sandbox") {
+		t.Fatalf("message = %q, want %q", resp.Message, want)
+	}
+	for _, req := range []sandboxapi.UnblockRequest{{Host: "example.org", Sandbox: "mubox"}, {Host: "api.anthropic.com", Sandbox: "nomodel"}} {
+		resp, err := e.m.Unblock(t.Context(), req)
+		must(t, err)
+		if resp.Message != "unblocked "+req.Host+" for sandbox "+req.Sandbox {
+			t.Errorf("%+v: message = %q", req, resp.Message)
+		}
+	}
+}
+
 // GAP-0354 with GAP-0361: OpenShell refuses a model request whose body
 // carries a credential placeholder on the sandbox's own model host. That is
 // the model channel refusing this conversation, not a connection outside
