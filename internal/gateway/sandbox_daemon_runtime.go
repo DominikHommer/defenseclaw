@@ -935,10 +935,17 @@ func sandboxMayRun(phase string) bool {
 // install, driver or ports, or sandboxes turned off) is a restart, deferred
 // until no sandbox runs; anything else applies now.
 func (d *SandboxDaemon) refreshSettings(ctx context.Context) {
+	if err := d.readSettings(ctx); err != nil {
+		d.logf("refresh the managed settings: %v", err)
+	}
+}
+
+// readSettings is refreshSettings that returns the failed read; the
+// settings it had stay.
+func (d *SandboxDaemon) readSettings(ctx context.Context) error {
 	next, err := d.relay.Settings(ctx)
 	if err != nil {
-		d.logf("refresh the managed settings: %v", err)
-		return
+		return err
 	}
 	d.settingsMu.Lock()
 	prev := d.settings
@@ -950,6 +957,7 @@ func (d *SandboxDaemon) refreshSettings(ctx context.Context) {
 		d.pendingRestart.Store(true)
 	}
 	d.reloadConfig()
+	return nil
 }
 
 // sandboxDaemonSettingsTTL is how long a status or a create trusts the
@@ -980,6 +988,23 @@ func (d *SandboxDaemon) refreshStaleSettings(ctx context.Context) {
 func (d *SandboxDaemon) freshSettings(ctx context.Context) sandboxrelay.DaemonSettings {
 	d.refreshStaleSettings(ctx)
 	return d.currentSettings()
+}
+
+// createSettings is the managed settings a create judges with, read from
+// the managed gateway now and not trusted within sandboxDaemonSettingsTTL:
+// they carry the administrator's trusted CAs, which decide the image a new
+// sandbox may run. A run right after the administrator pointed
+// openshell.trusted_ca_bundle at a file the gateway refuses started from
+// the image of the CAs before, while doctor already said none can be used
+// (GAP-0201). A failed read refuses the create.
+func (d *SandboxDaemon) createSettings(ctx context.Context) (sandboxrelay.DaemonSettings, error) {
+	rctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	defer cancel()
+	if err := d.readSettings(rctx); err != nil {
+		d.logf("read the managed settings for a create: %v", err)
+		return sandboxrelay.DaemonSettings{}, managedRelayError(err)
+	}
+	return d.currentSettings(), nil
 }
 
 // sandboxDaemonRestartNeeded reports a settings change the running daemon
@@ -1904,7 +1929,10 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		}
 		d.unlockLifecycle()
 	}()
-	s := d.freshSettings(ctx)
+	s, err := d.createSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if err := managedSettingsRefusal(s); err != nil {
 		return nil, err
 	}

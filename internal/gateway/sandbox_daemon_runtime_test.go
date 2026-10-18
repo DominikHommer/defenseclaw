@@ -269,6 +269,9 @@ func TestSandboxIngressForwardingNeedsRegistrations(t *testing.T) {
 // fakeRelay is a sandboxrelay.Client whose calls the test sets.
 type fakeRelay struct {
 	settings func() (sandboxrelay.DaemonSettings, error)
+	// unchanged answers Settings when settings is nil: the managed
+	// gateway's settings as the daemon holds them (a create reads them).
+	unchanged func() sandboxrelay.DaemonSettings
 	resolve  func(sandboxrelay.ResolveRequest) (sandboxrelay.ResolveResponse, error)
 	current  func(string) (sandboxrelay.CurrentPolicy, error)
 	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
@@ -289,6 +292,9 @@ var _ sandboxrelay.Client = (*fakeRelay)(nil)
 func (f *fakeRelay) Settings(context.Context) (sandboxrelay.DaemonSettings, error) {
 	if f.settings != nil {
 		return f.settings()
+	}
+	if f.unchanged != nil {
+		return f.unchanged(), nil
 	}
 	return sandboxrelay.DaemonSettings{}, errors.New("no settings")
 }
@@ -469,6 +475,7 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		t.Fatal(err)
 	}
 	f.d = d
+	f.relay.unchanged = d.currentSettings
 	return f
 }
 
