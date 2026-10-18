@@ -18,6 +18,8 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::WaitForSingleObject;
 
+#[path = "dll_startup_protocol.rs"]
+mod dll_startup_protocol;
 #[path = "native_environment.rs"]
 mod native_environment;
 #[path = "native_identity.rs"]
@@ -30,9 +32,10 @@ const LIMIT: u64 = 64 * 1024;
 pub fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let loader_only = args.as_slice() == ["--loader-only"];
+    let dll_only = args.as_slice() == ["--dll-startup-only"];
     ensure!(
-        args.is_empty() || loader_only,
-        "only the fixed --loader-only diagnostic selector is accepted"
+        args.is_empty() || loader_only || dll_only,
+        "only the fixed --loader-only or --dll-startup-only diagnostic selector is accepted"
     );
     let system = PathBuf::from(std::env::var("SystemRoot")?).canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
@@ -65,7 +68,32 @@ pub fn run() -> Result<i32> {
         eprintln!("fixed contributor supervisor deadline exceeded");
         std::process::exit(124);
     });
-    if loader_only {
+    let mut dll_initialization_all_succeeded = false;
+    if dll_only {
+        let payload = executable
+            .with_file_name("defenseclaw-axis-windows-psec-dll-child.exe")
+            .canonicalize()?;
+        let mut completed = true;
+        dll_initialization_all_succeeded = true;
+        for case in dll_startup_protocol::CASES {
+            let mode = format!("dll-{}", case.label());
+            match run_case(&paths, &payload, &mode, &[0; 4]) {
+                Ok(loaded) => dll_initialization_all_succeeded &= loaded,
+                Err(error) => {
+                    completed = false;
+                    dll_initialization_all_succeeded = false;
+                    // Retain one bounded failure record even if native creation
+                    // failed before a child marker. Continue the other fixed
+                    // cases; timeout/cleanup/missing return never become success.
+                    println!(
+                        "{}",
+                        serde_json::json!({"case": mode, "case_error": format!("{error:#}")})
+                    );
+                }
+            }
+        }
+        ensure!(completed, "one or more fixed DLL cases did not complete");
+    } else if loader_only {
         let payload = executable
             .with_file_name("defenseclaw-axis-windows-psec-loader-child.exe")
             .canonicalize()?;
@@ -96,7 +124,14 @@ pub fn run() -> Result<i32> {
     fs::remove_dir_all(&root)
         .context("remove verified owned fixture after all SDK handles stopped")?;
     ensure!(!root.exists(), "owned fixture remains");
-    let checks = if loader_only {
+    let checks = if dll_only {
+        vec![
+            "three_fixed_dll_start_markers",
+            "three_fixed_dll_return_observations",
+            "retained_direct_process_handles_signaled",
+            "owned_fixture_removed",
+        ]
+    } else if loader_only {
         vec![
             "separate_std_loader_marker",
             "exit23",
@@ -125,7 +160,10 @@ pub fn run() -> Result<i32> {
             "translation_contract": "fixed-axis-hard-block-to-mxc-typed-1.0.0",
             "backend": "native_windows_psec_only", "production_qualification": false,
             "loader_only_diagnostic": loader_only, "checks": checks,
-            "scope": if loader_only { "separate std loader marker and exit23 only; no boundary, network or customer qualification" }
+            "dll_startup_only_diagnostic": dll_only,
+            "dll_initialization_all_succeeded": dll_initialization_all_succeeded,
+            "scope": if dll_only { "three fixed System32 DLL initialization observations; returned load errors are not compatibility success; no UI, boundary or customer qualification" }
+                else if loader_only { "separate std loader marker and exit23 only; no boundary, network or customer qualification" }
                 else { "fixed offline canaries; no terminal, proxy, credentials, model or general resource audit" }
         })
     );
@@ -219,7 +257,7 @@ impl Paths {
     }
 }
 
-fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> Result<()> {
+fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> Result<bool> {
     let policy = paths.policy(executable, if mode == "timeout" { 1 } else { 5 })?;
     ensure!(
         policy.runtime.provider == RuntimeProvider::Mxc,
@@ -237,7 +275,12 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         "offline policy required"
     );
     let mut argv = vec![executable.as_os_str().to_owned()];
-    if mode == "argv" {
+    let dll_case = dll_startup_protocol::CASES
+        .into_iter()
+        .find(|case| mode == format!("dll-{}", case.label()));
+    if let Some(case) = dll_case {
+        argv.push(std::ffi::OsString::from(case.selector()));
+    } else if mode == "argv" {
         argv.extend(
             [
                 "--fixed-child",
@@ -355,10 +398,34 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     let diagnostics = err
         .join()
         .map_err(|_| anyhow::anyhow!("stderr reader panic"))??;
-    ensure!(signaled, "retained direct process handle is not signaled");
+    if dll_case.is_some() {
+        let outcome_text = match &outcome {
+            Ok(value) => format!("{value:?}"),
+            Err(error) => format!("WaitError({error})"),
+        };
+        // Retain every actually available start/return/exit/timeout/error
+        // observation before propagating a native wait or cleanup refusal.
+        println!(
+            "{}",
+            serde_json::json!({"case": mode, "outcome": outcome_text, "direct_handle_signaled": signaled, "stdout": output, "stderr": diagnostics})
+        );
+    } else {
+        ensure!(signaled, "retained direct process handle is not signaled");
+    }
     control?;
     control_kill?;
     let outcome = outcome?;
+    if let Some(case) = dll_case {
+        ensure!(signaled, "retained DLL process handle is not signaled");
+        ensure!(
+            outcome == WaitResult::Exited(0),
+            "fixed DLL child did not exit normally: {outcome:?}"
+        );
+        ensure!(diagnostics.is_empty(), "fixed DLL child wrote stderr");
+        let observation = dll_startup_protocol::LoadResult::parse(case, &output)
+            .context("fixed DLL start/return transcript differs")?;
+        return Ok(observation == dll_startup_protocol::LoadResult::Loaded);
+    }
     match mode {
         "argv" => {
             ensure!(
@@ -424,7 +491,7 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         serde_json::json!({"case": mode, "outcome": format!("{outcome:?}"), "direct_handle_signaled": signaled, "stdout": output, "stderr": diagnostics})
     );
     drop(process);
-    Ok(())
+    Ok(true)
 }
 
 fn bounded(mut reader: Box<dyn Read + Send>) -> Result<String> {

@@ -35,6 +35,9 @@ const diagnosticScope = "fixed_windows_native_psec_loader_diagnostic"
 const boundaryName = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
 const boundaryVariant = "standalone_std_boundary_native_identity_environment"
 const boundaryScope = "fixed_windows_native_psec_boundary_native_identity_environment"
+const dllName = "bin/defenseclaw-axis-windows-psec-dll-child.exe"
+const dllVariant = "standalone_std_fixed_dll_startup_diagnostic"
+const dllScope = "fixed_windows_native_psec_dll_startup_diagnostic"
 const combinedLock = "3b29ecb06dd2a81266c84712f8d6e088605290f386e87498bb7a7472a005af69"
 const outputBound = 64 * 1024
 
@@ -140,6 +143,9 @@ func checkedReceipt(path, expectedSHA, mode string) (*receipt, pinnedImages, err
 	if mode == "standalone-boundary" {
 		variant, scope = boundaryVariant, boundaryScope
 		seen[boundaryName] = false
+	} else if mode == "dll-startup-only" {
+		variant, scope = dllVariant, dllScope
+		seen[boundaryName], seen[dllName] = false, false
 	} else if mode != "loader-only" {
 		return nil, nil, errors.New("unknown fixed mode")
 	}
@@ -380,6 +386,8 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 	command := []string{binary}
 	if mode == "loader-only" {
 		command = append(command, "--loader-only")
+	} else if mode == "dll-startup-only" {
+		command = append(command, "--dll-startup-only")
 	} else if mode != "standalone-boundary" {
 		return record, errors.New("unknown fixed mode")
 	}
@@ -476,9 +484,18 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 	return record, nil
 }
 
-func selectedMode(loader, boundary bool) (string, error) {
-	if loader == boundary {
+func selectedMode(loader, boundary, dll bool) (string, error) {
+	choices := 0
+	for _, selected := range []bool{loader, boundary, dll} {
+		if selected {
+			choices++
+		}
+	}
+	if choices != 1 {
 		return "", errors.New("exactly one fixed mode is required")
+	}
+	if dll {
+		return "dll-startup-only", nil
 	}
 	if boundary {
 		return "standalone-boundary", nil
@@ -489,11 +506,12 @@ func selectedMode(loader, boundary bool) (string, error) {
 func main() {
 	loaderOnly := flag.Bool("loader-only", false, "explicit fixed std-only loader diagnostic")
 	boundary := flag.Bool("standalone-boundary", false, "explicit fixed std-only boundary and literal argv cases")
+	dll := flag.Bool("dll-startup-only", false, "explicit fixed System32 DLL startup observations")
 	receiptPath := flag.String("receipt", "", "absolute independently verified receipt")
 	receiptSHA := flag.String("receipt-sha256", "", "reviewed receipt SHA256")
 	caseRoot := flag.String("case-root", "", "absolute fresh psec-headless-* case path")
 	flag.Parse()
-	mode, modeErr := selectedMode(*loaderOnly, *boundary)
+	mode, modeErr := selectedMode(*loaderOnly, *boundary, *dll)
 	if flag.NArg() != 0 || modeErr != nil {
 		fmt.Fprintln(os.Stderr, "exactly one fixed mode is required; no workload arguments accepted")
 		os.Exit(2)

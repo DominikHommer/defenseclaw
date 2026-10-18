@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -149,6 +150,82 @@ class BoundaryObservationTests(ObservationTests):
         cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
         cases[3]["outcome"] = "Exited(124)"
         self.assertFalse(self.validate({**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)}))
+
+
+class DLLObservationTests(ObservationTests):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mode = "dll-startup-only"
+        cases = [
+            {
+                "case": "dll-" + label,
+                "outcome": "Exited(0)",
+                "direct_handle_signaled": True,
+                "stdout": f"FIXED_DLL_START:{label}\nFIXED_DLL_RETURN:{label}:loaded\n",
+                "stderr": "",
+            }
+            for label in live.DLL_CASES
+        ]
+        final = json.loads(self.record["stdout"].splitlines()[-1])
+        final.update(
+            loader_only_diagnostic=False,
+            dll_startup_only_diagnostic=True,
+            dll_initialization_all_succeeded=True,
+            checks=sorted(live.DLL_CHECKS),
+        )
+        cases.append(final)
+        self.record.update(
+            mode=self.mode,
+            variant=live.artifact_verifier.DLL_VARIANT,
+            scope=live.artifact_verifier.DLL_SCOPE,
+            stdout="\n".join(json.dumps(case) for case in cases),
+        )
+
+    def with_cases(self, cases: list[dict]) -> dict:
+        return {**self.record, "stdout": "\n".join(json.dumps(case) for case in cases)}
+
+    def test_returned_dll_error_is_observed_without_claiming_compatibility(self) -> None:
+        cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+        cases[0]["stdout"] = "FIXED_DLL_START:user32\nFIXED_DLL_RETURN:user32:error:1114\n"
+        cases[-1]["dll_initialization_all_succeeded"] = False
+        self.assertTrue(self.validate(self.with_cases(cases)))
+        cases[-1]["dll_initialization_all_succeeded"] = True
+        self.assertFalse(self.validate(self.with_cases(cases)))
+
+    def test_missing_return_timeout_abnormal_exit_or_cleanup_never_pass(self) -> None:
+        for index in range(3):
+            for key, changed in [
+                ("stdout", ""),
+                ("stdout", f"FIXED_DLL_START:{live.DLL_CASES[index]}\n"),
+                ("outcome", "TimedOut"),
+                ("outcome", "Exited(-1073741502)"),
+                ("direct_handle_signaled", False),
+                ("stderr", "fixed synthetic failure"),
+            ]:
+                with self.subTest(index=index, key=key, changed=changed):
+                    cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+                    cases[index][key] = changed
+                    self.assertFalse(self.validate(self.with_cases(cases)))
+        self.assertFalse(self.validate({**self.record, "exit_code": 1}))
+
+    def test_wrong_case_duplicate_extra_marker_and_noncanonical_error_refuse(self) -> None:
+        for suffix in ["0", "00", "01114", "+1114", "4294967296", "1114\0", "1114\nextra"]:
+            with self.subTest(suffix=suffix):
+                cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+                cases[0]["stdout"] = f"FIXED_DLL_START:user32\nFIXED_DLL_RETURN:user32:error:{suffix}\n"
+                cases[-1]["dll_initialization_all_succeeded"] = False
+                self.assertFalse(self.validate(self.with_cases(cases)))
+        cases = [json.loads(line) for line in self.record["stdout"].splitlines()]
+        cases[1] = cases[0]
+        self.assertFalse(self.validate(self.with_cases(cases)))
+        self.assertFalse(self.validate(self.with_cases(cases + [cases[0]])))
+
+    def test_exact_three_case_order_matches_the_rust_protocol_source(self) -> None:
+        source = (Path(__file__).parent / "src" / "dll_startup_protocol.rs").read_text(encoding="utf-8")
+        matches = re.findall(r"pub const CASES: \[FixedDll; 3\] = \[([^\]]+)\];", source)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(tuple(name.lower() for name in re.findall(r"FixedDll::(\w+)", matches[0])), live.DLL_CASES)
+        self.assertEqual(live.DLL_CASES, ("user32", "gdi32", "shell32"))
 
 
 class BoundedCleanupTests(unittest.TestCase):

@@ -57,6 +57,9 @@ ALL_FILES = FILES | {"PROVENANCE.json", "WORKFLOW.json"}
 BOUNDARY_BINARY = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
 BOUNDARY_VARIANT = "standalone_std_boundary_native_identity_environment"
 BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_native_identity_environment"
+DLL_BINARY = "bin/defenseclaw-axis-windows-psec-dll-child.exe"
+DLL_VARIANT = "standalone_std_fixed_dll_startup_diagnostic"
+DLL_SCOPE = "fixed_windows_native_psec_dll_startup_diagnostic"
 IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
 BOUNDARY_OVERLAY_SHA256 = "56e2597f8a01a62ddbac1417f08a38dc8ec5c33b806861e46ea0ad73cbac3e77"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
@@ -95,6 +98,16 @@ PURE_ENVIRONMENT_TESTS = {
         "probe::native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
         "probe::native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
         "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
+    ],
+}
+PURE_DLL_TESTS = {
+    "defenseclaw-axis-windows-psec-dll-child": [
+        "dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",
+        "dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
+    ],
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",
+        "probe::dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
     ],
 }
 BOUNDARY_MODIFIED_PATHS = PATCHED_PATHS | {
@@ -154,9 +167,10 @@ BOUNDARY_OVERLAY_FILES = {
 
 
 def artifact_contract(mode: str = "loader-only") -> dict:
-    if mode not in {"loader-only", "standalone-boundary"}:
+    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only"}:
         raise ValueError("unknown fixed artifact mode")
-    boundary = mode == "standalone-boundary"
+    boundary = mode != "loader-only"
+    dll = mode == "dll-startup-only"
     sources = {name: SOURCE_PREFIX + name for name in SOURCE_FILES}
     binaries = (BINARY, LOADER_BINARY)
     files = set(FILES)
@@ -171,9 +185,14 @@ def artifact_contract(mode: str = "loader-only") -> dict:
         binaries += (BOUNDARY_BINARY,)
         files |= {"source/" + name for name in sources} | {BOUNDARY_BINARY}
         extra.add("SDK-ADMISSION-TESTS.json")
+    if dll:
+        for name in ("src/dll_startup_child.rs", "src/dll_startup_protocol.rs"):
+            sources[name] = SOURCE_PREFIX + name
+        binaries += (DLL_BINARY,)
+        files |= {"source/" + name for name in sources} | {DLL_BINARY}
     return {
-        "variant": BOUNDARY_VARIANT if boundary else VARIANT,
-        "scope": BOUNDARY_SCOPE if boundary else SCOPE,
+        "variant": DLL_VARIANT if dll else BOUNDARY_VARIANT if boundary else VARIANT,
+        "scope": DLL_SCOPE if dll else BOUNDARY_SCOPE if boundary else SCOPE,
         "sources": sources,
         "binaries": binaries,
         "files": files,
@@ -296,7 +315,7 @@ def verify_github(
         and (
             run.get("head_branch") == "codex/axis-sandbox-feasibility"
             or (
-                mode == "standalone-boundary"
+                mode in {"standalone-boundary", "dll-startup-only"}
                 and run.get("event") == "workflow_dispatch"
                 and run.get("head_branch") in {"codex/axis-native-build", "codex/axis-peer-experiments"}
             )
@@ -411,7 +430,7 @@ def verify(
         sha256(read("source/patches/mxc-strict-windows-psec.patch")) == provenance.get("mxc_patch_sha256"),
         "reviewed SDK overlay differs",
     )
-    if mode == "standalone-boundary":
+    if mode in {"standalone-boundary", "dll-startup-only"}:
         require(
             provenance.get("pure_native_environment_tests_passed") is True
             and provenance.get("pure_native_environment_tests") == PURE_ENVIRONMENT_TESTS,
@@ -462,6 +481,12 @@ def verify(
                 "upstream_lock_sha256": SDK_LOCK_SHA256,
             },
             "exact SDK admission test evidence differs",
+        )
+    if mode == "dll-startup-only":
+        require(
+            provenance.get("pure_dll_startup_tests_passed") is True
+            and provenance.get("pure_dll_startup_tests") == PURE_DLL_TESTS,
+            "fixed pure DLL startup test evidence differs",
         )
     toolchain = read("TOOLCHAIN.txt")
     require(
@@ -525,7 +550,9 @@ def main() -> None:
     parser.add_argument("--build-commit", type=commit_argument, required=True)
     parser.add_argument("--build-run", type=int, required=True)
     parser.add_argument("--artifact-id", type=int, required=True)
-    parser.add_argument("--variant", choices=("loader-only", "standalone-boundary"), default="loader-only")
+    parser.add_argument(
+        "--variant", choices=("loader-only", "standalone-boundary", "dll-startup-only"), default="loader-only"
+    )
     args = parser.parse_args()
     require(args.build_run > 0 and args.artifact_id > 0, "positive exact GitHub IDs required")
     result = verify(

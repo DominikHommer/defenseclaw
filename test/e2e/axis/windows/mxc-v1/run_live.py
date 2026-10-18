@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import sys
@@ -40,6 +41,13 @@ BOUNDARY_CHECKS = {
     "retained_direct_process_handles_signaled",
     "owned_fixture_removed",
 }
+DLL_CHECKS = {
+    "three_fixed_dll_start_markers",
+    "three_fixed_dll_return_observations",
+    "retained_direct_process_handles_signaled",
+    "owned_fixture_removed",
+}
+DLL_CASES = ("user32", "gdi32", "shell32")
 PROCESS_ERRORS = (OSError, subprocess.SubprocessError, ValueError, RuntimeError)
 
 
@@ -143,11 +151,12 @@ def close_finished_stream(stream, reader, errors: list[str]) -> None:
 
 
 def valid_observations(record: object, receipt: dict, mode: str = "loader-only") -> bool:
-    if mode not in {"loader-only", "standalone-boundary"}:
+    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only"}:
         return False
     contract = artifact_verifier.artifact_contract(mode)
     boundary = mode == "standalone-boundary"
-    checks = BOUNDARY_CHECKS if boundary else CHECKS
+    dll = mode == "dll-startup-only"
+    checks = DLL_CHECKS if dll else BOUNDARY_CHECKS if boundary else CHECKS
     if not isinstance(record, dict):
         return False
     if not {"binary_sha256", "build_commit", "build_run", "combined_lock_sha256", "artifact_id"} <= receipt.keys():
@@ -176,6 +185,34 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
         lines = [json.loads(line) for line in record["stdout"].splitlines() if line]
     except (KeyError, ValueError, TypeError, AttributeError):
         return False
+    dll_all_loaded = False
+    if dll:
+        # A returned nonzero loader error is an observation, not compatibility
+        # success. Missing START/return, abnormal exit, timeout or cleanup still
+        # fails this fixed measurement contract.
+        if len(lines) != 4 or not all(isinstance(line, dict) for line in lines):
+            return False
+        dll_all_loaded = True
+        for observation, label in zip(lines[:-1], DLL_CASES, strict=True):
+            output = observation.get("stdout")
+            if not isinstance(output, str):
+                return False
+            loaded = output == f"FIXED_DLL_START:{label}\nFIXED_DLL_RETURN:{label}:loaded\n"
+            if not loaded:
+                match = re.fullmatch(
+                    rf"FIXED_DLL_START:{label}\nFIXED_DLL_RETURN:{label}:error:([1-9][0-9]{{0,9}})\n", output
+                )
+                if match is None or int(match[1]) > 0xFFFFFFFF:
+                    return False
+                dll_all_loaded = False
+            if observation != {
+                "case": "dll-" + label,
+                "outcome": "Exited(0)",
+                "direct_handle_signaled": True,
+                "stdout": output,
+                "stderr": "",
+            } or observation.get("direct_handle_signaled") is not True:
+                return False
     expected_cases = (
         [
             ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
@@ -186,17 +223,18 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
         if boundary
         else [("loader", "Exited(23)", "FIXED_PSEC_LOADER_STARTED\n")]
     )
-    if len(lines) != len(expected_cases) + 1 or not all(isinstance(line, dict) for line in lines):
-        return False
-    for observation, (case, outcome, marker) in zip(lines[:-1], expected_cases, strict=True):
-        if observation.get("direct_handle_signaled") is not True or observation != {
-            "case": case,
-            "outcome": outcome,
-            "direct_handle_signaled": True,
-            "stdout": marker,
-            "stderr": "",
-        }:
+    if not dll:
+        if len(lines) != len(expected_cases) + 1 or not all(isinstance(line, dict) for line in lines):
             return False
+        for observation, (case, outcome, marker) in zip(lines[:-1], expected_cases, strict=True):
+            if observation.get("direct_handle_signaled") is not True or observation != {
+                "case": case,
+                "outcome": outcome,
+                "direct_handle_signaled": True,
+                "stdout": marker,
+                "stderr": "",
+            }:
+                return False
     final = lines[-1]
     return (
         final.get("axis_commit") == artifact_verifier.AXIS_COMMIT
@@ -204,7 +242,13 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
         and final.get("translation_contract") == "fixed-axis-hard-block-to-mxc-typed-1.0.0"
         and final.get("backend") == "native_windows_psec_only"
         and final.get("production_qualification") is False
-        and final.get("loader_only_diagnostic") is (not boundary)
+        and final.get("loader_only_diagnostic") is (mode == "loader-only")
+        and (
+            not dll or (
+                final.get("dll_startup_only_diagnostic") is True
+                and final.get("dll_initialization_all_succeeded") is dll_all_loaded
+            )
+        )
         and isinstance(final.get("checks"), list)
         and all(isinstance(check, str) for check in final["checks"])
         and len(final["checks"]) == len(checks)
@@ -241,13 +285,18 @@ def main() -> None:
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--loader-only", action="store_true")
     modes.add_argument("--standalone-boundary", action="store_true")
+    modes.add_argument("--dll-startup-only", action="store_true")
     parser.add_argument("--custody", type=Path, required=True)
     parser.add_argument("--custody-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--receipt-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
-    mode = "standalone-boundary" if args.standalone_boundary else "loader-only"
+    mode = (
+        "dll-startup-only" if args.dll_startup_only
+        else "standalone-boundary" if args.standalone_boundary
+        else "loader-only"
+    )
     contract = artifact_verifier.artifact_contract(mode)
     if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise RuntimeError("live probe requires native Windows x86_64")

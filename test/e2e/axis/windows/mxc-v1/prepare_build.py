@@ -23,6 +23,7 @@ TOOLCHAIN = "1.95.0"
 BINARY = "defenseclaw-axis-windows-psec-probe.exe"
 LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
 BOUNDARY_BINARY = "defenseclaw-axis-windows-psec-boundary-child.exe"
+DLL_BINARY = "defenseclaw-axis-windows-psec-dll-child.exe"
 ROOT = Path(__file__).resolve().parent
 PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
 LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
@@ -74,6 +75,16 @@ PURE_ENVIRONMENT_TESTS = {
         "probe::native_environment::tests::native_folder_requires_exact_private_branch_and_one_profile_component",
         "probe::native_environment::tests::native_environment_utf16_frame_roundtrips_and_refuses_tampering",
         "probe::native_identity::tests::returned_sid_pointer_and_body_must_fit_the_fixed_native_result",
+    ],
+}
+PURE_DLL_TESTS = {
+    "defenseclaw-axis-windows-psec-dll-child": [
+        "dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",
+        "dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
+    ],
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::dll_startup_protocol::tests::fixed_dll_selectors_never_accept_an_arbitrary_module_or_path",
+        "probe::dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
     ],
 }
 
@@ -236,7 +247,7 @@ def main() -> None:
     # Run only these exact pure parser/spelling/buffer tests. They perform no
     # filesystem query, environment lookup, process creation or PSEC operation.
     pure_tests = PURE_ENVIRONMENT_TESTS
-    for binary, names in pure_tests.items():
+    for binary, names in [*pure_tests.items(), *PURE_DLL_TESTS.items()]:
         for name in names:
             output = command(
                 ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--bin", binary, name, "--", "--exact"],
@@ -247,7 +258,7 @@ def main() -> None:
                 output.splitlines().count(f"test {name} ... ok") != 1
                 or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in output
             ):
-                raise RuntimeError("fixed pure native environment test did not pass exactly once")
+                raise RuntimeError("fixed pure contributor test did not pass exactly once")
     if digest(lock) != lock_before:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
@@ -269,6 +280,8 @@ def main() -> None:
         Path("src/boundary_child.rs"),
         Path("src/native_environment.rs"),
         Path("src/native_identity.rs"),
+        Path("src/dll_startup_child.rs"),
+        Path("src/dll_startup_protocol.rs"),
         Path("patches/mxc-strict-windows-psec.patch"),
         Path("patches/mxc-literal-argv.patch"),
         Path("patches/mxc-windows-literal-argv.patch"),
@@ -278,7 +291,7 @@ def main() -> None:
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    for binary in (BINARY, LOADER_BINARY, BOUNDARY_BINARY):
+    for binary in (BINARY, LOADER_BINARY, BOUNDARY_BINARY, DLL_BINARY):
         shutil.copyfile(ROOT / "target" / "release" / binary, artifact / "bin" / binary)
         (artifact / "bin" / binary).chmod(0o755)
     (artifact / "upstream").mkdir()
@@ -291,7 +304,7 @@ def main() -> None:
     (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
     provenance = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
-        "variant": "standalone_std_boundary_native_identity_environment",
+        "variant": "standalone_std_fixed_dll_startup_diagnostic",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "mxc_patch_sha256": digest(PATCH),
@@ -309,9 +322,11 @@ def main() -> None:
         "pure_private_environment_spelling_test_passed": True,
         "pure_native_environment_tests": pure_tests,
         "pure_native_environment_tests_passed": True,
+        "pure_dll_startup_tests": PURE_DLL_TESTS,
+        "pure_dll_startup_tests_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
-        "scope": "fixed_windows_native_psec_boundary_native_identity_environment",
+        "scope": "fixed_windows_native_psec_dll_startup_diagnostic",
         "production_certification": False,
         "files": {
             path.relative_to(artifact).as_posix(): digest(path)

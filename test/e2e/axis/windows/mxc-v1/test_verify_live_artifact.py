@@ -259,6 +259,10 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         with self.assertRaisesRegex(ValueError, "build contract"):
             self.run_verify("loader-only")
 
+    def test_identity_artifact_cannot_be_accepted_as_four_image_dll_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "build contract"):
+            self.run_verify("dll-startup-only")
+
     def test_boundary_requires_exact_nonignored_sdk_test_evidence(self) -> None:
         for name, value in [("passed", 9), ("native_file_fixture_tests", True), ("sandbox_or_payload_execution", 0)]:
             with self.subTest(name=name):
@@ -303,6 +307,61 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             self.run_verify()
 
 
+class DLLArtifactVerificationTests(BoundaryArtifactVerificationTests):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mode = "dll-startup-only"
+        contract = verify.artifact_contract(self.mode)
+        for name, git_path in contract["sources"].items():
+            if "source/" + name not in self.files:
+                self.files["source/" + name] = ("synthetic:" + name).encode()
+            self.sources[git_path] = self.files["source/" + name]
+        self.files[verify.DLL_BINARY] = self.files[verify.BINARY]
+        self.provenance.update(
+            variant=verify.DLL_VARIANT,
+            scope=verify.DLL_SCOPE,
+            pure_dll_startup_tests=verify.PURE_DLL_TESTS,
+            pure_dll_startup_tests_passed=True,
+        )
+        self.write_artifact()
+
+    def test_identity_artifact_cannot_be_accepted_as_four_image_dll_mode(self) -> None:
+        # This subclass intentionally owns a distinct four-image artifact.
+        self.assertEqual(len(self.run_verify()["binaries"]), 4)
+        with self.assertRaisesRegex(ValueError, "build contract"):
+            self.run_verify("standalone-boundary")
+
+    def test_fourth_image_and_fixed_source_cannot_change(self) -> None:
+        (self.artifact / verify.DLL_BINARY).write_bytes(b"changed fourth PE")
+        with self.assertRaisesRegex(ValueError, "artifact file changed"):
+            self.run_verify()
+        self.write_artifact()
+        self.files["source/src/dll_startup_child.rs"] = b"unreviewed DLL child"
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "source Git blob differs"):
+            self.run_verify()
+
+    def test_dll_pure_test_receipt_and_builder_inventory_are_exact(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "fixed_dll_build", Path(__file__).with_name("prepare_build.py")
+        )
+        assert spec is not None and spec.loader is not None
+        build = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build)
+        self.assertEqual(build.PURE_DLL_TESTS, verify.PURE_DLL_TESTS)
+        self.assertEqual(sum(map(len, verify.PURE_DLL_TESTS.values())), 4)
+        for name, changed in [
+            ("pure_dll_startup_tests_passed", False),
+            ("pure_dll_startup_tests", {}),
+        ]:
+            with self.subTest(name=name):
+                original = self.provenance[name]
+                self.provenance[name] = changed
+                self.write_artifact()
+                with self.assertRaisesRegex(ValueError, "pure DLL startup test evidence"):
+                    self.run_verify()
+                self.provenance[name] = original
+
 class BoundedFileTests(unittest.TestCase):
     def test_growth_after_stat_cannot_exceed_the_read_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -338,6 +397,8 @@ class GitHubBuildAdmissionTests(unittest.TestCase):
             ("loader-only", "codex/axis-sandbox-feasibility", "push", True),
             ("standalone-boundary", "codex/axis-native-build", "workflow_dispatch", True),
             ("standalone-boundary", "codex/axis-peer-experiments", "workflow_dispatch", True),
+            ("dll-startup-only", "codex/axis-peer-experiments", "workflow_dispatch", True),
+            ("dll-startup-only", "codex/axis-native-build", "push", False),
             ("loader-only", "codex/axis-native-build", "workflow_dispatch", False),
             ("loader-only", "codex/axis-peer-experiments", "workflow_dispatch", False),
             ("standalone-boundary", "codex/axis-native-build", "push", False),

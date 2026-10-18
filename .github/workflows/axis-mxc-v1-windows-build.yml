@@ -60,6 +60,7 @@ jobs:
           files = ['Cargo.toml', 'README.md', 'prepare_build.py', 'test_prepare_build.py',
                    'src/main.rs', 'src/probe.rs', 'src/loader_child.rs', 'src/boundary_child.rs',
                    'src/native_environment.rs', 'src/native_identity.rs',
+                   'src/dll_startup_child.rs', 'src/dll_startup_protocol.rs',
                    'patches/mxc-strict-windows-psec.patch', 'patches/mxc-windows-literal-argv.patch',
                    'patches/mxc-windows-process-identity.patch']
           if (checkout / prefix / 'Cargo.lock').is_file(): files.append('Cargo.lock')

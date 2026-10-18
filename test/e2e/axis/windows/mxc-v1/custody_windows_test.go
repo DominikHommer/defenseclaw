@@ -122,18 +122,78 @@ func TestNativeIdentityReceiptMatchesVerifierAuthority(t *testing.T) {
 }
 
 func TestModesRequireExactlyOneExplicitChoice(t *testing.T) {
-	for _, choice := range [][2]bool{{false, false}, {true, true}} {
-		if _, err := selectedMode(choice[0], choice[1]); err == nil {
+	for _, choice := range [][3]bool{{false, false, false}, {true, true, false}, {true, false, true}, {false, true, true}, {true, true, true}} {
+		if _, err := selectedMode(choice[0], choice[1], choice[2]); err == nil {
 			t.Fatal("ambiguous fixed mode accepted")
 		}
 	}
 	for _, choice := range []struct {
-		loader, boundary bool
-		mode             string
-	}{{true, false, "loader-only"}, {false, true, "standalone-boundary"}} {
-		if mode, err := selectedMode(choice.loader, choice.boundary); err != nil || mode != choice.mode {
+		loader, boundary, dll bool
+		mode                  string
+	}{{true, false, false, "loader-only"}, {false, true, false, "standalone-boundary"}, {false, false, true, "dll-startup-only"}} {
+		if mode, err := selectedMode(choice.loader, choice.boundary, choice.dll); err != nil || mode != choice.mode {
 			t.Fatal("explicit mode differs")
 		}
+	}
+}
+
+func TestDLLReceiptMatchesVerifierAndRequiresAllFourImages(t *testing.T) {
+	source, err := os.ReadFile("verify_live_artifact.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, expected := range map[string]string{"DLL_VARIANT": dllVariant, "DLL_SCOPE": dllScope, "DLL_BINARY": dllName} {
+		matches := regexp.MustCompile(`(?m)^`+name+` = "([^"\r\n]+)"\r?$`).FindAllSubmatch(source, -1)
+		if len(matches) != 1 || string(matches[0][1]) != expected {
+			t.Fatalf("verifier and custody DLL %s differ", name)
+		}
+	}
+	path, value := syntheticBoundaryReceipt(t)
+	pin := writeReceipt(t, path, value, nil)
+	if _, images, err := checkedReceipt(path, pin, "dll-startup-only"); err == nil {
+		images.Close()
+		t.Fatal("three-image identity receipt admitted as DLL diagnostic")
+	}
+	value.Scope, value.Variant = dllScope, dllVariant
+	pin = writeReceipt(t, path, value, nil)
+	if _, images, err := checkedReceipt(path, pin, "dll-startup-only"); err == nil {
+		images.Close()
+		t.Fatal("DLL receipt without its fourth image admitted")
+	}
+	content := []byte("synthetic bytes; never executed")
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(dllName)), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	value.Binaries = append(value.Binaries, component{Path: dllName, SHA256: value.BinarySHA, Size: value.BinarySize})
+	pin = writeReceipt(t, path, value, nil)
+	_, images, err := checkedReceipt(path, pin, "dll-startup-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 4 {
+		images.Close()
+		t.Fatal("DLL receipt did not hold all four images")
+	}
+	if file, err := os.OpenFile(filepath.Join(value.Artifact, filepath.FromSlash(dllName)), os.O_WRONLY, 0); err == nil {
+		file.Close()
+		images.Close()
+		t.Fatal("fourth image permits writes while pinned")
+	}
+	if err := images.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"loader-only", "standalone-boundary"} {
+		if _, images, err := checkedReceipt(path, pin, mode); err == nil {
+			images.Close()
+			t.Fatal("DLL receipt admitted under a historical mode")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(dllName)), []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, images, err := checkedReceipt(path, pin, "dll-startup-only"); err == nil {
+		images.Close()
+		t.Fatal("tampered fourth image admitted")
 	}
 }
 

@@ -174,10 +174,10 @@ mxc-v1/
 ```
 
 Run `python prepare_build.py generate-lock`. It verifies source identities,
-applies the three reviewed MXC overlays in order, generates a combined lock, builds with
-`--locked`, compiles probe tests, runs one selected pure path-spelling test, and packages the
-three binaries, source, patches, licenses, locks, compiler identity and SHA256
-provenance. It fingerprints the 12 modified and three added SDK files before
+applies the four reviewed MXC overlays in order, generates a combined lock, builds with
+`--locked`, compiles probe tests, runs the exact selected pure environment and DLL-protocol tests, and packages the
+four binaries, source, patches, licenses, locks, compiler identity and SHA256
+provenance. It fingerprints the 13 modified and three added SDK files before
 and after the build; an unstaged Git diff alone cannot detect changes to added
 files. No dependency has been added for the separate std-only child.
 The pure Python build-helper gates run with:
@@ -206,7 +206,7 @@ installation; Git for Windows' Unix linker is not a compatible MSVC linker.
 ## Fixed live scope, after review
 
 The probe accepts no caller command, path, policy or environment flags. Its only
-optional operator selector is the fixed `--loader-only` diagnostic. Its
+optional operator selectors are the fixed `--loader-only` and `--dll-startup-only` diagnostics. Its
 standalone child accepts only fixed argv, boundary, exit-23 and timeout cases. It
 clears the supervisor environment before invoking SDK code or creating threads;
 the child receives only explicit system/private state entries with environment
@@ -230,7 +230,7 @@ bounded receiver window; Internet/DNS and proxy enforcement remain unqualified.
 The SDK's actual native entry point supplies the PSEC evidence; the child does
 not assert `TokenIsAppContainer`, because a current PSEC token is a different
 contract from the old BaseContainer experiment. The supervisor retains a
-read-only handle opened for the returned direct-child identity before wait,
+read/query handle duplicated from the SDK's retained direct-child process handle before wait,
 checks it becomes signaled, and never signals an inferred PID. General process
 tree and parent-death qualification require additional controlled live cases.
 The verified owned fixture path is removed only after handles have stopped.
@@ -259,3 +259,56 @@ canonicalizes the fixture, while Windows can return its current directory
 without that prefix. Case folding, slash changes, dot components, other drives,
 UNC/device paths and a different home remain refused. A selected pure Rust
 test exercises these cases during the build; it performs no sandbox operation.
+
+## Separate fixed DLL initialization diagnostic: source only
+
+The new four-PE artifact has variant
+`standalone_std_fixed_dll_startup_diagnostic` and scope
+`fixed_windows_native_psec_dll_startup_diagnostic`. It requires a new independently
+verified receipt. The three-PE native-environment receipt retains its own exact
+variant and cannot authorize this diagnostic. No new artifact or native run has
+qualified this source addition.
+
+`run_live.py --dll-startup-only` selects exactly three fresh native PSEC children,
+one each for `user32.dll`, `gdi32.dll` and `shell32.dll`. The fourth PE is a separate
+std-only program using direct Kernel32 FFI. It accepts only three literal
+selectors, flushes a fixed START marker, then calls `LoadLibraryExW` with
+`LOAD_LIBRARY_SEARCH_SYSTEM32`. It reports either a loaded marker or the immediate
+numeric `GetLastError` value. It does not call an exported UI function or any SDK,
+profile, token, network or filesystem mutation API. It disables error dialogs in
+its own process. Its initial PE import inventory must be independently checked
+before execution to ensure the diagnostic itself does not import a target DLL.
+
+All existing strict PSEC, filesystem, network and UI settings remain unchanged.
+Each child has a five-second MXC timeout; the parent retains its twenty-second
+watchdog, the owned-Job wrapper its thirty-second deadline, and the outer Python
+driver its existing bounded wait. Every case's raw start/return/exit/timeout
+observation is retained. Abnormal exit, timeout, missing return, malformed output,
+unsignaled retained handle or cleanup failure fails the diagnostic. A normal
+returned DLL error may complete a measurement, but the final
+`dll_initialization_all_succeeded` value is false; a zero wrapper exit alone is
+not a DLL compatibility claim. The pure Rust protocol tests never load a DLL.
+
+The original SDK-bearing self-payload has 37 distinct case-insensitive imported
+DLL names; the separate std-only boundary child has ten. Both import VCRuntime,
+so its presence alone does not explain the original startup failure. The retained
+SDK image imports `SHGetKnownFolderPath` from Shell32; this host's inspected
+Shell32 image imports User32 and GDI32. This is a dependency hypothesis until
+the new fixed diagnostic actually observes each load. Microsoft documents
+[the Win32k policy](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-process_mitigation_system_call_disable_policy)
+as denying GUI system calls, and
+[LoadLibrary](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryw)
+as calling DLL process-attach initialization. The
+[System32-only load flag](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw)
+excludes normal CWD/PATH searches for the module and its dependencies.
+
+Enabling Win32k is not implemented by this diagnostic. An explicit future
+compatibility experiment would have to preserve all PSEC UI restrictions and
+apply/verify matching Job UI restrictions before resuming a child. Those
+[restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions)
+do not themselves establish a private window station or desktop. The pinned
+runner currently leaves `STARTUPINFO.lpDesktop` null. A private noninteractive
+station/desktop would need separate reviewed object ownership and access tests;
+[CreateWindowStation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowstationw)
+also restricts named creation to administrators. No UI policy, window station,
+desktop, existing ACL or host namespace is changed here.
