@@ -16,6 +16,23 @@ At dispatch, compare the fresh trusted host authority binding and serialize
 authority rotation with admission and launch, or condition launch on that
 generation. Never accept an API client's binding as current host state.
 
+`internal/sandboxruntime/launch.go` (`@sym:LaunchGate`) serializes that boundary.
+Its callback reads the actual owner authority source; its last published binding
+detects out-of-transaction changes and rollback. Every authority writer must
+enter the rotation transaction before publishing new facts. Prepared handles
+copy complete launch inputs and receipts, consume once and refuse serialization.
+On partial launch, cancellation or an identity mismatch, clean up the exact
+owned resource handle; failed cleanup closes admission. The host controller
+still reserves unique session identities, aborts abandoned preparations and
+owns successful workloads. A gate is not adapter qualification or a session store.
+
+`internal/openshell/sandboxcli/session_transport.go` (`@sym:SessionTransport`)
+separates command execution from session orchestration. Bind the transport
+explicitly to the recorded target; pass literal argv without shell rendering.
+Missing or unsupported transports refuse. The existing fixed Unix image recipes
+remain explicitly OpenShell-only. Preserve terminal diagnostic custody, output
+filtering, interrupts, session notices and workspace review when adding adapters.
+
 ## Requirements: disclosure
 
 IDs live only in `reference/checklist.md`. These rows add detail and carry no IDs.
