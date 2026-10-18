@@ -84,12 +84,14 @@ until the user interrupted it.
 
 When a hook would fail closed on one of these events because the gateway is
 down or answers 5xx, its answer is unusable or the hook token is missing, it
-gives the agent's neutral allow instead, says on stderr that it is not blocking
-the event, and records the failure in `hook-failures.jsonl` with fail mode
-`open`. The agent ends the turn, and the next prompt or tool call is blocked as
-before until DefenseClaw is available. This holds for per-user hooks, the
-OpenShell sandbox hooks and the standalone managed hooks on Linux, macOS and
-Windows. Secure Client hooks keep their results.
+gives the agent's neutral allow instead and says on stderr that it is not
+blocking the event. Per-user hooks on Linux, macOS and Windows also record the
+failure in `hook-failures.jsonl` with fail mode `open`. In 1.0.3, OpenShell
+sandbox hooks and standalone managed hooks do not persist that failure row;
+that logging gap is a P3 follow-up for 1.0.4. The agent ends the turn, and the
+next prompt or tool call is blocked as before until DefenseClaw is available.
+The neutral allow holds for per-user, OpenShell sandbox and standalone managed
+hooks on Linux, macOS and Windows. Secure Client hooks keep their results.
 
 The hook has to know the event first. Codex and GitHub Copilot name it in the
 registered hook command; the other connectors read it from the payload's
