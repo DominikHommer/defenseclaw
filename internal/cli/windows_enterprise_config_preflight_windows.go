@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -230,7 +231,7 @@ func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result
 		result.AddWarning("rule_pack_readable_by_users", problem)
 	}
 	result.AddSandboxPolicyWarnings(cfg, "windows")
-	result.AddFailModePolicyWarnings(cfg)
+	result.AddFailModePolicyWarnings(cfg, enterprisepolicy.StandaloneConnectors(cfg))
 }
 
 // windowsEnterpriseStandaloneTransactionPending reports a lifecycle

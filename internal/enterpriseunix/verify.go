@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
@@ -1153,7 +1154,7 @@ func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
 		return
 	}
 	r.AddSandboxPolicyWarnings(cfg, env.GOOS)
-	r.AddFailModePolicyWarnings(cfg)
+	r.AddFailModePolicyWarnings(cfg, enterprisepolicy.StandaloneConnectors(cfg))
 	if problem := env.sandboxPackDirProblem(ctx, cfg); problem != "" {
 		r.AddWarning(codeSandboxPackDir, problem)
 	}

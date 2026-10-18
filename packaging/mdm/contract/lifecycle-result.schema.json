@@ -100,6 +100,7 @@
       }
     },
     "destinations": { "type": "array", "items": { "$ref": "#/$defs/destination" }, "description": "status only: the observability destinations the installed config.yaml compiles to (the compiler of defenseclaw observability plan), with the effective redaction profiles of each one's send routes." },
+    "hook_fail_modes": { "type": "object", "additionalProperties": { "enum": ["open", "closed"] }, "description": "standalone only: the resolved hook fail mode of each connector the installed config protects (closed for every connector outside Secure Client)." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },

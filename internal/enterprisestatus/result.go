@@ -179,8 +179,13 @@ type Result struct {
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
 	Destinations []Destination `json:"destinations,omitempty"`
-	LogPath      string        `json:"log_path,omitempty"`
-	ExitCode     int           `json:"exit_code"`
+	// HookFailModes is, on a standalone deployment, the resolved hook fail
+	// mode (open or closed) of each connector the installed config
+	// protects, from the resolver the hooks are rendered with
+	// (AddFailModePolicyWarnings, rel-1-0-3 GAP-0037).
+	HookFailModes map[string]string `json:"hook_fail_modes,omitempty"`
+	LogPath       string            `json:"log_path,omitempty"`
+	ExitCode      int               `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).
