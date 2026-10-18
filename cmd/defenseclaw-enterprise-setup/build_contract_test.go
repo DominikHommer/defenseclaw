@@ -85,6 +85,9 @@ func TestManagedSetupOmitsFleetCompiler(t *testing.T) {
 	if strings.Contains(readEnterpriseSetupContractFile(t, "packaging/windows/standalone/build-setup.sh"), "policy_compiler.py") {
 		t.Fatal("standalone build recipe includes the Fleet compiler")
 	}
+	if strings.Contains(readEnterpriseSetupContractFile(t, "cmd/windows-avc-assembler/main.go"), "policy_compiler.py") {
+		t.Fatal("signed standalone assembler includes the Fleet compiler")
+	}
 	compiler, err := os.ReadFile(filepath.Join(enterpriseSetupRepositoryRoot(t), "edge-connector", "tools", "policy_compiler.py"))
 	if err != nil {
 		t.Fatal(err)
