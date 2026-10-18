@@ -6,9 +6,10 @@ credentials, and telemetry; runtime adapters supply the execution boundary.
 After selecting AXIS as the default, the customer continues to use
 `defenseclaw sandbox run claude`.
 
-Status: draft design for Claude review, October 17, 2026. This PR contains the
-plan only. Implementation starts after Claude concludes that the plan is good
-and blocking review findings are resolved.
+Status: draft design, October 17, 2026. This PR contains the plan only.
+[Claude's review approved starting Stages 1 and 2](https://github.com/cisco-ai-defense/defenseclaw/pull/1307#issuecomment-6243746197).
+That approval does not cover merging or releasing AXIS support; later production
+stages retain their acceptance gates.
 
 ## Baseline and prerequisite
 
@@ -76,6 +77,24 @@ Enabling or installing a runtime does not change the default. Setup offers an
 explicit default selection and saves it through the shared configuration writer.
 On managed hosts, administrator policy decides which runtimes are enabled and
 whether a user can choose between them.
+
+Introduce `sandbox` additively; do not rename or remove `openshell` in this
+milestone. When `sandbox` is absent, the supported `openshell` configuration is
+the policy source. When present, `sandbox` is the common policy source, while
+OpenShell-specific binary, gateway, driver, and image settings remain under
+`openshell`. `sandbox.runtimes.openshell.enabled` enables that adapter; it does
+not replace the entire existing OpenShell configuration.
+
+There is no load-order precedence for overlapping policy values. Reject
+conflicting explicitly configured common values under `openshell` and `sandbox`
+with a field-specific error; matching duplicates may be accepted during the
+transition. Implicit loader defaults do not count as explicit conflicts.
+Administrator restrictions cannot be weakened during normalization. Add the
+optional fields to the closed schema and both language mirrors together, using
+loader defaults without bumping the configuration version for this pure
+addition. Any later removal or relocation of existing keys needs a separately
+reviewed schema version and Go migration that preserves the supported
+0.8.x-to-1.0.x upgrade chain.
 
 Resolve new sessions in this order: explicit runtime flag, configured default,
 then the established host-specific `auto` selection. Existing Linux and macOS
@@ -206,7 +225,10 @@ settings at the actual containment boundary, use scoped and revocable hook
 authentication, and run a hook-fire probe against the exact harness bundle.
 Prove allow/block outcomes and resist hostile user/project settings. Keep the
 hook path bounded; do not add runtime discovery or credential initialization to
-each tool call. Strong permission-bypass operation requires independent proof
+each tool call. AXIS hooks and relays fail closed on errors, timeouts, or an
+unreachable policy authority in every offered deployment mode. Secure Client's
+separate fail-mode rules do not apply to this preview. Strong permission-bypass
+operation requires independent proof
 of containment, hook integrity, credential scope, and mandatory egress.
 
 Use copied workspaces initially, with existing secret masks, bounded staging,
@@ -251,7 +273,7 @@ telemetry, and tests. No incomplete runtime is advertised as usable.
 | --- | --- | --- |
 | 1 | Reconcile current main with Windows abstraction work and preserve the complete current controller/API contract. | Review establishes one shared abstraction, managed-mode ownership, backwards compatibility, and prerequisite order. |
 | 2 | Build a small Linux Claude feasibility prototype against pinned AXIS. | Deterministic lifecycle, real interactive and headless Claude, authenticated hooks, API-key streaming, private HOME, and strict egress pass. Any upstream blockers have a concrete resolution. |
-| 3 | Add common runtime selection, capability reporting, configuration, and routing without enabling AXIS. | Existing OpenShell and managed-daemon tests pass; defaults, old records, and configuration round trips remain compatible. |
+| 3 | Add common runtime selection, capability reporting, configuration, routing, and registry identity fields without enabling AXIS. | Existing OpenShell and managed-daemon tests pass; defaults, old records, and configuration round trips remain compatible. The same PR updates `defenseclaw.sandbox.runtime` and `defenseclaw.sandbox.driver`, adds proposed `defenseclaw.sandbox.runtime_version` and `defenseclaw.sandbox.backend`, and generates/tests affected telemetry outputs. |
 | 4 | Implement the AXIS backend, supervised I/O, session custody, artifacts, workspace handling, hooks, policy rendering, and scoped model transport. | Backend conformance, negative enforcement, failure cleanup, and crash recovery pass. Only proven capabilities are admitted. |
 | 5 | Expose AXIS setup/default selection, doctor, TUI, wrappers, teardown, package detection, and telemetry. | AXIS-only and mixed-runtime workflows work through DefenseClaw. Both CLIs preserve arguments and exit codes; the UI uses reported capabilities. |
 | 6 | Qualify the Linux preview and the separately offered deployment/authentication combinations. | Live acceptance evidence identifies host, artifact digests, harness version, policy, commands, and results. Support claims match that exact scope. |
