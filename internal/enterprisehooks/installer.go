@@ -740,7 +740,49 @@ func validateActivationSurfaces(
 	return nil
 }
 
+// standaloneInHomeConfigLink returns the file an agent config symlink names
+// when the per-user worker writes through it: the worker runs as the
+// account (standalone Unix), and the link, followed to its end, names a
+// regular file inside the home whose folders below the home are real
+// directories the account owns, none of them group or other writable. A
+// dotfile manager keeps ~/.codex/config.toml as a link to a file in
+// ~/dotfiles; install replaced that link with a regular file and left the
+// linked file without DefenseClaw's entries (rel-1-0-3 GAP-0205, rel-1-0-2
+// GAP-0642). Any other link is not returned: install refuses it, or a
+// repair replaces the link itself and never touches the file it names.
+func standaloneInHomeConfigLink(home, path string, uid int) (string, bool) {
+	if !standalonePerUserRepair(uid) {
+		return "", false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	cleanHome := filepath.Clean(home)
+	realHome, err := filepath.EvalSymlinks(cleanHome)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(realHome, resolved)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", false
+	}
+	target := filepath.Join(cleanHome, rel)
+	if err := validateExistingUserFile(cleanHome, target, uid, "linked hook config"); err != nil {
+		return "", false
+	}
+	return target, true
+}
+
 func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRepair bool) error {
+	if target, ok := standaloneInHomeConfigLink(home, path, uid); ok {
+		// The link stays; the file it names is the one checked and written.
+		path = target
+	}
 	if !allowMissing && !allowRepair {
 		if !standaloneProfileProcess() {
 			return validateExistingUserFile(home, path, uid, "hook config")
@@ -911,6 +953,9 @@ func validateOptionalExistingUserFileRepair(home, path string, uid int, label st
 	path = filepath.Clean(strings.TrimSpace(path))
 	if path == "" {
 		return nil
+	}
+	if target, ok := standaloneInHomeConfigLink(home, path, uid); ok {
+		path = target
 	}
 	if err := validateOptionalUserPathPrefix(home, path, uid, label, false); err != nil {
 		return err
@@ -1083,6 +1128,9 @@ func hardenInstallFootprint(
 	for _, path := range sortedUnique(append(append([]string{}, hookConfigPaths...), footprint.PatchedFiles...)) {
 		if strings.TrimSpace(path) == "" {
 			continue
+		}
+		if target, ok := standaloneInHomeConfigLink(home, filepath.Clean(path), uid); ok {
+			path = target
 		}
 		if err := validateExistingUserFile(home, filepath.Clean(path), uid, "patched file"); err != nil {
 			return err
