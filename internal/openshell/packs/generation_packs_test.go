@@ -33,7 +33,7 @@ func TestGenerationPacksKeepTheLastGoodPack(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	good := "version: 1\nname: corp\nnetwork:\n  mode: allowlist\n"
+	good := "version: 1\nname: corp\nextends: balanced\negress: {allow: [artifacts.example.com]}\n"
 	if err := os.WriteFile(file, []byte(good), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestGenerationPacksKeepTheLastGoodPack(t *testing.T) {
 	}
 	UseGenerationPacks(dir, map[string]*Pack{file: pack})
 
-	if err := os.WriteFile(file, []byte("version: 1\nname: corp\nnetwork:\n  mode: unbuildable\n"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("version: 1\nname: corp\nextends: balanced\nnetwork:\n  mode: unbuildable\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadGenerationPack(s, file, dir); err == nil || !strings.Contains(err.Error(), "unbuildable") {
