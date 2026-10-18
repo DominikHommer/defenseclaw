@@ -14,6 +14,9 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
 )
 
 func TestParseEnterpriseSetupInstallContract(t *testing.T) {
@@ -145,6 +148,116 @@ func TestPlaceholderBuildFailsClosedWithoutEnterprisePayload(t *testing.T) {
 	_, err := loadEmbeddedEnterprisePayload()
 	if err == nil || !strings.Contains(err.Error(), "DefenseClawAssembler.exe") {
 		t.Fatalf("loadEmbeddedEnterprisePayload() error = %v", err)
+	}
+}
+
+// #1281: the Setup stages only the payload its own image was built with. A
+// trailer read from a different file (any flavor) is refused before
+// anything is staged, and an image with no binding takes no standalone
+// payload.
+func TestEnterprisePayloadMustMatchTheImageBinding(t *testing.T) {
+	trailer := func(t *testing.T, payloadFS fstest.MapFS) setuppayload.ReadResult {
+		t.Helper()
+		result := setuppayload.ReadResult{Manifest: payloadFS["payload/manifest.json"].Data}
+		for name, file := range payloadFS {
+			if name != "payload/manifest.json" {
+				result.Entries = append(result.Entries, setuppayload.Entry{Name: strings.TrimPrefix(name, "payload/"), Contents: file.Data})
+			}
+		}
+		return result
+	}
+	binding := func(manifest enterprisePayloadManifest) string {
+		digests := map[string]string{}
+		for _, file := range manifest.Files {
+			digests[file.Name] = file.SHA256
+		}
+		return setuppayload.PayloadBinding(setuppayload.PayloadIdentity{
+			DistributionFlavor: manifest.DistributionFlavor,
+			Version:            manifest.Version,
+			SourceCommit:       manifest.SourceCommit,
+		}, digests)
+	}
+	built, builtManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	stamp := binding(builtManifest)
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), stamp); err != nil {
+		t.Fatalf("the image's own payload was refused: %v", err)
+	}
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), strings.ToUpper(stamp)); err != nil {
+		t.Fatalf("an upper-case binding was refused: %v", err)
+	}
+
+	// A different payload: one file swapped for other bytes.
+	swapped, swappedManifest := newEnterprisePayloadFixtureForFlavor(t, true, true)
+	marker := []byte("swapped-file marker")
+	digest := sha256.Sum256(marker)
+	swapped["payload/defenseclaw.exe"] = &fstest.MapFile{Data: marker, Mode: 0o444}
+	for index, file := range swappedManifest.Files {
+		if file.Name == "defenseclaw.exe" {
+			swappedManifest.Files[index].SHA256, swappedManifest.Files[index].Size = hex.EncodeToString(digest[:]), int64(len(marker))
+		}
+	}
+	writeEnterprisePayloadManifest(t, swapped, swappedManifest)
+	if _, err := loadEnterprisePayload(swapped); err != nil {
+		t.Fatalf("fixture: the swapped payload is not otherwise valid: %v", err)
+	}
+	// The same payload bytes under another manifest identity: a replacement
+	// trailer that changes only the version (which the lifecycle compares
+	// and records) or the source commit.
+	relabeled := func(t *testing.T, change func(*enterprisePayloadManifest)) fstest.MapFS {
+		t.Helper()
+		payloadFS := fstest.MapFS{}
+		for name, file := range built {
+			payloadFS[name] = &fstest.MapFile{Data: append([]byte(nil), file.Data...), Mode: file.Mode}
+		}
+		manifest := builtManifest
+		manifest.Files = append([]enterprisePayloadManifestFile(nil), builtManifest.Files...)
+		change(&manifest)
+		writeEnterprisePayloadManifest(t, payloadFS, manifest)
+		if _, err := loadEnterprisePayload(payloadFS); err != nil {
+			t.Fatalf("fixture: the relabeled payload is not otherwise valid: %v", err)
+		}
+		return payloadFS
+	}
+	for name, other := range map[string]fstest.MapFS{
+		"swapped file": swapped,
+		"version only": relabeled(t, func(manifest *enterprisePayloadManifest) { manifest.Version = "99.0.0" }),
+		"source commit only": relabeled(t, func(manifest *enterprisePayloadManifest) {
+			manifest.SourceCommit = strings.Repeat("e", 40)
+		}),
+		"signed flavor": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+			return payloadFS
+		}(),
+		"Secure Client": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+			return payloadFS
+		}(),
+		"Secure Client u": func() fstest.MapFS {
+			payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, true, false)
+			return payloadFS
+		}(),
+	} {
+		if _, err := loadBoundEnterprisePayload(trailer(t, other), stamp); err == nil || !strings.Contains(err.Error(), "nothing was staged") {
+			t.Errorf("%s: a payload the image was not built with was accepted (err %v)", name, err)
+		}
+	}
+
+	// No binding: no standalone payload, the Secure Client flavors as before.
+	if _, err := loadBoundEnterprisePayload(trailer(t, built), ""); err == nil || !strings.Contains(err.Error(), "no payload binding") {
+		t.Fatalf("an unstamped image took a standalone payload (err %v)", err)
+	}
+	secureClient, _ := newEnterprisePayloadFixtureForFlavor(t, false, false)
+	if _, err := loadBoundEnterprisePayload(trailer(t, secureClient), ""); err != nil {
+		t.Fatalf("an unstamped image refused the Secure Client payload: %v", err)
+	}
+}
+
+func TestStampedSetupImageIsTheStandaloneSetup(t *testing.T) {
+	previous := standalonePayloadBinding
+	t.Cleanup(func() { standalonePayloadBinding = previous })
+	standalonePayloadBinding = strings.Repeat("ab", 32)
+	if !embeddedEnterpriseSetupStandalone() {
+		t.Fatal("a stamped image must parse its command line as the standalone Setup")
 	}
 }
 
@@ -544,6 +657,62 @@ func TestStandaloneSetupBundleIsAnEnsureProperty(t *testing.T) {
 	}
 	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/install", "--config=a", "--manifest=b", `BUNDLE=C:\b\v7.dcbundle`}, false); err == nil {
 		t.Fatal("the Secure Client Setup accepted BUNDLE=")
+	}
+}
+
+// #1288: anchors with an unsigned CONFIG= (or the --mode shorthand, which
+// renders one) is refused before anything is staged, exit 1639, with the
+// bundle_required code the lifecycle and the Unix kit use, not
+// invalid_arguments.
+func TestStandaloneSetupRefusesTrustAnchorsWithConfigAsBundleRequired(t *testing.T) {
+	if setupCodeBundleRequired != string(enterprisebundle.CodeBundleRequired) {
+		t.Fatalf("Setup code %q drifted from %q", setupCodeBundleRequired, enterprisebundle.CodeBundleRequired)
+	}
+	for _, arguments := range [][]string{
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`},
+		{"/ensure", `CONFIG=C:\c.yaml`, `trust-anchors=C:\b\a.json`},
+		{"/ensure", `TRUSTANCHORS=C:\b\a.json`, "--mode=action", "--connector=codex"},
+	} {
+		_, _, err := parseStandaloneEnterpriseSetupOptions(arguments)
+		var bundleRequired enterpriseSetupBundleRequired
+		if !errors.As(err, &bundleRequired) {
+			t.Errorf("standalone %v: err %v, want a bundle_required refusal", arguments, err)
+		}
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `BUNDLE=C:\b\v7.dcbundle`, `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("BUNDLE= with TRUSTANCHORS= was refused: %v", err)
+	}
+	if _, _, err := parseStandaloneEnterpriseSetupOptions([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`}); err != nil {
+		t.Fatalf("TRUSTANCHORS= alone was refused: %v", err)
+	}
+
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	loads := 0
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { loads++; return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", `TRUSTANCHORS=C:\b\a.json`, `CONFIG=C:\c.yaml`, "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		Action   string `json:"action"`
+		OK       bool   `json:"ok"`
+		ExitCode int    `json:"exit_code"`
+		Errors   []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.OK || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "bundle_required" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+	// The refusal came from the command line: the payload was read only to
+	// pick the exit code, and the lifecycle never ran.
+	if loads != 1 {
+		t.Fatalf("payload loads = %d, want 1 (exit-code lookup only)", loads)
 	}
 }
 
