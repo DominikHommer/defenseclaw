@@ -207,14 +207,14 @@ func TestDoctorMicroVMChecks(t *testing.T) {
 			f.doctor.Gateway.Managed = true
 			_ = os.RemoveAll(f.e2fsprogs)
 		}, want: checkWant{"vm-driver", fail, "e2fsprogs is not installed where the MicroVM driver looks for it"},
-			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir", manual: true}},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs or set enterprise.openshell.e2fsprogs_dir", manual: true}},
 		// Managed accounts do not use a Homebrew keg, even when its files and
 		// directory chain look trusted by the old owner check.
 		{name: "managed host: a Homebrew keg is not used", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
 			f.doctor.E2fsprogsDirs = []string{f.e2fsprogs}
 		}, want: checkWant{"vm-driver", fail, "enterprise.openshell.e2fsprogs_dir"},
-			fix: &fixWant{text: "ask your administrator to install e2fsprogs 1.43 or newer", manual: true}},
+			fix: &fixWant{text: "ask your administrator to repair the managed package's e2fsprogs", manual: true}},
 		{name: "managed host: the user's own e2fsprogs build", setup: func(f *doctorFixture) {
 			f.doctor.Gateway.Managed = true
 			_ = os.RemoveAll(f.e2fsprogs)
