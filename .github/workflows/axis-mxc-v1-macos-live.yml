@@ -4,12 +4,6 @@
 name: AXIS MXC V1 native macOS experiment
 
 on:
-  push:
-    branches: [codex/axis-sandbox-feasibility]
-    paths:
-      - .github/workflows/axis-mxc-v1-macos-live.yml
-      - test/e2e/axis/mxc-macos/run_live.py
-      - test/e2e/axis/mxc-macos/verify_live_artifact.py
   workflow_dispatch:
 
 permissions:
@@ -42,6 +36,14 @@ jobs:
           persist-credentials: false
           sparse-checkout: test/e2e/axis/mxc-macos
 
+      # Reviewed build artifacts expire after seven days. Expiry is an expected
+      # fail-closed refusal, not a harness regression; do not select "latest".
+      # Re-pin only after rebuilding the exact reviewed sources with the committed
+      # combined lock, independently checking every source/artifact hash, and
+      # reviewing any changed lock. Update the build checkout SHA, artifact ID,
+      # archive digest, run ID, build SHA/name and external provenance digest
+      # together below. Then manually dispatch this fixed experiment. Helper or
+      # source edits alone never authorize running an older pinned artifact.
       - name: Fetch only the reviewed locked artifact
         env:
           GH_TOKEN: ${{ github.token }}

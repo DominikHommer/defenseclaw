@@ -137,12 +137,12 @@ jobs:
                   "example_overlay": {
                       "source": "test/e2e/axis/runner/main.rs",
                       "sha256": hashlib.sha256((root / "OFFLINE_PROBE.rs").read_bytes()).hexdigest(),
-                      "build_command": "cargo +1.95.0 build --locked --release -p axis-sandbox --example defenseclaw_axis_offline",
+                      "build_command": f"cargo +{os.environ['RUST_TOOLCHAIN']} build --locked --release -p axis-sandbox --example defenseclaw_axis_offline",
                   },
               },
               "build": {
                   "toolchain": os.environ["RUST_TOOLCHAIN"],
-                  "command": "cargo +1.95.0 build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins",
+                  "command": f"cargo +{os.environ['RUST_TOOLCHAIN']} build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins",
                   "runner_os": platform.platform(),
                   "cargo_build_jobs": os.environ["CARGO_BUILD_JOBS"],
                   "cargo_incremental": os.environ["CARGO_INCREMENTAL"],
@@ -384,8 +384,8 @@ jobs:
             build = [ordered]@{
               toolchain = $env:RUST_TOOLCHAIN
               toolchain_output_sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'TOOLCHAIN.txt') -Algorithm SHA256).Hash.ToLowerInvariant()
-              axis_command = 'cargo +1.95.0 build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins'
-              mxc_command = 'cargo +1.95.0 build --locked --release -p wxc --no-default-features'
+              axis_command = "cargo +$env:RUST_TOOLCHAIN build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins"
+              mxc_command = "cargo +$env:RUST_TOOLCHAIN build --locked --release -p wxc --no-default-features"
               runner_os = [System.Environment]::OSVersion.VersionString
               cargo_build_jobs = $env:CARGO_BUILD_JOBS
               cargo_incremental = $env:CARGO_INCREMENTAL

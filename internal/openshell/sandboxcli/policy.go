@@ -547,9 +547,19 @@ func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) err
 		return fmt.Errorf("unknown egress list %q", list)
 	}
 	key := "openshell.egress." + list
+	displayKey := key
 	var removed, missing []string
 	err := a.patchConfigComputed("", func(raw []byte) (map[string]any, error) {
-		current, err := sourceEgressList(raw, list)
+		root, err := sandboxSource(raw)
+		if err != nil {
+			return nil, err
+		}
+		// The common block owns shared writes even when this list still
+		// inherits its current entries from the legacy source.
+		if sandboxSourceAt(root, "sandbox") != nil {
+			displayKey = "sandbox.egress." + list
+		}
+		current, err := sourceEgressListAt(root, list)
 		if err != nil {
 			return nil, err
 		}
@@ -562,7 +572,7 @@ func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) err
 			}
 		}
 		if len(removed) == 0 {
-			return nil, fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), key, CommandName)
+			return nil, fmt.Errorf("%s is not in %s; `%s policy explain` shows where a block comes from", strings.Join(hosts, ", "), displayKey, CommandName)
 		}
 		return map[string]any{key: next}, nil
 	})
@@ -574,9 +584,9 @@ func (a *App) PolicyRemove(ctx context.Context, list string, hosts []string) err
 			missing = append(missing, h)
 		}
 	}
-	a.ok("removed " + strings.Join(removed, ", ") + " from " + key)
+	a.ok("removed " + strings.Join(removed, ", ") + " from " + displayKey)
 	if len(missing) > 0 {
-		a.warn(strings.Join(missing, ", ") + " is not in " + key)
+		a.warn(strings.Join(missing, ", ") + " is not in " + displayKey)
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
 	return nil
@@ -613,11 +623,16 @@ func sourceEgressList(raw []byte, list string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return sourceEgressListAt(root, list)
+}
+
+func sourceEgressListAt(root *yaml.Node, list string) ([]string, error) {
 	node := sandboxSourceAt(root, "sandbox.egress."+list)
 	if node == nil {
 		node = sandboxSourceAt(root, "openshell.egress."+list)
 	}
 	var current []string
+	var err error
 	if node != nil {
 		err = node.Decode(&current)
 	}

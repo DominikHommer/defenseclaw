@@ -193,8 +193,36 @@ func waitFor(process windows.Handle, output *transcript, condition func(string) 
 	return errors.New("terminal acknowledgement deadline exceeded")
 }
 
+func claimFreshCaseRoot(root string) error {
+	if !filepath.IsAbs(root) {
+		return errors.New("absolute task-owned case root required")
+	}
+	if err := os.Mkdir(root, 0700); err != nil {
+		if os.IsExist(err) {
+			return errors.New("use a fresh task-owned terminal case root")
+		}
+		return err
+	}
+	return nil
+}
+
+func writeResultIfOwned(root string, claimed bool, raw []byte) error {
+	if !claimed {
+		return nil
+	}
+	file, err := os.OpenFile(filepath.Join(root, "terminal-result.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(append(raw, '\n')); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
+
 func run(v *verification, probe, root, mode string) (record map[string]any, resultErr error) {
-	record = map[string]any{"qualified_customer_runtime": false, "variant": v.Variant, "axis_commit": v.Axis, "mxc_commit": v.MXC, "archive_sha256": v.Archive, "overlay_sha256": v.ContributorOverlay.SHA256}
+	record = map[string]any{"qualified_customer_runtime": false, "case_root_claimed": false, "variant": v.Variant, "axis_commit": v.Axis, "mxc_commit": v.MXC, "archive_sha256": v.Archive, "overlay_sha256": v.ContributorOverlay.SHA256}
 	if len(v.ContributorRelayOverlays) != 0 {
 		record["relay_overlays"] = v.ContributorRelayOverlays
 	}
@@ -202,12 +230,10 @@ func run(v *verification, probe, root, mode string) (record map[string]any, resu
 	if mode != "terminal" && mode != "terminal-basic" && mode != "parent-death" && mode != "timeout" && mode != "close-session" && mode != "outer-control" && mode != "outer-control-interrupt" {
 		return record, errors.New("unsupported fixed terminal harness mode")
 	}
-	if !filepath.IsAbs(root) {
-		return record, errors.New("absolute task-owned case root required")
+	if err := claimFreshCaseRoot(root); err != nil {
+		return record, err
 	}
-	if _, err := os.Stat(root); !os.IsNotExist(err) {
-		return record, errors.New("use a fresh task-owned terminal case root")
-	}
+	record["case_root_claimed"] = true
 	workspace, home, tmp := filepath.Join(root, "workspace"), filepath.Join(root, "private-home"), filepath.Join(root, "private-tmp")
 	for _, directory := range []string{workspace, home, tmp, filepath.Join(home, "AppData", "Roaming"), filepath.Join(home, "AppData", "Local"), filepath.Join(root, "readonly")} {
 		if err := os.MkdirAll(directory, 0700); err != nil {
@@ -510,9 +536,17 @@ func main() {
 		os.Exit(2)
 	}
 	record, err := run(v, *probe, *root, *mode)
-	raw, _ := json.MarshalIndent(record, "", "  ")
-	if *root != "" {
-		_ = os.WriteFile(filepath.Join(*root, "terminal-result.json"), append(raw, '\n'), 0600)
+	raw, marshalErr := json.MarshalIndent(record, "", "  ")
+	if marshalErr != nil {
+		fmt.Fprintln(os.Stderr, marshalErr)
+		os.Exit(1)
+	}
+	if writeErr := writeResultIfOwned(*root, record["case_root_claimed"] == true, raw); writeErr != nil {
+		record["passed"] = false
+		record["error"] = fmt.Sprintf("terminal result receipt: %v", writeErr)
+		raw, _ = json.MarshalIndent(record, "", "  ")
+		fmt.Println(string(raw))
+		os.Exit(1)
 	}
 	fmt.Println(string(raw))
 	if err != nil {

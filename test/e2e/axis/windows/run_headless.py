@@ -8,11 +8,23 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
+
+import verify_artifact
+
+OVERLAY_ROOT = pathlib.Path(__file__).resolve().parent / "patches"
+VARIANTS = {"baseline", "inherited-console", "inherited-console-relay"}
+REVIEWED_OVERLAYS = {
+    "AXIS_INHERITED_CONSOLE.patch": "axis-inherited-console.patch",
+    "AXIS_CONSOLE_CTRL_C_RELAY.patch": "axis-console-ctrl-c-relay.patch",
+    "MXC_CONSOLE_CTRL_C_RELAY.patch": "mxc-console-ctrl-c-relay.patch",
+}
 
 
 def sha(path):
@@ -24,15 +36,103 @@ def yaml_path(path):
     return "'" + str(path).replace("'", "''") + "'"
 
 
-def run(verification_path, probe, case_root, mode):
+def checked_overlay(entry, payload, name, kind):
+    if not isinstance(entry, dict) or entry.get("path") != name or entry.get("kind") != kind:
+        raise ValueError("reviewed Windows overlay metadata differs")
+    digest = entry.get("sha256")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("reviewed Windows overlay digest missing")
+    if sha(OVERLAY_ROOT / REVIEWED_OVERLAYS[name]) != digest or sha(payload / name) != digest:
+        raise ValueError("reviewed Windows overlay bytes differ")
+
+
+def checked_bundle(verification_path):
     verification = json.loads(verification_path.read_text(encoding="utf-8-sig"))
-    if verification.get("verified") is not True:
-        raise ValueError("artifact verification is required before execution")
-    payload = pathlib.Path(verification["payload"])
-    for entry in verification["binaries"]:
+    variant = verification.get("variant", "baseline") if isinstance(verification, dict) else None
+    if (
+        not isinstance(verification, dict)
+        or verification.get("verified") is not True
+        or not isinstance(variant, str)
+        or variant not in VARIANTS
+        or verification.get("axis_commit") != verify_artifact.AXIS
+        or verification.get("mxc_commit") != verify_artifact.MXC
+        or not isinstance(verification.get("workflow_commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", verification["workflow_commit"]) is None
+        or not isinstance(verification.get("archive_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", verification["archive_sha256"]) is None
+    ):
+        raise ValueError("an exact reviewed AXIS/MXC artifact variant is required")
+    raw_payload = verification.get("payload")
+    if not isinstance(raw_payload, str) or not pathlib.Path(raw_payload).is_absolute():
+        raise ValueError("an absolute verified payload is required")
+    payload = pathlib.Path(raw_payload)
+    relay = verification.get("contributor_relay_overlays")
+    if variant == "baseline":
+        if verification.get("contributor_overlay") is not None or relay is not None:
+            raise ValueError("baseline cannot contain a Windows contributor overlay")
+    else:
+        checked_overlay(
+            verification.get("contributor_overlay"),
+            payload,
+            "AXIS_INHERITED_CONSOLE.patch",
+            "windows_inherited_console_experiment",
+        )
+        if variant == "inherited-console":
+            if relay is not None:
+                raise ValueError("relay overlays require the reviewed paired relay variant")
+        else:
+            if not isinstance(relay, dict) or set(relay) != {"axis", "mxc"}:
+                raise ValueError("both reviewed relay overlays are required")
+            for entry, name in [
+                (relay["axis"], "AXIS_CONSOLE_CTRL_C_RELAY.patch"),
+                (relay["mxc"], "MXC_CONSOLE_CTRL_C_RELAY.patch"),
+            ]:
+                checked_overlay(entry, payload, name, "windows_console_ctrl_c_relay_experiment")
+    entries = verification.get("binaries")
+    if not isinstance(entries, list):
+        raise ValueError("verified binary inventory is required")
+    allowed = {"bin/" + name for name in verify_artifact.BINARIES | verify_artifact.OPTIONAL_BINARIES}
+    required = {"bin/" + name for name in verify_artifact.BINARIES}
+    names = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid verified binary inventory")
+        name, digest, size = entry.get("path"), entry.get("sha256"), entry.get("size_bytes")
+        if (
+            not isinstance(name, str)
+            or name not in allowed
+            or name in names
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or type(size) is not int
+            or size < 1
+        ):
+            raise ValueError("invalid verified binary inventory")
+        names.add(name)
+    if not required <= names:
+        raise ValueError("required paired runtime binaries absent")
+    bin_dir = payload / "bin"
+    if not bin_dir.is_dir() or bin_dir.is_symlink() or getattr(bin_dir.lstat(), "st_file_attributes", 0) & 0x400:
+        raise ValueError("verified bin directory changed")
+    if {path.name for path in bin_dir.iterdir()} != {pathlib.PurePosixPath(name).name for name in names}:
+        raise ValueError("verified bin inventory changed")
+    for entry in entries:
         file = payload / entry["path"]
-        if sha(file) != entry["sha256"] or file.stat().st_size != entry["size_bytes"]:
+        info = file.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_file_attributes", 0) & 0x400
+            or info.st_size != entry["size_bytes"]
+            or sha(file) != entry["sha256"]
+        ):
             raise ValueError("verified binary changed before execution: " + entry["path"])
+    return verification, payload
+
+
+def run(verification_path, probe, case_root, mode):
+    if mode not in {"boundary", "exit23", "timeout"}:
+        raise ValueError("unsupported fixed headless case")
+    verification, payload = checked_bundle(verification_path)
     if case_root.exists():
         raise ValueError("use a fresh task-owned case directory")
     workspace = case_root / "workspace"

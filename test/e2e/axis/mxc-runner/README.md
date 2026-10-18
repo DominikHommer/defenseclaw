@@ -99,10 +99,18 @@ return `EACCES` or `EROFS`; its content must remain unchanged.
 The guarded child must also create files in its allowed workspace/HOME/tmp,
 reject creation of all four IPv4/IPv6 TCP/UDP socket cases with `EPERM` before
 any connect or DNS operation, and exit with code 23. The interactive case uses
-the **MXC-owned PTY**: initial geometry 30x100, child `isatty`, foreground process
-group, a readiness handshake, parent resize to 40x120, fixed input, required
-child acknowledgement and exit 23. A separate guarded child must reach its
-readiness marker and produce the SDK's typed timeout outcome.
+the **MXC-owned PTY**: initial geometry 30x100, child `isatty`, positive matching
+foreground/process groups, a readiness handshake and parent resize to 40x120.
+The fresh contained child installs a fixed SIGINT handler before AXIS guards;
+the handler only stores an atomic flag. The child verifies `ISIG` and
+`VINTR=0x03`, and the supervisor sends that control byte through the owned PTY.
+Normal child flow must observe the flag within three seconds and check the
+resized groups/geometry before acknowledging the interrupt. Only then does
+the supervisor send the fixed input line. The child checks positive groups
+again, acknowledges continued input and exits 23. No raw PID or process-group
+signal is sent. A separate guarded child must reach its readiness marker and
+produce the SDK's typed timeout outcome. This stronger signal test requires a
+fresh reviewed build and live run; earlier probe results do not qualify it.
 
 Output is bounded to 64 KiB per stream. A failing fixed synthetic child retains
 at most 8 KiB of JSON-escaped stderr for contributor diagnosis, without an
