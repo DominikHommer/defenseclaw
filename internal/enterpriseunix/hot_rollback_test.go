@@ -13,15 +13,18 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // GAP-0238 (#1279 L3): a hot change whose run was killed (TERM or SIGKILL
 // during apply) is rolled back by the next run with the gateway and the
 // sensor helper left running: the gateway reloads the restored config.yaml
-// itself, and the retry applies the change hot to the same gateway. An
+// itself, so the retry can apply the change hot to the same gateway. An
 // intent that is not hot (or written before the field) still rolls back
 // with a restart.
 func TestAnInterruptedHotChangeIsRolledBackWithTheGatewayRunning(t *testing.T) {
@@ -55,10 +58,16 @@ func TestAnInterruptedHotChangeIsRolledBackWithTheGatewayRunning(t *testing.T) {
 					t.Fatal(err)
 				}
 				from := len(h.services.calls)
-				r := h.run(Options{Action: ActionEnsure})
-				requireOK(t, r)
+				r := &enterprisestatus.Result{}
+				l := &lifecycle{env: h.env, opts: Options{Action: ActionEnsure}, result: r}
+				if !l.recoverInterrupted(context.Background()) {
+					t.Fatalf("recovery failed: %+v", r.Errors)
+				}
 				if !hasWarning(r, codeRecovered) {
 					t.Fatalf("expected the recovery warning: %+v", r.Warnings)
+				}
+				if pending, _ := h.env.loadPending(); pending != nil {
+					t.Fatalf("the intent is still pending: %+v", pending)
 				}
 				if got := h.read(configPath); got != applied {
 					t.Fatalf("config.yaml not restored: %q", got)
