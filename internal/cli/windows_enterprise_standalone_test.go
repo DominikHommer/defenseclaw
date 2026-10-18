@@ -3229,3 +3229,40 @@ func TestWindowsNoStartInstallSucceedsWithNotStartedWarning(t *testing.T) {
 		t.Fatalf("install without --no-start: %+v", result.Errors)
 	}
 }
+
+// #1105, GAP-0211: the upgrade from 1.0.2 went on without a signed-out
+// account whose DefenseClaw folder is untrusted. The result names the
+// account and the folder once, as the informational
+// user_runtime_folder_untrusted warning, and no error.
+func TestWindowsEnterpriseResultNamesSignedOutUntrustedFolders(t *testing.T) {
+	entry := `DCFC\r103gb13-u1 (S-1-5-21-1-2-3-1123): C:\Users\r103gb13-u1\.defenseclaw\hooks`
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1, "ok": true, "action": "upgrade", "installed": true, "transaction_pending": false,
+		"errors":                       []string{},
+		"signed_out_untrusted_folders": []string{entry},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.42")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	var found []string
+	for _, warning := range result.Warnings {
+		if warning.Code == windowsEnterpriseUntrustedUserFolderCode {
+			found = append(found, warning.Message)
+		}
+	}
+	if len(found) != 1 || !strings.Contains(found[0], "1 signed-out account(s)") ||
+		!strings.Contains(found[0], entry) || !strings.Contains(found[0], "at their next sign-in") ||
+		!strings.Contains(found[0], "reset its permissions") {
+		t.Fatalf("signed-out untrusted folder warning = %q", found)
+	}
+	if len(result.Errors) != 0 || !enterpriseInformationalWarningCodes[windowsEnterpriseUntrustedUserFolderCode] {
+		t.Fatalf("a signed-out untrusted folder became an error: %+v", result.Errors)
+	}
+}

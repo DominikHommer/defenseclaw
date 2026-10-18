@@ -552,3 +552,40 @@ def test_secure_client_claude_floor_is_unchanged() -> None:
     body = _floor_function()
     returns = re.findall(r"return '([0-9.]+)'", body)
     assert returns[-1] == "2.1.152"
+
+
+def test_signed_out_untrusted_folder_is_classified_alike() -> None:
+    """#1105, GAP-0211: the 1.0.2 -> 1.0.3 upgrade with a signed-out account
+    whose hooks folder had one extra permission entry returned 1603. The
+    manifest adoption (PowerShell) and the lifecycle's guardian check (Go)
+    excuse exactly the same failure, report it, and nothing else."""
+
+    module = _text(MODULE)
+    block = module[module.index("$script:SignedOutUntrustedFolderPattern = [regex]::new(") :]
+    block = block[: block.index("[Text.RegularExpressions.RegexOptions]::CultureInvariant")]
+    powershell = "".join(part.replace("''", "'") for part in re.findall(r"'((?:[^']|'')*)'", block))
+    go_source = (ROOT / "internal" / "cli" / "enterprise_hooks_signed_out_folder.go").read_text(encoding="utf-8")
+    go_block = go_source[go_source.index("enterpriseHookSignedOutUntrustedFolderPattern = regexp.MustCompile(") :]
+    go_block = go_block[: go_block.index("\n)\n")]
+    go = "".join(re.findall(r"`([^`]*)`", go_block))
+    assert powershell == go
+    live = (
+        "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable "
+        "(verification: enterprise hooks: managed hook directory verification failed: enterprise hooks: "
+        "managed Windows DACL on C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks has 8 ACEs, expected 7)"
+    )
+    found = re.fullmatch(go, live)
+    assert found and found.group(1) == "hook" and found.group(2) == "C:\\Users\\r103gb13-u1\\.defenseclaw\\hooks"
+    assert not re.fullmatch(go, live + "; more")
+
+    adoption = _function_body(module, "Get-DefenseClawStandaloneManifestAdoption")
+    assert "Get-DefenseClawSignedOutUntrustedFolder -Row $row" in adoption
+    assert "$excused = $folderRows + $waitingRows" in adoption
+    for name in ("Assert-DefenseClawEnterpriseDeployment", "Sync-DefenseClawStandaloneManagedHooksActivationBinding"):
+        assert "Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption" in _function_body(module, name)
+    assert "$status['signed_out_untrusted_folders']" in _function_body(module, "Get-DefenseClawLifecycleStatus")
+
+    lifecycle = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
+    assert "enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)" in lifecycle
+    standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert 'json:"signed_out_untrusted_folders"' in standalone

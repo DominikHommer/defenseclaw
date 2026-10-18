@@ -207,6 +207,27 @@ $script:DefenseClawRollbackLeftovers = @()
 # verify or apply the permissions of that account's DefenseClaw folder
 # (#1105, GAP-0781). Reset per lifecycle run.
 $script:DefenseClawRetireSkipped = @()
+# Standalone: each signed-out account whose guardian row failed only because
+# its DefenseClaw folder does not carry the owner or permissions DefenseClaw
+# set, which a manifest adoption went on without ("<account>: <folder>",
+# #1105, GAP-0211). Reset per lifecycle run.
+$script:DefenseClawSignedOutUntrustedFolders = @()
+# The whole error a guardian (1.0.2 and this release) records for a protected
+# Windows target whose account is signed out and whose verification failed on
+# the owner or permissions of the account's DefenseClaw folder (data) or its
+# hooks folder (hook). Keep it equal to
+# enterpriseHookSignedOutUntrustedFolderPattern in the gateway.
+$script:SignedOutUntrustedFolderPattern = [regex]::new(
+    '^enterprise hooks: protected target requires repair but its exact active Windows session is unavailable ' +
+    '\(verification: enterprise hooks: managed (data|hook) directory verification failed: enterprise hooks: (?:' +
+    'managed Windows DACL on (.+) has \d+ ACEs, expected \d+|' +
+    'managed Windows DACL is not protected on (.+)|' +
+    'managed Windows DACL on (.+) contains unexpected or duplicate ACE for principal S-[0-9-]+ \(mask 0x[0-9a-f]+, inheritance 0x[0-9a-f]+\)|' +
+    'managed Windows DACL on (.+) contains non-canonical ACE type at index \d+|' +
+    'owner SID \S+ does not match target SID S-[0-9-]+ on (.+)|' +
+    'null or unreadable Windows DACL on (.+))\)$',
+    [Text.RegularExpressions.RegexOptions]::CultureInvariant
+)
 # Standalone: how many old managed runtime generations the collect of a
 # compliant ensure removed, and why that collect could not run (#1105,
 # GAP-0211). Set by Invoke-DefenseClawStandaloneRuntimeGenerationCollect.
@@ -18269,6 +18290,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
     $script:DefenseClawRetireSkipped = @()
+    $script:DefenseClawSignedOutUntrustedFolders = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
     $script:DefenseClawRecoveryActivationDeferred = $false
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -20381,6 +20403,61 @@ function New-DefenseClawRequiredRights {
     return $required
 }
 
+function Get-DefenseClawSignedOutUntrustedFolder {
+    <#
+        Standalone manifest adoption. Returns the DefenseClaw folder of a
+        failed guardian row whose only recorded failure is that its account
+        is signed out and that folder (<profile>\.defenseclaw or its hooks
+        folder) does not carry the owner or permissions DefenseClaw set, or
+        '' for any other row (#1105, GAP-0211). The guardian repairs such a
+        target only in the account's own Windows session, at its next
+        sign-in, so no lifecycle run can fix it, and refusing the run kept
+        the whole computer on the older release. A connected account's row,
+        a folder of another account or any other failure returns ''.
+    #>
+    param($Row)
+    if ($null -eq $Row) {
+        return ''
+    }
+    $value = {
+        param([string]$Name)
+        $property = $Row.PSObject.Properties[$Name]
+        if ($null -eq $property) {
+            return $null
+        }
+        return $property.Value
+    }
+    if ([bool](& $value 'ok') -or [bool](& $value 'pending') -or $null -ne (& $value 'result')) {
+        return ''
+    }
+    $profileHome = ([string](& $value 'user_home')).Trim().Replace('/', '\').TrimEnd('\')
+    if ([string]::IsNullOrWhiteSpace($profileHome)) {
+        return ''
+    }
+    $found = $script:SignedOutUntrustedFolderPattern.Match(([string](& $value 'error')).Trim())
+    if (-not $found.Success) {
+        return ''
+    }
+    $folder = ''
+    for ($index = 2; $index -lt $found.Groups.Count; $index++) {
+        if ($found.Groups[$index].Success) {
+            $folder = $found.Groups[$index].Value
+            break
+        }
+    }
+    $expected = $profileHome + '\.defenseclaw'
+    if ($found.Groups[1].Value -ceq 'hook') {
+        $expected += '\hooks'
+    }
+    if (-not [string]::Equals(
+            $folder.Replace('/', '\').TrimEnd('\'),
+            $expected,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return ''
+    }
+    return $expected
+}
+
 function Get-DefenseClawStandaloneManifestAdoption {
     <#
         Standalone only. The hook enumerator service republishes targets.yaml
@@ -20404,11 +20481,12 @@ function Get-DefenseClawStandaloneManifestAdoption {
         [Parameter(Mandatory)][string]$InstalledManifestSHA256
     )
     $result = {
-        param([bool]$Ok, [string]$Reason, [int64]$TargetCount)
+        param([bool]$Ok, [string]$Reason, [int64]$TargetCount, [string[]]$UntrustedFolders = @())
         return [pscustomobject][ordered]@{
             ok = $Ok
             reason = $Reason
             target_count = $TargetCount
+            untrusted_folders = [string[]]@($UntrustedFolders)
         }
     }
     if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -20528,13 +20606,29 @@ function Get-DefenseClawStandaloneManifestAdoption {
     # help: name the accounts, and say what to do first.
     $signedOut = [Collections.Generic.List[string]]::new()
     $otherFailure = $false
+    # A signed-out account whose only failure is its DefenseClaw folder's
+    # owner or permissions waits for its next sign-in too, when the guardian
+    # repairs it: the adoption goes on and names the folder (#1105,
+    # GAP-0211). The gateway counts none of these rows (its counts are all
+    # or nothing), so the adoption counts them, and the waiting rows with
+    # them, itself.
+    $untrustedFolders = [Collections.Generic.List[string]]::new()
+    $folderRows = [int64]0
+    $waitingRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
             [bool](& $field $row 'pending')) {
             continue
         }
-        if ([string](& $field $row 'error') -notmatch
+        if (([string](& $field $row 'error')).Trim().StartsWith(
+                'enterprise hooks: protected target waits for its account''s next sign-in',
+                [StringComparison]::Ordinal)) {
+            $waitingRows++
+        }
+        $untrustedFolder = Get-DefenseClawSignedOutUntrustedFolder -Row $row
+        if ([string]::IsNullOrEmpty($untrustedFolder) -and
+            [string](& $field $row 'error') -notmatch
             'exact active Windows session is unavailable|no active interactive session token matches') {
             $otherFailure = $true
             continue
@@ -20557,9 +20651,23 @@ function Get-DefenseClawStandaloneManifestAdoption {
         elseif (-not [string]::IsNullOrWhiteSpace($sid)) {
             $account = "$account ($sid)"
         }
+        if (-not [string]::IsNullOrEmpty($untrustedFolder)) {
+            $folderRows++
+            $entry = "${account}: $untrustedFolder"
+            if (-not $untrustedFolders.Contains($entry)) {
+                $untrustedFolders.Add($entry)
+            }
+            continue
+        }
         if (-not $signedOut.Contains($account)) {
             $signedOut.Add($account)
         }
+    }
+    if ($folderRows -gt 0) {
+        # Every failed row must be one of these or a waiting row: a removed
+        # account's rows (which only the gateway can tell) or any other
+        # failure keep the adoption refused.
+        $excused = $folderRows + $waitingRows
     }
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
@@ -20603,7 +20711,30 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($targetCount -lt 0 -or $targetCount -gt 384) {
         return & $result $false 'guardian activation target count is outside its bound' -1
     }
-    return & $result $true '' $targetCount
+    return & $result $true '' $targetCount ([string[]]@($untrustedFolders))
+}
+
+function Add-DefenseClawSignedOutUntrustedFolders {
+    <#
+        Keeps the folders an accepted manifest adoption went on without for
+        the result (signed_out_untrusted_folders, the
+        user_runtime_folder_untrusted warning; #1105, GAP-0211).
+    #>
+    param($Adoption)
+    if ($null -eq $Adoption -or -not [bool]$Adoption.ok) {
+        return
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    foreach ($item in @($script:DefenseClawSignedOutUntrustedFolders)) {
+        $kept.Add([string]$item)
+    }
+    foreach ($item in @($Adoption.untrusted_folders)) {
+        $text = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$item) -MaxLength 1024
+        if ($text.Trim().Length -gt 0 -and -not $kept.Contains($text) -and $kept.Count -lt 256) {
+            $kept.Add($text)
+        }
+    }
+    $script:DefenseClawSignedOutUntrustedFolders = @($kept)
 }
 
 function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
@@ -20664,6 +20795,7 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
             " ($([string]$adoption.reason))"
         )
     }
+    Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption
     if ($PSVersionTable.PSVersion.Major -lt 7) {
         throw 'rebinding standalone managed-hook activation evidence requires PowerShell 7'
     }
@@ -20793,6 +20925,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
             throw $message
         }
+        Add-DefenseClawSignedOutUntrustedFolders -Adoption $adoption
     }
     if ($RequireReadiness -and
         [string]$managedHooksActivation.state -cne 'activated') {
@@ -22215,6 +22348,13 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawRetireSkipped).Count -gt 0) {
             $status['lifecycle_retire_skipped'] = [string[]]@(
                 $script:DefenseClawRetireSkipped
+            )
+        }
+        # The signed-out accounts whose untrusted DefenseClaw folder a
+        # manifest adoption went on without (GAP-0211).
+        if (@($script:DefenseClawSignedOutUntrustedFolders).Count -gt 0) {
+            $status['signed_out_untrusted_folders'] = [string[]]@(
+                $script:DefenseClawSignedOutUntrustedFolders
             )
         }
         # What the collect of a compliant ensure removed, or why it could

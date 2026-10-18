@@ -1136,7 +1136,8 @@ func validateWindowsManagedHooksGuardianActivation(
 	pendingTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
 	// awaitingSignIn counts the failed rows of deferred targets an earlier
 	// release protected that wait for their signed-out account's next
-	// sign-in (enterpriseHookAwaitingSignInPrefix, GAP-0644).
+	// sign-in (enterpriseHookAwaitingSignInPrefix, GAP-0644), and of those
+	// whose signed-out account's DefenseClaw folder is untrusted (GAP-0211).
 	awaitingSignIn := 0
 	for _, target := range ctx.targets {
 		key := strings.ToLower(target.Connector) + "\x00" + strings.ToUpper(target.SID)
@@ -1163,9 +1164,13 @@ func validateWindowsManagedHooksGuardianActivation(
 		seen[key] = struct{}{}
 		// The guardian keeps such a waiting row protected: its last protected
 		// row is carried forward and its SID stays enrolled, so teardown
-		// revokes it as an active target of a signed-out account. Any other
-		// failed row is still refused.
-		waiting := target.Deferred && enterpriseHookAwaitingSignInError(row)
+		// revokes it as an active target of a signed-out account. So does
+		// the row of a signed-out account whose only failure is its
+		// DefenseClaw folder's owner or permissions: the guardian repairs it
+		// at that account's next sign-in, and a 1.0.2 guardian records it
+		// that way (#1105, GAP-0211). Any other failed row is still refused.
+		_, untrustedFolder := enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)
+		waiting := target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)
 		if row.OK == row.Pending && !waiting {
 			return nil, errors.New("protected Guardian state contains an ambiguous target disposition")
 		}

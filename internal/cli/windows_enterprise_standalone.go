@@ -152,6 +152,11 @@ type windowsEnterpriseInstallerReport struct {
 	// permissions DefenseClaw could not verify or apply (#1105, GAP-0781).
 	// Decoded leniently, like the registration lists.
 	LifecycleRetireSkipped json.RawMessage `json:"lifecycle_retire_skipped"`
+	// SignedOutUntrustedFolders names each signed-out account whose guardian
+	// row failed only on its DefenseClaw folder's owner or permissions, which
+	// the lifecycle went on without ("<account>: <folder>", #1105, GAP-0211).
+	// Decoded leniently, like the registration lists.
+	SignedOutUntrustedFolders json.RawMessage `json:"signed_out_untrusted_folders"`
 	// LifecycleGenerationsCollected is how many old managed runtime
 	// generations the collect of a compliant ensure removed, and
 	// LifecycleCollectError why that collect could not run (GAP-0211).
@@ -1402,6 +1407,17 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: fmt.Sprintf("the lifecycle left the old DefenseClaw hook runtime copies of %d account(s) in place and changed nothing in their folders, "+
 				"because DefenseClaw could not verify or apply the permissions of each account's DefenseClaw folder; ", len(skipped)) +
 				windowsEnterpriseUntrustedUserFolderRemedy + ": " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
+	if waiting := windowsEnterpriseReportStrings(report.SignedOutUntrustedFolders); len(waiting) != 0 {
+		// The upgrade from 1.0.2 returned 1603 for such an account (GAP-0211).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: windowsEnterpriseUntrustedUserFolderCode,
+			Message: fmt.Sprintf("%d signed-out account(s) have a DefenseClaw folder whose owner or permissions are not the ones DefenseClaw set; "+
+				"the lifecycle went on without them, and the guardian repairs their DefenseClaw hooks only in their own Windows session, "+
+				"at their next sign-in. Have an administrator inspect each folder named here and reset its permissions, or remove "+
+				"the account with its profile if it no longer uses DefenseClaw: ", len(waiting)) +
+				windowsEnterpriseBoundedLabels(waiting),
 		})
 	}
 	if failure := strings.TrimSpace(report.LifecycleCollectError); failure != "" {
