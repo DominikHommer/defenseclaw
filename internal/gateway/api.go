@@ -64,6 +64,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/systemd"
 	"github.com/defenseclaw/defenseclaw/internal/version"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
@@ -2469,6 +2470,11 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			if a.store != nil {
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "file")
 				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "runtime")
+				if req.TargetType == "mcp" {
+					// The enrolled accounts' own rows of that name too
+					// (GAP-0216).
+					_ = watcher.ClearAccountMCPJournal(a.store, policyName, req.Connector, "runtime")
+				}
 			}
 		}
 	}

@@ -2301,6 +2301,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Direction:     "tool_call",
 			Connector:     req.ConnectorName,
 			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
+			callerCWD:     req.CWD,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
