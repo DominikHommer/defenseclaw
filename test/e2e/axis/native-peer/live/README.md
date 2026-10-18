@@ -40,6 +40,17 @@ proof. Artifact and policy admission otherwise retain their scope;
 the peer, Bubblewrap, payload and combined receipt are unchanged. This new pair
 has passed source/build/artifact review and inert tests, but has not yet passed
 the native four-case attempt.
+One [held-fixture attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39155130062)
+at `b656cf66` passed fixture admission and reached the actual peer's `Prepared`
+and `Started` replies. The first argv case then reported exit code 1, before any fixed
+payload marker or `Destroyed` reply; the remaining cases did not run. All three
+native/worker/driver cleanup owners completed with zero pending custody. The
+runner setting was restored, and ten synthetic fixture members totaling 192 bytes
+were collected. Evidence artifact `12146776297` has ZIP SHA256
+`bcb2c471fc7ca9a6759437b5c156f57f010db53825f89fa2a64a4c0a760300d1`.
+The recorded zero stdout/stderr counts are inconclusive: the harness returns on
+an unexpected exit before assigning captured buffer lengths. No payload, runner
+or Bubblewrap cause is established, and no unchanged retry was performed.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.
