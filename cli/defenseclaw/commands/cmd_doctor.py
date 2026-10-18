@@ -2469,9 +2469,11 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         if path == dotenv:
             try:
                 read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
-            except OSError:
+            except PermissionError:
                 unverified.append(f"{path} (cannot read)")
-                continue
+            except OSError:
+                # A size or file-type refusal does not erase the mode finding.
+                unverified.append(f"{path} (cannot safely read)")
         if os.name == "nt":
             problem = None if is_dir else windows_acl_confidentiality_error(path)
             if problem:
@@ -9918,6 +9920,17 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw setup llm' to configure one",
         )
         return
+    if getattr(llm, "base_url", ""):
+        from urllib.parse import urlsplit
+
+        try:
+            parsed = urlsplit(llm.base_url)
+            if not parsed.scheme or not parsed.hostname:
+                raise ValueError("missing URL scheme or host")
+        except ValueError:
+            _emit("fail", "LLM reachable", prefix + "configured llm.base_url is malformed", r=r,
+                  remediation="correct llm.base_url in config.yaml, then rerun 'defenseclaw doctor'")
+            return
     if r.passive:
         _emit(
             "skip",
@@ -9931,8 +9944,13 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     except Exception as exc:
         _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
         return
-    with _capture_stdout_when_json():
-        ok, msg = _llm.ping(llm, timeout=5)
+    try:
+        with _capture_stdout_when_json():
+            ok, msg = _llm.ping(llm, timeout=5)
+    except ValueError:
+        _emit("fail", "LLM reachable", prefix + "configured llm.base_url is malformed", r=r,
+              remediation="correct llm.base_url in config.yaml, then rerun 'defenseclaw doctor'")
+        return
     if not ok and getattr(llm, "base_url", ""):
         from urllib.parse import urlsplit, urlunsplit
 

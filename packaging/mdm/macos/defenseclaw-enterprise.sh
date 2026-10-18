@@ -237,7 +237,7 @@ dc_sweep_stages() {
 # payload's gateway cannot run, so on Linux the default is a root-only folder
 # of its own (GAP-0752); --staging-dir names another one.
 dc_stage_parent() {
-    DC_STAGE_PARENT=$DC_STAGING_DIR
+    DC_STAGE_PARENT=$DC_STAGING_DIR DC_TRUST_ACL=""
     if [ -z "$DC_STAGE_PARENT" ]; then
         if [ "$DC_SCRIPT_OS" = darwin ]; then
             DC_STAGE_PARENT=/var/tmp

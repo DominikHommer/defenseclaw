@@ -151,6 +151,22 @@ def test_doctor_reports_unreadable_dotenv_and_keeps_other_checks(
     assert "placeholder" not in str(row)
 
 
+def test_doctor_still_fails_exposed_dotenv_when_safe_read_rejects_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_bytes(b"x" * 10)
+    dotenv.chmod(0o644)
+    monkeypatch.setattr(
+        cmd_doctor, "read_regular_file_no_follow",
+        Mock(side_effect=UnsafePathError("sensitive file exceeds read limit")),
+    )
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_private_file_exposure(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
+    assert result.checks[0]["status"] == "fail"
+    assert "mode 0644" in result.checks[0]["detail"]
+
+
 def test_empty_data_dir_never_consumes_cwd_gateway_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

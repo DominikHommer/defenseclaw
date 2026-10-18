@@ -6180,6 +6180,13 @@ def identities(
             except requests.RequestException as exc:
                 raise click.ClickException(f"sidecar request failed: {exc}") from exc
             label = f"--user {user}" if user else f"--connector {connector_name}"
+            if user and os.name == "posix":
+                import pwd
+
+                try:
+                    pwd.getpwnam(user)
+                except KeyError as exc:
+                    raise click.UsageError(f"unknown account for --user: {user}") from exc
             click.echo(
                 f"No agent identity matches {label} "
                 f"({existing} identities exist; run without a filter to list them)."

@@ -125,6 +125,25 @@ def test_macos_trusted_path_refuses_write_acl_entries(tmp_path: Path) -> None:
         assert trusted("darwin", entry)[0], entry
     assert trusted("linux", write)[0]
 
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_missing_staging_folder_returns_structured_refusal(tmp_path: Path) -> None:
+    for platform in ("linux", "macos"):
+        wrapper = _text(MDM / platform / "defenseclaw-enterprise.sh")
+        stage = tmp_path / "missing"
+        functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_stage_parent",))
+        script = (
+            "set -u\nDC_EXIT_FAILURE=1\n"
+            f"DC_SCRIPT_OS={platform}\nDC_STAGING_DIR='{stage}'\n"
+            "dc_trusted_path() { return 1; }\n"
+            "dc_fail_result() { printf '%s|%s|%s' \"$1\" \"$2\" \"$3\"; }\n"
+            f"{functions}\ndc_stage_parent\n"
+        )
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "mdm_staging_untrusted" in result.stdout
+        assert "missing" in result.stdout
+
 def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
     entrypoints = {
         MDM / "intune" / "windows" / "Install-DefenseClawIntune.ps1": "1603",

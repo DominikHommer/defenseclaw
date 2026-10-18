@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 import pytest
@@ -111,8 +112,12 @@ def test_identity_filters_name_empty_results_and_reject_invalid_inputs(monkeypat
     monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: EmptyClient())
     runner = CliRunner()
     empty = runner.invoke(cli, ["agent", "identities", "--user", "nosuchuser"])
-    assert empty.exit_code == 0, empty.output
-    assert "No agent identity matches --user nosuchuser (2621 identities exist" in empty.output
+    if os.name == "posix":
+        assert empty.exit_code == 2, empty.output
+        assert "unknown account for --user: nosuchuser" in empty.output
+    else:
+        assert empty.exit_code == 0, empty.output
+        assert "No agent identity matches --user nosuchuser" in empty.output
     unknown = runner.invoke(cli, ["agent", "identities", "--connector", "bogus"])
     assert unknown.exit_code != 0 and "valid names" in unknown.output
     huge = runner.invoke(cli, ["agent", "identities", "--limit", "99999999999999999999"])

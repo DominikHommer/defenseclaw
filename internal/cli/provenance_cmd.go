@@ -20,9 +20,10 @@ var provenanceCmd = &cobra.Command{
 }
 
 var provenanceShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show schema_version, content_hash, generation, and binary_version",
-	RunE:  runProvenanceShow,
+	Use:         "show",
+	Short:       "Show schema_version, content_hash, generation, and binary_version",
+	Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
+	RunE:        runProvenanceShow,
 }
 
 func init() {
