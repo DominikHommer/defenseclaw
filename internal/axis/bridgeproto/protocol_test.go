@@ -284,6 +284,15 @@ func TestProtocolOutputLimitIncludesAllAcceptedFrames(t *testing.T) {
 	}
 }
 
+func TestProtocolAdmittedFailureStillRequiresOwnedCleanup(t *testing.T) {
+	c, binding := runningConversation(t)
+	frame := Frame{Version: Version, Binding: binding, Sequence: 3, Request: 2, Kind: Failed,
+		Failure: &Failure{Code: "io_failed"}}
+	if err := c.Bridge(frame); err != nil || c.Phase() != PhaseClosed || !c.PeerClosed() {
+		t.Fatal("accepted terminal failure did not preserve cleanup obligation")
+	}
+}
+
 func TestProtocolReplaysForeignBindingsAndEarlyLaunchPermanentlyRefuse(t *testing.T) {
 	for _, attack := range []string{"replay", "request_replay", "foreign_binding", "bridge_command", "early_exit", "output_after_eof"} {
 		t.Run(attack, func(t *testing.T) {

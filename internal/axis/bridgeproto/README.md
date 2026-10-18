@@ -65,6 +65,8 @@ aggregate cap. EOF or malformed/partial I/O permanently poisons the decoder;
 partial writes permanently poison the encoder. The owner must admit each
 outbound command before writing and each decoded event before dispatching it.
 An error must revoke grants and contain/wait the exact owned helper/workload.
+An admitted `failed` event also closes the conversation and requires that
+cleanup; successful protocol admission never means successful execution.
 These protocol checks do not establish native process-tree cleanup.
 
 Encoders/decoders perform synchronous bounded I/O without read-ahead. The
@@ -72,3 +74,6 @@ supervisor must set deadlines or close its owned pipes on cancellation,
 backpressure or peer death. This package does not interrupt an arbitrary
 blocking `io.Reader`/`io.Writer`. It also does not enforce elapsed execution
 time; the native supervisor must enforce the admitted deadline and cleanup.
+One owner must serialize sequence assignment, conversation admission and the
+corresponding frame write together. Encoder locking alone cannot preserve that
+order across independent callers that admit and write in separate steps.
