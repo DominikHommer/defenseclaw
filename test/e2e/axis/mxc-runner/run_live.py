@@ -25,6 +25,7 @@ CHECKS = {
     "exit_23",
     "pty_isatty_and_foreground",
     "pty_input_ack_and_resize",
+    "pty_sigint_ack_and_continued_input",
     "typed_timeout",
     "direct_child_pidfd_exited",
     "handle_kill_after_wait_idempotent",
@@ -34,9 +35,9 @@ OUTPUT_LIMIT = 128 * 1024
 
 
 def positive_pty_groups(value: object) -> bool:
-    if not isinstance(value, list) or len(value) != 2:
+    if not isinstance(value, list) or len(value) != 3:
         return False
-    for observation, phase in zip(value, ("initial", "resized"), strict=True):
+    for observation, phase in zip(value, ("initial", "resized", "continued"), strict=True):
         if not isinstance(observation, dict):
             return False
         foreground = observation.get("foreground_pgrp")

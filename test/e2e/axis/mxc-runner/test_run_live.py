@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -20,6 +21,15 @@ _SPEC.loader.exec_module(live)
 
 
 class FailureReceiptTests(TestCase):
+    def test_rust_success_check_inventory_matches_driver_without_duplicates(self):
+        source = Path(__file__).with_name("src").joinpath("probe.rs").read_text(encoding="utf-8")
+        inventories = re.findall(r'"checks":\s*(\[[^\]]*\])', source)
+        self.assertEqual(len(inventories), 1, "require one fixed Rust success-check inventory")
+        checks = json.loads(inventories[0])
+        self.assertTrue(all(isinstance(check, str) for check in checks))
+        self.assertEqual(len(checks), len(set(checks)), "Rust success-check inventory has duplicates")
+        self.assertEqual(set(checks), live.CHECKS)
+
     def run_case(self, *, timeout=False, checks=None, abi=3, groups=None):
         with tempfile.TemporaryDirectory(prefix="dc-live-receipt-unit-") as temporary:
             root = Path(temporary)
@@ -48,7 +58,7 @@ class FailureReceiptTests(TestCase):
                 "landlock_abi": abi,
                 "pty_groups": [
                     {"phase": phase, "isatty": 1, "foreground_pgrp": 7, "process_pgrp": 7}
-                    for phase in ("initial", "resized")
+                    for phase in ("initial", "resized", "continued")
                 ]
                 if groups is None
                 else groups,
@@ -112,13 +122,26 @@ class FailureReceiptTests(TestCase):
             with self.subTest(group=group):
                 groups = [
                     {"phase": phase, "isatty": 1, "foreground_pgrp": group, "process_pgrp": group}
-                    for phase in ("initial", "resized")
+                    for phase in ("initial", "resized", "continued")
                 ]
                 self.assertFalse(self.run_case(groups=groups)["passed"])
 
     def test_incomplete_or_reversed_foreground_evidence_is_refused(self):
         initial = {"phase": "initial", "isatty": 1, "foreground_pgrp": 7, "process_pgrp": 7}
         resized = dict(initial, phase="resized")
-        for groups in ([], [initial], [resized, initial], [initial, resized, resized], [True, True]):
+        continued = dict(initial, phase="continued")
+        for groups in (
+            [],
+            [initial],
+            [initial, resized],
+            [resized, initial, continued],
+            [initial, resized, resized],
+            [initial, resized, continued, continued],
+            [True, True, True],
+        ):
             with self.subTest(groups=groups):
                 self.assertFalse(self.run_case(groups=groups)["passed"])
+
+    def test_pre_sigint_check_inventory_is_refused(self):
+        checks = sorted(live.CHECKS - {"pty_sigint_ack_and_continued_input"})
+        self.assertFalse(self.run_case(checks=checks)["passed"])

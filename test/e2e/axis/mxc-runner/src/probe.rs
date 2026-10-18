@@ -14,6 +14,7 @@ use std::io::{self, BufRead, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -27,7 +28,10 @@ const UNGRANTED: &[u8] = b"synthetic-ungranted-canary\n";
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 8 * 1024;
 const PTY_GROUP_MARKER: &[u8] = b"PTY_GROUPS=";
+const PTY_PHASES: [&str; 3] = ["initial", "resized", "continued"];
+const PTY_SIGINT_ACK: &[u8] = b"PTY_SIGINT_ACK signal=SIGINT vintr=3 isig=true";
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
+static FIXED_SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 pub fn run() -> Result<i32> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -93,7 +97,7 @@ pub fn run() -> Result<i32> {
             "pty_groups": pty_groups,
             "checks": ["private_home_and_environment", "allowed_writes", "outer_mxc_canary_visible_before_guards", "ungranted_read_and_write_eacces",
                 "readonly_write_denied", "ipv4_ipv6_tcp_udp_socket_eperm", "exit_23", "pty_isatty_and_foreground",
-                "pty_input_ack_and_resize", "typed_timeout", "direct_child_pidfd_exited",
+                "pty_input_ack_and_resize", "pty_sigint_ack_and_continued_input", "typed_timeout", "direct_child_pidfd_exited",
                 "handle_kill_after_wait_idempotent", "owned_fixture_removed"],
             "scope": "fixed_benign_contributor_experiment", "production_or_claude_qualification": false,
             "proxy_or_descendant_cleanup_qualification": false
@@ -402,6 +406,7 @@ fn fixed_child(case: Case) -> Result<i32> {
     }
     if matches!(case, Case::Pty) {
         establish_namespace_foreground_group()?;
+        install_fixed_sigint_handler()?;
     }
     // SAFETY: PR_SET_NO_NEW_PRIVS has an integer value and unused zero args.
     // It affects only this already-contained fixed child and is irreversible.
@@ -461,7 +466,17 @@ fn fixed_child(case: Case) -> Result<i32> {
         }
         Case::Pty => {
             terminal_state(30, 100, "initial")?;
+            require_terminal_interrupt_settings()?;
+            ensure!(
+                !FIXED_SIGINT_RECEIVED.load(Ordering::Relaxed),
+                "SIGINT arrived before the owned PTY control-byte handshake"
+            );
             println!("PTY_READY isatty=true foreground=true rows=30 cols=100");
+            io::stdout().flush()?;
+            require_fixed_sigint(&FIXED_SIGINT_RECEIVED, Duration::from_secs(3))?;
+            terminal_state(40, 120, "resized")?;
+            require_terminal_interrupt_settings()?;
+            println!("PTY_SIGINT_ACK signal=SIGINT vintr=3 isig=true");
             io::stdout().flush()?;
             let mut line = String::new();
             // Input is bounded even if the fixed supervisor is changed later.
@@ -470,8 +485,10 @@ fn fixed_child(case: Case) -> Result<i32> {
                 line == "fixed-benign-input\n",
                 "PTY input acknowledgement differs"
             );
-            terminal_state(40, 120, "resized")?;
-            println!("PTY_ACK input=true rows=40 cols=120 foreground=true");
+            terminal_state(40, 120, "continued")?;
+            println!(
+                "PTY_ACK input=true rows=40 cols=120 foreground=true continued_after_sigint=true"
+            );
             Ok(23)
         }
         Case::Timeout => {
@@ -482,6 +499,79 @@ fn fixed_child(case: Case) -> Result<i32> {
             }
         }
     }
+}
+
+extern "C" fn fixed_sigint_handler(_signal: libc::c_int) {
+    // AtomicBool is lock-free on this x86_64-only contributor target. The
+    // handler performs no allocation, I/O, locking or non-signal-safe calls.
+    FIXED_SIGINT_RECEIVED.store(true, Ordering::Relaxed);
+}
+
+fn install_fixed_sigint_handler() -> Result<()> {
+    require_terminal_interrupt_settings()?;
+    FIXED_SIGINT_RECEIVED.store(false, Ordering::Relaxed);
+    // SAFETY: this runs only in the new contained fixed PTY child, before
+    // guards or threads. All C structs/sets are initialized and remain live
+    // for the calls. Only that child's SIGINT disposition/mask are changed.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = fixed_sigint_handler as *const () as libc::sighandler_t;
+        ensure!(
+            libc::sigemptyset(&mut action.sa_mask) == 0,
+            "initialize fixed SIGINT handler mask"
+        );
+        action.sa_flags = 0;
+        ensure!(
+            libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut()) == 0,
+            "install fixed SIGINT handler: {}",
+            io::Error::last_os_error()
+        );
+        let mut interrupt: libc::sigset_t = std::mem::zeroed();
+        ensure!(
+            libc::sigemptyset(&mut interrupt) == 0
+                && libc::sigaddset(&mut interrupt, libc::SIGINT) == 0,
+            "initialize fixed SIGINT unblock set"
+        );
+        let status = libc::pthread_sigmask(libc::SIG_UNBLOCK, &interrupt, std::ptr::null_mut());
+        ensure!(
+            status == 0,
+            "unblock fixed child SIGINT: {}",
+            io::Error::from_raw_os_error(status)
+        );
+    }
+    Ok(())
+}
+
+fn require_terminal_interrupt_settings() -> Result<()> {
+    // SAFETY: tcgetattr reads only the owned stdin terminal and writes into
+    // valid initialized stack memory. The probe never changes host termios.
+    let mut settings: libc::termios = unsafe { std::mem::zeroed() };
+    ensure!(
+        unsafe { libc::tcgetattr(0, &mut settings) } == 0,
+        "read owned PTY interrupt settings: {}",
+        io::Error::last_os_error()
+    );
+    validate_interrupt_settings(settings.c_lflag, settings.c_cc[libc::VINTR])
+}
+
+fn validate_interrupt_settings(flags: libc::tcflag_t, interrupt: libc::cc_t) -> Result<()> {
+    ensure!(
+        flags & libc::ISIG != 0 && interrupt == 0x03,
+        "owned PTY requires ISIG and VINTR=0x03"
+    );
+    Ok(())
+}
+
+fn require_fixed_sigint(received: &AtomicBool, limit: Duration) -> Result<()> {
+    let start = Instant::now();
+    while !received.load(Ordering::Relaxed) {
+        ensure!(
+            start.elapsed() < limit,
+            "fixed child did not observe owned PTY SIGINT within deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn establish_namespace_foreground_group() -> Result<()> {
@@ -685,13 +775,21 @@ fn run_pty(paths: &Paths, executable: &Path) -> Result<serde_json::Value> {
             size.rows == 40 && size.cols == 120,
             "SDK PTY resize readback differs"
         );
+        // VINTR is interpreted by this owned terminal's line discipline.
+        // No numeric PID/process-group signal is issued by the supervisor.
+        input.write_all(&[0x03])?;
+        input.flush()?;
+        if let Err(error) = output.require_marker(PTY_SIGINT_ACK, Duration::from_secs(4)) {
+            output.emit_pty_diagnostic();
+            return Err(error);
+        }
         input.write_all(b"fixed-benign-input\n")?;
         input.flush()?;
         let outcome = wait_terminal(&terminal).inspect_err(|_| output.emit_pty_diagnostic())?;
         let bytes = output.finish()?;
         let acknowledged = contains(
             &bytes,
-            b"PTY_ACK input=true rows=40 cols=120 foreground=true",
+            b"PTY_ACK input=true rows=40 cols=120 foreground=true continued_after_sigint=true",
         );
         if !matches!(outcome, WaitResult::Exited(23)) || !acknowledged {
             eprintln!(
@@ -980,10 +1078,10 @@ fn pty_group_evidence(output: &[u8]) -> Result<serde_json::Value> {
         })
         .collect::<Result<Vec<_>>>()?;
     ensure!(
-        observations.len() == 2,
+        observations.len() == PTY_PHASES.len(),
         "fixed PTY group evidence is incomplete"
     );
-    for (observation, phase) in observations.iter().zip(["initial", "resized"]) {
+    for (observation, phase) in observations.iter().zip(PTY_PHASES) {
         ensure!(
             observation["phase"] == phase && observation["isatty"] == 1,
             "fixed PTY group phase differs"
@@ -1112,7 +1210,7 @@ mod tests {
             (7, 8, false),
             (-1, -1, false),
         ] {
-            let output = ["initial", "resized"]
+            let output = PTY_PHASES
                 .map(|phase| {
                     format!(
                         "PTY_GROUPS={}\r\n",
@@ -1125,5 +1223,19 @@ mod tests {
                 .concat();
             assert_eq!(pty_group_evidence(output.as_bytes()).is_ok(), accepted);
         }
+    }
+
+    #[test]
+    fn fixed_sigint_requires_interrupt_mode_and_control_byte_three() {
+        assert!(validate_interrupt_settings(libc::ISIG, 0x03).is_ok());
+        assert!(validate_interrupt_settings(0, 0x03).is_err());
+        assert!(validate_interrupt_settings(libc::ISIG, 0).is_err());
+        assert!(validate_interrupt_settings(libc::ISIG, 0x04).is_err());
+    }
+
+    #[test]
+    fn fixed_sigint_wait_cannot_succeed_without_observed_flag() {
+        assert!(require_fixed_sigint(&AtomicBool::new(false), Duration::ZERO).is_err());
+        assert!(require_fixed_sigint(&AtomicBool::new(true), Duration::ZERO).is_ok());
     }
 }
