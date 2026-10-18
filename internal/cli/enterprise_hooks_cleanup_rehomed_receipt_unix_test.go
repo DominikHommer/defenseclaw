@@ -177,9 +177,12 @@ func TestStandaloneCleanupCopiedOpenCodeReceipt(t *testing.T) {
 				return
 			}
 			if outcome != enterpriseHookUserCleanupFailed || err == nil ||
-				!strings.Contains(err.Error(), c.oldPlugin) || !strings.Contains(err.Error(), c.newPlugin) ||
+				!strings.Contains(err.Error(), c.oldHome) || !strings.Contains(err.Error(), c.newPlugin) ||
 				!strings.Contains(err.Error(), "stale copied receipt") {
-				t.Fatalf("edited copy cleanup = %v, %v; want kept row naming both paths and remedy", outcome, err)
+				t.Fatalf("edited copy cleanup = %v, %v; want kept row naming the recorded home, the current plugin and the remedy", outcome, err)
+			}
+			if _, statErr := os.Stat(c.newReceipt()); statErr != nil {
+				t.Fatalf("the copied receipt of the kept plugin was lost: %v", statErr)
 			}
 			if data, readErr := os.ReadFile(c.newPlugin); readErr != nil || !bytes.Equal(data, c.oldEditedBytes) {
 				t.Fatalf("unverified current plugin changed: %v", readErr)
@@ -220,6 +223,60 @@ func TestStandaloneCleanupEmptiedOldHomeOpenCodeReceipt(t *testing.T) {
 	}
 	if _, err := os.Lstat(c.newPlugin); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the current home still loads the plugin: %v", err)
+	}
+}
+
+func (c rehomedOpenCodeCase) newReceipt() string {
+	return filepath.Join(c.currentHome, ".defenseclaw", "connector_backups", "opencode", "config.json")
+}
+
+// A failed cleanup of a copied home keeps what a retry needs: the edited
+// current plugin, its copied receipt and the recorded home's plugin and
+// receipt, all byte for byte. The current-home pass acts on the current
+// home's copy only; it removed the recorded home's plugin and then the
+// copied receipt before (rel-1-0-3 GAP-0200). Once the copy is back to what
+// DefenseClaw wrote, the retry removes both plugins and both receipts.
+func TestStandaloneCleanupFailedCopiedHomeKeepsBothReceipts(t *testing.T) {
+	c := setupRehomedOpenCodeCase(t, false, false)
+	pristine, err := os.ReadFile(c.newPlugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := alterCopiedPluginFirstLine(t, c.newPlugin)
+	read := func(path string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return data
+	}
+	before := map[string][]byte{c.oldPlugin: read(c.oldPlugin), c.oldReceipt: read(c.oldReceipt), c.newReceipt(): read(c.newReceipt())}
+	for attempt := 1; attempt <= 2; attempt++ {
+		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, c.entry, c.resolver)
+		if outcome != enterpriseHookUserCleanupFailed || err == nil || !strings.Contains(err.Error(), c.newPlugin) {
+			t.Fatalf("attempt %d = %v, %v", attempt, outcome, err)
+		}
+		if !bytes.Equal(read(c.newPlugin), edited) {
+			t.Fatalf("attempt %d changed the edited current plugin", attempt)
+		}
+		for path, data := range before {
+			if !bytes.Equal(read(path), data) {
+				t.Fatalf("attempt %d changed %s", attempt, path)
+			}
+		}
+	}
+	if err := os.WriteFile(c.newPlugin, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, c.entry, c.resolver)
+	if outcome != enterpriseHookUserCleanupDone || err != nil {
+		t.Fatalf("retry after the copy is pristine = %v, %v", outcome, err)
+	}
+	for _, path := range []string{c.newPlugin, c.oldPlugin, c.newReceipt(), c.oldReceipt} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s remains after the clean retry: %v", path, err)
+		}
 	}
 }
 
@@ -391,28 +448,32 @@ func TestStandaloneCleanupCopiedCodexReceiptUsesCurrentConfig(t *testing.T) {
 		homes = append(homes, account.Home)
 		return runEnterpriseHookWorker(ctx, account, request)
 	}
+	// The copy the account edited keeps the old home's absolute hook
+	// references, which the surgical removal does not own: the row stays
+	// with the current config named, and both homes keep their receipts.
+	copied, err := os.ReadFile(currentConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentConfig, append(copied, []byte("# edited after the move\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)
-	if outcome != enterpriseHookUserCleanupFailed || err == nil ||
-		!strings.Contains(err.Error(), oldConfig) || !strings.Contains(err.Error(), currentConfig) ||
-		!strings.Contains(err.Error(), "stale copied receipt") || len(homes) != 1 {
-		t.Fatalf("unverifiable Codex copy = %v, %v, worker homes %v", outcome, err, homes)
+	if outcome != enterpriseHookUserCleanupFailed || err == nil || !strings.Contains(err.Error(), currentConfig) ||
+		!strings.Contains(err.Error(), "stale copied receipt") || len(homes) != 2 {
+		t.Fatalf("edited Codex copy = %v, %v, worker homes %v", outcome, err, homes)
 	}
 	if data, readErr := os.ReadFile(currentConfig); readErr != nil || !strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
 		t.Fatalf("current Codex config unexpectedly cleaned: %v, %q", readErr, data)
 	}
-	// Removing the stale receipt alone does not prove the copied config is
-	// clean: Codex's old absolute hook references can survive its teardown.
-	if err := os.RemoveAll(filepath.Join(currentHome, ".defenseclaw", "connector_backups", "codex")); err != nil {
-		t.Fatal(err)
+	if _, statErr := os.Stat(oldReceipt); statErr != nil {
+		t.Fatalf("a failed cleanup lost the recorded home's receipt: %v", statErr)
 	}
-	outcome, err = attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)
-	if outcome != enterpriseHookUserCleanupFailed || err == nil || !strings.Contains(err.Error(), currentConfig) || len(homes) != 3 {
-		t.Fatalf("copied Codex config ended before its entries were removed: %v, %v, worker homes %v", outcome, err, homes)
+	if data, readErr := os.ReadFile(oldConfig); readErr != nil || !strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
+		t.Fatalf("the current-home pass changed the recorded home's config: %v", readErr)
 	}
-	if data, readErr := os.ReadFile(currentConfig); readErr != nil || !strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
-		t.Fatalf("copied config no longer reproduces residual entries: %v, %q", readErr, data)
-	}
-	// The operator removes the named entries. Only then may the row end.
+	// The operator removes the named entries. Only then may the row end,
+	// and the recorded home is cleaned by its own receipt.
 	if err := os.WriteFile(currentConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -420,14 +481,65 @@ func TestStandaloneCleanupCopiedCodexReceiptUsesCurrentConfig(t *testing.T) {
 	if outcome != enterpriseHookUserCleanupDone || err != nil {
 		t.Fatalf("Codex cleanup after removing entries = %v, %v, worker homes %v", outcome, err, homes)
 	}
-	if len(homes) != 5 || homes[0] != currentHome || homes[1] != currentHome || homes[2] != currentHome ||
-		homes[3] != currentHome || homes[4] != oldHome {
+	if len(homes) != 4 || homes[0] != currentHome || homes[1] != currentHome || homes[2] != currentHome || homes[3] != oldHome {
 		t.Fatalf("cleanup used unexpected homes: %v", homes)
 	}
 	for _, path := range []string{currentConfig, oldConfig} {
 		data, err := os.ReadFile(path)
 		if err != nil || strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
 			t.Fatalf("Codex config %s still has DefenseClaw entries: %v, %q", path, err, data)
+		}
+	}
+}
+
+// A copy left as DefenseClaw wrote it is restored from its own copied
+// receipt: one pass per home ends the row.
+func TestStandaloneCleanupPristineCodexCopyEndsInOnePass(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the per-user worker requires a non-root test account")
+	}
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	oldHome := f.home(t, "sample-codex-old", 0o700)
+	currentHome := f.home(t, "sample-codex-current", 0o700)
+	uid, gid := os.Getuid(), os.Getgid()
+	t.Setenv("HOME", oldHome)
+	t.Setenv("CODEX_HOME", "")
+	previousPath := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = ""
+	t.Cleanup(func() { connector.CodexConfigPathOverride = previousPath })
+	oldConfig := filepath.Join(oldHome, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(oldConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := enterprisehooks.InstallOptions{
+		ConnectorName: "codex", UserHome: oldHome, OwnerUID: uid, OwnerGID: gid,
+		APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000",
+		APIToken: strings.Repeat("a", 64), OTLPPathToken: strings.Repeat("b", 64),
+		GuardrailMode: "action", HookFailMode: "closed", AgentVersion: "codex-cli 0.142.0",
+		Registry: connector.NewDefaultRegistry(),
+	}
+	if _, err := enterprisehooks.Install(context.Background(), opts); err != nil {
+		t.Fatalf("install Codex in recorded home: %v", err)
+	}
+	copyRehomedTestTree(t, oldHome, currentHome)
+	currentConfig := filepath.Join(currentHome, ".codex", "config.toml")
+	resolver.accounts["sample-user"] = unixidentity.Account{Name: "sample-user", UID: uid, GID: gid, Home: currentHome}
+	entry := enterpriseHookUserCleanup{Connector: "codex", User: "sample-user", UID: uid,
+		UserHome: oldHome, DataDir: filepath.Join(oldHome, ".defenseclaw")}
+	useEnterpriseHookWorkerHelper(t, "real")
+	enterpriseHookWorkerRunner = runEnterpriseHookWorker
+	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &bytes.Buffer{}, entry, resolver)
+	if outcome != enterpriseHookUserCleanupDone || err != nil {
+		t.Fatalf("pristine Codex copy = %v, %v", outcome, err)
+	}
+	for _, path := range []string{currentConfig, oldConfig} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "model = \"gpt-5\"\n" {
+			t.Fatalf("Codex config %s was not restored exactly: %v, %q", path, err, data)
 		}
 	}
 }

@@ -124,6 +124,10 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// PreviousHome is the recorded home of a re-homed account whose current
+	// home a Remove cleans. Receipts copied from it act on this home's copy
+	// of the file, never on the other home (rel-1-0-3 GAP-0200).
+	PreviousHome string `json:"previous_home,omitempty"`
 }
 
 type enterpriseHookWorkerTarget struct {
@@ -582,6 +586,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				outcome.Repaired = err == nil
 			}
 		case enterpriseHookWorkerModeRemove:
+			previousHome := strings.TrimSpace(target.Options.PreviousHome)
+			if previousHome != "" && (!filepath.IsAbs(previousHome) || filepath.Clean(previousHome) != previousHome) {
+				err = fmt.Errorf("enterprise hooks: previous home %q is not a clean absolute path", previousHome)
+				break
+			}
+			restorePreviousHome := connector.BindManagedBackupPreviousHome(previousHome)
 			conn, setupOpts, setupErr := enterpriseHookWorkerRemoveSetup(opts)
 			if setupErr == nil {
 				var reportErr error
@@ -593,20 +603,31 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 					outcome.Unverified = enterpriseHookWorkerUnverifiedReason(reportErr)
 				}
 			}
+			// An agent config in the home that leads out of it is left
+			// alone, link and file, whoever owns that file: the removal
+			// fails with the remedy and no teardown runs (rel-1-0-3
+			// GAP-0206). The connector writes refuse it as well.
+			if err = enterpriseHookWorkerOutsideHomeConfig(opts.UserHome, outcome.CleanedPaths); err != nil {
+				restorePreviousHome()
+				break
+			}
 			// A report is needed only for a re-homed row. An unreadable
 			// receipt must not prevent ordinary teardown.
 			if err = enterpriseHookWorkerRemover(ctx, opts); err != nil {
+				restorePreviousHome()
 				break
 			}
 			if setupErr != nil {
 				outcome.Unverified = enterpriseHookWorkerUnverifiedReason(setupErr)
 			}
 			if !outcome.PathsReported {
+				restorePreviousHome()
 				purgeBlocked = firstNonEmpty(purgeBlocked, "the removal of its "+opts.ConnectorName+
 					" entries could not be checked ("+outcome.Unverified+"); fix that, then rerun the purge")
 				break
 			}
 			outcome.Remaining = enterpriseHookWorkerRemainingAfterRemove(opts, conn, setupOpts, outcome.CleanedPaths)
+			restorePreviousHome()
 			if outcome.Remaining != "" {
 				purgeBlocked = firstNonEmpty(purgeBlocked, "DefenseClaw entries remain after the removal ("+outcome.Remaining+
 					"); remove them from that agent's config, then rerun the purge")
@@ -749,6 +770,25 @@ func enterpriseHookWorkerRemovePaths(opts enterprisehooks.InstallOptions, conn c
 		return nil, err
 	}
 	return paths, nil
+}
+
+// enterpriseHookWorkerOutsideHomeConfig refuses a removal while one of the
+// agent config paths in the home leads out of it through a symlink (the
+// config, or a folder on the way), also to a file that does not exist. The
+// worker runs as the user, but a file outside the home is not DefenseClaw's
+// to restore or delete, even when the user may change it (rel-1-0-3
+// GAP-0206). A link chain that cannot be followed is refused too.
+func enterpriseHookWorkerOutsideHomeConfig(home string, paths []string) error {
+	for _, path := range paths {
+		target, outside, err := connector.AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return fmt.Errorf("%s: the agent config link cannot be followed (%v); DefenseClaw left it alone: replace the link with the file it names, then rerun", path, err)
+		}
+		if outside {
+			return &connector.AgentConfigOutsideHomeError{Path: path, Target: target}
+		}
+	}
+	return nil
 }
 
 // enterpriseHookWorkerRemainingAfterRemove names the first DefenseClaw entry

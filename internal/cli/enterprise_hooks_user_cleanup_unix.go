@@ -585,7 +585,14 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 
 // runEnterpriseHookStandaloneCleanupWorker sends the same remove request and
 // interprets the same response for a current or recorded home.
+// A current-home pass of a re-homed account (account.Home is not the
+// recorded home) names the recorded home as the previous one, so receipts
+// copied from it act on this home's copies only.
 func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpriseHookUserCleanup, account enterpriseHookWorkerAccount, dataDir string) (enterpriseHookUserCleanupOutcome, enterpriseHookWorkerTargetResult, error) {
+	previousHome := ""
+	if recorded := filepath.Clean(strings.TrimSpace(entry.UserHome)); filepath.IsAbs(recorded) && recorded != filepath.Clean(account.Home) {
+		previousHome = recorded
+	}
 	response, err := enterpriseHookWorkerRunner(ctx, account, enterpriseHookWorkerRequest{
 		Operation:  enterpriseHookWorkerOpApply,
 		Standalone: true,
@@ -597,6 +604,7 @@ func runEnterpriseHookStandaloneCleanupWorker(ctx context.Context, entry enterpr
 				OwnerUID:      account.UID,
 				OwnerGID:      account.GID,
 				DataDir:       dataDir,
+				PreviousHome:  previousHome,
 			},
 		}},
 	})

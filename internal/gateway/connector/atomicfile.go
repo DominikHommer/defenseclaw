@@ -195,7 +195,18 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	return err == nil && pathInfo.Mode()&os.ModeSymlink == 0 && os.SameFile(openedInfo, pathInfo)
 }
 
+// resolveAtomicWritePath is the file a write to path changes: the end of
+// its symlink chain. In an account home bound with WithUserHomeDir (the
+// enterprise per-user install and cleanup on Unix), a path in that home
+// that leads out of it is refused (rel-1-0-3 GAP-0206).
 func resolveAtomicWritePath(path string) (string, error) {
+	if err := confineAtomicWritePath(path); err != nil {
+		return "", err
+	}
+	return resolveAtomicWritePathUnconfined(path)
+}
+
+func resolveAtomicWritePathUnconfined(path string) (string, error) {
 	cur := path
 	for i := 0; i < 16; i++ {
 		info, err := os.Lstat(cur)
