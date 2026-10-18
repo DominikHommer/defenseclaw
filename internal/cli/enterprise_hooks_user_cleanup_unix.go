@@ -262,6 +262,29 @@ var enterpriseHookRecordedHomeGone = func(home string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
+// enterpriseHookRecordedHomeMoved reports whether a re-homed account's
+// recorded home counts as moved: it is gone, or it is an empty folder (an
+// rsync, then its contents deleted). A recorded home that still holds any
+// entry, or cannot be read, is a copy: the cleanup ran in it too and found
+// it clean, and the audit line must not call it a move (rel-1-0-3
+// GAP-0257).
+func enterpriseHookRecordedHomeMoved(home string) bool {
+	if enterpriseHookRecordedHomeGone(home) {
+		return true
+	}
+	info, err := enterprisehooks.BoundedLstat(home, enterpriseHookHomeCheckTimeout)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	dir, err := os.Open(home)
+	if err != nil {
+		return false
+	}
+	defer dir.Close()
+	names, err := dir.Readdirnames(1)
+	return len(names) == 0 && errors.Is(err, io.EOF)
+}
+
 // enterpriseHookDirectoryNoHome reports a directory home that is no home:
 // what the directory gives a removed or disabled account (a removed macOS
 // AD mobile account answers with /var/empty), not a place a user's agent
@@ -577,8 +600,13 @@ func attemptEnterpriseHookStandaloneUnixCleanup(
 					recordedAccount.Home, recordedDataDir, path, reason, report)
 			}
 		}
-		fmt.Fprintf(log, "[hook-guardian] %s: the account was re-homed from %s to %s; per-user cleanup ran in the current home\n",
-			enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		if enterpriseHookRecordedHomeMoved(homeChanged.home) {
+			fmt.Fprintf(log, "[hook-guardian] %s: the account's home moved from %s to %s (the recorded home is gone or empty); per-user cleanup ran in the current home\n",
+				enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		} else {
+			fmt.Fprintf(log, "[hook-guardian] %s: the account's home changed from %s to %s, and the recorded home still holds files, so this is a copy, not a move; per-user cleanup ran in both homes and found both clean\n",
+				enterpriseHookUserCleanupLabel(entry), homeChanged.home, account.Home)
+		}
 	}
 	return enterpriseHookUserCleanupDone, nil
 }

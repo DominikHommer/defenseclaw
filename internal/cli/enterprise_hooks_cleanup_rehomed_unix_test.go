@@ -89,7 +89,10 @@ func TestStandaloneCleanupRunsInTrustedCurrentHomeAndEndsRow(t *testing.T) {
 			if outcome != enterpriseHookUserCleanupDone || err != nil {
 				t.Fatalf("trusted re-home cleanup = %v, %v", outcome, err)
 			}
-			wantAudit := "the account was re-homed from " + oldHome + " to " + newHome
+			wantAudit := "the account's home moved from " + oldHome + " to " + newHome
+			if oldPresent {
+				wantAudit = "the account's home changed from " + oldHome + " to " + newHome + ", and the recorded home still holds files, so this is a copy, not a move"
+			}
 			if strings.Count(attemptLog.String(), wantAudit) != 1 {
 				t.Fatalf("re-home audit line = %q", attemptLog.String())
 			}
@@ -214,7 +217,7 @@ func TestStandaloneCleanupReconcileRemovesRegistrationInBothHomes(t *testing.T) 
 					t.Fatalf("registration %s remains: %v", config, err)
 				}
 			}
-			if strings.Count(log.String(), "the account was re-homed from "+oldHome+" to "+newHome) != 1 ||
+			if strings.Count(log.String(), "the account's home changed from "+oldHome+" to "+newHome+", and the recorded home still holds files, so this is a copy, not a move") != 1 ||
 				strings.Count(log.String(), "no longer enrolled; per-user cleanup done") != 1 {
 				t.Fatalf("guardian audit = %q", log.String())
 			}

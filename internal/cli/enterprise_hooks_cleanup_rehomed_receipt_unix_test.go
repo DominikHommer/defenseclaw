@@ -226,6 +226,56 @@ func TestStandaloneCleanupEmptiedOldHomeOpenCodeReceipt(t *testing.T) {
 	}
 }
 
+// A recorded home counts as moved only when it is gone or empty. An rsync
+// source that still holds the account's files is a copy: the cleanup runs
+// in both homes, ends only when both are clean, leaves the account's own
+// files alone, and the audit line says it is a copy, not a move (rel-1-0-3
+// GAP-0257).
+func TestStandaloneCleanupCallsOnlyAGoneOrEmptyRecordedHomeMoved(t *testing.T) {
+	const moved, copied = "the account's home moved from ", "so this is a copy, not a move; per-user cleanup ran in both homes"
+	for _, form := range []string{"nonempty source", "emptied source", "source gone"} {
+		t.Run(form, func(t *testing.T) {
+			c := setupRehomedOpenCodeCase(t, false, form != "nonempty source")
+			var own string
+			switch form {
+			case "nonempty source":
+				own = filepath.Join(c.oldHome, "notes.txt")
+				if err := os.WriteFile(own, []byte("mine"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "emptied source":
+				if err := os.Mkdir(c.oldHome, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var log bytes.Buffer
+			outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(context.Background(), &log, c.entry, c.resolver)
+			if outcome != enterpriseHookUserCleanupDone || err != nil {
+				t.Fatalf("cleanup = %v, %v", outcome, err)
+			}
+			for _, path := range []string{c.newPlugin, c.oldPlugin, c.newReceipt(), c.oldReceipt} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("%s remains: %v", path, err)
+				}
+			}
+			audit := log.String()
+			if form == "nonempty source" {
+				if !strings.Contains(audit, "the account's home changed from "+c.oldHome+" to "+c.currentHome) ||
+					!strings.Contains(audit, copied) || strings.Contains(audit, moved) {
+					t.Fatalf("a nonempty source was not called a copy: %q", audit)
+				}
+				if data, err := os.ReadFile(own); err != nil || string(data) != "mine" {
+					t.Fatalf("the cleanup changed the account's own file in the source: %v", err)
+				}
+				return
+			}
+			if !strings.Contains(audit, moved+c.oldHome+" to "+c.currentHome) || strings.Contains(audit, copied) {
+				t.Fatalf("a %s was not called moved: %q", form, audit)
+			}
+		})
+	}
+}
+
 func (c rehomedOpenCodeCase) newReceipt() string {
 	return filepath.Join(c.currentHome, ".defenseclaw", "connector_backups", "opencode", "config.json")
 }
