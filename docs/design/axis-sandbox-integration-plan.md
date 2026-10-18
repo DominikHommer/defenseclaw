@@ -12,9 +12,14 @@ results are recorded in [the manual evidence](../../test/e2e/axis/mxc-v1-manual-
 and [the Windows evidence](../../test/e2e/axis/windows/mxc-v1/manual-results.md).
 The run command now accepts `--runtime`; AXIS execution remains unavailable while
 its complete policy, hook, credential and agent paths are being qualified.
-On Windows, implicit/configured selection still encounters the legacy platform
-guard before configuration is loaded; an explicit `--runtime axis` reports the
-AXIS qualification refusal. This selection work does not enable native execution.
+On Windows, implicit/auto run selection loads the canonical configuration before
+OpenShell's platform check, so a configured AXIS default reports its qualification
+refusal. Explicit AXIS and OpenShell refusals need no configuration. Other
+commands retain their platform-first check. This selection work does not enable
+native execution. Managed Windows hosts also retain their platform-first refusal
+before per-user configuration or `.env` loading; uncertain or untrusted
+installation metadata also refuses that read without becoming managed policy
+authority. Their daemon adapter remains unavailable.
 The private [backend](../../internal/axis/backend/README.md) now owns held assets,
 one-use preparation and launch, canceled preparation, retired session IDs and
 independent native cleanup. Its installation catalog and policy compiler remain

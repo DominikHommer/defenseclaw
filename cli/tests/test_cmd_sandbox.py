@@ -354,6 +354,26 @@ def test_windows_is_refused_with_a_clear_message(monkeypatch: pytest.MonkeyPatch
     assert "Linux and macOS only" in result.output
 
 
+@pytest.mark.parametrize("runtime_args", [[], ["--runtime", "auto"], ["--runtime=auto"]])
+def test_windows_run_delegates_configured_runtime_selection(exec_capture, monkeypatch, runtime_args) -> None:
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
+    monkeypatch.setattr(
+        "defenseclaw.config.require_v8_config", lambda **_kwargs: pytest.fail("Python loaded the runtime configuration")
+    )
+    args = ["sandbox", "run", "claude", *runtime_args]
+    result = CliRunner().invoke(main_module.cli, args, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert exec_capture == [["/opt/dc/defenseclaw-gateway", "/opt/dc/defenseclaw-gateway", *args]]
+
+
+def test_explicit_windows_openshell_refuses_without_gateway_lookup(monkeypatch) -> None:
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: pytest.fail("OpenShell gateway lookup"))
+    result = CliRunner().invoke(sandbox, ["run", "claude", "--runtime", "openshell"], obj=AppContext())
+    assert result.exit_code == 3
+    assert "OpenShell sandboxes run on Linux and macOS only" in result.output
+
+
 def test_windows_refusal_comes_before_a_broken_config(monkeypatch: pytest.MonkeyPatch) -> None:
     # GAP-0242: an unparsable config.yaml was reported (exit 1) instead of
     # the Windows refusal (exit 3) for a feature that cannot run there.
