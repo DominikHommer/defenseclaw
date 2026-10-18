@@ -47,6 +47,12 @@ SOURCE = {
     "src/wire.rs",
     "patches/README.md",
     "patches/bwrap-COPYING",
+    "static/README.md",
+    "static/sources.json",
+    "static/build_static.py",
+    "static/test_build_static.py",
+    "static/musl-LICENSE",
+    "static/libcap-LICENSE",
 } | (set(PATCHES) - {"mxc-literal-argv.patch"})
 PATH_PACKAGES = {
     ("axis-core", "0.3.5"),
@@ -56,19 +62,80 @@ PATH_PACKAGES = {
 }
 
 
-def ordinary(path: Path, bound: int = 2 << 20) -> bytes:
+def ordinary(path: Path, bound: int = 2 << 20, *, allow_empty: bool = False) -> bytes:
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
         raise RuntimeError("source must be an ordinary non-reparse regular file")
     with path.open("rb") as stream:
         raw = stream.read(bound + 1)
-    if not raw or len(raw) > bound:
+    if (not raw and not allow_empty) or len(raw) > bound:
         raise RuntimeError("source exceeds its byte bound")
     return raw
 
 
 def sha(path: Path) -> str:
-    return hashlib.sha256(ordinary(path, 512 << 20)).hexdigest()
+    return hashlib.sha256(ordinary(path, 512 << 20, allow_empty=True)).hexdigest()
+
+
+DEPENDENCY_TESTS = {
+    "axis": {
+        "workspace": "axis-source",
+        "package": "axis-sandbox",
+        "prefix": "linux::seccomp::tests::private_offline_export_",
+        "tests": {
+            "linux::seccomp::tests::private_offline_export_denies_every_socket_without_installing_filter",
+            "linux::seccomp::tests::private_offline_export_keeps_explicit_blocked_syscalls_and_refuses_unknown",
+        },
+    },
+    "mxc": {
+        "workspace": "mxc-source/src",
+        "package": "mxc-sdk",
+        "prefix": "owned_bubblewrap::tests::",
+        "tests": {
+            "owned_bubblewrap::tests::static_structure_refuses_interpreter_dynamic_and_mutable_images",
+            "owned_bubblewrap::tests::guest_destinations_refuse_alias_components_and_synthetic_roots",
+        },
+    },
+}
+
+
+def dependency_unit_gates(artifact: Path) -> None:
+    evidence = {}
+    for name, spec in DEPENDENCY_TESTS.items():
+        workspace = ROOT / spec["workspace"]
+        lock = ordinary(workspace / "Cargo.lock")
+        base = [
+            "cargo",
+            f"+{TOOLCHAIN}",
+            "test",
+            "--locked",
+            "--release",
+            "-p",
+            spec["package"],
+            "--no-default-features",
+            "--lib",
+            spec["prefix"],
+            "--",
+        ]
+        listing = command([*base, "--list"], cwd=workspace, capture=True)
+        listed = {line.removesuffix(": test") for line in listing.splitlines() if line.endswith(": test")}
+        if listed != spec["tests"]:
+            raise RuntimeError("pure dependency unit-test inventory differs")
+        output = command([*base, "--test-threads=1"], cwd=workspace, capture=True)
+        passed = set(re.findall(r"^test (\S+) \.\.\. ok$", output, re.MULTILINE))
+        if passed != listed or "test result: ok. 2 passed; 0 failed; 0 ignored;" not in output:
+            raise RuntimeError("pure dependency unit-test pass inventory differs")
+        if ordinary(workspace / "Cargo.lock") != lock:
+            raise RuntimeError("dependency unit tests changed pinned upstream workspace lock")
+        (artifact / f"{name.upper()}-PURE-UNIT-TESTS.txt").write_text(output, encoding="utf-8")
+        evidence[name] = {
+            "tests": sorted(passed),
+            "passed": len(passed),
+            "workspace_lock_sha256": hashlib.sha256(lock).hexdigest(),
+            "scope": "BPF_export_or_inert_memfd_path_validation_only",
+            "sandbox_or_peer_execution": False,
+        }
+    (artifact / "DEPENDENCY-PURE-UNIT-TESTS.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
 
 
 def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -172,7 +239,12 @@ def admit_lock(seed: bytes, candidate: bytes) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("discover", "locked"))
-    mode = parser.parse_args().mode
+    parser.add_argument("--static-musl", action="store_true", help="build two unexecuted static C closure candidates")
+    parser.add_argument(
+        "--dependency-unit-gates", action="store_true", help="run four selected nonspawning dependency tests"
+    )
+    options = parser.parse_args()
+    mode = options.mode
     if sys.platform != "linux" or os.uname().machine != "x86_64":
         raise RuntimeError("build the private peer on disposable Linux x86_64")
     artifact = ROOT / "build-artifact"
@@ -214,6 +286,31 @@ def main() -> None:
     admission = admit_lock(seed, lock_bytes)
     artifact.mkdir()
     (artifact / "LOCK-ADMISSION.json").write_text(json.dumps(admission, indent=2) + "\n", encoding="utf-8")
+    # Retain the exact inputs even if a later Rust/C/static build refuses.
+    for name, raw in upstream.items():
+        target = artifact / "upstream" / name
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(raw)
+    for name in sorted(SOURCE | {"mxc-literal-argv.patch", "Cargo.lock", "reviewed-linux-seed.lock"}):
+        target = artifact / "source" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(ordinary(ROOT / name))
+    (artifact / "BUILD-INPUTS.json").write_text(
+        json.dumps(
+            {
+                "source_commits": {"axis": AXIS, "mxc": MXC, "bwrap": BWRAP},
+                "patch_sha256": PATCHES,
+                "overlay_files": overlays,
+                "mode": mode,
+                "static_build_requested": options.static_musl,
+                "dependency_pure_unit_gates_requested": options.dependency_unit_gates,
+                "peer_or_sandbox_execution": False,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     toolchain = command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True)
     if not toolchain.startswith("rustc 1.95.0 ") or "host: x86_64-unknown-linux-gnu" not in toolchain:
         raise RuntimeError("unexpected Rust toolchain identity")
@@ -253,6 +350,8 @@ def main() -> None:
         encoding="utf-8",
     )
     (artifact / "RUST-UNIT-TESTS.txt").write_text(output, encoding="utf-8")
+    if options.dependency_unit_gates:
+        dependency_unit_gates(artifact)
     if (
         ordinary(lock) != lock_bytes
         or ordinary(axis / "Cargo.lock") != upstream["axis-Cargo.lock"]
@@ -292,14 +391,11 @@ def main() -> None:
         + "\n",
         encoding="utf-8",
     )
-    for name, raw in upstream.items():
-        target = artifact / "upstream" / name
-        target.parent.mkdir(exist_ok=True)
-        target.write_bytes(raw)
-    for name in sorted(SOURCE | {"mxc-literal-argv.patch", "Cargo.lock", "reviewed-linux-seed.lock"}):
-        target = artifact / "source" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(ordinary(ROOT / name))
+    static_candidate = {"candidate_supplied": False, "runtime_admission": False}
+    if options.static_musl:
+        from static.build_static import build
+
+        static_candidate = build(ROOT, bwrap, artifact)
     (artifact / "bin").mkdir()
     shutil.copyfile(ROOT / "target/release/defenseclaw-axis-peer", artifact / "bin/defenseclaw-axis-peer")
     inventory = {
@@ -318,6 +414,7 @@ def main() -> None:
         "contained_payload_execution": False,
         "customer_activation": False,
         "static_bwrap_runtime_supplied": False,
+        "static_bwrap_build_candidate": static_candidate,
         "unit_scope": "protocol_fake_processes_and_owned_inert_fds_only",
         "overlay_files": overlays,
         "patch_sha256": PATCHES,

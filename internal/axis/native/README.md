@@ -37,7 +37,8 @@ and retains a pidfd for the exact Bubblewrap monitor. The private bwrap route
 uses `execv` and requires an absolute guest executable, with no shell fallback.
 Both static ELF structure and separate reviewed static-musl build provenance
 are mandatory. Static glibc or a missing interpreter entry alone cannot prove
-the loader closure. No static-musl/libcap runtime is supplied by this change.
+the loader closure. The optional static build supplies only an unexecuted
+candidate and its evidence, without runtime admission.
 
 The host must create the peer as PID1 of a fresh outer PID namespace. Before
 environment, descriptor or backend preparation, the peer requires PID1/parent0
@@ -68,7 +69,14 @@ requirements on a disposable runner. Nothing installs an AXIS service/runtime.
 CI compiles the Rust peer and runs protocol/fake-process/owned inert-FD tests.
 It separately compiles the C extension using ordinary dynamic host libraries,
 without running it; that output is not an admitted runtime and is not packaged
-as one. Artifact evidence retains source overlays, exact licenses, upstream and
+as one. Four selected dependency unit gates separately exercise the AXIS BPF
+export and MXC inert-image/guest-path admission against unchanged upstream
+workspace locks; these tests never install a filter or spawn a backend. The
+explicit `--static-musl` build-only extension uses pinned musl/libcap sources,
+the exact GCC13/Ubuntu package byte inventory, an allowlisted static link closure
+and two independent staging roots. It never executes either Bubblewrap image.
+See [static closure requirements](static/README.md). Artifact evidence retains
+source overlays, exact licenses, upstream and
 combined locks, toolchain, checksums and explicit unqualified scope. A discovery
 artifact, green unit tests or a C compile do not authorize native execution.
 

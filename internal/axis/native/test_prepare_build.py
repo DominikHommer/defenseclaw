@@ -52,6 +52,20 @@ class BuildAdmissionTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     build.ordinary(path, 16)
 
+    def test_empty_diagnostic_hash_is_retained_but_empty_source_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.stderr"
+            path.write_bytes(b"")
+            self.assertEqual(build.sha(path), build.hashlib.sha256(b"").hexdigest())
+            with self.assertRaises(RuntimeError):
+                build.ordinary(path)
+
+    def test_dependency_unit_gate_inventory_is_four_fixed_nonspawning_tests(self):
+        self.assertEqual(sum(len(value["tests"]) for value in build.DEPENDENCY_TESTS.values()), 4)
+        for value in build.DEPENDENCY_TESTS.values():
+            self.assertEqual(len(value["tests"]), 2)
+            self.assertTrue(all(name.startswith(value["prefix"]) for name in value["tests"]))
+
     def test_patch_path_traversal_refuses(self):
         self.assertEqual(build.patch_paths(b"+++ b/src/fixed.rs\n"), {"src/fixed.rs"})
         for name in (b"../escape", b"/absolute", b"src//alias", b"src/./alias"):
