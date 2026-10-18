@@ -314,5 +314,6 @@ if [ -n "${MACOS_INSTALLER_SIGN_IDENTITY:-}" ]; then
     [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && product_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
 fi
 productbuild "${product_args[@]}" "$OUTPUT"
+"$REPO_ROOT/scripts/test-managed-package-no-fleet-compiler.sh" "$OUTPUT"
 (cd "$DIST_DIR" && shasum -a 256 "$(basename "$OUTPUT")" >"$(basename "$OUTPUT").sha256")
 echo "built $OUTPUT"

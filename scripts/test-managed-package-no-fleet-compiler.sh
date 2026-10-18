@@ -34,7 +34,10 @@ for package in "$@"; do
                 exit 2
             fi
             ;;
-        *.pkg) pkgutil --expand-full "$package" "$work/extracted" ;;
+        *.pkg)
+            rmdir "$work/extracted"
+            pkgutil --expand-full "$package" "$work/extracted"
+            ;;
         *.tar.gz) tar -xzf "$package" -C "$work/extracted" ;;
         *.zip) unzip -q "$package" -d "$work/extracted" ;;
         *.exe)

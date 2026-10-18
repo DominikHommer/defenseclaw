@@ -236,9 +236,8 @@ if [ "${FLAVOR}" = "standalone-unsigned" ]; then
     ASSEMBLER_SIGNING_FLAGS=(-AllowUnsigned)
 else
     # The signed channels (--payload-dir / --sign-command) hand the
-    # assembler signed executables/scripts plus the release-source Python
-    # compiler. The signed module pins the compiler digest; the signed outer
-    # Setup binds the trailer and is checked again before installation.
+    # assembler signed executables/scripts. The signed outer Setup binds
+    # the trailer and is checked again before installation.
     ASSEMBLER_SIGNING_FLAGS=(
         -SigningType "${SIGNING_TYPE}"
         -ExpectedSignerSha256 "${EXPECTED_SIGNER_SHA256}"
@@ -258,6 +257,8 @@ if [ -n "${SIGN_COMMAND}" ]; then
     echo "==> signing ${SETUP##*/}"
     "${SIGN_COMMAND}" "${SETUP}" || die "signing ${SETUP##*/} failed"
 fi
+
+"${REPO_ROOT}/scripts/test-managed-package-no-fleet-compiler.sh" "${SETUP}"
 
 if command -v sha256sum >/dev/null 2>&1; then
     ( cd "${OUT_DIR}" && sha256sum "${SETUP##*/}" > "${SETUP##*/}.sha256" )
