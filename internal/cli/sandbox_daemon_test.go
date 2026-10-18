@@ -332,6 +332,9 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 
 	// macOS: no trusted e2fsprogs refuses; the user's own build, then the
 	// administrator's directory, goes first on PATH.
+	if err := os.WriteFile(config, []byte("[openshell.gateway]\nbind_address = '127.0.0.1:17670'\ncompute_driver = 'vm'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := planSandboxOpenShellExec(context.Background(), "darwin", nil); !errors.Is(err, errOpenShellPrerequisiteMissing) {
 		t.Fatalf("macOS without e2fsprogs: %v", err)
 	}
