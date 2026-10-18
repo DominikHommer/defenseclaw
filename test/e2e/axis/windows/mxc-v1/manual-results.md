@@ -413,3 +413,45 @@ remains under
 `environment-control-private-02/windows-current-psec-boundary-max-07`.
 Windows boundary, terminal, hooks, credentials and Claude qualification remain
 incomplete; customer AXIS execution is unavailable.
+
+## Native process identity: private environment mapping refuses
+
+[Locked build 39138642152](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39138642152)
+at `4a5aa3d964d19fe35fd27e933bacfc956088b0df` passed six exact pure Rust tests
+and eleven exact SDK tests. Two independent artifact reviews checked all 27
+archive members, source/lock identity and sixteen reconstructed SDK paths.
+The child's ten imported DLLs match the prior standalone child; native token
+and profile queries remain in the trusted parent.
+
+The Go custody wrapper's native-identity receipt constants were synchronized
+separately in `1ab78c8d`. Its new cross-language inert test accepts the actual
+Python verifier's three-image identity and rejects the earlier variant/scope.
+Native race/vet passed before a fresh Go1.26.5, CGO-disabled build. The attempt
+loaded frozen hash-checked Git helper bytes, independently of later source work.
+
+One fresh case08 ran. Literal argv passed with an observed signaled direct
+process handle. The next case refused with the fixed error `native private
+environment binding refused`. Source ordering places this failure in the pure
+native-folder/private-root binding after successful token/SID/profile API
+queries; it does not establish the returned folder's shape or a valid mapping.
+No native-identity environment marker or subsequent credential/write/socket
+boundary checks passed. The expected-path check was not weakened or retried.
+
+The wrapper exited 1 in 6.083 seconds; the probe observation took 3.666 seconds.
+The outer Job was assigned before resume, ended empty with zero active
+processes, and reported no deadline, overflow or stream-read error. The exact
+synthetic fixture `dc-axis-windows-psec-MnHFQy` remains under
+`environment-control-private-02/windows-current-psec-boundary-max-08`.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12141560414` | `df1864bdc92408e41a77736fbc4f3f6fce5502ab251129a3ced2bd6600693dfb` |
+| Provenance | `296183a3e95c03fe1c6489ddc52776891b2512f72b12f2dda8af402232e9cdae` |
+| Root verification receipt | `c595a5a503b4305117d2f4393a4514a21c77b12ba18b7874acf3916a0c633987` |
+| Go custody image | `27c5d09fc98e8d46e0fb790a019ff12b18969bb60ba528c0a8a2da3f7a917be8` |
+| Actual live result | `22b04d978b291028986fcd2c3a1687c2d50ba6a9dcd52b3c448e5564e1f3e522` |
+
+The next investigation must establish the relationship between the native
+profile API's result and the child's explicitly supplied private USERPROFILE.
+No native path values were logged. Full Windows and real Claude acceptance
+remain incomplete.
