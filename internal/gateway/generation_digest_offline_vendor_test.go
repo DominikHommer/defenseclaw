@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -29,87 +30,119 @@ import (
 // config (GAP-0223). The test runs on every CI host OS, so a Windows, macOS
 // and Linux signer are all covered.
 func TestOfflineSignShippedTemplateMatchesDeviceDigest(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	repo := filepath.Join(filepath.Dir(file), "..", "..")
 	for _, tc := range []struct{ goos, template string }{
 		{"linux", "linux-standalone.yaml"},
 		{"darwin", "macos-standalone.yaml"},
 	} {
 		t.Run(tc.goos, func(t *testing.T) {
-			layout, err := managed.StandaloneLayoutFor(tc.goos)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := os.Stat(path.Join(layout.PolicyDir, "guardrail", "default")); err == nil {
-				t.Skipf("this host has the device pack folder %s/guardrail/default", layout.PolicyDir)
-			}
-			template, err := os.ReadFile(filepath.Join(repo, "testdata", "enterprise-configs", tc.template))
-			if err != nil {
-				t.Fatal(err)
-			}
-			const anchor = "guardrail:\n  enabled: true\n"
-			if !strings.Contains(string(template), anchor) {
-				t.Fatalf("%s has no %q", tc.template, anchor)
-			}
-			source := strings.Replace(string(template), anchor, anchor+"  block_at: MEDIUM\n", 1)
-			b := &enterprisebundle.Bundle{Files: map[string][]byte{enterprisebundle.ConfigName: []byte(source)}}
-
-			// Signer: the bundle sign digest, with its working copy as the
-			// bundle root.
-			signerRoot := t.TempDir()
-			digester := func(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
-				policy, err := ComputeEffectivePolicyFor(ctx, cfg, EffectivePolicyOptions{GOOS: goos, BundleRoot: root, Raw: raw})
-				return policy.Digest, err
-			}
-			signed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), b, signerRoot, []string{tc.goos}, digester)
+			b := shippedTemplateBundle(t, tc.template, false)
+			signed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), b, t.TempDir(), []string{tc.goos}, offlineTestDigester)
 			if err != nil {
 				t.Fatalf("sign %s from %s: %v", tc.goos, tc.template, err)
 			}
-
-			// Device: apply renders config.yaml for its receipt directory and
-			// the gateway loads it from the layout config path. The device's
-			// installed vendor tree is a copy of the source release policies.
-			const bundleID, receiptID = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A", "r-01J9ZK3Q4R5S6T7V8W9X0Y1Z2B"
-			bundles := path.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
-			installed, err := enterprisebundle.RenderConfig(b, path.Join(bundles, enterprisebundle.VersionDirNameForReceipt(10324003, bundleID, receiptID)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			deviceCfg, err := config.LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, installed, layout.DataDir, tc.goos)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got, want := deviceCfg.ResolveRulePackDir(globalRulePackRef(deviceCfg)), path.Join(layout.VendorPolicyDir, "guardrail", "default"); got != want {
-				t.Fatalf("device default pack %q, want the vendor fallback %q", got, want)
-			}
-			installedVendor := t.TempDir()
-			if err := os.CopyFS(installedVendor, os.DirFS(filepath.Join(repo, "policies"))); err != nil {
-				t.Fatal(err)
-			}
-			packCfg := cloneConfig(deviceCfg)
-			packCfg.UseOfflineVendorPolicies(layout.VendorPolicyDir, installedVendor)
-			rulePacks, err := generationRulePacks(packCfg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			profiles, err := newGuardrailProfileSet(packCfg, rulePacks.cache, false)
-			if err != nil {
-				profiles = nil
-			}
-			// The generation record names the bundle and the settings-only
-			// config names no bundle file, so the gateway digests in the
-			// bundle scope of the version directory (GAP-0158).
-			device, err := buildGeneration(context.Background(), generationInputs{cfg: deviceCfg, raw: installed,
-				rulePacks: rulePacks, profiles: profiles, goos: tc.goos,
-				bundleRoot:   path.Join(bundles, enterprisebundle.VersionDirName(10324003, bundleID)),
-				vendorRoot:   installedVendor,
-				vendorTarget: layout.VendorPolicyDir})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if device.Digest != signed[tc.goos] {
-				t.Fatalf("device digest %s != signed %s; device components %v", device.Digest, signed[tc.goos], device.Components)
+			if device := deviceBundleDigest(t, b, tc.goos); device != signed[tc.goos] {
+				t.Fatalf("device digest %s != signed %s", device, signed[tc.goos])
 			}
 		})
 	}
+
+	// The Linux template's data_dir is the Linux one, so a macOS or Windows
+	// target is refused for that setting, never for a rule pack the signer
+	// lacks. Without data_dir and policy_dir the same settings sign for all
+	// three platforms and match the Linux and macOS devices.
+	b := shippedTemplateBundle(t, "linux-standalone.yaml", false)
+	for _, goos := range []string{"darwin", "windows"} {
+		_, err := enterprisebundle.EffectivePolicyDigests(context.Background(), b, t.TempDir(), []string{goos}, offlineTestDigester)
+		if err == nil || !strings.Contains(err.Error(), "data_dir") || strings.Contains(err.Error(), "rule pack") {
+			t.Fatalf("sign the Linux template for %s: %v, want the data_dir refusal", goos, err)
+		}
+	}
+	portable := shippedTemplateBundle(t, "linux-standalone.yaml", true)
+	signed, err := enterprisebundle.EffectivePolicyDigests(context.Background(), portable, t.TempDir(), []string{"linux", "darwin", "windows"}, offlineTestDigester)
+	if err != nil {
+		t.Fatalf("sign the portable settings for three platforms: %v", err)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if device := deviceBundleDigest(t, portable, goos); device != signed[goos] {
+			t.Fatalf("%s device digest %s != signed %s", goos, device, signed[goos])
+		}
+	}
+}
+
+func offlineTestDigester(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
+	policy, err := ComputeEffectivePolicyFor(ctx, cfg, EffectivePolicyOptions{GOOS: goos, BundleRoot: root, Raw: raw})
+	return policy.Digest, err
+}
+
+// shippedTemplateBundle is a settings-only bundle of a shipped template with
+// one tested change (block_at), optionally without data_dir and policy_dir.
+func shippedTemplateBundle(t *testing.T, template string, portable bool) *enterprisebundle.Bundle {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "testdata", "enterprise-configs", template))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const anchor = "guardrail:\n  enabled: true\n"
+	if !strings.Contains(string(raw), anchor) {
+		t.Fatalf("%s has no %q", template, anchor)
+	}
+	source := strings.Replace(string(raw), anchor, anchor+"  block_at: MEDIUM\n", 1)
+	if portable {
+		source = regexp.MustCompile(`(?m)^(data_dir|policy_dir):.*\n`).ReplaceAllString(source, "")
+	}
+	return &enterprisebundle.Bundle{Files: map[string][]byte{enterprisebundle.ConfigName: []byte(source)}}
+}
+
+// deviceBundleDigest is the digest a goos device's gateway publishes once
+// apply installed b: apply renders config.yaml for its receipt directory, the
+// gateway loads it from the layout config path, and the generation record
+// names the bundle, so a settings-only config is digested in the bundle
+// scope of the version directory (GAP-0158). The device's installed vendor
+// tree is a copy of the source release policies.
+func deviceBundleDigest(t *testing.T, b *enterprisebundle.Bundle, goos string) string {
+	t.Helper()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path.Join(layout.PolicyDir, "guardrail", "default")); err == nil {
+		t.Skipf("this host has the device pack folder %s/guardrail/default", layout.PolicyDir)
+	}
+	const bundleID, receiptID, version = "b-01J9ZK3Q4R5S6T7V8W9X0Y1Z2A", "r-01J9ZK3Q4R5S6T7V8W9X0Y1Z2B", 10324003
+	bundles := path.Join(layout.ConfigDir, enterprisebundle.BundlesDirName)
+	installed, err := enterprisebundle.RenderConfig(b, path.Join(bundles, enterprisebundle.VersionDirNameForReceipt(version, bundleID, receiptID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, installed, layout.DataDir, goos)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.ResolveRulePackDir(globalRulePackRef(cfg)), path.Join(layout.VendorPolicyDir, "guardrail", "default"); got != want {
+		t.Fatalf("device default pack %q, want the vendor pack %q", got, want)
+	}
+	_, file, _, _ := runtime.Caller(0)
+	installedVendor := t.TempDir()
+	if err := os.CopyFS(installedVendor, os.DirFS(filepath.Join(filepath.Dir(file), "..", "..", "policies"))); err != nil {
+		t.Fatal(err)
+	}
+	packCfg := cloneConfig(cfg)
+	packCfg.UseOfflineVendorPolicies(layout.VendorPolicyDir, installedVendor)
+	rulePacks, err := generationRulePacks(packCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(packCfg, rulePacks.cache, false)
+	if err != nil {
+		profiles = nil
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, raw: installed,
+		rulePacks: rulePacks, profiles: profiles, goos: goos,
+		bundleRoot: path.Join(bundles, enterprisebundle.VersionDirName(version, bundleID)),
+		vendorRoot: installedVendor, vendorTarget: layout.VendorPolicyDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g.Digest
 }
