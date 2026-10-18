@@ -121,7 +121,10 @@ def run(args):
             "no inferred descendant was signaled"
         ),
     }
-    (case / "parent-death-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    result_path = (
+        case / "parent-death-result.json" if case.exists() else case.parent / (case.name + "-parent-death-result.json")
+    )
+    result_path.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
     return passed
 

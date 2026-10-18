@@ -3137,9 +3137,14 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
         return
     openshell = raw.get("openshell") if isinstance(raw.get("openshell"), Mapping) else {}
     admin = openshell.get("admin") if isinstance(openshell.get("admin"), Mapping) else {}
+    legacy_admin = admin
     common = raw.get("sandbox") if isinstance(raw.get("sandbox"), Mapping) else {}
     common_admin = common.get("admin") if isinstance(common.get("admin"), Mapping) else {}
     if common_admin:
+        for source, section in (("sandbox", common_admin), ("openshell", admin)):
+            error = _sandbox_section_error(section, "admin")
+            if error:
+                raise ValueError(source + ": " + error)
         # Source overlap is validated separately; retain every legacy-only
         # restriction when the new common namespace is present.
         admin = _sandbox_merge_admin_sources(admin, common_admin)
@@ -3154,9 +3159,14 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
     if (sections or floor_keys) and config_writer.secure_client_document(dict(raw)):
         if sections:
             raise ValueError(f"guardrail: {_SANDBOX_SECURE_CLIENT_PROFILES}")
+        common_floor_keys = [key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if common_admin.get(key) not in (None, "")]
+        source = "sandbox" if common_floor_keys else "openshell"
+        source_keys = common_floor_keys or [
+            key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if legacy_admin.get(key) not in (None, "")
+        ]
         raise ValueError(
-            "openshell: admin."
-            + ", admin.".join(floor_keys)
+            source + ": admin."
+            + ", admin.".join(source_keys)
             + ": managed sandbox keys are not supported with the Secure Client integration"
         )
     for name in sorted(sections):
@@ -3166,7 +3176,8 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
             raise ValueError(where + error)
     error = _sandbox_section_error(admin, "admin")
     if error:
-        raise ValueError("openshell: " + error)
+        source = "sandbox: combined with openshell.admin, " if common_admin else "openshell: "
+        raise ValueError(source + error)
 
 
 def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
