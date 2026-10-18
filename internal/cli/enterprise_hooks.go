@@ -2707,14 +2707,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			// Record which specific event armed the debounce so the
 			// resulting reconcile log line names the culprit path.
-			// Preserve the FIRST event of a burst rather than
-			// overwriting; that's the one that actually caused the
-			// debounce arm, subsequent events during the 750ms window
-			// are already-scheduled noise.
-			if lastTriggerPath == "" {
-				lastTriggerPath = filepath.Clean(event.Name)
-				lastTriggerOp = event.Op
-			}
+			lastTriggerPath, lastTriggerOp = enterpriseHookWatchNoteTrigger(lastTriggerPath, lastTriggerOp, event)
 			if !debouncePending {
 				debounceArmedAt = time.Now()
 			}
@@ -3121,6 +3114,22 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 		return false
 	}
 	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
+}
+
+// enterpriseHookWatchNoteTrigger keeps the path of the first event of a burst
+// (the one that armed the debounce) and joins the ops of later events on that
+// same path. An in-place overwrite on macOS reports the truncation (Chmod)
+// before the Write, so the pass names both, not Chmod alone.
+func enterpriseHookWatchNoteTrigger(path string, op fsnotify.Op, event fsnotify.Event) (string, fsnotify.Op) {
+	name := filepath.Clean(event.Name)
+	switch {
+	case path == "":
+		return name, event.Op
+	case path == name:
+		return path, op | event.Op
+	default:
+		return path, op
+	}
 }
 
 // enterpriseHookOwnedFileFingerprint fingerprints an owned file for the
