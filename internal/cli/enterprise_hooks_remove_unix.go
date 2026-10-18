@@ -91,6 +91,7 @@ const (
 	enterpriseHookPurgeSkipKeptHome         = "its recorded home may still hold a hook registration; the state stays while cleanup is unresolved"
 	enterpriseHookPurgeSkipPending          = "its hook cleanup is still pending; the state stays until it finishes"
 	enterpriseHookPurgeSkipUnreadableLedger = "the pending cleanup ledger could not be read; the state stays until it can be checked"
+	enterpriseHookPurgeSkipRehomed          = "the account was re-homed after the manifest named it, so the purge does not pick a home; its state stays in the recorded and the current home: remove ~/.defenseclaw in each by hand once its hooks are gone"
 )
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
@@ -168,7 +169,7 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	} else {
 		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode, copilotVSCodeCreatedDirs(recorded))
 	}
-	purgeSkip := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
+	purgeSkip := runEnterpriseHookPendingCleanups(cmd, &report, jobs, enterpriseHookRehomedRowCleanups(rows)...)
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, purgeSkip)...)
 	}
@@ -266,11 +267,15 @@ func newEnterpriseHookRemoveJob(account enterpriseHookWorkerAccount) *enterprise
 // reconcile resolves it; uninstall required them in the row and stopped
 // halfway on such a manifest (GAP-1101). A row with all three keeps them, so
 // it is removed while the directory does not answer. problem says why a row
-// did not resolve.
+// did not resolve. rehomed is the home the directory now gives the account
+// of such a row when that is another real home of the same account (a copied
+// or moved home): its removal then runs as a re-homed cleanup, which must
+// find both homes clean (GAP-0073).
 type enterpriseHookRemoveRow struct {
 	target  enterprisehooks.ManifestTarget
 	who     string
 	problem string
+	rehomed string
 }
 
 func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterpriseHookRemoveRow {
@@ -283,6 +288,9 @@ func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterp
 			row.who = "uid " + strconv.Itoa(*target.UID)
 		}
 		if target.UID != nil && target.GID != nil && *target.UID > 0 && filepath.IsAbs(filepath.Clean(home)) {
+			if current, name := enterpriseHookRemoveRowDirectoryHome(target, resolver); current != "" {
+				row.rehomed, row.target.User, row.who = current, name, name
+			}
 			rows = append(rows, row)
 			continue
 		}
@@ -301,6 +309,49 @@ func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterp
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// enterpriseHookRemoveRowDirectoryHome returns the home the directory now
+// gives the account of a row that names its own uid, gid and home, and the
+// account's name, when that home is another real home of the same account.
+// The published home stays the target while the directory does not answer,
+// gives no home, or gives the uid to another name.
+func enterpriseHookRemoveRowDirectoryHome(target enterprisehooks.ManifestTarget, resolver unixidentity.Resolver) (string, string) {
+	account, err := resolver.LookupUID(*target.UID)
+	if err != nil || account.UID != *target.UID || strings.TrimSpace(account.Name) == "" || enterpriseHookDirectoryNoHome(account.Home) {
+		return "", ""
+	}
+	if name := strings.TrimSpace(target.User); name != "" && name != account.Name {
+		return "", ""
+	}
+	current := filepath.Clean(strings.TrimSpace(account.Home))
+	if current == filepath.Clean(strings.TrimSpace(target.UserHome)) {
+		return "", ""
+	}
+	return current, account.Name
+}
+
+// enterpriseHookRehomedRowCleanups is the re-homed cleanup of each manifest
+// row whose account the directory now gives another home. A Remove in the
+// recorded home alone found nothing there and counted the row removed while
+// the copied current home still loaded the plugin (GAP-0073).
+func enterpriseHookRehomedRowCleanups(rows []enterpriseHookRemoveRow) []enterpriseHookUserCleanup {
+	var out []enterpriseHookUserCleanup
+	for _, row := range rows {
+		target := row.target
+		name := strings.ToLower(strings.TrimSpace(target.Connector))
+		if row.rehomed == "" || row.problem != "" || name == "" {
+			continue
+		}
+		out = append(out, enterpriseHookUserCleanup{
+			Connector: name,
+			UID:       *target.UID,
+			User:      strings.TrimSpace(target.User),
+			UserHome:  filepath.Clean(strings.TrimSpace(target.UserHome)),
+			DataDir:   strings.TrimSpace(target.DataDir),
+		})
+	}
+	return out
 }
 
 // enterpriseHookRemoveJobs groups the manifest rows into one worker job per
@@ -323,6 +374,9 @@ func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpri
 		case target.UID == nil || target.GID == nil || *target.UID <= 0 || !filepath.IsAbs(home) || name == "":
 			failed = append(failed, label+": the manifest row has no usable uid, gid, home or connector")
 			continue
+		}
+		if row.rehomed != "" {
+			continue // enterpriseHookRehomedRowCleanups removes it, in both homes
 		}
 		uid, gid := *target.UID, *target.GID
 		switch enterpriseHookCheckHome(home, uid).State {
@@ -462,75 +516,101 @@ func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJo
 // strongest reason wins when an account has several). An unreadable cleanup
 // ledger blocks the purge of every worker job's account. A cleanup of a
 // removed account is reported pending as "user/connector: reason", so the
-// uninstall warns and goes on.
-func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob) map[int]string {
-	return runEnterpriseHookPendingCleanupsWith(cmd, report, jobs, enterprisehooks.StandaloneResolver())
+// uninstall warns and goes on. rehomed are the cleanups of the manifest rows
+// whose account was re-homed (enterpriseHookRehomedRowCleanups). They run
+// like a pending cleanup, once even when the ledger holds the same one, and
+// keep the account's state from the purge.
+func runEnterpriseHookPendingCleanups(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob, rehomed ...enterpriseHookUserCleanup) map[int]string {
+	return runEnterpriseHookPendingCleanupsWith(cmd, report, jobs, enterprisehooks.StandaloneResolver(), rehomed...)
 }
 
-func runEnterpriseHookPendingCleanupsWith(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob, resolver unixidentity.Resolver) map[int]string {
+func runEnterpriseHookPendingCleanupsWith(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, jobs map[int]*enterpriseHookWorkerJob, resolver unixidentity.Resolver, rehomed ...enterpriseHookUserCleanup) map[int]string {
 	skip := map[int]string{}
-	if cfg == nil {
-		return skip
-	}
-	pending, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
-	if err != nil {
-		report.Failed = append(report.Failed, "pending per-user cleanups: "+boundedString(err.Error(), 256))
-		for uid := range jobs {
-			skip[uid] = enterpriseHookPurgeSkipUnreadableLedger
+	var pending []enterpriseHookUserCleanup
+	if cfg != nil {
+		loaded, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
+		if err != nil {
+			report.Failed = append(report.Failed, "pending per-user cleanups: "+boundedString(err.Error(), 256))
+			for uid := range jobs {
+				skip[uid] = enterpriseHookPurgeSkipUnreadableLedger
+			}
+		} else {
+			pending = loaded
 		}
-		return skip
 	}
+	key := func(entry enterpriseHookUserCleanup) string {
+		return fmt.Sprintf("%d\x00%s\x00%s", entry.UID, strings.ToLower(strings.TrimSpace(entry.Connector)), filepath.Clean(strings.TrimSpace(entry.UserHome)))
+	}
+	ran := map[string]bool{}
 	for _, entry := range pending {
 		name := strings.ToLower(strings.TrimSpace(entry.Connector))
 		if enterpriseHookPendingCleanupCoveredByJob(jobs[entry.UID], name, entry, resolver) {
 			continue // a manifest row still names it, in the same home
 		}
-		label := strings.TrimSpace(entry.User) + "/" + name
-		outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
-		var kept *enterpriseHookCleanupHomeKeptError
-		var oldKept *enterpriseHookCleanupOldHomeKeptError
-		switch {
-		case outcome == enterpriseHookUserCleanupDone && errors.Is(err, errEnterpriseHookCleanupHomeGone):
-			// Nothing was removed: the home is gone. The uninstall warns
-			// for that user and agent and goes on (GAP-0553).
-			report.Pending = append(report.Pending, fmt.Sprintf("%s: its recorded home %s is gone, so nothing was left to remove; if that home is restored, remove DefenseClaw's entries from the %s config in it",
-				label, filepath.Clean(strings.TrimSpace(entry.UserHome)), name))
-		case errors.As(err, &oldKept):
-			report.Pending = append(report.Pending, fmt.Sprintf("%s: the account was re-homed to %s and cleaned there, but its recorded home %s still exists or cannot be confirmed gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if unused",
-				label, oldKept.currentHome, oldKept.home, name, oldKept.home))
-			if skip[entry.UID] != enterpriseHookPurgeSkipFailed {
-				skip[entry.UID] = enterpriseHookPurgeSkipKeptHome
-			}
-		case errors.As(err, &kept):
-			// A removed account whose home folder was kept: no one to
-			// remove it as, and the uninstall must not stop for it.
-			report.Pending = append(report.Pending, fmt.Sprintf("%s: the directory gives the account no home (%s), so it looks removed, but its recorded home %s is not gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if the account is gone",
-				label, kept.directoryHome, kept.home, name, kept.home))
-			if skip[entry.UID] != enterpriseHookPurgeSkipFailed {
-				skip[entry.UID] = enterpriseHookPurgeSkipKeptHome
-			}
-		case outcome == enterpriseHookUserCleanupDone:
-			report.Removed++
-		case outcome == enterpriseHookUserCleanupPending:
-			report.Pending = append(report.Pending, label)
-			if skip[entry.UID] == "" {
-				skip[entry.UID] = enterpriseHookPurgeSkipPending
-			}
-		default:
-			reason := "the cleanup failed"
-			if err != nil {
-				var rehomed *enterpriseHookTargetHomeChangedError
-				if errors.As(err, &rehomed) {
-					reason = enterpriseHookRehomedReportReason(err)
-				} else {
-					reason = boundedString(err.Error(), 256)
-				}
-			}
-			report.Failed = append(report.Failed, label+": "+reason)
-			skip[entry.UID] = enterpriseHookPurgeSkipFailed
+		ran[key(entry)] = true
+		finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver)
+	}
+	for _, entry := range rehomed {
+		if !ran[key(entry)] {
+			ran[key(entry)] = true
+			finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver)
+		}
+		if skip[entry.UID] == "" {
+			skip[entry.UID] = enterpriseHookPurgeSkipRehomed
 		}
 	}
 	return skip
+}
+
+// finishEnterpriseHookRemoveAllCleanup runs one per-user cleanup for
+// remove-all and adds its outcome to report, and to skip the reason the
+// account's state must stay.
+func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, skip map[int]string, entry enterpriseHookUserCleanup, resolver unixidentity.Resolver) {
+	name := strings.ToLower(strings.TrimSpace(entry.Connector))
+	label := strings.TrimSpace(entry.User) + "/" + name
+	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
+	var kept *enterpriseHookCleanupHomeKeptError
+	var oldKept *enterpriseHookCleanupOldHomeKeptError
+	switch {
+	case outcome == enterpriseHookUserCleanupDone && errors.Is(err, errEnterpriseHookCleanupHomeGone):
+		// Nothing was removed: the home is gone. The uninstall warns
+		// for that user and agent and goes on (GAP-0553).
+		report.Pending = append(report.Pending, fmt.Sprintf("%s: its recorded home %s is gone, so nothing was left to remove; if that home is restored, remove DefenseClaw's entries from the %s config in it",
+			label, filepath.Clean(strings.TrimSpace(entry.UserHome)), name))
+	case errors.As(err, &oldKept):
+		report.Pending = append(report.Pending, fmt.Sprintf("%s: the account was re-homed to %s and cleaned there, but its recorded home %s still exists or cannot be confirmed gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if unused",
+			label, oldKept.currentHome, oldKept.home, name, oldKept.home))
+		if skip[entry.UID] != enterpriseHookPurgeSkipFailed {
+			skip[entry.UID] = enterpriseHookPurgeSkipKeptHome
+		}
+	case errors.As(err, &kept):
+		// A removed account whose home folder was kept: no one to
+		// remove it as, and the uninstall must not stop for it.
+		report.Pending = append(report.Pending, fmt.Sprintf("%s: the directory gives the account no home (%s), so it looks removed, but its recorded home %s is not gone and may still hold DefenseClaw's entries; remove them from the %s config in %s, or delete that home if the account is gone",
+			label, kept.directoryHome, kept.home, name, kept.home))
+		if skip[entry.UID] != enterpriseHookPurgeSkipFailed {
+			skip[entry.UID] = enterpriseHookPurgeSkipKeptHome
+		}
+	case outcome == enterpriseHookUserCleanupDone:
+		report.Removed++
+	case outcome == enterpriseHookUserCleanupPending:
+		report.Pending = append(report.Pending, label)
+		if skip[entry.UID] == "" {
+			skip[entry.UID] = enterpriseHookPurgeSkipPending
+		}
+	default:
+		reason := "the cleanup failed"
+		if err != nil {
+			var rehomed *enterpriseHookTargetHomeChangedError
+			if errors.As(err, &rehomed) {
+				reason = enterpriseHookRehomedReportReason(err)
+			} else {
+				reason = boundedString(err.Error(), 256)
+			}
+		}
+		report.Failed = append(report.Failed, label+": "+reason)
+		skip[entry.UID] = enterpriseHookPurgeSkipFailed
+	}
 }
 
 func init() {
@@ -762,6 +842,10 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 			notPurged[user] = "its manifest row has no usable uid"
 			continue
 		}
+		if reason, skipped := skip[*target.UID]; skipped {
+			notPurged[user] = reason
+			continue
+		}
 		job := jobs[*target.UID]
 		if job == nil {
 			reason := "its home is not trusted"
@@ -770,10 +854,6 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 				reason = "its home is not available; rerun the purge when it is"
 			}
 			notPurged[user] = reason
-			continue
-		}
-		if reason, skipped := skip[*target.UID]; skipped {
-			notPurged[job.Account.User] = reason
 			continue
 		}
 		dataDir := strings.TrimSpace(target.DataDir)

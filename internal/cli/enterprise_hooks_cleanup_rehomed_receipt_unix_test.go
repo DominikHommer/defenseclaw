@@ -431,3 +431,101 @@ func TestStandaloneCleanupCopiedCodexReceiptUsesCurrentConfig(t *testing.T) {
 		}
 	}
 }
+
+// A manifest row that carries its own uid, gid and home names the recorded
+// home of an account the directory has re-homed to a copy. remove-all runs
+// the row as a re-homed cleanup: while the copied current home loads a
+// changed plugin, the row is Failed with that path and the remedy, it is not
+// counted removed, and the account's state is not purged. Once both homes
+// are clean the row is removed (GAP-0073).
+func TestRemoveAllRehomedManifestRowChecksTheCurrentHome(t *testing.T) {
+	c := setupRehomedOpenCodeCase(t, false, false)
+	pristine, err := os.ReadFile(c.newPlugin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := alterCopiedPluginFirstLine(t, c.newPlugin)
+	uid, gid := c.entry.UID, os.Getgid()
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{{
+		User: "sample-user", UserHome: c.oldHome, UID: &uid, GID: &gid,
+		Connector: "opencode", DataDir: filepath.Join(c.oldHome, ".defenseclaw"),
+	}}}
+	removeAll := func() (enterpriseHooksRemoveAllReport, map[int]string, []string) {
+		rows := resolveEnterpriseHookRemoveRows(manifest)
+		jobs, pending, failed := enterpriseHookRemoveJobs(rows)
+		if len(pending) != 0 || len(failed) != 0 {
+			t.Fatalf("rows = pending %v, failed %v", pending, failed)
+		}
+		if job := jobs[uid]; job != nil && enterpriseHookJobRemoves(job, "opencode") {
+			t.Fatal("the re-homed row was removed in its recorded home only")
+		}
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		report := enterpriseHooksRemoveAllReport{}
+		skip := runEnterpriseHookPendingCleanups(cmd, &report, jobs, enterpriseHookRehomedRowCleanups(rows)...)
+		return report, skip, addEnterpriseHookStatePurges(jobs, rows, skip)
+	}
+	report, skip, notPurged := removeAll()
+	if report.Removed != 0 || len(report.Failed) != 1 || !strings.HasPrefix(report.Failed[0], "sample-user/opencode: ") ||
+		!strings.Contains(report.Failed[0], c.newPlugin) || !strings.Contains(report.Failed[0], "stale copied receipt") ||
+		!strings.Contains(report.Failed[0], "rerun") || skip[uid] != enterpriseHookPurgeSkipFailed {
+		t.Fatalf("copied home with a changed plugin counted removed: report %+v, skip %+v", report, skip)
+	}
+	if len(notPurged) != 1 || notPurged[0] != "sample-user: "+enterpriseHookPurgeSkipFailed {
+		t.Fatalf("not purged = %v", notPurged)
+	}
+	if data, err := os.ReadFile(c.newPlugin); err != nil || !bytes.Equal(data, edited) {
+		t.Fatalf("remove-all changed the current plugin: %v", err)
+	}
+	// The operator puts back DefenseClaw's own plugin; now both homes clean.
+	if err := os.WriteFile(c.newPlugin, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, skip, notPurged = removeAll()
+	if report.Removed != 1 || len(report.Failed) != 0 || len(report.Pending) != 0 || skip[uid] != enterpriseHookPurgeSkipRehomed {
+		t.Fatalf("clean homes = report %+v, skip %+v", report, skip)
+	}
+	if len(notPurged) != 1 || notPurged[0] != "sample-user: "+enterpriseHookPurgeSkipRehomed {
+		t.Fatalf("not purged = %v", notPurged)
+	}
+	for _, plugin := range []string{c.newPlugin, c.oldPlugin} {
+		if _, err := os.Lstat(plugin); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s still loads: %v", plugin, err)
+		}
+	}
+}
+
+// A row with its own uid, gid and home whose account the directory gives
+// the same home, gives no home, or does not know is removed in that home, as
+// before.
+func TestRemoveAllExplicitRowKeepsItsHomeUnlessRehomed(t *testing.T) {
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
+		"same-user":   {Name: "same-user", UID: 5101, GID: 5101, Home: "/home/same-user"},
+		"nohome-user": {Name: "nohome-user", UID: 5102, GID: 5102, Home: "/var/empty"},
+		"renamed":     {Name: "renamed", UID: 5103, GID: 5103, Home: "/home/renamed"},
+	}}
+	for _, tc := range []struct {
+		user string
+		uid  int
+		home string
+	}{
+		{"same-user", 5101, "/home/same-user"},
+		{"nohome-user", 5102, "/home/nohome-user"},
+		{"old-name", 5103, "/home/old-name"},
+		{"unknown", 5104, "/home/unknown"},
+	} {
+		uid := tc.uid
+		target := enterprisehooks.ManifestTarget{User: tc.user, UserHome: tc.home, UID: &uid, GID: &uid, Connector: "opencode"}
+		if current, name := enterpriseHookRemoveRowDirectoryHome(target, resolver); current != "" || name != "" {
+			t.Errorf("%s: re-homed to %q (%q)", tc.user, current, name)
+		}
+	}
+	resolver.accounts["moved"] = unixidentity.Account{Name: "moved", UID: 5105, GID: 5105, Home: "/home/moved-new"}
+	uid := 5105
+	for _, user := range []string{"moved", ""} {
+		target := enterprisehooks.ManifestTarget{User: user, UserHome: "/home/moved", UID: &uid, GID: &uid, Connector: "opencode"}
+		if current, name := enterpriseHookRemoveRowDirectoryHome(target, resolver); current != "/home/moved-new" || name != "moved" {
+			t.Errorf("user %q: re-homed = %q, %q", user, current, name)
+		}
+	}
+}
