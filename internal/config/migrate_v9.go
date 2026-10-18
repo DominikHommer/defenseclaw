@@ -29,6 +29,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -151,6 +152,54 @@ type MigrateV9Result struct {
 	// secret: never print or record it.
 	EnvKey   string `json:"-"`
 	EnvValue string `json:"-"`
+	// ProvidersFold is what the run did with a legacy custom-providers.json
+	// (nil when there is none).
+	ProvidersFold *ProvidersFold `json:"-"`
+}
+
+// ProvidersFold is what a migration did with a legacy custom-providers.json
+// (one without _derived_from): the providers config.yaml took from it and
+// where the file went, or why nothing was folded.
+type ProvidersFold struct {
+	// Overlay is the legacy file.
+	Overlay string `json:"overlay"`
+	// Folded names the providers llm_providers.custom took from it.
+	Folded []string `json:"folded,omitempty"`
+	// Retired is where the file was moved once config.yaml held all of it
+	// ("" while it stays a live input).
+	Retired string `json:"retired,omitempty"`
+	// Refused says why nothing was folded; config.yaml and the file are
+	// unchanged.
+	Refused string `json:"refused,omitempty"`
+	// Conflicts are the providers whose fields config.yaml and the file set
+	// to different values.
+	Conflicts []ProviderConflict `json:"conflicts,omitempty"`
+	// Repeated are the providers the file names more than once with
+	// different values for an extra_headers key.
+	Repeated []ProviderConflict `json:"repeated,omitempty"`
+	// HeadersAfterFold are the extra_headers the gateway sends only once the
+	// file is no longer a live input: before 1.0.3 a same-name merge dropped
+	// them, and the gateway keeps that rule while the file is one (GAP-0184).
+	HeadersAfterFold []ProviderFields `json:"headers_after_fold,omitempty"`
+	// Notes are this fold's migration notes.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// ProviderConflict is a provider config.yaml and the legacy overlay both
+// name (or the overlay names twice), with the fields they set to different
+// values (names only: a header value may be a credential). InUse says, per
+// field, whose value the gateway uses while the file is a live input:
+// "config.yaml", "custom-providers.json" or "none" (a header not sent).
+type ProviderConflict struct {
+	Provider string            `json:"provider"`
+	Fields   []string          `json:"fields"`
+	InUse    map[string]string `json:"in_use,omitempty"`
+}
+
+// ProviderFields is a provider with field names (never values).
+type ProviderFields struct {
+	Provider string   `json:"provider"`
+	Fields   []string `json:"fields"`
 }
 
 // MigrationRecord is migration-v9.json: every value moved and every
@@ -321,7 +370,7 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 			"to complete; run `defenseclaw-gateway config migrate --to 9`")
 	}
 	m.record.ResultSHA256 = cfgtxn.SHA256Hex(migrated)
-	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
+	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue, ProvidersFold: m.fold}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
 		// A config.yaml changed since the commit (config set, the TUI,
@@ -341,7 +390,7 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 				result.Record = record
 			}
 		}
-		return result, nil
+		return result, m.foldProvidersOverlayV9(ctx, source, result)
 	}
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
@@ -737,6 +786,10 @@ type v9Migrator struct {
 	// llm_providers; commit writes providerCAs and retires the file.
 	providersOverlay string
 	providerCAs      []v9RegoRefresh
+	// fold is what migrateCustomProviders did with the overlay (nil when
+	// there is none), and foldChanged whether it changed llm_providers.
+	fold        *ProvidersFold
+	foldChanged bool
 	// retired are the unmodified 0.8 copies of retired policy files that
 	// commit removes.
 	retired []string
@@ -961,8 +1014,15 @@ func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
 // config (generation +1), the record, the data.json rename (not on a
-// managed host), the inline key move and finally the audit.db rows.
-func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]string, error) {
+// managed host), the inline key move and finally the audit.db rows. The
+// inline key move holds .env.lock (after config.yaml.lock, the order every
+// writer takes) until the commit or its undo is done, so a credential that
+// keys set or setup saves meanwhile is never erased. A failure that leaves
+// the v8 config.yaml in place takes the moved key back out of .env, so the
+// command does not report that nothing was migrated while it is still there
+// (GAP-0808); while config.yaml may hold the v9 file, which reads the key
+// from .env, the key stays and the error says so.
+func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (written []string, err error) {
 	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
 	if err != nil {
 		return nil, err
@@ -986,7 +1046,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		defer auditDB.Close()
 		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
 	}
-	var written []string
+	committed := false
 	// The documented rollback path must hold the v8 source of this run.
 	// Keep an older backup as a timestamped sibling before refreshing it.
 	backup := m.configPath + ConfigV8BackupSuffix
@@ -1027,10 +1087,36 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
-		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
-			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, err)
+		releaseEnv, lockErr := cfgtxn.LockFile(ctx, envPath, 0)
+		if lockErr != nil {
+			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, lockErr)
 		}
-		written = append(written, envPath)
+		// Registered before the undo, so it runs after it.
+		defer releaseEnv()
+		undo, appendErr := appendDotEnvKey(envPath, m.envKey, m.envValue)
+		if undo != nil {
+			written = append(written, envPath)
+			defer func() {
+				if committed || err == nil {
+					return
+				}
+				// Commit puts the v8 bytes back when it fails, unless that
+				// restore fails too; anything else on disk may be the v9
+				// config, which reads the key from .env.
+				if onDisk, readErr := os.ReadFile(m.configPath); readErr != nil || !bytes.Equal(onDisk, current) {
+					err = fmt.Errorf("%w; %s keeps the moved scanner key because config.yaml may now read it from there", err, envPath)
+					return
+				}
+				if undoErr := undo(); undoErr != nil {
+					err = fmt.Errorf("%w; %s still holds the moved scanner key: %v", err, envPath, undoErr)
+					return
+				}
+				written = slices.DeleteFunc(written, func(path string) bool { return path == envPath })
+			}()
+		}
+		if appendErr != nil {
+			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, appendErr)
+		}
 	}
 	// Provider CA files and the evidence record must exist before the
 	// committed config can reference them. An obstructed record path then
@@ -1075,9 +1161,10 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	written = append(written, recordPath)
-	if _, err := txn.Commit(current, migrated, exists, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration"}); err != nil {
+	if _, err := commitV9Config(txn, current, migrated, exists, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration"}); err != nil {
 		return written, err
 	}
+	committed = true
 	written = append(written, m.configPath)
 	// On a managed host the admin owns policy_dir (as planRegoRefresh
 	// reports): its data.json stays, so a rollback to the v8 config finds it.
@@ -1200,18 +1287,49 @@ func migrationDataDir(configPath string, root *yaml.Node) string {
 	return filepath.Dir(configFile)
 }
 
+// commitV9Config is txn.Commit; tests replace it to fail the commit.
+var commitV9Config = func(txn *cfgtxn.Txn, expected, candidate []byte, expectedExists bool, mode os.FileMode, w cfgtxn.Writer) (cfgtxn.GenerationState, error) {
+	return txn.Commit(expected, candidate, expectedExists, mode, w)
+}
+
+// writeDotEnvDurable is cfgtxn.WriteFileDurable; tests replace it to fail
+// the .env write.
+var writeDotEnvDurable = cfgtxn.WriteFileDurable
+
 // appendDotEnvKey adds key=value to a private .env unless the key is already
-// defined there.
-func appendDotEnvKey(path, key, value string) error {
+// defined there; the caller holds .env.lock. undo is non-nil whenever the
+// file may have changed, also when the write reports an error after its
+// rename (a failed directory fsync). undo puts back the previous bytes or
+// removes the file the write created; it leaves a file that no longer holds
+// the bytes it wrote as it is and says so.
+func appendDotEnvKey(path, key, value string) (undo func() error, err error) {
 	existing, err := os.ReadFile(path)
+	existed := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	updated, changed := DotEnvWithKey(existing, key, value)
 	if !changed {
-		return nil
+		return nil, nil
 	}
-	return cfgtxn.WriteFileDurable(path, updated, 0o600)
+	undo = func() error {
+		onDisk, readErr := os.ReadFile(path)
+		switch {
+		case errors.Is(readErr, os.ErrNotExist):
+			return nil
+		case readErr != nil:
+			return readErr
+		case existed && bytes.Equal(onDisk, existing):
+			return nil
+		case !bytes.Equal(onDisk, updated):
+			return fmt.Errorf("%s changed after the migration wrote it, so it was left as it is", path)
+		case existed:
+			return writeDotEnvDurable(path, existing, 0o600)
+		default:
+			return os.Remove(path)
+		}
+	}
+	return undo, writeDotEnvDurable(path, updated, 0o600)
 }
 
 // DotEnvWithKey returns the .env bytes with a usable key. An existing
@@ -3375,11 +3493,23 @@ const ProvidersOverlayFile = "custom-providers.json"
 // in-memory load leaves it alone (the gateway still merges a legacy overlay
 // itself), as does a managed host, whose provider list is the admin's. An
 // overlay that uses request_overrides, which config can not hold, stays a
-// live input and is reported. A provider named twice, in the overlay or in
-// the overlay and llm_providers.custom, becomes one entry with the 0.8.x
-// overlay merge rules (configs.ApplyOverlay): lists are unioned and the
-// overlay's values win. Skipping the second entry lost its domains, env keys
-// and settings once the overlay was retired (GAP-0709).
+// live input and is reported.
+//
+// The fold keeps the provider registry the gateway used. A provider the
+// overlay names twice becomes one entry with the 0.8.x overlay merge rules
+// (configs.ApplyOverlay: the lists are unioned and the later entry's values
+// win), as the gateway read the file; skipping the second entry lost its
+// domains, env keys and settings (GAP-0709). A provider llm_providers.custom
+// already has takes the overlay's other list items, map keys and the fields
+// it leaves unset: the gateway applies llm_providers over the overlay, so
+// config's values were the ones in use, except extra_headers, which a
+// same-name merge dropped before 1.0.3 (configs.ApplyLegacyOverlay). When the
+// overlay sets a field to a value other than config's, or names a provider
+// twice with different values for a header, nothing is folded (GAP-0163):
+// config.yaml and the file stay as they are, the gateway keeps merging the
+// file with the rule it had (GAP-0184), and m.fold names each provider and
+// field and whose value is in use, so no value in use changes and none is
+// dropped unless the operator chooses it.
 func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	if m.in.InMemory {
 		return
@@ -3413,7 +3543,7 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		tls       bool
 		ca        *v9RegoRefresh
 	}
-	var entries []overlayEntry
+	var entries []*overlayEntry
 	for _, p := range overlay.Providers {
 		name := strings.TrimSpace(p.Name)
 		if name == "" {
@@ -3453,7 +3583,37 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			m.note("could not move provider %q from %s: %v", entry.Name, path, err)
 			return
 		}
-		entries = append(entries, overlayEntry{key: strings.ToLower(name), name: name, node: &node, tls: entry.TLS != nil, ca: ca})
+		entries = append(entries, &overlayEntry{key: strings.ToLower(name), name: name, node: &node, tls: entry.TLS != nil, ca: ca})
+	}
+	// The overlay's own same-name entries merge first, in file order.
+	var folded []*overlayEntry
+	index := map[string]*overlayEntry{}
+	var twice []string
+	shadowed := map[string][]string{}
+	for _, e := range entries {
+		first := index[e.key]
+		if first == nil {
+			index[e.key] = e
+			folded = append(folded, e)
+			continue
+		}
+		sameTLS := func(_, _ *yaml.Node) bool {
+			return v9TLSInsecure(v8YAMLMapValue(first.node, "tls")) == v9TLSInsecure(v8YAMLMapValue(e.node, "tls")) &&
+				bytes.Equal(v9CAData(first.ca), v9CAData(e.ca))
+		}
+		for _, field := range v9ProviderConflicts(first.node, e.node, sameTLS) {
+			if !slices.Contains(shadowed[first.name], field) {
+				shadowed[first.name] = append(shadowed[first.name], field)
+			}
+		}
+		v9MergeOverlayProvider(first.node, e.node)
+		// The later tls replaces the earlier one, with or without its CA.
+		if e.tls {
+			first.tls, first.ca = true, e.ca
+		}
+		if !slices.Contains(twice, first.name) {
+			twice = append(twice, first.name)
+		}
 	}
 	list := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")
 	byName := map[string]*yaml.Node{}
@@ -3462,32 +3622,125 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			byName[key] = item
 		}
 	}
-	var added []*yaml.Node
-	var names, merged []string
-	cas := map[string]*v9RegoRefresh{}
-	var caKeys []string
-	for _, e := range entries {
-		if into := byName[e.key]; into != nil {
-			v9MergeOverlayProvider(into, e.node)
-			if !slices.Contains(merged, e.key) {
-				merged = append(merged, e.key)
-			}
-		} else {
-			byName[e.key] = e.node
-			added = append(added, e.node)
-			names = append(names, e.name)
+	var conflicts []ProviderConflict
+	for _, e := range folded {
+		into := byName[e.key]
+		if into == nil {
+			continue
 		}
-		// The overlay's tls replaces the entry's, with or without its CA.
-		if e.tls {
-			if !slices.Contains(caKeys, e.key) {
-				caKeys = append(caKeys, e.key)
-			}
-			cas[e.key] = e.ca
+		ca := e.ca
+		sameTLS := func(have, value *yaml.Node) bool {
+			return v9TLSInsecure(have) == v9TLSInsecure(value) && v9ConfigCAMatches(have, ca)
+		}
+		if fields := v9ProviderConflicts(into, e.node, sameTLS); len(fields) > 0 {
+			conflicts = append(conflicts, ProviderConflict{Provider: yamlScalarValue(v8YAMLMapValue(into, "name")), Fields: fields})
 		}
 	}
-	for _, key := range caKeys {
-		if ca := cas[key]; ca != nil {
-			m.providerCAs = append(m.providerCAs, *ca)
+	var repeated []ProviderConflict
+	for _, name := range twice {
+		var fields []string
+		for _, field := range shadowed[name] {
+			if strings.HasPrefix(field, v9HeaderField) {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) > 0 {
+			repeated = append(repeated, ProviderConflict{Provider: name, Fields: fields})
+		}
+	}
+	// The headers the gateway sends now (the legacy merge rule, while the
+	// file is a live input) and once config.yaml is the only input.
+	overlayHeaders, configHeaders := v9OverlayHeaderProviders(overlay.Providers), v9ConfigHeaderProviders(v9SeqItems(list))
+	live := v9RegistryHeaders(overlayHeaders, configHeaders, true)
+	configValues := map[string]map[string]string{}
+	for _, p := range configHeaders {
+		if key := strings.ToLower(p.Name); configValues[key] == nil {
+			configValues[key] = p.ExtraHeaders
+		}
+	}
+	unsettled := map[string]bool{}
+	for i := range conflicts {
+		c := &conflicts[i]
+		c.InUse = make(map[string]string, len(c.Fields))
+		for _, field := range c.Fields {
+			c.InUse[field] = v9InUseConfig
+			if header, ok := strings.CutPrefix(field, v9HeaderField); ok {
+				unsettled[strings.ToLower(c.Provider)+"\x00"+header] = true
+				value, sent := live.get(c.Provider, header)
+				switch config, set := configValues[strings.ToLower(c.Provider)][header]; {
+				case !sent:
+					c.InUse[field] = v9InUseNone
+				case !set || config != value:
+					c.InUse[field] = ProvidersOverlayFile
+				}
+			}
+		}
+	}
+	for i := range repeated {
+		c := &repeated[i]
+		c.InUse = make(map[string]string, len(c.Fields))
+		for _, field := range c.Fields {
+			header := strings.TrimPrefix(field, v9HeaderField)
+			unsettled[strings.ToLower(c.Provider)+"\x00"+header] = true
+			c.InUse[field] = ProvidersOverlayFile
+			if _, sent := live.get(c.Provider, header); !sent {
+				c.InUse[field] = v9InUseNone
+			}
+		}
+	}
+	after := v9HeadersAfterFold(live, v9RegistryHeaders(overlayHeaders, configHeaders, false), unsettled)
+	var sentLater string
+	if len(after) > 0 {
+		named := make([]string, 0, len(after))
+		for _, p := range after {
+			named = append(named, fmt.Sprintf("%s (%s)", p.Provider, strings.Join(p.Fields, ", ")))
+		}
+		sentLater = strings.Join(named, "; ")
+	}
+	if len(conflicts) > 0 || len(repeated) > 0 {
+		var reasons []string
+		for _, c := range conflicts {
+			reasons = append(reasons, "config.yaml and the file set different values for "+v9ConflictText(c, "the file's value is in use"))
+		}
+		for _, c := range repeated {
+			reasons = append(reasons, "the file sets different values for "+
+				v9ConflictText(c, "the first entry's value is in use")+" in two entries of the same name")
+		}
+		then := ""
+		if sentLater != "" {
+			then = "; the gateway then also sends extra_headers it does not send now: " + sentLater
+		}
+		m.fold = &ProvidersFold{Overlay: path, Conflicts: conflicts, Repeated: repeated, HeadersAfterFold: after, Refused: fmt.Sprintf(
+			"%s was not folded into config.yaml: %s. Neither file was changed, and the gateway keeps merging %s with "+
+				"config.yaml as the release before did, so no value in use changed. Keep the value you want in "+
+				"config.yaml (defenseclaw setup provider, or defenseclaw config set llm_providers.custom), remove the "+
+				"other values or the file, then run `defenseclaw migrate` again: it moves the file's providers into "+
+				"llm_providers.custom and retires the file, and config.yaml's value is then in use for every field%s",
+			path, strings.Join(reasons, "; "), ProvidersOverlayFile, then)}
+		m.note("%s", m.fold.Refused)
+		return
+	}
+	var added []*yaml.Node
+	var names, merged []string
+	for _, e := range folded {
+		if into := byName[e.key]; into != nil {
+			tookTLS := e.tls && v9EmptyNode(v8YAMLMapValue(into, "tls"))
+			if v9FillOverlayProvider(into, e.node) {
+				m.foldChanged = true
+			}
+			if tookTLS && e.ca != nil {
+				m.providerCAs = append(m.providerCAs, *e.ca)
+			}
+			name := yamlScalarValue(v8YAMLMapValue(into, "name"))
+			merged = append(merged, name)
+			names = append(names, name)
+			continue
+		}
+		byName[e.key] = e.node
+		added = append(added, e.node)
+		names = append(names, e.name)
+		if e.tls && e.ca != nil {
+			m.providerCAs = append(m.providerCAs, *e.ca)
 		}
 	}
 	if len(added) > 0 {
@@ -3496,39 +3749,189 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			v9Set(root, list, "llm_providers", "custom")
 		}
 		list.Content = append(list.Content, added...)
-	}
-	var mergedNames []string
-	for _, key := range merged {
-		name := yamlScalarValue(v8YAMLMapValue(byName[key], "name"))
-		mergedNames = append(mergedNames, name)
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
+		m.foldChanged = true
 	}
 	if len(names) > 0 {
 		m.moved(ProvidersOverlayFile, path, "llm_providers.custom", names)
 	}
-	if len(mergedNames) > 0 {
-		m.note("%s names provider(s) %s more than once, or llm_providers.custom already has them; each became one entry, "+
-			"with the lists unioned and the overlay's values kept, as 0.8.x merged them", path, strings.Join(mergedNames, ", "))
+	if len(twice) > 0 {
+		m.note("%s names provider(s) %s more than once; each became one entry, with the lists unioned and the "+
+			"later entry's values kept, as the gateway read the file", path, strings.Join(twice, ", "))
 	}
-	if len(overlay.OllamaPorts) > 0 && v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "ollama_ports") == nil {
-		ports := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
-		for _, port := range overlay.OllamaPorts {
-			ports.Content = append(ports.Content, v9Scalar(port))
+	for _, name := range twice {
+		if fields := shadowed[name]; len(fields) > 0 {
+			m.note("%s: the earlier %s values of %s were never in use (a later entry of the same name set them) and "+
+				"are not in config.yaml; the retired file keeps them", path, strings.Join(fields, ", "), name)
 		}
-		v9Set(root, ports, "llm_providers", "ollama_ports")
-		m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", overlay.OllamaPorts)
+	}
+	if len(merged) > 0 {
+		m.note("%s and llm_providers.custom both name provider(s) %s; config.yaml kept its values and took the "+
+			"file's other domains, keys and settings", path, strings.Join(merged, ", "))
+	}
+	if len(overlay.OllamaPorts) > 0 {
+		ports := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "ollama_ports")
+		if ports == nil || ports.Kind != yaml.SequenceNode {
+			ports = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+			v9Set(root, ports, "llm_providers", "ollama_ports")
+		}
+		seen := map[string]bool{}
+		for _, item := range ports.Content {
+			seen[item.Value] = true
+		}
+		var moved []int
+		for _, port := range overlay.OllamaPorts {
+			if key := fmt.Sprint(port); !seen[key] {
+				seen[key] = true
+				ports.Content = append(ports.Content, v9Scalar(port))
+				moved = append(moved, port)
+			}
+		}
+		if len(moved) > 0 {
+			m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", moved)
+			m.foldChanged = true
+		}
+	}
+	if sentLater != "" {
+		m.note("%s: once the file is no longer a live input, the gateway also sends %s, which it did not send while "+
+			"it was one (before 1.0.3 a provider entry named like a built-in provider or like an earlier entry lost its "+
+			"extra_headers); remove them from llm_providers.custom if they are not wanted", path, sentLater)
 	}
 	m.providersOverlay = path
+	m.fold = &ProvidersFold{Overlay: path, Folded: names, HeadersAfterFold: after}
 }
 
-// v9MergeOverlayProvider folds src, an overlay provider, into dst, the
-// provider of the same name, with the 0.8.x overlay merge rules
+// The sides v9ProviderConflicts' fields can be in use from, besides
+// ProvidersOverlayFile.
+const (
+	v9InUseConfig = "config.yaml"
+	v9InUseNone   = "none"
+	v9HeaderField = "extra_headers."
+)
+
+// v9ConflictText is "<provider> (<fields>: <whose value is in use>; ...)",
+// field names only. fileInUse words a field whose value from the file is in
+// use.
+func v9ConflictText(c ProviderConflict, fileInUse string) string {
+	var parts []string
+	for _, side := range []string{v9InUseConfig, ProvidersOverlayFile, v9InUseNone} {
+		var fields []string
+		for _, field := range c.Fields {
+			if c.InUse[field] == side {
+				fields = append(fields, field)
+			}
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		in := "config.yaml's value is in use"
+		switch side {
+		case ProvidersOverlayFile:
+			in = fileInUse
+		case v9InUseNone:
+			in = "no value is in use, the header is not sent"
+		}
+		parts = append(parts, strings.Join(fields, ", ")+": "+in)
+	}
+	return c.Provider + " (" + strings.Join(parts, "; ") + ")"
+}
+
+// v9Headers is the extra_headers of each provider of a registry, by
+// lower-case name, with the name the registry gives it.
+type v9Headers map[string]configs.Provider
+
+func (h v9Headers) get(provider, header string) (string, bool) {
+	value, ok := h[strings.ToLower(provider)].ExtraHeaders[header]
+	return value, ok
+}
+
+// v9RegistryHeaders is the extra_headers the gateway's registry holds when it
+// merges the built-in providers, then overlay, then custom (llm_providers),
+// with the legacy header rule (configs.ApplyLegacyOverlay, while the overlay
+// is a live input) or the current one (configs.ApplyOverlay; for the
+// fields no conflict holds, the registry once the overlay is folded).
+func v9RegistryHeaders(overlay, custom []configs.Provider, legacy bool) v9Headers {
+	reg, err := configs.LoadEmbeddedProviders()
+	if err != nil || reg == nil {
+		reg = &configs.ProvidersConfig{}
+	}
+	apply := configs.ApplyOverlay
+	if legacy {
+		apply = configs.ApplyLegacyOverlay
+	}
+	for _, providers := range [][]configs.Provider{overlay, custom} {
+		cloned := make([]configs.Provider, 0, len(providers))
+		for _, p := range providers {
+			cloned = append(cloned, configs.Provider{Name: p.Name, ExtraHeaders: maps.Clone(p.ExtraHeaders)})
+		}
+		apply(reg, configs.ProvidersConfig{Providers: cloned})
+	}
+	out := make(v9Headers, len(reg.Providers))
+	for _, p := range reg.Providers {
+		out[strings.ToLower(p.Name)] = configs.Provider{Name: p.Name, ExtraHeaders: p.ExtraHeaders}
+	}
+	return out
+}
+
+// v9OverlayHeaderProviders is the name and extra_headers of each overlay
+// entry, as the gateway reads them.
+func v9OverlayHeaderProviders(in []configs.Provider) []configs.Provider {
+	out := make([]configs.Provider, 0, len(in))
+	for _, p := range in {
+		out = append(out, configs.Provider{Name: p.Name, ExtraHeaders: p.ExtraHeaders})
+	}
+	return out
+}
+
+// v9ConfigHeaderProviders is the name and extra_headers of each
+// llm_providers.custom item.
+func v9ConfigHeaderProviders(items []*yaml.Node) []configs.Provider {
+	var out []configs.Provider
+	for _, item := range items {
+		name := yamlScalarValue(v8YAMLMapValue(item, "name"))
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		var headers map[string]string
+		if node := v8YAMLMapValue(item, "extra_headers"); node != nil && node.Kind == yaml.MappingNode {
+			if err := node.Decode(&headers); err != nil {
+				headers = nil
+			}
+		}
+		out = append(out, configs.Provider{Name: name, ExtraHeaders: headers})
+	}
+	return out
+}
+
+// v9HeadersAfterFold names, per provider in name order, the extra_headers
+// (as "extra_headers.<key>", key order) that resolved sends and live does not
+// send, or sends with another value, leaving out the unsettled keys
+// ("<lower-case provider>\x00<key>") a conflict holds: their outcome is the
+// operator's choice.
+func v9HeadersAfterFold(live, resolved v9Headers, unsettled map[string]bool) []ProviderFields {
+	var out []ProviderFields
+	for _, key := range slices.Sorted(maps.Keys(resolved)) {
+		p := resolved[key]
+		var fields []string
+		for _, header := range slices.Sorted(maps.Keys(p.ExtraHeaders)) {
+			if unsettled[key+"\x00"+header] {
+				continue
+			}
+			if value, sent := live.get(key, header); !sent || value != p.ExtraHeaders[header] {
+				fields = append(fields, v9HeaderField+header)
+			}
+		}
+		if len(fields) > 0 {
+			out = append(out, ProviderFields{Provider: p.Name, Fields: fields})
+		}
+	}
+	return out
+}
+
+// v9MergeOverlayProvider folds src, a later overlay entry, into dst, an
+// earlier entry of the same name, with the 0.8.x overlay merge rules
 // (configs.ApplyOverlay): a list gains the items it lacks, the string maps
-// take src's keys (ApplyOverlay drops extra_headers; it is kept here) and any
-// other field src sets replaces dst's. src holds only the fields its overlay
-// entry sets.
+// (request_path_overrides, extra_headers) take src's keys and any other field
+// src sets replaces dst's. src holds only the fields its overlay entry sets.
 func v9MergeOverlayProvider(dst, src *yaml.Node) {
 	for i := 0; i+1 < len(src.Content); i += 2 {
 		key, value := src.Content[i].Value, src.Content[i+1]
@@ -3536,18 +3939,8 @@ func v9MergeOverlayProvider(dst, src *yaml.Node) {
 		switch {
 		case key == "name":
 		case have != nil && have.Kind == yaml.SequenceNode && value.Kind == yaml.SequenceNode:
-			seen := map[string]bool{}
-			for _, item := range have.Content {
-				seen[item.Value] = true
-			}
-			for _, item := range value.Content {
-				if !seen[item.Value] {
-					seen[item.Value] = true
-					have.Content = append(have.Content, item)
-				}
-			}
-		case (key == "request_path_overrides" || key == "extra_headers") &&
-			have != nil && have.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode:
+			v9UnionSeq(have, value)
+		case v9StringMapField(key) && have != nil && have.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode:
 			for j := 0; j+1 < len(value.Content); j += 2 {
 				v9Set(have, value.Content[j+1], value.Content[j].Value)
 			}
@@ -3555,6 +3948,141 @@ func v9MergeOverlayProvider(dst, src *yaml.Node) {
 			v9Set(dst, value, key)
 		}
 	}
+}
+
+// v9FillOverlayProvider folds src, an overlay provider, into dst, the
+// llm_providers.custom entry of the same name, once v9ProviderConflicts found
+// no value to choose between: a list gains the items it lacks, a string map
+// the keys it lacks, and a field dst leaves unset takes src's value. It
+// reports whether dst changed.
+func v9FillOverlayProvider(dst, src *yaml.Node) bool {
+	changed := false
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		key, value := src.Content[i].Value, src.Content[i+1]
+		have := v8YAMLMapValue(dst, key)
+		switch {
+		case key == "name", v9EmptyNode(value):
+		case v9EmptyNode(have):
+			v9Set(dst, value, key)
+			changed = true
+		case have.Kind == yaml.SequenceNode && value.Kind == yaml.SequenceNode:
+			if v9UnionSeq(have, value) {
+				changed = true
+			}
+		case v9StringMapField(key) && have.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode:
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if v8YAMLMapValue(have, value.Content[j].Value) == nil {
+					v9Set(have, value.Content[j+1], value.Content[j].Value)
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+// v9ProviderConflicts names the fields of src, an overlay provider, that dst,
+// the provider of the same name it would fold into, sets to another value: a
+// scalar or a block (bedrock, vertex, azure) both set differently, a key of
+// request_path_overrides or extra_headers both map differently (named
+// "<map>.<key>"), or a tls block sameTLS refuses. Lists never conflict (they
+// are unioned), and a field either side leaves unset or empty does not
+// either. Only names are returned: a header value may be a credential.
+func v9ProviderConflicts(dst, src *yaml.Node, sameTLS func(have, value *yaml.Node) bool) []string {
+	var fields []string
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		key, value := src.Content[i].Value, src.Content[i+1]
+		have := v8YAMLMapValue(dst, key)
+		switch {
+		case key == "name", v9EmptyNode(have), v9EmptyNode(value):
+		case have.Kind == yaml.SequenceNode && value.Kind == yaml.SequenceNode:
+		case v9StringMapField(key) && have.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode:
+			for j := 0; j+1 < len(value.Content); j += 2 {
+				if old := v8YAMLMapValue(have, value.Content[j].Value); old != nil && !v9NodesEqual(old, value.Content[j+1]) {
+					fields = append(fields, key+"."+value.Content[j].Value)
+				}
+			}
+		case key == "tls":
+			if !sameTLS(have, value) {
+				fields = append(fields, key)
+			}
+		case !v9NodesEqual(have, value):
+			fields = append(fields, key)
+		}
+	}
+	return fields
+}
+
+// v9StringMapField reports the provider fields merged key by key.
+func v9StringMapField(key string) bool {
+	return key == "request_path_overrides" || key == "extra_headers"
+}
+
+// v9UnionSeq appends the items of src that dst lacks and reports whether it
+// added one.
+func v9UnionSeq(dst, src *yaml.Node) bool {
+	seen := map[string]bool{}
+	for _, item := range dst.Content {
+		seen[item.Value] = true
+	}
+	added := false
+	for _, item := range src.Content {
+		if !seen[item.Value] {
+			seen[item.Value] = true
+			dst.Content = append(dst.Content, item)
+			added = true
+		}
+	}
+	return added
+}
+
+// v9EmptyNode reports an unset field: absent, null, an empty string, or an
+// empty list or map.
+func v9EmptyNode(node *yaml.Node) bool {
+	if node == nil {
+		return true
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		return node.Tag == "!!null" || node.Value == ""
+	case yaml.SequenceNode, yaml.MappingNode:
+		return len(node.Content) == 0
+	}
+	return false
+}
+
+// v9NodesEqual compares two YAML values by what they decode to.
+func v9NodesEqual(a, b *yaml.Node) bool {
+	var x, y any
+	if a.Decode(&x) != nil || b.Decode(&y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+// v9TLSInsecure reports a tls block's insecure_skip_verify.
+func v9TLSInsecure(tls *yaml.Node) bool {
+	return strings.EqualFold(yamlScalarValue(v8YAMLMapValue(tls, "insecure_skip_verify")), "true")
+}
+
+// v9CAData is an overlay CA bundle, nil for none.
+func v9CAData(ca *v9RegoRefresh) []byte {
+	if ca == nil {
+		return nil
+	}
+	return ca.data
+}
+
+// v9ConfigCAMatches reports whether the CA file a config tls block names
+// holds the overlay's CA bundle (both absent matches). A file that can not
+// be read does not match.
+func v9ConfigCAMatches(tls *yaml.Node, ca *v9RegoRefresh) bool {
+	file := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(tls, "ca_cert_file")))
+	if file == "" || ca == nil {
+		return file == "" && ca == nil
+	}
+	raw, err := os.ReadFile(expandPath(file)) // #nosec G304 -- llm_providers.custom[].tls.ca_cert_file.
+	return err == nil && strings.TrimSpace(string(raw)) == strings.TrimSpace(string(ca.data))
 }
 
 // v9ProviderCAName gives each case-insensitive provider a stable CA path.
@@ -3580,13 +4108,109 @@ func (m *v9Migrator) writeProviderCAs(written *[]string) error {
 
 // retireProvidersOverlay renames the legacy overlay once its providers and
 // CA files are in the committed config. The next config write renders the
-// derived file.
+// derived file. A file an earlier migration retired keeps its name: the new
+// one takes the first free ".N" suffix.
 func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
-	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
+	target := freeSiblingPath(m.providersOverlay + DataJSONMigratedSuffix)
+	if err := os.Rename(m.providersOverlay, target); err != nil {
 		m.note("could not rename %s: %v", m.providersOverlay, err)
 		return
 	}
-	*written = append(*written, m.providersOverlay+DataJSONMigratedSuffix)
+	if m.fold != nil {
+		m.fold.Retired = target
+	}
+	*written = append(*written, target)
+}
+
+// foldProvidersOverlayV9 folds a legacy custom-providers.json next to a
+// config that is already config_version 9 (one an operator wrote after the
+// upgrade, or one a release before 1.0.3 left in place) into llm_providers
+// with the rules of migrateCustomProviders, and retires it (GAP-0163).
+// Before, the file stayed a live input that only the gateway merged. When
+// config.yaml sets a field of the file to another value, or the result would
+// not validate, nothing is written and result.ProvidersFold says why. The
+// commit holds config.yaml.lock and needs the bytes MigrateV9 read; the
+// installer's rollback copy of the data home puts back config.yaml and the
+// file (a file outside the data home is left in place, as
+// leftOutsideRollbackCopy says).
+func (m *v9Migrator) foldProvidersOverlayV9(ctx context.Context, source []byte, result *MigrateV9Result) error {
+	if m.in.InMemory || m.in.Managed || m.in.ack {
+		return nil
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(source, &doc); err != nil {
+		return fmt.Errorf("config: parse %s: %w", m.configPath, err)
+	}
+	root := v8DocumentRoot(&doc)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	m.root = root
+	notes := len(m.record.Notes)
+	m.migrateCustomProviders(root)
+	fold := m.fold
+	defer func() {
+		if fold != nil {
+			fold.Notes = append([]string(nil), m.record.Notes[notes:]...)
+			result.ProvidersFold = fold
+		}
+	}()
+	if fold == nil || fold.Refused != "" {
+		return nil
+	}
+	folded := source
+	if m.foldChanged {
+		var out bytes.Buffer
+		enc := yaml.NewEncoder(&out)
+		enc.SetIndent(2)
+		if err := enc.Encode(&doc); err != nil {
+			return fmt.Errorf("config: encode the config with the providers of %s: %w", fold.Overlay, err)
+		}
+		if err := enc.Close(); err != nil {
+			return fmt.Errorf("config: encode the config with the providers of %s: %w", fold.Overlay, err)
+		}
+		folded = out.Bytes()
+		if err := ValidateCandidate(m.configPath, folded); err != nil {
+			fold.Folded = nil
+			fold.Refused = fmt.Sprintf("the providers of %s were not folded into config.yaml, which would not "+
+				"validate with them (%v); neither file was changed, and the gateway keeps merging %s with config.yaml",
+				fold.Overlay, err, ProvidersOverlayFile)
+			m.note("%s", fold.Refused)
+			return nil
+		}
+	}
+	result.Migrated = folded
+	if m.in.DryRun {
+		return nil
+	}
+	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
+	if err != nil {
+		return err
+	}
+	defer txn.Close()
+	current, mode, exists, err := txn.Read()
+	if err != nil {
+		return err
+	}
+	if !exists || !bytes.Equal(current, source) {
+		return fmt.Errorf("config: config.yaml changed while %s was folded into it; run `defenseclaw migrate` again", fold.Overlay)
+	}
+	var written []string
+	defer func() { result.Written = append(result.Written, written...) }()
+	if err := m.writeProviderCAs(&written); err != nil {
+		return err
+	}
+	if m.foldChanged {
+		if _, err := commitV9Config(txn, current, folded, exists, mode,
+			cfgtxn.Writer{Actor: m.record.Actor, Reason: "fold the legacy " + ProvidersOverlayFile + " into llm_providers"}); err != nil {
+			return err
+		}
+		written = append(written, m.configPath)
+	}
+	if !m.leftOutsideRollbackCopy(fold.Overlay) {
+		m.retireProvidersOverlay(&written)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

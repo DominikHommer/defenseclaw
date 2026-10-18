@@ -523,6 +523,10 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 			// An agent identity (GAP-0829).
 			return "an agent identity: agt- followed by 16 lowercase hexadecimal digits"
 		}
+		if words := v8SchemaPatternWords(current); words != "" {
+			// A severity or level spelled in any case (GAP-0760).
+			return words
+		}
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
@@ -538,6 +542,55 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 	}
 	return ""
 }
+
+// v8SchemaPatternWords names the words a ^(a|b|c)$ pattern allows, as the
+// Python validator does: [Cc][Rr]... spellings mean any case and an empty
+// alternative means an empty value inherits. It is "" for any other pattern.
+func v8SchemaPatternWords(value any) string {
+	pattern, _ := value.(string)
+	inner, ok := strings.CutPrefix(pattern, "^(")
+	if !ok {
+		return ""
+	}
+	if inner, ok = strings.CutSuffix(inner, ")$"); !ok {
+		return ""
+	}
+	var words []string
+	anyCase, empty := false, false
+	for _, part := range strings.Split(inner, "|") {
+		switch {
+		case part == "":
+			empty = true
+		case v8SchemaAnyCaseWord.MatchString(part):
+			var word strings.Builder
+			for i := 2; i < len(part); i += 4 {
+				word.WriteByte(part[i])
+			}
+			words = append(words, strings.ToUpper(word.String()))
+			anyCase = true
+		case v8SchemaPlainWord.MatchString(part):
+			words = append(words, part)
+		default:
+			return ""
+		}
+	}
+	if len(words) == 0 {
+		return ""
+	}
+	out := "one of " + strings.Join(words, ", ")
+	if anyCase {
+		out += " in any case"
+	}
+	if empty {
+		out += " (empty inherits)"
+	}
+	return out
+}
+
+var (
+	v8SchemaAnyCaseWord = regexp.MustCompile(`^(?:\[[A-Za-z][A-Za-z]\])+$`)
+	v8SchemaPlainWord   = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+)
 
 // v8SchemaSizeExpectation words a length, item or key count limit: "a string
 // of at most 512 characters", "a mapping that sets at least one of agents,

@@ -364,13 +364,16 @@ class TestOpenShellValidation(unittest.TestCase):
             ({"guardrail": {"block_at": 12}}, "$.guardrail.block_at",
              "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
             ({"guardrail": {"mode": 5}}, "$.guardrail.mode", "use one of observe, action"),
+            # GAP-0760: hilt.min_severity takes the block_at words in any case.
             ({"guardrail": {"hilt": {"min_severity": "bogus"}}}, "$.guardrail.hilt.min_severity",
-             "use one of LOW, MEDIUM, HIGH, CRITICAL (empty inherits)"),
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
         ):
             with self.assertRaises(V8ConfigError) as caught:
                 load_validate_v8({"config_version": 9, **document})
             self.assertEqual(caught.exception.path, path)
             self.assertEqual(caught.exception.corrective_action, want)
+        # The lower case block_at takes is accepted for hilt.min_severity too.
+        load_validate_v8({"config_version": 9, "guardrail": {"hilt": {"min_severity": "high"}}})
 
 
 class TestPolicyConnectors(unittest.TestCase):
