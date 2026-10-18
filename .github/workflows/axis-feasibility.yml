@@ -10,7 +10,7 @@ on:
     branches: [codex/axis-sandbox-feasibility]
     paths:
       - .github/workflows/axis-feasibility.yml
-      - test/e2e/axis/**
+      - test/e2e/axis/runner/**
   workflow_dispatch:
 
 permissions:
@@ -37,6 +37,15 @@ jobs:
         shell: bash
         working-directory: axis-source
     steps:
+      - name: Check out the contributor probe source
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: defenseclaw-source
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: test/e2e/axis/runner
+
       - name: Check out the reviewed AXIS source
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -68,6 +77,15 @@ jobs:
           cargo +"$RUST_TOOLCHAIN" build --locked --release -p axis-cli -p axis-daemon -p axis-sandbox --bins
           git diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
 
+      - name: Build the direct native contributor probe with the upstream lock
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          mkdir -p crates/axis-sandbox/examples
+          install -m 0644 ../defenseclaw-source/test/e2e/axis/runner/main.rs crates/axis-sandbox/examples/defenseclaw_axis_offline.rs
+          cargo +"$RUST_TOOLCHAIN" build --locked --release -p axis-sandbox --example defenseclaw_axis_offline
+          git diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
+
       - name: Assemble contributor payload and provenance
         env:
           BUILD_REPOSITORY: ${{ github.repository }}
@@ -85,6 +103,8 @@ jobs:
             test ! -L "target/release/$binary"
             install -m 0755 "target/release/$binary" "dist/$payload/bin/$binary"
           done
+          install -m 0755 target/release/examples/defenseclaw_axis_offline "dist/$payload/bin/defenseclaw-axis-offline-probe"
+          cp ../defenseclaw-source/test/e2e/axis/runner/main.rs "dist/$payload/OFFLINE_PROBE.rs"
           cp Cargo.lock rust-toolchain.toml Cargo.toml LICENSE "dist/$payload/"
           rustc +"$RUST_TOOLCHAIN" -Vv > "dist/$payload/TOOLCHAIN.txt"
           cargo +"$RUST_TOOLCHAIN" --version >> "dist/$payload/TOOLCHAIN.txt"
@@ -113,6 +133,11 @@ jobs:
                   "commit": os.environ["AXIS_SOURCE_COMMIT"],
                   "cargo_lock_sha256": hashlib.sha256((root / "Cargo.lock").read_bytes()).hexdigest(),
                   "toolchain_file_sha256": hashlib.sha256((root / "rust-toolchain.toml").read_bytes()).hexdigest(),
+                  "example_overlay": {
+                      "source": "test/e2e/axis/runner/main.rs",
+                      "sha256": hashlib.sha256((root / "OFFLINE_PROBE.rs").read_bytes()).hexdigest(),
+                      "build_command": "cargo +1.95.0 build --locked --release -p axis-sandbox --example defenseclaw_axis_offline",
+                  },
               },
               "build": {
                   "toolchain": os.environ["RUST_TOOLCHAIN"],
