@@ -86,7 +86,9 @@ func TestSandboxDaemonHandoverAfterLifecycle(t *testing.T) {
 // not certificates and CAs, and shows no sandbox port the daemon does not
 // hold (GAP-0461).
 func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		seedSandboxRecord(t, o.StateDir, "kept1", map[string]any{})
+	})
 	f.run(t)
 	ctx := context.Background()
 	c := sandboxapi.NewUnixClient(f.socket)
@@ -106,6 +108,10 @@ func TestSandboxDaemonGatewayForKeptSandboxes(t *testing.T) {
 	}
 	if _, err := c.Stop(ctx, "kept1"); err == nil || !strings.Contains(err.Error(), "one account at a time") {
 		t.Fatalf("stop while another account holds the port: %v", err)
+	}
+	// A name with no sandbox says so whoever holds the port (GAP-0126).
+	if _, err := c.Delete(ctx, "never-made", sandboxapi.DeleteRequest{}); err == nil || !strings.Contains(err.Error(), "no DefenseClaw sandbox named") {
+		t.Fatalf("delete of an absent name while another account holds the port: %v", err)
 	}
 	st, err := c.Status(ctx)
 	if err != nil || st.Available || st.GatewayElsewhere != "another account" || st.Reason != sandboxAccountBusyMessage ||
