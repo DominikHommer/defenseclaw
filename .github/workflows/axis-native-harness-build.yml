@@ -119,9 +119,9 @@ jobs:
               target.write_bytes(raw)
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           registry = Path('test/e2e/axis/native-peer/harness/artifact.go').read_bytes()
-          receipt_sha = '8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b'
+          receipt_sha = '6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668'
           registry_sha = hashlib.sha256(registry).hexdigest()
-          if registry_sha != '9c339e8d3036b5d9df0cc8bb6177072a4681d4ed15e627b3e00be3fbb96f6e72' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
+          if registry_sha != 'd9250c55cfd1bf35b16f62c50926d51bbc4b22f1fa7761b0deefb1af83ed91f0' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
               raise SystemExit('exact reviewed fixed-contributor registry source required')
           (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'fixed_suites': {'baseline': ['argv', 'stdio', 'exit23', 'boundaries'], 'lifecycle': ['wait-timeout', 'wait-cancel', 'tree-cancel']}, 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
@@ -212,15 +212,16 @@ jobs:
               retained[key] = {'path': target.relative_to(artifact).as_posix(), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'size': target.stat().st_size}
           (artifact / 'DEPENDENCY-CLOSURE.json').write_text(json.dumps({'module': expected, 'local_packages': sorted(local), 'package_count': count, 'retained': retained, 'module_verification': True, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
-      - name: Run only source-reviewed inert lifecycle unit tests
+      - name: Run only source-reviewed inert lifecycle and registry unit tests
         shell: bash
         run: |
           set -euo pipefail
-          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/harness -run '^TestLifecycle' -count=1 -timeout=20s > harness-artifact/INERT-LIFECYCLE-TESTS.jsonl
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/harness -run '^Test(Lifecycle|ReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls$)' -count=1 -timeout=20s > harness-artifact/INERT-LIFECYCLE-TESTS.jsonl
           python3 - <<'PY'
           import json
           from pathlib import Path
           expected = {
+              'TestReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls',
               'TestLifecycleSuiteAndPlansAreClosedAndBaselineUnchanged',
               'TestLifecycleMarkersRequireExactUniqueSetDespiteChunkOrder',
               'TestLifecycleProtocolCorrelatesTimeoutCancelAndSeparateCleanup',
@@ -238,7 +239,7 @@ jobs:
           passed = [row['Test'] for row in rows if row.get('Action') == 'pass' and 'Test' in row]
           if set(passed) != expected or len(passed) != len(expected) or any(row.get('Action') in ('skip', 'fail') for row in rows) or not any(row.get('Action') == 'pass' and 'Test' not in row for row in rows):
               raise SystemExit('exact inert lifecycle test inventory refused')
-          Path('harness-artifact/INERT-LIFECYCLE-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 6, 'inert_filesystem_and_go_writer_only': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
+          Path('harness-artifact/INERT-LIFECYCLE-TESTS.json').write_text(json.dumps({'passed': sorted(passed), 'count': len(passed), 'root_count': 7, 'inert_filesystem_and_go_writer_only': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'namespace_or_prctl_called': False}, indent=2) + '\n')
           PY
       - name: Build two deterministic static wrapper images and retain evidence
         shell: bash

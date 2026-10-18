@@ -5,11 +5,12 @@
 
 This is source for a separate Linux amd64 experiment. Its compiled registry
 admits only receipt SHA256
-`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`
+`6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668`
 for the closed baseline/lifecycle suites and the exact reviewed c914 build
 (byte-identical aa215 Rust peer and revised static Bubblewrap), with the
-3f295 payload. Its first lifecycle attempt passed the two fixed wait cases but
-failed the tree precondition; see the [actual result](../README.md#lifecycle-probe-revision-and-first-failed-attempt).
+corrected 6a1 payload. This pairing has not executed. The previous 3f295
+pairing passed the two fixed wait cases but failed the tree precondition; see
+the [actual result](../README.md#lifecycle-probe-revision-and-first-failed-attempt).
 Historically, the c914
 Bubblewrap, d074 payload, ae9 wrapper and 5125 driver
 passed one [fixed four-case attempt](../README.md#first-passing-native-attempt-four-fixed-offline-cases)
@@ -241,16 +242,25 @@ The explicit `--suite lifecycle` selector adds three bounded experiments while
 the default `--suite baseline` retains the four original cases. It requires a
 new reviewed wrapper and paired driver artifact; the historical ae9/5125
 artifacts do not accept these selectors. The peer, static Bubblewrap and offline
-policy stay unchanged. The reviewed 3f295 fixed payload replaces d074 in the
-new combined receipt `8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`:
-the historical d074 tree requested setsid for its grandchild, which the pinned
-filter denies. Payload build run `39167683927`, artifact `12151291706`, binds
-image `ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2`
-(1,929,342 bytes) and source SHA256
-`80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb`.
-The first attempt at this pairing failed the tree precondition after the two
-fixed wait cases passed. It did not observe tree cancellation or stability;
-historical receipts and run evidence remain unchanged.
+policy stay unchanged. Historical d074 requested setsid for its grandchild;
+3f295 instead required denial before normal descendant creation. The first
+3f295 attempt under receipt
+`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`
+failed the group-query precondition after its two wait cases passed. It did not
+observe tree cancellation or stability, and remains failed historical evidence.
+
+The corrected 6a1 payload uses raw allowed amd64 `SYS_GETPGRP` with errno checked
+before the same positive nonleader predicate. The peer/filter stay unchanged.
+New receipt `6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668`
+binds payload run `39171740021`, artifact `12152816365`, image
+`3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d`
+(1,929,342 bytes) and main source SHA256
+`aa695d4df73865cce90afd8dab41c819949a6f8dec66b9fe1a641be035df815e`.
+Its injected-function unit test passed without an actual group query. Fresh
+wrapper/driver artifacts and their review remain required before another
+separately authorized attempt. The wrapper build also selects the existing
+pure canonical-registry test alongside the six lifecycle unit roots (ten
+passes including nested tests), without any namespace or workload execution.
 
 `wait-timeout` requires the fixed payload's ready marker before its five-second
 native plan deadline, then a Launch-correlated `Exited(-1)` with `timed_out`

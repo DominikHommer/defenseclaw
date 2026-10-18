@@ -61,7 +61,7 @@ type reviewedRegistry struct {
 // This entry admits only the fixed baseline/lifecycle suites and these exact
 // independently reviewed artifacts. It grants no production/provider authority.
 // No CLI, environment, discovery or caller digest may replace these pins.
-const fixedContributorReceiptSHA = "8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b"
+const fixedContributorReceiptSHA = "6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668"
 
 var liveRegistry = fixedContributorRegistry()
 
@@ -80,15 +80,15 @@ func fixedContributorRegistry() reviewedRegistry {
 			MXC:                     "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
 			Bubblewrap:              "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
 			StaticClosureSHA:        "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
-			PayloadSourceSHA:        "80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb",
+			PayloadSourceSHA:        "aa695d4df73865cce90afd8dab41c819949a6f8dec66b9fe1a641be035df815e",
 			Builds: []buildIdentity{
 				{Role: "peer_and_static_bwrap", Commit: "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139", Run: 39158759518, Artifact: 12148605722, ArchiveSHA: "68e5d232ed286cfbbbbcb212170cc6bf0aff4536cfbc98fb7129da1315a99085", ProvenanceSHA: "7d6fd05f40006e334921fa4efec58a033b3c2bbaf707d7be03b6322bc81ac59c"},
-				{Role: "fixed_payload", Commit: "3f295c8351d29028278e99349de9036207df6590", Run: 39167683927, Artifact: 12151291706, ArchiveSHA: "ae4e4c905d707a4505b80c1d3343f7896051a6e5c51f56835e7d7552d4fc67a5", ProvenanceSHA: "0d92d049bf554404c8d4edfc7d124890258be0177bf336b44441298ac093f578"},
+				{Role: "fixed_payload", Commit: "6a1f7080a39fbdfa39b98f3ea7db02516910dc3d", Run: 39171740021, Artifact: 12152816365, ArchiveSHA: "f27e44a36ff6d2349dff1ad38909f279ca027d429e85cb03a04b77322feb92db", ProvenanceSHA: "70979ab492b883e5c6c9d0c583477b9f1cb999b6d14fdc6a89ad356aa8134dae"},
 			},
 			Images: []imageIdentity{
 				{Role: "peer", Path: "images/peer", SHA: "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665", Size: 2722752},
 				{Role: "static_musl_bwrap", Path: "images/bwrap-static-musl", SHA: "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee37d", Size: 198584},
-				{Role: "fixed_payload", Path: "images/fixed-payload", SHA: "ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2", Size: 1929342},
+				{Role: "fixed_payload", Path: "images/fixed-payload", SHA: "3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d", Size: 1929342},
 			},
 		},
 	}
