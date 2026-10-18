@@ -141,9 +141,9 @@ admission rejected or could not scan. The server process itself can run
 until Claude Code stops it. It runs with the user's own rights, the same
 rights the user has to start any program.
 
-On managed Windows, a project server whose `cwd` is a relative path, or a
-folder the user's server cannot start in, is blocked as not scanned with
-"is not started in <folder>". If the hook enumerator cannot parse a user's
+On managed Windows, a project server whose `cwd` is a relative path, or
+names a folder the server cannot start in, is blocked as not scanned. The
+scan error says that the server is not started in that folder, and why. If the hook enumerator cannot parse a user's
 Claude Code server list (`~/.claude.json` or a project `.mcp.json`), it does
 not guess: it refuses all of that user's Claude Code MCP servers, and
 `status` names the file until it parses again.
