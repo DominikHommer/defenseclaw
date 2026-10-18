@@ -4,15 +4,15 @@ This contributor driver owns one run of the reviewed four-case native peer
 wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `6eec7b67ff8ff2d79dd32d362faa72e52efbac6c`
-in Actions run `39154280846`, artifact `12146611161`. Two independent inert
+The fixed input wrapper was built at `9ea21f6d9da3dacf60cb451d45cc8818ef9db3e9`
+in Actions run `39156089152`, artifact `12147162086`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`fddd52c5ea5093de7e00128f85a5487d7fcce904ced5e6e669e1e4ea5127ff1c`
-(3,432,574 bytes); archive SHA-256 is
-`bd6a71983f51505617d95bf630fd5b89cd7f393c3835213689bfb8ea36b7b40f`;
+`4b64f27003027663af8bce1c2159daa9f8315635a6e3b5504f345178e9750455`
+(3,440,766 bytes); archive SHA-256 is
+`3b8a43bc3db52f035b213e411704a982b58fe69e069476a955f6b68797e4bec3`;
 provenance SHA-256 is
-`da1572b265ca1a81e913df1c5754122418ca03290cc0cf1db3b273a237603a45`.
+`f7a74392af14379b22c92bc6391cc8dc8af3be8be01ad144dd58c52e622a792c`.
 Its fixed combined peer/payload receipt is
 `9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`.
 These are compiled source pins. There is no caller-supplied image, digest,
