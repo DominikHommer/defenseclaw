@@ -236,7 +236,7 @@ func TestRelayRefusesBadCallsBeforeSending(t *testing.T) {
 	path := relayTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sent = true }))
 	c := newTestClient(t, path)
 	big := http.Header{}
-	big.Set("Traceparent", strings.Repeat("a", MaxForwardHeaderBytes))
+	big.Set("Content-Type", strings.Repeat("a", MaxForwardHeaderBytes))
 	for _, call := range []RelayCall{
 		{Class: RouteHook, Target: "../admin", Registration: "reg-1"},
 		{Class: RouteInspect, Target: "everything", Registration: "reg-1"},

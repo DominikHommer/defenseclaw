@@ -19,6 +19,8 @@ package sandboxrelay
 import (
 	"errors"
 	"net/http"
+
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // Client-side failures of the relay. Each one fails the sandbox's hook
@@ -73,9 +75,8 @@ const (
 // notice that clears by itself, not a refusal to take to IT;
 // DetailSetupChanging is the reason code a refusal of it carries.
 const (
-	UnavailableSetupChanging = "your organization changed how sandboxes run on this computer, and DefenseClaw is still setting that up; " +
-		"try again in a few minutes"
-	DetailSetupChanging = "openshell_setup_changing"
+	UnavailableSetupChanging = sandboxapi.UnavailableSetupChanging
+	DetailSetupChanging      = "openshell_setup_changing"
 )
 
 // ReasonStatus is the HTTP status each refusal reason answers with; 0 for

@@ -294,6 +294,8 @@ var accessRuleTexts = map[string]string{
 	"allow_unblock":     "can't be unblocked under your profile",
 	"user_approvals":    "needs an approval your profile doesn't let you give",
 	"allow_host_ports":  "is a port on this computer your profile doesn't open to sandboxes",
+	"min_profile":       "can't be kept for future sandboxes under the strict profile your organization requires",
+	"required_pack":     "is not allowed by the sandbox pack your organization requires",
 }
 
 // AccessRefused is the refusal of an ask or unblock for host that the

@@ -413,13 +413,17 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 				}
 			}
 			l := newYAMLCheckedLauncher(t, tc.spec, "")
+			refusalCode := 2
+			if tc.spec == OpenCode {
+				refusalCode = LauncherRefusedExitCode
+			}
 			for _, c := range tc.cases {
 				r := l.run(t, "", nil, c.args...)
 				if c.refusal == "" {
 					if r.exit != 0 || !r.started() {
 						t.Errorf("%q refused: exit %d %s", c.args, r.exit, r.output)
 					}
-				} else if r.exit != 2 || r.started() || !strings.Contains(r.output, c.refusal) {
+				} else if r.exit != refusalCode || r.started() || !strings.Contains(r.output, c.refusal) {
 					t.Errorf("%q: exit %d started %t output %q, want a refusal saying %q", c.args, r.exit, r.started(), r.output, c.refusal)
 				}
 			}
@@ -642,7 +646,7 @@ func TestCodexLauncherKeepsTheTokenOffTheCommandLine(t *testing.T) {
 func TestOpenCodeLauncherRefusesForeignPlugins(t *testing.T) {
 	// Config it cannot check is refused.
 	r := newLauncher(t, OpenCode, "/usr/bin/jq", "/nonexistent/jq").run(t, "", []string{`OPENCODE_CONFIG_CONTENT={"model":"x"}`}, "run", "hi")
-	if r.exit != 2 || r.started() || !strings.Contains(r.output, "OPENCODE_CONFIG_CONTENT could not be checked") {
+	if r.exit != LauncherRefusedExitCode || r.started() || !strings.Contains(r.output, "OPENCODE_CONFIG_CONTENT could not be checked") {
 		t.Fatalf("without jq: exit %d\n%s", r.exit, r.output)
 	}
 	if _, err := os.Stat("/usr/bin/jq"); err != nil {
@@ -778,7 +782,7 @@ func TestOpenCodeLauncherRefusesForeignPlugins(t *testing.T) {
 				return
 			}
 			names := strings.ReplaceAll(tc.names, "{root}", root)
-			if r.exit != 2 || r.started() || !strings.Contains(r.output, "refusing to start OpenCode: "+names+" "+tc.reason) {
+			if r.exit != LauncherRefusedExitCode || r.started() || !strings.Contains(r.output, "refusing to start OpenCode: "+names+" "+tc.reason) {
 				t.Fatalf("exit %d, want a refusal naming %s %s:\n%s", r.exit, names, tc.reason, r.output)
 			}
 		})

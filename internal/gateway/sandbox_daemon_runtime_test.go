@@ -192,10 +192,9 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if seen.Header.Get(sandboxrelay.FilesHeader) != "" || seen.Header.Get(sandboxrelay.RegistrationHeader) != "reg-claude-app" {
 		t.Fatalf("sandbox headers: files %q registration %q", seen.Header.Get(sandboxrelay.FilesHeader), seen.Header.Get(sandboxrelay.RegistrationHeader))
 	}
-	if seen.Header.Get("Traceparent") == "" || seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
-		t.Fatalf("allowlisted headers missing: %v", seen.Header)
+	if seen.Header.Get("X-Defenseclaw-Hook-Event") != "PreToolUse" {
+		t.Fatalf("hook event header missing: %v", seen.Header)
 	}
-	mode = "plain"
 	mu.Unlock()
 	decisions, failures := obs.take()
 	if len(decisions) != 1 || len(failures) != 0 {
@@ -217,6 +216,19 @@ func TestSandboxRelayForwarding(t *testing.T) {
 	if of := generationOf.Load(); generation.Load() != 7 || of == nil || *of != "reg-"+strings.TrimPrefix(f.claude.SandboxName, "dc-") {
 		t.Fatalf("generation = %d of %v", generation.Load(), of)
 	}
+
+	// A 200 block caused by failed evaluation also counts as a hook failure.
+	mu.Lock()
+	decision.FailedClosed = true
+	mu.Unlock()
+	rec = f.do(t, http.MethodPost, path, f.claudeTok, body)
+	if decisions, failures := obs.take(); rec.Code != http.StatusOK || len(decisions) != 1 || len(failures) != 1 || failures[0].Status != http.StatusInternalServerError {
+		t.Fatalf("failed-closed relay: status %d decisions %v failures %v", rec.Code, decisions, failures)
+	}
+	mu.Lock()
+	decision.FailedClosed = false
+	mode = "plain"
+	mu.Unlock()
 
 	// A 2xx without a trailer records nothing.
 	rec = f.do(t, http.MethodPost, path, f.claudeTok, `{"hook_event_name":"Stop"}`)
@@ -274,7 +286,9 @@ type fakeRelay struct {
 	explain  func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
 	test     func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
 	packs    func(registration, connector, name string) ([]sandboxrelay.PackView, error)
-	deleted  atomic.Int64
+	// decisions answers the saved-decisions list of a registration.
+	decisions func(registration string) ([]sandboxrelay.Decision, error)
+	deleted   atomic.Int64
 
 	eventsMu sync.Mutex
 	events   []sandboxrelay.EventBatch
@@ -357,7 +371,10 @@ func (f *fakeRelay) Pack(_ context.Context, registration, connector, name string
 func (f *fakeRelay) Decide(context.Context, sandboxrelay.DecisionRequest) (sandboxrelay.DecisionResult, error) {
 	return sandboxrelay.DecisionResult{}, nil
 }
-func (f *fakeRelay) Decisions(context.Context, string) ([]sandboxrelay.Decision, error) {
+func (f *fakeRelay) Decisions(_ context.Context, registration string) ([]sandboxrelay.Decision, error) {
+	if f.decisions != nil {
+		return f.decisions(registration)
+	}
 	return nil, nil
 }
 func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) error {

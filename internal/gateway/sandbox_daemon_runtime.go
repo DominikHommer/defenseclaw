@@ -2051,6 +2051,9 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
 	d.regs.applyOrdered(r, seq, cp)
+	// A sandbox that starts again runs under the profile minimum of the
+	// person's floor now, not the looser one it registered under (GAP-0224).
+	d.regs.applyStartFloor(name, r.ID, cp)
 	r, _ = d.regs.get(name)
 	if d.floorConflicts(ctx, r.Floor, name) {
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Status: http.StatusConflict,
@@ -2063,6 +2066,8 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, err
 	}
 	d.adoptFloor(name)
+	// Its saved decisions as the floor now keeps them (GAP-0224).
+	c.ReloadDecisions(ctx, r.ID)
 	return c.Manager.Start(withManagedMCPJudge(ctx, d.startMCPJudge(r.ID)), name, req)
 }
 
@@ -2194,7 +2199,20 @@ func applyManagedPosture(out *sandboxapi.Explain, p *sandboxapi.ManagedPosture) 
 // (GAP-0228).
 func (c *managedSandboxController) PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
 	if req.Sandbox != "" {
-		return c.Manager.PolicyTest(ctx, req)
+		// Judged under the policy the sandbox's next connection meets: a
+		// changed policy and its saved decisions are confirmed first, as
+		// the egress proxy does, and while the proxy refuses the sandbox's
+		// connections the test says so (GAP-0224).
+		_, off := c.d.confirmEgressPolicy(ctx, egress.Principal{SandboxName: req.Sandbox})
+		res, err := c.Manager.PolicyTest(ctx, req)
+		if err != nil || off == nil {
+			return res, err
+		}
+		for i := range res.Decisions {
+			d := &res.Decisions[i]
+			d.Allowed, d.Rule, d.Match, d.Source, d.Reason, d.Unblockable = false, string(off.Category), "", "", off.Reason, false
+		}
+		return res, nil
 	}
 	// The managed gateway judges them under the caller's floor, its
 	// required pack and profile minimum included, which the daemon's own
@@ -2621,6 +2639,28 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.applyLiveLocked(name, cp)
+}
+
+// applyStartFloor gives the registration id of sandbox name the min_profile
+// of a policy/current answer its start asked for (CurrentPolicy.MinProfile).
+// The profile minimum is not live: a running sandbox keeps the one it
+// started with, and its next start takes the floor's now, so a sandbox
+// stopped under a looser profile never runs under it again (GAP-0224). An
+// answer without it changes nothing.
+func (r *daemonRegistrations) applyStartFloor(name, id string, cp sandboxrelay.CurrentPolicy) {
+	if cp.MinProfile == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reg, ok := r.byName[name]
+	if !ok || reg.ID != id || reg.Floor.MinProfile == *cp.MinProfile {
+		return
+	}
+	reg.Floor.MinProfile = *cp.MinProfile
+	r.byName[name] = reg
+	_ = r.saveLocked()
+	r.changes.Add(1)
 }
 
 // nextSeq numbers a policy request of a registration, taken before it is

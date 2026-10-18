@@ -32,6 +32,7 @@
     "egress_block": {"type": "array", "items": {"type": "string"}},
     "user_approvals": {"type": "string", "enum": ["", "none", "session"]},
     "allow_unblock": {"type": "boolean"},
+    "foreign_sandboxes": {"type": "string", "enum": ["", "stop", "alert"]},
     "mcp_included": {"type": "array", "items": {"type": "string"}},
     "mcp_blocked": {
       "type": "array",

@@ -73,6 +73,7 @@ type API interface {
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
+	PolicyDecision(ctx context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
 	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
 	Activity(ctx context.Context, q sandboxapi.ActivityQuery, fn func(sandboxapi.ActivityEvent) error) error

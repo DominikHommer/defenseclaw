@@ -130,6 +130,9 @@ type session struct {
 	// passArgs is set when the command was given arguments for the harness
 	// (after --), which it may answer without a session (--version).
 	passArgs bool
+	// continueAfterDetached marks a Claude Code --continue after a completed
+	// detached run, whose conversation may not have been saved.
+	continueAfterDetached bool
 	// startedAt is when the harness (or shell) was attached; harnessCode
 	// its exit status.
 	startedAt   time.Time
@@ -861,6 +864,9 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 		a.line("review:  " + CommandName + " review " + s.sb.Name + "   undo: " + CommandName + " undo " + s.sb.Name)
 	}
 	a.line("stop:    " + CommandName + " stop " + s.sb.Name)
+	if s.spec.Name == harness.ClaudeCode.Name {
+		a.note("A completed detached Claude Code run may leave no saved conversation. If connect -- --continue cannot find one, connect without --continue to start a new conversation.")
+	}
 	return nil
 }
 

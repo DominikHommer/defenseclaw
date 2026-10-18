@@ -30,13 +30,14 @@ import (
 
 // REST paths, all on the daemon's main API port.
 const (
-	PathPrefix        = "/api/v1/sandbox/"
-	PathStatus        = "/api/v1/sandbox/status"
-	PathSandboxes     = "/api/v1/sandbox/sandboxes"
-	PathApprovals     = "/api/v1/sandbox/approvals"
-	PathActivity      = "/api/v1/sandbox/activity"
-	PathEgressUnblock = "/api/v1/sandbox/egress/unblock"
-	PathPolicyExplain = "/api/v1/sandbox/policy/explain"
+	PathPrefix         = "/api/v1/sandbox/"
+	PathStatus         = "/api/v1/sandbox/status"
+	PathSandboxes      = "/api/v1/sandbox/sandboxes"
+	PathApprovals      = "/api/v1/sandbox/approvals"
+	PathActivity       = "/api/v1/sandbox/activity"
+	PathEgressUnblock  = "/api/v1/sandbox/egress/unblock"
+	PathPolicyExplain  = "/api/v1/sandbox/policy/explain"
+	PathPolicyDecision = "/api/v1/sandbox/policy/decision"
 	// PathPolicyTest is POST: what a sandbox's egress policy decides for
 	// destinations (PolicyTestRequest).
 	PathPolicyTest = "/api/v1/sandbox/policy/test"
@@ -46,6 +47,20 @@ const (
 	// the Status.
 	PathReady = "/api/v1/sandbox/ready"
 )
+
+// PolicyDecisionRequest records one managed user's lasting host decision
+// through a sandbox registration. Kind is allow or block.
+type PolicyDecisionRequest struct {
+	Sandbox string `json:"sandbox,omitempty"`
+	Host    string `json:"host"`
+	Kind    string `json:"kind"`
+}
+
+type PolicyDecisionResponse struct {
+	Sandbox string `json:"sandbox"`
+	Host    string `json:"host"`
+	Kind    string `json:"kind"`
+}
 
 // ClientHeader is the CSRF header every mutating request carries, and
 // ClientName the value the DefenseClaw CLI sends.
@@ -1118,6 +1133,8 @@ type ManagedExplain struct {
 	// and unblocks the caller may approve.
 	UserApprovals string `json:"user_approvals,omitempty"`
 	AllowUnblock  bool   `json:"allow_unblock"`
+	// ForeignSandboxes is the action applied to sandboxes outside DefenseClaw.
+	ForeignSandboxes string `json:"foreign_sandboxes,omitempty"`
 	// MCPIncluded names the caller's MCP servers the run includes;
 	// MCPBlocked those it leaves out, with the reason.
 	MCPIncluded []string     `json:"mcp_included,omitempty"`

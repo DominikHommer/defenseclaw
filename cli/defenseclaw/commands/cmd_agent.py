@@ -378,6 +378,8 @@ def usage(
         return
 
     if payload.get("enabled") is False and not (payload.get("signals") or []):
+        if sandboxes:
+            _sandboxes_not_found(client, payload, sandboxes)
         click.echo(
             "AI discovery is disabled, so there is no AI usage to show. "
             "Enable it with: defenseclaw agent discovery enable"
