@@ -405,6 +405,9 @@ func TestStatusAndVerifyWarnForGuardianDirectoryOutageWithCachedFacts(t *testing
 				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":0,"stale":2}}`), nil
 			}
 			dir := enterprisehooks.IdentitySpoolDir(h.env.P(h.env.Layout.GuardianAuthDir))
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
 			if err := enterprisehooks.WriteDirectoryUnreachable(dir, []string{"dclab.test"}, h.env.Now(), nil); err != nil {
 				t.Fatal(err)
 			}
