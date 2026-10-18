@@ -112,8 +112,9 @@ func (f *fakeSandboxOps) stopped() []string { return append([]string(nil), f.sto
 // and the account side.
 type osHost struct {
 	*testHost
-	ops   *fakeSandboxOps
-	alice SandboxAccount
+	ops        *fakeSandboxOps
+	alice      SandboxAccount
+	payloadDir string
 }
 
 const fakeSocketUnit = "[Unit]\nDescription=fake\n[Socket]\nListenStream=%t/defenseclaw/sandbox.sock\n[Install]\nWantedBy=sockets.target\n"
@@ -179,18 +180,13 @@ func (h *osHost) ensure(cfg []byte) *enterprisestatus.Result {
 	return h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce(), ConfigFile: writeTempConfig(h.t, cfg)})
 }
 
-var payloadDirs sync.Map
-
 // payloadOnce stages one payload per host, so repeated ensures see the same
 // binaries.
 func (h *osHost) payloadOnce() string {
-	if dir, ok := payloadDirs.Load(h.t.Name()); ok {
-		return dir.(string)
+	if h.payloadDir == "" {
+		h.payloadDir = h.payload("1.0.0")
 	}
-	dir := h.payload("1.0.0")
-	payloadDirs.Store(h.t.Name(), dir)
-	h.t.Cleanup(func() { payloadDirs.Delete(h.t.Name()) })
-	return dir
+	return h.payloadDir
 }
 
 func (h *osHost) exists(canonical string) bool {
