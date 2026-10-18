@@ -112,19 +112,26 @@ esac
 // (openshell.SandboxTrustedCARunDir), again at every start because
 // OpenShell's CA can change with each sandbox start, and points each of
 // those six variables at it when it is unset or names OpenShell's own files
-// (in the directory of SSL_CERT_FILE); a variable the caller set elsewhere
-// is kept. A shell started from a launcher finds SSL_CERT_FILE already
-// pointing there and changes nothing. Without SSL_CERT_FILE the image's
-// system bundle, which holds the CAs, fills the unset variables. When the
-// file cannot be written, OpenShell's variables are left as they are, so
-// an intercepted connection still fails rather than verifying with less.
-// An image without trusted CAs is left alone. POSIX sh, like
-// egressEnvScript.
+// (in the directory of OpenShell's bundle); a variable the caller set
+// elsewhere is kept.
+//
+// OpenShell's bundle is what SSL_CERT_FILE names when the first shell or
+// launcher of a process tree starts (OpenShell starts each of those). That
+// one records it in openshell.EnvTrustedCABase, so a shell started below
+// it reads OpenShell's bundle from there, not from SSL_CERT_FILE: a
+// SSL_CERT_FILE the caller set before starting a nested login shell
+// (env SSL_CERT_FILE=... sh -l) is the caller's and is kept (GAP-0127).
+// Without SSL_CERT_FILE the image's system bundle, which holds the CAs,
+// fills the unset variables. When the file cannot be written, OpenShell's
+// variables are left as they are, so an intercepted connection still fails
+// rather than verifying with less. An image without trusted CAs is left
+// alone. POSIX sh, like egressEnvScript.
 const trustedCAScript = `# The trusted CAs of ` + openshell.TrustedCAKey + ` are in this image's system store, but
 # OpenShell's sandbox bundle is made from its supervisor's own store: every runtime
-# gets OpenShell's bundle plus them.
+# gets OpenShell's bundle plus them. The first shell records OpenShell's bundle,
+# so a SSL_CERT_FILE set before a nested shell starts is the caller's own.
 if [ -d ` + openshell.SandboxTrustedCADir + ` ]; then
-  dc_ca_base="${SSL_CERT_FILE:-}"; dc_ca_out=""
+  dc_ca_base="${` + openshell.EnvTrustedCABase + `:-${SSL_CERT_FILE:-}}"; dc_ca_out=""
   case "$dc_ca_base" in
     ` + openshell.SandboxTrustedCARunDir + `-*/*) ;;
     "") dc_ca_out=` + openshell.SandboxSystemCABundle + ` ;;
@@ -136,6 +143,7 @@ if [ -d ` + openshell.SandboxTrustedCADir + ` ]; then
         if (umask 077; { cat "$dc_ca_base" && echo && cat ` + openshell.SandboxTrustedCADir + `/*.crt; } >"$dc_ca_tmp") 2>/dev/null &&
           mv -f "$dc_ca_tmp" "$dc_ca_run/ca-bundle.pem" 2>/dev/null; then
           dc_ca_out="$dc_ca_run/ca-bundle.pem"
+          ` + openshell.EnvTrustedCABase + `="$dc_ca_base"; export ` + openshell.EnvTrustedCABase + `
         else
           rm -f "$dc_ca_tmp" 2>/dev/null
         fi

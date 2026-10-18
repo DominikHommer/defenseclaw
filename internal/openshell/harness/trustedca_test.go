@@ -183,6 +183,31 @@ func TestSandboxShellsGiveEveryRuntimeTheTrustedCAs(t *testing.T) {
 		expect(what, "nested shell", got, all(ours))
 	}
 
+	// GAP-0127: the first shell records OpenShell's bundle, so a
+	// SSL_CERT_FILE the caller sets before a nested login shell
+	// (env SSL_CERT_FILE=... sh -l) is the caller's and is kept; the other
+	// variables keep the bundle.
+	inner := write("inner.sh", []byte(". "+profile+"\n"+record.String()), 0o644)
+	nestedLogin := write("nested.sh", []byte("SSL_CERT_FILE="+openshell.SandboxSystemCABundle+"; export SSL_CERT_FILE\n"+
+		"printf 'base=%s\\n' \"${"+openshell.EnvTrustedCABase+"-<unset>}\"\nexec /bin/sh "+inner+"\n"), 0o644)
+	nestedWant := all(ours)
+	nestedWant["SSL_CERT_FILE"] = openshell.SandboxSystemCABundle
+	for what, cmd := range map[string]*exec.Cmd{
+		"login shell":  exec.Command("/bin/sh", "-c", ". "+profile+"\n. "+nestedLogin),
+		"sandbox exec": exec.Command(wrapper, "/bin/sh", nestedLogin),
+	} {
+		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, openShellEnv...)
+		b, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s, nested login shell: %v\n%s", what, err, b)
+		}
+		got := shellEnvLines(string(b))
+		if got["base"] != bundle {
+			t.Errorf("%s, nested login shell: %s=%q, want OpenShell's bundle %q", what, openshell.EnvTrustedCABase, got["base"], bundle)
+		}
+		expect(what, "nested login shell after the caller set SSL_CERT_FILE", got, nestedWant)
+	}
+
 	// A variable the caller pointed elsewhere is kept.
 	custom := append(append([]string(nil), openShellEnv[:1]...), append([]string{"REQUESTS_CA_BUNDLE=/srv/certs/corp.pem"}, openShellEnv[2:]...)...)
 	want := all(ours)

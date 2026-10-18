@@ -76,6 +76,11 @@ const (
 	// ca-bundle.pem, OpenShell's sandbox bundle plus the trusted CAs, which
 	// every runtime's CA variable names.
 	SandboxTrustedCARunDir = "/tmp/defenseclaw-ca"
+	// EnvTrustedCABase is the variable the first sandbox shell or launcher
+	// of a process tree sets to OpenShell's bundle after writing the one in
+	// SandboxTrustedCARunDir, so a shell below it tells OpenShell's
+	// SSL_CERT_FILE from one the caller set (GAP-0127).
+	EnvTrustedCABase = "DEFENSECLAW_SANDBOX_CA_BASE"
 )
 
 // TrustedCAs is a parsed trusted CA file: PEM is the normalized bundle

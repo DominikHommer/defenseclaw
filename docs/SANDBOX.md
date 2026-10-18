@@ -1710,7 +1710,9 @@ modes and owners are set in the tar headers) and streams it to
    `/tmp/defenseclaw-ca-<uid>/ca-bundle.pem` (owner-only, at every start)
    and point those six variables at it when they are unset or name
    OpenShell's files; when it cannot be written they stay as OpenShell set
-   them (`trustedCAScript` in `harness/shellenv.go`). The supervisor's own
+   them (`trustedCAScript` in `harness/shellenv.go`). The first shell
+   records OpenShell's bundle in `DEFENSECLAW_SANDBOX_CA_BASE`, so a
+   `SSL_CERT_FILE` set before a nested login shell starts is kept. The supervisor's own
    upstream TLS, for the endpoints whose credential it puts in (model
    providers, `--credential` hosts), trusts only its store, and OpenShell
    adds a CA to it only with an explicit upstream proxy (`https_proxy` with
