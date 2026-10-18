@@ -801,6 +801,23 @@ int dclaw_mqtt_poll(int timeout_ms) {
     return 0;
 }
 
+/* Socket for the daemon's event loop to poll, or -1 when disconnected. */
+int dclaw_mqtt_get_fd(void) {
+    return mqtt_ctx.connected ? mqtt_ctx.net.my_socket : -1;
+}
+
+/* True when input is already buffered (decrypted TLS bytes, or a frame
+ * that is partly read), so the caller must yield without waiting for the
+ * socket to become readable. */
+bool dclaw_mqtt_has_pending_input(void) {
+    if (!mqtt_ctx.connected) return false;
+    if (mqtt_frame_phase != MQTT_FRAME_HEADER) return true;
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
+    if (mqtt_ctx.net.tls_active && dclaw_tls_pending() > 0) return true;
+#endif
+    return false;
+}
+
 bool dclaw_mqtt_is_connected(void) {
     return mqtt_ctx.connected && MQTTIsConnected(&mqtt_ctx.paho);
 }

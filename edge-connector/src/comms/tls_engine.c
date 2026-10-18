@@ -435,6 +435,11 @@ int dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms) {
     }
 }
 
+size_t dclaw_tls_pending(void) {
+    if (!tls_initialized) return 0;
+    return mbedtls_ssl_get_bytes_avail(&tls_ssl);
+}
+
 void dclaw_tls_shutdown(void) {
     if (!tls_initialized) return;
 
@@ -473,6 +478,7 @@ int  dclaw_tls_init(void)                                          { return -1; 
 int  dclaw_tls_connect(int tcp_fd, const char *hostname)            { (void)tcp_fd; (void)hostname; return -1; }
 int  dclaw_tls_write(const uint8_t *data, size_t len)              { (void)data; (void)len; return -1; }
 int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms)      { (void)buf; (void)len; (void)timeout_ms; return -1; }
+size_t dclaw_tls_pending(void)                                     { return 0; }
 void dclaw_tls_shutdown(void)                                       {}
 
 #endif /* DCLAW_HAS_MBEDTLS */

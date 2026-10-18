@@ -48,6 +48,8 @@ extern int  dclaw_mqtt_connect(void);
 extern int  dclaw_mqtt_send_heartbeat(void);
 extern int  dclaw_mqtt_reconnect(void);
 extern int  dclaw_mqtt_poll(int timeout_ms);
+extern int  dclaw_mqtt_get_fd(void);
+extern bool dclaw_mqtt_has_pending_input(void);
 extern void dclaw_canary_tick(void);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
@@ -292,8 +294,9 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "edge-connector: running (profile=%s, ipc=%s)\n",
             DCLAW_PROFILE_NAME, ipc_socket_path);
 
-    /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
-    struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
+    /* pollfd array: slot 0 = server socket, slots 1..num_clients = client
+     * connections, then the MQTT socket when connected. */
+    struct pollfd fds[2 + DCLAW_MAX_IPC_CLIENTS];
 
     memset(fds, 0, sizeof(fds));
     memset(client_buf_len, 0, sizeof(client_buf_len));
@@ -309,6 +312,9 @@ int main(int argc, char *argv[]) {
     fds[0].events = POLLIN;
 
     uint64_t last_idle_flush = hal_tick_ms();
+#if DCLAW_MQTT_ENABLED
+    uint64_t last_mqtt_yield = 0;
+#endif
 
     while (g_running) {
         hal_watchdog_feed();
@@ -323,8 +329,25 @@ int main(int argc, char *argv[]) {
             fds[nfds].revents = 0;
             nfds++;
         }
+        const int client_slots_end = nfds;
 
-        int ready = poll(fds, (nfds_t)nfds, 10 /* 10ms timeout */);
+        int poll_timeout_ms = 10;
+#if DCLAW_MQTT_ENABLED
+        /* Poll the MQTT socket here so a gateway verdict wakes the loop
+         * immediately, instead of waiting inside a fixed-length MQTTYield. */
+        int mqtt_slot = -1;
+        int mqtt_fd = dclaw_mqtt_get_fd();
+        if (mqtt_fd >= 0) {
+            mqtt_slot = nfds;
+            fds[nfds].fd = mqtt_fd;
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+        if (dclaw_mqtt_has_pending_input()) poll_timeout_ms = 0;
+#endif
+
+        int ready = poll(fds, (nfds_t)nfds, poll_timeout_ms);
 
         /* Accept new connections */
         if (ready > 0 && (fds[0].revents & POLLIN)) {
@@ -347,7 +370,8 @@ int main(int argc, char *argv[]) {
         /* Process data from connected clients */
         for (int i = 0; i < num_clients; i++) {
             int slot = 1 + i; /* pollfd index */
-            if (slot >= nfds) break;
+            /* Clients accepted in this pass have no pollfd entry yet. */
+            if (slot >= client_slots_end) break;
 
             if (dclaw_deferred_pending_for_fd(client_fds[i])) {
                 if (fds[slot].revents & (POLLHUP | POLLERR | POLLNVAL))
@@ -511,9 +535,21 @@ int main(int argc, char *argv[]) {
             client_buf_len[i] = remaining;
         }
 
-        /* MQTT: poll for incoming messages (non-blocking, 10ms max) */
+        /* MQTT: yield to Paho when the socket is readable or input is
+         * already buffered, and at least once a second for keepalive and the
+         * reconnect grace check. The 1 ms timeout is only a read budget. */
 #if DCLAW_MQTT_ENABLED
-        dclaw_mqtt_poll(10);
+        {
+            uint64_t now = hal_tick_ms();
+            bool mqtt_ready = (mqtt_slot >= 0 && ready > 0 &&
+                               (fds[mqtt_slot].revents & (POLLIN | POLLHUP | POLLERR))) ||
+                              dclaw_mqtt_has_pending_input() ||
+                              now - last_mqtt_yield >= 1000;
+            if (mqtt_ready) {
+                dclaw_mqtt_poll(1);
+                last_mqtt_yield = now;
+            }
+        }
 #endif
         dclaw_deferred_expire(hal_tick_ms());
 
