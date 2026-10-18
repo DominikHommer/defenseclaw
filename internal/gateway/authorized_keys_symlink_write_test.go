@@ -271,6 +271,16 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 	if !trustedExistingAuthorizedKeysSymlinkWrite(truncatedRequest, actionfacts.Analyze(truncatedInput)) {
 		t.Fatal("managed truncated proof made an unlisted external write safe")
 	}
+	incompleteInput := actionfacts.Input{Tool: "Bash", Command: "find /workspace -type f 2>/dev/null",
+		CWD: cwd, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	incompleteRequest := trustedActionRequest{Input: incompleteInput, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
+			hookpaths.TruncatedKey: "1", "/dev/null": "",
+		}}
+	if trustedExistingAuthorizedKeysSymlinkWrite(incompleteRequest, actionfacts.Analyze(incompleteInput)) {
+		t.Fatal("incomplete header blocked an ordinary external diagnostic redirect")
+	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
 	}
