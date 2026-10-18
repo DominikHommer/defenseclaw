@@ -18,7 +18,13 @@ for package in "$@"; do
     mkdir -p "$work/extracted"
     case "$package" in
         *.deb) dpkg-deb --extract "$package" "$work/extracted" ;;
-        *.rpm) bsdtar -xf "$package" -C "$work/extracted" ;;
+        *.rpm)
+            if command -v bsdtar >/dev/null; then
+                bsdtar -xf "$package" -C "$work/extracted"
+            else
+                (cd "$work/extracted" && rpm2cpio "$package" | cpio -id --quiet)
+            fi
+            ;;
         *.pkg) pkgutil --expand-full "$package" "$work/extracted" ;;
         *.tar.gz) tar -xzf "$package" -C "$work/extracted" ;;
         *.zip) unzip -q "$package" -d "$work/extracted" ;;
