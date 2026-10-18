@@ -1698,25 +1698,38 @@ modes and owners are set in the tar headers) and streams it to
    certificate in `/usr/local/share/ca-certificates/defenseclaw`
    (`trusted-ca/defenseclaw-trusted-ca-NN.crt` in the context), then
    `update-ca-certificates`, and a check that each one reached
-   `/etc/ssl/certs/ca-certificates.crt`. OpenShell's supervisor makes the
-   workload's combined bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
-   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`) and its upstream TLS from that file,
-   so a TLS-inspecting proxy's certificates verify; the build's own
-   downloads trust them too. `NODE_EXTRA_CA_CERTS` and `DENO_CERT` name only
-   OpenShell's CA, so the launchers, the login-shell profile and the
-   `sandbox exec` wrapper point them at the combined bundle when the CA
-   directory exists (`trustedCAScript` in `harness/shellenv.go`). The
-   bundle is parsed and normalized (`openshell.ParseTrustedCAs`: CA
-   certificates only), its files are build-context files (so the content
-   hash and tag cover them, and an image without trusted CAs is unchanged),
-   the record keeps the PEM (`Record.TrustedCAs`) and the image carries the
-   `io.defenseclaw.trusted-cas` digest label. A file that cannot be used
+   `/etc/ssl/certs/ca-certificates.crt`; the build's own downloads trust
+   them. OpenShell's supervisor does not read that file: it makes the
+   workload's bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`; `NODE_EXTRA_CA_CERTS` and
+   `DENO_CERT` name its CA alone) from its own store, a container of its own
+   image on the docker driver and the MicroVM's boot image on the vm driver
+   (OpenShell 0.1.1 to 0.1.4). So the launchers, the login-shell profile and
+   the `sandbox exec` wrapper of an image with the CA directory write
+   OpenShell's bundle plus the trusted CAs to
+   `/tmp/defenseclaw-ca-<uid>/ca-bundle.pem` (owner-only, at every start)
+   and point those six variables at it when they are unset or name
+   OpenShell's files; when it cannot be written they stay as OpenShell set
+   them (`trustedCAScript` in `harness/shellenv.go`). The supervisor's own
+   upstream TLS, for the endpoints whose credential it puts in (model
+   providers, `--credential` hosts), trusts only its store, and OpenShell
+   adds a CA to it only with an explicit upstream proxy (`https_proxy` with
+   `proxy_ca_bundle`); those hosts must not be inspected, which the doctor
+   row reports. The bundle is parsed and normalized
+   (`openshell.ParseTrustedCAs`: CA certificates only), its files are
+   build-context files (so the content hash and tag cover them, and an image
+   without trusted CAs is unchanged), the record keeps the PEM
+   (`Record.TrustedCAs`, stored in `images-trusted-cas.json` beside
+   `images.json`, whose records keep the fields DefenseClaw 1.0.2 reads) and
+   the image carries the `io.defenseclaw.trusted-cas` digest label. A file
+   that cannot be used
    fails closed: no image is built or selected (`image.TrustedCAsFor`). On a
    managed computer the managed gateway reads the administrator's file
    (`managed.ValidateTrustedFilePath`) and relays the PEM in the daemon
    settings (`OperationalSettings.TrustedCAs`); the account's own
    configuration names none. The `tls-trust` doctor row (`doctor.sandbox.tls-trust`) compares
-   provider chains with the host's trust and the distribution's public roots.
+   provider chains with the host's trust and the distribution's public roots,
+   and fails while a provider host is inspected, with or without the CA.
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
    (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
    (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after

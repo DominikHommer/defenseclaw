@@ -493,8 +493,16 @@ system store. A user cannot add a CA of their own: their own configuration
 is not read. A file that fails the ownership check, or holds anything but
 CA certificates, stops image builds for everyone, and each user's
 `defenseclaw sandbox doctor` shows the reason in the Sandbox TLS trust row.
-The row also fails, by name, when it sees a provider certificate that the
-computer trusts but sandboxes do not.
+
+The CA covers what programs in a sandbox reach (package installs, git, MCP
+servers, the agent's tools). It does not cover the agents' model calls:
+OpenShell's sandbox supervisor makes those, adding the credential, and
+verifies the provider with its own trust store, which takes no extra CA.
+Exempt the model provider hosts your agents use from TLS inspection on the
+proxy (for example `api.anthropic.com`, `api.openai.com`,
+`api.githubcopilot.com` and `bedrock-mantle.<region>.api.aws`). The Sandbox
+TLS trust row fails, by name, while any of the hosts it checks is
+inspected, with or without the CA.
 
 ### The docker fallback
 

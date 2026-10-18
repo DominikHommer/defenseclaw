@@ -1839,17 +1839,32 @@ OpenShell. The situations where `--fix` cannot help are below.
 ### Behind a TLS-inspecting proxy
 
 On a network whose proxy decrypts TLS (a secure web gateway such as Cisco
-Secure Access, Umbrella or Zscaler), the proxy re-signs provider
-certificates with your organization's root CA. Your computer trusts that CA;
-a sandbox does not, so agents fail with `unable to get local issuer
-certificate`. The Sandbox TLS trust row of `defenseclaw sandbox doctor`
-connects to `api.anthropic.com`, `api.openai.com` and
-`api.githubcopilot.com` and fails by name when a certificate verifies on your
-computer but not with the roots a sandbox trusts:
+Secure Access, Umbrella or Zscaler), the proxy re-signs server certificates
+with your organization's root CA. Your computer trusts that CA; a sandbox
+does not. Two things are needed, because two different programs make a
+sandbox's connections:
+
+1. **The agent's model calls** (to Anthropic, OpenAI, GitHub Copilot or
+   Amazon Bedrock) are made by OpenShell's sandbox supervisor, which adds
+   the credential to each request. It verifies the provider with its own
+   trust store, and OpenShell does not let it trust another CA (except
+   for an explicit upstream proxy, OpenShell's `https_proxy` with
+   `proxy_ca_bundle`). Ask your IT department to exempt the model provider
+   hosts your agents use from TLS inspection (a "do not decrypt" rule), for
+   example `api.anthropic.com`, `api.openai.com`, `api.githubcopilot.com`
+   and `bedrock-mantle.<region>.api.aws`. Without that exemption the model
+   calls fail however the sandbox is set up.
+2. **Everything else in the sandbox** (package installs, git, MCP servers,
+   web fetches, the agent's own tools) trusts the CAs you name in
+   `openshell.trusted_ca_bundle`.
+
+The Sandbox TLS trust row of `defenseclaw sandbox doctor` connects to
+`api.anthropic.com`, `api.openai.com` and `api.githubcopilot.com` and fails
+by name while any of them is inspected:
 
 ```text
   ✗ Sandbox TLS trust          TLS inspection: api.anthropic.com, api.openai.com present a certificate from "Corp Root CA", which this computer trusts but sandboxes do not, …
-    → save the TLS-inspecting proxy's root CA certificate as a PEM file (your IT department has it) and name it in openshell.trusted_ca_bundle; …: defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem
+    → ask your IT department to exempt api.anthropic.com, api.openai.com and the other model provider hosts your agents use from TLS inspection on the proxy …; for everything else sandboxes reach, save the proxy's root CA certificate as a PEM file and name it in openshell.trusted_ca_bundle …: defenseclaw config set openshell.trusted_ca_bundle /path/to/proxy-root-ca.pem
 ```
 
 Get the root CA from your IT department (or export it from your keychain as
@@ -1857,13 +1872,16 @@ PEM), then name it:
 
 ```bash
 defenseclaw config set openshell.trusted_ca_bundle ~/certs/proxy-root-ca.pem
-defenseclaw sandbox doctor        # Sandbox TLS trust now passes
+defenseclaw sandbox doctor        # passes once the provider hosts are exempt
 ```
 
-The next run rebuilds the harness image with the CA in its system store.
-Only the CAs in that file are added: DefenseClaw never imports your
-computer's whole trust store. On a managed computer your administrator sets
-the key in the managed configuration.
+The next run rebuilds the harness image with the CA in its system store,
+and each sandbox points `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS` and `DENO_CERT` at
+OpenShell's CA bundle plus your CAs, so Node, Python, Go, Rust, curl and git
+programs all trust them. Only the CAs in that file are added: DefenseClaw
+never imports your computer's whole trust store. On a managed computer your
+administrator sets the key in the managed configuration.
 
 ### No gateway service installed
 
