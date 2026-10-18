@@ -254,7 +254,8 @@ type perUserGatewayWait struct {
 // one's start are over (GAP-0094, GAP-0102, GAP-0107). The first refused
 // connection starts the gateway (opts.GatewayRecovery) beside the tries,
 // not before them: the start outlives the hook when it takes longer than
-// the budget, so the next call finds the gateway running. A start that
+// the budget (bounded by the hook's own deadline, not by the call's end),
+// so the next call finds the gateway running. A start that
 // fails at once (the gateway was stopped with defenseclaw-gateway stop, a
 // recent start failed) ends the wait with its cause.
 func awaitPerUserGateway(
@@ -274,8 +275,15 @@ func awaitPerUserGateway(
 			start := opts.GatewayRecovery
 			// The start must not end with this call: a gateway that takes
 			// longer than the budget to start still serves the next one.
-			startCtx := context.WithoutCancel(ctx)
-			go func(cause error) { recovered <- start(startCtx, cause) }(err)
+			// It keeps the hook's own deadline as its bound.
+			startCtx, cancelStart := context.WithoutCancel(ctx), context.CancelFunc(func() {})
+			if hookDeadline, ok := ctx.Deadline(); ok {
+				startCtx, cancelStart = context.WithDeadline(startCtx, hookDeadline)
+			}
+			go func(cause error) {
+				defer cancelStart()
+				recovered <- start(startCtx, cause)
+			}(err)
 		}
 		delay := gatewayRestartRetryDelay
 		if !time.Now().Add(delay).Before(deadline) {

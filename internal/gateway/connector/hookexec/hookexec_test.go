@@ -1065,7 +1065,8 @@ func TestAColdStartThatOutlastsTheRestartBudgetDoesNotHoldTheCall(t *testing.T) 
 
 // The start a per-user hook runs after a refused connection outlives the
 // call: a gateway that takes longer than the restart budget to start still
-// comes up for the next call.
+// comes up for the next call. It keeps the registered hook deadline as its
+// bound.
 func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -1089,8 +1090,12 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
 	}
 	ctx := <-startCtx
-	if _, ok := ctx.Deadline(); ok || ctx.Err() != nil {
-		t.Fatalf("the cold start context ends with the call (err %v)", ctx.Err())
+	if ctx.Err() != nil {
+		t.Fatalf("the cold start context ended with the call: %v", ctx.Err())
+	}
+	deadline, ok := ctx.Deadline()
+	if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s (set %v), want within the registered request budget", remaining, ok)
 	}
 }
 
