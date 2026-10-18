@@ -2106,7 +2106,10 @@ func (c *managedSandboxController) Delete(ctx context.Context, name string, req 
 	ready := c.d.openShellForKept(ctx, true)
 	resp, err := c.Manager.Delete(ctx, name, req)
 	if err != nil {
-		if ready != nil {
+		// A name the account has no sandbox of is that, whoever holds the
+		// gateway: the busy text sent the person to wait for nothing
+		// (GAP-0126).
+		if ready != nil && !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 			return nil, ready
 		}
 		return resp, err

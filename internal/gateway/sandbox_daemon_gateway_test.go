@@ -136,6 +136,11 @@ func TestSandboxDaemonDeleteRetainedWhileOtherAccountHoldsGateway(t *testing.T) 
 	if _, err := ctl.Manager.Get(t.Context(), "retained"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
 		t.Fatalf("retained record survived: %v", err)
 	}
+	// A name with no sandbox at all says so, not that another account is
+	// using the sandboxes (GAP-0126).
+	if _, err := ctl.Delete(t.Context(), "never-made", sandboxapi.DeleteRequest{}); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
+		t.Fatalf("delete of an absent name while another account holds the gateway: %v", err)
+	}
 }
 
 // A second OpenShell gateway the account starts writes its own client
