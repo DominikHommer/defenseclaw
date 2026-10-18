@@ -21,21 +21,21 @@ from verify_native_artifact import manifest as peer_manifest  # noqa: E402
 from verify_native_artifact import record_matches, static_elf
 
 REPOSITORY = "cisco-ai-defense/defenseclaw"
-RECEIPT_SHA = "4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621"
+RECEIPT_SHA = "9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db"
 # Independently reviewed source/build/image inputs; no caller or API chooses a
 # pin. This source recipe needs its own review and explicit run authorization.
-DRIVER_PROVENANCE_SHA = "b468abb74e7f67d11392f0a93b54c00d40187bdfc69454e91cb6ad7d43af9c57"
+DRIVER_PROVENANCE_SHA = "7d0263acee3423f218015e0698f9c374aaed212728ffb7f7103e4fdd5b0fe71f"
 PINS = {
     "peer": {
-        "commit": "e054b7c6f3eacd49135a59f6d0abcd623be3955f",
-        "run": 39137571404,
-        "artifact": 12140317596,
-        "archive": "4796180dca73d873c04132b7bc715d7c28dfc5168fb22a44002088f194853a7a",
-        "provenance": "494dfe47b485bbe7246b0c0e3ac5fbb828191c8f88c8bf76fc766b1e839f264a",
+        "commit": "aa21514cf1a1ce7c17ddd4a06d76efc001c7d5d7",
+        "run": 39148188923,
+        "artifact": 12144198239,
+        "archive": "14752d1506e9f206b5f2c0c5f227efe0fdccee5594530e9e0b7e3b06ba5405a3",
+        "provenance": "2223dd9576928daabfa41288c38810568215faf000cd161ec2a5bbf680d6a3e3",
         "workflow": ".github/workflows/axis-native-peer-build.yml",
         "stem": "axis-private-native-peer-linux-",
-        "branch": "codex/axis-peer-experiments",
-        "event": "workflow_dispatch",
+        "branch": "codex/axis-sandbox-feasibility",
+        "event": "push",
     },
     "payload": {
         "commit": "d07485c4cc8ecf8ab7db1a0121ac61a6a8b636f3",
@@ -49,25 +49,25 @@ PINS = {
         "event": "push",
     },
     "wrapper": {
-        "commit": "d056852e147bfd79309eda1e346439bbe317f30e",
-        "run": 39144832868,
-        "artifact": 12142861838,
-        "archive": "744f4a72cc95874847cc503f0b6314d2532026826dc8ea09212b34f8c825bf3c",
-        "provenance": "782708c28c02117a0ad984c2aa8a76db0e3f6268af0e78df7610a34dc9302adb",
+        "commit": "efc2c3b304690320447dee57f01a51fc6df25060",
+        "run": 39150168377,
+        "artifact": 12144044675,
+        "archive": "038fcd824a661d4ab81ccdc8b29ef3201cc47453f8b657ac7753750002084fc2",
+        "provenance": "46e190705132b0e1098e37ee84af2ab775fc0f92a581c4411c822f7ebc19b2d7",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "c8d4d9949b5e3a9dd4b690768898a5910e0c1dd4",
-        "run": 39145457974,
-        "artifact": 12142902258,
-        "archive": "bf7b7bea17dfa045bbd88d39437e525fd02dea409d9bce66fc5199e9dafaadcf",
+        "commit": "74290890763d4a049d9b343e0f25240a03fae496",
+        "run": 39150939990,
+        "artifact": 12144563368,
+        "archive": "d9d256f1587a3659d0d0ac689b28ffa3e98e62da2c3d623d6e01adc5dea9138e",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
-        "event": "push",
+        "event": "workflow_dispatch",
     },
 }
 
@@ -248,8 +248,8 @@ def prepare(root, metadata_api=api, download=None):
             "peer",
             "build-artifact/bin/defenseclaw-axis-peer",
             images / "peer",
-            "03672f6c94a05a29f640d0f9d40181eeafdd75af691e95023fa9a236e63fe70b",
-            2706904,
+            "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665",
+            2722752,
         ),
         (
             "peer",
@@ -269,15 +269,15 @@ def prepare(root, metadata_api=api, download=None):
             "wrapper",
             "bin/reviewed-harness",
             images / "reviewed-wrapper",
-            "0197f67426caa1d0df19be5efc7bb7f9596caa67d50025a0522682ff9a1b9648",
-            3387518,
+            "cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233",
+            3432574,
         ),
         (
             "driver",
             "bin/fixed-outer-driver",
             images / "fixed-driver",
-            "189bc8777d0134a61198156a0e01d9484ce3e85048a7491f25f71ed3df3e008a",
-            3137662,
+            "a82943121c4d69f35a8612d3bd30dcf59ae66dc86bbb745cc52e5f52d835a357",
+            3182718,
         ),
     ]
     for role, member, target, digest, size in members:

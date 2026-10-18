@@ -1,7 +1,7 @@
 # Fixed Linux native peer CI canary
 
 This is one contributor-only four-case attempt using the separately reviewed
-e054 peer/static-musl Bubblewrap, d074 fixed payload, d056 diagnostic wrapper, and c8d4
+aa215 peer/unchanged static-musl Bubblewrap, d074 fixed payload, efc2 diagnostic wrapper, and 7429
 outer driver. The cases check literal argv, binary stdin/EOF and stderr, exit
 23, and fixed offline filesystem/network/FD/namespace boundaries. This is not
 customer activation, PTY/Claude/model/hook qualification, or completion of the
@@ -12,10 +12,13 @@ caller-selected artifact, command, image digest, policy, environment or retry.
 The exact Actions source/run/attempt/workflow/branch/event and archive digest
 must match constants in `prepare.py`. Each ZIP/provenance manifest is checked
 in full with bounded readers, and every selected image/proof must match its
-fixed hash and size. The combined receipt bytes are pinned to `4f6cfd2e...`.
+fixed hash and size. The combined receipt bytes are pinned to `9e7c6f82...`.
 The four archives already received two independent inert reviews of source,
 build, dependency and image evidence. CI preparation rechecks their exact
 byte identity; it does not repeat upstream source/toolchain reconstruction.
+The new peer, wrapper and driver include the reviewed FD3 namespace proof,
+private mount propagation, matching procfs and capability drop before control
+or workload launch. This source change has not yet been exercised natively.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.

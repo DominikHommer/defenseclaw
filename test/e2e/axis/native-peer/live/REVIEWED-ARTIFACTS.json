@@ -12,11 +12,11 @@
   "builds": [
     {
       "role": "peer_and_static_bwrap",
-      "commit": "e054b7c6f3eacd49135a59f6d0abcd623be3955f",
-      "run": 39137571404,
-      "artifact": 12140317596,
-      "archive_sha256": "4796180dca73d873c04132b7bc715d7c28dfc5168fb22a44002088f194853a7a",
-      "provenance_sha256": "494dfe47b485bbe7246b0c0e3ac5fbb828191c8f88c8bf76fc766b1e839f264a"
+      "commit": "aa21514cf1a1ce7c17ddd4a06d76efc001c7d5d7",
+      "run": 39148188923,
+      "artifact": 12144198239,
+      "archive_sha256": "14752d1506e9f206b5f2c0c5f227efe0fdccee5594530e9e0b7e3b06ba5405a3",
+      "provenance_sha256": "2223dd9576928daabfa41288c38810568215faf000cd161ec2a5bbf680d6a3e3"
     },
     {
       "role": "fixed_payload",
@@ -31,8 +31,8 @@
     {
       "role": "peer",
       "path": "images/peer",
-      "sha256": "03672f6c94a05a29f640d0f9d40181eeafdd75af691e95023fa9a236e63fe70b",
-      "size": 2706904
+      "sha256": "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665",
+      "size": 2722752
     },
     {
       "role": "static_musl_bwrap",
