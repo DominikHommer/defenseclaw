@@ -194,6 +194,16 @@ func (e *Env) configRefusedMessage(reason string) string {
 		reason, e.Layout.ConfigPath, ensure, ensure)
 }
 
+// policyAssetRefusedMessage says that the installed gateway refuses the
+// policy of an up-to-date deployment, why, and that nothing was applied: a
+// policy file the config names (a sandbox pack, say) was edited in place
+// into one that does not load, and the running gateway keeps the policy it
+// loaded.
+func (e *Env) policyAssetRefusedMessage(reason string) string {
+	return fmt.Sprintf("a policy file the configuration names does not load: %s; nothing was applied and the running gateway keeps the last good policy; correct or restore that file and run `%s` again",
+		reason, e.lifecycleCommand(ActionEnsure))
+}
+
 // recordActivationFailure keeps the gateway's output across the rollback
 // and returns a result excerpt ("" when the gateway printed nothing).
 func (l *lifecycle) recordActivationFailure(ctx context.Context) string {

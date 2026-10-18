@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -177,6 +178,14 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		}
 	}
 
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) && !in.offline && !cfg.SecureClientIntegration() {
+		loaded, err := loadSandboxRequiredPacks(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("generation: %w", err)
+		}
+		g.sandboxPacks, g.sandboxPackDir = loaded, cfg.OpenShell.PackDir
+	}
+
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
 	record := readConfigGenerationRecord(cfg.ConfigFilePath, in.raw)
 	g.ConfigGen, g.ConfigGenRecorded = record.Generation, record.Recorded
@@ -269,6 +278,58 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.assetDirs = generationAssetDirs(cfg, g)
 	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// loadSandboxRequiredPacks loads every custom required sandbox pack that a
+// floor of cfg names (openshell.admin, alone and with each guardrail
+// profile's sandbox section) as the sandbox routes load it. A pack that
+// does not load (malformed, a value it does not build with, missing, a
+// file standard users could change, or content other than its pin) fails
+// the generation: a reload keeps the last good generation and its packs,
+// the gateway refuses to start on it, and `policy digest` refuses it, so
+// ensure neither records nor restarts for it (GAP-0229). A pack this
+// process may not read (a standard user's `policy digest`) is left to the
+// gateway, which can. A floor that does not resolve is refused by the
+// sandbox routes, as before.
+func loadSandboxRequiredPacks(cfg *config.Config) (map[string]*packs.Pack, error) {
+	// A profile without a required pack of its own runs the
+	// administrator's: only those with one name another pack.
+	names := []string{""}
+	for name, profile := range cfg.Guardrail.Profiles {
+		if profile.Sandbox != nil && strings.TrimSpace(profile.Sandbox.RequiredPack) != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	subject := packs.Subject{UID: os.Getuid()}
+	loaded := map[string]*packs.Pack{}
+	for _, name := range names {
+		floor, _, err := cfg.SandboxManagedFloor(name)
+		if err != nil {
+			continue
+		}
+		ref := strings.TrimSpace(floor.RequiredPack)
+		if ref == "" || packs.IsBuiltin(ref) {
+			continue
+		}
+		pack, done := loaded[ref]
+		if !done {
+			var packErr *packs.Error
+			pack, err = packs.LoadGenerationPack(subject, ref, cfg.OpenShell.PackDir)
+			switch {
+			case err == nil:
+				loaded[ref] = pack
+			case errors.As(err, &packErr) && packErr.Code == "unreadable":
+				continue
+			default:
+				return nil, fmt.Errorf("sandbox pack %s does not load: %w", ref, err)
+			}
+		}
+		if pin := strings.TrimSpace(floor.RequiredPackDigest); pin != "" && pack.Digest != pin {
+			return nil, fmt.Errorf("sandbox pack %s has digest %s, not the pinned required_pack_digest %s", ref, pack.Digest, pin)
+		}
+	}
+	return loaded, nil
 }
 
 // rulePackSourceDir identifies the files behind a loaded pack component.
@@ -486,6 +547,7 @@ func publishGeneration(g *Generation) {
 	g.N = generationSeq.Add(1)
 	bindRegisteredConnectorRules(g)
 	liveGeneration.Store(g)
+	packs.UseGenerationPacks(g.sandboxPackDir, g.sandboxPacks)
 	publishPackPostures()
 	liveReloadError.Store("")
 	applyGenerationProviders(g.Providers)

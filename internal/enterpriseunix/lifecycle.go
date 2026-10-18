@@ -179,6 +179,12 @@ type lifecycle struct {
 	// names edited in place (policyAssetsChanged): the apply then records the
 	// next config_generation although config.yaml stayed the same.
 	policyAssetsEdited bool
+	// policyAssetRefusal is why the installed gateway binary refuses the
+	// policy of an up-to-date deployment (configRefusal), found by
+	// policyAssetsChanged: a policy asset the config names was edited in
+	// place into one that does not load. ensure applies nothing and reports
+	// it (GAP-0229).
+	policyAssetRefusal string
 	// noopPolicy is the policy ensureNoop computed for an up-to-date
 	// deployment, which the result's policy block reuses once
 	// (computePolicy) instead of building the generation again.
@@ -520,6 +526,9 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 		r.Noop = !restored
 		if !restored {
 			r.NoopReason = reason
+		}
+		if refusal := l.policyAssetRefusal; refusal != "" {
+			r.AddError(codeConfigRefused, env.policyAssetRefusedMessage(refusal))
 		}
 		if err := env.sealHookBinary(record); err != nil {
 			r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
@@ -2848,7 +2857,7 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 // desired state. It never mutates the host.
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
-	l.noopPolicy, l.policyAssetsEdited = nil, false
+	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -2894,6 +2903,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if l.policyAssetsChanged(ctx, record, account) {
 		return false, ""
 	}
+	if l.policyAssetRefusal != "" {
+		return true, "policy_refused"
+	}
 	return true, "up_to_date"
 }
 
@@ -2907,7 +2919,8 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 // (GAP-0133). A gateway that is down or not serving, that publishes no
 // digest (Secure Client), or that rejected its last reload, and a policy that
 // does not build, are not changes a run can apply; status and verify keep
-// reporting them.
+// reporting them, and ensure fails with the reason a policy does not build
+// (policyAssetRefusal).
 func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment, account Account) bool {
 	if record.NoStart {
 		return false
@@ -2927,6 +2940,11 @@ func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment,
 	}
 	digest, generation, ok := l.computePolicy(ctx)
 	if !ok {
+		// A policy that does not build is no change ensure applies: the
+		// running gateway keeps the policy it loaded, and the run fails
+		// with the reason instead of restarting into a policy that does not
+		// load (GAP-0229).
+		l.policyAssetRefusal = l.configRefusal(ctx)
 		return false
 	}
 	if digest == reported {

@@ -28,10 +28,15 @@ import (
 type policyDigestRunner struct {
 	*fakeRunner
 	digest string
+	// refusal, when set, is why the gateway binary refuses the policy.
+	refusal string
 }
 
 func (r *policyDigestRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
 	if strings.Join(args, " ") == "policy digest --json" {
+		if r.refusal != "" {
+			return CommandResult{Stderr: []byte("Error: policy digest: " + r.refusal + "\n"), ExitCode: 1}, nil
+		}
 		if r.digest == "" {
 			return CommandResult{Stderr: []byte("policy digest: pack digest mismatch"), ExitCode: 1}, nil
 		}
@@ -203,5 +208,61 @@ func TestEnsureAppliesAPolicyAssetEditedInPlace(t *testing.T) {
 	runner.digest, reloadError = before, "pack digest mismatch"
 	if r = h.run(Options{Action: ActionEnsure}); !r.Noop || !hasWarning(r, codePolicyReloadRejected) {
 		t.Fatalf("ensure with a rejected reload: noop %v warnings %+v", r.Noop, r.Warnings)
+	}
+}
+
+// GAP-0229: a sandbox pack edited in place into one that does not load
+// (`policy digest` refuses it, as the gateway would at start) is no change
+// ensure applies: the run records no config_generation, does not restart
+// the gateway, which keeps the policy it loaded, and fails with the reason.
+// Restoring the pack makes the next ensure a plain noop again.
+func TestEnsureRefusesAPolicyAssetThatDoesNotLoad(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("ab12", 16)
+	h := newTestHost(t, "linux")
+	runner := &policyDigestRunner{fakeRunner: h.runner, digest: digest}
+	h.env.Runner = runner
+	reported, reloadError := digest, ""
+	servePolicyHealth(h, &reported, &reloadError)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	generation := func() uint64 {
+		t.Helper()
+		state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.Generation
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	first := generation()
+
+	reason := `generation: sandbox pack /etc/defenseclaw/policies/sandbox/corp/pack.yaml does not load: network.mode: "unbuildable" must be one of open, allowlist, deny`
+	runner.refusal = reason
+	h.services.mu.Lock()
+	mark := len(h.services.calls)
+	h.services.mu.Unlock()
+	r := h.run(Options{Action: ActionEnsure})
+	requireError(t, r, codeConfigRefused)
+	if got := messagesOf(r.Errors, codeConfigRefused); !strings.Contains(got, "network.mode") || !strings.Contains(got, "keeps the last good policy") {
+		t.Fatalf("refusal message: %q", got)
+	}
+	if !r.Noop || r.NoopReason != "policy_refused" {
+		t.Fatalf("ensure with a policy that does not load: noop %v (%s)", r.Noop, r.NoopReason)
+	}
+	if got := generation(); got != first {
+		t.Fatalf("config_generation moved to %d for a policy that does not load", got)
+	}
+	h.services.mu.Lock()
+	for _, call := range h.services.calls[mark:] {
+		if call == "start "+unitGateway || call == "restart "+unitGateway || call == "stop "+unitGateway {
+			t.Errorf("ensure touched the gateway for a policy that does not load: %s", call)
+		}
+	}
+	h.services.mu.Unlock()
+
+	runner.refusal = ""
+	r = h.run(Options{Action: ActionEnsure})
+	requireOK(t, r)
+	if !r.Noop || r.NoopReason != "up_to_date" {
+		t.Fatalf("ensure after the pack was restored: noop %v (%s)", r.Noop, r.NoopReason)
 	}
 }
