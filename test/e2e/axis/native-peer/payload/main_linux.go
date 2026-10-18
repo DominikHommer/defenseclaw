@@ -17,7 +17,6 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -207,6 +206,19 @@ func writeNew(path string, content []byte) error {
 }
 
 func tree(mode string) (int, error) {
+	// Require EPERM without relaxing the pinned session-creation filter.
+	// A group leader can also get EPERM naturally. Only the new positive-group,
+	// nonleader descendants substantiate filter denial; parent EPERM is a
+	// consistency check and is not counted as independent denial evidence.
+	if mode != "tree-parent" {
+		group := unix.Getpgrp()
+		if group <= 0 || group == os.Getpid() {
+			return refuse("tree_setsid_precondition")
+		}
+	}
+	if _, err := unix.Setsid(); !errors.Is(err, unix.EPERM) {
+		return refuse("tree_setsid_denial")
+	}
 	if mode != "tree-grandchild" {
 		next := "tree-child"
 		if mode == "tree-child" {
@@ -218,7 +230,6 @@ func tree(mode string) (int, error) {
 		command.Dir = "/work"
 		command.Stdin = nil
 		command.Stdout, command.Stderr = os.Stdout, os.Stderr
-		command.SysProcAttr = &syscall.SysProcAttr{Setsid: mode == "tree-child"}
 		if err := command.Start(); err != nil {
 			return refuse("tree_spawn")
 		}

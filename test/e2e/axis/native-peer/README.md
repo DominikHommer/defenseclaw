@@ -147,3 +147,19 @@ observations do not substitute for those tests. Timeout, cancellation, parent
 death and descendant stress, terminal behavior, actual Claude, hooks, credential
 relay and model traffic remain unqualified. The retained result explicitly has
 `common_launch_gate_qualified=false` and `production_certification=false`.
+
+## Next lifecycle probe revision: source only
+
+The historical d074 tree selector requests setsid for a grandchild; the pinned
+offline filter denies that syscall. The new fixed tree source instead requires
+Setsid to return EPERM in every role, then creates its normal parent/child/
+grandchild chain. Only the child and grandchild substantiate filter denial:
+both require a positive process-group ID different from their own PID before
+the syscall. The parent's EPERM is consistency only, since a group leader
+can receive that error naturally. The filter, peer and static Bubblewrap are
+unchanged. A new
+payload artifact, combined receipt and paired wrapper/driver reviews are
+required before the separate wait-timeout, wait-cancel and tree-cancel suite
+can run. The earlier four-case success and its exact historical artifacts stay
+unchanged. No lifecycle, terminal or customer runtime qualification follows
+from this source revision.
