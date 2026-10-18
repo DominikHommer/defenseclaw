@@ -185,6 +185,17 @@ declared credential scope, streaming behavior, expiry, rotation, and revocation
 before admitting that authentication profile. A session-scoped relay is not
 proof of OpenShell's executable-bound credential semantics.
 
+Every upstream hop carrying a provider credential must use HTTPS with validated
+TLS and an approved origin. Reject an HTTP target before attaching the
+credential. Refuse redirects for credentialed model requests rather than
+following them, including cross-origin redirects and HTTPS-to-HTTP downgrades.
+Return a bounded, redacted refusal without contacting the redirect target.
+Contract tests must prove that a credentialed request redirected to an unapproved
+host is rejected with no target connection or credential disclosure, and that
+an HTTP destination receives no credential. This rule concerns provider secrets;
+the separately authenticated local hook/model channel must not carry those
+secrets or expose a general-purpose host proxy.
+
 Initial API-key qualification does not certify Claude subscription/OAuth, AWS
 routes, arbitrary `--credential` substitution, or every child executable.
 Reject an unsupported selected profile before creating the sandbox, and explain
@@ -278,7 +289,7 @@ checks for each implementation PR.
 | Selection and compatibility | Explicit/default/auto selection; disabled or unavailable runtime; legacy OpenShell configuration and records; mixed lists; default changes; resume mismatch; every existing OpenShell API operation. |
 | Lifecycle and terminal | Interactive/headless exit status; streams; resize; Ctrl+C/Ctrl+D; terminal restoration; timeout; parent death; descendant cleanup; teardown; concurrency; restart reconciliation. Unsupported persistence/detach modes refuse clearly. |
 | Hooks and policy | Real hook-fire allow/block probe; hostile settings; tamper/silence detection; authenticated ingress; effective admin clamps; no direct control-API access; unsupported resource policy refused before launch. |
-| Credentials and egress | Raw secret absence in guest environment, files, logs, and telemetry; API-key and OAuth independently; Anthropic streaming; expiry/revocation; direct network bypass blocked; DNS/non-HTTP paths; approvals and policy refresh. |
+| Credentials and egress | Raw secret absence in guest environment, files, logs, and telemetry; API-key and OAuth independently; Anthropic streaming; expiry/revocation; HTTPS required before credential attachment; credentialed redirects refused, including unapproved-host and downgrade targets, with no target connection or credential disclosure; direct network bypass blocked; DNS/non-HTTP paths; approvals and policy refresh. |
 | Workspace and ownership | Private HOME; no real Claude state migration; secret masks; copied project review/pull/undo; archive/path safety; two simultaneous sessions; recovery preserving user changes; operations restricted to owned instances. |
 | Deployment and UI | AXIS-only installation; both providers installed; disabled runtime has no background cost; missing prerequisites; config save/load and managed controls; correct TUI runtime arguments and action availability; uninstall cleans only owned artifacts. |
 | Managed execution | Per-user daemon identity; gateway registration and policy authority; generation/revocation; relay failures; cross-user refusal/privacy; upgrade and rollback against supported prior configurations. |
