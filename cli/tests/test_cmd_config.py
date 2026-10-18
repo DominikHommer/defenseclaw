@@ -456,11 +456,20 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
 
     def test_maximum_length_names_value_and_bound(self):
         raw = b"config_version: 9\nguardrail:\n  block_message: " + b"B" * 4097 + b"\n"
+        # The bound is the gateway's own for this field (GAP-0181).
+        message = cmd_config._plain_v8_issue(
+            raw,
+            "$.guardrail.block_message",
+            "[maxLength] configuration violates the maxLength constraint; expected a string of at most 4096 "
+            "characters (it has 4097)",
+        )
+        self.assertIn("4097 characters; the limit is 4096.", message)
+        # Without the gateway's bound no number is made up.
         message = cmd_config._plain_v8_issue(
             raw, "$.guardrail.block_message", "[maxLength] configuration violates the maxLength constraint"
         )
-        self.assertIn("4097 characters", message)
-        self.assertIn("4096", message)
+        self.assertIn("4097 characters; that is longer than the field allows.", message)
+        self.assertNotIn("the limit is", message)
 
     def test_empty_config_set_points_to_unset(self):
         result = CliRunner().invoke(cmd_config.config_set, ["guardrail.block_at", ""], obj=SimpleNamespace())
