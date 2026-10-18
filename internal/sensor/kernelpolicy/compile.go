@@ -497,6 +497,10 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 	}
 	for _, install := range in.Installs {
 		if uidSet[install.UID] && scope.allows(install.Connector) {
+			for _, native := range install.NativeLaunches {
+				addBin(install.UID, native)
+			}
+			// Keep compatibility with resolved installs constructed by callers.
 			for _, native := range install.Native {
 				addBin(install.UID, native)
 			}
@@ -510,6 +514,7 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 		}
 		if root.Native {
 			addBin(root.UID, root.Exe)
+			addBin(root.UID, root.Launch)
 		} else {
 			pidOnly = true
 		}

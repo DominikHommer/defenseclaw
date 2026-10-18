@@ -549,6 +549,7 @@ func (c *Controller) finish(ctx context.Context, g guardedClient, agent Agent, c
 				for _, binary := range p.Binaries {
 					c.lastNative[p.BinaryUID][binary] = nativeAnchor{
 						loadTicks: c.st.Applied[p.Name].LoadTicks, enforce: lp.Mode.Enforcing(),
+						policy: p.Name,
 					}
 				}
 			}
@@ -773,7 +774,9 @@ func (c *Controller) sessionCoverage() (anchored, denied map[int]int) {
 	anchored, denied = map[int]int{}, map[int]int{}
 	for _, root := range c.roots.Roots {
 		anchor, ok := c.lastNative[root.UID][root.Exe]
-		marked := ok && newBinaryMark([]string{root.Exe}, anchor.loadTicks).marked(root)
+		launch, launchCovered := c.lastNative[root.UID][root.Launch]
+		marked := root.Native && root.Launch != "" && ok && launchCovered &&
+			anchor.policy == launch.policy && anchor.loadTicks > 0 && root.StartTicks > anchor.loadTicks
 		retained := c.retainedRoots[rootKey{root.PID, root.StartTicks}]
 		if c.lastPIDs[root.PID] || marked || retained {
 			anchored[root.UID]++
