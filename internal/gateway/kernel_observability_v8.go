@@ -553,16 +553,16 @@ func (adapter *aiRuntimeV8Adapter) emitKernelBlock(
 }
 
 // kernelBlockUserName fills the sensor's missing name only from the kernel UID.
-// A failed NSS lookup stays unnamed; no process-provided guess is substituted.
+// A failed account lookup stays unnamed; no process-provided guess is substituted.
 func kernelBlockUserName(event sensor.KernelEvent) string {
+	return kernelBlockUserNameWithLookup(event, kernelBlockUIDName)
+}
+
+func kernelBlockUserNameWithLookup(event sensor.KernelEvent, lookup func(int) string) string {
 	if event.User != "" || event.UID == nil {
 		return event.User
 	}
-	account, err := osuser.LookupId(strconv.Itoa(*event.UID))
-	if err != nil {
-		return ""
-	}
-	return account.Username
+	return lookup(*event.UID)
 }
 
 // kernelOccurrenceID is a stable occurrence id for one denial, so a

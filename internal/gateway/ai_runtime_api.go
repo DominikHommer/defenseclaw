@@ -25,11 +25,9 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
-	osuser "os/user"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
@@ -559,21 +557,13 @@ func kernelNextReadyHours(users []acquire.KernelUserStatus, now time.Time) *floa
 	return next
 }
 
-// kernelAccountName is a uid's account name through NSS, cached, else
-// "uid N".
-var kernelAccountName = func(uid int) string {
-	if cached, ok := kernelAccountNames.Load(uid); ok {
-		return cached.(string)
+// kernelAccountName uses the same bounded account cache as kernel denials.
+func kernelAccountName(uid int) string {
+	if name := kernelBlockUIDName(uid); name != "" {
+		return name
 	}
-	name := "uid " + strconv.Itoa(uid)
-	if account, err := osuser.LookupId(strconv.Itoa(uid)); err == nil && account.Username != "" {
-		name = account.Username
-	}
-	kernelAccountNames.Store(uid, name)
-	return name
+	return "uid " + strconv.Itoa(uid)
 }
-
-var kernelAccountNames sync.Map
 
 // kernelPauseUntil renders a break-glass pause's end: a UTC time, "reboot"
 // for --until-reboot, "resumed" for a pause file the helper cannot trust (a
