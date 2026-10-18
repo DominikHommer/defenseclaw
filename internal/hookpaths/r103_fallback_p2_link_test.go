@@ -62,4 +62,3 @@ func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 		})
 	}
 }
-
