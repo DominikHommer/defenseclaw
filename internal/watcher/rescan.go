@@ -937,6 +937,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
+		if evt.Type == InstallMCP {
+			fmt.Fprintf(os.Stderr, "[rescan] mcp %s is no longer listed; skipped\n", evt.Name)
+		}
 		return rescanSkipped
 	}
 	if errors.Is(err, errLinkedAssetOutsideRoots) {

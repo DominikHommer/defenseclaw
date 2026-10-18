@@ -109,7 +109,9 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		keep[strings.ToLower(name)] = true
 		servers, unreadablePath, err := source.read(key, home, logf)
 		var data []byte
+		unreadable := false
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			unreadable = true
 			if logf != nil {
 				logf("[hook-enumerator] WARN %s MCP servers for %s: %v", source.label, key, err)
 			}
@@ -119,6 +121,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
 			if err == nil && len(data) > maxClaudeMCPSpoolRecordBytes {
+				unreadable = true
 				if logf != nil {
 					logf("[hook-enumerator] WARN %s MCP spool for %s exceeds %d bytes", source.label, key, maxClaudeMCPSpoolRecordBytes)
 				}
@@ -134,8 +137,14 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr == nil && bytes.Equal(current, data) {
 			continue
 		}
-		if err := writeSpoolBytes(dir, name, source.tmpPattern, data, setOwnership); err != nil && logf != nil {
-			logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
+		if err := writeSpoolBytes(dir, name, source.tmpPattern, data, setOwnership); err != nil {
+			if logf != nil {
+				logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
+			}
+		} else if logf != nil {
+			// What the gateway admits for the user, so a server that never
+			// reached admission can be traced to the record (GAP-0219).
+			logf("[hook-enumerator] published %s MCP servers for %s: %s", source.label, key, mcpSpoolPublishedSummary(servers, unreadable))
 		}
 	}
 	if entries, err := os.ReadDir(dir); err == nil {
@@ -194,7 +203,14 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
 	}
 	if parseErr != nil {
-		return nil, statePath, parseErr
+		// A project .mcp.json that does not parse is named; the user's
+		// servers are unknown either way (GAP-0219).
+		path := statePath
+		var fileErr *config.MCPFileParseError
+		if errors.As(parseErr, &fileErr) {
+			path = fileErr.Path
+		}
+		return nil, path, parseErr
 	}
 	if projectErr != nil {
 		return nil, projectPath, projectErr
@@ -345,4 +361,21 @@ func windowsWorkDirFinalPath(path string) (string, error) {
 		return trimmed, nil
 	}
 	return "", fmt.Errorf("the folder opens as %s, not a local drive path", final)
+}
+
+// mcpSpoolPublishedSummary is the published record in the enumerator log:
+// the server count and names (at most 20), or that the state is unreadable.
+func mcpSpoolPublishedSummary(servers []config.MCPServerEntry, unreadable bool) string {
+	if unreadable {
+		return "state unreadable, no servers (the warning above says why)"
+	}
+	names := make([]string, 0, len(servers))
+	for i, server := range servers {
+		if i == 20 {
+			names = append(names, fmt.Sprintf("and %d more", len(servers)-20))
+			break
+		}
+		names = append(names, server.Name)
+	}
+	return fmt.Sprintf("%d servers %v", len(servers), names)
 }
