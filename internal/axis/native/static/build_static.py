@@ -280,7 +280,9 @@ def ubuntu_origins(policy: str, version: str, mirrors: bytes | None = None) -> l
                     fields = mirror.split("#", 1)[0].split()
                     if not fields:
                         continue
-                    if len(fields) != 1:
+                    if len(fields) not in {1, 2} or (
+                        len(fields) == 2 and not re.fullmatch(r"priority:[1-9][0-9]{0,3}", fields[1])
+                    ):
                         raise RuntimeError("unexpected Ubuntu runner mirror syntax")
                     urls.append(fields[0])
             if not urls or any(not ubuntu_url(url) for url in urls):

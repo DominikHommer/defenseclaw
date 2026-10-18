@@ -148,11 +148,19 @@ class ClosureAdmissionTests(unittest.TestCase):
         )
         mapping = b"http://azure.archive.ubuntu.com/ubuntu/\nhttp://security.ubuntu.com/ubuntu/\n"
         self.assertEqual(len(build.ubuntu_origins(policy, "1.0", mapping)), 2)
+        prioritized = (
+            b"http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\n"
+            b"https://archive.ubuntu.com/ubuntu/\tpriority:2\n"
+            b"https://security.ubuntu.com/ubuntu/\tpriority:3\n"
+        )
+        self.assertEqual(len(build.ubuntu_origins(policy, "1.0", prioritized)), 3)
         for candidate in (
             None,
             b"https://unreviewed.invalid/ubuntu\n",
             b"http://archive.ubuntu.com/other\n",
             b"http://archive.ubuntu.com/ubuntu extra\n",
+            b"http://archive.ubuntu.com/ubuntu priority:1 unreviewed\n",
+            b"http://archive.ubuntu.com/ubuntu priority:arbitrary\n",
         ):
             with self.subTest(candidate=candidate), self.assertRaises(RuntimeError):
                 build.ubuntu_origins(policy, "1.0", candidate)
