@@ -49,7 +49,12 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	if started.IsZero() {
 		started = time.Now()
 	}
-	restartDeadline := managedGatewayRestartDeadline(opts, started)
+	// Only a managed hook exchanges a session; the guard leaves a per-user
+	// hook without one.
+	var restartDeadline time.Time
+	if opts.ManagedEnterprise {
+		restartDeadline = gatewayRestartDeadline(opts, started)
+	}
 	client := opts.HTTPClient
 	if client == nil {
 		var err error
@@ -84,7 +89,7 @@ func ExchangeForeignHookSession(ctx context.Context, opts Options, connector str
 	// after it does: it is sent again within the restart budget, the peer
 	// verified on every try.
 	response, err := send()
-	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+	for err != nil && awaitGatewayRestart(ctx, restartDeadline, err) {
 		response, err = send()
 	}
 	stopWatch()

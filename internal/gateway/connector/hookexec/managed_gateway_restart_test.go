@@ -25,9 +25,9 @@ import (
 
 func fastRestartRetries(t *testing.T) {
 	t.Helper()
-	previous := managedGatewayRestartRetryDelay
-	managedGatewayRestartRetryDelay = 5 * time.Millisecond
-	t.Cleanup(func() { managedGatewayRestartRetryDelay = previous })
+	previous := gatewayRestartRetryDelay
+	gatewayRestartRetryDelay = 5 * time.Millisecond
+	t.Cleanup(func() { gatewayRestartRetryDelay = previous })
 }
 
 func managedCodex(opts *Options) {
@@ -83,7 +83,7 @@ func TestManagedHookFailsClosedWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	result := run(t, "codex", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		managedCodex(opts)
 		opts.FailMode = "open"
-		opts.StartedAt = time.Now().Add(-managedGatewayRestartBudget + 150*time.Millisecond)
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 150*time.Millisecond)
 	})
 	elapsed := time.Since(started)
 	if elapsed > time.Second {
@@ -97,9 +97,9 @@ func TestManagedHookFailsClosedWhenTheRestartOutlastsTheBudget(t *testing.T) {
 	}
 }
 
-// Only restart-shaped failures are tried again, and only by managed hooks
-// outside Secure Client.
-func TestOnlyManagedRestartFailuresAreSentAgain(t *testing.T) {
+// Only restart-shaped failures are tried again, and never by a Secure
+// Client hook. (Per-user hooks: per_user_gateway_restart_test.go.)
+func TestOnlyRestartFailuresAreSentAgain(t *testing.T) {
 	fastRestartRetries(t)
 	impostor := fmt.Errorf("%w: hook socket listener uid 1000 is neither root nor the gateway service uid", errManagedGatewayPeerUnverified)
 	for _, test := range []struct {
@@ -108,7 +108,7 @@ func TestOnlyManagedRestartFailuresAreSentAgain(t *testing.T) {
 		mutate func(*Options)
 	}{
 		{"a listener that is not the gateway", &stubRT{err: impostor}, managedCodex},
-		{"a per-user hook", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) { opts.FailMode = "closed" }},
+		{"a per-user timeout", &stubRT{err: context.DeadlineExceeded}, func(opts *Options) { opts.FailMode = "closed" }},
 		{"Secure Client", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) { managedCodex(opts); opts.SecureClient = true }},
 		{"a timeout", &stubRT{err: context.DeadlineExceeded}, managedCodex},
 	} {
@@ -143,7 +143,7 @@ func TestQueuedStandaloneCallFailsClosedWhenTheGatewayStaysDown(t *testing.T) {
 		opts.ManagedUnixSocket = "/run/defenseclaw-hook/hook.sock"
 		opts.ManagedServiceUID = 990
 		opts.FailMode = "open"
-		opts.StartedAt = time.Now().Add(-managedGatewayRestartBudget + 200*time.Millisecond)
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 	})
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("the queued call waited %s", elapsed)

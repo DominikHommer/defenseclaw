@@ -331,8 +331,11 @@ type Options struct {
 	HTTPClient *http.Client
 	// GatewayRecovery is installed only by the protected native Windows hook
 	// launcher. After an exact connection-refused result, it may start and wait
-	// for the installer-owned gateway. Run invokes it at most once and retries
-	// the original authenticated hook request once within the same deadline.
+	// for the gateway. Run invokes it at most once per call. A managed hook
+	// calls it after the restart budget and retries the original
+	// authenticated request once within the same deadline; a per-user hook
+	// runs it beside the restart-budget tries, with a context that outlives
+	// the call (awaitPerUserGateway).
 	GatewayRecovery func(context.Context, error) error
 	// Now is injectable for deterministic failure-log timestamps in tests.
 	Now func() time.Time
@@ -487,7 +490,7 @@ func Run(ctx context.Context, opts Options) int {
 			// for a moment while it restarts: wait for it within the
 			// restart budget instead of failing closed at once.
 			opts.HTTPClient, err = newManagedHookHTTPClient(ctx, opts, requestTimeout,
-				managedGatewayRestartDeadline(opts, startedAt))
+				gatewayRestartDeadline(opts, startedAt))
 			if err != nil {
 				return failUnreachable(opts, sp, "closed", managedPeerFailureReason(opts, err))
 			}
@@ -663,35 +666,63 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
-	restartDeadline := managedGatewayRestartDeadline(opts, opts.StartedAt)
+	restartDeadline := gatewayRestartDeadline(opts, opts.StartedAt)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	defer releaseWatch()
-	resp, err := sendHookRequest(ctx, opts, sp, payload, token)
+	send := func() (*http.Response, error) { return sendHookRequest(ctx, opts, sp, payload, token) }
+	if !opts.ManagedEnterprise {
+		// Each try of a per-user hook must have its connection within the
+		// restart budget (connectBy); the response is read under its context.
+		var releases []func()
+		defer func() {
+			for _, release := range releases {
+				release()
+			}
+		}()
+		send = func() (*http.Response, error) {
+			tryCtx, release := connectBy(ctx, restartDeadline)
+			releases = append(releases, release)
+			resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
+			return resp, notConnectedError(tryCtx, err)
+		}
+	}
+	resp, err := send()
+	if !opts.ManagedEnterprise {
+		// This account's own gateway is restarting or starting: send the
+		// call again until the restart budget ends, starting the gateway
+		// beside the tries after a refused connection.
+		wait := awaitPerUserGateway(ctx, opts, restartDeadline, resp, err, send)
+		resp, err = wait.resp, wait.err
+		switch {
+		case wait.recoveryErr != nil:
+			// Keep the cause: hook-failures.jsonl is the only record of
+			// why a hook could not start the gateway (GAP-0480).
+			return failUnreachable(opts, sp, failMode, coldStartFailureReason(wait.recoveryErr))
+		case wait.outlasted:
+			return failUnreachable(opts, sp, failMode, perUserGatewayRestartingReason)
+		}
+	}
 	// A managed gateway that is restarting refuses the connection, or drops
 	// one it accepted as it exits: send the call again, to the gateway that
 	// starts, until the restart budget ends. Every try verifies the peer
 	// again, and a call that never gets an answer still fails closed below.
-	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+	for opts.ManagedEnterprise && err != nil && awaitGatewayRestart(ctx, restartDeadline, err) {
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 	}
 	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, failMode, err.Error())
 	}
-	if err != nil && opts.GatewayRecovery != nil && connectionRefused(err) {
+	// A managed Windows hook starts the installer-owned gateway after the
+	// restart budget; a per-user hook started its own gateway above.
+	if err != nil && opts.ManagedEnterprise && opts.GatewayRecovery != nil && connectionRefused(err) {
 		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
 			// The initial request proved no listener was present. Recovery verifies
 			// and starts the exact installer-owned gateway, including authenticated
 			// readiness, before this single retry.
 			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
 		} else {
-			// Keep the cause: hook-failures.jsonl is the only record of why a
-			// hook could not start the gateway (GAP-0480).
-			reason := coldStartFailedReason
-			if !opts.ManagedEnterprise {
-				reason = coldStartFailureReason(recoveryErr)
-			}
-			return failUnreachable(opts, sp, failMode, reason)
+			return failUnreachable(opts, sp, failMode, coldStartFailedReason)
 		}
 	}
 	// A gateway that has taken all it can answer in time (or an account over
@@ -1443,6 +1474,9 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	case reason == "gateway unreachable":
 		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
 			"Run `defenseclaw-gateway start` to resume protection."
+	case reason == perUserGatewayRestartingReason:
+		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
+			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection."
 	case strings.HasPrefix(reason, coldStartFailedReason):
 		// The logged reason carries the cause of the failed start (GAP-0480).
 		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
@@ -1469,10 +1503,17 @@ func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 // step instead of repeating it (GAP-1204); a managed hook's gateway is not the
 // user's to restart, and every other reason is kept.
 func unreachableDetail(opts Options, reason string) string {
-	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return reason
 	}
-	return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	switch reason {
+	case "gateway unreachable":
+		return "check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`"
+	case perUserGatewayRestartingReason:
+		return "this account's gateway is restarting or not running (no answer within 3 seconds); " +
+			"try again in a moment, or check `defenseclaw-gateway status`"
+	}
+	return reason
 }
 
 // perUserGatewayDownText is what a per-user hook that fails closed because
@@ -1489,7 +1530,16 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
-	if reason != "gateway unreachable" || opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	if reason == perUserGatewayRestartingReason {
+		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway is " +
+			"restarting or not running and did not answer within 3 seconds (fail mode closed). Try again in a " +
+			"moment; if this continues, check it with `defenseclaw-gateway status` and start it with " +
+			"`defenseclaw-gateway start`."
+	}
+	if reason != "gateway unreachable" {
 		return ""
 	}
 	return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": the DefenseClaw gateway is not running or " +

@@ -316,20 +316,24 @@ codex_gateway_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 
-CURL_STATUS=0
-RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-# A refused connection means this account's gateway is not running (after a
-# reboot, for example): start it once and retry. SessionEnd has no time for a
-# start. See defenseclaw_gateway_cold_start in _hardening.sh.
-if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ] &&
-  defenseclaw_gateway_cold_start "$CURL_STATUS"; then
-  CURL_STATUS=0
-  RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-fi
-# defenseclaw_retry_busy resends a call the gateway answered 429 (POST sets RESPONSE).
+# defenseclaw_await_gateway and defenseclaw_retry_busy send the call again
+# through this (POST sets RESPONSE).
 codex_gateway_post_response() {
   RESPONSE=$(codex_gateway_post)
 }
+CURL_STATUS=0
+RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
+# A refused or dropped connection means this account's gateway is restarting
+# or not running (after a reboot, for example): send the call again for up to
+# 3 seconds, starting the gateway after a refusal. SessionEnd has no time for
+# it. See defenseclaw_await_gateway in _hardening.sh.
+if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ]; then
+  if defenseclaw_await_gateway "$CURL_STATUS" codex_gateway_post_response; then
+    CURL_STATUS=0
+  else
+    CURL_STATUS=$?
+  fi
+fi
 if [ "$CURL_STATUS" -eq 0 ]; then
   defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
 fi

@@ -13,8 +13,10 @@ package hookexec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"syscall"
 	"time"
@@ -34,31 +36,33 @@ var errGatewayRestarting = errors.New("the managed gateway service is restarting
 // managedGatewayRestartingReason is the hook-failure reason of a managed
 // hook that failed closed because its gateway was restarting (a package
 // upgrade, a rollback, a configuration change that needs a restart) for
-// longer than managedGatewayRestartBudget.
+// longer than gatewayRestartBudget.
 const managedGatewayRestartingReason = "enterprise_managed_gateway_restarting"
 
-// managedGatewayRestartBudget is how long, from the start of the hook, a
-// managed hook keeps trying a gateway that is restarting: it sends the call
-// again when the gateway refused the connection or dropped it unanswered,
-// and stops waiting on a call queued in a socket while the service is not
-// running. After it the call fails closed. A restart that is over by then
-// is invisible to the agent, which is answered from the policy the gateway
-// loads at start, the last one applied; a longer one blocks each call
-// within about 3 seconds instead of holding it for the hook's whole budget
-// (#1278). A gateway that is up and evaluating keeps the full budget.
-const managedGatewayRestartBudget = 3 * time.Second
+// gatewayRestartBudget is how long, from the start of the hook, a hook keeps
+// trying a gateway that is restarting: it sends the call again when the
+// gateway refused the connection or dropped it unanswered, and a managed
+// hook stops waiting on a call queued in a socket while the service is not
+// running. After it the call fails (closed for a managed hook; a per-user
+// hook applies its fail mode, closed unless the account chose open). A
+// restart that is over by then is invisible to the agent, which is answered
+// from the policy the gateway loads at start, the last one applied; a longer
+// one blocks each call within about 3 seconds instead of holding it for the
+// hook's whole budget (#1278, GAP-0094, GAP-0102, GAP-0107). A gateway that
+// is up and evaluating keeps the full budget.
+const gatewayRestartBudget = 3 * time.Second
 
-// managedGatewayRestartRetryDelay is the pause between two tries.
-var managedGatewayRestartRetryDelay = 200 * time.Millisecond
+// gatewayRestartRetryDelay is the pause between two tries.
+var gatewayRestartRetryDelay = 200 * time.Millisecond
 
-// managedGatewayRestartDeadline is when a managed hook started at startedAt
-// stops waiting for a restarting gateway; zero (no restart handling) for a
-// per-user or Secure Client hook, which keep their behavior.
-func managedGatewayRestartDeadline(opts Options, startedAt time.Time) time.Time {
-	if !opts.ManagedEnterprise || opts.SecureClient || startedAt.IsZero() {
+// gatewayRestartDeadline is when a hook started at startedAt stops waiting
+// for a restarting gateway; zero (no restart handling) for a Secure Client
+// hook, which keeps its behavior.
+func gatewayRestartDeadline(opts Options, startedAt time.Time) time.Time {
+	if opts.SecureClient || startedAt.IsZero() {
 		return time.Time{}
 	}
-	return startedAt.Add(managedGatewayRestartBudget)
+	return startedAt.Add(gatewayRestartBudget)
 }
 
 // ManagedGatewayRestartingReason is the reason code of a managed hook that
@@ -87,7 +91,7 @@ func newManagedHookHTTPClient(ctx context.Context, opts Options, timeout time.Du
 		return managedEnterpriseHTTPClient(timeout, opts.APIAddr, opts.ManagedGatewayServiceName)
 	}
 	client, err := managedStandaloneHTTPClient(timeout, opts.ManagedUnixSocket, opts.ManagedServiceUID)
-	for err != nil && awaitManagedGatewayRestart(ctx, restartDeadline, err) {
+	for err != nil && awaitGatewayRestart(ctx, restartDeadline, err) {
 		client, err = managedStandaloneHTTPClient(timeout, opts.ManagedUnixSocket, opts.ManagedServiceUID)
 	}
 	return client, err
@@ -101,7 +105,7 @@ func gatewayRestartShaped(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayNotRunning) {
+	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayNotConnected) {
 		return true
 	}
 	if errors.Is(err, errManagedGatewayPeerUnverified) || errors.Is(err, errInvalidHookRequest) {
@@ -111,15 +115,15 @@ func gatewayRestartShaped(err error) bool {
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-// awaitManagedGatewayRestart waits before the next try of a call that failed
+// awaitGatewayRestart waits before the next try of a call that failed
 // because its gateway is restarting, and reports whether to try again: only
 // for a restart-shaped error, and only while the next try still starts
 // before deadline.
-func awaitManagedGatewayRestart(ctx context.Context, deadline time.Time, err error) bool {
+func awaitGatewayRestart(ctx context.Context, deadline time.Time, err error) bool {
 	if deadline.IsZero() || ctx.Err() != nil || !gatewayRestartShaped(err) {
 		return false
 	}
-	delay := managedGatewayRestartRetryDelay
+	delay := gatewayRestartRetryDelay
 	if !time.Now().Add(delay).Before(deadline) {
 		return false
 	}
@@ -222,4 +226,121 @@ func watchGatewayStarts(
 		}
 		timer.Reset(next)
 	}
+}
+
+// perUserGatewayRestartingReason is the hook-failure reason of a per-user
+// hook whose own gateway still refused or dropped the call at the end of
+// gatewayRestartBudget: it is restarting (defenseclaw-gateway restart, an
+// upgrade) or not running.
+const perUserGatewayRestartingReason = "gateway restarting or not running"
+
+// perUserGatewayWait is the outcome of awaitPerUserGateway.
+type perUserGatewayWait struct {
+	resp *http.Response
+	err  error
+	// recoveryErr is the cause of a cold start that failed; the call fails
+	// with it, as before the restart budget.
+	recoveryErr error
+	// outlasted reports a call still refused or dropped at the end of the
+	// restart budget.
+	outlasted bool
+}
+
+// awaitPerUserGateway sends a per-user hook call again, every
+// gatewayRestartRetryDelay until deadline, while this account's gateway
+// refuses or drops it: a restart, an upgrade or a start is answered by the
+// gateway that comes up, and a longer outage ends the call within the
+// budget instead of holding it until the old gateway's stop and the new
+// one's start are over (GAP-0094, GAP-0102, GAP-0107). The first refused
+// connection starts the gateway (opts.GatewayRecovery) beside the tries,
+// not before them: the start outlives the hook when it takes longer than
+// the budget, so the next call finds the gateway running. A start that
+// fails at once (the gateway was stopped with defenseclaw-gateway stop, a
+// recent start failed) ends the wait with its cause.
+func awaitPerUserGateway(
+	ctx context.Context,
+	opts Options,
+	deadline time.Time,
+	resp *http.Response,
+	err error,
+	send func() (*http.Response, error),
+) perUserGatewayWait {
+	var recovered chan error
+	recoveryStarted := false
+	for err != nil && !deadline.IsZero() && gatewayRestartShaped(err) {
+		if !recoveryStarted && opts.GatewayRecovery != nil && connectionRefused(err) {
+			recoveryStarted = true
+			recovered = make(chan error, 1)
+			start := opts.GatewayRecovery
+			// The start must not end with this call: a gateway that takes
+			// longer than the budget to start still serves the next one.
+			startCtx := context.WithoutCancel(ctx)
+			go func(cause error) { recovered <- start(startCtx, cause) }(err)
+		}
+		delay := gatewayRestartRetryDelay
+		if !time.Now().Add(delay).Before(deadline) {
+			return perUserGatewayWait{resp: resp, err: err, outlasted: true}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return perUserGatewayWait{resp: resp, err: err}
+		case recoveryErr := <-recovered:
+			timer.Stop()
+			// A nil channel never fires again: one start per call.
+			recovered = nil
+			if recoveryErr != nil {
+				return perUserGatewayWait{resp: resp, err: err, recoveryErr: recoveryErr}
+			}
+		case <-timer.C:
+		}
+		resp, err = send()
+	}
+	return perUserGatewayWait{resp: resp, err: err}
+}
+
+// errGatewayNotConnected ends a per-user hook try that has no connection to
+// the gateway at the end of the restart budget. A connect to a port nobody
+// listens on can take about 2 seconds on Windows, so one late try could
+// otherwise hold the call well past the budget.
+var errGatewayNotConnected = errors.New("no connection to the gateway within the restart budget")
+
+// connectBy returns ctx for one per-user hook try: it is ended with
+// errGatewayNotConnected at deadline unless the try has its connection by
+// then. A try that is connected keeps ctx until release (call it once the
+// response is read): a gateway that accepted the call evaluates it within
+// the hook's whole budget.
+func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context, release func()) {
+	if deadline.IsZero() {
+		return ctx, func() {}
+	}
+	connected := make(chan struct{})
+	var once sync.Once
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { once.Do(func() { close(connected) }) }}
+	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
+	go func() {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			select {
+			case <-connected:
+			default:
+				cancel(errGatewayNotConnected)
+			}
+		case <-connected:
+		case <-tryCtx.Done():
+		}
+	}()
+	return tryCtx, func() { cancel(nil) }
+}
+
+// notConnectedError keeps errGatewayNotConnected on the error of a try that
+// connectBy ended.
+func notConnectedError(tryCtx context.Context, err error) error {
+	if err != nil && errors.Is(context.Cause(tryCtx), errGatewayNotConnected) && !errors.Is(err, errGatewayNotConnected) {
+		return fmt.Errorf("%w: %w", errGatewayNotConnected, err)
+	}
+	return err
 }

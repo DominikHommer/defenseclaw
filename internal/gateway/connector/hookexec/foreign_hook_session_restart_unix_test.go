@@ -83,7 +83,7 @@ func TestForeignHookSessionExchangeFailsClosedWhenTheHookSocketStaysMissing(t *t
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	started := time.Now()
-	invocation := started.Add(-managedGatewayRestartBudget + 200*time.Millisecond)
+	invocation := started.Add(-gatewayRestartBudget + 200*time.Millisecond)
 	_, err := ExchangeForeignHookSession(ctx, standaloneExchangeOptions(socket, invocation), "claudecode", []byte(`{}`))
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("the exchange waited %s past the restart budget of the invocation", elapsed)
@@ -115,7 +115,7 @@ func TestQueuedForeignHookSessionExchangeEndsAtTheRestartBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	started := time.Now()
-	invocation := started.Add(-managedGatewayRestartBudget + 300*time.Millisecond)
+	invocation := started.Add(-gatewayRestartBudget + 300*time.Millisecond)
 	response, err := ExchangeForeignHookSession(ctx, standaloneExchangeOptions(socket, invocation), "claudecode", []byte(`{}`))
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("the queued exchange waited %s", elapsed)
