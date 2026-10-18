@@ -97,27 +97,65 @@ case "${` + openshell.EnvEgressURL + `:-}" in
 esac
 `
 
-// trustedCAScript points Node and Deno at the bundle that holds the
-// trusted CAs of openshell.trusted_ca_bundle, in an image that has them
-// (openshell.SandboxTrustedCADir exists only there). OpenShell sets
-// SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE and GIT_SSL_CAINFO to its
-// combined bundle (the image's system store, which holds those CAs, plus its
-// own CA), but NODE_EXTRA_CA_CERTS and DENO_CERT to its own CA alone, so
-// Node (Claude Code, Codex's and Copilot's launchers, npm), Bun (OpenCode)
-// and Deno still failed a TLS-inspecting proxy's certificates with "unable
-// to get local issuer certificate" (#1296). They take the combined bundle
-// instead, which still holds OpenShell's CA; without SSL_CERT_FILE the
-// image's system bundle. An image without trusted CAs is left alone. POSIX
-// sh, like egressEnvScript.
-const trustedCAScript = `# The trusted CAs of ` + openshell.TrustedCAKey + ` are in the system store and
-# so in OpenShell's combined bundle; Node and Deno read only the CA files named.
+// trustedCAScript gives every runtime in a sandbox the trusted CAs of
+// openshell.trusted_ca_bundle, in an image that has them
+// (openshell.SandboxTrustedCADir exists only there). They are in the
+// image's system store, but OpenShell's supervisor makes the bundle it sets
+// SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE and GIT_SSL_CAINFO to
+// from its own store (and NODE_EXTRA_CA_CERTS and DENO_CERT to its own CA),
+// so Node (Claude Code, Copilot, npm), Rust (Codex, which reads
+// SSL_CERT_FILE alone), Go, Bun and Deno failed a TLS-inspecting proxy's
+// certificates, and only programs that also read the hashed /etc/ssl/certs
+// directory (OpenSSL's Python and curl) passed (#1296, GAP-0065, GAP-0066,
+// GAP-0074). The script writes OpenShell's bundle plus the trusted CAs to
+// ca-bundle.pem in an owner-only directory under /tmp
+// (openshell.SandboxTrustedCARunDir), again at every start because
+// OpenShell's CA can change with each sandbox start, and points each of
+// those six variables at it when it is unset or names OpenShell's own files
+// (in the directory of SSL_CERT_FILE); a variable the caller set elsewhere
+// is kept. A shell started from a launcher finds SSL_CERT_FILE already
+// pointing there and changes nothing. Without SSL_CERT_FILE the image's
+// system bundle, which holds the CAs, fills the unset variables. When the
+// file cannot be written, OpenShell's variables are left as they are, so
+// an intercepted connection still fails rather than verifying with less.
+// An image without trusted CAs is left alone. POSIX sh, like
+// egressEnvScript.
+const trustedCAScript = `# The trusted CAs of ` + openshell.TrustedCAKey + ` are in this image's system store, but
+# OpenShell's sandbox bundle is made from its supervisor's own store: every runtime
+# gets OpenShell's bundle plus them.
 if [ -d ` + openshell.SandboxTrustedCADir + ` ]; then
-  dc_ca="${SSL_CERT_FILE:-` + openshell.SandboxSystemCABundle + `}"
-  if [ -f "$dc_ca" ] && [ -r "$dc_ca" ]; then
-    NODE_EXTRA_CA_CERTS="$dc_ca"; DENO_CERT="$dc_ca"
-    export NODE_EXTRA_CA_CERTS DENO_CERT
+  dc_ca_base="${SSL_CERT_FILE:-}"; dc_ca_out=""
+  case "$dc_ca_base" in
+    ` + openshell.SandboxTrustedCARunDir + `-*/*) ;;
+    "") dc_ca_out=` + openshell.SandboxSystemCABundle + ` ;;
+    *)
+      dc_ca_run="` + openshell.SandboxTrustedCARunDir + `-$(id -u)"
+      if [ -f "$dc_ca_base" ] && [ -r "$dc_ca_base" ] && (umask 077; mkdir -p "$dc_ca_run") 2>/dev/null &&
+        [ -d "$dc_ca_run" ] && [ ! -h "$dc_ca_run" ] && [ -O "$dc_ca_run" ]; then
+        dc_ca_tmp="$dc_ca_run/.ca-bundle.$$"
+        if (umask 077; { cat "$dc_ca_base" && echo && cat ` + openshell.SandboxTrustedCADir + `/*.crt; } >"$dc_ca_tmp") 2>/dev/null &&
+          mv -f "$dc_ca_tmp" "$dc_ca_run/ca-bundle.pem" 2>/dev/null; then
+          dc_ca_out="$dc_ca_run/ca-bundle.pem"
+        else
+          rm -f "$dc_ca_tmp" 2>/dev/null
+        fi
+      fi
+      ;;
+  esac
+  if [ -n "$dc_ca_out" ]; then
+    for dc_var in SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE GIT_SSL_CAINFO NODE_EXTRA_CA_CERTS DENO_CERT; do
+      eval "dc_val=\${$dc_var:-}"
+      if [ -n "$dc_val" ]; then
+        [ -n "$dc_ca_base" ] || continue
+        case "$dc_val" in
+          "$dc_ca_base"|"${dc_ca_base%/*}"/*) ;;
+          *) continue ;;
+        esac
+      fi
+      eval "$dc_var=\$dc_ca_out; export $dc_var"
+    done
   fi
-  unset dc_ca
+  unset dc_ca_base dc_ca_out dc_ca_run dc_ca_tmp dc_var dc_val
 fi
 `
 

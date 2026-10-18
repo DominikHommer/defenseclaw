@@ -191,8 +191,9 @@ type OpenShellConfig struct {
 	// TrustedCABundle names a PEM file of CA certificates sandboxes trust
 	// besides the image's public roots: the root of a TLS-inspecting proxy
 	// that re-signs provider certificates (#1296). Every overlay image
-	// built while it is set carries them in its system store, which
-	// OpenShell's sandbox bundle (SSL_CERT_FILE) is made from. An absolute
+	// built while it is set carries them in its system store, and the
+	// sandbox shells point every runtime's CA variable (SSL_CERT_FILE,
+	// NODE_EXTRA_CA_CERTS, ...) at OpenShell's bundle plus them. An absolute
 	// path or one starting with "~/"; in managed_enterprise an absolute
 	// path to an administrator-owned file. Nothing is imported from the
 	// host's own store.

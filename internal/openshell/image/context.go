@@ -113,10 +113,11 @@ type BuildSpec struct {
 	MicroVM bool
 	// TrustedCAs is the PEM bundle of openshell.trusted_ca_bundle
 	// (openshell.ParseTrustedCAs): CA certificates the image's system store
-	// takes, so OpenShell's sandbox bundle (SSL_CERT_FILE) and its upstream
-	// TLS trust a TLS-inspecting proxy's re-signed certificates. The build
-	// adds them before any download, so the image's own installs trust them
-	// too. They are build-context files, so the content hash covers them;
+	// takes, so programs in the sandbox trust a TLS-inspecting proxy's
+	// re-signed certificates (the shells add them to OpenShell's bundle,
+	// harness trustedCAScript). The build adds them before any download, so
+	// the image's own installs trust them too. They are build-context
+	// files, so the content hash covers them;
 	// an image without any has the Dockerfile and the content hash it had
 	// before.
 	TrustedCAs []byte
@@ -341,7 +342,7 @@ func trustedCAImageName(i int) string { return fmt.Sprintf("defenseclaw-trusted-
 // trustedCAStep is the Dockerfile part of an image with trusted CAs
 // (BuildSpec.TrustedCAs): one root-owned file per certificate in
 // openshell.SandboxTrustedCADir, then update-ca-certificates, and a check
-// that every one reached the system bundle OpenShell reads. It comes right
+// that every one reached the system bundle. It comes right
 // after USER root, before any download. A base without
 // update-ca-certificates fails the build: an image that silently left the
 // CAs out would fail every intercepted TLS connection with no word why.
@@ -349,7 +350,7 @@ func trustedCAStep(c *Context) string {
 	dir, bundle := openshell.SandboxTrustedCADir, openshell.SandboxSystemCABundle
 	var b strings.Builder
 	b.WriteString("# The trusted CAs of " + openshell.TrustedCAKey + " (a TLS-inspecting proxy's root): in the system store, which\n" +
-		"# OpenShell's sandbox bundle (SSL_CERT_FILE) and its upstream TLS are made from, and which this build's downloads use.\n")
+		"# this build's downloads use and the sandbox shells add to OpenShell's bundle.\n")
 	fmt.Fprintf(&b, "RUN install -d -o root -g root -m 0755 %s\n", dir)
 	for i := range c.TrustedCAs.Certs {
 		fmt.Fprintf(&b, "COPY --chown=0:0 --chmod=0644 %s %s/%s\n", trustedCAContextName(i), dir, trustedCAImageName(i))

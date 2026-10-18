@@ -37,13 +37,25 @@ import (
 //
 // Behind a TLS-inspecting proxy (a corporate secure web gateway) every
 // provider certificate is re-signed by the organization's CA. The host
-// trusts that CA; a sandbox does not: OpenShell builds the bundle its
-// workload verifies with (SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
-// GIT_SSL_CAINFO) from the image's system store plus its own CA, and its
-// upstream TLS from the same store. DefenseClaw never imports the host's
+// trusts that CA; a sandbox does not. DefenseClaw never imports the host's
 // store on its own: an operator names the CA file, and the overlay image
 // build adds exactly those certificates to the image's system store
-// (image.BuildSpec.TrustedCAs), so OpenShell's bundle holds them.
+// (image.BuildSpec.TrustedCAs).
+//
+// That store is not where OpenShell's sandbox bundle comes from. OpenShell's
+// supervisor makes the bundle it points SSL_CERT_FILE, REQUESTS_CA_BUNDLE,
+// CURL_CA_BUNDLE and GIT_SSL_CAINFO at (and NODE_EXTRA_CA_CERTS at its own
+// CA) from its own store: a container of its own image on the docker driver,
+// the MicroVM's boot image on the vm driver (OpenShell 0.1.1 to 0.1.4). So the
+// sandbox shells and launchers give every runtime a bundle of OpenShell's
+// plus the trusted CAs instead (harness trustedCAScript,
+// SandboxTrustedCARunDir).
+//
+// The supervisor's own upstream TLS, for the endpoints whose credential it
+// puts in (the agents' model providers and --credential hosts), trusts only
+// its own store, and OpenShell takes no extra CA for it without an explicit
+// upstream proxy (https_proxy with proxy_ca_bundle). Those hosts must not be
+// inspected; the tls-trust doctor row says so.
 const (
 	// MaxTrustedCABytes caps the trusted CA file.
 	MaxTrustedCABytes = 1 << 20
@@ -58,6 +70,12 @@ const (
 	// SandboxSystemCABundle is the Debian and Ubuntu system bundle
 	// update-ca-certificates writes, the first one OpenShell reads.
 	SandboxSystemCABundle = "/etc/ssl/certs/ca-certificates.crt"
+	// SandboxTrustedCARunDir is the prefix of the directory
+	// (SandboxTrustedCARunDir + "-<uid>", owner-only) in a sandbox's /tmp
+	// where the shells and launchers of an image with trusted CAs write
+	// ca-bundle.pem, OpenShell's sandbox bundle plus the trusted CAs, which
+	// every runtime's CA variable names.
+	SandboxTrustedCARunDir = "/tmp/defenseclaw-ca"
 )
 
 // TrustedCAs is a parsed trusted CA file: PEM is the normalized bundle
