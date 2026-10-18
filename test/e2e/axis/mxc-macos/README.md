@@ -28,7 +28,7 @@ process resource limits to zero. Zero disables AXIS's process-count, memory
 and CPU quota claims, which this Seatbelt route cannot enforce. The planner
 receives no weaker-capability acceptance. MXC availability is observed before
 the AXIS planner's Seatbelt dependencies are marked present; the actual spawn
-remains the decisive host check. The request selects
+remains the decisive host check. The default request selects
 `Containment::Seatbelt` with no profile override, GUI, nested PTY, Keychain,
 or extra Mach lookups. It supplies only a fixed environment under a private
 0700 fixture and disables default-environment inheritance and telemetry.
@@ -46,6 +46,30 @@ implicit grant or refuse the backend for policies it cannot represent. The
 existing AXIS-native profile is not used; this experiment tests MXC's
 generated policy and does not establish equivalence with that separate backend.
 
+An explicit `--strict-fixed` mode is a separate fixed Seatbelt experiment.
+After the same AXIS admission, the bridge checks every admitted filesystem
+list and supplies MXC's supported `SeatbeltConfig.profile_override`. MXC
+still owns `sandbox_init`, spawn, PTY, timeout and process cleanup. The
+profile starts with deny-default and names only the private fixture, the
+fixed probe executable, selected system loader paths, `/dev/null`,
+`/dev/urandom` and terminal devices needed by these cases. It grants metadata
+only on ancestors of those paths. It rejects path aliases, symlinks under the
+owned fixture, ambiguous or control characters, unsupported policy features
+and any change to the fixed grant and deny sets. This is not a general policy
+compiler, and selected system directories and PTY device rules remain
+broader than exact per-file grants. Process fork/exec, same-sandbox signaling
+and sysctl reads are fixed runtime permissions needed by this workload; the
+initial strict profile grants no Mach lookups. Live evidence must establish
+whether that footprint is sufficient on the tested macOS image.
+
+Strict mode adds an open-only check of `/private/etc/hosts`: the host first
+confirms this known nonsecret file can be opened, while the child must receive
+`EACCES` or `EPERM`. Neither side reads, prints or changes its contents. The
+private ungranted canary and all default boundary, network, pipe, PTY and
+timeout checks also run under the strict profile. A passing result remains
+limited to this fixed profile and the tested host; it cannot qualify general
+macOS policy translation or the AXIS dispatch path.
+
 The child receives a private `HOME`, CWD and TMPDIR. It must write in HOME
 and CWD, read a nested read-only canary but fail to write it, fail to read,
 write or stat explicitly denied canaries in both HOME and CWD, and fail to
@@ -62,7 +86,9 @@ typed timeout after a descendant announces readiness. A delayed descendant
 would write a private marker three seconds later if it survived. The
 supervisor checks that the marker remains absent. Output capture is capped
 at 64 KiB per stream, each case has an MXC timeout and an additional
-15-second polling deadline. An outer CI process deadline is still needed in
+15-second polling deadline. Failures include at most 8 KiB of JSON-escaped
+fixed-child output for diagnosis, with no host environment dump. An outer CI
+process deadline is still needed in
 case SDK spawn itself hangs. A clean result proves only these exact benign
 cases on the tested macOS host; it cannot certify general policy equivalence,
 all descendant cleanup, security of arbitrary paths or production readiness.
@@ -94,11 +120,16 @@ checkouts, the reviewed lock and `python3 prepare_build.py build-locked`.
 That mode refuses a missing lock and checks it did not change. The generated
 lock artifact must not be run live before review and locked rebuild.
 
-There is no workflow or live result in this directory. An eventual disposable
-macOS Actions live job should run only the reviewed locked artifact as an
+The build-only workflow compiles the crate and its unit tests without running
+the probe. After a reviewed locked build, run the fixed profile-generator unit
+tests with `cargo +1.95.0 test --locked --release strict_profile::tests
+-- --test-threads=1` in the fresh staging directory. This runs only pure
+generator tests, not a sandboxed workload. A separate disposable macOS
+Actions live job should run only the reviewed locked artifact as an
 unprivileged user, with an outer process-group watchdog and a 60-second
 deadline. It should record the artifact provenance and hashes with the exact
-macOS version/architecture and the probe's fixed JSON outcome. A failed
+macOS version/architecture and the probe's fixed JSON outcome for both the
+default and `--strict-fixed` selectors. A failed
 admission, unavailable Seatbelt, wrong errno, missing acknowledgement, wait
 error or teardown failure is a failed experiment; no alternate backend is
 used.

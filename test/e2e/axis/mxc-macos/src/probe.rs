@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::strict_profile;
+
 const AXIS_COMMIT: &str = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c";
 const MXC_COMMIT: &str = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2";
 const PREFIX: &str = "dc-axis-mxc-macos-";
@@ -35,6 +37,7 @@ const READONLY: &[u8] = b"synthetic-readonly\n";
 const DENIED: &[u8] = b"synthetic-denied\n";
 const UNGRANTED: &[u8] = b"synthetic-ungranted\n";
 const OUTPUT_LIMIT: usize = 64 * 1024;
+const DIAGNOSTIC_INPUT_LIMIT: usize = 1200;
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
 
 // MXC's generated Seatbelt profile adds these broad system reads regardless of
@@ -65,6 +68,7 @@ pub fn run() -> Result<i32> {
     if args.len() == 2 && args[0] == "--fixed-child" {
         return match args[1].to_str() {
             Some("boundaries") => fixed_child(Case::Boundaries),
+            Some("boundaries-strict") => fixed_child(Case::StrictBoundaries),
             Some("pipe") => fixed_child(Case::Pipe),
             Some("pty") => fixed_child(Case::Pty),
             Some("timeout") => fixed_child(Case::Timeout),
@@ -72,10 +76,11 @@ pub fn run() -> Result<i32> {
             _ => bail!("unknown fixed child case"),
         };
     }
-    ensure!(
-        args.is_empty(),
-        "the probe accepts no command, path or policy arguments"
-    );
+    let strict = match args.as_slice() {
+        [] => false,
+        [flag] if flag == "--strict-fixed" => true,
+        _ => bail!("the probe accepts only the fixed strict selector"),
+    };
     // SAFETY: geteuid is a read-only identity query with no pointer arguments.
     ensure!(
         unsafe { libc::geteuid() } != 0,
@@ -91,6 +96,15 @@ pub fn run() -> Result<i32> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let _positive = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    if strict {
+        // Host-only positive control. Never read, print or modify this known
+        // nonsecret system file; the child must fail its open with EACCES/EPERM.
+        ensure!(
+            fs::metadata("/private/etc/hosts")?.is_file(),
+            "host canary is not a file"
+        );
+        drop(fs::File::open("/private/etc/hosts")?);
+    }
     private_supervisor_environment(&paths, port)?;
     ensure!(
         v1::available_backends()
@@ -98,10 +112,20 @@ pub fn run() -> Result<i32> {
             .any(|backend| backend.backend == "seatbelt"),
         "MXC Seatbelt is unavailable on this host"
     );
-    run_piped(&paths, &executable, Case::Boundaries, port)?;
-    run_piped(&paths, &executable, Case::Pipe, port)?;
-    run_pty(&paths, &executable, port)?;
-    run_piped(&paths, &executable, Case::Timeout, port)?;
+    run_piped(
+        &paths,
+        &executable,
+        if strict {
+            Case::StrictBoundaries
+        } else {
+            Case::Boundaries
+        },
+        port,
+        strict,
+    )?;
+    run_piped(&paths, &executable, Case::Pipe, port, strict)?;
+    run_pty(&paths, &executable, port, strict)?;
+    run_piped(&paths, &executable, Case::Timeout, port, strict)?;
     thread::sleep(Duration::from_secs(3));
     ensure!(
         !paths.late_marker.exists(),
@@ -142,13 +166,15 @@ pub fn run() -> Result<i32> {
         serde_json::json!({
             "axis_commit": AXIS_COMMIT, "mxc_commit": MXC_COMMIT,
             "containment": "mxc_sdk_v1_seatbelt", "bridge": "axis_policy_and_old_wire_admission_to_typed_mxc_v1",
+            "seatbelt_profile": if strict { "reviewed_fixed_strict_override" } else { "mxc_generated_default" },
             "checks": ["explicit_footprint_admission", "private_home_and_cwd", "denied_read_write_metadata",
                 "readonly_write_denied", "ungranted_read_denied", "loopback_network_denied_with_host_positive_control",
                 "pipe_echo_exit_23", "pty_echo_resize_exit_23", "typed_timeout", "descendant_marker_absent",
                 "owned_fixture_removed"],
             "scope": "fixed_benign_composite_contributor_experiment",
             "production_or_defenseclaw_provider_qualification": false,
-            "exact_system_read_or_general_metadata_parity": false
+            "exact_system_read_or_general_metadata_parity": false,
+            "strict_host_canary_open_denied": strict
         })
     );
     Ok(0)
@@ -157,6 +183,7 @@ pub fn run() -> Result<i32> {
 #[derive(Clone, Copy)]
 enum Case {
     Boundaries,
+    StrictBoundaries,
     Pipe,
     Pty,
     Timeout,
@@ -167,6 +194,7 @@ impl Case {
     fn argument(self) -> &'static str {
         match self {
             Self::Boundaries => "boundaries",
+            Self::StrictBoundaries => "boundaries-strict",
             Self::Pipe => "pipe",
             Self::Pty => "pty",
             Self::Timeout => "timeout",
@@ -261,7 +289,7 @@ impl Paths {
         ])
     }
 
-    fn axis_policy(&self, executable: &Path) -> Result<Policy> {
+    fn axis_policy(&self, executable: &Path, strict: bool) -> Result<Policy> {
         // Parse the fixed AXIS document first; dynamic fixture paths are
         // assigned as typed fields, never interpolated into YAML or Seatbelt.
         let mut policy = Policy::from_yaml(
@@ -274,7 +302,11 @@ process: { max_processes: 0, max_memory_mb: 0, cpu_rate_percent: 0 }
 network: { mode: block }
 ",
         )?;
-        policy.filesystem.read_only = MXC_SYSTEM_READS.iter().map(|path| (*path).into()).collect();
+        policy.filesystem.read_only = if strict {
+            strict_profile::runtime_read_paths()?
+        } else {
+            MXC_SYSTEM_READS.iter().map(|path| (*path).into()).collect()
+        };
         policy.filesystem.read_only.push(text(executable)?.into());
         policy
             .filesystem
@@ -284,10 +316,14 @@ network: { mode: block }
             .iter()
             .map(|path| text(path).map(str::to_owned))
             .collect::<Result<_>>()?;
-        policy
-            .filesystem
-            .read_write
-            .extend(MXC_SYSTEM_RW_DEVICES.iter().map(|path| (*path).into()));
+        if strict {
+            policy.filesystem.read_write.push("/dev/null".into());
+        } else {
+            policy
+                .filesystem
+                .read_write
+                .extend(MXC_SYSTEM_RW_DEVICES.iter().map(|path| (*path).into()));
+        }
         policy.filesystem.deny = [&self.denied_home, &self.denied_work]
             .iter()
             .map(|path| text(path).map(str::to_owned))
@@ -296,17 +332,27 @@ network: { mode: block }
         Ok(policy)
     }
 
-    fn request(&self, executable: &Path, case: Case, port: u16) -> Result<ContainerRequest> {
+    fn request(
+        &self,
+        executable: &Path,
+        case: Case,
+        port: u16,
+        strict: bool,
+    ) -> Result<ContainerRequest> {
         ensure!(
             !matches!(case, Case::Delayed),
             "delayed child is never launched as a standalone request"
+        );
+        ensure!(
+            strict || !matches!(case, Case::StrictBoundaries),
+            "strict boundary requires strict profile"
         );
         let command = format!(
             "exec {} --fixed-child {}",
             shell_quote(text(executable)?),
             case.argument()
         );
-        let policy = self.axis_policy(executable)?;
+        let policy = self.axis_policy(executable, strict)?;
         let environment: BTreeMap<_, _> = self.environment(port)?.into_iter().collect();
         // Host evidence is taken from MXC's read-only Seatbelt availability
         // probe. AXIS's planner still has the final word on the policy pair.
@@ -338,6 +384,12 @@ network: { mode: block }
                 && spec.resources.max_memory_mb == 0
                 && spec.resources.cpu_rate_percent == 0,
             "resource claims are outside this experiment"
+        );
+        ensure!(
+            spec.filesystem.read_only == policy.filesystem.read_only
+                && spec.filesystem.read_write == policy.filesystem.read_write
+                && spec.filesystem.deny == policy.filesystem.deny,
+            "AXIS changed the fixed filesystem footprint"
         );
         // AXIS fb5 emits an older 0.6 JSON shape. Use its validation and
         // normalized plan, but never submit that wire document to MXC 1.0.1.
@@ -374,7 +426,11 @@ network: { mode: block }
             })
             .collect::<Result<Vec<_>>>()?;
         let mut seatbelt = SeatbeltConfig::default();
-        seatbelt.profile_override = None;
+        seatbelt.profile_override = if strict {
+            Some(strict_profile::build_profile(&policy, &self.root, executable)?)
+        } else {
+            None
+        };
         seatbelt.gui_access = false;
         seatbelt.nested_pty = false;
         seatbelt.keychain_access = false;
@@ -456,7 +512,7 @@ fn fixed_child(case: Case) -> Result<i32> {
     let paths = Paths::from_child()?;
     let port = verify_environment(&paths)?;
     match case {
-        Case::Boundaries => {
+        Case::Boundaries | Case::StrictBoundaries => {
             ensure!(
                 fs::read(&paths.readonly)? == READONLY,
                 "readonly canary unreadable"
@@ -481,6 +537,9 @@ fn fixed_child(case: Case) -> Result<i32> {
                 )?;
             }
             denied_errno(fs::read(&paths.ungranted), "read ungranted canary")?;
+            if matches!(case, Case::StrictBoundaries) {
+                denied_errno(fs::File::open("/private/etc/hosts"), "open fixed host canary")?;
+            }
             denied_errno(
                 OpenOptions::new()
                     .write(true)
@@ -493,7 +552,11 @@ fn fixed_child(case: Case) -> Result<i32> {
                 std::net::TcpStream::connect_timeout(&target, Duration::from_secs(1)),
                 "connect to ready loopback listener",
             )?;
-            println!("BOUNDARIES_OK");
+            if matches!(case, Case::StrictBoundaries) {
+                println!("STRICT_BOUNDARIES_OK");
+            } else {
+                println!("BOUNDARIES_OK");
+            }
             Ok(23)
         }
         Case::Pipe => {
@@ -555,9 +618,9 @@ fn terminal_state(rows: u16, cols: u16) -> Result<()> {
     Ok(())
 }
 
-fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<()> {
+fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16, strict: bool) -> Result<()> {
     let mut process = v1::spawn(
-        paths.request(executable, case, port)?,
+        paths.request(executable, case, port, strict)?,
         SpawnOptions {
             telemetry: disabled_telemetry(),
         },
@@ -579,10 +642,18 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
         } else {
             drop(process.take_stdin());
         }
-        let outcome = wait_process(&mut process)?;
-        let output = stdout.finish()?;
-        let errors = stderr.finish()?;
-        match case {
+        let outcome = wait_process(&mut process);
+        let output = stdout.finish();
+        let errors = stderr.finish();
+        let diagnostic = errors
+            .as_ref()
+            .map(|bytes| fixed_child_diagnostic(bytes))
+            .unwrap_or_else(|_| "\"stderr capture failed\"".to_owned());
+        let outcome = outcome.with_context(|| format!("fixed child stderr={diagnostic}"))?;
+        let output = output.with_context(|| format!("fixed child stderr={diagnostic}"))?;
+        let errors = errors?;
+        (|| -> Result<()> {
+            match case {
             Case::Boundaries => {
                 ensure!(
                     outcome == WaitResult::Exited(23),
@@ -591,6 +662,16 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
                 ensure!(
                     contains(&output, b"BOUNDARIES_OK") && errors.is_empty(),
                     "boundary acknowledgement missing"
+                );
+            }
+            Case::StrictBoundaries => {
+                ensure!(
+                    outcome == WaitResult::Exited(23),
+                    "strict boundary child did not exit 23"
+                );
+                ensure!(
+                    contains(&output, b"STRICT_BOUNDARIES_OK") && errors.is_empty(),
+                    "strict boundary acknowledgement missing"
                 );
             }
             Case::Pipe => {
@@ -614,8 +695,11 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
                 );
                 ensure!(errors.is_empty(), "timeout child wrote stderr");
             }
-            Case::Pty | Case::Delayed => bail!("invalid pipe case"),
-        }
+                Case::Pty | Case::Delayed => bail!("invalid pipe case"),
+            }
+            Ok(())
+        })()
+        .with_context(|| format!("fixed child stderr={diagnostic}"))?;
         process.kill()?;
         process.kill()?;
         Ok(())
@@ -623,17 +707,19 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case, port: u16) -> Result<
     if result.is_err() {
         let killed = process.kill();
         let waited = process.wait();
-        ensure!(
-            killed.is_ok() && waited.is_ok(),
-            "failed probe also failed SDK cleanup"
-        );
+        if let Err(error) = killed {
+            return result.context(format!("failed probe also failed SDK kill: {error}"));
+        }
+        if let Err(error) = waited {
+            return result.context(format!("failed probe also failed SDK wait: {error}"));
+        }
     }
     result.with_context(|| format!("fixed {} experiment", case.argument()))
 }
 
-fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
+fn run_pty(paths: &Paths, executable: &Path, port: u16, strict: bool) -> Result<()> {
     let terminal = v1::spawn_with_pty(
-        paths.request(executable, Case::Pty, port)?,
+        paths.request(executable, Case::Pty, port, strict)?,
         SpawnWithPtyOptions {
             telemetry: disabled_telemetry(),
             size: terminal_size(30, 100),
@@ -654,14 +740,17 @@ fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
         input.write_all(b"fixed-benign-input\n")?;
         input.flush()?;
         drop(input);
-        ensure!(
-            wait_terminal(&terminal)? == WaitResult::Exited(23),
-            "PTY child did not exit 23"
-        );
+        let outcome = wait_terminal(&terminal);
         let bytes = output.finish()?;
+        let diagnostic = fixed_child_diagnostic(&bytes);
+        ensure!(
+            outcome.with_context(|| format!("fixed PTY output={diagnostic}"))?
+                == WaitResult::Exited(23),
+            "PTY child did not exit 23; fixed PTY output={diagnostic}"
+        );
         ensure!(
             contains(&bytes, b"PTY_ECHO_OK rows=40 cols=120"),
-            "PTY input/resize acknowledgement missing"
+            "PTY input/resize acknowledgement missing; fixed PTY output={diagnostic}"
         );
         terminal.kill()?;
         terminal.kill()?;
@@ -670,10 +759,12 @@ fn run_pty(paths: &Paths, executable: &Path, port: u16) -> Result<()> {
     if result.is_err() {
         let killed = terminal.kill();
         let waited = terminal.wait();
-        ensure!(
-            killed.is_ok() && waited.is_ok(),
-            "failed PTY probe also failed SDK cleanup"
-        );
+        if let Err(error) = killed {
+            return result.context(format!("failed PTY probe also failed SDK kill: {error}"));
+        }
+        if let Err(error) = waited {
+            return result.context(format!("failed PTY probe also failed SDK wait: {error}"));
+        }
     }
     result.context("fixed MXC-owned PTY experiment")
 }
@@ -775,7 +866,14 @@ impl Capture {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        bail!("fixed child readiness acknowledgement missing")
+        let captured = self
+            .bytes
+            .lock()
+            .map_err(|_| anyhow!("capture mutex poisoned"))?;
+        bail!(
+            "fixed child readiness acknowledgement missing; fixed output={}",
+            fixed_child_diagnostic(captured.as_slice())
+        )
     }
 
     fn finish(mut self) -> Result<Vec<u8>> {
@@ -857,6 +955,20 @@ fn text(path: &Path) -> Result<&str> {
 
 fn contains(bytes: &[u8], needle: &[u8]) -> bool {
     bytes.windows(needle.len()).any(|part| part == needle)
+}
+
+fn fixed_child_diagnostic(bytes: &[u8]) -> String {
+    // At most 1,200 input bytes expand to 7,200 JSON bytes even if every
+    // byte becomes a six-byte control escape. The child has only fixed private
+    // fixture data and an allowlisted environment.
+    let clipped = &bytes[..bytes.len().min(DIAGNOSTIC_INPUT_LIMIT)];
+    let encoded = serde_json::to_string(&String::from_utf8_lossy(clipped))
+        .unwrap_or_else(|_| "\"stderr encoding failed\"".to_owned());
+    if bytes.len() > clipped.len() {
+        format!("{encoded} [truncated]")
+    } else {
+        encoded
+    }
 }
 
 fn shell_quote(value: &str) -> String {

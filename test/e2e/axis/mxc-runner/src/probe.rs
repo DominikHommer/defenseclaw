@@ -25,6 +25,7 @@ const SEAL: &[u8] = b"defenseclaw-fixed-mxc-contributor-fixture-v1\n";
 const READONLY: &[u8] = b"synthetic-readonly-canary\n";
 const UNGRANTED: &[u8] = b"synthetic-ungranted-canary\n";
 const OUTPUT_LIMIT: usize = 64 * 1024;
+const DIAGNOSTIC_LIMIT: usize = 8 * 1024;
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
 
 pub fn run() -> Result<i32> {
@@ -501,6 +502,15 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case) -> Result<()> {
         );
         let output = stdout.finish()?;
         let errors = stderr.finish()?;
+        if !errors.is_empty() {
+            // This child receives only our synthetic fixture and private
+            // environment. Preserve its actual refusal without dumping host
+            // environment, unbounded output or terminal control characters.
+            eprintln!(
+                "AXIS_MXC_FIXED_CHILD_DIAGNOSTIC={}",
+                fixed_child_diagnostic(case, &outcome, &errors)
+            );
+        }
         ensure!(errors.is_empty(), "fixed child wrote stderr");
         match case {
             Case::Boundaries => {
@@ -816,6 +826,17 @@ fn terminal_size(rows: u16, cols: u16) -> MxcPtySize {
     }
 }
 
+fn fixed_child_diagnostic(case: Case, outcome: &WaitResult, errors: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "scope": "fixed_synthetic_private_environment_contributor_child",
+        "case": case.argument(),
+        "outcome": format!("{outcome:?}"),
+        "captured_stderr_bytes": errors.len(),
+        "truncated": errors.len() > DIAGNOSTIC_LIMIT,
+        "stderr": String::from_utf8_lossy(&errors[..errors.len().min(DIAGNOSTIC_LIMIT)])
+    })
+}
+
 fn denied_errno<T>(result: io::Result<T>, allowed: &[i32], action: &str) -> Result<()> {
     match result {
         Err(error)
@@ -879,5 +900,20 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn fixed_child_diagnostics_are_bounded_and_json_escaped() {
+        let mut errors = vec![0; DIAGNOSTIC_LIMIT];
+        errors.extend_from_slice(b"not-in-diagnostic");
+        let diagnostic = fixed_child_diagnostic(Case::Boundaries, &WaitResult::Exited(1), &errors);
+        assert_eq!(diagnostic["case"], "boundaries");
+        assert_eq!(diagnostic["outcome"], "Exited(1)");
+        assert_eq!(diagnostic["truncated"], true);
+        assert_eq!(diagnostic["stderr"].as_str().unwrap().len(), DIAGNOSTIC_LIMIT);
+        let encoded = diagnostic.to_string();
+        assert!(encoded.contains("\\u0000"));
+        assert!(!encoded.contains('\0'));
+        assert!(!encoded.contains("not-in-diagnostic"));
     }
 }

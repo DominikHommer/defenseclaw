@@ -188,12 +188,14 @@ jobs:
           compression-level: 0
 
   windows-source-artifact:
-    name: Build native Windows inherited-console contributor artifacts
+    name: Build native Windows inherited-console relay contributor artifacts
     runs-on: windows-2022
     timeout-minutes: 45
     env:
       MXC_SOURCE_COMMIT: 1736b48398c3fe4d1315b2311c0951cc893eb3ae
       AXIS_CONSOLE_OVERLAY_SHA256: 2dae4716da9581632fe9f19929a78902df71a2d828ea726b3545c7387686b8c4
+      AXIS_RELAY_OVERLAY_SHA256: 874035bb9429abda372d8302ea8ef2adeec479020867f3ea3680c424f20a9919
+      MXC_RELAY_OVERLAY_SHA256: 8689309175f62ce2c112b1a22f7cc7b7878ac5938aa83cb94521f85c8c9508cf
     defaults:
       run:
         shell: pwsh
@@ -252,6 +254,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay did not match pinned AXIS source' }
           git -C axis-source apply --whitespace=error $overlay
           if ($LASTEXITCODE -ne 0) { throw 'Contributor overlay application failed' }
+          python -c "import os,pathlib,subprocess; pathlib.Path('AXIS_CONSOLE_CTRL_C_RELAY.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/axis-console-ctrl-c-relay.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed AXIS relay overlay' }
+          $relayOverlay = (Resolve-Path -LiteralPath AXIS_CONSOLE_CTRL_C_RELAY.patch).Path
+          if ((Get-FileHash -LiteralPath $relayOverlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:AXIS_RELAY_OVERLAY_SHA256) { throw 'AXIS relay overlay digest mismatch' }
+          git -C axis-source apply --check --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS relay overlay did not match the console experiment' }
+          git -C axis-source apply --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS relay overlay application failed' }
           $changed = @(git -C axis-source diff --name-only | Sort-Object)
           if ($LASTEXITCODE -ne 0 -or ($changed -join ',') -ne 'crates/axis-sandbox/Cargo.toml,crates/axis-sandbox/src/windows/mxc.rs') { throw 'Unexpected AXIS source modifications' }
 
@@ -265,6 +275,14 @@ jobs:
             git -C mxc-source apply --whitespace=error $patch.FullName
             if ($LASTEXITCODE -ne 0) { throw "MXC compatibility patch failed: $($patch.Name)" }
           }
+          python -c "import os,pathlib,subprocess; pathlib.Path('MXC_CONSOLE_CTRL_C_RELAY.patch').write_bytes(subprocess.check_output(['git','-C','defenseclaw-source','show',os.environ['GITHUB_SHA']+':test/e2e/axis/windows/patches/mxc-console-ctrl-c-relay.patch']))"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the committed MXC relay overlay' }
+          $relayOverlay = (Resolve-Path -LiteralPath MXC_CONSOLE_CTRL_C_RELAY.patch).Path
+          if ((Get-FileHash -LiteralPath $relayOverlay -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:MXC_RELAY_OVERLAY_SHA256) { throw 'MXC relay overlay digest mismatch' }
+          git -C mxc-source apply --check --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC relay overlay did not match the pinned patched executor' }
+          git -C mxc-source apply --whitespace=error $relayOverlay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC relay overlay application failed' }
 
       - name: Build the pinned AXIS and patched native Windows MXC binaries
         timeout-minutes: 30
@@ -274,10 +292,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'AXIS Windows source build failed' }
           git -C axis-source diff --exit-code -- Cargo.lock Cargo.toml rust-toolchain.toml
           if ($LASTEXITCODE -ne 0) { throw 'AXIS dependency or toolchain source changed during build' }
-          cargo "+$env:RUST_TOOLCHAIN" test --locked --manifest-path axis-source/Cargo.toml -p axis-sandbox inherited_console_requires_every_standard_handle
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path axis-source/Cargo.toml -p axis-sandbox inherited_console_requires_every_standard_handle
           if ($LASTEXITCODE -ne 0) { throw 'Inherited-console admission unit test failed' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path axis-source/Cargo.toml -p axis-sandbox axis_console_relay
+          if ($LASTEXITCODE -ne 0) { throw 'AXIS console relay event unit test failed' }
           cargo "+$env:RUST_TOOLCHAIN" build --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features
           if ($LASTEXITCODE -ne 0) { throw 'Patched MXC Windows executor build failed' }
+          cargo "+$env:RUST_TOOLCHAIN" test --locked --release --manifest-path mxc-source/src/Cargo.toml -p wxc --no-default-features axis_console_relay
+          if ($LASTEXITCODE -ne 0) { throw 'MXC console relay admission unit tests failed' }
           git -C mxc-source diff --exit-code -- src/Cargo.lock
           if ($LASTEXITCODE -ne 0) { throw 'MXC dependency lock changed during build' }
 
@@ -289,7 +311,7 @@ jobs:
           BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $payloadName = "axis-source-windows-inherited-console-x86_64-$env:AXIS_SOURCE_COMMIT"
+          $payloadName = "axis-source-windows-inherited-console-relay-x86_64-$env:AXIS_SOURCE_COMMIT"
           $dist = Join-Path $env:GITHUB_WORKSPACE 'windows-dist'
           $payload = Join-Path $dist $payloadName
           $bin = Join-Path $payload 'bin'
@@ -309,6 +331,8 @@ jobs:
             Copy-Item -LiteralPath "axis-source/$name" -Destination $axisMetadata
           }
           Copy-Item -LiteralPath AXIS_INHERITED_CONSOLE.patch -Destination $payload
+          Copy-Item -LiteralPath AXIS_CONSOLE_CTRL_C_RELAY.patch -Destination $payload
+          Copy-Item -LiteralPath MXC_CONSOLE_CTRL_C_RELAY.patch -Destination $payload
           Copy-Item -LiteralPath mxc-source/src/Cargo.lock -Destination $mxcMetadata
           Copy-Item -LiteralPath mxc-source/LICENSE.md -Destination $mxcMetadata
           Get-ChildItem -LiteralPath axis-source/third_party/mxc/patches -File -Filter '*.patch' |
@@ -329,7 +353,7 @@ jobs:
             schema_version = 1
             purpose = 'contributor_source_build_only'
             support_certification = $false
-            variant = 'inherited-console'
+            variant = 'inherited-console-relay'
             axis_source = [ordered]@{
               repository = 'https://github.com/ROCm/axis'
               commit = $env:AXIS_SOURCE_COMMIT
@@ -340,12 +364,22 @@ jobs:
                 sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'AXIS_INHERITED_CONSOLE.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
                 kind = 'windows_inherited_console_experiment'
               }
+              contributor_relay_overlay = [ordered]@{
+                path = 'AXIS_CONSOLE_CTRL_C_RELAY.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'AXIS_CONSOLE_CTRL_C_RELAY.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_console_ctrl_c_relay_experiment'
+              }
             }
             mxc_source = [ordered]@{
               repository = 'https://github.com/microsoft/mxc'
               commit = $env:MXC_SOURCE_COMMIT
               cargo_lock_sha256 = (Get-FileHash -LiteralPath (Join-Path $mxcMetadata 'Cargo.lock') -Algorithm SHA256).Hash.ToLowerInvariant()
               patches = @(Get-ChildItem -LiteralPath $patchMetadata -File | Sort-Object Name | ForEach-Object { Get-PayloadFile $_ })
+              contributor_relay_overlay = [ordered]@{
+                path = 'MXC_CONSOLE_CTRL_C_RELAY.patch'
+                sha256 = (Get-FileHash -LiteralPath (Join-Path $payload 'MXC_CONSOLE_CTRL_C_RELAY.patch') -Algorithm SHA256).Hash.ToLowerInvariant()
+                kind = 'windows_console_ctrl_c_relay_experiment'
+              }
             }
             build = [ordered]@{
               toolchain = $env:RUST_TOOLCHAIN
@@ -364,7 +398,7 @@ jobs:
               'Build only: no live sandbox, Claude, daemon, helper or broker execution.'
               'No installation, administrator actions, service registration or firewall changes.'
               'Windows BaseContainer availability and isolation require separate host qualification.'
-              'Stock AXIS refuses interactive Windows MXC; this reviewed contributor overlay tests inherited-console admission only.'
+              'Stock AXIS refuses interactive Windows MXC; paired contributor overlays test inherited-console admission and process-local Ctrl-C relay.'
               'Direct BaseContainer pseudoconsole startup attributes remain unsupported; real console input, resize, signals and cleanup need manual proof.'
               'Strict proxy networking requires an explicitly installed privileged AXIS WFP broker.'
               'This manifest and checksums are evidence, not signed production provenance.'
@@ -387,7 +421,7 @@ jobs:
       - name: Upload the native Windows source-bound contributor artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: axis-source-windows-inherited-console-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
+          name: axis-source-windows-inherited-console-relay-x86_64-fb5fd5f0f9377c2ccb30d7e027a36373de0d037c
           path: |
             windows-dist/*.zip
             windows-dist/*.zip.sha256

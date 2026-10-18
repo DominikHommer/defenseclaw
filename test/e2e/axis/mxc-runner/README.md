@@ -104,7 +104,9 @@ group, a readiness handshake, parent resize to 40x120, fixed input, required
 child acknowledgement and exit 23. A separate guarded child must reach its
 readiness marker and produce the SDK's typed timeout outcome.
 
-Output is bounded to 64 KiB per stream and never printed as diagnostics. Each
+Output is bounded to 64 KiB per stream. A failing fixed synthetic child retains
+at most 8 KiB of JSON-escaped stderr for contributor diagnosis, without an
+environment dump. Each
 case has a configured MXC timeout and a 15-second supervisor polling deadline;
 stream interruption has a further bounded wait. Run the eventual manual
 experiment under an outer 60-second process deadline as a final safeguard

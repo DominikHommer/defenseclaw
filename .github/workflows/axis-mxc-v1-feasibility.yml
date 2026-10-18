@@ -104,6 +104,11 @@ jobs:
           }, indent=2) + "\n", encoding="utf-8")
           PY
 
+      - name: Test bounded fixed-child diagnostic formatting
+        working-directory: probe
+        shell: bash
+        run: cargo +"$RUST_TOOLCHAIN" test --locked --release fixed_child_diagnostics_are_bounded_and_json_escaped
+
       - name: Upload build evidence and the combined lock for review
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -192,6 +197,11 @@ jobs:
               "execution_performed": False,
           }, indent=2) + "\n", encoding="utf-8")
           PY
+
+      - name: Test the fixed Seatbelt profile generator without launching a sandbox
+        working-directory: probe
+        shell: bash
+        run: cargo +"$RUST_TOOLCHAIN" test --locked --release strict_profile::tests -- --test-threads=1
 
       - name: Upload build evidence and the combined lock for review
         if: ${{ always() }}

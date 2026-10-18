@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "macos")]
 mod probe;
+#[cfg(target_os = "macos")]
+mod strict_profile;
 
 fn main() {
     #[cfg(target_os = "macos")]

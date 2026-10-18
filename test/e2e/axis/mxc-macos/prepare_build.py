@@ -98,6 +98,7 @@ def main() -> None:
         Path("README.md"),
         Path("src/main.rs"),
         Path("src/probe.rs"),
+        Path("src/strict_profile.rs"),
     ):
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
