@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import platform
+import stat
 import subprocess
 import sys
 import threading
@@ -27,8 +28,126 @@ CHECKS = {
     "owned_fixture_removed",
 }
 
+BOUNDARY_CHECKS = {
+    "literal_windows_argv",
+    "private_environment",
+    "allowed_write",
+    "outside_read_write_denied",
+    "readonly_write_denied",
+    "loopback_ipv4_ipv6_tcp_udp",
+    "exit23",
+    "timeout",
+    "retained_direct_process_handles_signaled",
+    "owned_fixture_removed",
+}
+PROCESS_ERRORS = (OSError, subprocess.SubprocessError, ValueError, RuntimeError)
 
-def valid_observations(record: object, receipt: dict) -> bool:
+
+def open_custody_pin(path: Path):
+    """Open the ordinary local wrapper without permitting image writes or deletion."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    for component in [path, *path.parents]:
+        metadata = component.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 0x400:
+            raise ValueError("custody reparse-point path refused")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes, close_handle.restype = [wintypes.HANDLE], wintypes.BOOL
+    descriptor = None
+    try:
+        # The held handle was opened on the leaf itself, without following a
+        # reparse point. Inspect that same object before converting ownership.
+        class AttributeTagInfo(ctypes.Structure):
+            _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+        information = AttributeTagInfo()
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        get_information.restype = wintypes.BOOL
+        if not get_information(handle, 9, ctypes.byref(information), ctypes.sizeof(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if information.attributes & (0x400 | 0x10):
+            raise ValueError("custody image is a reparse point or directory")
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+        handle = None  # The CRT descriptor now owns the native handle.
+        source = os.fdopen(descriptor, "rb")
+        descriptor = None  # The file object now owns the CRT descriptor.
+        return source
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if handle is not None:
+            close_handle(handle)
+
+
+def pin_custody(path: Path, expected_sha256: str):
+    source = open_custody_pin(path)
+    try:
+        metadata = os.fstat(source.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= artifact_verifier.MAX_FILE_BYTES:
+            raise ValueError("custody image type or size differs")
+        digest = hashlib.sha256()
+        while chunk := source.read(64 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("the explicitly pinned contributor custody binary differs")
+        return source
+    except BaseException:
+        source.close()
+        raise
+
+
+def stop_owned(process, errors: list[str]) -> int | None:
+    """One bounded attempt against the retained Popen handle; never raises a cleanup error."""
+    try:
+        code = process.poll()
+        if code is not None:
+            return code
+    except PROCESS_ERRORS as error:
+        errors.append("owned custody poll failed: " + type(error).__name__)
+    try:
+        process.kill()
+    except PROCESS_ERRORS as error:
+        errors.append("owned custody kill failed: " + type(error).__name__)
+    try:
+        return process.wait(timeout=5)
+    except PROCESS_ERRORS as error:
+        errors.append("owned custody wait failed: " + type(error).__name__)
+        return None
+
+
+def close_finished_stream(stream, reader, errors: list[str]) -> None:
+    # A live reader owns its synchronous pipe. Closing it here could block.
+    if stream is not None and not reader.is_alive():
+        try:
+            stream.close()
+        except (OSError, ValueError) as error:
+            errors.append("custody stream close failed: " + type(error).__name__)
+
+
+def valid_observations(record: object, receipt: dict, mode: str = "loader-only") -> bool:
+    if mode not in {"loader-only", "standalone-boundary"}:
+        return False
+    contract = artifact_verifier.artifact_contract(mode)
+    boundary = mode == "standalone-boundary"
+    checks = BOUNDARY_CHECKS if boundary else CHECKS
     if not isinstance(record, dict):
         return False
     if not {"binary_sha256", "build_commit", "build_run", "combined_lock_sha256", "artifact_id"} <= receipt.keys():
@@ -38,9 +157,9 @@ def valid_observations(record: object, receipt: dict) -> bool:
         for name, value in {
             "passed": True,
             "production_certification": False,
-            "scope": artifact_verifier.SCOPE,
-            "variant": artifact_verifier.VARIANT,
-            "mode": "loader-only",
+            "scope": contract["scope"],
+            "variant": contract["variant"],
+            "mode": mode,
             "exit_code": 0,
             "outer_job_active_before_final_cleanup": 0,
             "outer_job_empty": True,
@@ -57,29 +176,39 @@ def valid_observations(record: object, receipt: dict) -> bool:
         lines = [json.loads(line) for line in record["stdout"].splitlines() if line]
     except (KeyError, ValueError, TypeError, AttributeError):
         return False
-    if len(lines) != 2 or not all(isinstance(line, dict) for line in lines):
+    expected_cases = (
+        [
+            ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
+            ("boundary", "Exited(0)", "FIXED_BOUNDARIES_PASS\n"),
+            ("exit23", "Exited(23)", "FIXED_EXIT23_STARTED\n"),
+            ("timeout", "TimedOut", "FIXED_TIMEOUT_STARTED\n"),
+        ]
+        if boundary
+        else [("loader", "Exited(23)", "FIXED_PSEC_LOADER_STARTED\n")]
+    )
+    if len(lines) != len(expected_cases) + 1 or not all(isinstance(line, dict) for line in lines):
         return False
-    observation = lines[0]
-    if observation.get("direct_handle_signaled") is not True or observation != {
-        "case": "loader",
-        "outcome": "Exited(23)",
-        "direct_handle_signaled": True,
-        "stdout": "FIXED_PSEC_LOADER_STARTED\n",
-        "stderr": "",
-    }:
-        return False
-    final = lines[1]
+    for observation, (case, outcome, marker) in zip(lines[:-1], expected_cases, strict=True):
+        if observation.get("direct_handle_signaled") is not True or observation != {
+            "case": case,
+            "outcome": outcome,
+            "direct_handle_signaled": True,
+            "stdout": marker,
+            "stderr": "",
+        }:
+            return False
+    final = lines[-1]
     return (
         final.get("axis_commit") == artifact_verifier.AXIS_COMMIT
         and final.get("mxc_commit") == artifact_verifier.MXC_COMMIT
         and final.get("translation_contract") == "fixed-axis-hard-block-to-mxc-typed-1.0.0"
         and final.get("backend") == "native_windows_psec_only"
         and final.get("production_qualification") is False
-        and final.get("loader_only_diagnostic") is True
+        and final.get("loader_only_diagnostic") is (not boundary)
         and isinstance(final.get("checks"), list)
         and all(isinstance(check, str) for check in final["checks"])
-        and len(final["checks"]) == len(CHECKS)
-        and set(final["checks"]) == CHECKS
+        and len(final["checks"]) == len(checks)
+        and set(final["checks"]) == checks
     )
 
 
@@ -109,19 +238,21 @@ class Capture:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--loader-only", action="store_true", required=True)
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--loader-only", action="store_true")
+    modes.add_argument("--standalone-boundary", action="store_true")
     parser.add_argument("--custody", type=Path, required=True)
     parser.add_argument("--custody-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--receipt-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
+    mode = "standalone-boundary" if args.standalone_boundary else "loader-only"
+    contract = artifact_verifier.artifact_contract(mode)
     if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise RuntimeError("live probe requires native Windows x86_64")
     custody = args.custody.absolute()
     receipt_path = args.receipt.absolute()
-    if hashlib.sha256(artifact_verifier.ordinary_file(custody)).hexdigest() != args.custody_sha256:
-        raise ValueError("the explicitly pinned contributor custody binary differs")
     receipt_raw = artifact_verifier.ordinary_file(receipt_path, 64 * 1024)
     if hashlib.sha256(receipt_raw).hexdigest() != args.receipt_sha256:
         raise ValueError("the independently pinned verification receipt differs")
@@ -130,8 +261,8 @@ def main() -> None:
         not isinstance(receipt, dict)
         or receipt.get("verified") is not True
         or receipt.get("execution_performed") is not False
-        or receipt.get("variant") != artifact_verifier.VARIANT
-        or receipt.get("scope") != artifact_verifier.SCOPE
+        or receipt.get("variant") != contract["variant"]
+        or receipt.get("scope") != contract["scope"]
     ):
         raise ValueError("an independently verified non-executing receipt is required")
     evidence = args.evidence.absolute()
@@ -151,7 +282,7 @@ def main() -> None:
     }
     command = [
         str(custody),
-        "-loader-only",
+        "-" + mode,
         "-receipt",
         str(receipt_path),
         "-receipt-sha256",
@@ -166,6 +297,7 @@ def main() -> None:
     exit_code = None
     process = None
     readers = []
+    custody_pin = pin_custody(custody, args.custody_sha256)
     try:
         process = subprocess.Popen(
             command,
@@ -188,16 +320,11 @@ def main() -> None:
             deadline = True
             # This Popen retains the exact helper process handle. Killing it
             # closes its non-inherited Job handle; never signal an inferred PID.
-            process.kill()
-            exit_code = process.wait(timeout=5)
-    except (OSError, subprocess.SubprocessError) as error:
+            exit_code = stop_owned(process, errors)
+    except PROCESS_ERRORS as error:
         errors.append(type(error).__name__)
-        if process is not None and process.poll() is None:
-            process.kill()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                errors.append("owned custody handle did not stop")
+        if process is not None:
+            exit_code = stop_owned(process, errors)
     finally:
         for reader in readers:
             reader.join(timeout=2)
@@ -208,8 +335,11 @@ def main() -> None:
                 # Do not block closing a stream concurrently owned by a stuck
                 # reader. That path is a failed qualification, with daemon
                 # readers and handles reclaimed when this CLI process exits.
-                if stream is not None and not reader.is_alive():
-                    stream.close()
+                close_finished_stream(stream, reader, errors)
+        try:
+            custody_pin.close()
+        except (OSError, ValueError) as error:
+            errors.append("custody image pin close failed: " + type(error).__name__)
     output_bytes, output_overflow, output_error = output.snapshot()
     diagnostic_bytes, diagnostic_overflow, diagnostic_error = diagnostic.snapshot()
     for name, data in [("custody-stdout.json", output_bytes), ("custody-stderr.txt", diagnostic_bytes)]:
@@ -230,7 +360,7 @@ def main() -> None:
         and output_error is None
         and diagnostic_error is None
         and not fixtures
-        and valid_observations(result, receipt)
+        and valid_observations(result, receipt, mode)
     )
     record = {
         "passed": passed,
@@ -246,8 +376,12 @@ def main() -> None:
         "retained_owned_fixtures": fixtures,
         "observations": result,
         "production_or_claude_qualification": False,
+        "mode": mode,
         "scope": (
-            "fixed std-only loader diagnostic; marker, exit23 and owned custody only; "
+            "fixed local canaries and literal argv only; loopback endpoints only; "
+            "no terminal, credentials, model or general resource audit"
+            if mode == "standalone-boundary"
+            else "fixed std-only loader diagnostic; marker, exit23 and owned custody only; "
             "no filesystem/network boundary, terminal, proxy, secrets, model or general resource audit"
         ),
     }

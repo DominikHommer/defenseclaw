@@ -55,10 +55,80 @@ func writeReceipt(t *testing.T, path string, value receipt, extra []byte) string
 	return hex.EncodeToString(digest[:])
 }
 
+func syntheticBoundaryReceipt(t *testing.T) (string, receipt) {
+	t.Helper()
+	path, value := syntheticReceipt(t)
+	content, err := os.ReadFile(filepath.Join(value.Artifact, filepath.FromSlash(binaryName)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(boundaryName)), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	value.Scope, value.Variant = boundaryScope, boundaryVariant
+	value.Binaries = append(value.Binaries, component{Path: boundaryName, SHA256: value.BinarySHA, Size: value.BinarySize})
+	return path, value
+}
+
+func TestModesRequireExactlyOneExplicitChoice(t *testing.T) {
+	for _, choice := range [][2]bool{{false, false}, {true, true}} {
+		if _, err := selectedMode(choice[0], choice[1]); err == nil {
+			t.Fatal("ambiguous fixed mode accepted")
+		}
+	}
+	for _, choice := range []struct {
+		loader, boundary bool
+		mode             string
+	}{{true, false, "loader-only"}, {false, true, "standalone-boundary"}} {
+		if mode, err := selectedMode(choice.loader, choice.boundary); err != nil || mode != choice.mode {
+			t.Fatal("explicit mode differs")
+		}
+	}
+}
+
+func TestBoundaryReceiptRequiresItsOwnModeAndAllThreeImages(t *testing.T) {
+	path, value := syntheticBoundaryReceipt(t)
+	pin := writeReceipt(t, path, value, nil)
+	if _, images, err := checkedReceipt(path, pin, "loader-only"); err == nil {
+		images.Close()
+		t.Fatal("boundary accepted as loader")
+	}
+	_, images, err := checkedReceipt(path, pin, "standalone-boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer images.Close()
+	if len(images) != 3 {
+		t.Fatal("complete boundary bundle is not held")
+	}
+	if file, err := os.OpenFile(filepath.Join(value.Artifact, filepath.FromSlash(boundaryName)), os.O_WRONLY, 0); err == nil {
+		file.Close()
+		t.Fatal("third image can be overwritten while pinned")
+	}
+}
+
+func TestBoundaryRejectsMissingOrTamperedThirdImage(t *testing.T) {
+	path, value := syntheticBoundaryReceipt(t)
+	pin := writeReceipt(t, path, value, nil)
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(boundaryName)), []byte("tampered"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, images, err := checkedReceipt(path, pin, "standalone-boundary"); err == nil {
+		images.Close()
+		t.Fatal("changed third image accepted")
+	}
+	value.Binaries = value.Binaries[:2]
+	pin = writeReceipt(t, path, value, nil)
+	if _, images, err := checkedReceipt(path, pin, "standalone-boundary"); err == nil {
+		images.Close()
+		t.Fatal("missing third image accepted")
+	}
+}
+
 func TestReceiptMustBeIndependentlyPinned(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	writeReceipt(t, path, value, nil)
-	if _, image, err := checkedReceipt(path, strings.Repeat("0", 64)); err == nil {
+	if _, image, err := checkedReceipt(path, strings.Repeat("0", 64), "loader-only"); err == nil {
 		image.Close()
 		t.Fatal("changed receipt accepted")
 	}
@@ -68,7 +138,7 @@ func TestMissingExplicitNonExecutionEvidenceRefused(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	value.ExecutionPerformed = nil
 	pin := writeReceipt(t, path, value, nil)
-	if _, image, err := checkedReceipt(path, pin); err == nil {
+	if _, image, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		image.Close()
 		t.Fatal("missing false execution evidence accepted")
 	}
@@ -78,7 +148,7 @@ func TestDifferentCombinedLockRefused(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	value.Lock = strings.Repeat("d", 64)
 	pin := writeReceipt(t, path, value, nil)
-	if _, image, err := checkedReceipt(path, pin); err == nil {
+	if _, image, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		image.Close()
 		t.Fatal("unreviewed lock accepted")
 	}
@@ -87,7 +157,7 @@ func TestDifferentCombinedLockRefused(t *testing.T) {
 func TestTrailingJSONRefused(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	pin := writeReceipt(t, path, value, []byte("\n{}"))
-	if _, image, err := checkedReceipt(path, pin); err == nil {
+	if _, image, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		image.Close()
 		t.Fatal("trailing JSON accepted")
 	}
@@ -99,7 +169,7 @@ func TestChangedBinaryRefused(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(binaryName)), []byte("tampered"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, image, err := checkedReceipt(path, pin); err == nil {
+	if _, image, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		image.Close()
 		t.Fatal("changed binary accepted")
 	}
@@ -109,7 +179,7 @@ func TestBothDiagnosticImagesAreRequired(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	value.Binaries = value.Binaries[:1]
 	pin := writeReceipt(t, path, value, nil)
-	if _, images, err := checkedReceipt(path, pin); err == nil {
+	if _, images, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		images.Close()
 		t.Fatal("missing loader image accepted")
 	}
@@ -120,7 +190,7 @@ func TestHeadlessReceiptCannotBecomeLoaderDiagnostic(t *testing.T) {
 	value.Scope = "fixed_windows_native_psec_only_headless"
 	value.Variant = ""
 	pin := writeReceipt(t, path, value, nil)
-	if _, images, err := checkedReceipt(path, pin); err == nil {
+	if _, images, err := checkedReceipt(path, pin, "loader-only"); err == nil {
 		images.Close()
 		t.Fatal("historical headless variant accepted as loader diagnostic")
 	}
@@ -129,7 +199,7 @@ func TestHeadlessReceiptCannotBecomeLoaderDiagnostic(t *testing.T) {
 func TestVerifiedImageRemainsPinnedAgainstWrites(t *testing.T) {
 	path, value := syntheticReceipt(t)
 	pin := writeReceipt(t, path, value, nil)
-	_, image, err := checkedReceipt(path, pin)
+	_, image, err := checkedReceipt(path, pin, "loader-only")
 	if err != nil {
 		t.Fatal(err)
 	}

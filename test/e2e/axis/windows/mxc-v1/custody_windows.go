@@ -32,6 +32,9 @@ const binaryName = "bin/defenseclaw-axis-windows-psec-probe.exe"
 const loaderName = "bin/defenseclaw-axis-windows-psec-loader-child.exe"
 const diagnosticVariant = "separate_std_loader_diagnostic"
 const diagnosticScope = "fixed_windows_native_psec_loader_diagnostic"
+const boundaryName = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
+const boundaryVariant = "standalone_std_boundary_literal_argv"
+const boundaryScope = "fixed_windows_native_psec_boundary_literal_argv"
 const combinedLock = "3b29ecb06dd2a81266c84712f8d6e088605290f386e87498bb7a7472a005af69"
 const outputBound = 64 * 1024
 
@@ -131,7 +134,15 @@ func pinFile(path string, maximum int64) (*os.File, string, error) {
 	return file, hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func checkedReceipt(path, expectedSHA string) (*receipt, pinnedImages, error) {
+func checkedReceipt(path, expectedSHA, mode string) (*receipt, pinnedImages, error) {
+	variant, scope := diagnosticVariant, diagnosticScope
+	seen := map[string]bool{binaryName: false, loaderName: false}
+	if mode == "standalone-boundary" {
+		variant, scope = boundaryVariant, boundaryScope
+		seen[boundaryName] = false
+	} else if mode != "loader-only" {
+		return nil, nil, errors.New("unknown fixed mode")
+	}
 	if !shaPattern.MatchString(expectedSHA) {
 		return nil, nil, errors.New("an explicit receipt SHA256 pin is required")
 	}
@@ -157,7 +168,7 @@ func checkedReceipt(path, expectedSHA string) (*receipt, pinnedImages, error) {
 	}
 	if !value.Verified || value.ExecutionPerformed == nil || *value.ExecutionPerformed ||
 		value.ProductionCertification == nil || *value.ProductionCertification ||
-		value.Scope != diagnosticScope || value.Variant != diagnosticVariant ||
+		value.Scope != scope || value.Variant != variant ||
 		value.Axis != "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c" ||
 		value.MXC != "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2" ||
 		value.Lock != combinedLock || value.Binary != binaryName ||
@@ -166,10 +177,9 @@ func checkedReceipt(path, expectedSHA string) (*receipt, pinnedImages, error) {
 		!shaPattern.MatchString(value.BinarySHA) || value.BinarySize <= 0 || value.BinarySize > 64*1024*1024 {
 		return nil, nil, errors.New("the reviewed locked Windows PSEC verification receipt is required")
 	}
-	if len(value.Binaries) != 2 {
-		return nil, nil, errors.New("both exact diagnostic binaries are required")
+	if len(value.Binaries) != len(seen) {
+		return nil, nil, errors.New("all exact fixed-mode binaries are required")
 	}
-	seen := map[string]bool{binaryName: false, loaderName: false}
 	var images pinnedImages
 	for _, item := range value.Binaries {
 		present, allowed := seen[item.Path]
@@ -269,9 +279,9 @@ func childPipe() (windows.Handle, *os.File, error) {
 	return write, os.NewFile(uintptr(read), "owned-output-pipe"), nil
 }
 
-func run(value *receipt, root string) (record map[string]any, resultErr error) {
+func run(value *receipt, root, mode string) (record map[string]any, resultErr error) {
 	record = map[string]any{"passed": false, "production_certification": false, "scope": value.Scope,
-		"variant": value.Variant, "mode": "loader-only",
+		"variant": value.Variant, "mode": mode,
 		"binary_sha256": value.BinarySHA, "build_commit": value.BuildCommit, "build_run": value.BuildRun,
 		"combined_lock_sha256": value.Lock, "artifact_id": value.ArtifactID}
 	if !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(root), "psec-headless-") {
@@ -367,7 +377,12 @@ func run(value *receipt, root string) (record map[string]any, resultErr error) {
 	if err != nil {
 		return record, err
 	}
-	command := []string{binary, "--loader-only"}
+	command := []string{binary}
+	if mode == "loader-only" {
+		command = append(command, "--loader-only")
+	} else if mode != "standalone-boundary" {
+		return record, errors.New("unknown fixed mode")
+	}
 	commandLine, err := windows.UTF16PtrFromString(windows.ComposeCommandLine(command))
 	if err != nil {
 		return record, err
@@ -461,24 +476,36 @@ func run(value *receipt, root string) (record map[string]any, resultErr error) {
 	return record, nil
 }
 
+func selectedMode(loader, boundary bool) (string, error) {
+	if loader == boundary {
+		return "", errors.New("exactly one fixed mode is required")
+	}
+	if boundary {
+		return "standalone-boundary", nil
+	}
+	return "loader-only", nil
+}
+
 func main() {
 	loaderOnly := flag.Bool("loader-only", false, "explicit fixed std-only loader diagnostic")
+	boundary := flag.Bool("standalone-boundary", false, "explicit fixed std-only boundary and literal argv cases")
 	receiptPath := flag.String("receipt", "", "absolute independently verified receipt")
 	receiptSHA := flag.String("receipt-sha256", "", "reviewed receipt SHA256")
 	caseRoot := flag.String("case-root", "", "absolute fresh psec-headless-* case path")
 	flag.Parse()
-	if flag.NArg() != 0 || !*loaderOnly {
-		fmt.Fprintln(os.Stderr, "explicit -loader-only is required; no workload arguments accepted")
+	mode, modeErr := selectedMode(*loaderOnly, *boundary)
+	if flag.NArg() != 0 || modeErr != nil {
+		fmt.Fprintln(os.Stderr, "exactly one fixed mode is required; no workload arguments accepted")
 		os.Exit(2)
 	}
-	value, image, err := checkedReceipt(*receiptPath, *receiptSHA)
+	value, image, err := checkedReceipt(*receiptPath, *receiptSHA, mode)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	defer image.Close()
 	started := time.Now()
-	record, err := run(value, *caseRoot)
+	record, err := run(value, *caseRoot, mode)
 	record["elapsed_seconds"] = time.Since(started).Seconds()
 	if err != nil {
 		record["error"] = err.Error()

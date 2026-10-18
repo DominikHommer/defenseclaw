@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import struct
 import tempfile
@@ -174,6 +175,153 @@ class ArtifactVerificationTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "artifact identity"),
         ):
             verify.verify_github(456, 123, self.commit, "b" * 64)
+
+
+class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mode = "standalone-boundary"
+        contract = verify.artifact_contract(self.mode)
+        for name, git_path in contract["sources"].items():
+            if "source/" + name not in self.files:
+                self.files["source/" + name] = ("synthetic:" + name).encode()
+            self.sources[git_path] = self.files["source/" + name]
+        self.files[verify.BOUNDARY_BINARY] = self.files[verify.BINARY]
+        literal = verify.sha256(self.files["source/patches/mxc-literal-argv.patch"])
+        windows = verify.sha256(self.files["source/patches/mxc-windows-literal-argv.patch"])
+        sdk_lock = verify.sha256(self.files["upstream/mxc-Cargo.lock"])
+        mock.patch.object(verify, "LITERAL_OVERLAY_SHA256", literal).start()
+        mock.patch.object(verify, "BOUNDARY_OVERLAY_SHA256", windows).start()
+        mock.patch.object(verify, "SDK_LOCK_SHA256", sdk_lock).start()
+        self.provenance.update(
+            variant=verify.BOUNDARY_VARIANT,
+            scope=verify.BOUNDARY_SCOPE,
+            mxc_patched_paths=sorted(verify.BOUNDARY_MODIFIED_PATHS),
+            mxc_added_paths=sorted(verify.BOUNDARY_ADDED_PATHS),
+            mxc_overlay_file_sha256=dict(verify.BOUNDARY_OVERLAY_FILES),
+            mxc_literal_argv_patch_sha256=literal,
+            mxc_literal_argv_patch_source="test/e2e/axis/patches/mxc-literal-argv.patch",
+            mxc_windows_argv_patch_sha256=windows,
+        )
+        self.admission = {
+            "tests": list(verify.SDK_TESTS),
+            "passed": 10,
+            "sandbox_or_payload_execution": False,
+            "native_file_fixture_tests": 1,
+            "upstream_lock_sha256": sdk_lock,
+        }
+        self.write_artifact()
+
+    def write_artifact(self) -> None:
+        if not hasattr(self, "mode"):
+            return super().write_artifact()
+        self.provenance["files"] = {name: verify.sha256(data) for name, data in self.files.items()}
+        for name, data in self.files.items():
+            target = self.artifact / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        for name, value in [
+            ("PROVENANCE.json", self.provenance),
+            ("WORKFLOW.json", self.workflow),
+            ("SDK-ADMISSION-TESTS.json", self.admission),
+        ]:
+            (self.artifact / name).write_text(json.dumps(value), encoding="utf-8")
+        with zipfile.ZipFile(self.archive, "w") as bundle:
+            for name in sorted(verify.artifact_contract(self.mode)["all_files"]):
+                bundle.write(self.artifact / name, "build-artifact/" + name)
+            bundle.writestr("Cargo.lock", self.files["source/Cargo.lock"])
+
+    def run_verify(self, mode: str | None = None) -> dict:
+        with (
+            mock.patch.object(verify, "git_blob", side_effect=self.git_blob),
+            mock.patch.object(verify, "verify_github"),
+        ):
+            return verify.verify(
+                self.artifact,
+                self.archive,
+                self.root,
+                self.root,
+                self.root,
+                verify.sha256(self.archive.read_bytes()),
+                verify.sha256((self.artifact / "PROVENANCE.json").read_bytes()),
+                self.commit,
+                123,
+                456,
+                self.mode if mode is None else mode,
+            )
+
+    def test_boundary_cannot_be_accepted_as_loader_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "build contract"):
+            self.run_verify("loader-only")
+
+    def test_boundary_requires_exact_nonignored_sdk_test_evidence(self) -> None:
+        for name, value in [("passed", 9), ("native_file_fixture_tests", True), ("sandbox_or_payload_execution", 0)]:
+            with self.subTest(name=name):
+                original = self.admission[name]
+                self.admission[name] = value
+                self.write_artifact()
+                with self.assertRaisesRegex(ValueError, "SDK admission test evidence"):
+                    self.run_verify()
+                self.admission[name] = original
+
+    def test_forged_added_source_fingerprint_is_refused(self) -> None:
+        self.provenance["mxc_overlay_file_sha256"][sorted(verify.BOUNDARY_ADDED_PATHS)[0]] = "0" * 64
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "SDK source fingerprint digest"):
+            self.run_verify()
+
+    def test_third_image_change_is_refused(self) -> None:
+        (self.artifact / verify.BOUNDARY_BINARY).write_bytes(b"changed third image")
+        with self.assertRaisesRegex(ValueError, "artifact file changed"):
+            self.run_verify()
+
+
+class BoundedFileTests(unittest.TestCase):
+    def test_growth_after_stat_cannot_exceed_the_read_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary).resolve() / "synthetic.bin"
+            path.write_bytes(b"x")
+            source = io.BytesIO(b"grown")
+            with mock.patch.object(Path, "open", return_value=source):
+                with self.assertRaisesRegex(ValueError, "grew beyond its read bound"):
+                    verify.ordinary_file(path, 4)
+            self.assertTrue(source.closed)
+
+
+class GitHubBuildAdmissionTests(unittest.TestCase):
+    def test_isolated_branch_requires_explicit_boundary_dispatch(self) -> None:
+        commit, digest = "a" * 40, "b" * 64
+        artifact = {
+            "id": 456,
+            "name": "axis-mxc-v1-windows-contributor-" + commit,
+            "expired": False,
+            "digest": "sha256:" + digest,
+            "workflow_run": {"id": 123, "head_sha": commit},
+        }
+        baseline = {
+            "id": 123,
+            "head_sha": commit,
+            "path": verify.WORKFLOW,
+            "repository": {"full_name": verify.REPOSITORY},
+            "head_repository": {"full_name": verify.REPOSITORY},
+            "status": "completed",
+            "conclusion": "success",
+        }
+        for mode, branch, event, accepted in [
+            ("loader-only", "codex/axis-sandbox-feasibility", "push", True),
+            ("standalone-boundary", "codex/axis-native-build", "workflow_dispatch", True),
+            ("loader-only", "codex/axis-native-build", "workflow_dispatch", False),
+            ("standalone-boundary", "codex/axis-native-build", "push", False),
+            ("standalone-boundary", "unreviewed-branch", "workflow_dispatch", False),
+        ]:
+            with self.subTest(mode=mode, branch=branch, event=event):
+                run = {**baseline, "head_branch": branch, "event": event}
+                with mock.patch.object(verify, "github_json", side_effect=[artifact, run]):
+                    if accepted:
+                        verify.verify_github(456, 123, commit, digest, mode)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "workflow did not succeed"):
+                            verify.verify_github(456, 123, commit, digest, mode)
 
 
 if __name__ == "__main__":

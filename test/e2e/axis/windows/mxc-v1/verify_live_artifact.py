@@ -54,6 +54,112 @@ FILES = {"source/" + name for name in SOURCE_FILES} | {
     "upstream/mxc-LICENSE",
 }
 ALL_FILES = FILES | {"PROVENANCE.json", "WORKFLOW.json"}
+BOUNDARY_BINARY = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
+BOUNDARY_VARIANT = "standalone_std_boundary_literal_argv"
+BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_literal_argv"
+BOUNDARY_OVERLAY_SHA256 = "da5ba589f8ca09d70f30af1e43c5e3169e0223affe08c6cc9e14f92cf230e3aa"
+LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
+SDK_LOCK_SHA256 = "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0"
+SDK_TEST_GROUPS = {
+    "core_modules::mxc_engine::strict_psec_tests": [
+        "strict_psec_refuses_fallback_dry_run_and_other_backends_before_spawn",
+        "contributor_psec_admission_only_accepts_fixed_offline_posture",
+    ],
+    "v1::strict_windows_psec_argv_tests": [
+        "preparation_preserves_literal_arguments_and_closed_native_options",
+        "preparation_rejects_legacy_ambiguity_other_backend_and_missing_filesystem",
+        "preparation_refuses_network_allow_before_any_native_creation",
+        "preparation_refuses_normalization_that_drops_a_covering_grant",
+    ],
+    "backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests": [
+        "explicit_application_and_native_quoting_preserve_literal_values",
+        "native_limit_and_invalid_application_fail_before_resource_creation",
+    ],
+    "backend_modules::process_container::common::base_container_runner::strict_windows_path_tests": [
+        "local_lexical_admission_accepts_only_unambiguous_drive_paths",
+        "native_local_file_custody_holds_image_against_write_without_spawning",
+    ],
+}
+SDK_TESTS = [group + "::" + name for group, names in SDK_TEST_GROUPS.items() for name in names]
+BOUNDARY_MODIFIED_PATHS = PATCHED_PATHS | {
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs",
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs",
+    "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs",
+    "src/mxc-sdk/src/core/mxc_common/mod.rs",
+    "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs",
+    "src/mxc-sdk/src/core/mxc_common/validator.rs",
+    "src/mxc-sdk/src/policy.rs",
+    "src/mxc-sdk/src/policy/exact/mod.rs",
+}
+BOUNDARY_ADDED_PATHS = {
+    "src/mxc-sdk/src/core/mxc_common/literal_argv.rs",
+    "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs",
+    "src/mxc-sdk/src/literal_argv.rs",
+}
+
+
+# Exact reviewed fda source with the three pinned overlays, including the typed flag fix.
+BOUNDARY_OVERLAY_FILES = {
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
+        "752a526612d9e4d5c507b2084433c03c348fc611f7d9ddda0c08b4104e07a4ed"
+    ),
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs": (
+        "522dc19070819955d0933b0e18ef4124b16a3a33afa5f4acf22d7d1bea18283b"
+    ),
+    "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
+        "7d82f2a5c8a69594fbbdb511b4bb6f508846d70223d279a87ddfabba572ffdbf"
+    ),
+    "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
+        "9458c371a352a09ea70df3fca580e4b07bd0d82817262ada2d633fce56fa256b"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/literal_argv.rs": (
+        "3291f38ae3ca95ee36b4867862dfa815e5b28af2ba278af96e8e4ca1c9a7440e"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/mod.rs": ("baa030e7f08d5d90507da788618de690fded3cfbe7203819c1a8d7a63d6943c6"),
+    "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs": (
+        "4d25493dbbf4295e5fbe093a364c4d4f71eb5f33368183ce5cd367a623eb4698"
+    ),
+    "src/mxc-sdk/src/core/mxc_common/validator.rs": (
+        "52354ae2ee8c33ee48438648ef7b5139492f2a8c219e02627b9d2f82d741579d"
+    ),
+    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs": ("1cb0d3e36407cbae3c7942a93078926bd5c70f4dd711fd9edc147c1324e8bb6e"),
+    "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs": (
+        "3e88ef2b03bd29dd122f25d51973ea3f79017af5d06b08513ae5512dea528479"
+    ),
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs": ("67ff4af0b57c1e3adb51e638ec56796981d46daa75a3f2d6d7d6b7bbcd7e2cf5"),
+    "src/mxc-sdk/src/lib.rs": ("4f9c1e49c52ffad33864fee9e83a22dfa30b26034386024fdf930534e46556b4"),
+    "src/mxc-sdk/src/literal_argv.rs": ("2526447ed5d2c29ceb0d0bd4788ce573b5c4440d225c328b8b6aab01fe3ea059"),
+    "src/mxc-sdk/src/policy/exact/mod.rs": ("dc10991d33dda35658c826e1494a3c6a51ff50e558c636a030af28475c398bc7"),
+    "src/mxc-sdk/src/policy.rs": ("38e0ab07e8b5fb01e20a167902197a961930fa9e6799050ce3b4cd78c3f918fa"),
+}
+
+
+def artifact_contract(mode: str = "loader-only") -> dict:
+    if mode not in {"loader-only", "standalone-boundary"}:
+        raise ValueError("unknown fixed artifact mode")
+    boundary = mode == "standalone-boundary"
+    sources = {name: SOURCE_PREFIX + name for name in SOURCE_FILES}
+    binaries = (BINARY, LOADER_BINARY)
+    files = set(FILES)
+    extra = {"PROVENANCE.json", "WORKFLOW.json"}
+    if boundary:
+        for name in ("src/boundary_child.rs", "patches/mxc-windows-literal-argv.patch"):
+            sources[name] = SOURCE_PREFIX + name
+        sources["patches/mxc-literal-argv.patch"] = "test/e2e/axis/patches/mxc-literal-argv.patch"
+        binaries += (BOUNDARY_BINARY,)
+        files |= {"source/" + name for name in sources} | {BOUNDARY_BINARY}
+        extra.add("SDK-ADMISSION-TESTS.json")
+    return {
+        "variant": BOUNDARY_VARIANT if boundary else VARIANT,
+        "scope": BOUNDARY_SCOPE if boundary else SCOPE,
+        "sources": sources,
+        "binaries": binaries,
+        "files": files,
+        "all_files": files | extra,
+        "modified": BOUNDARY_MODIFIED_PATHS if boundary else PATCHED_PATHS,
+    }
+
+
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 96 * 1024 * 1024
 
@@ -86,16 +192,19 @@ def ordinary_file(path: Path, bound: int = MAX_FILE_BYTES) -> bytes:
         require(not getattr(metadata, "st_file_attributes", 0) & 0x400, "reparse-point path refused")
     metadata = path.stat()
     require(stat.S_ISREG(metadata.st_mode) and metadata.st_size <= bound, "file type or size differs")
-    return path.read_bytes()
+    with path.open("rb") as source:
+        data = source.read(bound + 1)
+    require(len(data) <= bound, "file grew beyond its read bound")
+    return data
 
 
-def payload_file(root: Path, name: str) -> bytes:
-    require(name in ALL_FILES, "path outside the exact artifact inventory")
+def payload_file(root: Path, name: str, allowed: set[str] = ALL_FILES) -> bytes:
+    require(name in allowed, "path outside the exact artifact inventory")
     return ordinary_file(root.joinpath(*PurePosixPath(name).parts))
 
 
-def exact_inventory(root: Path) -> set[str]:
-    directories = {str(parent) for name in ALL_FILES for parent in PurePosixPath(name).parents if str(parent) != "."}
+def exact_inventory(root: Path, allowed: set[str] = ALL_FILES) -> set[str]:
+    directories = {str(parent) for name in allowed for parent in PurePosixPath(name).parents if str(parent) != "."}
     pending = [root]
     files = set()
     entries = 0
@@ -113,7 +222,7 @@ def exact_inventory(root: Path) -> set[str]:
                 require(name in directories, "unreviewed artifact directory")
                 pending.append(path)
             else:
-                require(name in ALL_FILES and stat.S_ISREG(metadata.st_mode), "unreviewed artifact entry")
+                require(name in allowed and stat.S_ISREG(metadata.st_mode), "unreviewed artifact entry")
                 files.add(name)
     return files
 
@@ -144,7 +253,9 @@ def github_json(endpoint: str) -> dict:
     return value
 
 
-def verify_github(artifact_id: int, run_id: int, build_commit: str, archive_sha256: str) -> None:
+def verify_github(
+    artifact_id: int, run_id: int, build_commit: str, archive_sha256: str, mode: str = "loader-only"
+) -> None:
     artifact = github_json(f"artifacts/{artifact_id}")
     run = github_json(f"runs/{run_id}")
     require(
@@ -160,7 +271,14 @@ def verify_github(artifact_id: int, run_id: int, build_commit: str, archive_sha2
         run.get("id") == run_id
         and run.get("head_sha") == build_commit
         and run.get("path") == WORKFLOW
-        and run.get("head_branch") == "codex/axis-sandbox-feasibility"
+        and (
+            run.get("head_branch") == "codex/axis-sandbox-feasibility"
+            or (
+                mode == "standalone-boundary"
+                and run.get("event") == "workflow_dispatch"
+                and run.get("head_branch") == "codex/axis-native-build"
+            )
+        )
         and run.get("repository", {}).get("full_name") == REPOSITORY
         and run.get("head_repository", {}).get("full_name") == REPOSITORY
         and run.get("event") in {"push", "workflow_dispatch"}
@@ -170,9 +288,9 @@ def verify_github(artifact_id: int, run_id: int, build_commit: str, archive_sha2
     )
 
 
-def verify_archive(archive: Path, artifact: Path, archive_sha256: str) -> None:
+def verify_archive(archive: Path, artifact: Path, archive_sha256: str, allowed: set[str] = ALL_FILES) -> None:
     require(sha256(ordinary_file(archive, MAX_ARCHIVE_BYTES)) == archive_sha256, "outer archive digest differs")
-    expected = {"build-artifact/" + name for name in ALL_FILES} | {"Cargo.lock"}
+    expected = {"build-artifact/" + name for name in allowed} | {"Cargo.lock"}
     with zipfile.ZipFile(archive) as bundle:
         members = bundle.infolist()
         require(len(members) <= 64, "too many ZIP entries")
@@ -190,7 +308,9 @@ def verify_archive(archive: Path, artifact: Path, archive_sha256: str) -> None:
             total += member.file_size
             require(total <= MAX_ARCHIVE_BYTES, "oversized ZIP payload")
             relative = name.removeprefix("build-artifact/") if name != "Cargo.lock" else "source/Cargo.lock"
-            require(bundle.read(member) == payload_file(artifact, relative), "ZIP and extracted artifact differ")
+            require(
+                bundle.read(member) == payload_file(artifact, relative, allowed), "ZIP and extracted artifact differ"
+            )
         require(names == expected, "ZIP inventory differs")
 
 
@@ -205,15 +325,21 @@ def verify(
     build_commit: str,
     run_id: int,
     artifact_id: int,
+    mode: str = "loader-only",
 ) -> dict:
+    contract = artifact_contract(mode)
+
+    def read(name: str) -> bytes:
+        return payload_file(artifact, name, contract["all_files"])
+
     require(artifact.is_absolute() and artifact.is_dir(), "absolute extracted artifact directory required")
-    provenance_raw = payload_file(artifact, "PROVENANCE.json")
+    provenance_raw = read("PROVENANCE.json")
     require(sha256(provenance_raw) == provenance_sha256, "external provenance pin differs")
     provenance = json.loads(provenance_raw)
     require(isinstance(provenance, dict), "provenance must be an object")
     required = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
-        "variant": VARIANT,
+        "variant": contract["variant"],
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "combined_lock_sha256": COMBINED_LOCK_SHA256,
@@ -221,9 +347,9 @@ def verify(
         "probe_executed": False,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": True,
-        "scope": SCOPE,
+        "scope": contract["scope"],
         "production_certification": False,
-        "mxc_patched_paths": sorted(PATCHED_PATHS),
+        "mxc_patched_paths": sorted(contract["modified"]),
     }
     for key, expected in required.items():
         require(
@@ -231,29 +357,27 @@ def verify(
             "build contract differs: " + key,
         )
     inventory = provenance.get("files")
-    require(isinstance(inventory, dict) and set(inventory) == FILES, "provenance inventory differs")
-    actual = exact_inventory(artifact)
-    require(actual == ALL_FILES, "extracted artifact has missing or additional files")
+    require(isinstance(inventory, dict) and set(inventory) == contract["files"], "provenance inventory differs")
+    actual = exact_inventory(artifact, contract["all_files"])
+    require(actual == contract["all_files"], "extracted artifact has missing or additional files")
     for name, expected in inventory.items():
         require(
             isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{64}", expected) is not None, "invalid file digest"
         )
-        require(sha256(payload_file(artifact, name)) == expected, "artifact file changed: " + name)
-    for name in SOURCE_FILES:
+        require(sha256(read(name)) == expected, "artifact file changed: " + name)
+    for name, source_path in contract["sources"].items():
         require(
-            payload_file(artifact, "source/" + name) == git_blob(checkout, build_commit, SOURCE_PREFIX + name),
+            read("source/" + name) == git_blob(checkout, build_commit, source_path),
             "source Git blob differs: " + name,
         )
-    require(
-        sha256(payload_file(artifact, "source/Cargo.lock")) == COMBINED_LOCK_SHA256, "reviewed combined lock differs"
-    )
+    require(sha256(read("source/Cargo.lock")) == COMBINED_LOCK_SHA256, "reviewed combined lock differs")
     upstream_hashes = {}
     for name, source, commit, lock, license_name in [
         ("axis", axis, AXIS_COMMIT, "Cargo.lock", "LICENSE"),
         ("mxc", mxc, MXC_COMMIT, "src/Cargo.lock", "LICENSE.md"),
     ]:
         for packaged, git_path in [(f"upstream/{name}-Cargo.lock", lock), (f"upstream/{name}-LICENSE", license_name)]:
-            raw = payload_file(artifact, packaged)
+            raw = read(packaged)
             git_bytes = git_blob(source, commit, git_path)
             require(
                 raw == git_bytes or raw.replace(b"\r\n", b"\n") == git_bytes, "upstream Git bytes differ: " + packaged
@@ -262,11 +386,51 @@ def verify(
                 upstream_hashes[name] = sha256(raw)
     require(provenance.get("upstream_lock_sha256") == upstream_hashes, "raw upstream lock digests differ")
     require(
-        sha256(payload_file(artifact, "source/patches/mxc-strict-windows-psec.patch"))
-        == provenance.get("mxc_patch_sha256"),
+        sha256(read("source/patches/mxc-strict-windows-psec.patch")) == provenance.get("mxc_patch_sha256"),
         "reviewed SDK overlay differs",
     )
-    toolchain = payload_file(artifact, "TOOLCHAIN.txt")
+    if mode == "standalone-boundary":
+        require(upstream_hashes["mxc"] == SDK_LOCK_SHA256, "SDK admission upstream lock differs")
+        require(provenance.get("mxc_added_paths") == sorted(BOUNDARY_ADDED_PATHS), "added SDK paths differ")
+        fingerprints = provenance.get("mxc_overlay_file_sha256")
+        require(
+            isinstance(fingerprints, dict) and set(fingerprints) == BOUNDARY_MODIFIED_PATHS | BOUNDARY_ADDED_PATHS,
+            "SDK source fingerprint inventory differs",
+        )
+        require(fingerprints == BOUNDARY_OVERLAY_FILES, "SDK source fingerprint digest differs")
+        require(
+            sha256(read("source/patches/mxc-literal-argv.patch"))
+            == LITERAL_OVERLAY_SHA256
+            == provenance.get("mxc_literal_argv_patch_sha256"),
+            "shared literal overlay differs",
+        )
+        require(
+            provenance.get("mxc_literal_argv_patch_source") == "test/e2e/axis/patches/mxc-literal-argv.patch",
+            "shared overlay source differs",
+        )
+        require(
+            sha256(read("source/patches/mxc-windows-literal-argv.patch"))
+            == BOUNDARY_OVERLAY_SHA256
+            == provenance.get("mxc_windows_argv_patch_sha256"),
+            "Windows literal overlay differs",
+        )
+        admission = json.loads(read("SDK-ADMISSION-TESTS.json"))
+        require(
+            isinstance(admission, dict)
+            and type(admission.get("passed")) is int
+            and type(admission.get("native_file_fixture_tests")) is int
+            and admission.get("sandbox_or_payload_execution") is False
+            and admission
+            == {
+                "tests": SDK_TESTS,
+                "passed": 10,
+                "sandbox_or_payload_execution": False,
+                "native_file_fixture_tests": 1,
+                "upstream_lock_sha256": SDK_LOCK_SHA256,
+            },
+            "exact SDK admission test evidence differs",
+        )
+    toolchain = read("TOOLCHAIN.txt")
     require(
         toolchain.startswith(b"rustc 1.95.0 ")
         and b"host: x86_64-pc-windows-msvc" in toolchain
@@ -274,8 +438,8 @@ def verify(
         "compiler identity differs",
     )
     binaries = []
-    for relative in (BINARY, LOADER_BINARY):
-        binary = payload_file(artifact, relative)
+    for relative in contract["binaries"]:
+        binary = read(relative)
         require(len(binary) >= 64 and binary[:2] == b"MZ", "native PE image required")
         pe = struct.unpack_from("<I", binary, 60)[0]
         require(
@@ -286,7 +450,7 @@ def verify(
             "native x64 PE image required",
         )
         binaries.append({"path": relative, "sha256": inventory[relative], "size": len(binary)})
-    workflow = json.loads(payload_file(artifact, "WORKFLOW.json"))
+    workflow = json.loads(read("WORKFLOW.json"))
     require(
         isinstance(workflow, dict)
         and workflow.get("repository") == REPOSITORY
@@ -295,13 +459,13 @@ def verify(
         and workflow.get("execution_performed") is False,
         "workflow attribution differs",
     )
-    verify_archive(archive, artifact, archive_sha256)
-    verify_github(artifact_id, run_id, build_commit, archive_sha256)
+    verify_archive(archive, artifact, archive_sha256, contract["all_files"])
+    verify_github(artifact_id, run_id, build_commit, archive_sha256, mode)
     return {
         "verified": True,
         "execution_performed": False,
         "scope": required["scope"],
-        "variant": VARIANT,
+        "variant": contract["variant"],
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "build_commit": build_commit,
@@ -328,6 +492,7 @@ def main() -> None:
     parser.add_argument("--build-commit", type=commit_argument, required=True)
     parser.add_argument("--build-run", type=int, required=True)
     parser.add_argument("--artifact-id", type=int, required=True)
+    parser.add_argument("--variant", choices=("loader-only", "standalone-boundary"), default="loader-only")
     args = parser.parse_args()
     require(args.build_run > 0 and args.artifact_id > 0, "positive exact GitHub IDs required")
     result = verify(
@@ -341,6 +506,7 @@ def main() -> None:
         args.build_commit,
         args.build_run,
         args.artifact_id,
+        args.variant,
     )
     with args.receipt.open("x", encoding="utf-8") as output:
         output.write(json.dumps(result, indent=2) + "\n")
