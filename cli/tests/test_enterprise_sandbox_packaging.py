@@ -12,6 +12,7 @@ launcher is covered by internal/cli/launcher_test.go; the install lane
 (scripts/test-enterprise-unix-install.sh) checks a real install.
 """
 
+import hashlib
 import os
 import plistlib
 import shlex
@@ -33,7 +34,7 @@ LAUNCHD = ROOT / "packaging" / "launchd-standalone"
 LAUNCHD_AGENTS = LAUNCHD / "agents"
 BUILDER = ROOT / "scripts" / "build-macos-enterprise-pkg.sh"
 E2FSPROGS_TOOLS = ("mke2fs", "debugfs", "e2fsck")
-E2FSPROGS_LICENSES = ("NOTICE", "e2fsprogs-1.47.3.tar.xz", "README.txt")
+E2FSPROGS_LICENSES = ("NOTICE", "e2fsprogs-1.47.4.tar.xz", "README.txt")
 
 USER_UNITS = (
     "defenseclaw-sandbox.socket",
@@ -184,14 +185,14 @@ def _build_fixture(
     )
     _stub(bin_dir, "pkgbuild", pkgbuild)
     _stub(bin_dir, "productbuild", 'for last; do :; done; : >"$last"')
-    _stub(bin_dir, "shasum", "echo 0000")
     codesign_calls = tmp_path / "codesign-calls"
     codesign_calls.mkdir()
     _stub(
         bin_dir,
         "codesign",
         'for target; do :; done\n'
-        f'printf "%s\\n" "$@" > {shlex.quote(str(codesign_calls))}/"$(basename "$target")"',
+        f'printf "%s\\n" "$@" > {shlex.quote(str(codesign_calls))}/"$(basename "$target")"\n'
+        'printf "signed fixture\\n" >> "$target"',
     )
     return repo, payload, bin_dir, captured
 
@@ -249,9 +250,13 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
         assert _mode(agent) == 0o644, label
         launchd = plistlib.loads(agent.read_bytes())
         assert launchd["Label"] == label
-        # Both user jobs execute the signed gateway in bin. The e2fsprogs
-        # payload must not change their program to a helper under share.
-        assert launchd["ProgramArguments"][0] == "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
+        gateway = root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway"
+        digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+        program = f"/opt/cisco/defenseclaw/bin/launch-agents/{digest}/defenseclaw-gateway"
+        assert launchd["ProgramArguments"][0] == program
+        agent_binary = root / program.lstrip("/")
+        assert agent_binary.read_bytes() == gateway.read_bytes()
+        assert _mode(agent_binary) == 0o755
 
     # launchd and every account must be able to reach what the payload lays
     # down, whatever umask the builder has.
@@ -288,7 +293,7 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
 
     install_root = root / "opt" / "cisco" / "defenseclaw"
     executable_dirs = (install_root / "bin", install_root / "share" / "e2fsprogs" / "sbin")
-    executables = {path.name: path for directory in executable_dirs for path in directory.iterdir()}
+    executables = {path.name: path for directory in executable_dirs for path in directory.iterdir() if path.is_file()}
     assert set(executables) == {
         "defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp",
         *E2FSPROGS_TOOLS,
@@ -302,6 +307,11 @@ def test_macos_pkg_signs_all_executables_with_hardened_runtime(tmp_path: Path):
             "--identifier", f"com.cisco.defenseclaw.{name}",
         ]
         assert args[-1].endswith("/" + executable.relative_to(root).as_posix())
+    gateway = install_root / "bin" / "defenseclaw-gateway"
+    digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+    agent_binary = install_root / "bin" / "launch-agents" / digest / "defenseclaw-gateway"
+    assert agent_binary.read_bytes() == gateway.read_bytes()
+    assert gateway.read_bytes().endswith(b"signed fixture\n")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")

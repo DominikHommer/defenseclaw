@@ -14,8 +14,8 @@ if [ "$(uname -m)" != arm64 ]; then
 fi
 out=$1
 export MACOSX_DEPLOYMENT_TARGET=13.0
-version=1.47.3
-sha=857e6ef800feaa2bb4578fbc810214be5d3c88b072ea53c5384733a965737329
+version=1.47.4
+sha=fd5bf388cbdbe006a3d3b318d983b2948382440acc85a87f1e7d108653e8db0b
 url="https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${version}/e2fsprogs-${version}.tar.xz"
 work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-e2fsprogs.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -32,6 +32,13 @@ mkdir -p "$work/build" "$out/sbin" "$out/licenses"
     "$work/e2fsprogs-$version/configure" --disable-nls --enable-libuuid --enable-libblkid --disable-rpath
     make -j "$(sysctl -n hw.ncpu)"
 )
+# The upstream build embeds its default mke2fs profile. Exercise file
+# population across the 2 GiB boundary with the actual binary before it is
+# packaged; a version banner or a dry-run format cannot detect this failure.
+mkdir "$work/large-file-probe"
+dd if=/dev/zero of="$work/large-file-probe/source-rootfs.tar" bs=1 count=1 seek=2147483648 2>/dev/null
+dd if=/dev/zero of="$work/large-file-probe.ext4" bs=1 count=1 seek=3221225471 2>/dev/null
+"$work/build/misc/mke2fs" -q -F -t ext4 -d "$work/large-file-probe" "$work/large-file-probe.ext4"
 for row in misc/mke2fs debugfs/debugfs e2fsck/e2fsck; do
     tool=${row##*/}
     install -m 0755 "$work/build/$row" "$out/sbin/$tool"
