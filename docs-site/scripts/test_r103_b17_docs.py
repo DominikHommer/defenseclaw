@@ -29,11 +29,13 @@ class R103B17DocsTest(unittest.TestCase):
 
     def test_1101_admission_managed_alternative(self):
         text = (DOCS / "policies/admission.mdx").read_text()
-        self.assertIn("`config get` command still exists", text)
+        self.assertIn("For a per-user installation, read the compiled result", text)
+        self.assertIn("installed `defenseclaw` launcher accepts only `sandbox` commands", text)
         self.assertIn("The managed Windows CLI has no `config get`", text)
         self.assertIn("A standard account is refused", text)
-        self.assertIn("sudo defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill", text)
-        self.assertIn("sudo defenseclaw-gateway policy show", text)
+        self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill", text)
+        self.assertIn("sudo /opt/defenseclaw/bin/defenseclaw-gateway policy show", text)
+        self.assertNotIn("sudo defenseclaw-gateway policy", text)
         self.assertEqual(text.count("defenseclaw.exe' policy evaluate"), 1)
         self.assertEqual(text.count("defenseclaw.exe' policy show"), 1)
         self.assertIn(
@@ -44,8 +46,17 @@ class R103B17DocsTest(unittest.TestCase):
     def test_known_limits_documented(self):
         self.assertIn("**Known limit.**", page("policies/defaults.mdx"))
         self.assertIn("do not yet check who owns the gateway port", page("enterprise/secure-client.mdx"))
-        self.assertIn("pull <name>`) before you switch drivers", page("sandboxes/guide.mdx"))
+        self.assertIn("pull <name> --apply` to merge them into your host project", page("sandboxes/guide.mdx"))
         self.assertNotIn("Current install output also says", page("reference/sandbox-cli.mdx"))
+
+    def test_group_test_followups(self):
+        self.assertIn("Windows Setup results report `policy`", page("enterprise/lifecycle.mdx"))
+        self.assertIn("do not include a `changes` list", page("enterprise/lifecycle.mdx"))
+        self.assertIn("five-minute interval starts at its first launch", page("enterprise/enrollment.mdx"))
+        for rel in ("enterprise/threat-model.mdx", "connectors/claudecode.mdx"):
+            text = page(rel)
+            self.assertIn("without a pre-tool hook", text)
+            self.assertIn("Guardrails cover the actions the agent takes", text)
 
     def test_1229_foreign_sandboxes_list_and_enforcement(self):
         text = page("enterprise/sandboxes.mdx")

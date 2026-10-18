@@ -479,7 +479,9 @@ avoid lookups.
   `.local\share\claude\versions` on its first start, so a new user's first
   Claude Code start is refused ("this account is not enrolled yet; restart
   the agent in 5 minutes") and the next cycle, within five minutes, enrolls
-  it. The guardian sees the
+  it. For a newly installed Claude Code, this five-minute interval starts at
+  its first launch, not at Windows sign-in; the first allowed prompt can come
+  more than five minutes after sign-in. The guardian sees the
   manifest change and writes their registration right away; its one-minute
   check retries a write that has to wait. Machine-policy
   agents run DefenseClaw's hooks from the first call: on Linux and macOS

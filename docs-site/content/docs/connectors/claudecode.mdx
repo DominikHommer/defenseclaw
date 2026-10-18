@@ -170,6 +170,11 @@ path and source without treating the observation as durable discovery authority.
 
 ### Settings that turn the hooks off
 
+Commands a user types into Claude Code's own bash mode are the user's input,
+not an agent tool call. Claude Code runs them without a pre-tool hook, so
+DefenseClaw does not check or block them, the same as a command the user runs
+in their own terminal. Guardrails cover the actions the agent takes.
+
 The per-user hooks live in Claude Code's own settings, so Claude Code's own
 switches apply to them:
 
