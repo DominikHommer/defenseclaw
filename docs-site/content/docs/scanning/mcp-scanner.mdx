@@ -182,6 +182,8 @@ A pin that does not match its file is refused where the config is applied: the m
 
 Automatic selection never fails a scan for a missing optional key: a configured cloud model without its key falls back to YARA and prints `warning: LLM analyzer skipped: DEFENSECLAW_LLM_KEY is not configured; continuing with local analyzers`. An explicit list is honored exactly as written.
 
+A clean verdict means every selected analyzer read every tool. If the YARA analyzer, the bundled DefenseClaw YARA rules or the Cisco AI Defense API analyzer fails on a tool, or the bundled rules are missing from the installation, the scan fails with `the scan of MCP server '<name>' is incomplete, so it has no verdict` (or names the missing rules) and admission blocks the server as not scanned. Only the LLM analyzer degrades with a warning, as described above.
+
 ```bash
 defenseclaw keys set CISCO_AI_DEFENSE_API_KEY
 defenseclaw config set scanners.mcp_scanner.analyzers --json '["yara", "llm", "api"]'
@@ -292,7 +294,8 @@ until they sign in. See
     alerts and a server the scanner cannot start shows `scan failed` instead
     of being blocked. A server on a block list stays blocked. Until a new
     server's admission has a verdict, the Claude Code and Codex hooks refuse
-    its tool calls with "is not scanned yet ... try again in a minute" and the
+    its tool calls ("DefenseClaw is still scanning MCP server ... Try the same
+    call again in about a minute") and the
     gateway admits it at once; Claude Code may already have started the
     server's process when it opened the project, but no call reaches it
     before the verdict. With `gateway.watcher.mcp.take_action: false` nothing

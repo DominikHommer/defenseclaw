@@ -92,23 +92,21 @@ def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYA
 
 
 def _bundled_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
+    # Every package ships these rules. Without them the scan would not run
+    # the analyzer set it reports, so it has no verdict (GAP-0209).
     rules_dir = bundled_mcp_yara_rules_dir()
     if rules_dir is None:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules are unavailable; "
-            "continuing with upstream YARA rules",
-            file=sys.stderr,
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules are missing, so the MCP scan has no verdict; "
+            "repair the DefenseClaw installation"
         )
-        return []
     try:
         return [yara_analyzer_cls(rules_dir=rules_dir)]
     except Exception as exc:
-        print(
-            "warning: bundled DefenseClaw MCP YARA rules could not be loaded; "
-            f"continuing with upstream YARA rules: {exc}",
-            file=sys.stderr,
-        )
-        return []
+        raise MCPScanIncompleteError(
+            "the bundled DefenseClaw MCP YARA rules could not be loaded, so the MCP scan has no verdict; "
+            f"repair the DefenseClaw installation ({type(exc).__name__})"
+        ) from exc
 
 
 def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> object:
@@ -1649,6 +1647,13 @@ class MCPScannerWrapper:
                     _STDIO_SCAN_TIMEOUT_SECONDS,
                     getattr(exc, "_defenseclaw_exit_code", None),
                 ) from exc
+            _raise_if_analysis_incomplete(entry.name, errors, results, scanner)
+            llm_errors = [
+                m for (name, m) in errors
+                if _is_llm_backend_error(name, m, self._llm) or str(m or "").lstrip().startswith("LLM analysis failed")
+            ]
+            if llm_errors:
+                self._warn_llm_skipped(entry.name, llm_errors[0])
 
             all_findings: list[object] = []
             for tool_result in results:
@@ -1718,6 +1723,7 @@ class MCPScannerWrapper:
                     f"scan failed for local server {entry.name!r} "
                     f"({entry.command}): {other_errors[0]}"
                 )
+            _raise_if_analysis_incomplete(entry.name, errors, list(results or []), scanner)
 
             all_findings: list[object] = []
             for tr in results:
@@ -1740,6 +1746,7 @@ class MCPScannerWrapper:
         errors: list[tuple[str, str]] = []
         with _capture_sdk_error_logs(errors):
             findings = self._scan_remote_uncaptured(scanner, target, analyzers)
+        _raise_if_analysis_incomplete(target, errors, [], scanner)
         llm_errors = [m for (name, m) in errors if _is_llm_backend_error(name, m, self._llm)]
         if llm_errors:
             self._warn_llm_skipped(target, llm_errors[0])
@@ -1881,6 +1888,59 @@ class MCPScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+class MCPScanIncompleteError(RuntimeError):
+    """An analyzer did not inspect every tool, so the scan has no verdict."""
+
+
+# The upstream scanner (mcpscanner ``Scanner._analyze_tool`` and its prompt,
+# resource and instruction siblings) logs an analyzer that raised and goes
+# on: that tool then reports no findings from it, which read as clean. The
+# LLM analyzer is the exception the scan already degrades on with a warning
+# (``_warn_llm_skipped``). The labels never copy the logged text, which can
+# carry server-controlled tool names.
+_ANALYZER_FAILURE_LOGS = (
+    ("API analysis failed", "the Cisco AI Defense API analyzer"),
+    ("YARA analysis failed", "the YARA analyzer"),
+    ("Readiness analysis failed", "the readiness analyzer"),
+    ("Custom analyzer ", "the DefenseClaw YARA rules"),
+)
+
+
+def _analysis_gap(errors: list[tuple[str, str]], results: list[object], scanner: object) -> str:
+    """Why the analyzers did not inspect every tool, or "" when they did."""
+    for _logger, message in errors:
+        text = str(message or "").lstrip()
+        for prefix, label in _ANALYZER_FAILURE_LOGS:
+            if text.startswith(prefix):
+                return f"{label} failed on a tool of the server"
+    custom = getattr(scanner, "get_custom_analyzers", None)
+    expected = [getattr(a, "name", "") for a in (custom() if callable(custom) else [])]
+    expected = [name for name in expected if isinstance(name, str) and name]
+    for result in results:
+        ran = getattr(result, "analyzers", None)
+        if not isinstance(ran, list):
+            continue
+        ran_names = {str(getattr(a, "value", a)) for a in ran}
+        if any(name not in ran_names for name in expected):
+            return "the DefenseClaw YARA rules did not run on a tool of the server"
+    return ""
+
+
+def _raise_if_analysis_incomplete(
+    target: str, errors: list[tuple[str, str]], results: list[object], scanner: object,
+) -> None:
+    """Fail a scan whose analyzers did not inspect every tool (GAP-0209).
+
+    A clean verdict must mean every configured analyzer read every tool
+    description; an analyzer that failed silently would otherwise admit a
+    server nothing inspected. The scan fails, and the gateway blocks the
+    server as not scanned (fail closed).
+    """
+    gap = _analysis_gap(errors, results, scanner)
+    if gap:
+        raise MCPScanIncompleteError(f"the scan of MCP server {target!r} is incomplete, so it has no verdict: {gap}")
 
 
 def _extract_findings(tool_result: object) -> list[object]:
