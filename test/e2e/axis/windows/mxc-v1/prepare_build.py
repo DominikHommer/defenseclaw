@@ -64,6 +64,12 @@ ADDED_PATHS = {
 }
 
 
+NATIVE_DIRECTORY_CUSTODY_TESTS = {
+    "defenseclaw-axis-windows-psec-probe": [
+        "probe::native_identity::tests::directory_custody_blocks_rename_until_handles_close_without_spawning",
+    ],
+}
+
 PURE_ENVIRONMENT_TESTS = {
     "defenseclaw-axis-windows-psec-boundary-child": [
         "tests::private_environment_only_accepts_exact_local_disk_prefix_difference",
@@ -248,6 +254,20 @@ def main() -> None:
                 or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in output
             ):
                 raise RuntimeError("fixed pure native environment test did not pass exactly once")
+    # A separate filesystem-only gate opens fresh synthetic directories. It
+    # queries no token/profile, creates no child and performs no PSEC operation.
+    for binary, names in NATIVE_DIRECTORY_CUSTODY_TESTS.items():
+        for name in names:
+            output = command(
+                ["cargo", f"+{TOOLCHAIN}", "test", "--locked", "--release", "--bin", binary, name, "--", "--exact"],
+                capture=True,
+            )
+            print(output)
+            if (
+                output.splitlines().count(f"test {name} ... ok") != 1
+                or "test result: ok. 1 passed; 0 failed; 0 ignored;" not in output
+            ):
+                raise RuntimeError("fixed native directory custody test did not pass exactly once")
     if digest(lock) != lock_before:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
@@ -309,6 +329,8 @@ def main() -> None:
         "pure_private_environment_spelling_test_passed": True,
         "pure_native_environment_tests": pure_tests,
         "pure_native_environment_tests_passed": True,
+        "native_directory_custody_tests": NATIVE_DIRECTORY_CUSTODY_TESTS,
+        "native_directory_custody_tests_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
         "scope": "fixed_windows_native_psec_boundary_native_identity_environment",
