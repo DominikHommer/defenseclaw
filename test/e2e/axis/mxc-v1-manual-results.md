@@ -200,3 +200,39 @@ fixtures, and restored the disposable runner's AppArmor namespace knob with
 `original=1 changed=1 current=1`. This qualifies the fixed synthetic offline
 terminal protocol only. It does not establish arbitrary descendant custody,
 broker credentials, real Claude, general policy translation or product support.
+
+## Native literal arguments
+
+[Native Linux experiment 39118661388](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39118661388)
+passed all 15 fixed checks using the additive typed MXC literal-argv API. The
+child checked empty, spaced, quoted, Unicode, trailing-backslash and shell
+metacharacter arguments as literal data, then returned its fixed marker and
+exit 23. The boundary, offline socket, timeout, input/resize and real SIGINT
+checks also passed. All three PTY observations again had `isatty=1` and
+foreground/process groups `2 == 2`. The receipt reports Landlock ABI 7,
+exit 0 in 1.128 seconds, empty stderr, no matching probe process and no new
+owned fixture. Disposable runner AppArmor preparation was restored.
+
+The first literal run [39117371416](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39117371416)
+failed before boundary assertions because the strict environment verifier did
+not account for Bubblewrap's own `PWD`. That failure remains recorded. The
+fix permits only `PWD` equal to the verified private working directory; shell
+keys `SHLVL` and `_`, inherited keys and a different `PWD` remain refused.
+The pinned Bubblewrap [source](https://github.com/containers/bubblewrap/blob/v0.9.0/bubblewrap.c)
+sets `PWD` from its explicit `--chdir`, including after `--clearenv`.
+
+The passing locked build was [39118099423](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39118099423)
+at `7c62a3cf6310c5f54f3635d13cec9ac376742bc3`. Root review checked all
+15 manifest files, nine Git source blobs, unchanged locks, licenses, workflow
+and toolchain before manually dispatching the separate live harness
+`dc6efffef7a8795da5a052ca5e13bd720c1970d1`.
+
+| Evidence | SHA256 |
+| --- | --- |
+| Build ZIP, artifact `12133580892` | `7d7cf06eda40bad4b5b9d4dd4a17b23e6f1ffd9af2164cd41bf3bfa3cce3a81c` |
+| Build provenance | `095d08d042af01210b2fe796746599586ca374fc60b974fc7d33b9e6def12a1a` |
+| Probe | `20794a3222b3b7096b65afa564ec801aaff622faee86304fe29aeeda180f13bf` |
+| Live ZIP, artifact `12133795206` | `c2eaa2621d93b1d51cef8cf67479dbde3eb3bcbde8014a88a73cd9c510a20d12` |
+
+This result does not qualify a production provider, general policy translation,
+host broker/credentials, real Claude or arbitrary descendant custody.
