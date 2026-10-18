@@ -272,3 +272,48 @@ The next source retains the same exact assertion and adds only a fixed failing
 key, bounded UTF-16 lengths, prefix flags, ASCII-case comparison flag and
 first-difference index. It never logs path or environment contents. A fresh
 locked build and independent review precede further native testing.
+
+## Bounded diagnostic: TEMP differs before permitted writes
+
+[Locked build 39129614000](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39129614000)
+at `246210c3b484ea1de0785756dd4410beda25adfb` preserves the exact private
+environment assertion and adds only bounded comparison metadata. Ten selected
+SDK tests and the exact pure comparison test passed. Two independent reviews
+verified the artifact, source, lock, all 15 reconstructed SDK files and the
+unchanged import DLL lists before one fresh native attempt.
+
+Literal argv and direct seal read passed. Both DOS path queries again returned
+Win32 5. The child then reported:
+
+```text
+FIXED_PRIVATE_ENV_MISMATCH key=TEMP actual_units=214 expected_units=135 actual_verbatim=true expected_verbatim=true ascii_case_only=false first_difference=128
+```
+
+The preceding HOME and USERPROFILE assertions passed by the pinned source's
+execution order. TMP, APPDATA and LOCALAPPDATA were not reached. The diagnostic
+contains no environment values or path contents and does not establish the
+cause of the differing TEMP value. No permitted write, negative write or
+network check is qualified by this failed attempt.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12137991365` | `715c01dac75dd24300f3154622eb3837afa0de36de37462873fc477b271c6b49` |
+| Provenance | `099bcb4a93fb74974afa727911570f604300c7f44d56d5519bb8457723e53581` |
+| Root verification receipt | `b257b27b49f1cf7ee4fa510e17e198760f77a31a409d9188d8458f054a720612` |
+| Actual live result | `9dd809393930bf404fb020c8d708a6aedad217f98cf3014b1339a7982228b261` |
+
+The wrapper exited 1 in 3.343 seconds without deadline, overflow or reader
+error. The owned outer Job was assigned before resume and ended empty with
+zero active processes. The exact failed fixture `dc-axis-windows-psec-BS9U2l`
+remains under private evidence `windows-current-psec-boundary-max-06`. This
+artifact was not retried, and no policy, grant, host ACL, firewall, UI setting
+or SDK overlay changed. Windows customer execution remains unavailable.
+
+A separate outside-PSEC control uses the same reviewed fixed child and eight
+explicit environment entries. Its expected exit occurs at the successful
+outside read, after the environment assertions and two private permitted
+writes, before negative writes or sockets. This control cannot qualify PSEC
+containment. Its first wrapper attempt refused the existing evidence parent's
+DACL before creating a fixture or child; the raw stdout and nonzero exit are
+retained in `environment-control-01-outer-result.json`. A fresh private parent
+and separately reviewed invocation are required for a further attempt.
