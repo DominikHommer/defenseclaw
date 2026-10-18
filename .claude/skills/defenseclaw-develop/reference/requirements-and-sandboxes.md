@@ -2,7 +2,7 @@
 
 Open this when: your change adds or depends on something outside the Python wheel and Go binaries (Docker, a VM or microVM, KVM, a GPU, a local model server, a node or python extra, a system package, an OS version, network egress), or you touch OpenShell, sandboxes, judges or scanners.
 
-Heavy requirements stay optional, off by default and never installed silently. Sandboxes are off until `openshell.enabled` is set by `defenseclaw sandbox setup`.
+Heavy requirements stay optional, off by default and never installed silently. With no common `sandbox` namespace, sandboxes remain off until `openshell.enabled` is set by `defenseclaw sandbox setup`. An explicitly present common namespace owns the master switch and runtime-lane enablement; preserve legacy restrictions for missing common policy leaves. Active AXIS configuration is refused until its execution and containment gates are qualified; configuration enablement alone is never availability evidence.
 
 ## Requirements: disclosure
 

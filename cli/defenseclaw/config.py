@@ -37,7 +37,7 @@ import sys
 import urllib.parse
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1763,6 +1763,42 @@ class OpenShellConfig:
         return (api_port if api_port > 0 else 18970) + 2
 
 
+@dataclass
+class SandboxRuntimeConfig:
+    enabled: bool = False
+
+
+@dataclass
+class SandboxRuntimesConfig:
+    openshell: SandboxRuntimeConfig = field(default_factory=SandboxRuntimeConfig)
+    axis: SandboxRuntimeConfig = field(default_factory=SandboxRuntimeConfig)
+
+
+@dataclass
+class SandboxConfig:
+    """Common policy; an absent namespace preserves legacy OpenShell settings."""
+
+    enabled: bool = False
+    runtime: str = "auto"
+    runtimes: SandboxRuntimesConfig = field(default_factory=SandboxRuntimesConfig)
+    ingress_port: int = 0
+    egress_port: int = 0
+    pack: str = ""
+    pack_dir: str = ""
+    profile: str = ""
+    yolo: bool | None = None
+    llm: str = "auto"
+    keep_headless: bool = False
+    workdir: OpenShellWorkdirConfig = field(default_factory=OpenShellWorkdirConfig)
+    egress: OpenShellEgressConfig = field(default_factory=OpenShellEgressConfig)
+    approvals: OpenShellApprovalsConfig = field(default_factory=OpenShellApprovalsConfig)
+    resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
+    harnesses: list[str] = field(default_factory=list)
+    wrappers: list[str] = field(default_factory=list)
+    mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
+    admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
+
+
 def api_bind_host(cfg: Any) -> str:
     """Return the address the gateway REST API listens on.
 
@@ -3101,6 +3137,12 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
         return
     openshell = raw.get("openshell") if isinstance(raw.get("openshell"), Mapping) else {}
     admin = openshell.get("admin") if isinstance(openshell.get("admin"), Mapping) else {}
+    common = raw.get("sandbox") if isinstance(raw.get("sandbox"), Mapping) else {}
+    common_admin = common.get("admin") if isinstance(common.get("admin"), Mapping) else {}
+    if common_admin:
+        # Source overlap is validated separately; retain every legacy-only
+        # restriction when the new common namespace is present.
+        admin = _sandbox_merge_admin_sources(admin, common_admin)
     guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), Mapping) else {}
     profiles = guardrail.get("profiles") if isinstance(guardrail.get("profiles"), Mapping) else {}
     sections = {
@@ -3775,6 +3817,7 @@ class Config:
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
     scanners: ScannersConfig = field(default_factory=ScannersConfig)
     openshell: OpenShellConfig = field(default_factory=OpenShellConfig)
+    sandbox: SandboxConfig | None = None
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
@@ -3930,10 +3973,10 @@ class Config:
         surfaces keep using :meth:`active_connectors`.
         """
         names = set(self.active_connectors())
-        openshell = getattr(self, "openshell", None)
-        for harness in getattr(openshell, "harnesses", None) or []:
-            if str(harness).strip():
-                names.add(connector_paths.normalize(str(harness)))
+        for policy in (self.openshell, self.sandbox):
+            for harness in getattr(policy, "harnesses", None) or []:
+                if str(harness).strip():
+                    names.add(connector_paths.normalize(str(harness)))
         return sorted(names)
 
     def skill_dirs(self, connector: str | None = None) -> list[str]:
@@ -4633,6 +4676,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     _serialize_openshell(d)
+    if d.get("sandbox") is None:
+        d.pop("sandbox", None)
+    else:
+        _serialize_openshell({"openshell": d["sandbox"]})
     _serialize_routing(d)
     return d
 
@@ -6615,6 +6662,37 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     )
 
 
+def _merge_sandbox(
+    raw: dict[str, Any] | None, data_dir: str = "", legacy: dict[str, Any] | None = None,
+) -> SandboxConfig | None:
+    if raw is None:
+        return None
+    shared = {item.name for item in fields(SandboxConfig)} - {"runtime", "runtimes", "enabled"}
+    previous = {key: value for key, value in _openshell_mapping(legacy).items() if key in shared}
+    policy = _merge_openshell(_sandbox_merge_admin_sources(previous, raw), data_dir)
+    runtimes = _openshell_mapping(raw.get("runtimes"))
+    return SandboxConfig(
+        **{item.name: getattr(policy, item.name) for item in fields(SandboxConfig)
+           if item.name not in {"runtime", "runtimes"}},
+        runtime=_openshell_str(raw.get("runtime")) or "auto",
+        runtimes=SandboxRuntimesConfig(**{
+            name: SandboxRuntimeConfig(
+                enabled=_coerce_bool(_openshell_mapping(runtimes.get(name)).get("enabled", False)),
+            )
+            for name in ("openshell", "axis")
+        }),
+    )
+
+
+def _sandbox_merge_admin_sources(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(old)
+    for key, value in new.items():
+        previous = merged.get(key)
+        merged[key] = (_sandbox_merge_admin_sources(previous, value)
+                       if isinstance(previous, Mapping) and isinstance(value, Mapping) else value)
+    return merged
+
+
 def _openshell_optional_str_list(value: Any) -> list[str] | None:
     """A list whose absence means "no constraint": None when unset, the
     entries (possibly none) otherwise."""
@@ -7056,6 +7134,7 @@ def load(
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
         openshell=_merge_openshell(raw.get("openshell"), data_dir),
+        sandbox=_merge_sandbox(raw.get("sandbox"), data_dir, raw.get("openshell")),
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
@@ -7117,6 +7196,17 @@ def load(
     cfg.guardrail.validate()
     validate_guardrail_profiles(cfg.guardrail)
     validate_sandbox_floors(raw)
+    from defenseclaw.openshell_validation import sandbox_error
+
+    sandbox_problem = sandbox_error(raw)
+    if sandbox_problem is not None:
+        raise ValueError(f"{sandbox_problem[0]}: {sandbox_problem[1]}")
+    if cfg.sandbox is not None:
+        for item in fields(SandboxConfig):
+            if item.name not in {"enabled", "runtime", "runtimes"}:
+                setattr(cfg.openshell, item.name, copy.deepcopy(getattr(cfg.sandbox, item.name)))
+        cfg.openshell.enabled = (cfg.sandbox.enabled and cfg.sandbox.runtime != "axis"
+                                 and cfg.sandbox.runtimes.openshell.enabled)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.

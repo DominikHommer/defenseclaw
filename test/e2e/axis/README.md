@@ -109,9 +109,14 @@ teardown. That lifecycle limitation is another unresolved gate.
 
 ## Evidence and remaining gates
 
-No live Linux AXIS result has been recorded by this change. Development occurred
-on Windows without a Linux execution environment. Passing ordinary tests or
-cross-compiling the live tests is not live feasibility evidence.
+The [manual test record](manual-test-results.md) includes actual Linux AXIS
+execution in an isolated WSL2 distribution on Windows. Explicit native offline
+file/socket boundary probes passed; MXC strict-policy acceptance and native
+interactive keyboard input failed. These are distinct provider experiments,
+with no automatic fallback. Passing ordinary tests or cross-compiling live
+tests is not live feasibility evidence. The separate
+[direct native runner](runner/README.md) uses the pinned Rust API for additional
+fixed offline probes, without the CLI's missing-socket workaround.
 
 Even a successful live run proves only these benign offline probes. Before
 Stage 2 can pass, record the exact host/kernel, AXIS and dependency provenance,

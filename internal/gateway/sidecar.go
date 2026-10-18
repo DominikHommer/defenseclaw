@@ -2557,8 +2557,9 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	// Every openshell key but the listeners' is read per sandbox launch, so
-	// none may bounce the API listener.
+	// The candidate loader projects common sandbox policy into OpenShell.
+	// Only its listener settings may bounce the API listener; other sandbox
+	// settings are read from the published generation per launch.
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
