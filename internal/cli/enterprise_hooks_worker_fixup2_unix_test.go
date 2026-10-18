@@ -169,7 +169,9 @@ func TestEnterpriseHookWorkerConfigScanKeepsReadLimits(t *testing.T) {
 	if err := os.Symlink(outside, path); err != nil {
 		t.Fatal(err)
 	}
-	if got := enterpriseHookWorkerRemainingConfigReference(home, filepath.Join(home, ".defenseclaw"), []string{path}); !strings.Contains(got, "symlink to a file outside the home") {
+	// A link out of the home is read as the account (never changed), so
+	// the entry in the file it names is reported (rel-1-0-3 GAP-0206).
+	if got := enterpriseHookWorkerRemainingConfigReference(home, filepath.Join(home, ".defenseclaw"), []string{path}); !strings.Contains(got, path+":1: DefenseClaw data-dir path remains") {
 		t.Fatalf("a symlink out of the home was treated as clean: %s", got)
 	}
 	if err := os.Remove(path); err != nil {
