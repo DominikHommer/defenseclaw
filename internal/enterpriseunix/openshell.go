@@ -303,10 +303,14 @@ func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 			return nil, fmt.Errorf("identify the LaunchAgent gateway: %w", err)
 		}
 		program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
-		copyDigest, err := sha256File(e.P(program))
+		info, err := os.Lstat(e.P(program))
 		if os.IsNotExist(err) {
 			return data, nil // Older and non-package installations use the canonical path.
 		}
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
+		}
+		copyDigest, err := sha256File(e.P(program))
 		if err != nil || copyDigest != digest {
 			return nil, fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
 		}

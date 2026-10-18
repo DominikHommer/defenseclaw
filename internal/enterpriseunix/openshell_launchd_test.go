@@ -217,6 +217,15 @@ func TestMacOSPackageLaunchAgentUsesContentAddressedGateway(t *testing.T) {
 	if _, err := h.env.userUnitBytes(unit); err == nil {
 		t.Fatal("mismatched LaunchAgent program accepted")
 	}
+	if err := os.Remove(copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canonical, copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.env.userUnitBytes(unit); err == nil {
+		t.Fatal("symlinked LaunchAgent program accepted")
+	}
 }
 
 func TestMacOSLaunchAgentRepairDecision(t *testing.T) {
