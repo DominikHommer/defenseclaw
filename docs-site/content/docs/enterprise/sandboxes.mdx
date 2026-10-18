@@ -260,6 +260,9 @@ this release, so:
   their secrets in `secret_env` where the notifier supports it. An installed
   1.0.2 config with literals still loads. `status` and `verify` name the
   paths to review and advise `{credential: NAME}` where supported.
+  `defenseclaw-gateway config validate <file>` applies the same rule to a
+  candidate file as `ensure --config`; on the installed config it prints the
+  same advisory instead.
 - `ensure`, `status` and `verify` count the enrolled accounts in the group
   (`docker_group_members`, a number, no names), and
   `defenseclaw sandbox doctor` tells such a person what the membership means.
