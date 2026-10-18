@@ -25,6 +25,12 @@ with the next release.
 
 Standard library only, and imported before the rest of the CLI, so it keeps
 working when anything else in the installed version is broken.
+
+A downgrade is the one case the older release's installer cannot handle on
+its own: it refuses a config.yaml that sets a key it does not have. So this
+shim sets aside the keys of ``NEWER_CONFIG_KEYS`` the older release lacks
+(``SET_ASIDE_FILE`` in the data folder) before it runs that installer, and
+``defenseclaw migrate`` of a release that has them puts them back.
 """
 
 from __future__ import annotations
@@ -55,6 +61,13 @@ RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # pass it to the installer as --local.
 LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+# Configuration keys added after 1.0.2, with the first release that has each.
+# The installer of an older release refuses a config.yaml that sets one
+# ("unknown field", GAP-0137), so a downgrade sets them aside first.
+NEWER_CONFIG_KEYS = (("openshell.trusted_ca_bundle", (1, 0, 3)),)
+# Where a downgrade keeps the keys it set aside, in the data folder:
+# {"version": 1, "for": "<older release>", "keys": {"<dotted key>": value}}.
+SET_ASIDE_FILE = "config-set-aside.json"
 _TIMEOUT = 30
 
 RECOVER_CORRUPT_AUDIT_NOTE = (
@@ -314,8 +327,120 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+    if _key(version) < _key(installed):
+        try:
+            _set_aside_newer_keys(version)
+        except BaseException:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise
     extra = ["--local", local_dir] if local_dir else []
     return _run_installer(installer, (["--yes"] if yes else []) + extra, workdir)
+
+
+def _active_config_path() -> str:
+    override = os.environ.get("DEFENSECLAW_CONFIG", "").strip()
+    return os.path.expanduser(override) if override else os.path.join(_data_home(), "config.yaml")
+
+
+def _set_aside_newer_keys(version: str) -> None:
+    """Take the keys DefenseClaw ``version`` does not have out of config.yaml.
+
+    Its installer would refuse the configuration ("unknown field", GAP-0137).
+    The values go to ``SET_ASIDE_FILE`` first, then one validated write
+    removes the keys; ``defenseclaw migrate`` of a release that has them
+    puts them back. When the keys cannot be set aside, the upgrade stops
+    with the command that removes them, and nothing is changed.
+    """
+
+    target = _key(version)
+    config = _active_config_path()
+    try:
+        import yaml
+
+        with open(config, encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - no config or one that does not parse: the installer's check names it
+        return
+    found: dict[str, object] = {}
+    for dotted, since in NEWER_CONFIG_KEYS:
+        if target >= since:
+            continue
+        node: object = raw
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node not in (None, ""):
+            found[dotted] = node
+    if not found:
+        return
+    names = ", ".join(found)
+    stop = (
+        f"DefenseClaw {version} does not have {names}, so its installer would refuse config.yaml; "
+        f"remove it with 'defenseclaw config unset {' '.join(found)}' and run the upgrade again"
+    )
+    held = os.path.join(_data_home(), SET_ASIDE_FILE)
+    try:
+        from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
+    except Exception as exc:  # noqa: BLE001 - a broken install: say what to remove by hand
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    previous: bytes | None = None
+    try:
+        with open(held, "rb") as stream:
+            previous = stream.read()
+        kept = json.loads(previous.decode("utf-8")).get("keys")
+    except FileNotFoundError:
+        kept = None
+    except (OSError, ValueError, AttributeError):
+        kept = None
+    keys = dict(kept) if isinstance(kept, dict) else {}
+    keys.update(found)
+    try:
+        _write_private_json(held, {"version": 1, "for": version, "keys": keys})
+    except OSError as exc:
+        raise ShimError(f"{stop} (could not write {held}: {exc})") from None
+    try:
+        apply(
+            [Change(key, unset=True) for key in found],
+            ACTOR_MIGRATION,
+            f"set aside for the downgrade to {version}",
+            path=config,
+        )
+    except Exception as exc:  # noqa: BLE001 - config.yaml is unchanged; so is the record
+        try:
+            if previous is None:
+                os.remove(held)
+            else:
+                _write_private_bytes(held, previous)
+        except OSError:
+            pass
+        raise ShimError(f"{stop} (the keys could not be set aside: {exc})") from None
+    print(f"  → DefenseClaw {version} does not have {names}: set aside in {held}.")
+    print(
+        "    Installing a release that has it puts it back. If the installer stops, "
+        "or after a rollback, put it back with: defenseclaw migrate"
+    )
+
+
+def _write_private_json(path: str, document: dict[str, object]) -> None:
+    _write_private_bytes(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+
+
+def _write_private_bytes(path: str, data: bytes) -> None:
+    """Write ``path`` owner-only and atomically."""
+
+    fd, tmp = tempfile.mkstemp(prefix=".config-set-aside.", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _data_home() -> str:

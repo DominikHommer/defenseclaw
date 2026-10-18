@@ -112,6 +112,12 @@ scripts/test-install-lifecycle.sh --assets /tmp/dc-1.0.1 --previous-assets /tmp/
 | `drills` | A gateway that never becomes healthy, a migration that fails halfway, a configuration from a newer release, a CLI broken at import, an install killed mid-swap, and a stale `gateway.pid` |
 | `macos-app` | The app bundle is swapped with the runtime and restored by rollback (macOS only) |
 
+On macOS and Linux, `upgrade-0.X.Y` retries the legacy installer at most twice
+when its release download reports HTTP 5xx. Checksum failures and other
+installer errors fail the lane immediately. The Unix Standalone Lifecycle CI
+job logs each enterprise Unix test name and runs that suite separately from
+the other lifecycle packages so a stalled test can be identified.
+
 When `cosign` is installed and the assets carry `checksums.txt.bundle`, the
 `fresh` lane also checks that the installer verified the release signature.
 The PowerShell script takes `-Assets`, `-PreviousAssets` and `-Lanes`. Its

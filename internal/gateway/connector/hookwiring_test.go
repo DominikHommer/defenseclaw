@@ -1805,7 +1805,10 @@ func TestAntigravityWindowsHookCommandBypassesUntrustedCurrentDirectory(t *testi
 	if len(argv) == 0 {
 		t.Fatalf("empty Antigravity command")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// The two just-built probe executables may be cold-scanned by a hosted
+	// Windows runner before producing output. This test checks which path ran,
+	// not the production hook deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = untrustedDir

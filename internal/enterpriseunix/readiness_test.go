@@ -24,7 +24,9 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -391,6 +393,52 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	if got := messagesOf(status.Warnings, codeProfileAssignment); !strings.Contains(got, `group "dc-okta-ml" is not known to this host`) ||
 		strings.Count(got, "dc-okta-ml") != 1 {
 		t.Fatalf("an assignment that selects nobody must warn once: %+v", status.Warnings)
+	}
+}
+
+func TestStatusAndVerifyWarnForGuardianDirectoryOutageWithCachedFacts(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":0,"stale":2}}`), nil
+			}
+			dir := enterprisehooks.IdentitySpoolDir(h.env.P(h.env.Layout.GuardianAuthDir))
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := enterprisehooks.WriteDirectoryUnreachable(dir, []string{"dclab.test"}, h.env.Now(), nil); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				got := messagesOf(result.Warnings, codeDirectoryLookups)
+				if !strings.Contains(got, "dclab.test") || !strings.Contains(got, "cached account facts") {
+					t.Fatalf("%s omitted guardian outage: %q", action, got)
+				}
+			}
+			// The gateway's uncached-account warning remains alongside the
+			// guardian warning when both sources report an outage.
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":1,"since":"2026-10-18T00:00:00Z","accounts":["1001"]}}`), nil
+			}
+			got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDirectoryLookups)
+			if !strings.Contains(got, "failing for 1 account(s)") || !strings.Contains(got, "dclab.test") {
+				t.Fatalf("the uncached-account warning was lost: %q", got)
+			}
+			// A stale record cannot keep the warning up after recovery.
+			if err := enterprisehooks.WriteDirectoryUnreachable(dir, []string{"dclab.test"},
+				h.env.Now().Add(-enterprisehooks.DirectoryUnreachableMaxAge-time.Second), nil); err != nil {
+				t.Fatal(err)
+			}
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"directory":{"failing":0}}`), nil
+			}
+			if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDirectoryLookups); got != "" {
+				t.Fatalf("stale guardian record still warned: %q", got)
+			}
+		})
 	}
 }
 

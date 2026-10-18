@@ -1548,6 +1548,29 @@ func TestPolicyEdit(t *testing.T) {
 	}
 }
 
+func TestPolicyAllowWarnsWhenTheGuardAlwaysRefusesAnAddress(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.ok(t, ta.PolicyEdit(bg, "allow", []string{"169.254.169.254", "registry.npmjs.org"}))
+	has(t, ta.output(), "169.254.169.254 is a loopback, link-local, cloud metadata or reserved address", "this allow entry cannot open it")
+	lacks(t, ta.output(), "registry.npmjs.org is a loopback")
+	if got := loadConfig(t, ta).OpenShell.Egress.Allow; !slices.Equal(got, []string{"169.254.169.254", "registry.npmjs.org"}) {
+		t.Fatalf("saved allow entries = %v", got)
+	}
+}
+
+func TestManagedPolicyDecisionUsesDaemon(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("onebox"))
+	ta.daemon.managed = true
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "block", []string{"Example.ORG"}, "onebox"))
+	has(t, ta.output(), "blocked example.org for your sandboxes")
+	ta.out.Reset()
+	ta.ok(t, ta.ManagedPolicyDecision(bg, "allow", []string{"api.example.org"}, ""))
+	has(t, ta.output(), "allowed api.example.org for your sandboxes")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "allow", []string{"*.example.org"}, ""), "name one destination host")
+	wantErr(t, ta.ManagedPolicyDecision(bg, "block", []string{"one.example", "two.example"}, ""), "one destination host at a time")
+}
+
 // The daemon saves its "always" decisions to the same egress lists while a
 // command runs. An edit builds its list from config.yaml and writes it only
 // if the file is still the one it read, so a host saved after the command

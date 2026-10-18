@@ -416,6 +416,9 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.selection_patcher = patch(
             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"
         )

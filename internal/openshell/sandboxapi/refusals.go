@@ -294,6 +294,8 @@ var accessRuleTexts = map[string]string{
 	"allow_unblock":     "can't be unblocked under your profile",
 	"user_approvals":    "needs an approval your profile doesn't let you give",
 	"allow_host_ports":  "is a port on this computer your profile doesn't open to sandboxes",
+	"min_profile":       "can't be kept for future sandboxes under the strict profile your organization requires",
+	"required_pack":     "is not allowed by the sandbox pack your organization requires",
 }
 
 // AccessRefused is the refusal of an ask or unblock for host that the
@@ -442,12 +444,16 @@ func PolicyUnloadable() string {
 // ProfileStop is the notice for a sandbox stopped because the caller's
 // profile no longer allows field (a phrase such as "mounts"); harness is
 // the connector or harness command to start again. When no new run of that
-// harness is allowed, the next step is to request access instead.
+// harness is allowed, the next step is to request access instead; for host
+// ports, to start it again without them (GAP-0078).
 func ProfileStop(field, harness, requestAccess string) string {
 	field = refusalValue(field)
 	text := "This sandbox was stopped: your profile no longer allows " + field + ". "
-	if field == "sandboxes" || field == "this agent in a sandbox" {
+	switch field {
+	case "sandboxes", "this agent in a sandbox":
 		return text + "Request access: " + contact(requestAccess) + "."
+	case "host ports":
+		return text + "Start it again without --host-port: " + sandboxCommand + " run " + harnessFor(harness).command
 	}
 	return text + "Start it again: " + sandboxCommand + " run " + harnessFor(harness).command
 }

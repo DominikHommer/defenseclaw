@@ -34,6 +34,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -433,6 +434,8 @@ func (d *SandboxDaemon) buildConfigWith(floor *config.OpenShellAdminConfig) *con
 	o.Harnesses, o.Wrappers = op.Harnesses, op.Wrappers
 	o.TokenDelivery, o.Middleware.Enabled = op.TokenDelivery, op.Middleware
 	o.LLM, o.KeepHeadless, o.UpstreamTelemetry = op.LLM, op.KeepHeadless, op.UpstreamTelemetry
+	// Only the administrator's trusted CAs: the account names none.
+	o.TrustedCAPEM, o.TrustedCAError = op.TrustedCAs, op.TrustedCAError
 	o.Workdir.Mode = config.OpenShellWorkdirCopy
 	if s.Enterprise.Install == config.EnterpriseOpenShellInstallSetup {
 		if d.home != "" {
@@ -933,10 +936,17 @@ func sandboxMayRun(phase string) bool {
 // install, driver or ports, or sandboxes turned off) is a restart, deferred
 // until no sandbox runs; anything else applies now.
 func (d *SandboxDaemon) refreshSettings(ctx context.Context) {
+	if err := d.readSettings(ctx); err != nil {
+		d.logf("refresh the managed settings: %v", err)
+	}
+}
+
+// readSettings is refreshSettings that returns the failed read; the
+// settings it had stay.
+func (d *SandboxDaemon) readSettings(ctx context.Context) error {
 	next, err := d.relay.Settings(ctx)
 	if err != nil {
-		d.logf("refresh the managed settings: %v", err)
-		return
+		return err
 	}
 	d.settingsMu.Lock()
 	prev := d.settings
@@ -948,6 +958,7 @@ func (d *SandboxDaemon) refreshSettings(ctx context.Context) {
 		d.pendingRestart.Store(true)
 	}
 	d.reloadConfig()
+	return nil
 }
 
 // sandboxDaemonSettingsTTL is how long a status or a create trusts the
@@ -978,6 +989,23 @@ func (d *SandboxDaemon) refreshStaleSettings(ctx context.Context) {
 func (d *SandboxDaemon) freshSettings(ctx context.Context) sandboxrelay.DaemonSettings {
 	d.refreshStaleSettings(ctx)
 	return d.currentSettings()
+}
+
+// createSettings is the managed settings a create judges with, read from
+// the managed gateway now and not trusted within sandboxDaemonSettingsTTL:
+// they carry the administrator's trusted CAs, which decide the image a new
+// sandbox may run. A run right after the administrator pointed
+// openshell.trusted_ca_bundle at a file the gateway refuses started from
+// the image of the CAs before, while doctor already said none can be used
+// (GAP-0201). A failed read refuses the create.
+func (d *SandboxDaemon) createSettings(ctx context.Context) (sandboxrelay.DaemonSettings, error) {
+	rctx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	defer cancel()
+	if err := d.readSettings(rctx); err != nil {
+		d.logf("read the managed settings for a create: %v", err)
+		return sandboxrelay.DaemonSettings{}, managedRelayError(err)
+	}
+	return d.currentSettings(), nil
 }
 
 // sandboxDaemonRestartNeeded reports a settings change the running daemon
@@ -1047,9 +1075,12 @@ func (d *SandboxDaemon) pollRegistrations(ctx context.Context, adopt bool) []dae
 		// one's registration authorizes no relayed call (GAP-0505).
 		ans := d.askPolicy(ctx, r, report, running)
 		if ans.gone {
-			d.regs.markRevoked(r.Sandbox, ans.reason)
-			r.Revoked, r.RevokedReason = true, ans.reason
-			revoked = append(revoked, r)
+			// A status's confirmation (confirmRunningView) that marked it
+			// first stops it.
+			if d.regs.markRevokedText(r.Sandbox, ans.reason, ans.stopText) {
+				r.Revoked, r.RevokedReason, r.StopText = true, ans.reason, ans.stopText
+				revoked = append(revoked, r)
+			}
 			continue
 		}
 		if ans.err != nil {
@@ -1183,7 +1214,7 @@ func (d *SandboxDaemon) reportStopped(ctx context.Context, name string) {
 		return
 	}
 	if cp.Revoked {
-		d.regs.markRevoked(name, cp.RevokedReason)
+		d.regs.markRevokedText(name, cp.RevokedReason, cp.RevokedReason)
 	}
 }
 
@@ -1309,15 +1340,125 @@ const sandboxConfirmingNote = "DefenseClaw is confirming this sandbox's policy w
 	"try again in a moment. Until then it has no web egress, and the policy shown is the one it was created with"
 
 // confirmingView makes v say its policy is being confirmed (Manager.ConfirmingView)
-// while its registration waits for that on the closed floor.
+// while its registration waits for that on the closed floor. A sandbox
+// whose registration the managed gateway revoked shows, on the closed
+// floor, the policy it was created with and no note: judged against that
+// floor, the list of a sandbox a regroup had stopped read profile strict
+// and network deny after a daemon restart, instead of its balanced
+// allowlist (GAP-0079). Its Stopped row says why it stopped; the floor
+// stays closed, so this changes only what the views show.
 func (c *managedSandboxController) confirmingView(v *sandboxapi.Sandbox) {
 	if v == nil || !c.d.floorClosed() {
 		return
 	}
-	if r, ok := c.d.regs.get(v.Name); ok && registrationUnconfirmed(r) {
+	r, ok := c.d.regs.get(v.Name)
+	switch {
+	case !ok:
+	case registrationUnconfirmed(r):
 		c.ConfirmingView(v, sandboxConfirmingNote)
+	case r.Revoked:
+		c.ConfirmingView(v, "")
 	}
 }
+
+// confirmRunningView asks the managed gateway for the current policy of
+// name's confirmed registration before a status of its running sandbox is
+// shown, and reports whether the answer changed what the status shows. The
+// daemon learned of a regroup only from a relayed hook or the minute's
+// poll, so for up to a minute `sandbox status NAME` named the profile before
+// the regroup while `sandbox policy explain` named the new one (GAP-0080).
+// A changed answer is put in force first (the policies re-resolved, the
+// settings read again for a new generation), as a connection's confirmation
+// does (confirmOnce). An answer that ended the registration marks it
+// revoked and stops the sandbox, as the poll does, so the status shows the
+// stop and the organization's words for it. A managed gateway that does not
+// answer within sandboxEgressConfirmTimeout changes nothing: the status
+// shows the policy the daemon holds, which the relayed hooks and the
+// sandbox's connections confirm on their own.
+func (d *SandboxDaemon) confirmRunningView(ctx context.Context, name string) bool {
+	r, ok := d.regs.get(name)
+	if !ok || r.ID == "" || r.Revoked || !r.Confirmed {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, sandboxEgressConfirmTimeout)
+	ans := d.askPolicy(cctx, r, false, false)
+	cancel()
+	switch {
+	case ans.gone:
+		if d.regs.markRevokedText(r.Sandbox, ans.reason, ans.stopText) {
+			r.Revoked, r.RevokedReason, r.StopText = true, ans.reason, ans.stopText
+			sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), revalidateTimeout)
+			d.stopRevoked(sctx, r)
+			scancel()
+		}
+		return true
+	case ans.err != nil || !ans.changed:
+		return false
+	}
+	if ans.moved {
+		sctx, scancel := context.WithTimeout(ctx, sandboxEgressConfirmTimeout)
+		d.refreshSettings(sctx)
+		scancel()
+	}
+	actx, acancel := context.WithTimeout(ctx, sandboxEgressConfirmTimeout)
+	d.adoptApplied(actx, ans.moved)
+	acancel()
+	if ans.moved {
+		// The other registrations follow at once.
+		d.askPoll()
+	}
+	return true
+}
+
+// managedStopReason is the managed gateway's words for a revoke as the
+// user's views show them: display-safe and bounded.
+func managedStopReason(text string) string {
+	text = strings.TrimSpace(sandboxapi.DisplayText(text))
+	const limit = 512
+	if len(text) > limit {
+		cut := limit
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
+		}
+		text = text[:cut]
+	}
+	return text
+}
+
+// registrationView adds to v what the daemon's registration of the sandbox
+// says: the profile and digest of its current match, which a regroup moves
+// (the manager's view has the pack and network profile it was resolved
+// with), or, once the registration was revoked, the organization's words
+// for the stop (#1199).
+func (c *managedSandboxController) registrationView(v *sandboxapi.Sandbox) {
+	if v == nil {
+		return
+	}
+	r, ok := c.d.regs.get(v.Name)
+	if !ok {
+		return
+	}
+	if r.Revoked {
+		v.StopReason = managedStopReason(r.StopText)
+		return
+	}
+	v.OrganizationProfile, v.PolicyDigest, v.Provisional = sandboxapi.DisplayText(r.Profile), sandboxapi.DisplayText(r.Digest), r.Provisional
+}
+
+// notePolicyStop says in the activity feed why the organization's policy
+// stopped r's sandbox, in the managed gateway's words, when it gave them:
+// the feed said only that a hook call failed (403) and that the sandbox
+// stopped (#1199).
+func (d *SandboxDaemon) notePolicyStop(r daemonRegistration) {
+	if text := managedStopReason(r.StopText); text != "" {
+		d.rt.manager.Feed().Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: r.Sandbox,
+			Reason: sandboxPolicyStopReason, Message: text})
+	}
+}
+
+// sandboxPolicyStopReason is the feed reason of a stop the organization's
+// policy made.
+const sandboxPolicyStopReason = "policy_stop"
 
 // stopRevoked stops a sandbox whose registration the managed gateway
 // revoked; it never starts again from this registration.
@@ -1327,6 +1468,7 @@ func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
 		return
 	}
 	d.logf("stopped %s: its managed registration was revoked (%s)", r.Sandbox, r.RevokedReason)
+	d.notePolicyStop(r)
 	// A stop a re-match asked for (allowed false, a harness no longer
 	// allowed) ends the registration at the gateway only when it hears the
 	// sandbox stopped; the poll no longer reports a registration this daemon
@@ -1811,19 +1953,25 @@ func (c *managedSandboxController) List(ctx context.Context) ([]sandboxapi.Sandb
 	}
 	for i := range list {
 		c.confirmingView(&list[i])
+		c.registrationView(&list[i])
 	}
 	return list, err
 }
 
-// Get is List for one sandbox.
+// Get is List for one sandbox. A status (sandboxPolicyConfirmAsked) of a
+// running sandbox first confirms its policy (confirmRunningView).
 func (c *managedSandboxController) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
 	c.d.confirmIfClosed(ctx)
 	sb, err := c.Manager.Get(ctx, name)
 	if err == nil && sb != nil && unconfirmedSandbox(*sb) && c.d.openShellForKept(ctx, false) == nil {
 		sb, err = c.Manager.Get(ctx, name)
 	}
+	if err == nil && sb != nil && sandboxPolicyConfirmAsked(ctx) && sandboxMayRun(sb.Phase) && c.d.confirmRunningView(ctx, name) {
+		sb, err = c.Manager.Get(ctx, name)
+	}
 	if err == nil {
 		c.confirmingView(sb)
+		c.registrationView(sb)
 	}
 	return sb, err
 }
@@ -1902,7 +2050,10 @@ func (c *managedSandboxController) Create(ctx context.Context, req sandboxapi.Cr
 		}
 		d.unlockLifecycle()
 	}()
-	s := d.freshSettings(ctx)
+	s, err := d.createSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if err := managedSettingsRefusal(s); err != nil {
 		return nil, err
 	}
@@ -2046,11 +2197,14 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, managedRelayError(err)
 	}
 	if cp.Revoked {
-		d.regs.markRevoked(name, cp.RevokedReason)
+		d.regs.markRevokedText(name, cp.RevokedReason, cp.RevokedReason)
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Status: http.StatusForbidden,
 			Message: "your organization's policy no longer covers sandbox " + name + "; delete it and start it again with defenseclaw sandbox run"}
 	}
 	d.regs.applyOrdered(r, seq, cp)
+	// A sandbox that starts again runs under the profile minimum of the
+	// person's floor now, not the looser one it registered under (GAP-0224).
+	d.regs.applyStartFloor(name, r.ID, cp)
 	r, _ = d.regs.get(name)
 	if d.floorConflicts(ctx, r.Floor, name) {
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Status: http.StatusConflict,
@@ -2063,6 +2217,8 @@ func (c *managedSandboxController) Start(ctx context.Context, name string, req s
 		return nil, err
 	}
 	d.adoptFloor(name)
+	// Its saved decisions as the floor now keeps them (GAP-0224).
+	c.ReloadDecisions(ctx, r.ID)
 	return c.Manager.Start(withManagedMCPJudge(ctx, d.startMCPJudge(r.ID)), name, req)
 }
 
@@ -2194,7 +2350,20 @@ func applyManagedPosture(out *sandboxapi.Explain, p *sandboxapi.ManagedPosture) 
 // (GAP-0228).
 func (c *managedSandboxController) PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error) {
 	if req.Sandbox != "" {
-		return c.Manager.PolicyTest(ctx, req)
+		// Judged under the policy the sandbox's next connection meets: a
+		// changed policy and its saved decisions are confirmed first, as
+		// the egress proxy does, and while the proxy refuses the sandbox's
+		// connections the test says so (GAP-0224).
+		_, off := c.d.confirmEgressPolicy(ctx, egress.Principal{SandboxName: req.Sandbox})
+		res, err := c.Manager.PolicyTest(ctx, req)
+		if err != nil || off == nil {
+			return res, err
+		}
+		for i := range res.Decisions {
+			d := &res.Decisions[i]
+			d.Allowed, d.Rule, d.Match, d.Source, d.Reason, d.Unblockable = false, string(off.Category), "", "", off.Reason, false
+		}
+		return res, nil
 	}
 	// The managed gateway judges them under the caller's floor, its
 	// required pack and profile minimum included, which the daemon's own
@@ -2459,11 +2628,15 @@ type daemonRegistration struct {
 	RequiredPack *packs.Pack `json:"required_pack,omitempty"`
 	// Driver and DriverReason are the compute driver the sandbox was
 	// created on and why (openshell.DriverReason*); it never switches.
-	Driver        string    `json:"driver,omitempty"`
-	DriverReason  string    `json:"driver_reason,omitempty"`
-	Revoked       bool      `json:"revoked,omitempty"`
-	RevokedReason string    `json:"revoked_reason,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Driver        string `json:"driver,omitempty"`
+	DriverReason  string `json:"driver_reason,omitempty"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
+	// StopText is the managed gateway's words for the revoke, when its
+	// policy answer said them (CurrentPolicy.RevokedReason): the user's
+	// views and the activity feed give them (#1199).
+	StopText  string    `json:"stop_text,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 	// Confirmed is never persisted: the managed gateway answered for the
 	// registration in this daemon's lifetime (a create, or policy/current),
 	// so its floor may be adopted.
@@ -2599,16 +2772,23 @@ func (r *daemonRegistrations) drop(name string) error {
 	return r.saveLocked()
 }
 
-func (r *daemonRegistrations) markRevoked(name, reason string) {
+func (r *daemonRegistrations) markRevoked(name, reason string) { r.markRevokedText(name, reason, "") }
+
+// markRevokedText is markRevoked with the managed gateway's words for the
+// revoke (daemonRegistration.StopText), "" when it gave none.
+// It reports whether this call marked it: a registration another path
+// marked first is that path's to stop.
+func (r *daemonRegistrations) markRevokedText(name, reason, text string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	reg, ok := r.byName[name]
 	if !ok || reg.Revoked {
-		return
+		return false
 	}
-	reg.Revoked, reg.RevokedReason, reg.UpdatedAt = true, reason, time.Now().UTC()
+	reg.Revoked, reg.RevokedReason, reg.StopText, reg.UpdatedAt = true, reason, text, time.Now().UTC()
 	r.byName[name] = reg
 	_ = r.saveLocked()
+	return true
 }
 
 // applyLive switches the live fields of name's floor (plan §5.2 "live")
@@ -2621,6 +2801,28 @@ func (r *daemonRegistrations) applyLive(name string, cp sandboxrelay.CurrentPoli
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.applyLiveLocked(name, cp)
+}
+
+// applyStartFloor gives the registration id of sandbox name the min_profile
+// of a policy/current answer its start asked for (CurrentPolicy.MinProfile).
+// The profile minimum is not live: a running sandbox keeps the one it
+// started with, and its next start takes the floor's now, so a sandbox
+// stopped under a looser profile never runs under it again (GAP-0224). An
+// answer without it changes nothing.
+func (r *daemonRegistrations) applyStartFloor(name, id string, cp sandboxrelay.CurrentPolicy) {
+	if cp.MinProfile == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	reg, ok := r.byName[name]
+	if !ok || reg.ID != id || reg.Floor.MinProfile == *cp.MinProfile {
+		return
+	}
+	reg.Floor.MinProfile = *cp.MinProfile
+	r.byName[name] = reg
+	_ = r.saveLocked()
+	r.changes.Add(1)
 }
 
 // nextSeq numbers a policy request of a registration, taken before it is
@@ -2691,13 +2893,20 @@ func (r *daemonRegistrations) applyLiveLocked(name string, cp sandboxrelay.Curre
 	f.AllowUnblock, f.AllowLearnMode, f.UserApprovals = live.AllowUnblock, live.AllowLearnMode, live.UserApprovals
 	f.OnSilence, f.MaxSilenceAfter, f.ProcessTree = live.OnSilence, live.MaxSilenceAfter, live.ProcessTree
 	f.ForeignSandboxes, f.DeleteStoppedAfter, f.RequestAccess = live.ForeignSandboxes, live.DeleteStoppedAfter, live.RequestAccess
-	// The profile of the same match as the digest: a regroup re-matched the
-	// registration (#1199).
+	// The profile and provisional state of the same match as the digest: a
+	// regroup re-matched the registration, or the directory answered again
+	// after a provisional create (#1199).
 	profile := strings.TrimSpace(cp.Profile)
-	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile)
+	provisional := reg.Provisional
+	if cp.Provisional != nil {
+		provisional = *cp.Provisional
+	}
+	changed := !reflect.DeepEqual(before, reg.Floor) || (digest != "" && digest != reg.Digest) || (profile != "" && profile != reg.Profile) ||
+		provisional != reg.Provisional
 	if profile != "" {
 		reg.Profile = profile
 	}
+	reg.Provisional = provisional
 	if !changed {
 		r.byName[name] = reg
 		if moved {

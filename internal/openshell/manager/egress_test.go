@@ -912,6 +912,20 @@ func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
 	}
 }
 
+func TestCredentialEndpointMismatchFindingNamesTheCauseAndFix(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const mismatch = `FINDING:BLOCKED [HIGH] "Provider credential used at an unauthorized endpoint" [type:openshell.provider_credential.endpoint_mismatch]`
+	for range 4 {
+		e.ocsf("findbox", mismatch, e.m.now())
+	}
+	findings := where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	if len(findings) != 1 || !strings.Contains(findings[0].Description, "credential placeholder is bound to its configured endpoint") ||
+		!strings.Contains(findings[0].Remediation, "model provider's configured credential") {
+		t.Fatalf("endpoint mismatch finding = %+v", findings)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972"}}}
 	if c, ok := recoverCredential(sb, "dcx-abc"); !ok || c.Password != "secret" {
@@ -1368,6 +1382,32 @@ func TestARefusalOnTheModelHostSaysTheModelChannelStaysOpen(t *testing.T) {
 		return r.Blocked && strings.HasPrefix(r.Reason, "a connection outside the model channel") && strings.HasSuffix(r.Reason, "(transparent_tcp_mapping_denied)")
 	}); n != 1 {
 		t.Fatalf("%d records say the model channel stays open, want 1", n)
+	}
+}
+
+// GAP-0178, GAP-0183: an unblock of the sandbox's own model host said only
+// "unblocked", and the next fetch by another program was refused again by
+// the model host's provider rule, which opens the host to the agent's own
+// programs only. The unblock still lifts DefenseClaw's refusal, and says
+// that the other programs still cannot reach the model host; an unblock of
+// another host, or of the host for a sandbox without that model, does not.
+func TestAnUnblockOfTheModelHostSaysOtherProgramsStillCannotReachIt(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "mubox", Profile: "balanced", LLM: llm})
+	e.create(sandboxapi.CreateRequest{Name: "nomodel", Profile: "balanced", Project: e.otherProject("nomodel")})
+	resp, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "api.anthropic.com", Sandbox: "mubox"})
+	must(t, err)
+	want := "unblocked api.anthropic.com for sandbox mubox" + modelHostUnblockNote("api.anthropic.com")
+	if resp.Message != want || !strings.Contains(resp.Message, "still refuses the other programs in the sandbox") {
+		t.Fatalf("message = %q, want %q", resp.Message, want)
+	}
+	for _, req := range []sandboxapi.UnblockRequest{{Host: "example.org", Sandbox: "mubox"}, {Host: "api.anthropic.com", Sandbox: "nomodel"}} {
+		resp, err := e.m.Unblock(t.Context(), req)
+		must(t, err)
+		if resp.Message != "unblocked "+req.Host+" for sandbox "+req.Sandbox {
+			t.Errorf("%+v: message = %q", req, resp.Message)
+		}
 	}
 }
 

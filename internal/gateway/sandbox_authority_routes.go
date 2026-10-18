@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"io"
 	"maps"
 	"net/http"
@@ -187,7 +188,7 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 
 func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) sandboxrelay.OperationalSettings {
 	o := cfg.OpenShell
-	return sandboxrelay.OperationalSettings{
+	out := sandboxrelay.OperationalSettings{
 		IngressPort:      cfg.OpenShellIngressPort(),
 		EgressPort:       cfg.OpenShellEgressPort(),
 		GatewayName:      o.Gateway.Name,
@@ -205,6 +206,14 @@ func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) s
 		// caller's floor allows it.
 		UpstreamTelemetry: o.UpstreamTelemetry && floor.AllowUpstreamTelemetry != nil && *floor.AllowUpstreamTelemetry,
 	}
+	// The administrator's trusted CAs, read here as the gateway's service
+	// account from an administrator-owned file.
+	if trusted, err := image.TrustedCAsFor(cfg); err != nil {
+		out.TrustedCAError = err.Error()
+	} else {
+		out.TrustedCAs = string(trusted)
+	}
+	return out
 }
 
 // sandboxEnterprise is enterprise.openshell as the caller's daemon runs
@@ -374,6 +383,21 @@ var sandboxFilterMCP = func(ctx context.Context, a *APIServer, peer managedHookP
 		}
 	}
 	return kept, skipped
+}
+
+// sandboxRunMCPJudge records the actual run's MCP decision. A pack that
+// disables import leaves every claimed server out before the gateway's
+// server-level policy is relevant.
+func sandboxRunMCPJudge(ctx context.Context, a *APIServer, peer managedHookPeer, connectorName string,
+	claims []sandboxrelay.MCPServerClaim, importMCP bool) ([]string, []sandboxrelay.MCPSkip) {
+	if importMCP {
+		return sandboxFilterMCP(ctx, a, peer, connectorName, claims)
+	}
+	skipped := make([]sandboxrelay.MCPSkip, 0, len(claims))
+	for _, claim := range claims {
+		skipped = append(skipped, sandboxrelay.MCPSkip{Name: claim.Name, Reason: sandboxrelay.MCPSkipOrganizationBlock})
+	}
+	return nil, skipped
 }
 
 // validateSandboxResolve bounds every claim of a resolve; the text is the
@@ -572,7 +596,7 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		refuse(sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable, access)
 		return
 	}
-	kept, skipped := sandboxFilterMCP(r.Context(), a, peer, req.Connector, req.MCP)
+	kept, skipped := sandboxRunMCPJudge(r.Context(), a, peer, req.Connector, req.MCP, eff.MCP.Import)
 	id, err := sandboxreg.NewID()
 	if err != nil {
 		refuse(sandboxrelay.ReasonUnavailable, sandboxTextUnavailable, access)
@@ -804,10 +828,14 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
 		return
 	}
+	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
+		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
+		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
+	minProfile := floor.MinProfile
+	current.MinProfile = &minProfile
 	if reg.State == sandboxreg.StateRevoked {
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
 	}
@@ -930,7 +958,8 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,
-		WorkdirMode: "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
+		ForeignSandboxes: floor.ForeignSandboxes,
+		WorkdirMode:      "copy", AllowMount: false, AllowHostPorts: floor.AllowHostPorts == nil || *floor.AllowHostPorts,
 		AllowYolo: floor.AllowYolo == nil || *floor.AllowYolo, OnSilence: floor.OnSilence, MaxSilenceAfter: floor.MaxSilenceAfter,
 		ProcessTree: floor.ProcessTree != nil && *floor.ProcessTree, DeleteStoppedAfter: floor.DeleteStoppedAfter,
 		RequestAccess:  sandboxRequestAccess(floor),
@@ -956,6 +985,9 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		out.Driver, out.DriverReason = scope.reg.Driver, scope.reg.DriverReason
 		eff, violations, err = sandboxRegistrationEffective(cfg, auth, peer, scope.reg, floor)
 		tier = scope.reg.TamperTier
+		if err == nil {
+			importMCP = eff.MCP.Import
+		}
 	} else {
 		// The driver a sandbox would get now, by the gateway's view (the
 		// daemon's own probe at sandbox start decides).
@@ -985,8 +1017,13 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 	}
 	// The caller's own MCP servers, judged as a resolve judges them: the
 	// MCP row of the caller's explain, and what a start brings along.
-	if len(req.MCP) > 0 && importMCP {
-		kept, skipped := sandboxFilterMCP(r.Context(), a, peer, scope.connector, req.MCP)
+	if scope.registered && len(req.MCP) == 0 {
+		out.MCPIncluded = slices.Clone(scope.reg.MCPKept)
+		for _, s := range scope.reg.MCPSkipped {
+			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
+		}
+	} else if len(req.MCP) > 0 {
+		kept, skipped := sandboxRunMCPJudge(r.Context(), a, peer, scope.connector, req.MCP, importMCP)
 		out.MCPIncluded = kept
 		for _, s := range skipped {
 			out.MCPBlocked = append(out.MCPBlocked, sandboxapi.ManagedMCP{Name: s.Name, Reason: s.Reason})
@@ -1039,7 +1076,7 @@ func sandboxExplainRepo(overlay []byte) (*packs.RepoPolicy, error) {
 // sandboxExplainKeys are the floor keys a managed explain's sources name.
 var sandboxExplainKeys = []string{"allowed", "required_for", "when_unavailable", "allowed_harnesses", "allowed_credentials",
 	"egress_allow_only", "egress_block", "user_approvals", "allow_unblock", "allow_mount", "allow_host_ports", "allow_yolo",
-	"on_silence", "max_silence_after", "process_tree", "delete_stopped_after", "request_access", "driver_fallback",
+	"on_silence", "max_silence_after", "process_tree", "foreign_sandboxes", "delete_stopped_after", "request_access", "driver_fallback",
 	"min_profile", "required_pack"}
 
 // sandboxExplainSources says where each floor key of the caller's floor

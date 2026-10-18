@@ -23,7 +23,6 @@ from time import monotonic
 from typing import Any
 
 import requests
-from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.measure import Measurement
@@ -388,30 +387,6 @@ def _overview_banner_lines(width: int) -> int:
     return 1
 
 
-class _TailKeepingLine:
-    """One row of text cut with "…" before ``tail``, so a key hint survives.
-
-    A plain ``overflow="ellipsis"`` cut the end of the Overview runtime
-    notice at 80 columns, and with it "no findings; N for details" (GAP-2551).
-    """
-
-    def __init__(self, message: str, tail: str) -> None:
-        self.message = message
-        self.tail = tail
-
-    def __rich_measure__(self, console: Any, options: Any) -> Measurement:
-        return Measurement(1, cell_len(self.message))
-
-    def __rich_console__(self, console: Any, options: Any):
-        width = options.max_width
-        text = Text(self.message, no_wrap=True, overflow="ellipsis")
-        if cell_len(self.message) > width and self.message.endswith(self.tail) and cell_len(self.tail) < width - 8:
-            text = Text(self.message[: -len(self.tail)], no_wrap=True, overflow="ellipsis")
-            text.truncate(width - cell_len(self.tail), overflow="ellipsis")
-            text.append(self.tail)
-        yield text
-
-
 def _hanging_text(head: str, tail: str, style: str) -> Table:
     """``head tail`` whose wrapped lines start under ``tail``, not at the edge (GAP-2550)."""
 
@@ -635,7 +610,7 @@ class _OverviewRenderSnapshot:
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     # The terminal size the body was laid out for (_overview_layout_key).
-    layout: tuple[int, bool]
+    layout: tuple[int]
 
 
 @dataclass(frozen=True)
@@ -5013,9 +4988,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ],
             "inventory": [
                 ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
-                ("j/k or Up/Down", "Navigate items"),
+                ("j/k or Up/Down", "Navigate items and Summary metrics"),
+                ("PgUp/PgDn or Home/End", "Jump through Summary metrics or a list; PgUp/PgDn scroll the open detail"),
                 ("Enter / Esc", "Open / close the detail pane"),
-                ("PgUp / PgDn", "Scroll the open detail"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
@@ -9128,7 +9103,6 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
         notice_block: list[RenderableType] = []
-        short_notices = 0 < self.size.height < 32
         for notice in notices[:4]:
             if notice.level == "error":
                 icon, color = "[!]", TOKENS.accent_red
@@ -9139,16 +9113,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             else:
                 icon, color = "[-]", TOKENS.accent_green
             # A grid so wrapped lines hang under the text, not under the icon
-            # (GAP-2533). Below 32 rows each notice is one row ending with "…"
-            # when cut: at 80x24 the wrapped rest fell under the button bar
-            # mid-sentence (GAP-1775). Taller screens wrap the full text.
+            # (GAP-2533). The Overview body scrolls, so keep the full action
+            # visible on narrow terminals instead of cutting its last words.
             line = Table.grid(expand=True)
             line.add_column(no_wrap=True, width=len(icon) + 2)
-            line.add_column(ratio=1, no_wrap=short_notices, overflow="ellipsis")
-            message: RenderableType = Text(notice.message)
-            if short_notices and notice.keep_tail:
-                message = _TailKeepingLine(notice.message, notice.keep_tail)
-            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), message)
+            line.add_column(ratio=1, overflow="fold")
+            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), Text(notice.message))
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
@@ -9783,18 +9753,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
 
-    def _overview_layout_key(self) -> tuple[int, bool]:
+    def _overview_layout_key(self) -> tuple[int]:
         """The part of the terminal size the Overview layout depends on."""
 
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
         width = int(getattr(self.size, "width", 0) or 0)
-        # Notices are one "…" line below 32 rows and wrap above it, so the
-        # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
-        # wrapped notice, its end hidden under the button bar (GAP-2519).
-        short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
-        return (width, short)
+        return (width,)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".

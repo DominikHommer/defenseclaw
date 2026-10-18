@@ -32,6 +32,8 @@ the hooks are gone.
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import os
 import re
@@ -40,9 +42,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from defenseclaw import bootstrap, hook_integrity
+from defenseclaw import bootstrap, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.config import default_config
+from defenseclaw.cursor_contract import CursorRegistrationValidation
 
 _GOLDEN = json.loads(
     (
@@ -57,6 +60,15 @@ _GOLDEN = json.loads(
 _CASES = _GOLDEN["cases"]
 _POSIX = [case for case in _CASES if case["os"] == "posix"]
 _JSON_POSIX = [case for case in _POSIX if all(f["path"].endswith(".json") for f in case["files"])]
+_WINDOWS_STATUS_CONNECTORS = {"amp", "cursor", "kiro", "opencode"}
+_WINDOWS_STATUS_CASES = [
+    case for case in _POSIX if case["connector"] in _WINDOWS_STATUS_CONNECTORS and case["scope"] == "user"
+]
+_WINDOWS_STATUS_MODES = [
+    pytest.param(case, mode, id=f"{case['connector']}-{case['scope']}-{case['os']}-{mode}")
+    for case in _WINDOWS_STATUS_CASES
+    for mode in (["per_user", "managed_enterprise"] if case["connector"] in {"cursor", "kiro"} else ["per_user"])
+]
 
 # The doctor rows that say a hook file does not register DefenseClaw.
 _DOCTOR_UNREGISTERED = re.compile(
@@ -192,3 +204,76 @@ def test_the_windows_render_is_registered_until_its_entries_are_removed(tmp_path
         f"no DefenseClaw hooks are registered in {paths[0]}"
     ]
     assert os.path.getsize(paths[0]) < 16
+
+
+def _windows_status_case(case: dict[str, Any]) -> dict[str, Any]:
+    """Use the platform-neutral plugin or a Windows encoded hook command."""
+
+    rendered = copy.deepcopy(case)
+    rendered["os"] = "windows"
+    connector = case["connector"]
+    if connector not in {"cursor", "kiro"}:
+        return rendered
+    script = f"& 'C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe' hook --connector {connector}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    command = f"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -EncodedCommand {encoded}"
+
+    def replace_commands(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: command if key == "command" else replace_commands(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace_commands(item) for item in value]
+        return value
+
+    for file in rendered["files"]:
+        file["content"] = json.dumps(replace_commands(json.loads(file["content"])))
+    return rendered
+
+
+@pytest.mark.parametrize("case, mode", _WINDOWS_STATUS_MODES)
+def test_windows_hook_files_are_reflected_in_status_quickstart_and_doctor(tmp_path, monkeypatch, case, mode):
+    # Amp and OpenCode load the same plugin on Windows. Cursor and Kiro write
+    # JSON hook entries with the native launcher inside a PowerShell command.
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    rendered = _windows_status_case(case)
+    connector = rendered["connector"]
+    cfg, paths = _install(tmp_path, monkeypatch, rendered)
+    cfg.deployment_mode = "" if mode == "per_user" else mode
+    if mode == "managed_enterprise" and connector == "cursor":
+        # Cursor's full schema contract is exercised separately; this row
+        # isolates the per-file registration check for encoded commands.
+        monkeypatch.setattr(
+            cmd_doctor,
+            "validate_cursor_registration",
+            lambda *_args, **_kwargs: CursorRegistrationValidation(
+                True, "registered", runtime_path=paths[0], entry_count=21
+            ),
+        )
+    assert hook_integrity.hook_registration_problems(cfg, connector) == []
+    assert _status_problem(cfg, connector) == ""
+    assert _quickstart_problem(cfg, connector) == ""
+    doctor_rows = _doctor_rows(cfg, connector, monkeypatch)
+    assert _doctor_unregistered(doctor_rows) == []
+    if mode == "managed_enterprise":
+        assert any(row["label"] == f"{connector.title()} hooks" and row["status"] == "pass" for row in doctor_rows)
+    if mode == "managed_enterprise":
+        monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_args: ("open", None))
+        monkeypatch.setattr(
+            fail_mode,
+            "connector_fail_mode_report",
+            lambda *_args, **_kwargs: {"configured": "open", "desired": "open", "effective": "open"},
+        )
+        monkeypatch.setattr(cmd_doctor, "_doctor_effective_guardrail_mode", lambda *_args: "observe")
+        monkeypatch.setattr(
+            cmd_doctor,
+            "_check_hook_contract_lock",
+            lambda _cfg, _name, result: cmd_doctor._emit("pass", "Hook contract", "registered", r=result),
+        )
+        assert cmd_doctor.connector_setup_readiness(cfg, connector).ready
+
+    Path(paths[0]).write_text("{}" if paths[0].endswith(".json") else "// unrelated plugin", encoding="utf-8")
+    if mode == "per_user":
+        assert "DEGRADED" in _status_problem(cfg, connector)
+    assert _doctor_unregistered(_doctor_rows(cfg, connector, monkeypatch))
+    if mode == "managed_enterprise":
+        assert not cmd_doctor.connector_setup_readiness(cfg, connector).ready

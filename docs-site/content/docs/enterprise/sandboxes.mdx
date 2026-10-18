@@ -220,7 +220,7 @@ contact.
 | --- | --- | --- | --- |
 | Hardware | Any supported host | KVM. On EC2, a nested-virtualization type (for example m8i) or a `.metal` size. Graviton needs metal. | Apple silicon |
 | Group membership | The user is in `docker` | The user is in `kvm` (and `/dev/kvm` is readable and writable for them) and in `docker`, because the agent images are built in Docker for each user | None |
-| Also needed | Docker Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
+| Also needed | Docker Engine 28 or newer with BuildKit, Landlock ABI 3 or newer (kernel 6.2 upstream; a distribution kernel may carry a backport, and `sandbox doctor` reports the ABI of the running kernel) | `e2fsprogs` 1.43 or newer, a Docker socket for image builds | `e2fsprogs` (see below), and Docker Desktop running for the user: the agent images are built there, and `sandbox doctor` checks it |
 | Service settings | Rendered `gateway.toml`, run by DefenseClaw's user unit | Rendered `gateway.toml`, run by DefenseClaw's user unit (it sets the umask the driver needs) | Rendered `gateway.toml`, run by DefenseClaw's LaunchAgent |
 
 `ensure` never adds anyone to a group. Adding people to `docker` or `kvm` is
@@ -247,12 +247,22 @@ this release, so:
 - Credential and environment references keep secrets out of `config.yaml`, but
   they do not protect them from members of the group: the LLM and AI Defense
   keys are within their reach too.
-- A managed config refuses inline values only for `llm.api_key`,
+- A managed config refuses inline values for `llm.api_key`,
+  `inspect_llm.api_key`,
   `guardrail.llm.api_key`, `guardrail.judge.llm.api_key`,
   `scanners.mcp_scanner.llm.api_key`, `scanners.skill_scanner.llm.api_key`,
   `scanners.plugin_llm.api_key`, `cisco_ai_defense.api_key` and
-  `gateway.token`. Webhook URLs and provider or destination headers are
-  accepted as literals, and anyone who can read the config can read them.
+  `gateway.token`. New administrator input also refuses credential-bearing
+  provider headers in every `llm.extra_headers` block and literal credential
+  headers on observability destinations. Routing and version headers without
+  credentials remain valid. Use `{credential: NAME}` for destination headers.
+  Webhook URLs remain supported because they have no URL reference form; keep
+  their secrets in `secret_env` where the notifier supports it. An installed
+  1.0.2 config with literals still loads. `status` and `verify` name the
+  paths to review and advise `{credential: NAME}` where supported.
+  `defenseclaw-gateway config validate <file>` applies the same rule to a
+  candidate file as `ensure --config`; on the installed config it prints the
+  same advisory instead.
 - `ensure`, `status` and `verify` count the enrolled accounts in the group
   (`docker_group_members`, a number, no names), and
   `defenseclaw sandbox doctor` tells such a person what the membership means.
@@ -279,6 +289,15 @@ harness session. On macOS the user services run in the account's launchd
 `gui` domain when available, otherwise its `user` domain; logout that removes
 that domain also ends its services, so a detached run does not guarantee
 survival of logout.
+
+**Macs where a user only signs in over SSH (unsupported).** The sandbox
+services on macOS are LaunchAgents. An SSH-only session has no `gui` domain
+and does not load the account's LaunchAgents, so the sandbox daemon is not
+started for a user who never signs in at the Mac's desktop, and one that is
+started by hand in the `user` domain keeps running after the SSH session ends
+instead of stopping at the user's last logout. DefenseClaw does not support
+sandboxes for an SSH-only macOS account. Have the user sign in to the desktop
+session (the console or Screen Sharing) before they use `defenseclaw sandbox`.
 
 To preserve the same interactive terminal, launch inside your own tmux
 session (`tmux new -s sandbox`), detach with Ctrl-B then D, and reattach with
@@ -475,6 +494,34 @@ Other combinations that cannot be satisfied are refused the same way: two
 leaves no destination once the floor is applied, `allowed_credentials: [none]`
 together with other providers, an unknown `required_for` connector, or a pack
 outside `<policy_dir>/sandbox/` or looser than the floor's.
+
+### Behind a TLS-inspecting proxy
+
+When your network decrypts TLS, sandboxes need the proxy's root CA. Put it in
+an administrator-owned PEM file (root-owned, not writable by group or others,
+with root-owned parent folders) and name it in the admin `config.yaml`:
+
+```yaml
+openshell:
+  trusted_ca_bundle: /etc/defenseclaw/proxy-root-ca.pem   # /Library/... on macOS
+```
+
+The managed gateway reads the file and hands its certificates to each
+user's sandbox daemon, which builds every harness image with them in its
+system store. A user cannot add a CA of their own: their own configuration
+is not read. A file that fails the ownership check, or holds anything but
+CA certificates, stops image builds for everyone, and each user's
+`defenseclaw sandbox doctor` shows the reason in the Sandbox TLS trust row.
+
+The CA covers what programs in a sandbox reach (package installs, git, MCP
+servers, the agent's tools). It does not cover the agents' model calls:
+OpenShell's sandbox supervisor makes those, adding the credential, and
+verifies the provider with its own trust store, which takes no extra CA.
+Exempt the model provider hosts your agents use from TLS inspection on the
+proxy (for example `api.anthropic.com`, `api.openai.com`,
+`api.githubcopilot.com` and `bedrock-mantle.<region>.api.aws`). The Sandbox
+TLS trust row fails, by name, while any of the hosts it checks is
+inspected, with or without the CA.
 
 ### The docker fallback
 
@@ -1006,8 +1053,20 @@ connection picks the change up on its next poll.
 | Kind of field | What happens |
 | --- | --- |
 | Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
-| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. Only after a verified match, never on a failed lookup. |
+| Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. A sandbox started with `--host-port` under a profile that no longer allows host ports gets "no longer allows host ports" and the advice to start it again without `--host-port`. The agent's session ends with it, `sandbox activity` shows it, and `sandbox status NAME` repeats it on a `Stopped` row. Only after a verified match, never on a failed lookup. |
 | Looser create-time fields | Apply at the next run |
+
+`sandbox status NAME` shows the organization profile the sandbox's
+registration matches now on its `Your policy` row, with the digest of that
+same match, as `sandbox policy explain` names them. For a running sandbox,
+`sandbox status NAME` first asks your organization's gateway for the
+sandbox's current policy, so after a regroup it names the new profile at once,
+or shows the stop when the new profile no longer allows the sandbox; if the
+gateway does not answer within 2 seconds, it shows the policy DefenseClaw last
+confirmed. The `Policy` row above it keeps naming the policy pack and network
+profile the sandbox runs under. A sandbox the organization's policy stopped
+keeps showing the pack and network profile it ran with, also after the
+sandbox service restarts.
 
 A person whose group changes to one that no longer allows sandboxes sees this
 when the sandbox stops under them. The session summary says where the work is,
@@ -1021,7 +1080,9 @@ and then starts under `default_profile`, marked
 or failed group lookup never refuses a create or a hook. The computer must
 still know the account itself: OpenShell reaches every sandbox over ssh as the
 person, and ssh refuses an account the computer can't look up (on Linux, SSSD
-stopped, or no cached entry for the account). Then a new `sandbox run` stops
+stopped, or no cached entry for the account). A new `sandbox run` then waits
+up to 10 seconds for the computer to name the account again, and starts if it
+does (an SSSD restart, say). Otherwise it stops
 with "Your account can't be looked up on this computer right now. Try again in
 a moment.", says that this isn't the organization's sandbox policy and names
 the request-access contact for when it lasts, although `sandbox policy

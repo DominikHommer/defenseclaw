@@ -557,6 +557,17 @@ test('quick start hard block exports action mode for activation', () => {
   assert.equal(exported.guardrail.block_threshold, 2);
 });
 
+test('fresh playground keeps the default preset threshold until an interview edit', () => {
+  const preset = policyFromPreset('default');
+  assert.equal(preset.guardrail.alert_threshold, 2);
+  // The Quick Start answer is intentionally a separate choice. Applying it
+  // during mount would change the fresh Playground to HIGH.
+  assert.equal(applyAnswers(defaultAnswers()).guardrail.alert_threshold, 3);
+  const quickStart = readFileSync(join(import.meta.dirname, '../components/policy-creator/quick-start/index.tsx'), 'utf8');
+  assert.match(quickStart, /onPolicyChange\(applyAnswers\(draft\)\)/);
+  assert.equal((quickStart.match(/onPolicyChange\(applyAnswers\(/g) ?? []).length, 1);
+});
+
 test('guardrail mode control keeps an unset host mode out of the export', async () => {
   const { GUARDRAIL_MODE_CHOICES, getGuardrailModeChoice, setGuardrailModeChoice } =
     await import('../components/policy-creator/lib/guardrail-mode.js');

@@ -428,6 +428,18 @@ func assertClosedFloorDeny(t *testing.T, what string, v sandboxapi.Sandbox) {
 	}
 }
 
+// assertCreatedPolicy fails unless v shows the policy newClosedFloorFixture
+// created its sandboxes with (balanced, allowlist), with no violation and no
+// warning of the closed floor and no confirming note (GAP-0079).
+func assertCreatedPolicy(t *testing.T, what string, v sandboxapi.Sandbox) {
+	t.Helper()
+	if slices.ContainsFunc(v.Violations, closedFloorDeny) || v.Pack != "balanced" || v.Profile != "balanced" ||
+		v.NetworkMode != "allowlist" || v.Approvals != "triage" || slices.Contains(v.Warnings, sandboxConfirmingNote) ||
+		slices.ContainsFunc(v.Warnings, func(w string) bool { return strings.Contains(w, "policy changed since this sandbox was created") }) {
+		t.Fatalf("%s: %+v %s/%s/%s %q, want the policy it was created with", what, v.Violations, v.Pack, v.Profile, v.NetworkMode, v.Warnings)
+	}
+}
+
 // assertOrganizationPolicy fails unless v is judged against the
 // registration's floor: no organization violation, no strict or deny-all
 // policy, no confirming note.
@@ -593,7 +605,8 @@ func TestSandboxDaemonClosedFloorStaysWithoutAConfirmedRegistration(t *testing.T
 // A revoked registration keeps the closed floor and its deny: revoked by
 // the poll's answer, or confirmed and then revoked before its floor was
 // adopted (a start the managed gateway refused), even with the managed
-// gateway answering again.
+// gateway answering again. The sandbox's views show the policy it was
+// created with, not the closed floor's strict deny (GAP-0079).
 func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 	t.Run("revoked by the poll", func(t *testing.T) {
 		c := newClosedFloorFixture(t)
@@ -606,7 +619,7 @@ func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 		c.d.pollOnce(context.Background())
 		c.assertClosed(t, "after the polls")
 		for _, v := range c.statusAndList(t, "dc-a") {
-			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+			assertCreatedPolicy(t, "a revoked registration's sandbox", v)
 		}
 		c.assertClosed(t, "after the status")
 	})
@@ -618,7 +631,7 @@ func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 		c.d.pollOnce(context.Background())
 		c.assertClosed(t, "after the poll")
 		for _, v := range c.statusAndList(t, "dc-a") {
-			assertClosedFloorDeny(t, "a revoked registration's sandbox", v)
+			assertCreatedPolicy(t, "a revoked registration's sandbox", v)
 		}
 		c.assertClosed(t, "after the status")
 	})
