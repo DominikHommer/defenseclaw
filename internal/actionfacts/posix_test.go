@@ -1855,14 +1855,14 @@ func TestPOSIXNoExecShellCommandRawStructuredWrapperParity(t *testing.T) {
 }
 
 func TestPOSIXRedirectOnlyPrefixKeepsFollowingCommandAuthoritative(t *testing.T) {
-	facts := Analyze(Input{Tool: "Bash", Command: "> /tmp/redirect-output; rm -rf /", DialectHint: DialectPOSIX})
+	facts := Analyze(Input{Tool: "Bash", Command: "> /tmp/redirect-output; cat ~/.ssh/id_rsa", DialectHint: DialectPOSIX})
 	if !facts.Authoritative() || !facts.EnforcementEligible() || len(facts.Commands) != 2 ||
 		facts.Commands[0].Kind != CommandKindShellRedirect ||
 		facts.Commands[0].Effect != EffectExecute ||
-		facts.Commands[1].Program != "rm" {
+		facts.Commands[1].Program != "cat" {
 		t.Fatalf("redirect prefix facts = %#v", facts)
 	}
-	partial := Analyze(Input{Tool: "Bash", Command: "> $OUTPUT; rm -rf /", DialectHint: DialectPOSIX})
+	partial := Analyze(Input{Tool: "Bash", Command: "> $OUTPUT; cat ~/.ssh/id_rsa", DialectHint: DialectPOSIX})
 	if partial.Authoritative() || partial.EnforcementEligible() {
 		t.Fatalf("dynamic redirect became authoritative: %#v", partial)
 	}
