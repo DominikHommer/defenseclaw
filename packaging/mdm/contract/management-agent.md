@@ -310,8 +310,10 @@ Prints one line and exits 0, also on a managed device. Schema
 ```
 
 There is no features list: a build that prints `management_contract: 1` has
-everything in this file. A build without the member predates the contract;
-use these fallbacks on it:
+everything in this file except the members marked optional, which a later
+build added without a bump (section 0): gate on `management_contract` 1 and
+then on the member being present. A build without the member predates that
+member; use these fallbacks on it:
 
 | Item | `management_contract` 1 | Member absent |
 |---|---|---|
@@ -321,6 +323,7 @@ use these fallbacks on it:
 | Windows secret locks and JSON | Windows `secret set` / `remove` take `--lock-wait`, `bundle.lock` then `lifecycle.lock`, and print a JSON document on every outcome | do **not** pass `--lock-wait` (exit 1); the set takes no lock and can collide with an apply's confirm step or an installer run; failures print no JSON |
 | Linux and macOS secret failure JSON | `secret set` / `remove` / `status` print the schema-1 failure document for an argument, flag, privilege, value or stdin read error | those failures print one line on stderr and no JSON: classify them by the exit code (2 fix the call, 1 failed) |
 | Anchors command (Linux, macOS) | `enterprise bundle anchors install` | install the file as the MDM kit does (section 4.8) |
+| Optional status v2 members (from 1.0.3) | `bundle verify` `secret_refs_missing` and `restart_prediction` (4.2); `status` / `verify` `connectors`, `openshell` and `identity` (4.4.1); each only when present | absent: preflight by verifying and reading the refusal, and treat every apply as one that can restart the gateway |
 
 On Windows the anchors call is the same on every build:
 `enterprise windows ensure --profile standalone --trust-anchors F --json`
@@ -379,7 +382,8 @@ Exit 0.
   includes the confirmed bundle and the credential check can read the store
   (otherwise it warns `floor_unchecked` and `secret_presence_unchecked`).
 - Preconditions: none; it is the dry run of apply.
-- Lock: none. Changes nothing (it stages into a private temporary folder).
+- Lock: none. Changes nothing (it stages into a private temporary folder
+  and reads the credential store listing and the installed config.yaml).
 - Idempotency: pure; repeat freely.
 - stdout: `bundle-verify.schema.json`. `result` is `verified`,
   `already_applied` (the bytes are the confirmed bundle: apply would be a
@@ -389,6 +393,51 @@ Exit 0.
   `signature_invalid`, `tenant_mismatch`, `target_mismatch`,
   `version_not_newer`, `product_too_old`, `secret_ref_missing`,
   `digest_mismatch`, `config_invalid`); 2 / 1639 `invalid_arguments`.
+- `secret_refs_missing` and `restart_prediction` are optional: absent on
+  builds before 1.0.3 and added without a `management_contract` bump, so the
+  agent gates on `management_contract` 1 and on the member being present
+  (section 3).
+- Missing credentials, `secret_refs_missing` (absent on builds before
+  1.0.3): as root or SYSTEM on a device, the names of every `secret_refs`
+  credential the device does not hold, required and optional, in manifest
+  order; `[]` when all are stored. A `secret_ref_missing` refusal lists all
+  of them, not only the first. Absent off a device, when the store could
+  not be read (`secret_presence_unchecked`) and on a refusal before the
+  credential check. Names only, never a value.
+- Restart prediction, `restart_prediction` (absent on builds before 1.0.3):
+  on a device, for `verified` and `already_applied`, whether the apply
+  restarts the gateway, from the installed config.yaml and the bundle
+  config, with the classifier the apply uses on that OS:
+  - `required`: the apply restarts the gateway and managed hooks fail closed
+    while it restarts. `reason_codes` `restart_settings` (`settings` names the
+    restart-required settings as patterns such as `guardrail.hook_self_heal`
+    or `guardrail.connectors.*.enabled`, never a profile, group or connector
+    name) or, on Windows, `codex_machine_policy` (Codex protection turns on or
+    off: every DefenseClaw service restarts, 4.3).
+  - `not_required`: no changed setting needs a restart, so the gateway keeps
+    running (`already_applied`: the apply changes nothing). The apply still
+    restarts a gateway that is down or does not report the new policy in
+    time.
+  - `unknown`: `installed_config_unreadable` (run as root or SYSTEM) or, on
+    Windows, `fleet_setup_required` (the bundle changes `fleet.enabled`; the
+    apply refuses it, deliver it with signed Setup).
+
+  The prediction holds for the installed config verify read. Another apply
+  or an MDM `ensure` before this apply can change it; the receipt's
+  `restart` is what happened. The receipt carries `restart` only when the
+  gateway restarted (always `true`); when it is absent the gateway kept
+  running, never read an absent `restart` as unknown.
+- Preflight before an apply:
+  1. Run verify. `already_applied`: done.
+  2. `refused` with `secret_ref_missing`: store every name in
+     `secret_refs_missing` (4.7), then run verify again. The refusal is
+     final until the credentials change (2.2). A `verified` result can list
+     optional names: the apply succeeds and what needs them stays off until
+     they are stored.
+  3. `verified` with `gateway_restart` `required` or `unknown`: apply only in
+     the device's maintenance window. `not_required`: apply at any time.
+     There is no `--defer-restart` in this version: the agent defers a
+     restart by not running the apply.
 
 ```sh
 "$GW" enterprise bundle verify --bundle /var/lib/<vendor>/inbox/v13.dcbundle --json
@@ -579,7 +628,8 @@ Exit 0.
   `policy.effective_digest` / `policy.gateway_reported_digest` /
   `policy.applied`, `bundle` (the last receipt that reached staging and the
   confirmed bundle), `last_refusal`, `inspection`, `readiness`, `services`,
-  `coverage_complete` and `security_complete`. A pending transaction is
+  `coverage_complete` and `security_complete`, and from 1.0.3 the optional
+  `connectors`, `openshell` and `identity` blocks (4.4.1). A pending transaction is
   `transaction_pending: true` with `errors[].code` `verify_failed`.
   A bundle receipt no run finished (state `received`, `verified`, `staged`
   or `applied`) while no run holds the lock is also `transaction_pending:
@@ -599,6 +649,79 @@ Exit 0.
 ```powershell
 & $GW enterprise windows status --profile standalone --json
 ```
+
+#### 4.4.1 Connector, OpenShell and identity blocks
+
+From 1.0.3, `status` and `verify` of the standalone profile carry three
+optional members. Builds before 1.0.3 leave them out, and adding them did
+not bump `management_contract`: the agent treats a present block as "this
+build reports it" and ignores members it does not know (section 0). Under
+Secure Client and in a `not_root` result they are absent. They never add an
+error, never change `ok`, `coverage_complete`, `security_complete` or the
+exit code; a block whose input could not be read leaves out the members that
+input feeds and adds the warning `status_detail_unavailable`.
+
+- `connectors`: one entry per connector id (`codex`, `claudecode`, ...) the
+  installed config enables, or that still has guardian targets or
+  unprotected installs. `enabled`; `detected` (the enumerator found the
+  agent for at least one eligible account; absent when not enabled or the
+  enumerator has not run); `versions` (distinct agent versions, at most 8;
+  a string that is not a plain version is not shown);
+  `hooks_installed` (`all`, `partial`, `none`, or `unknown` when the
+  guardian state is missing or not vouched for by the root-only
+  attestation); `targets` (`total`, `protected`, `pending`, `failed`,
+  absent with `unknown`); `effective_mode` (`observe` or `action`, the
+  connector default; a guardrail profile can change it per request);
+  `effective_hook_fail_mode` (`open` or `closed`: the value the hook
+  renderer writes into the managed hooks, not the configured one); and
+  `managed_hook` (`true` when the hook is in administrator-owned vendor
+  machine policy, `false` for a per-user registration the guardian keeps).
+  On Linux and macOS a connector whose hook is in vendor machine policy only
+  (Codex, Claude Code, Copilot, OpenCode) gets no per-user target, so its
+  entry has no `targets`, and `hooks_installed` says whether DefenseClaw's
+  entries are in that machine policy (`all`; `partial` with conflicts;
+  `none`; `unknown` when it could not be read). It has `detected` (`true`)
+  and `versions` only when the enumerator listed an unprotected install of
+  it (for example an `unenrolled_users: deny` user it could not enroll);
+  status reports that install in its warnings or errors (for example
+  `agent_unprotected`), not as a target.
+  `effective_hook_fail_mode` is `open` for an agent that cannot fail closed
+  (Hermes, Copilot), whatever the config asks for.
+- `openshell`: `enabled`, `install` (`prerequisite` or `setup`),
+  `installed` (prerequisite mode: the administrator's OpenShell parts are
+  present and root-owned), `version`, `driver` (configured: `vm`, `docker`,
+  `auto`), `driver_available` (what users get now: `vm`, `docker`, which
+  includes the docker fallback of the MicroVM driver, or `none`) and
+  `reason_code` when that is not the configured driver or is `none`
+  (`openshell_prerequisite_missing`, `openshell_launcher_conflict`,
+  `openshell_driver_fallback`, `openshell_disabled`). Windows always
+  reports `{"enabled": false, "driver_available": "none", "reason_code":
+  "platform_unsupported"}`. Status spawns no extra probe for it: the block is
+  derived from the sandbox rows status already checks, plus, on Linux when
+  it would report `docker`, one bounded connect to the Docker engine socket:
+  a stopped engine is `driver_available` `none` with
+  `openshell_prerequisite_missing` (also a warning).
+- `identity`: the gateway's directory lookups. `state` is `ok`, `failing`
+  (`failing_accounts` > 0), `idle` (no lookup succeeded since the gateway
+  started) or `unknown` with `reason_code` `gateway_not_ready` or
+  `gateway_did_not_report` (an older gateway during an upgrade). `sources`
+  lists each identity source that answered since the gateway started, with
+  its `directory` and `last_ok_age_seconds`: the source tokens are those of
+  the telemetry attribute `defenseclaw.user.identity.source` (`sssd`,
+  `sssd_infopipe`, `winbind`, `nss_files`, `windows_lsa`,
+  `macos_opendirectory`, ...), the directory one of `local`, `ldap`,
+  `active_directory`, `entra_id`, `okta`, `other`. `stale_accounts` and
+  `serving_offline_cache` say that DefenseClaw serves directory facts past
+  their 15-minute lifetime because their refresh fails (it drops them at 60
+  minutes).
+
+Privacy: the blocks carry connector ids, codes, counts, versions and ages
+only, never an account name, UPN, SID, uid, pid, path, group or free text.
+The agent may forward them as they are. It must not forward the members
+that do name accounts (`enrollment.accounts`,
+`bundle.sessions_restart_required.entries`, warning and error messages)
+off the device. The agent does not read `/health` itself (section 7); the
+`identity` block is the supported way to see it.
 
 ### 4.5 Bundle state: `enterprise bundle status`
 
@@ -1082,6 +1205,12 @@ Per-user installs and Secure Client computers refuse every command.
   (section 0).
 - Windows `bundle apply` and `secret set` / `remove` default to no wait for
   `bundle.lock`; Linux and macOS wait 5 s. Pass `--lock-wait` on every OS.
+- The `identity` block cannot see an SSSD or Open Directory that answers
+  from its own offline cache: the lookup succeeds, so `state` stays `ok`.
+  It reports lookups since the gateway last started, so `idle` right after
+  a restart is normal. `effective_mode` is the connector default; a
+  guardrail profile can select another mode per request, which status does
+  not report per user (4.4.1).
 - DefenseClaw does not stop or restart agent sessions. A session already
   running when a bundle enables or changes its connector is not enforced
   until it restarts, although the apply is `confirmed`;
