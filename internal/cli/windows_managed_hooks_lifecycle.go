@@ -79,7 +79,10 @@ type windowsManagedHooksLifecycleReport struct {
 	// folder has permissions DefenseClaw could not verify or apply (#1105,
 	// GAP-0781): "<connector> generations of <account>: <reason>".
 	RetireSkipped []string `json:"retire_skipped,omitempty"`
-	Error         string   `json:"error,omitempty"`
+	// Collected is how many old managed runtime generations a collect
+	// removed (#1105, GAP-0211).
+	Collected int    `json:"collected,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type windowsManagedHooksLifecycleContext struct {
@@ -157,7 +160,7 @@ func newWindowsManagedHooksLifecycleCommand() *cobra.Command {
 		Hidden: true,
 	}
 	for _, action := range []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",
 	} {
 		action := action
 		var jsonOutput bool
@@ -212,7 +215,7 @@ func runWindowsManagedHooksLifecycle(
 		return report, err
 	}
 	if action != "capture" && action != "restore" && action != "retire" &&
-		action != "retire-committed" && action != "classify-activation" {
+		action != "retire-committed" && action != "classify-activation" && action != "collect" {
 		return fail(fmt.Errorf("unsupported managed-hook lifecycle snapshot action %q", action))
 	}
 	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
@@ -228,6 +231,17 @@ func runWindowsManagedHooksLifecycle(
 		return fail(err)
 	}
 	pendingExists := pending != nil
+	if action == "collect" {
+		skipped, collected, err := collectWindowsManagedHooksLifecycleGenerations(ctx, pendingExists)
+		if err != nil {
+			return fail(err)
+		}
+		report.RetireSkipped = skipped
+		report.Collected = collected
+		report.Phase = "collected"
+		report.OK = true
+		return report, nil
+	}
 	if action != "retire" && !pendingExists {
 		return fail(errors.New(
 			"managed-hook lifecycle snapshot requires an authenticated pending lifecycle transaction",
@@ -447,7 +461,7 @@ func runWindowsManagedHooksLifecycle(
 		); err != nil {
 			return fail(err)
 		}
-		skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(
+		skipped, _, err := garbageCollectWindowsManagedHooksLifecycleGenerations(
 			journal,
 			ctx,
 		)
@@ -896,7 +910,7 @@ func finalizeRetireCommittedWindowsManagedHooksLifecycle(
 	// well as enrollment restoration. Complete the bounded, idempotent GC
 	// before moving that authority out of its canonical path. Retrying after
 	// either crash edge repeats GC safely before acknowledging adoption.
-	skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, ctx)
+	skipped, _, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1959,11 +1973,12 @@ func restoreWindowsManagedHooksLifecycleSelectors(
 // it is removed, and its leftover generations are inert (the protected
 // selector names the one in force). One such profile, often a stale or
 // foreign one, used to fail the retire and roll back the whole upgrade with
-// 1603 (#1105, GAP-0781). Every other failure still fails the retire.
+// 1603 (#1105, GAP-0781). Every other failure still fails the retire. It
+// also returns how many generations it removed.
 func garbageCollectWindowsManagedHooksLifecycleGenerations(
 	journal windowsManagedHooksLifecycleJournal,
 	ctx windowsManagedHooksLifecycleContext,
-) ([]string, error) {
+) ([]string, int, error) {
 	type cleanupTarget struct {
 		connector      string
 		sid            string
@@ -2001,16 +2016,19 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 	}
 	sort.Strings(keys)
 	var skipped []string
+	removed := 0
 	for _, key := range keys {
 		target := targets[key]
-		if _, err := windowsManagedHooksLifecycleGenerationGC(
+		count, err := windowsManagedHooksLifecycleGenerationGC(
 			enterprisehooks.WindowsManagedRuntimeGenerationGCOptions{
 				Connector:      target.connector,
 				TargetSID:      target.sid,
 				DataDir:        target.dataDir,
 				HookExecutable: target.hookExecutable,
 			},
-		); err != nil {
+		)
+		removed += count
+		if err != nil {
 			account := ""
 			if label := enterpriseHookWindowsAccountLabel(enterpriseHookReconcileRow{SID: target.sid}); label != target.sid {
 				account = " (" + strings.TrimSuffix(label, " ("+target.sid+")") + ")"
@@ -2025,7 +2043,7 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 				)))
 				continue
 			}
-			return nil, fmt.Errorf(
+			return nil, removed, fmt.Errorf(
 				"retire %s managed runtime generations for SID %s%s: %w",
 				target.connector,
 				target.sid,
@@ -2034,7 +2052,37 @@ func garbageCollectWindowsManagedHooksLifecycleGenerations(
 			)
 		}
 	}
-	return skipped, nil
+	return skipped, removed, nil
+}
+
+// collectWindowsManagedHooksLifecycleGenerations is the collect action: the
+// generation collection of a retire, for the accounts the protected manifest
+// names now, run by an ensure that found the deployment compliant. Without
+// it the old copies a retire left in a folder it could not trust stayed
+// after the folder was fixed, and that ensure no longer named the folder
+// (#1105, GAP-0211). It runs only between transactions: a pending
+// transaction or a committed journal belongs to the lifecycle, whose retire
+// collects them.
+func collectWindowsManagedHooksLifecycleGenerations(
+	ctx windowsManagedHooksLifecycleContext,
+	pendingExists bool,
+) ([]string, int, error) {
+	if pendingExists {
+		return nil, 0, errors.New(
+			"managed-hook lifecycle collect refused: a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies",
+		)
+	}
+	if _, err := os.Lstat(ctx.journalPath); err == nil {
+		return nil, 0, errors.New(
+			"managed-hook lifecycle collect refused: a committed lifecycle journal is waiting for its retire; Setup /ensure retires it and collects the old runtime copies",
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, 0, err
+	}
+	return garbageCollectWindowsManagedHooksLifecycleGenerations(
+		windowsManagedHooksLifecycleJournal{},
+		ctx,
+	)
 }
 
 func windowsManagedHooksClaudeOptions(

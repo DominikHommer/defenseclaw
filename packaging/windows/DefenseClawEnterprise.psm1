@@ -207,6 +207,11 @@ $script:DefenseClawRollbackLeftovers = @()
 # verify or apply the permissions of that account's DefenseClaw folder
 # (#1105, GAP-0781). Reset per lifecycle run.
 $script:DefenseClawRetireSkipped = @()
+# Standalone: how many old managed runtime generations the collect of a
+# compliant ensure removed, and why that collect could not run (#1105,
+# GAP-0211). Set by Invoke-DefenseClawStandaloneRuntimeGenerationCollect.
+$script:DefenseClawRuntimeGenerationsCollected = 0
+$script:DefenseClawRuntimeGenerationCollectError = ''
 # Standalone pending-transaction recovery that may leave the restored release
 # stopped when it cannot be reactivated (Test-DefenseClawRecoveryActivationDeferral),
 # and whether this run did. Set per recovery; reset per lifecycle run.
@@ -18062,6 +18067,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         [Parameter(Mandatory)]
         [ValidateSet(
             'capture',
+            'collect',
             'restore',
             'retire',
             'retire-committed',
@@ -18151,6 +18157,7 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         'retire' { @('absent', 'retired') }
         'retire-committed' { 'adopted' }
         'classify-activation' { 'classified' }
+        'collect' { 'collected' }
     }
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
@@ -18177,7 +18184,57 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
         }
         $script:DefenseClawRetireSkipped = @($kept)
     }
+    $collected = $report.PSObject.Properties['collected']
+    if ($null -ne $collected -and $null -ne $collected.Value) {
+        $script:DefenseClawRuntimeGenerationsCollected += [int]$collected.Value
+    }
     return $report
+}
+
+function Invoke-DefenseClawStandaloneRuntimeGenerationCollect {
+    <#
+        Standalone Verify of an ensure that found the deployment compliant
+        (-CollectRuntimeGenerations). Runs the gateway's collect, the
+        generation collection of a retire for the accounts the protected
+        manifest names now, under the lifecycle lock and only between
+        transactions. Without it the old copies a retire left in a per-user
+        folder it could not trust stayed after the folder was fixed, and the
+        next ensure no longer named that folder (#1105, GAP-0211). Each
+        account whose folder is still untrusted is kept for the result
+        (lifecycle_retire_skipped), the number removed too, and a failure is
+        reported, not thrown: the old copies are inert, so a compliant
+        deployment stays compliant.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $script:DefenseClawRetireSkipped = @()
+    $script:DefenseClawRuntimeGenerationsCollected = 0
+    $script:DefenseClawRuntimeGenerationCollectError = ''
+    if (-not (Test-DefenseClawStandaloneProfile) -or -not (Test-DefenseClawAdministrator)) {
+        return
+    }
+    try {
+        $lock = Enter-DefenseClawLifecycleLock -Layout $Layout
+        try {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath -PathType Leaf) {
+                throw 'a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies'
+            }
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action collect)
+        }
+        finally {
+            Exit-DefenseClawLifecycleLock -Lock $lock
+        }
+    }
+    catch {
+        $script:DefenseClawRuntimeGenerationCollectError = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value ([string]$_.Exception.Message) `
+            -MaxLength 1024
+    }
 }
 
 function Test-DefenseClawLocalSystemToken {
@@ -22164,6 +22221,14 @@ function Get-DefenseClawLifecycleStatus {
             $status['lifecycle_retire_skipped'] = [string[]]@(
                 $script:DefenseClawRetireSkipped
             )
+        }
+        # What the collect of a compliant ensure removed, or why it could
+        # not run (GAP-0211).
+        if ([int]$script:DefenseClawRuntimeGenerationsCollected -gt 0) {
+            $status['lifecycle_generations_collected'] = [int]$script:DefenseClawRuntimeGenerationsCollected
+        }
+        if (-not [string]::IsNullOrEmpty($script:DefenseClawRuntimeGenerationCollectError)) {
+            $status['lifecycle_collect_error'] = $script:DefenseClawRuntimeGenerationCollectError
         }
         $status['claude_effective_policy_stale_reason'] = $(
             if ([string]::IsNullOrEmpty($claudeEffectivePolicyStaleReason)) {
@@ -29890,7 +29955,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$LauncherTemp,
         # Standalone Uninstall only: remove the deployment without recovering
         # its pending transaction (Setup /uninstall FORCE=1).
-        [switch]$Force
+        [switch]$Force,
+        # Standalone Verify only: the Verify of an ensure that found the
+        # deployment compliant also collects old managed runtime generations
+        # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
+        [switch]$CollectRuntimeGenerations
     )
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
     $script:DefenseClawLauncherTemp = [string]$LauncherTemp
@@ -29973,6 +30042,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($Force -and ($Action -ne 'Uninstall' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-Force is valid only with a standalone Uninstall'
+    }
+    if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -30161,6 +30233,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -RequireReadiness
+        if ($CollectRuntimeGenerations) {
+            Invoke-DefenseClawStandaloneRuntimeGenerationCollect `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName
+        }
         return Get-DefenseClawLifecycleStatus `
             -Action $Action `
             -Layout $layout `

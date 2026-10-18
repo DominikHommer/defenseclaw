@@ -1117,6 +1117,96 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 }
 
+// GAP-0211: an elevated ensure that finds the deployment compliant asks its
+// Verify (and only its Verify) to collect old managed runtime generations. It
+// stays a no-op, keeps naming each per-user folder that is still untrusted,
+// says how many copies it removed, and reports a collect that could not run
+// as an informational warning. A standard account's ensure asks for nothing.
+func TestWindowsEnterpriseCompliantEnsureCollectsOldRuntimeGenerations(t *testing.T) {
+	const skipped = "claudecode generations of SID S-1-5-21-1-2-3-1119 (HOST\\lane): enterprise hooks: " +
+		windowsEnterpriseUntrustedUserFolderText + `: enterprise hooks: managed Windows DACL on C:\Users\lane\.defenseclaw\hooks has 8 ACEs, expected 7`
+	for _, tc := range []struct {
+		name        string
+		elevated    bool
+		verify      map[string]any
+		wantCollect bool
+		wantWarning string
+		wantChange  string
+	}{
+		{
+			name: "still untrusted", elevated: true, wantCollect: true,
+			verify:      map[string]any{"lifecycle_retire_skipped": []string{skipped}, "lifecycle_generations_collected": 3},
+			wantWarning: windowsEnterpriseUntrustedUserFolderCode,
+			wantChange:  "removed 3 old DefenseClaw hook runtime copies",
+		},
+		{
+			name: "collect could not run", elevated: true, wantCollect: true,
+			verify:      map[string]any{"lifecycle_collect_error": "lifecycle lock is held by another DefenseClaw lifecycle"},
+			wantWarning: windowsEnterpriseGenerationsNotCollectedCode,
+		},
+		{name: "standard account", elevated: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &ensureStub{t: t}
+			stub.install(t)
+			originalElevated := windowsEnterpriseIsElevated
+			t.Cleanup(func() { windowsEnterpriseIsElevated = originalElevated })
+			windowsEnterpriseIsElevated = func() bool { return tc.elevated }
+			verify := installedStatus("verify")
+			for key, value := range tc.verify {
+				verify[key] = value
+			}
+			replies := []map[string]any{installedStatus("status"), verify}
+			requested := map[string]bool{}
+			windowsEnterpriseStandaloneRunner = func(ctx context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
+				requested[windowsEnterpriseInstallerAction(args)] = windowsEnterpriseCollectGenerationsRequested(ctx)
+				reply := replies[0]
+				replies = replies[1:]
+				body, _ := json.Marshal(reply)
+				return windowsEnterpriseStandaloneRun{Output: body}, nil
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`); err != nil {
+				t.Fatalf("ensure on a compliant host: %v\n%s", err, stdout.String())
+			}
+			if requested["Status"] || requested["Verify"] != tc.wantCollect {
+				t.Fatalf("collect requested %v, want only the Verify to ask (%v)", requested, tc.wantCollect)
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !result.OK || !result.Noop || result.NoopReason != "compliant" || len(result.Errors) != 0 {
+				t.Fatalf("result %+v, want an ok compliant no-op", result)
+			}
+			found := tc.wantWarning == ""
+			for _, warning := range result.Warnings {
+				if warning.Code == tc.wantWarning {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("warnings %+v, want %s", result.Warnings, tc.wantWarning)
+			}
+			if tc.wantWarning == windowsEnterpriseUntrustedUserFolderCode && !strings.Contains(stdout.String(), `HOST\\lane`) {
+				t.Fatalf("the warning does not name the account: %s", stdout.String())
+			}
+			changed := tc.wantChange == ""
+			for _, change := range result.Changes {
+				if strings.Contains(change, tc.wantChange) && tc.wantChange != "" {
+					changed = true
+				}
+			}
+			if !changed {
+				t.Fatalf("changes %q, want %q", result.Changes, tc.wantChange)
+			}
+		})
+	}
+}
+
 func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 	refusal := "DefenseClaw enterprise installer rejected its module before import: Authenticode signature is not valid (NotSigned)"
 	stub := &ensureStub{t: t, replies: []map[string]any{

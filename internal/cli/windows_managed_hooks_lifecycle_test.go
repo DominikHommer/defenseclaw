@@ -420,9 +420,9 @@ func TestWindowsManagedHooksLifecycleGenerationGCSkipsUntrustedFolders(t *testin
 		}
 		return 1, nil
 	}
-	skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{})
-	if err != nil {
-		t.Fatalf("an untrusted per-user folder failed the retire: %v", err)
+	skipped, removed, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{})
+	if err != nil || removed != 1 {
+		t.Fatalf("an untrusted per-user folder failed the retire: removed=%d err=%v", removed, err)
 	}
 	if len(collected) != 2 {
 		t.Fatalf("collected %v, want both accounts", collected)
@@ -451,8 +451,70 @@ func TestWindowsManagedHooksLifecycleGenerationGCSkipsUntrustedFolders(t *testin
 		}
 		return 0, nil
 	}
-	if skipped, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{}); !errors.Is(err, other) || skipped != nil {
+	if skipped, _, err := garbageCollectWindowsManagedHooksLifecycleGenerations(journal, windowsManagedHooksLifecycleContext{}); !errors.Is(err, other) || skipped != nil {
 		t.Fatalf("another GC failure: skipped=%q err=%v, want the failure", skipped, err)
+	}
+}
+
+// GAP-0211: the collect a compliant ensure runs collects the old generations
+// of every account the manifest names with this deployment's hook binary,
+// reports an account whose folder is still untrusted, and counts what it
+// removed. It refuses, without collecting anything, while a transaction is
+// pending or a committed journal waits for its retire.
+func TestWindowsManagedHooksLifecycleCollectOutsideATransaction(t *testing.T) {
+	originalGC := windowsManagedHooksLifecycleGenerationGC
+	t.Cleanup(func() { windowsManagedHooksLifecycleGenerationGC = originalGC })
+
+	const stale, healthy = "S-1-5-21-111-222-333-1103", "S-1-5-21-111-222-333-1001"
+	ctx := windowsManagedHooksLifecycleContext{
+		journalPath: filepath.Join(t.TempDir(), windowsManagedHooksLifecycleJournalFile),
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: stale, DataDir: `C:\Users\stale\.defenseclaw`},
+			{Connector: "claudecode", SID: healthy, DataDir: `C:\Users\alice\.defenseclaw`},
+		},
+	}
+	ctx.opts.HookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	untrusted := fmt.Errorf("%w: managed Windows DACL on %s has 8 ACEs, expected 7",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, `C:\Users\stale\.defenseclaw\hooks`)
+	var calls []enterprisehooks.WindowsManagedRuntimeGenerationGCOptions
+	windowsManagedHooksLifecycleGenerationGC = func(
+		opts enterprisehooks.WindowsManagedRuntimeGenerationGCOptions,
+	) (int, error) {
+		calls = append(calls, opts)
+		if opts.TargetSID == stale {
+			return 0, untrusted
+		}
+		return 2, nil
+	}
+
+	skipped, collected, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false)
+	if err != nil || collected != 2 {
+		t.Fatalf("collect: collected=%d err=%v, want 2 and no failure", collected, err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("collect ran for %d accounts, want both", len(calls))
+	}
+	for _, call := range calls {
+		if call.HookExecutable != ctx.opts.HookBinary {
+			t.Fatalf("collect used hook binary %q, want this deployment's %q", call.HookExecutable, ctx.opts.HookBinary)
+		}
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "claudecode generations of SID "+stale) ||
+		!strings.Contains(skipped[0], windowsEnterpriseUntrustedUserFolderText) {
+		t.Fatalf("skipped = %q, want the still-untrusted account", skipped)
+	}
+
+	calls = nil
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, true); err == nil ||
+		!strings.Contains(err.Error(), "transaction is pending") || len(calls) != 0 {
+		t.Fatalf("collect during a pending transaction: err=%v calls=%d", err, len(calls))
+	}
+	if err := os.WriteFile(ctx.journalPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := collectWindowsManagedHooksLifecycleGenerations(ctx, false); err == nil ||
+		!strings.Contains(err.Error(), "committed lifecycle journal") || len(calls) != 0 {
+		t.Fatalf("collect with a committed journal: err=%v calls=%d", err, len(calls))
 	}
 }
 

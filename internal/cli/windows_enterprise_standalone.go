@@ -152,6 +152,11 @@ type windowsEnterpriseInstallerReport struct {
 	// permissions DefenseClaw could not verify or apply (#1105, GAP-0781).
 	// Decoded leniently, like the registration lists.
 	LifecycleRetireSkipped json.RawMessage `json:"lifecycle_retire_skipped"`
+	// LifecycleGenerationsCollected is how many old managed runtime
+	// generations the collect of a compliant ensure removed, and
+	// LifecycleCollectError why that collect could not run (GAP-0211).
+	LifecycleGenerationsCollected int    `json:"lifecycle_generations_collected"`
+	LifecycleCollectError         string `json:"lifecycle_collect_error"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -232,6 +237,10 @@ func runWindowsEnterprisePowerShell7(
 		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
 		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
 			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		}
+		if err == nil && windowsEnterpriseCollectGenerationsRequested(ctx) &&
+			windowsEnterpriseInstallerAction(args) == "Verify" {
+			env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
 		}
 		return env, err
 	}
@@ -422,6 +431,21 @@ type windowsEnterpriseForcedUninstallKey struct{}
 func windowsEnterpriseForcedUninstallRequested(ctx context.Context) bool {
 	forced, _ := ctx.Value(windowsEnterpriseForcedUninstallKey{}).(bool)
 	return forced
+}
+
+// windowsEnterpriseCollectGenerationsVariable asks the standalone installer's
+// Verify to collect old managed runtime generations: an elevated ensure that
+// found the deployment compliant sets it, so the old copies a retire left in
+// a per-user folder it could not trust go once the folder is fixed, and the
+// folder stays named until then (#1105, GAP-0211). Like the forced uninstall
+// it is not an installer parameter.
+const windowsEnterpriseCollectGenerationsVariable = "DEFENSECLAW_STANDALONE_COLLECT_RUNTIME_GENERATIONS"
+
+type windowsEnterpriseCollectGenerationsKey struct{}
+
+func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
+	requested, _ := ctx.Value(windowsEnterpriseCollectGenerationsKey{}).(bool)
+	return requested
 }
 
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
@@ -1370,6 +1394,15 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 				windowsEnterpriseUntrustedUserFolderRemedy + ": " + windowsEnterpriseBoundedLabels(skipped),
 		})
 	}
+	if failure := strings.TrimSpace(report.LifecycleCollectError); failure != "" {
+		// The collect of a compliant ensure did not run (GAP-0211).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: windowsEnterpriseGenerationsNotCollectedCode,
+			Message: "ensure could not remove the old DefenseClaw hook runtime copies from the accounts' DefenseClaw folders " +
+				"(they are inert; the deployment is not affected): " + windowsEnterpriseBoundedDiagnostic(failure) +
+				"; run Setup /ensure again once nothing else changes the deployment",
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleTeardownJournalRemoved); removed != "" {
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: "stale_lifecycle_journal_removed",
@@ -1443,9 +1476,12 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 // what the administrator does about it (#1105, GAP-0781). The copies left
 // there are inert: the protected selector names the generation in force.
 const (
-	windowsEnterpriseUntrustedUserFolderText   = "managed runtime generation directory is untrusted"
-	windowsEnterpriseUntrustedUserFolderCode   = "user_runtime_folder_untrusted"
-	windowsEnterpriseUntrustedUserFolderRemedy = "the deployment is not affected. Have an administrator inspect each folder named here, " +
+	windowsEnterpriseUntrustedUserFolderText = "managed runtime generation directory is untrusted"
+	windowsEnterpriseUntrustedUserFolderCode = "user_runtime_folder_untrusted"
+	// windowsEnterpriseGenerationsNotCollectedCode reports a compliant
+	// ensure whose collect of old runtime copies could not run (GAP-0211).
+	windowsEnterpriseGenerationsNotCollectedCode = "runtime_generations_not_collected"
+	windowsEnterpriseUntrustedUserFolderRemedy   = "the deployment is not affected. Have an administrator inspect each folder named here, " +
 		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
 )
 
@@ -3054,7 +3090,14 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 	}
 	if plan.Action == "" {
-		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
+		verifyCtx := ctx
+		if windowsEnterpriseIsElevated() {
+			// A compliant deployment runs no retire, so this Verify collects
+			// the old runtime copies a retire left and names each per-user
+			// folder still untrusted (#1105, GAP-0211).
+			verifyCtx = context.WithValue(ctx, windowsEnterpriseCollectGenerationsKey{}, true)
+		}
+		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(verifyCtx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil {
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
@@ -3070,6 +3113,10 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				for _, removed := range windowsEnterpriseRemoveReplacementCopies() {
 					result.Changes = append(result.Changes, "removed "+removed+", which no program runs any more")
 				}
+			}
+			if collected := verifyReport.LifecycleGenerationsCollected; collected > 0 {
+				result.Changes = append(result.Changes, fmt.Sprintf(
+					"removed %d old DefenseClaw hook runtime copies from the accounts' DefenseClaw folders", collected))
 			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
