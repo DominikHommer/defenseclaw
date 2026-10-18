@@ -278,6 +278,7 @@ class VerifierTests(unittest.TestCase):
                 verify.record_matches(b"a", value)
 
     def test_source_inventory_requires_explicit_review_when_build_inputs_change(self):
+        self.assertEqual(verify.PEER_TEST_COUNT, prepare_build.NATIVE_TEST_COUNT)
         self.assertEqual(
             verify.SOURCES, prepare_build.SOURCE | {"Cargo.lock", "reviewed-linux-seed.lock", "mxc-literal-argv.patch"}
         )

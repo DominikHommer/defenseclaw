@@ -37,6 +37,7 @@ MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 LOCK = "9fb53262adf9c0b9ec3fb434dd04a5fe17572d6a522b4b5e3fb31cd2c6bef325"
 SEED = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
+PEER_TEST_COUNT = 19
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
@@ -51,6 +52,7 @@ SOURCES = {
     "test_prepare_build.py",
     "src/lib.rs",
     "src/main.rs",
+    "src/namespace.rs",
     "src/conversation.rs",
     "src/custody.rs",
     "src/linux.rs",
@@ -370,7 +372,11 @@ def unit_gates(archive):
                 f"{PurePosixPath(name).stem}::tests::{test}"
                 for test in re.findall(r"#\[test\]\s+fn ([A-Za-z_][A-Za-z_0-9]*)\(\)", raw)
             )
-    require(len(expected) == 18 and peer.get("tests") == sorted(expected) and peer.get("passed") == 18)
+    require(
+        len(expected) == PEER_TEST_COUNT
+        and peer.get("tests") == sorted(expected)
+        and peer.get("passed") == PEER_TEST_COUNT
+    )
     require(peer.get("peer_execution_performed") is False and peer.get("contained_payload_execution") is False)
     dependency_gates = archive.object("build-artifact/DEPENDENCY-PURE-UNIT-TESTS.json")
     require(set(dependency_gates) == set(DEPENDENCIES))

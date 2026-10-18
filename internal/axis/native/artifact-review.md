@@ -20,7 +20,7 @@ refuses. It checks:
   separately uploaded root lock and workflow identity record.
 - All committed build-source Git bytes, upstream locks/licenses, the reviewed
   combined registry lock and every applied overlay's reconstructed file bytes.
-- The exact 18 peer, six dependency and four inert C test inventories.
+- The exact 19 peer, six dependency and four inert C test inventories.
 - Both identical static-musl images, their ELF structure, original source
   archives/licenses, static `dlopen` refusal and exact source/compiler/musl/
   libcap link inputs. Retained GCC runtime objects must match the recorded
