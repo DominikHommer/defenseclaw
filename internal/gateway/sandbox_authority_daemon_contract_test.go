@@ -85,8 +85,10 @@ func TestSandboxAuthorityRefusesOutdatedDaemon(t *testing.T) {
 			sandboxrelay.StateReport{V: 1, Running: true}, old))
 		isOutdated("policy/current", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyCurrent+"?registration="+running.Registration.ID, nil, old))
 		isOutdated("relayed hook", f.hook(sbxAlice, running.Registration.ID, "claudecode", old))
-		isOutdated("packs", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyPacks, nil, with(old, sandboxrelay.ConnectorHeader, "claudecode")))
 	}
+	// The packs route has a small budget of its own: one call.
+	isOutdated("packs", f.do(sbxAlice, http.MethodGet, sandboxrelay.PathPolicyPacks, nil,
+		map[string]string{sandboxrelay.DaemonContractHeader: "", sandboxrelay.ConnectorHeader: "claudecode"}))
 	mu.Lock()
 	if len(refused) != 3 || refused[0] != "contractors:"+sandboxrelay.ReasonDaemonOutdated {
 		t.Fatalf("recorded resolve refusals: %v", refused)
