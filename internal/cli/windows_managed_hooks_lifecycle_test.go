@@ -100,7 +100,7 @@ func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{
-		"capture", "classify-activation", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",
 	}) {
 		t.Fatalf("actions = %v", actions)
 	}
