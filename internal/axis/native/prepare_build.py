@@ -186,7 +186,7 @@ def main() -> None:
         "axis-Cargo.lock": ordinary(axis / "Cargo.lock"),
         "mxc-Cargo.lock": ordinary(mxc / "src/Cargo.lock"),
         "axis-LICENSE": ordinary(axis / "LICENSE"),
-        "mxc-LICENSE": ordinary(mxc / "LICENSE"),
+        "mxc-LICENSE": ordinary(mxc / "LICENSE.md"),
         "bwrap-COPYING": ordinary(bwrap / "COPYING"),
     }
     if upstream["bwrap-COPYING"] != ordinary(ROOT / "patches/bwrap-COPYING"):
