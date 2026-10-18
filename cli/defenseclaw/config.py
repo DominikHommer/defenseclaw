@@ -2921,20 +2921,29 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
             )
         for segment in p.split("/"):
             if _sandbox_bad_glob_segment(segment):
-                return f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} has a malformed glob segment {_go_quote(segment)}"
+                return (
+                    f"{prefix}.require_copy_for[{index}]: {_go_quote(pattern)} "
+                    f"has a malformed glob segment {_go_quote(segment)}"
+                )
     resources = section.get("max_resources") or {}
     if isinstance(resources, Mapping):
         cpu = str(resources.get("cpu") or "").strip()
         if cpu:
             if not re.fullmatch(r"(?:[0-9]{1,6}(?:\.[0-9]{1,3})?|[0-9]{1,9}m)", cpu):
-                return f'{prefix}.max_resources.cpu { _go_quote(cpu) } must be cores ("2", "1.5") or millicores ("500m")'
+                return (
+                    f"{prefix}.max_resources.cpu {_go_quote(cpu)} "
+                    'must be cores ("2", "1.5") or millicores ("500m")'
+                )
             if not any(ch in "123456789" for ch in cpu):
                 return f"{prefix}.max_resources.cpu {_go_quote(cpu)} must be positive"
         memory = str(resources.get("memory") or "").strip()
         if memory:
             match = re.fullmatch(r"([0-9]{1,15})(Ki|Mi|Gi|Ti|k|K|M|G|T)?", memory)
             if match is None:
-                return f"{prefix}.max_resources.memory {_go_quote(memory)} must be bytes with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix"
+                return (
+                    f"{prefix}.max_resources.memory {_go_quote(memory)} "
+                    "must be bytes with an optional Ki/Mi/Gi/Ti or k/M/G/T suffix"
+                )
             if int(match.group(1)) == 0:
                 return f"{prefix}.max_resources.memory {_go_quote(memory)} must be positive"
             multiplier = {"": 1, "k": 1000, "K": 1000, "M": 1000**2, "G": 1000**3, "T": 1000**4,
@@ -3058,7 +3067,10 @@ def _sandbox_egress_pattern_error(pattern: str) -> str | None:
     if not p:
         return "egress pattern is empty"
     if p == "*":
-        return 'egress pattern "*" matches every host; choose the profile instead (open allows by default, strict turns the web off)'
+        return (
+            'egress pattern "*" matches every host; '
+            "choose the profile instead (open allows by default, strict turns the web off)"
+        )
     invalid = f'egress pattern {_go_quote(pattern)} must be a host name, "*.<host>", an IP address or a CIDR prefix'
     wildcard = p.startswith("*.")
     if wildcard:
