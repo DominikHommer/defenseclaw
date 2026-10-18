@@ -70,6 +70,17 @@ live shape is:
 <reviewed-control.exe> --run-fixed --receipt <exact-reviewed246-ROOT-REVIEW.json> --evidence <fresh-private-parent>/environment-control-01
 ```
 
-No execution has been performed for this control source. A passing control
-would isolate one environment-construction comparison; it would not qualify
-PSEC, filesystem/network containment, child lifetime, Claude or production.
+One fresh control passed on the native Windows host using this exact source,
+Go 1.26.5 and wrapper SHA256
+`fd5132faff988a3a7ac7f96ff4bc878e15528c9993e30ea94754692d81b9c349`.
+The wrapper exited zero in 0.156 seconds; bounded stdout matched the persisted
+result, all six environment assertions passed by the reviewed child source
+order, both private permitted writes appeared and original sentinels remained
+unchanged. It stopped at the expected outside-read failure before negative
+writes or sockets. Evidence SHA256 is
+`e075cb59147d03e72695946c2a97a0148a79c4b314a6ed943d7091ab33317fbd`.
+The first attempt refused its evidence parent's DACL before fixture or child
+creation; the passing attempt used a fresh atomically private parent and
+retained its fixture. See `../mxc-v1/manual-results.md` for the paired PSEC
+failure. This isolates an environment-construction comparison; it does not
+qualify PSEC, filesystem/network containment, child lifetime, Claude or production.

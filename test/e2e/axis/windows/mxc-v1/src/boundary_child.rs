@@ -211,6 +211,59 @@ fn fixed_environment_comparison(actual: &OsStr, expected: &Path) -> String {
     )
 }
 
+fn fixed_environment_location(actual: &OsStr, root: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+
+    // Lexical diagnostic flags only, never filesystem admission or a relaxed
+    // environment assertion. Keep arbitrary values and component names private.
+    fn units(value: &OsStr) -> Option<Vec<u16>> {
+        let value: Vec<_> = value.encode_wide().take(32_769).collect();
+        if value.len() > 32_768 {
+            return None;
+        }
+        Some(
+            value
+                .strip_prefix(&[92, 92, 63, 92])
+                .unwrap_or(&value)
+                .to_vec(),
+        )
+    }
+    let (Some(actual), Some(root)) = (units(actual), units(root.as_os_str())) else {
+        return "classification=oversize".to_owned();
+    };
+    let below = |suffix: &str| {
+        let mut prefix = root.clone();
+        if !suffix.is_empty() {
+            prefix.push(92);
+            prefix.extend(suffix.encode_utf16());
+        }
+        actual.starts_with(&prefix)
+            && (actual.len() == prefix.len() || actual.get(prefix.len()) == Some(&92))
+    };
+    let relative = actual
+        .strip_prefix(root.as_slice())
+        .and_then(|tail| tail.strip_prefix(&[92]));
+    let parts: Vec<_> = relative
+        .map(|tail| tail.split(|unit| *unit == 92).collect())
+        .unwrap_or_default();
+    let dot_or_slash =
+        actual.contains(&47) || parts.iter().any(|part| *part == [46] || *part == [46, 46]);
+    let final_temp = parts
+        .last()
+        .is_some_and(|part| *part == [84, 101, 109, 112]);
+    format!(
+        "lexical_fixture_prefix={} lexical_home_prefix={} lexical_local_app_data_prefix={} lexical_private_tmp_prefix={} lexical_packages_prefix={} relative_components={} dot_component_or_slash={} final_temp_component={}",
+        below(""),
+        below("home"),
+        below(r"home\AppData\Local"),
+        below("tmp"),
+        below(r"home\AppData\Local\Packages"),
+        parts.len(),
+        dot_or_slash,
+        final_temp,
+    )
+}
+
 fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
     require(
         args.first().is_some_and(|arg| arg == "--fixed-child"),
@@ -301,6 +354,7 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         )? == SENTINEL,
         "fixture seal missing",
     )?;
+    let mut environment_matches = true;
     for (key, expected) in [
         ("HOME", root.join("home")),
         ("USERPROFILE", root.join("home")),
@@ -319,9 +373,14 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
                 "FIXED_PRIVATE_ENV_MISMATCH key={key} {}",
                 fixed_environment_comparison(&actual, &expected),
             );
-            return Err(io::Error::other("private environment differs").into());
+            eprintln!(
+                "FIXED_PRIVATE_ENV_LOCATION key={key} {}",
+                fixed_environment_location(&actual, root),
+            );
+            environment_matches = false;
         }
     }
+    require(environment_matches, "private environment differs")?;
     require(
         std::env::var_os("OPENAI_API_KEY").is_none()
             && std::env::var_os("ANTHROPIC_API_KEY").is_none(),
@@ -430,5 +489,36 @@ mod tests {
         );
         assert!(!diagnostic.contains("fixed-private"));
         assert!(!diagnostic.contains("HOME"));
+        let root = Path::new(r"C:\fixed-private");
+        let diagnostic = fixed_environment_location(
+            OsStr::new(
+                r"\\?\C:\fixed-private\home\AppData\Local\Packages\synthetic-profile\AC\Temp",
+            ),
+            root,
+        );
+        assert_eq!(
+            diagnostic,
+            "lexical_fixture_prefix=true lexical_home_prefix=true lexical_local_app_data_prefix=true lexical_private_tmp_prefix=false lexical_packages_prefix=true relative_components=7 dot_component_or_slash=false final_temp_component=true"
+        );
+        assert!(!diagnostic.contains("synthetic-profile"));
+        assert!(!diagnostic.contains("fixed-private"));
+        assert!(
+            fixed_environment_location(OsStr::new(r"C:\fixed-private\tmp"), root)
+                .contains("lexical_private_tmp_prefix=true")
+        );
+        for actual in [
+            r"C:\fixed-private-other\home\Temp",
+            r"C:\other\home\Temp",
+            r"D:\fixed-private\home\Temp",
+        ] {
+            assert!(
+                fixed_environment_location(OsStr::new(actual), root)
+                    .starts_with("lexical_fixture_prefix=false")
+            );
+        }
+        assert!(
+            fixed_environment_location(OsStr::new(r"C:\fixed-private\home\..\tmp"), root)
+                .contains("dot_component_or_slash=true")
+        );
     }
 }

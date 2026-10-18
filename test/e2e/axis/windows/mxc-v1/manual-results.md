@@ -317,3 +317,49 @@ containment. Its first wrapper attempt refused the existing evidence parent's
 DACL before creating a fixture or child; the raw stdout and nonzero exit are
 retained in `environment-control-01-outer-result.json`. A fresh private parent
 and separately reviewed invocation are required for a further attempt.
+
+## Outside-PSEC environment control: passed
+
+The same reviewed build-246 boundary child ran once outside PSEC with eight
+explicit environment entries, no inherited credentials and a fresh synthetic
+fixture. Its separately reviewed Go wrapper used `processutil.RunTree` and an
+owned non-breakaway kill-on-close Job assigned before child resume. A pinned
+outer wrapper image/process and bounded readers enforced a 55-second deadline.
+
+The fresh evidence parent was created atomically with a protected DACL for
+the current token SID and SYSTEM. No existing ACL was changed, and no failed
+fixture was reused or removed. The wrapper revalidated the new parent's owner,
+DACL and non-reparse identity before creating the fixture. The original
+control-01 refusal remains a pre-execution result, not a containment test.
+
+Control-02 passed in 0.156 seconds: zero wrapper exit, no deadline, overflow or
+reader error, and matching stdout/persisted reports. The child exited 1 with
+the exact expected `outside read was not denied` failure. By the pinned source
+order, all six private environment comparisons and credential/parent-canary
+absence checks had passed; both private allowed writes were present, and the
+outside/read-only/seal sentinels remained unchanged. It stopped before
+negative writes and sockets. The complete fresh fixture remains retained.
+
+| Input | SHA256 |
+| --- | --- |
+| Exact Go wrapper source | `d91f089bc1f91e7184b248e9c6b67f3624e0d1456751632f430fd9b48b823ac3` |
+| Go 1.26.5 wrapper image | `fd5132faff988a3a7ac7f96ff4bc878e15528c9993e30ea94754692d81b9c349` |
+| Fixed private-parent creator | `4275cda2c0e5a45f897773a2b81061d9cd710676d0e14a30f1a512214e668fb2` |
+| Bounded outer driver | `1df16fa4a749de7fd991be19b317784e1a4ac7b173dea9220ace6fce1244ed80` |
+| Actual outer result | `e075cb59147d03e72695946c2a97a0148a79c4b314a6ed943d7091ab33317fbd` |
+
+This narrows the TEMP discrepancy to the SDK/PSEC launch path compared with
+the direct Go control. Source review found no SDK-side TEMP rewrite between
+the explicit request and its UTF-16 `CreateProcessW` environment block.
+Microsoft documents TEMP/TMP profile redirection for
+[AppContainer launches](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer).
+That is a hypothesis for this PSEC observation, not an established cause.
+The existing metadata shows the differing value shares the entire exact
+synthetic fixture root before diverging at its first child component. A new
+child-only lexical diagnostic retains every exact assertion and continues
+through the remaining present variables after a mismatch, then fails before
+any credential check, write or socket. A missing variable still fails
+immediately. It classifies root/home/local-AppData/private-tmp/Packages prefixes,
+component count, dot/slash components and final Temp component without logging
+values or accessing any filesystem path. A fresh locked build and independent
+artifact review are required before that diagnostic can execute.
