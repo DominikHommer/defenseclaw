@@ -48,10 +48,15 @@ launch on that generation; retaining an older policy handle grants no exception.
 `LaunchGate` supplies that serialization for the future adapter. It reads the
 owner's actual authority source at registration and dispatch, and rejects a
 binding that differs from the last successful transaction. Every writer must
-enter `Rotate` before changing those facts; checking a callback alone cannot
-close an unsynchronized writer's race. Rotation must revoke affected live
-grants/workloads and publish its new, increasing generation before success.
-An incomplete transition or failed owned cleanup closes the gate.
+enter `Rotate` or `RotatePublished` before changing those facts; checking a
+callback alone cannot close an unsynchronized writer's race. Rotation must
+revoke affected live grants/workloads and publish its new, increasing generation
+before success.
+`RotatePublished` accepts the exact binding returned by the existing host
+publisher when it assigns a generation during the transaction; never predict
+that publisher's counter. Decide no-op changes before entering the callback.
+An incomplete transition, cancellation during it or failed owned cleanup closes
+the gate. These methods still require wiring to the actual gateway owner.
 
 Trusted preparation resources register a private one-use handle with copied
 runtime/receipt evidence and the complete launch specification. Dispatch checks

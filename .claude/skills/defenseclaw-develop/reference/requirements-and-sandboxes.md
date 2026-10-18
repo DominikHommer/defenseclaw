@@ -19,8 +19,13 @@ generation. Never accept an API client's binding as current host state.
 `internal/sandboxruntime/launch.go` (`@sym:LaunchGate`) serializes that boundary.
 Its callback reads the actual owner authority source; its last published binding
 detects out-of-transaction changes and rollback. Every authority writer must
-enter the rotation transaction before publishing new facts. Prepared handles
-copy complete launch inputs and receipts, consume once and refuse serialization.
+enter the rotation transaction before publishing new facts.
+`RotatePublished` accepts the exact binding returned by a host publisher that
+assigns its generation inside that transaction; never guess its next counter.
+Skip no-op changes before entering a transition. Once entered, cancellation or
+non-advancing/mismatched publication closes admission.
+Prepared handles copy complete launch inputs and receipts, consume once and
+refuse serialization.
 On partial launch, cancellation or an identity mismatch, clean up the exact
 owned resource handle; failed cleanup closes admission. The host controller
 still reserves unique session identities, aborts abandoned preparations and

@@ -236,23 +236,49 @@ func (g *LaunchGate) Rotate(ctx context.Context, next PolicyAuthorityBinding, tr
 	if g == nil || transition == nil {
 		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "sandbox authority rotation requires an owned transition")
 	}
+	return g.rotate(ctx, &next, func(ctx context.Context) (PolicyAuthorityBinding, error) {
+		return next, transition(ctx)
+	})
+}
+
+// RotatePublished serializes revocation and publication when the existing host
+// publisher assigns its generation during the transaction. transition must
+// revoke affected old grants/workloads before publishing, then return the exact
+// binding actually published in current's source. Never predict a host counter.
+// Every relevant writer must use this same gate, and must not reenter it.
+// Decide no-op updates before calling: once transition begins, a non-advancing
+// generation, cancellation or any incomplete publication closes the gate.
+func (g *LaunchGate) RotatePublished(ctx context.Context, transition func(context.Context) (PolicyAuthorityBinding, error)) error {
+	if g == nil || transition == nil {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "sandbox authority rotation requires an owned transition")
+	}
+	return g.rotate(ctx, nil, transition)
+}
+
+func (g *LaunchGate) rotate(ctx context.Context, planned *PolicyAuthorityBinding, transition func(context.Context) (PolicyAuthorityBinding, error)) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	current, err := g.ready()
 	if err != nil {
 		return err
 	}
-	if !validAuthority(next) || next.Generation <= current.Generation {
+	if planned != nil && (!validAuthority(*planned) || planned.Generation <= current.Generation) {
 		return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox authority generation must advance")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := transition(ctx); err != nil {
+	next, err := transition(ctx)
+	if err = errors.Join(err, ctx.Err()); err != nil {
 		g.closed = true
 		return fmt.Errorf("sandbox authority transition failed; launch gate closed: %w", err)
 	}
-	if g.current() != next {
+	observed := g.current()
+	if err := ctx.Err(); err != nil {
+		g.closed = true
+		return fmt.Errorf("sandbox authority transition failed; launch gate closed: %w", err)
+	}
+	if !validAuthority(next) || next.Generation <= current.Generation || observed != next || (planned != nil && *planned != next) {
 		g.closed = true
 		return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox authority transition did not publish its expected binding; launch gate closed")
 	}
