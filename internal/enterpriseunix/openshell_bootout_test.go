@@ -13,6 +13,7 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,75 @@ func (r bootoutRunner) Run(ctx context.Context, name string, args ...string) (Co
 		}
 		return CommandResult{ExitCode: 3, Stderr: []byte("No such process")}, errors.New("launchctl bootout: exit 3: No such process")
 	}
+	if name == "launchctl" && len(args) == 2 && args[0] == "print" {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.loaded[args[1]] || r.broken[args[1]] {
+			return CommandResult{Stdout: []byte(args[1] + " = {\n\tstate = running\n}\n")}, nil
+		}
+		return CommandResult{ExitCode: 113, Stderr: []byte("Could not find service")}, errors.New("launchctl print: exit 113: Could not find service")
+	}
 	return r.Runner.Run(ctx, name, args...)
+}
+
+// unloadingOps is the account side of a Mac whose account stop boots the
+// account's agents out of its gui domain, as commandUserOps.Stop does.
+type unloadingOps struct {
+	*fakeSandboxOps
+	runner bootoutRunner
+}
+
+func (o unloadingOps) Stop(ctx context.Context, a SandboxAccount, scope StopScope) error {
+	o.runner.mu.Lock()
+	for _, label := range []string{labelSandbox, labelOpenShellGateway} {
+		delete(o.runner.loaded, "gui/"+strconv.Itoa(a.UID)+"/"+label)
+	}
+	o.runner.mu.Unlock()
+	return o.fakeSandboxOps.Stop(ctx, a, scope)
+}
+
+// GAP-0113: a purge stops each account's units, which boots its agents out
+// of its gui domain before the sweep runs, so the sweep found nothing loaded
+// and the result did not say the agents were unloaded. The uninstall reads
+// what is loaded first and names every agent it unloaded, and never one
+// that was not loaded.
+func TestPurgeNamesTheAgentsTheAccountsOwnStopUnloaded(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	if h.alice.UID < 501 {
+		t.Skipf("uid %d is below the first macOS user account", h.alice.UID)
+	}
+	requireOK(t, h.ensure(sandboxConfig(t, "darwin", true, setupVMSettings)))
+	h.installTarballFiles(t, h.alice, "0.1.3")
+	uid := strconv.Itoa(h.alice.UID)
+	var calls []string
+	runner := bootoutRunner{
+		Runner: h.env.Runner,
+		ps:     "  0\n " + uid + "\n",
+		mu:     &sync.Mutex{},
+		loaded: map[string]bool{
+			"gui/" + uid + "/" + labelSandbox:          true,
+			"gui/" + uid + "/" + labelOpenShellGateway: true,
+		},
+		calls: &calls,
+	}
+	h.env.Runner = runner
+	h.env.SandboxUsers = unloadingOps{fakeSandboxOps: h.ops, runner: runner}
+	r := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
+	if got := strings.Join(h.ops.events, ", "); got != "teardown alice, stop alice" {
+		t.Fatalf("events = %q: the account's own stop did not run before the sweep", got)
+	}
+	if len(runner.loaded) != 0 {
+		t.Fatalf("still loaded: %v (calls %v)", runner.loaded, calls)
+	}
+	if !containsLine(r.Changes, "unloaded the DefenseClaw sandbox LaunchAgents of the signed-in accounts (gui/"+uid+"/"+labelSandbox+", gui/"+uid+"/"+labelOpenShellGateway+")") {
+		t.Fatalf("changes = %v", r.Changes)
+	}
+	for _, line := range r.Changes {
+		if strings.Contains(line, "user/"+uid+"/") {
+			t.Fatalf("names an agent that was never loaded: %q", line)
+		}
+	}
 }
 
 // #1210: launchd loads both sandbox LaunchAgents for every account that
