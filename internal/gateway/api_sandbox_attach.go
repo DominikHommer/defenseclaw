@@ -230,7 +230,9 @@ func (a *APIServer) serveSandboxAttachment(ctx context.Context, cancel context.C
 			stopReading()
 			<-readerDone
 			closeErr := closeAttachment()
-			if closeErr != nil || !time.Now().Before(admittedDeadline) || (inputErr != nil && !errors.Is(inputErr, context.Canceled) && !(inputReadError && inputReadBeforeDeadline && isSandboxAttachReadDeadline(inputErr))) {
+			inputFailed := inputErr != nil && !errors.Is(inputErr, context.Canceled)
+			expectedReadDeadline := inputReadError && inputReadBeforeDeadline && isSandboxAttachReadDeadline(inputErr)
+			if closeErr != nil || !time.Now().Before(admittedDeadline) || (inputFailed && !expectedReadDeadline) {
 				_ = writeSandboxAttach(conn, sandboxapi.AttachEvent{Kind: "failure", Code: "stream_failed"})
 				return
 			}

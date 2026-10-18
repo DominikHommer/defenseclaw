@@ -67,7 +67,7 @@ func (b *Backend) OpenAttachment(ctx context.Context, identity sandboxruntime.Se
 		return nil, err
 	}
 	defer e.release()
-	if !b.active() || e.isClosing() || e.phase != "started" || e.consumed != true || e.attached || e.native == nil || e.launchRequest == 0 || e.executionDeadline.IsZero() || e.outputLimit == 0 {
+	if !b.active() || e.isClosing() || e.phase != "started" || !e.consumed || e.attached || e.native == nil || e.launchRequest == 0 || e.executionDeadline.IsZero() || e.outputLimit == 0 {
 		return nil, ErrSession
 	}
 	deadline := time.Now().Add(time.Duration(request.TimeoutSeconds) * time.Second)

@@ -53,7 +53,7 @@ func (c *Client) Attach(ctx context.Context, name string, request AttachRequest)
 		transport = c.HTTP.Transport
 	}
 	t, ok := transport.(*http.Transport)
-	if !ok || (t.Dial != nil && t.DialContext == nil) || (t.DialTLS != nil && t.DialTLSContext == nil) || t.OnProxyConnectResponse != nil || t.GetProxyConnectHeader != nil || len(t.ProxyConnectHeader) != 0 {
+	if !ok || (t.Dial != nil && t.DialContext == nil) || (t.DialTLS != nil && t.DialTLSContext == nil) || t.OnProxyConnectResponse != nil || t.GetProxyConnectHeader != nil || len(t.ProxyConnectHeader) != 0 { //nolint:staticcheck // Reject legacy dialers that cannot honor attachment cancellation.
 		return nil, errors.New("sandbox attachment requires the API's context-aware HTTP transport")
 	}
 	dialer := websocket.Dialer{NetDialContext: t.DialContext, NetDialTLSContext: t.DialTLSContext,

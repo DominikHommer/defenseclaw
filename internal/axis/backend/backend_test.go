@@ -114,7 +114,7 @@ func TestManagerLifetimeMustBeBoundedAndBackendExplicit(t *testing.T) {
 	if _, err := New(context.Background(), runtime); !errors.Is(err, ErrUnavailable) {
 		t.Fatal(err)
 	}
-	if _, err := New(nil, runtime); !errors.Is(err, ErrUnavailable) {
+	if _, err := New(nil, runtime); !errors.Is(err, ErrUnavailable) { //nolint:staticcheck // Exercise refusal of an absent owner lifetime.
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
