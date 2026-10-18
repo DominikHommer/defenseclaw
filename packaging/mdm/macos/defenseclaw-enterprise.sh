@@ -126,6 +126,9 @@ LC_ALL=C
 export PATH LC_ALL
 unset IFS || true
 umask 077
+# Set by dc_trusted_path; empty until a check names an ACL entry. Messages
+# that a failed check reaches without running it read it too (GAP-0188).
+DC_TRUST_ACL=""
 
 readonly DC_EXIT_FAILURE=1 DC_EXIT_INVALID=2 DC_EXIT_BUSY=75
 readonly DC_MAX_CONFIG_BYTES=1048576 DC_MAX_SECRET_BYTES=16384
@@ -251,7 +254,10 @@ dc_stage_parent() {
         /*) ;;
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
-    if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
+    if [ ! -d "$DC_STAGE_PARENT" ]; then
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT does not exist or is not a directory; create it as a root-owned directory that only root can write, or leave out --staging-dir"
+    fi
+    if ! dc_trusted_path "$DC_STAGE_PARENT"; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi
 }
