@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-type options struct{ receipt, evidence string }
+type options struct{ receipt, evidence, suite string }
 
 func parseOptions(args []string) (options, error) {
 	var opts options
@@ -24,10 +24,18 @@ func parseOptions(args []string) (options, error) {
 	explicit := flags.Bool("run-fixed", false, "explicit reviewed contributor experiment")
 	flags.StringVar(&opts.receipt, "receipt", "", "exact reviewed artifact set receipt")
 	flags.StringVar(&opts.evidence, "evidence", "", "fresh private result directory")
-	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" {
+	flags.StringVar(&opts.suite, "suite", "baseline", "fixed baseline or lifecycle suite")
+	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" || len(opts.receipt) > 4096 || len(opts.evidence) > 4096 || !validSuite(opts.suite) {
 		return opts, errors.New("explicit fixed selector and reviewed receipt/evidence metadata required")
 	}
 	return opts, nil
+}
+
+func workerOptions(args []string) (options, error) {
+	if (len(args) != 4 && len(args) != 6) || args[0] != "--receipt" || args[2] != "--evidence" || len(args) == 6 && args[4] != "--suite" {
+		return options{}, errors.New("fixed worker metadata refused")
+	}
+	return parseOptions(append([]string{"--run-fixed"}, args...))
 }
 
 func execute(args []string) (map[string]any, *cleanupOwner, error) {
@@ -45,6 +53,7 @@ func executeWithRegistry(args []string, registry reviewedRegistry, supervise sup
 	if err != nil {
 		return record, owner, err
 	}
+	record["fixed_suite"] = opts.suite
 	// This is before any artifact read, fixture creation, memfd or native clone.
 	if err := registry.validate(); err != nil {
 		return record, owner, err

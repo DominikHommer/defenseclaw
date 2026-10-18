@@ -58,10 +58,10 @@ type reviewedRegistry struct {
 	Receipt    artifactReceipt
 }
 
-// This entry admits only the four fixed contributor cases and these exact
+// This entry admits only the fixed baseline/lifecycle suites and these exact
 // independently reviewed artifacts. It grants no production/provider authority.
 // No CLI, environment, discovery or caller digest may replace these pins.
-const fixedContributorReceiptSHA = "6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6"
+const fixedContributorReceiptSHA = "8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b"
 
 var liveRegistry = fixedContributorRegistry()
 
@@ -80,15 +80,15 @@ func fixedContributorRegistry() reviewedRegistry {
 			MXC:                     "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
 			Bubblewrap:              "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
 			StaticClosureSHA:        "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
-			PayloadSourceSHA:        "40e6e1bccb635385cdab82e0969de893cb9e5c9d1aeb1499a2446623a9cca986",
+			PayloadSourceSHA:        "80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb",
 			Builds: []buildIdentity{
 				{Role: "peer_and_static_bwrap", Commit: "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139", Run: 39158759518, Artifact: 12148605722, ArchiveSHA: "68e5d232ed286cfbbbbcb212170cc6bf0aff4536cfbc98fb7129da1315a99085", ProvenanceSHA: "7d6fd05f40006e334921fa4efec58a033b3c2bbaf707d7be03b6322bc81ac59c"},
-				{Role: "fixed_payload", Commit: "d07485c4cc8ecf8ab7db1a0121ac61a6a8b636f3", Run: 39134453264, Artifact: 12138953410, ArchiveSHA: "251779fc9462ca8f49014dceb6c86b633c86712b488d009a4a61e9095df9c401", ProvenanceSHA: "ae7d3700b3a8f20236cbef90e249f2c529103747e79d8c3473042b9fd5259a98"},
+				{Role: "fixed_payload", Commit: "3f295c8351d29028278e99349de9036207df6590", Run: 39167683927, Artifact: 12151291706, ArchiveSHA: "ae4e4c905d707a4505b80c1d3343f7896051a6e5c51f56835e7d7552d4fc67a5", ProvenanceSHA: "0d92d049bf554404c8d4edfc7d124890258be0177bf336b44441298ac093f578"},
 			},
 			Images: []imageIdentity{
 				{Role: "peer", Path: "images/peer", SHA: "274717415360304d4ff14096faa13cc98fcf7eaba5409dcd1c800350d4048665", Size: 2722752},
 				{Role: "static_musl_bwrap", Path: "images/bwrap-static-musl", SHA: "b4d1a59426c6a52e9f9a0d57d03d620e4dfc1beef976201a3afc0c1b492ee37d", Size: 198584},
-				{Role: "fixed_payload", Path: "images/fixed-payload", SHA: "d2d2ac02859541bbc03eaae305a8b1f833338a7783f8b31e57046e5dd4e4533c", Size: 1929342},
+				{Role: "fixed_payload", Path: "images/fixed-payload", SHA: "ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2", Size: 1929342},
 			},
 		},
 	}

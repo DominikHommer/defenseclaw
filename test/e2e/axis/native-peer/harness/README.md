@@ -5,10 +5,11 @@
 
 This is source for a separate Linux amd64 experiment. Its compiled registry
 admits only receipt SHA256
-`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`
-for the four fixed contributor cases and the exact reviewed c914 build
+`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`
+for the closed baseline/lifecycle suites and the exact reviewed c914 build
 (byte-identical aa215 Rust peer and revised static Bubblewrap), with the
-unchanged d074 payload. The paired c914 Bubblewrap, ae9 wrapper and 5125 driver
+3f295 payload. This new pairing has not executed. Historically, the c914
+Bubblewrap, d074 payload, ae9 wrapper and 5125 driver
 passed one [fixed four-case attempt](../README.md#first-passing-native-attempt-four-fixed-offline-cases)
 at source `2e494e16e75410903577f62fa07cb9a009711f70`. The `wait`/`tree-*`,
 guest FD/namespace-ID, terminal, Claude, hook and credential gates remain
@@ -231,3 +232,54 @@ unsupported sources. The reviewed c914 build and combined receipt change only
 the Bubblewrap image/static closure and first build identity; peer bytes and
 the d074 payload remain unchanged. A fresh wrapper, paired driver and separately
 reviewed native attempt are required.
+
+## Fixed lifecycle suite: source only
+
+The explicit `--suite lifecycle` selector adds three bounded experiments while
+the default `--suite baseline` retains the four original cases. It requires a
+new reviewed wrapper and paired driver artifact; the historical ae9/5125
+artifacts do not accept these selectors. The peer, static Bubblewrap and offline
+policy stay unchanged. The reviewed 3f295 fixed payload replaces d074 in the
+new combined receipt `8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`:
+the historical d074 tree requested setsid for its grandchild, which the pinned
+filter denies. Payload build run `39167683927`, artifact `12151291706`, binds
+image `ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2`
+(1,929,342 bytes) and source SHA256
+`80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb`.
+No lifecycle attempt has executed for this new source; historical receipts and
+run evidence remain unchanged.
+
+`wait-timeout` requires the fixed payload's ready marker before its five-second
+native plan deadline, then a Launch-correlated `Exited(-1)` with `timed_out`
+true. `wait-cancel` observes the same marker before sending Cancel, requiring
+`Exited(-1)` with `timed_out` false. `tree-cancel` requires all three exact
+parent/child/grandchild markers once, in any order, plus held-work ready files
+and heartbeat progress from every process before Cancel. Each role must first
+observe Setsid returning EPERM under the unchanged filter, then spawn its fixed
+normal descendant. Only the child and grandchild substantiate filter denial:
+each first requires a positive group ID different from its own PID. The
+parent's EPERM is consistency only because group leadership can cause it
+naturally. Cancel cases use a fifteen-second
+plan deadline but refuse readiness arriving five seconds after Started; the
+tree file observer has an additional two-second bound within that window.
+
+Wait and Cancel have no separate success reply. Both complete through the
+original Launch binding, followed by separate Destroy/Destroyed and retained
+native cleanup. Every frame, byte stream and file read is bounded. Before any
+host Session.Close, the tree case samples unchanged held heartbeat bytes and
+mtime six times over 600ms after Exited but before sending Destroy. This is
+inside the peer's existing five-second exited idle window. A subsequent
+Destroy/Destroyed exchange is mandatory; protocol EOF automatically starts
+outer cleanup, so sampling after Destroyed would not distinguish that fallback.
+The heartbeat sample is corroboration from
+known synthetic writers, not proof of universal descendant absence. The pinned
+peer's Exited requires native terminal observation and both native output EOFs;
+independent owned native wait and zero cleanup-pending remain mandatory. Host
+Close itself can force the outer namespace down, so these observations are
+recorded separately. Public count snapshots for the three fixed roles retain
+before/progress/post-terminal values and exactly six stable samples; the driver
+requires every role to progress and final counts to remain at least those
+values. Failures preserve fixtures and stop the suite.
+
+This suite does not qualify root-parent death, control-pipe loss, guest FD or
+namespace-ID assertions, terminals, Claude, hooks or broker/model credentials.

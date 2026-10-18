@@ -21,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeowner"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeprocess"
+	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeproto"
 	"golang.org/x/sys/unix"
 )
 
@@ -576,15 +577,24 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 	if err != nil {
 		return err
 	}
-	results := make([]caseResult, 0, len(fixedCases))
-	for _, mode := range fixedCases {
+	cases, err := casesForSuite(opts.suite)
+	if err != nil {
+		return err
+	}
+	results := make([]caseResult, 0, len(cases))
+	for _, mode := range cases {
 		record["native_case"] = mode
 		record["native_stage"] = "host_canary_verification"
 		if err := f.verify(false); err != nil {
 			return err
 		}
 		record["native_stage"] = "fixed_plan"
-		plan, err := fixedPlan(mode, f.path+"/outside")
+		var plan bridgeproto.Preparation
+		if opts.suite == "lifecycle" {
+			plan, err = lifecyclePlan(mode)
+		} else {
+			plan, err = fixedPlan(mode, f.path+"/outside")
+		}
 		if err != nil {
 			return err
 		}
@@ -609,13 +619,29 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 			record["execution_performed"] = false
 		}
 		result := caseResult{Mode: mode}
+		var tree *treeObservation
+		if mode == "tree-cancel" {
+			tree = &treeObservation{work: f.work}
+		}
 		if startErr == nil && session != nil && session.Protocol != nil {
 			record["native_stage"] = "peer_protocol"
-			result, err = exercise(ownerCtx, session.Protocol, binding, plan, mode)
+			if opts.suite == "lifecycle" {
+				var beforeCancel, beforeDestroy func(context.Context) error
+				if tree != nil {
+					beforeCancel = tree.beforeCancel
+					beforeDestroy = tree.stableBeforeDestroy
+				}
+				result, err = exerciseLifecycle(ownerCtx, session.Protocol, binding, plan, mode, beforeCancel, beforeDestroy)
+			} else {
+				result, err = exercise(ownerCtx, session.Protocol, binding, plan, mode)
+			}
 		} else if startErr == nil {
 			err = errors.New("native factory returned no owned session")
 		} else {
 			err = startErr
+		}
+		if tree != nil {
+			result.TreeHeartbeats = &tree.evidence
 		}
 		if result.Started {
 			record["peer_started_reply_observed"] = true
@@ -628,6 +654,9 @@ func runNative(ctx context.Context, opts options, registry reviewedRegistry, rec
 			closeErr := owner.close(session)
 			result.NativeCleanup = closeErr == nil
 			err = errors.Join(err, closeErr)
+		}
+		if tree != nil {
+			err = errors.Join(err, tree.close())
 		}
 		cancel()
 		if err == nil {

@@ -338,7 +338,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	}
 	stdout, stderr := &boundedCapture{}, &boundedCapture{}
 	pidfd := -1
-	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-wrapper", "--owned-fixed-worker", "--receipt", opts.receipt, "--evidence", opts.evidence},
+	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-wrapper", "--owned-fixed-worker", "--receipt", opts.receipt, "--evidence", opts.evidence, "--suite", opts.suite},
 		Env: []string{}, Dir: "/", ExtraFiles: []*os.File{proof, grantRead, readyWrite, image}, Stdout: stdout, Stderr: stderr,
 		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
 			AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN},
@@ -412,7 +412,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 	record["owned_worker_exit_code"] = owner.exit
 	var child map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if overflow || decoder.Decode(&child) != nil || decoder.Decode(new(any)) != io.EOF || child["scope"] != harnessScope || child["production_certification"] != false || child["common_launch_gate_qualified"] != false {
+	if overflow || decoder.Decode(&child) != nil || decoder.Decode(new(any)) != io.EOF || child["scope"] != harnessScope || child["fixed_suite"] != opts.suite || child["production_certification"] != false || child["common_launch_gate_qualified"] != false {
 		return errors.New("fixed owned worker observation refused")
 	}
 	for key, value := range child {
@@ -437,9 +437,11 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 		return record, owner, errUnreviewed
 	}
 	record["worker_admission_stage"] = "metadata"
-	if len(args) != 4 || args[0] != "--receipt" || args[2] != "--evidence" || len(args[1]) == 0 || len(args[1]) > 4096 || len(args[3]) == 0 || len(args[3]) > 4096 {
-		return record, owner, errors.New("fixed worker metadata refused")
+	opts, err := workerOptions(args)
+	if err != nil {
+		return record, owner, err
 	}
+	record["fixed_suite"] = opts.suite
 	record["worker_admission_stage"] = "namespace_identity"
 	if os.Getpid() != 1 || os.Getppid() != 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed worker requires its owned PID namespace")
@@ -490,5 +492,5 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 	record["owned_guardian_grant_observed"] = true
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	return record, owner, runNative(ctx, options{receipt: args[1], evidence: args[3]}, registry, record, workerPermit{granted: true}, owner)
+	return record, owner, runNative(ctx, opts, registry, record, workerPermit{granted: true}, owner)
 }

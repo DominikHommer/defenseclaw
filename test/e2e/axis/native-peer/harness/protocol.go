@@ -78,21 +78,28 @@ type protocolOwner interface {
 }
 
 type caseResult struct {
-	Mode          string `json:"mode"`
-	Passed        bool   `json:"passed"`
-	Prepared      bool   `json:"prepared"`
-	Started       bool   `json:"started"`
-	PayloadMarker bool   `json:"fixed_payload_marker_observed"`
-	ExitCode      int32  `json:"exit_code"`
-	Destroyed     bool   `json:"destroyed"`
-	NativeCleanup bool   `json:"native_cleanup_observed"`
-	OutputBytes   int    `json:"output_bytes"`
-	StderrBytes   int    `json:"stderr_bytes"`
-	StderrReason  string `json:"stderr_reason"`
-	StderrErrno   string `json:"stderr_errno"`
-	Error         string `json:"error,omitempty"`
-	ProtocolStage string `json:"protocol_stage,omitempty"`
-	PeerFailure   string `json:"peer_failure,omitempty"`
+	Mode           string                 `json:"mode"`
+	Passed         bool                   `json:"passed"`
+	Prepared       bool                   `json:"prepared"`
+	Started        bool                   `json:"started"`
+	PayloadMarker  bool                   `json:"fixed_payload_marker_observed"`
+	ExitCode       int32                  `json:"exit_code"`
+	Destroyed      bool                   `json:"destroyed"`
+	NativeCleanup  bool                   `json:"native_cleanup_observed"`
+	OutputBytes    int                    `json:"output_bytes"`
+	StderrBytes    int                    `json:"stderr_bytes"`
+	StderrReason   string                 `json:"stderr_reason"`
+	StderrErrno    string                 `json:"stderr_errno"`
+	Error          string                 `json:"error,omitempty"`
+	ProtocolStage  string                 `json:"protocol_stage,omitempty"`
+	PeerFailure    string                 `json:"peer_failure,omitempty"`
+	TimedOut       bool                   `json:"timed_out"`
+	CancelSent     bool                   `json:"cancel_sent"`
+	TreeReady      bool                   `json:"tree_ready_files_verified,omitempty"`
+	TreeProgress   bool                   `json:"tree_heartbeat_progress_observed,omitempty"`
+	TreeStable     bool                   `json:"tree_heartbeat_stable_before_destroy,omitempty"`
+	NativeTerminal bool                   `json:"native_terminal_before_outer_cleanup,omitempty"`
+	TreeHeartbeats *treeHeartbeatEvidence `json:"tree_heartbeat_samples,omitempty"`
 }
 
 type fixedPeerFailure string
@@ -233,7 +240,7 @@ func fixedStderrReason(stderr []byte) (string, string) {
 	if bytes.HasPrefix(line, []byte("FIXED_NATIVE_FAILURE ")) {
 		code := string(bytes.TrimPrefix(line, []byte("FIXED_NATIVE_FAILURE ")))
 		switch code {
-		case "selector", "cwd", "fixture", "environment_count", "extra_environment", "missing_environment", "arguments", "literal_argv", "outside_fixture", "input_bytes_or_eof", "timeout_not_enforced", "private_root_readonly", "readonly_positive", "private_write_fixture", "write_positive", "readonly_denial", "outside_read_denial", "outside_write_denial", "offline_socket_denial", "offline_socketpair_denial", "tree_spawn", "tree_heartbeat_create", "tree_ready_write", "tree_heartbeat_write", "tree_cleanup_not_enforced":
+		case "selector", "cwd", "fixture", "environment_count", "extra_environment", "missing_environment", "arguments", "literal_argv", "outside_fixture", "input_bytes_or_eof", "timeout_not_enforced", "private_root_readonly", "readonly_positive", "private_write_fixture", "write_positive", "readonly_denial", "outside_read_denial", "outside_write_denial", "offline_socket_denial", "offline_socketpair_denial", "tree_setsid_precondition", "tree_setsid_denial", "tree_spawn", "tree_heartbeat_create", "tree_ready_write", "tree_heartbeat_write", "tree_cleanup_not_enforced":
 			return "payload_" + code, "none"
 		default:
 			return "payload_unclassified", "none"
