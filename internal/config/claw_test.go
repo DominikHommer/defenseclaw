@@ -833,9 +833,7 @@ func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
 			positions[layer.Scope] = index
 		}
 	}
-	if !(positions["project-directory"] < positions["home-directory"] &&
-		positions["home-directory"] < positions["custom-directory"] &&
-		positions["custom-directory"] < positions["inline"]) {
+	if (positions["project-directory"] >= positions["home-directory"] || positions["home-directory"] >= positions["custom-directory"]) || positions["custom-directory"] >= positions["inline"] {
 		t.Fatalf("layer positions = %+v, want project < home < custom < inline", positions)
 	}
 	var remote, managed bool

@@ -21,7 +21,7 @@ def test_grafana_no_hook_and_would_block_count_distinct_findings() -> None:
         target = panel["targets"][0]
         expression = target["expr"]
         assert "body_defenseclaw_ai_runtime_finding_id" in expression
-        assert "sum by (host_name, body_defenseclaw_ai_runtime_finding_id" in expression
+        assert "host_name, activity_key) (count_over_time((" in expression
         assert "[$__range]" in expression
         assert target["instant"] is True
     assert no_hook["type"] == "stat"

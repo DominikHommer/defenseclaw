@@ -2766,8 +2766,8 @@ func codexSafeAwkProgram(program string) bool {
 			start := i
 			for i < len(program) {
 				char = program[i]
-				if char != '_' && !(char >= 'A' && char <= 'Z') &&
-					!(char >= 'a' && char <= 'z') && !(char >= '0' && char <= '9') {
+				if char != '_' && (char < 'A' || char > 'Z') &&
+					(char < 'a' || char > 'z') && (char < '0' || char > '9') {
 					break
 				}
 				i++

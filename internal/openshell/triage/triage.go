@@ -817,11 +817,11 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 		return verdict
 	}
 	verdict.Risky, verdict.Unblockable = true, chk.Unblockable
-	switch {
-	case chk.Category == egress.CategoryHostInternal:
+	switch chk.Category {
+	case egress.CategoryHostInternal:
 		return reject(verdict, ReasonResolvesToHost, verdict.Host+" resolves to "+resolvedWhat(chk)+
 			"; sandboxes reach services on this machine only through a host port"+hostPortHint(verdict.Port))
-	case chk.Category == egress.CategoryPrivateNetwork:
+	case egress.CategoryPrivateNetwork:
 		if !decider.UnblocksAllowed() {
 			verdict.Violation = &packs.Violation{
 				Key: "approvals.approve", Source: packs.SourceUser, Attempted: verdict.Host,
@@ -831,7 +831,7 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 			return reject(verdict, ReasonAdmin, verdict.Violation.Error())
 		}
 		return ask(verdict, ReasonPrivateNetwork, "the sandbox asks to reach "+verdict.Host+", which resolves to a private network address")
-	case chk.Category == egress.CategoryAdminBlock:
+	case egress.CategoryAdminBlock:
 		verdict.AdminRule = egress.AdminRule(chk.Category)
 		return reject(verdict, ReasonAdmin, verdict.Host+" resolves to an address your organization's DefenseClaw policy blocks")
 	default:

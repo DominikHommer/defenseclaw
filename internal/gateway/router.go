@@ -1741,10 +1741,7 @@ func serializeArgvForLegacyScan(argv []string) string {
 	serialized := make([]string, 0, len(argv))
 	for _, argument := range argv {
 		if argument != "" && strings.IndexFunc(argument, func(character rune) bool {
-			return !((character >= 'a' && character <= 'z') ||
-				(character >= 'A' && character <= 'Z') ||
-				(character >= '0' && character <= '9') ||
-				strings.ContainsRune("_-./:=@%+,", character))
+			return ((((character < 'a' || character > 'z') && (character < 'A' || character > 'Z')) && (character < '0' || character > '9')) && !(strings.ContainsRune("_-./:=@%+,", character)))
 		}) == -1 {
 			serialized = append(serialized, argument)
 			continue

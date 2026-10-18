@@ -328,15 +328,15 @@
       {
         "name": "sandbox",
         "label": "Sandbox",
-        "description": "DefenseClaw sandbox name. Applies to the sandbox signals table and the per-signal log; the rows and panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox. All keeps the host's own records in the per-signal log. Sandbox identities are never metric labels, so the metric panels count the host and its sandboxes together.",
+        "description": "DefenseClaw sandbox name. Applies to the sandbox signals table and the per-signal log; the rows and panels marked (all names) ignore it. Populated from the defenseclaw_sandbox_name Loki index label the local collector and the bundled Loki config add to every record that names a sandbox. All keeps the host's own records in the per-signal log. Sandbox identities are never metric labels, so the metric panels count the host and its sandboxes together.",
         "type": "query",
         "datasource": {
           "type": "loki",
           "uid": "defenseclaw-loki"
         },
-        "definition": "label_values({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "definition": "label_values({service_name=\"defenseclaw\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
         "query": {
-          "query": "label_values({service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "query": "label_values({service_name=\"defenseclaw\", host_name=~\"$host\"}, defenseclaw_sandbox_name)",
           "refId": "LokiVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

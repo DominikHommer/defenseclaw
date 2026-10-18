@@ -1079,7 +1079,7 @@ func (s CorrelationSpec) Validate() error {
 		default:
 			return fmt.Errorf("unknown correlation surface %q", surface)
 		}
-		if len(bindings) == 0 && !(surface == CorrelationSurfaceNativeOTLP && s.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
+		if len(bindings) == 0 && (surface != CorrelationSurfaceNativeOTLP || s.NativeTelemetry.BindingMode != NativeTelemetryBindingsExporterOnly) {
 			return fmt.Errorf("correlation surface %q has no reviewed bindings", surface)
 		}
 	}

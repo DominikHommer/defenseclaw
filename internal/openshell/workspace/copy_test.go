@@ -1150,7 +1150,7 @@ func TestPullRejectsTamperedBundles(t *testing.T) {
 		},
 	} {
 		err := pullWith(&tamperExec{fakeSandbox: fs, afterCapture: func() { _ = os.RemoveAll(bundle); swap() }}, limit)
-		if err == nil || !(strings.Contains(err.Error(), "not a regular file") || strings.Contains(err.Error(), "bundle has")) {
+		if err == nil || (!(strings.Contains(err.Error(), "not a regular file")) && !(strings.Contains(err.Error(), "bundle has"))) {
 			t.Fatalf("%s accepted: %v", name, err)
 		}
 		_ = os.RemoveAll(bundle)

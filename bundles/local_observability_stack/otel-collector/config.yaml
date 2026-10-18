@@ -58,7 +58,7 @@ processors:
   # Copy that one value onto the record as the defenseclaw.sandbox.name
   # attribute (Loki: defenseclaw_sandbox_name). The body is never changed, only
   # records that name a sandbox are parsed, and the value is the producer's own
-  # field, never free text from the workload. It is a log attribute only:
+  # field, never free text from the workload. It is set on logs only:
   # sandbox identities stay out of metric labels.
   transform/sandbox-identity:
     error_mode: ignore
@@ -69,6 +69,15 @@ processors:
         statements:
           - 'set(log.cache["record"], ParseJSON(log.body.string))'
           - 'set(log.attributes["defenseclaw.sandbox.name"], log.cache["record"]["body"]["defenseclaw.sandbox.name"]) where IsString(log.cache["record"]["body"]["defenseclaw.sandbox.name"])'
+
+  # Loki indexes resource attributes only (loki.yaml otlp_config), and a
+  # dashboard box can list index labels only. Move the sandbox name set above
+  # onto the resource: the records that name a sandbox form their own stream
+  # with an indexed defenseclaw_sandbox_name label, and the Sandbox box lists
+  # it. A record that names no sandbox keeps its resource. Logs pipeline only.
+  groupbyattrs/sandbox-identity:
+    keys:
+      - defenseclaw.sandbox.name
 
   # Defense-in-depth resource enrichment so every signal carries the
   # service.namespace=defenseclaw label even if the sidecar forgets to
@@ -193,5 +202,5 @@ service:
       # DefenseClaw has already applied the selected v8 route and redaction
       # profile. The local Collector must preserve that canonical projection;
       # it performs resource enrichment and batching only.
-      processors: [resource, transform/sandbox-identity, batch]
+      processors: [resource, transform/sandbox-identity, groupbyattrs/sandbox-identity, batch]
       exporters: [otlphttp/loki, debug]

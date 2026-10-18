@@ -294,8 +294,8 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		TransactionSummary:       w.TransactionSummary,
 	}
 	previous, err := ReadGenerationState(t.path)
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		next.Generation = previous.Generation + 1
 	default:
 		// Missing or corrupt: say so. A corrupt file may still carry a

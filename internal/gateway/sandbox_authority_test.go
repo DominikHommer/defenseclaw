@@ -73,7 +73,6 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	cfg.Enterprise.Enrollment = enrollment
 	f.cfg = cfg
 	f.api = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
-	t.Cleanup(func() { sandboxAuthorities.Delete(f.api) })
 
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
 	identityFactsEnabled.Store(true)

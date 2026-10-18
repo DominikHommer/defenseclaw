@@ -1283,7 +1283,7 @@ func HookRuntimeRegistrationCurrent(
 		return true, nil
 	}
 	if strings.TrimSpace(opts.DataDir) == "" || !filepath.IsAbs(opts.DataDir) {
-		return false, errors.New("Codex runtime registration requires an absolute data directory")
+		return false, errors.New("Codex runtime registration requires an absolute data directory") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -1471,9 +1471,7 @@ func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocatio
 		caps := hp.HookCapabilities(opts)
 		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
 	}
-	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
-		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
-	}
+	loc.HookScriptPaths = append(loc.HookScriptPaths, hookRuntimeArtifactPaths(opts, conn)...)
 	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
 
 	cp, ok := conn.(ConnectorCapabilityProvider)

@@ -2323,7 +2323,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			}
 			text := string(data)
 			connectorName := tt.conn.Name()
-			if connectorName == "cursor" {
+			switch connectorName {
+			case "cursor":
 				wantCommand := hookInvocationCommand(
 					"cursor",
 					filepath.Join(dataDir, "hooks", "cursor-hook.sh"),
@@ -2356,7 +2357,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
-			} else if connectorName == "antigravity" {
+			case "antigravity":
 				wantCommand := antigravityHookInvocationCommandForEvent(
 					"windows",
 					"PreToolUse",
@@ -2377,7 +2378,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					!windowsBridgeBindsArgumentForTest(decoded, "--event", "PreToolUse") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
-			} else if connectorName == "claudecode" {
+			case "claudecode":
 				var cfg map[string]interface{}
 				if err := json.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Claude Code config: %v", err)
@@ -2406,7 +2407,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				if !structuredHookCommandReferences(execView(cfg), []string{nativeHookFlag + connectorName}) {
 					t.Errorf("config missing native exec-form connector command for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "codex" {
+			case "codex":
 				var cfg map[string]interface{}
 				if err := toml.Unmarshal(data, &cfg); err != nil {
 					t.Fatalf("parse Codex config: %v", err)
@@ -2428,7 +2429,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					!windowsBridgeBindsArgumentForTest(decoded, "--hook-contract", "codex-hooks-v4") {
 					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
 				}
-			} else if connectorName == "copilot" {
+			case "copilot":
 				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "copilot-hook.ps1"))
 				if err != nil {
 					t.Fatalf("read Copilot Windows adapter: %v", err)
@@ -2464,7 +2465,7 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Fatalf("Copilot adapter must set the console input encoding before reading stdin (encoding=%d read=%d)", encodingAt, readAt)
 					}
 				}
-			} else {
+			default:
 				if !strings.Contains(text, windowsHookBinaryName) {
 					t.Errorf("config does not invoke %s:\n%s", windowsHookBinaryName, text)
 				}

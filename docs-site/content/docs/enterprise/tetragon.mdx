@@ -712,7 +712,9 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon status
 
 What to read in `status`:
 
-- **Users.** One row per enrolled user: whether they are `enforcing`, in
+- **Users.** One row per enrolled user: whether they are `enforcing` (an
+  agent session of theirs is anchored and denied), `armed` (enforce is loaded
+  for them and no running agent session is anchored yet), in
   burn-in, reset by a hit, or monitor-only and why, and their burn-in as
   progress, percent and an estimate. The estimate appears after the window is
   24 hours old; before that it reads "measuring".
@@ -903,7 +905,7 @@ needed.
 
 **The fleet play.** `fleet-readiness.yml` runs `tetragon verify --json` on
 every computer and prints one summary: computers ready and not ready (with the
-failing checks); users enforcing, ready for enforce, in burn-in, reset by a hit,
+failing checks); users enforcing, armed, ready for enforce, in burn-in, reset by a hit,
 monitor-only, with no agent installed, and held in monitor by a deny-anchor
 limit, a pause or an operator change (each user's `phase`, which `verify`
 reports for `observe` and `enforce`); and whether the computers run different
@@ -955,6 +957,7 @@ builds (more than one digest).
           - "Hosts ready: {{ fleet_ready_hosts | length }} of {{ fleet_vars | length }}"
           - "Hosts not ready: {{ fleet_not_ready_hosts | join(', ') | default('none', true) }}"
           - "Users enforcing: {{ fleet_users_all | selectattr('phase', 'equalto', 'enforcing') | list | length }}"
+          - "Users armed (enforce loaded, no agent session anchored yet): {{ fleet_users_all | selectattr('phase', 'equalto', 'armed') | list | length }}"
           - "Users ready for enforce: {{ fleet_users_all | selectattr('phase', 'equalto', 'ready') | list | length }}"
           - "Users in burn-in: {{ fleet_users_all | selectattr('phase', 'equalto', 'burn_in') | list | length }}"
           - "Users reset by a hit: {{ fleet_users_all | selectattr('phase', 'equalto', 'reset') | list | length }}"
@@ -1063,6 +1066,7 @@ jq -s -r --arg mode "$mode" '
 	    "Hosts not ready: \(if ($notready | length) > 0 then ($notready | map(.host) | join(", ")) else "none" end)",
 	    "Hosts not checked: \(if ($unchecked | length) > 0 then ($unchecked | join(", ")) else "none" end)",
 	    "Users enforcing: \($users | map(select(.phase == "enforcing")) | length)",
+	    "Users armed (enforce loaded, no agent session anchored yet): \($users | map(select(.phase == "armed")) | length)",
 	    "Users ready for enforce: \($users | map(select(.phase == "ready")) | length)",
 	    "Users in burn-in: \($users | map(select(.phase == "burn_in")) | length)",
 	    "Users reset by a hit: \($users | map(select(.phase == "reset")) | length)",

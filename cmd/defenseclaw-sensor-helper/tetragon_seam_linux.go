@@ -342,7 +342,7 @@ func kernelChanges(changes []kernelpolicy.Change) []acquire.KernelChange {
 
 func userMode(state string) string {
 	switch state {
-	case kernelpolicy.UIDEnforcing:
+	case kernelpolicy.UIDEnforcing, kernelpolicy.UIDArmed:
 		return "enforce"
 	case kernelpolicy.UIDBurnIn:
 		return "burnin"
