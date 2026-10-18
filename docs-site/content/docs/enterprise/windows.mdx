@@ -1122,7 +1122,10 @@ upgrade back with `1603`. An upgrade from 1.0.2, whose installed release
 stops at that folder before the new one runs, reports it in a
 `stale_lifecycle_journal_removed` warning instead. To remove the old copies,
 inspect the folder, reset its permissions or remove it if the account no
-longer uses DefenseClaw, then run Setup `/ensure` again. With a pending
+longer uses DefenseClaw, then run Setup `/ensure` again. A Setup `/ensure`
+that finds the deployment compliant runs the same collection on its own: it
+keeps naming each folder that is still untrusted, removes the old copies of
+every account it can, and lists them under `changes`. With a pending
 transaction the run still fails with `1603` and names the same remedy.
 
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
