@@ -396,10 +396,11 @@ process. The observed status samples do not establish a cause or authorize an
 unchanged retry, weaker policy, or production runtime activation.
 
 
-## Fixed uncontained native-create discriminator (source only)
+## Fixed uncontained native-create discriminator
 
 `claude-create-control-only` is a separate contributor build/receipt and closed
-runtime selector. It has not been built or run. It asks whether the same fixed
+runtime selector. Its separately reviewed build and one native attempt are
+recorded in [manual results](manual-results.md). It asks whether the same fixed
 Claude 2.1.292 `--version` creation inputs work when the process security-
 environment attribute is omitted. It is **uncontained**, supplies no PSEC
 filesystem/network/Win32k enforcement, and cannot qualify a sandbox or act as a
@@ -449,6 +450,9 @@ a difference in this downstream call path; it would not identify the failing
 PSEC parameter, prove an upstream defect, observe Claude's realized environment,
 or qualify authentication, models, hooks, terminal or production use.
 
-Source, fresh CI artifact, host wrapper and one-shot recipe need independent
-review before a separately authorized native attempt. This text authorizes no
-execution or retry of an existing artifact.
+Source, fresh CI artifact, host wrapper and one-shot recipe received independent
+review before that one native attempt. The control emitted exact constructed-
+input equality, then failed native creation with Win32 87 before any Claude
+start was observed. PSEC attachment was not necessary for this refusal; the PSEC
+object was still constructed, and the cause remains unresolved. This text
+authorizes no execution or retry of an existing artifact.

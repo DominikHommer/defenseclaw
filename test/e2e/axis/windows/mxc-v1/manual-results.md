@@ -580,7 +580,8 @@ The evidence does not establish an upstream defect: this path uses reviewed
 downstream SDK overlays for literal argv, held executable custody and native
 process observation. A fixed comparison of the exact native launch parameters
 outside PSEC may help separate parameter/path compatibility from containment,
-but no such control is implemented or executed by this result.
+but no such control was implemented or executed by this result. The later
+separate control is recorded below.
 
 ## Read-only synthetic profile query: missing registered profile
 
@@ -597,3 +598,75 @@ nor binds any expected path to its actual contained child. See the separate
 [control results](../profile-query-control/manual-results.md). The retained outer
 query result SHA256 is
 `e470d41ac2cf782c09131bdfd3258ec76f63cc2e2508ff58b4017e838e81f5fe`.
+
+## Uncontained native-create control: attachment is not necessary for refusal
+
+[Locked build 39154166072](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39154166072)
+at `ea90b28a36fed512afa8b3adb8fff73c619c5ee1` built the distinct
+`claude-create-control-only` slice. Independent inert reviews checked 31 unique
+archive members, 27 manifest hashes, eighteen exact Git source paths, unchanged
+combined/upstream locks, and all seventeen SDK fingerprints reconstructed from
+five reviewed overlays. The actual CI log contains 24 distinct one-time passes:
+thirteen SDK tests, six pure environment tests, four pure DLL protocol tests and
+one native directory regression. CI did not run the control or Claude.
+
+One fresh native attempt used that separately admitted control, the fixed signed
+Claude Code 2.1.292 image and literal `--version`. The control constructed a normal
+PSEC startup plan and a HANDLE_LIST-only plan, using the same bounded application,
+command, environment and cwd buffers, creation flags, eighteen `STARTUPINFOW`
+fields and three actual inherited handles. It reported this exact proof before
+its single selected raw call:
+
+```json
+{"fixed_create_control_inputs_equal":true,"psec_attribute_attached":false,"constructed_psec_attribute_count":2,"selected_attribute_count":1}
+```
+
+The normal reference plan was not executed. The PSEC object was still constructed
+and held, but no security-environment attribute was attached to the attempted
+Claude process. This was an **uncontained diagnostic**, with no claimed PSEC
+filesystem, network or Win32k enforcement. Its separate receipt, Cargo feature
+and fixed selector cannot be used as a production fallback or ordinary PSEC case.
+
+The selected `CreateProcessW` call failed before any Claude start or version
+output was observed. Immediate `GetLastError` was 87; the sampled last NT status
+was `0xc000000d`. The NT sample may be stale and does not identify a failing
+parameter or cause. No Claude environment, authentication, hook or model behavior
+was observed.
+
+| Structural observation | Value |
+| --- | --- |
+| Application UTF-16 units | 205 |
+| Command UTF-16 units | 177 |
+| Environment-block UTF-16 units | 1180 |
+| CWD UTF-16 units | 181 |
+| Argv entries, including program | 2 |
+| Environment entries | 8 |
+| Any diagnostic count capped | false |
+
+Lengths include terminating NULs. Equality describes the two constructed plans
+within this one attempt, not the differently named fixtures from earlier runs.
+The numeric and equality records do not expose host paths or environment values.
+The downstream adapter still supplied its held-image volume-GUID application
+name and separately quoted original argv[0].
+
+The driver returned in 5.422 seconds; the probe observation took 3.2272703 seconds.
+The outer Job was assigned before resume and ended empty with zero active
+processes. No outer deadline, overflow, stream-read error or driver error was
+reported. The fresh inner fixture was retained after refusal. No unchanged retry
+occurred and no existing host namespace, ACL or deployed runtime policy changed.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12146194784` | `89128269cbcf7a5fafc35463e367a741a31bf16c256c6e5e3dcdf717d92d765c` |
+| Provenance | `d82a4bcb5578ad6679b711d1d0d747bc2a5487b8fbdf29f37ce0bdb3b26a6f2a` |
+| Root verification receipt | `c3db147ce2bdb4eec457fb959b64f607fd652e2a9a50e8a2ea80ea24da8101aa` |
+| Native control probe image | `101ba1cbad3f503512d8cb9a30b9471362b1fcdbdc87d648b92c9b0d8891ff25` |
+| Fixed local image | `eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23` |
+| Go custody image | `8a4eb11a09e1a0cfdb88a8cbc4273cfe0bb21190367c46c5f8df776b9020a82b` |
+| Actual live result | `e1084a0a0f9a0ca94e6788734ec414d375b30e1438f04955002fb6570c35f04d` |
+
+This narrows the observation: attaching PSEC was not necessary for the refusal in
+this downstream adapter. It does not establish the cause, exclude every effect
+of PSEC object construction, or reproduce a defect on unmodified MXC. No customer
+runtime or Claude qualification follows. The compatibility investigation is
+tracked in [MXC issue 1523](https://github.com/microsoft/mxc/issues/1523).
