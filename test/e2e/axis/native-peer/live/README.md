@@ -110,6 +110,36 @@ parent-death/descendant stress, terminal, Claude, hooks, credentials and model
 traffic remain separate gates. Both production and common launch-gate
 qualification fields remain false. Earlier failures remain unchanged above.
 
+## Lifecycle pairing: source only
+
+The checked-in recipe now selects `--suite lifecycle`, retaining the wrapper's
+baseline default and the historical four-case evidence above. The new pairing
+uses the same reviewed c914 peer/Bubblewrap, reviewed 3f295 payload, and 52e4
+wrapper under combined receipt
+`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`.
+The paired driver is built at `b38a49dda8da9aca450994b709b44e9cea7d5c19`,
+run `39169432727`, artifact `12151303749`, image
+`a93df15dba750e5e2363ec4276b7c0e75f593101fa58ee9ef0e5b901bb2b3f39`
+(3,211,390 bytes). Wrapper run `39168692019`, artifact `12151861098`, binds
+image `70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb`
+(3,473,534 bytes). Payload run `39167683927`, artifact `12151291706`, binds
+image `ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2`
+(1,929,342 bytes). The wrapper recorded nine approved inert test passes and the
+driver recorded twenty. These are source/build gates; no lifecycle result is
+claimed here. Final source/artifact review and a separate explicit one-attempt
+authorization remain mandatory before dispatch.
+
+The three cases are `wait-timeout`, `wait-cancel`, and `tree-cancel`. Timeout
+requires the live ready marker before the five-second deadline; cancel requires
+readiness and an explicit Cancel before the fifteen-second deadline. The tree
+case additionally requires all three exact markers, held ready files and live
+heartbeat progress before Cancel. It then samples six stable heartbeat states
+after native Exited and before Destroy/Destroyed or host outer cleanup. The
+finite observation corroborates only these three synthetic writers; independent
+native owner cleanup and zero pending custody remain mandatory. The unchanged
+offline filter must deny Setsid; only positive-group nonleader descendants
+substantiate that denial, and the parent result is consistency only.
+
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.
@@ -120,8 +150,8 @@ the exact wrapper, establishes atomic pidfd ownership of a new PID namespace,
 and requires READY then one GRANT before exec. The wrapper separately owns its
 worker and native sessions. The outer driver has a 120-second deadline plus
 bounded cleanup/retry, and a trusted 160-second timeout encloses the driver.
-The workflow requires all four fixed case assertions and cleanup results for
-success. It never restarts a failed experiment automatically.
+The workflow requires the exact three lifecycle case assertions and cleanup
+results for success. It never restarts a failed experiment automatically.
 
 The disposable Ubuntu GitHub VM is the only permitted host for this recipe.
 If its AppArmor unprivileged-userns knob is 1, the explicit preparation step
@@ -136,13 +166,15 @@ hashes, driver raw result/stderr, wrapper result, host-floor/restore records,
 and a bounded copy of the exact owned synthetic fixture when native custody
 has completed. Copying requires the wrapper receipt, fixed random path shape,
 current UID ownership, no-follow descriptor opens, regular single-link files,
-and total depth/member/byte bounds. It never deletes the source fixture. A
+and total depth/member/byte bounds. The only dot-containing names admitted are
+the six exact public `tree-{parent,child,grandchild}.{ready,heartbeat}` files,
+only as regular files immediately under `work`. It never deletes the source fixture. A
 missing or unsafe copy is recorded as incomplete evidence.
 
 Source tests use inert archives, fake metadata, missing admission, and private
 temporary data only. No test executes a peer, driver, Bubblewrap or payload.
-The Linux descriptor-copy test is skipped on Windows and runs in the CI source
-test step. A local preparation rehearsal may read the four already-downloaded
+The two Linux descriptor-copy tests are skipped on Windows and run in the CI
+source test step. A local preparation rehearsal may read the four already-downloaded
 reviewed archives as data without executing them.
 
 Before dispatch, the root and independent reviewer must review this exact

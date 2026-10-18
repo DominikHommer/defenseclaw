@@ -92,7 +92,7 @@ jobs:
           # Its internal deadline is 120s, followed by bounded cleanup/retry.
           # This outer trusted timeout also bounds a failed driver implementation.
           /usr/bin/timeout --signal=TERM --kill-after=5s 160s \
-            /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed \
+            /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed --suite lifecycle \
             --receipt "$(pwd)/live-inputs/REVIEWED-ARTIFACTS.json" \
             --evidence "$(pwd)/live-evidence/native-peer-fixed-wrapper" \
             >live-evidence/DRIVER-RESULT.json 2>live-evidence/driver-stderr.log

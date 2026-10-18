@@ -141,6 +141,64 @@ class FixedPreparationTests(unittest.TestCase):
             finally:
                 os.chdir(original)
 
+    def test_tree_member_names_are_exact_and_only_in_work(self):
+        expected = {
+            "tree-parent.ready",
+            "tree-child.ready",
+            "tree-grandchild.ready",
+            "tree-parent.heartbeat",
+            "tree-child.heartbeat",
+            "tree-grandchild.heartbeat",
+        }
+        self.assertEqual(prepare.TREE_FILES, expected)
+        for name in expected:
+            self.assertTrue(prepare.fixture_member_name(name, ("work",)))
+            for relative in [(), ("home",), ("work", "nested")]:
+                self.assertFalse(prepare.fixture_member_name(name, relative))
+        for name in [
+            "tree-other.ready",
+            "tree-parent.ready.extra",
+            ".ready",
+            "../tree-parent.ready",
+            "tree-parent/ready",
+        ]:
+            self.assertFalse(prepare.fixture_member_name(name, ("work",)))
+        self.assertTrue(prepare.fixture_member_name("fixture-seal", ("work",)))
+        with (
+            mock.patch.object(prepare.os, "listdir", return_value=["tree-parent.ready"]),
+            mock.patch.object(prepare.os, "open", side_effect=AssertionError("refused name reached native open")),
+        ):
+            with self.assertRaises(ValueError):
+                prepare.copy_fixture(99, Path("unused"), 0, [0, 0])
+
+    @unittest.skipUnless(__import__("os").name == "posix", "descriptor fixture copier is Linux-only")
+    def test_tree_file_copy_keeps_existing_limits_and_refuses_directory_alias(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, target = root / "source", root / "target"
+            source.mkdir()
+            target.mkdir()
+            work = source / "work"
+            work.mkdir()
+            for name in prepare.TREE_FILES:
+                (work / name).write_bytes(b"fixed-public\n")
+            fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                budget = [0, 0]
+                prepare.copy_fixture(fd, target, 0, budget)
+                self.assertEqual(budget, [7, 78])
+                self.assertEqual({path.name for path in (target / "work").iterdir()}, prepare.TREE_FILES)
+                (work / "tree-parent.ready").unlink()
+                (work / "tree-parent.ready").mkdir()
+                second = root / "second"
+                second.mkdir()
+                with self.assertRaisesRegex(ValueError, "regular file"):
+                    prepare.copy_fixture(fd, second, 0, [0, 0])
+            finally:
+                os.close(fd)
+
     @unittest.skipUnless(__import__("os").name == "posix", "descriptor fixture copier is Linux-only")
     def test_fixture_copy_rejects_links_and_preserves_owned_regular_data(self):
         import os

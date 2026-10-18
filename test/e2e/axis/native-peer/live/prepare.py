@@ -21,10 +21,10 @@ from verify_native_artifact import manifest as peer_manifest  # noqa: E402
 from verify_native_artifact import record_matches, static_elf
 
 REPOSITORY = "cisco-ai-defense/defenseclaw"
-RECEIPT_SHA = "6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6"
+RECEIPT_SHA = "8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b"
 # Independently reviewed source/build/image inputs; no caller or API chooses a
 # pin. This source recipe needs its own review and explicit run authorization.
-DRIVER_PROVENANCE_SHA = "2f7400d478f50338ea09068b82ea99663de6f88a0be9a42c006df0583bb056f4"
+DRIVER_PROVENANCE_SHA = "d53a38d6dcbeaf035edbc1210f20b1ae2fa1415de9323e77d9ca2784feb405cc"
 PINS = {
     "peer": {
         "commit": "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139",
@@ -38,36 +38,36 @@ PINS = {
         "event": "push",
     },
     "payload": {
-        "commit": "d07485c4cc8ecf8ab7db1a0121ac61a6a8b636f3",
-        "run": 39134453264,
-        "artifact": 12138953410,
-        "archive": "251779fc9462ca8f49014dceb6c86b633c86712b488d009a4a61e9095df9c401",
-        "provenance": "ae7d3700b3a8f20236cbef90e249f2c529103747e79d8c3473042b9fd5259a98",
+        "commit": "3f295c8351d29028278e99349de9036207df6590",
+        "run": 39167683927,
+        "artifact": 12151291706,
+        "archive": "ae4e4c905d707a4505b80c1d3343f7896051a6e5c51f56835e7d7552d4fc67a5",
+        "provenance": "0d92d049bf554404c8d4edfc7d124890258be0177bf336b44441298ac093f578",
         "workflow": ".github/workflows/axis-native-payload-build.yml",
         "stem": "axis-fixed-native-payload-linux-",
-        "branch": "codex/axis-peer-experiments",
-        "event": "push",
+        "branch": "codex/axis-sandbox-feasibility",
+        "event": "workflow_dispatch",
     },
     "wrapper": {
-        "commit": "ae9f9e0c8cea430501f723bb79430955f76df013",
-        "run": 39160365924,
-        "artifact": 12148552547,
-        "archive": "4b938f0b5df48dbc05c5fc0d0eaec516abda29a226bd1a9eeb16927eb3b9ad30",
-        "provenance": "bd0fe0646543173ddb244a12a41396884ab7652e23809b66d99fa3bed5d03bd7",
+        "commit": "52e4a071109d1522d3cadf53085c9537467ef9c7",
+        "run": 39168692019,
+        "artifact": 12151861098,
+        "archive": "86d78d2aee702fbcbfb356a94b8bd654dc07b842f8c54b5531c744f434f59f5e",
+        "provenance": "7d4dad5aa155b47e932c61e88a72ff1f5d42bb00dca80c7fb2955d7add767d31",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "5125d37fed95e3b7967c94edb3d1f9ddd59260c6",
-        "run": 39160923199,
-        "artifact": 12148188690,
-        "archive": "3569455f8880ee61e37d8dc3e763f90c5a53e08326c27b988bfcf996d4928817",
+        "commit": "b38a49dda8da9aca450994b709b44e9cea7d5c19",
+        "run": 39169432727,
+        "artifact": 12151303749,
+        "archive": "08800337cd68304ac4038e2b6d12af13404ee725c819f3feae1a29124a6e6384",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
-        "event": "workflow_dispatch",
+        "event": "push",
     },
 }
 
@@ -262,22 +262,22 @@ def prepare(root, metadata_api=api, download=None):
             "payload",
             "bin/payload",
             images / "fixed-payload",
-            "d2d2ac02859541bbc03eaae305a8b1f833338a7783f8b31e57046e5dd4e4533c",
+            "ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2",
             1929342,
         ),
         (
             "wrapper",
             "bin/reviewed-harness",
             images / "reviewed-wrapper",
-            "97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818",
-            3440766,
+            "70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb",
+            3473534,
         ),
         (
             "driver",
             "bin/fixed-outer-driver",
             images / "fixed-driver",
-            "ddc177532298d62d2f39af1d63c51ef982a778a123180dbf8f1ea6749289ec91",
-            3207294,
+            "a93df15dba750e5e2363ec4276b7c0e75f593101fa58ee9ef0e5b901bb2b3f39",
+            3211390,
         ),
     ]
     for role, member, target, digest, size in members:
@@ -299,7 +299,7 @@ def prepare(root, metadata_api=api, download=None):
             "payload",
             "source/test/e2e/axis/native-peer/payload/main_linux.go",
             source / "payload-main_linux.go",
-            "40e6e1bccb635385cdab82e0969de893cb9e5c9d1aeb1499a2446623a9cca986",
+            "80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb",
         ),
     ]:
         target.write_bytes(select(archives[role], member, digest))
@@ -387,12 +387,22 @@ def collect():
         (evidence / "COLLECTION.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
-def copy_fixture(parent, destination, depth, budget):
+TREE_FILES = frozenset(
+    f"tree-{role}.{suffix}" for role in ("parent", "child", "grandchild") for suffix in ("ready", "heartbeat")
+)
+
+
+def fixture_member_name(name, relative):
+    # Dot-containing names belong only to these six fixed public work files.
+    return bool(re.fullmatch("[a-z0-9-]{1,64}", name)) or relative == ("work",) and name in TREE_FILES
+
+
+def copy_fixture(parent, destination, depth, budget, relative=()):
     require(depth <= 3, "fixture depth bound")
     names = os.listdir(parent)
     require(len(names) <= 32, "fixture member bound")
     for name in sorted(names):
-        require(re.fullmatch("[a-z0-9-]{1,64}", name), "fixture member name differs")
+        require(fixture_member_name(name, relative), "fixture member name differs")
         budget[0] += 1
         require(budget[0] <= 32, "fixture total member bound")
         child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=parent)
@@ -401,8 +411,9 @@ def copy_fixture(parent, destination, depth, budget):
             require(metadata.st_uid == os.geteuid(), "fixture member owner differs")
             target = destination / name
             if stat.S_ISDIR(metadata.st_mode):
+                require(name not in TREE_FILES, "fixed tree evidence must be a regular file")
                 target.mkdir(mode=0o700)
-                copy_fixture(child, target, depth + 1, budget)
+                copy_fixture(child, target, depth + 1, budget, (*relative, name))
             else:
                 require(
                     stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and metadata.st_size <= 64 << 10,
