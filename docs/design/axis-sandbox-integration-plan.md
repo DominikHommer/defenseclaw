@@ -381,6 +381,65 @@ are visible refusals, not silently ignored settings or fallback execution.
 
 ## Review decisions
 
+### Research update: MXC API and the replaceable execution layer
+
+The October 18 follow-up requires implementation and adversarial/manual testing
+of the three native routes, with DefenseClaw behavior preserved across future
+providers. The original Linux-only feasibility scope is superseded by the
+platform matrix above. Qualification gates still apply to every offered mode.
+
+Two upstream versions must be kept distinct:
+
+- AXIS remains pinned at `fb5fd5f0f9377c2ccb30d7e027a36373de0d037c`, reporting
+  0.3.5. Its Windows packaging pairs Microsoft MXC
+  `1736b48398c3fe4d1315b2311c0951cc893eb3ae` with three AXIS patches. See the
+  [paired dependency contract](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/third_party/mxc/README.md).
+- Current MXC research is pinned independently at
+  `fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2`, SDK 1.0.1. Its supported V1 API
+  has typed containment requests, live pipes, structured wait outcomes, and
+  terminal handles. Native JSON contract versions and SDK versions are separate;
+  replacing AXIS's executor with this build without updating its translator is
+  not a compatible upgrade. See the
+  [V1 execution API](https://github.com/microsoft/mxc/blob/fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2/docs/api-reference/rust/v1/api.md)
+  and [versioning model](https://github.com/microsoft/mxc/blob/fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2/docs/development/architecture/versioning.md).
+
+The proposed implementation boundary is a small native execution bridge beneath
+the common Go controller. Keep admitted policy, session ownership, authentication,
+approvals, workspace review, hook dispatch, and model credentials in DefenseClaw.
+The bridge translates an immutable effective-policy snapshot, launches the
+selected MXC substrate, and exposes bounded streams, terminal control, wait,
+termination, and structured enforcement errors. A Rust bridge can reuse AXIS
+policy guards and the supported MXC SDK without making AXIS's CLI output or
+daemon into DefenseClaw's protocol. This is a design inference from the APIs,
+subject to the prototypes below; it is not a claim that stock AXIS provides it.
+
+The common contract must include a policy generation/digest, exact composite
+artifact identity, owner and session identity, literal argv, explicit replacement
+environment, private working/state directories, required capabilities, and
+bounded deadlines/output. The adapter must report a plan for every requested
+policy surface: exact enforcement, an explicit required host dependency, or
+unsupported. A customer cannot supply capability evidence. Unsupported required
+semantics prevent execution; adapter defaults must not expand admitted access.
+
+Concrete integration work established by source review:
+
+| Surface | Current evidence | Implementation consequence |
+| --- | --- | --- |
+| Windows process isolation | AXIS's MXC adapter contains a real native launch path despite stale blanket refusal prose elsewhere. | Test the paired native artifacts on the actual host; do not infer availability from either README wording or API export presence. |
+| Windows terminal | AXIS refuses interactive MXC; current MXC's native ProcessContainer adapter also rejects caller-controlled PTY. The Node SDK uses an outer ConPTY/executor topology. | Prototype an explicit inherited-console mode retaining the interactive request and all containment checks; prove input, resize, signals, exit and cleanup before Claude. [Native SDK admission](https://github.com/microsoft/mxc/blob/fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2/src/mxc-sdk/src/backends/process_container/common/mod.rs#L58-L68), [Node transport](https://github.com/microsoft/mxc/blob/fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2/sdk/node/src/bindings/process-container-pty.ts#L140-L181). |
+| Linux streams and terminal | New MXC V1 exposes typed pipe/PTY handles, including resize and structured timeout outcomes. | Use the supported handles, then add AXIS child guards needed to meet the exact admitted filesystem and syscall policy. Independently test Bubblewrap confinement and each added guard. [API and tests](https://github.com/microsoft/mxc/blob/fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2/src/mxc-sdk/tests/streaming_bubblewrap.rs). |
+| macOS MXC | AXIS rejects MXC selection on macOS; its current implementation directly launches its own Seatbelt profile. | Add an explicit reviewed MXC Seatbelt route and qualify it. Sharing Seatbelt as an OS primitive does not establish identical policy or lifecycle behavior. [AXIS dispatch](https://github.com/ROCm/axis/blob/fb5fd5f0f9377c2ccb30d7e027a36373de0d037c/crates/axis-sandbox/src/sandbox.rs#L678-L834). |
+| Shared policy authority | AXIS has policy/proxy/inference components in addition to process isolation. | Compile DefenseClaw's resolved policy once. Do not expose independent AXIS policy files, inference selection, credential storage, or approval decisions as a second authority. |
+
+Use the same conformance suite for every provider: denied reads/writes, allowed
+workspace operations, network bypass attempts, hook failure/revocation,
+credential confinement, session ownership, approval effects, terminal behavior,
+timeouts, parent death, teardown, restart/recovery, and workspace review. Run
+real Claude separately after the benign confinement/transport tests pass.
+Capture exact native host, runtime/bridge/executor hashes, policy and harness
+identity, commands, and observed outcomes. Upstream tests and synthetic adapter
+fixtures inform the design but do not replace DefenseClaw acceptance evidence.
+
 Claude's review should resolve these design decisions before implementation:
 
 1. Is the shared abstraction reconciled with current main and the Windows work,
