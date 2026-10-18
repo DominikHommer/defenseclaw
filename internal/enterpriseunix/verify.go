@@ -128,6 +128,15 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	// The 1.0.2 loader accepted these literals. Keep an installed deployment
+	// running while pointing the administrator to the candidate-safe form.
+	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+		if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(env.Layout.ConfigPath, raw); err == nil {
+			if paths := config.ManagedStandaloneUpgradeAdvisories(installed, raw); len(paths) > 0 {
+				r.AddWarning("managed_literal_credentials", "installed config uses literals at "+strings.Join(paths, ", ")+"; use {credential: NAME} or {env: NAME} where supported; webhook URLs remain supported")
+			}
+		}
+	}
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify

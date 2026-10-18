@@ -180,6 +180,11 @@ func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig,
 		}
 		return nil, e.explainConfigError(err, source)
 	}
+	if source != "" {
+		if err := config.ValidateManagedStandaloneLiteralCandidate(validated.Loaded, raw); err != nil {
+			return nil, e.explainConfigError(err, source)
+		}
+	}
 	return validated, nil
 }
 
