@@ -58,6 +58,26 @@ locator_refuses_deleted_traversal_and_unrepresentable_names (void)
 }
 
 static bool
+cloned_view_uses_reopened_mount_id_and_still_refuses_nested_aliases (void)
+{
+  /* Pure inventories, not mount/namespace operations. The imported FD may
+   * retain old ID99 while its trusted namespace clone has current ID22.
+   * Only the reopened current view can describe the tree open_tree will copy.
+   * Object/flag identity and trusted clone-only/idmap provenance are separate
+   * mandatory predicates; this parser test does not fabricate that proof. */
+  const char *current = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n"
+                         "22 11 0:1 /same-object /grant rw - ext4 /dev/fixed rw\n";
+  const char *nested = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n"
+                        "22 11 0:1 /same-object /grant rw - ext4 /dev/fixed rw\n"
+                        "23 22 0:1 /same-object /grant/nested rw - ext4 /dev/fixed rw\n";
+  return !owned_mountinfo_admits (current, "/grant", 99) &&
+         owned_mountinfo_admits (current, "/grant", 22) &&
+         !owned_mountinfo_admits (current, "/grant", 0) &&
+         !owned_mountinfo_admits (nested, "/grant", 22) &&
+         !owned_preserves_flags (ST_RDONLY | ST_NOEXEC, ST_RDONLY);
+}
+
+static bool
 immutable_copy_preserves_seals_size_and_every_byte (void)
 {
   cleanup_fd int source = -1;
@@ -116,9 +136,10 @@ main (int argc, char **argv)
 #define RUN_TEST(name) do { if (!(name ())) return 1; puts (#name); } while (0)
   RUN_TEST (topology_refuses_nested_bind_mounts_and_malformed_inventory);
   RUN_TEST (locator_refuses_deleted_traversal_and_unrepresentable_names);
+  RUN_TEST (cloned_view_uses_reopened_mount_id_and_still_refuses_nested_aliases);
   RUN_TEST (immutable_copy_preserves_seals_size_and_every_byte);
   RUN_TEST (readonly_root_is_nonrecursive_and_source_noexec_is_preserved);
 #undef RUN_TEST
-  puts ("PASS 4 inert owned-FD tests; no namespace, mount or workload execution");
+  puts ("PASS 5 inert owned-FD tests; no namespace, mount or workload execution");
   return 0;
 }

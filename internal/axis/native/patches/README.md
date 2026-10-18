@@ -28,15 +28,18 @@ to the old mount namespace after unshare: the kernel requires a source in the
 current namespace, and an unprivileged original namespace cannot safely
 pre-clone it. The private route therefore admits a deliberately narrower view:
 
-1. Before unshare, hold the original root and namespace. Capture the source
+1. Before Bubblewrap's own unshare, hold its current root and namespace. Capture the source
    descriptor's canonical `/proc/self/fd` locator and reopen it beneath that
    root using `openat2` with `RESOLVE_BENEATH|NO_SYMLINKS|NO_MAGICLINKS|CACHED`.
-   Compare device/inode/type, filesystem identity, `statx` mount ID and mount
-   flags with the original held source. Refuse deleted, unreachable,
+   Compare device/inode/type, filesystem identity and every mount flag bit
+   with the original held source. Obtain the `statx` mount ID from this
+   reopened current view. A descriptor inherited across an earlier trusted
+   namespace clone still refers to its old mount ID; that ID cannot identify
+   the cloned view. Refuse deleted, unreachable,
    non-normalized or unrepresentable locators. Any lookup needing I/O or
    revalidation refuses with no weaker retry, including intermediate automounts.
 2. Parse the complete bounded mountinfo inventory, not only `st_dev`. Require
-   the source mount ID and refuse every nested mountpoint beneath the source,
+   the reopened current source mount ID and refuse every nested mountpoint beneath the source,
    including bind aliases on the same filesystem. Before/after inventories
    must match byte-for-byte. Unparseable or truncated inventories refuse.
 3. Prove the active namespace differs from the held original before any mount
@@ -50,6 +53,19 @@ pre-clone it. The private route therefore admits a deliberately narrower view:
    grants, then use `move_mount` with a held destination. No source lookup
    occurs at mount time and no original source attributes change. There is no
    path-authority or mutable snapshot fallback.
+
+This rebind is limited to the trusted private factory's clone-only namespace
+chain. It is not proof that an arbitrary foreign or idmapped FD is equivalent
+to a different bind alias with the same inode. Before its first clone, the fixed
+host driver checks its held temporary parent and fresh empty fixture root using
+`STATX_MNT_ID_UNIQUE` and current-namespace `statmount(STATMOUNT_MNT_BASIC)`.
+Both must identify the same reachable mount, return the required fields, and
+have no `MOUNT_ATTR_IDMAP`; unsupported queries refuse. Subsequent trusted
+bootstraps only clone the namespace and replace reserved `/proc`, which no
+source grant can cover. The kernel preserves each cloned mount's idmap.
+There is no untrusted workload before the later current-view admission.
+General production producers still need explicit source-origin/idmap admission;
+the unavailable catalog does not advertise that qualification.
 
 `--dc-ro-image-fd` is a separate, exactly-one fixed payload operation at
 `/.defenseclaw/payload`. It accepts a held immutable sealed regular file up to
@@ -100,8 +116,8 @@ man-page generation explicitly and retain the exact source, patch, license,
 compiler, flags and output hash. No install or privileged build is needed.
 
 The separate `bwrap-owned-fd-tests.c` entry point includes this source with its
-main renamed and never called. Four inert tests cover mountinfo/locator
-refusals, source/root flag predicates and a fixed sealed memfd byte copy into
+main renamed and never called. Five inert tests cover mountinfo/locator
+refusals, current-versus-imported mount IDs and nested aliases, source/root flag predicates and a fixed sealed memfd byte copy into
 an exclusive task-owned temporary file. They never create a namespace, mount,
 backend or contained workload. The build records their exact names and results.
 

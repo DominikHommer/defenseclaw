@@ -1,5 +1,5 @@
 diff --git a/bubblewrap.c b/bubblewrap.c
-index 9b78a9a..8ebb89d 100644
+index 9b78a9a..2d9e1a1 100644
 --- a/bubblewrap.c
 +++ b/bubblewrap.c
 @@ -32,6 +32,14 @@
@@ -69,7 +69,7 @@ index 9b78a9a..8ebb89d 100644
             "    --remount-ro DEST            Remount DEST as readonly; does not recursively remount\n"
             "    --exec-label LABEL           Exec label for the sandbox\n"
             "    --file-label LABEL           File label for temporary sandbox content\n"
-@@ -1165,6 +1190,547 @@ privileged_op (int         privileged_op_socket,
+@@ -1165,6 +1190,558 @@ privileged_op (int         privileged_op_socket,
   * some privileged operations (also in the child namespace) via the
   * privileged_op_socket.
   */
@@ -347,7 +347,7 @@ index 9b78a9a..8ebb89d 100644
 +        char descriptor[64];
 +        char locator[PATH_MAX + 1];
 +        ssize_t length;
-+        uint64_t mount_id = owned_mount_id (op->fd);
++        uint64_t mount_id;
 +        if (fstat (op->fd, &op->owned_original_stat) != 0 ||
 +            fstatfs (op->fd, &op->owned_original_fs) != 0 || fstatvfs (op->fd, &flags) != 0)
 +          die_with_error ("Can't inspect original owned source");
@@ -363,9 +363,20 @@ index 9b78a9a..8ebb89d 100644
 +        if (has_path_prefix ("/tmp", locator))
 +          die ("Owned source must not cover the private staging mountpoint");
 +        reachable = owned_reopen (owned_original_root_fd, locator);
-+        if (reachable < 0 || !owned_source_matches (op, reachable) ||
-+            owned_mount_id (reachable) != mount_id || !owned_mountinfo_admits (before, locator, mount_id))
-+          die ("Owned source is unreachable or has unsupported nested mounts");
++        if (reachable < 0)
++          die_with_error ("Owned source namespace-local reopen failed");
++        if (!owned_source_matches (op, reachable))
++          die ("Owned source namespace-local object or restrictions differ");
++        /* The trusted private factory may have cloned its mount namespace
++         * before this executable. An imported FD still holds the old mount;
++         * copy_mnt_ns does not translate its file path to the cloned mount ID.
++         * Keep that FD as object/flag authority, but inspect the actual view
++         * reopened in our current namespace, which is the only view cloned.
++         * This requires the factory's clone-only origin/idmap provenance;
++         * matching an arbitrary foreign FD's inode is not that provenance. */
++        mount_id = owned_mount_id (reachable);
++        if (!owned_mountinfo_admits (before, locator, mount_id))
++          die ("Owned source namespace-local topology is unsupported");
 +        op->source = xstrdup (locator);
 +      }
 +  after = owned_mountinfo_snapshot ();
@@ -617,7 +628,7 @@ index 9b78a9a..8ebb89d 100644
  static void
  setup_newroot (bool unshare_pid,
                 int  privileged_op_socket)
-@@ -1178,8 +1744,8 @@ setup_newroot (bool unshare_pid,
+@@ -1178,8 +1755,8 @@ setup_newroot (bool unshare_pid,
        int source_mode = 0;
        unsigned int i;
  
@@ -628,7 +639,7 @@ index 9b78a9a..8ebb89d 100644
          {
            source = get_oldroot_path (op->source);
            source_mode = get_file_mode (source);
-@@ -1215,6 +1781,13 @@ setup_newroot (bool unshare_pid,
+@@ -1215,6 +1792,13 @@ setup_newroot (bool unshare_pid,
  
        switch (op->type)
          {
@@ -642,7 +653,7 @@ index 9b78a9a..8ebb89d 100644
          case SETUP_RO_BIND_MOUNT:
          case SETUP_DEV_BIND_MOUNT:
          case SETUP_BIND_MOUNT:
-@@ -1517,6 +2090,31 @@ close_ops_fd (void)
+@@ -1517,6 +2101,31 @@ close_ops_fd (void)
            (void) close (op->fd);
            op->fd = -1;
          }
@@ -674,7 +685,7 @@ index 9b78a9a..8ebb89d 100644
      }
  }
  
-@@ -1549,6 +2147,9 @@ resolve_symlinks_in_ops (void)
+@@ -1549,6 +2158,9 @@ resolve_symlinks_in_ops (void)
              }
            break;
  
@@ -684,7 +695,7 @@ index 9b78a9a..8ebb89d 100644
          case SETUP_MOUNT_PROC:
          case SETUP_MOUNT_DEV:
          case SETUP_MOUNT_TMPFS:
-@@ -1847,6 +2448,35 @@ parse_args_recurse (int          *argcp,
+@@ -1847,6 +2459,35 @@ parse_args_recurse (int          *argcp,
            argv += 2;
            argc -= 2;
          }
@@ -720,7 +731,7 @@ index 9b78a9a..8ebb89d 100644
        else if (strcmp(arg, "--ro-bind") == 0 ||
                 strcmp(arg, "--ro-bind-try") == 0)
          {
-@@ -2751,6 +3381,45 @@ main (int    argc,
+@@ -2751,6 +3392,45 @@ main (int    argc,
    if (!is_privileged && getuid () != 0 && opt_userns_fd == -1)
      opt_unshare_user = TRUE;
  
@@ -766,7 +777,7 @@ index 9b78a9a..8ebb89d 100644
  #ifdef ENABLE_REQUIRE_USERNS
    /* In this build option, we require userns. */
    if (is_privileged && getuid () != 0 && opt_userns_fd == -1)
-@@ -2818,6 +3487,13 @@ main (int    argc,
+@@ -2818,6 +3498,13 @@ main (int    argc,
    proc_fd = open ("/proc", O_PATH);
    if (proc_fd == -1)
      die_with_error ("Can't open /proc");
@@ -780,7 +791,7 @@ index 9b78a9a..8ebb89d 100644
  
    /* We need *some* mountpoint where we can mount the root tmpfs.
     * Because we use pivot_root, it won't appear to be mounted from
-@@ -3077,7 +3753,15 @@ main (int    argc,
+@@ -3077,7 +3764,15 @@ main (int    argc,
    /* Mark everything as slave, so that we still
     * receive mounts from the real root, but don't
     * propagate mounts to the real root. */
@@ -797,7 +808,7 @@ index 9b78a9a..8ebb89d 100644
      die_with_mount_error ("Failed to make / slave");
  
    /* Create a tmpfs which we will use as / in the namespace */
-@@ -3112,6 +3796,15 @@ main (int    argc,
+@@ -3112,6 +3807,15 @@ main (int    argc,
    if (chdir ("/") != 0)
      die_with_error ("chdir / (base path)");
  
@@ -813,7 +824,7 @@ index 9b78a9a..8ebb89d 100644
    if (is_privileged)
      {
        pid_t child;
-@@ -3163,6 +3856,8 @@ main (int    argc,
+@@ -3163,6 +3867,8 @@ main (int    argc,
        setup_newroot (opt_unshare_pid, -1);
      }
  
@@ -822,7 +833,7 @@ index 9b78a9a..8ebb89d 100644
    close_ops_fd ();
  
    /* The old root better be rprivate or we will send unmount events to the parent namespace */
-@@ -3380,7 +4075,9 @@ main (int    argc,
+@@ -3380,7 +4086,9 @@ main (int    argc,
    if (opt_argv0 != NULL)
      argv[0] = (char *) opt_argv0;
  

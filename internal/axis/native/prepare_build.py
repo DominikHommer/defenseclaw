@@ -28,15 +28,16 @@ NATIVE_TEST_COUNT = 19
 C_TESTS = (
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
+    "cloned_view_uses_reopened_mount_id_and_still_refuses_nested_aliases",
     "immutable_copy_preserves_seals_size_and_every_byte",
     "readonly_root_is_nonrecursive_and_source_noexec_is_preserved",
 )
-C_TEST_SUMMARY = "PASS 4 inert owned-FD tests; no namespace, mount or workload execution"
+C_TEST_SUMMARY = "PASS 5 inert owned-FD tests; no namespace, mount or workload execution"
 SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
     "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
-    "patches/bwrap-owned-fds.patch": "91fa2035f9679edcd0490b778816f4dec94fea7079090e174871e127304370e1",
+    "patches/bwrap-owned-fds.patch": "1563032b5bfbd74b56214119f1287de3a7e63c9054898b58c6cd9603948dd621",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
 SOURCE = {
