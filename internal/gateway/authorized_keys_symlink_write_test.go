@@ -244,7 +244,8 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 		name, command, operand, resolved string
 		blocked                          bool
 	}{
-		{"ordinary header claim", "printf marker > report.txt", ordinary, protected, false},
+		{"ordinary target", "printf marker > report.txt", ordinary, ordinary, false},
+		{"positive protected claim", "printf marker > report.txt", ordinary, protected, true},
 		{"protected header claim", "printf marker > ../.ssh/authorized_keys", protected, ordinary, true},
 		{"proc ordinary", "printf marker > /proc/self/cwd/report.txt", "/proc/self/cwd/report.txt", ordinary, false},
 		{"proc protected", "printf marker > /proc/self/cwd/../.ssh/authorized_keys", "/proc/self/cwd/../.ssh/authorized_keys", protected, true},

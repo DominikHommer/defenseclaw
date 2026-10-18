@@ -720,22 +720,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
-	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
-		len(request.ResolvedWriteTargets) != 0 {
-		// Claude's newly carried header is needed for process-cwd writes.
-		// Preserve the established decision for all other operands until
-		// their header and shell ordering can be proved together.
-		var cwdTargets map[string]string
-		for operand, resolved := range request.ResolvedWriteTargets {
-			if strings.HasPrefix(operand, "/proc/self/cwd/") {
-				if cwdTargets == nil {
-					cwdTargets = make(map[string]string)
-				}
-				cwdTargets[operand] = resolved
-			}
-		}
-		request.ResolvedWriteTargets = cwdTargets
-	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
@@ -746,6 +730,26 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	isProtected := func(path string) bool {
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
+	}
+	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
+		len(request.ResolvedWriteTargets) != 0 {
+		// Keep the client's positive protected-path evidence, inspected copy
+		// sources and directory facts. A generic ordinary or unknown write
+		// target does not override the established shell-ordering decision.
+		// The process-cwd alias needs its own client target to be provable.
+		var scoped map[string]string
+		for operand, resolved := range request.ResolvedWriteTargets {
+			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix) ||
+				operand == hookpaths.CWDKey || isProtected(resolved) {
+				if scoped == nil {
+					scoped = make(map[string]string)
+				}
+				scoped[operand] = resolved
+			}
+		}
+		request.ResolvedWriteTargets = scoped
 	}
 	clientCWD := facts.CWD
 	if !filepath.IsAbs(clientCWD) {
