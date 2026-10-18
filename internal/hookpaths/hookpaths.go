@@ -1885,6 +1885,10 @@ func Resolve(payload []byte) string {
 					dynamicOperands, dynamicUnknown = shellDynamicWriteOperandsFile(file, cwd, home)
 					if dynamicUnknown && safeDynamicRedirectFile(file, cwd, home, true) {
 						sourceFacts[SafeDynamicKey] = "1"
+						// The one unresolved redirect is covered by the
+						// client proof. Its target cannot name any protected
+						// file, so the operand map is complete for this command.
+						dynamicUnknown = false
 					}
 				}
 				if parsed {

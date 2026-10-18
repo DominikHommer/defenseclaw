@@ -47,7 +47,7 @@ func safeDynamicRedirectFile(file *syntax.File, cwd, home string, verifyFS bool)
 	variable, kind := "", ""
 	writer := file.Stmts[0]
 	if len(file.Stmts) == 2 {
-		variable, kind = safeDynamicAssignment(file.Stmts[0], home)
+		variable, kind = safeDynamicAssignment(file.Stmts[0], cwd, home, verifyFS)
 		if kind == "" {
 			return false
 		}
@@ -165,7 +165,7 @@ func safePlainParam(param *syntax.ParamExp, name string) bool {
 		param.Slice == nil && param.Repl == nil && param.Names == 0
 }
 
-func safeDynamicAssignment(stmt *syntax.Stmt, home string) (variable, kind string) {
+func safeDynamicAssignment(stmt *syntax.Stmt, cwd, home string, verifyFS bool) (variable, kind string) {
 	if stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
 		return "", ""
 	}
@@ -196,19 +196,63 @@ func safeDynamicAssignment(stmt *syntax.Stmt, home string) (variable, kind strin
 	if !ok || len(inner.Assigns) != 0 || len(inner.Args) == 0 {
 		return "", ""
 	}
-	words, ok := shellStaticWords(inner.Args, home)
-	if !ok {
-		return "", ""
+	words := make([]string, len(inner.Args))
+	for i, arg := range inner.Args {
+		value, ok := staticShellWordWithVars(arg, home, shellVariables{"PWD": cwd}, shellVariablePoison{})
+		if !ok {
+			return "", ""
+		}
+		words[i] = value
 	}
 	switch {
 	case len(words) == 1 && words[0] == "mktemp":
 		return variable, "mktemp-file"
 	case len(words) == 2 && words[0] == "mktemp" && words[1] == "-d":
 		return variable, "mktemp-dir"
+	case len(words) == 2 && words[0] == "mktemp" &&
+		safeMktempTemplate(words[1], cwd, home, verifyFS):
+		return variable, "mktemp-file"
+	case len(words) == 3 && words[0] == "mktemp" && words[1] == "-d" &&
+		safeMktempTemplate(words[2], cwd, home, verifyFS):
+		return variable, "mktemp-dir"
 	case len(words) == 2 && words[0] == "date" && (words[1] == "+%s" || words[1] == "+%Y%m%d"):
 		return variable, "date-digits"
 	}
 	return "", ""
+}
+
+// A successful mktemp creates a fresh entry, so no pre-existing protected
+// file or symlink can occupy it. Keep the template under a resolved directory
+// that does not contain a protected file; a failed mktemp is checked by the
+// redirect's separate fallback path.
+func safeMktempTemplate(template, cwd, home string, verifyFS bool) bool {
+	if template == "" || strings.HasPrefix(template, "-") ||
+		!strings.HasSuffix(filepath.Base(template), "XXXXXX") ||
+		strings.ContainsAny(template, "\x00\r\n") {
+		return false
+	}
+	directory := filepath.Dir(OperandPath(template, cwd))
+	if !filepath.IsAbs(directory) {
+		return false
+	}
+	if !verifyFS {
+		return true
+	}
+	physical, ok := ResolveWriteTarget(directory)
+	if !ok {
+		return false
+	}
+	info, err := os.Stat(physical)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	for _, protected := range ProtectedAuthorizedKeysPaths(home) {
+		resolved, ok := ResolveWriteTarget(protected)
+		if !ok || physical == resolved || strings.HasPrefix(resolved, physical+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
 }
 
 func safeNumericDirectory(path, home string) bool {
