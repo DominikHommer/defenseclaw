@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -36,9 +37,9 @@ func TestCodexManagedWindowsDirectSetupRefusesWithoutMutation(t *testing.T) {
 	CodexConfigPathOverride = configPath
 	t.Cleanup(func() { CodexConfigPathOverride = previousPath })
 	conn := NewCodexConnector()
-	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), ManagedEnterprise: true}
-	if err := conn.Setup(context.Background(), opts); err == nil {
-		t.Fatal("managed direct Setup succeeded without machine requirements installer")
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), ManagedEnterprise: true, InstallCodeGuard: true}
+	if err := conn.Setup(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "administrator-owned machine requirements installer") {
+		t.Fatalf("managed direct Setup error = %v, want machine requirements refusal", err)
 	}
 	for path, want := range map[string][]byte{configPath: configSeed, managedPath: managedSeed} {
 		got, err := os.ReadFile(path)
