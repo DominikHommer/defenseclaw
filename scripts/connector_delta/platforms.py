@@ -12,12 +12,28 @@ from .platform_bindings import canonical_path
 PATTERNS = {
     "linux": r"\b(?:Linux|WSL[12]?)\b",
     "macos": r"\b(?:macOS|Darwin|Mac OS)\b",
-    "windows": r"\bWindows\b|\bWin32\b|\bPowerShell\b",
+    # Lowercase "windows" is ordinary prose, not the Windows OS name.
+    "windows": r"\b(?-i:Windows|WINDOWS)\b|\bWin32\b|\bPowerShell\b|\b(?:on|for|under) windows\b",
 }
 
 
 def scope(text):
     return [name for name, pattern in PATTERNS.items() if re.search(pattern, text, re.IGNORECASE)]
+
+
+def _claim_scope(provider, claim, text):
+    """Use the claim's source lines, including prefixes omitted by extraction."""
+    if not invariants.checked_claim(claim, provider.texts):
+        # Missing/invalid evidence still goes through the comparator's review
+        # gate; candidate keywords cannot establish a verified OS binding.
+        return scope(text)
+    found = set()
+    for ref in claim["evidence"]:
+        source = provider.texts[(ref["artifact"], ref["revision"])]
+        start = source.rfind("\n", 0, ref["start"]) + 1
+        end = source.find("\n", ref["end"] - 1)
+        found.update(scope(source[start : end if end >= 0 else len(source)]))
+    return [platform for platform in PATTERNS if platform in found]
 
 
 def profiles(provider, bindings):
@@ -95,21 +111,18 @@ def extract_scoped(provider, text, artifact, revision, *, base=0, full_text=None
 
 
 def evaluate(provider, bindings, claims, selected, text):
-    platforms = scope(text)
-    local = copy.deepcopy(bindings)
     scoped = [claim for claim in claims if "deployment_scope" in claim or "platforms" in claim]
     if scoped:
         checks = []
         matrix = profiles(provider, bindings)
         for invariant in dict.fromkeys(selected):
             targeted = [claim for claim in scoped if claim["invariant_id"] == invariant]
+            unscoped = [claim for claim in claims if claim not in scoped and claim["invariant_id"] == invariant]
+            if unscoped or not targeted:
+                # A scoped fact must not hide an unscoped fact on the same
+                # invariant. Missing requirements still get their review row.
+                checks.extend(evaluate(provider, bindings, unscoped, [invariant], text))
             if not targeted:
-                # Other selected requirements remain unresolved, not borrowed
-                # from a different platform or from adjacent prose.
-                unresolved = evaluate(
-                    provider, bindings, [claim for claim in claims if claim not in scoped], [invariant], text
-                )
-                checks.extend(unresolved)
                 continue
             dimensions = {(tuple(claim.get("platforms", [])), claim.get("deployment_scope")) for claim in targeted}
             for target_platforms, deployment in sorted(dimensions, key=str):
@@ -156,19 +169,30 @@ def evaluate(provider, bindings, claims, selected, text):
                         row.update(platforms=[platform], deployment_scope=deployment)
                     checks.extend(rows)
         return checks
-    if platforms:
-        # Common user bindings do not verify managed loaders or native shell /
-        # argv contracts. An OS-scoped path or launch claim must remain review.
-        for key in ("hook.discovery", "hook.registration", "hook.execution"):
-            local[key]["verified"] = False
-    checks = invariants.evaluate(
-        provider.catalog, local, claims, selected=selected, transport=provider.transport, texts=provider.texts
-    )
-    for check in checks:
-        check["platforms"] = platforms or ["unspecified"]
-        if platforms and check["invariant_id"] in {"hook.discovery", "hook.registration", "hook.execution"}:
-            check["reason"] = (
-                "OS-specific discovery/registration/execution needs explicit OS and deployment scope; "
-                "nearby keywords do not select a verified binding."
+    checks = []
+    for invariant in dict.fromkeys(selected):
+        groups = {}
+        for claim in claims:
+            if claim.get("invariant_id") == invariant:
+                groups.setdefault(tuple(_claim_scope(provider, claim, text)), []).append(claim)
+        if not groups:
+            groups[tuple(scope(text))] = []
+        for platforms, facts in groups.items():
+            local = copy.deepcopy(bindings)
+            if platforms:
+                # Common user bindings do not verify managed loaders or native
+                # shell/argv contracts. OS-specific claims remain review.
+                for key in ("hook.discovery", "hook.registration", "hook.execution"):
+                    local[key]["verified"] = False
+            rows = invariants.evaluate(
+                provider.catalog, local, facts, selected=[invariant], transport=provider.transport, texts=provider.texts
             )
+            for row in rows:
+                row["platforms"] = list(platforms) or ["unspecified"]
+                if platforms and invariant in {"hook.discovery", "hook.registration", "hook.execution"}:
+                    row["reason"] = (
+                        "OS-specific discovery/registration/execution needs explicit OS and deployment scope; "
+                        "nearby keywords do not select a verified binding."
+                    )
+            checks.extend(rows)
     return checks

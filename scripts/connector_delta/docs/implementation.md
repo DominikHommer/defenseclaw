@@ -354,7 +354,7 @@ watchlist. These become `review_required`, with the affected invariant IDs,
 local bindings and concrete review instructions; they are never declared safe
 or breaking just because a path matched. No broad AI question is sent.
 
-For example, Codex's hook additional-context renderer can change while all 24
+For example, Codex's hook additional-context renderer can change while all
 watched files are identical. That creates an informative notice to inspect
 context delivery and response handling. A new Claude managed-settings example
 likewise prompts review of user-hook discovery **if adopted**, not a claim that
@@ -448,15 +448,31 @@ publisher job, issue call or mention occurs. An empty incremental run does not
 close an existing incident or declare it resolved.
 
 A public-safe outbox is checkpointed separately from source progress. Failed
-or disabled publishing keeps notices pending; a successful publisher writes a
+publishing keeps notices pending; a successful publisher writes a
 receipt, and the next run removes only acknowledged IDs. Repeat issue/comment
 markers deduplicate a retry after a network interruption. Batches contain at
-most 200 notices, with a bounded 1000-item outbox; saturation fails visibly
-instead of dropping older notices. Large messages drain across runs, acknowledging
+most 200 notices, with a bounded 1000-item outbox. A notification-disabled run
+retains any existing queue but adds no new notices; enabling it later is not a
+retroactive email replay. The workflow passes the effective per-run delivery switch
+to the projection step, including `workflow_dispatch`'s `notify` choice.
+
+If an enabled queue saturates, older notices remain queued and source/inventory
+checkpoints still advance. Overflow notices are **not queued**: a persistent
+delivery-gap health notice, run summary and exit code 2 require local review or
+replay of the affected range. After recovery and review, an operator may clear
+`notification_delivery_gap` in the recovered checkpoint; a receipt alone does not
+erase that history. Large messages drain across runs, acknowledging
 only the portion actually published. This records GitHub acceptance, not mailbox
 delivery, and does not promise exactly-once email.
 
-Successful AI results are cached locally, not in public artifacts. A source checkpoint advances only after that
+Successful AI results are cached locally, not in public artifacts. Hosted
+checkpoints retain only completion digests qualified by the candidate, local
+context and analyzer signature. That lets the next run continue a frozen batch
+without repeating its first AI calls. Previously completed items remain
+review-required when their model output is unavailable, never silently compatible.
+Completion keys are removed when their source batch completes; malformed or
+over-capacity ledgers fail visibly instead of discarding progress.
+A source checkpoint advances only after that
 source's batch finishes; other sources may advance independently. Pending
 batches are frozen so a smaller AI budget cannot silently drop changes as new
 releases arrive. Newer source snapshots wait for the next run after the frozen
@@ -514,7 +530,7 @@ ruff check scripts/connector_delta_monitor.py scripts/connector_delta/ \
   cli/tests/connector_delta
 ```
 
-The 32 Claude and 23 Codex synthetic cases exercise explicit path retirement, retained legacy paths,
+The Claude and Codex synthetic cases exercise explicit path retirement, retained legacy paths,
 scope/negation guards, registration changes, event removal/addition, type changes,
 optional fields, actual versus unconsumed decisions, async/phase/timeout changes,
 blocking exit codes, and example/table omissions. These are mutation regressions,

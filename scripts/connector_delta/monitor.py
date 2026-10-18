@@ -43,6 +43,7 @@ MAX_BYTES = 4 * 1024 * 1024
 MAX_CHANGE = 24000
 MAX_CONTEXT = 100000
 SCHEMA = 1
+AI_PROGRESS_LIMIT = 10000
 CODEX_PATHS = {row["path"] for row in json.loads((CONFIG / "connectors/codex/manifest.json").read_text())["sources"]}
 VERSION = re.compile(r"^## (\d+\.\d+\.\d+)\s*$", re.MULTILINE)
 DECISIONS = {"no_impact", "observed", "review_required", "validation_required"}
@@ -607,6 +608,28 @@ def check_snapshot(snapshot, manifest):
     return seen
 
 
+def ai_progress(state, manifest):
+    """Public-safe, context/signature-qualified completion keys, never AI text."""
+    completed = state.get("ai_completed", {})
+    context = state.get("ai_context_digest")
+    sources = {row["id"] for row in manifest["sources"]}
+    if (
+        not isinstance(completed, dict)
+        or len(completed) > AI_PROGRESS_LIMIT
+        or context is not None
+        and (not isinstance(context, str) or not re.fullmatch(r"[a-f0-9]{64}", context))
+        or any(
+            not isinstance(key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", key)
+            or not isinstance(source, str)
+            or source not in sources
+            for key, source in completed.items()
+        )
+    ):
+        raise MonitorError("invalid AI completion checkpoint")
+    return dict(completed)
+
+
 def run_monitor(
     snapshot,
     manifest,
@@ -637,6 +660,7 @@ def run_monitor(
     if not isinstance(pending, dict):
         raise MonitorError("invalid pending-source checkpoint")
     check_snapshot({"schema_version": SCHEMA, "sources": list(pending.values())}, manifest)
+    state["ai_completed"] = ai_progress(state, manifest)
     system = read_text(CONFIG / "shared/system-prompt.txt")
     provider = PROVIDERS[manifest["connector"]](root)
     provider.platform_coverage = platforms.coverage(provider)
@@ -652,6 +676,10 @@ def run_monitor(
             )
         }
     )
+    if state.get("ai_context_digest") != context_digest:
+        # Old context-qualified keys must not fill the bounded ledger forever.
+        state["ai_completed"] = {}
+    state["ai_context_digest"] = context_digest
     implementation_digest = digest(
         {
             path: read_text(CONFIG / path)
@@ -678,6 +706,7 @@ def run_monitor(
         # Invalidate judgments, not the evidence needed to compare that delta.
         # Retain frozen backlog, inventory cursor and undelivered notices too.
         state["cache"] = {}
+        state["ai_completed"] = {}
     state["signature"] = signature
     provider.prepare(snapshot, state)
     revision = subprocess.run(
@@ -820,9 +849,21 @@ def run_monitor(
                 if ai == "off":
                     continue
                 cache_key = digest([candidate["id"], context_digest, signature])
+                if cache_key not in state["ai_completed"] and len(state["ai_completed"]) >= AI_PROGRESS_LIMIT:
+                    raise MonitorError("AI completion ledger is full; reduce the replay window and review locally")
                 if cache_key in state["cache"]:
                     analysis = validate_analysis(state["cache"][cache_key], packet)
                     finding["analysis_status"] = "cached"
+                elif state["ai_completed"].get(cache_key) == source["id"]:
+                    # A previous hosted run completed the analysis, but its model
+                    # output is intentionally absent from public artifacts. Do
+                    # not reconstruct a compatibility verdict from a digest.
+                    finding["analysis_status"] = "completed_prior_run"
+                    finding["unknowns"] = [
+                        "AI analysis completed in an earlier run; model output was not persisted publicly. "
+                        "This item remains review-required, not proof of compatibility."
+                    ]
+                    continue
                 else:
                     if calls >= max_ai:
                         raise MonitorError("AI call budget exhausted; matched candidates remain pending")
@@ -830,6 +871,7 @@ def run_monitor(
                     analysis = validate_analysis(analyzer(packet, model, system), packet)
                     state["cache"][cache_key] = analysis
                     finding["analysis_status"] = "completed"
+                state["ai_completed"][cache_key] = source["id"]
                 finding.update(analysis=analysis, decision=analysis["decision"], impact=analysis["impact"])
             except (MonitorError, invariant_engine.InvariantError, json.JSONDecodeError, TypeError, KeyError) as exc:
                 if finding["decision"] != "breaking_change":
@@ -845,6 +887,9 @@ def run_monitor(
         if len(report["gaps"]) == gap_start:
             state["sources"][source["id"]] = source
             state["pending_sources"].pop(source["id"], None)
+            state["ai_completed"] = {
+                key: value for key, value in state["ai_completed"].items() if value != source["id"]
+            }
             if deferred:
                 report["gaps"].append(
                     {

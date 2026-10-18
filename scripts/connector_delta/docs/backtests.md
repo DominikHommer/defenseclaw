@@ -115,6 +115,23 @@ configured handles. The publisher is implemented but absent from current main;
 no repository setting, live issue/comment, email delivery or client setup was
 changed by these checks. Generated evidence and the preview stay local.
 
+### CodeRabbit regression fixes (2026-10-18)
+
+The review found missed production facts after Rust test guards, mixed OS/global
+claims hiding a conflict, and ordinary window nouns selecting Windows. New
+regressions cover these cases, hosted AI checkpoint round-trips, notification-off
+queue behavior and enabled-queue saturation. Completion digests preserve AI
+progress without publishing its output; notification capacity no longer freezes
+source tracking. Disabled delivery does not hide actionable run summaries.
+
+All 58 mutation cases passed. The same 26 pinned historical PR cases were
+replayed offline: all 13 held-out routing checks passed, the known Codex #44349
+static conflict remained detected, and no other PR produced a breaking alert.
+Nine PR cases still carry historical coverage gaps; these are not safe verdicts.
+The expanded 15-transition Codex corpus retained that conflict with zero
+collection gaps. These are selected regression controls, not runtime certification
+or a measured population false-positive rate.
+
 The following sections preserve the earlier pre-improvement measurements.
 
 ## Organized implementation and regression comparison

@@ -20,6 +20,7 @@ from scripts.connector_delta import monitor  # noqa: E402
 from scripts.connector_delta.connectors.codex.provider import (  # noqa: E402
     CodexProvider,
     json_span,
+    rust_test_spans,
     schema_added_fields,
     schema_document,
     schema_property,
@@ -489,6 +490,151 @@ impl StartHookTarget {
         self.assertIsNone(schema_property(json.dumps(doc), ["x"])[0])
         with self.assertRaises(InvariantError):
             json_span('{"x":1,"x":2}', ["x"])
+
+    def test_rust_test_regions_preserve_production_timeout_facts_and_breaking_verdicts(self):
+        declaration = "const SESSION_END_MAX_TIMEOUT_SEC: u64 = 1;"
+        prefixes = (
+            "#[cfg(test)]\nuse crate::test_support;\n",
+            "#[cfg(test)]\npub(crate) use crate::{test_support, nested::{helper, other}};\n",
+            "#[cfg(windows)]\nuse crate::platform_support;\n",
+            '#[cfg_attr(feature = "fixture", cfg(unix))]\nuse crate::platform_support;\n',
+            "# [ cfg ( /* test-only */ test ) ]\nuse crate::test_support;\n",
+            'const MARKER: &str = "#[cfg(test)]";\n',
+            'const MARKER: &str = r##"#[cfg(test)] mod tests { }"##;\n',
+            '#[cfg(test)]\nmod tests {\nfn sample() { let braces = "} {"; }\n}\n',
+            "#[cfg(test)]\n#[test]\nasync fn sample() { if true { check(); } }\n",
+            "#[cfg(test)] mod tests {\nconst SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\n}\n"
+            "#[cfg(test)] fn sample() { const SESSION_END_MAX_TIMEOUT_SEC: u64 = 0; }\n",
+            "#[cfg(unix)] mod platform {\nconst SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\n}\n",
+            "#[cfg(not(test))]\nconst SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\n",
+            "#[cfg(test)]\nconst SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 1;\n",
+            "#[cfg(test)]\nstruct Fixture<const N: usize = { 1 + 2 }> { bytes: [u8; N] }\n",
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                code = prefix + declaration + "\n"
+                after = source_snapshot(self.manifest, {"codex-session-end": code}, SHA)
+                source = next(s for s in after["sources"] if s["id"] == "codex-session-end")
+                claims = CodexProvider(ROOT).extract(source)
+                self.assertEqual([(c["kind"], c["value"]) for c in claims], [("hard_timeout_seconds", 1)])
+                ref = claims[0]["evidence"][0]
+                self.assertEqual(ref["quote"], declaration)
+                self.assertEqual(ref["start"], len(prefix))
+                self.assertEqual(ref["end"], len(prefix) + len(declaration))
+                self.assertEqual(ref["line"], prefix.count("\n") + 1)
+                before = source_snapshot(self.manifest, {"codex-session-end": code.replace("= 1;", "= 30;")})
+                _, state = monitor.run_monitor(before, self.manifest)
+                report, _ = monitor.run_monitor(after, self.manifest, state)
+                self.assertEqual(report["summary"], {"breaking_change": 1})
+                self.assertEqual(report["ai_calls"], 0)
+                check = next(
+                    c for f in report["findings"] for c in f["invariants"] if c["verdict"] == "breaking_change"
+                )
+                self.assertEqual(check["invariant_id"], "hook.execution")
+                self.assertFalse(check["runtime_verified"])
+
+    def test_rust_test_declarations_cannot_supply_production_timeout_facts(self):
+        declaration = "const SESSION_END_MAX_TIMEOUT_SEC: u64 = 1;"
+        for code in (
+            "#[cfg(test)]\nmod tests {\n" + declaration + "\n}\n",
+            "#[cfg(test)]\n#[test]\nfn sample() {\n" + declaration + "\n}\n",
+            "#[cfg(test)]\n" + declaration + "\n",
+        ):
+            source = {"id": "codex-session-end", "url": "fixture:session_end.rs", "revision": SHA, "text": code}
+            with self.subTest(code=code):
+                self.assertEqual(CodexProvider(ROOT).extract(source), [])
+
+    def test_malformed_or_unrecognized_rust_test_guards_remain_uncertain(self):
+        declaration = "const SESSION_END_MAX_TIMEOUT_SEC: u64 = 1;\n"
+        for guard in (
+            "#[cfg(test)]\nmod tests {\n",
+            "#[cfg(test)\n",
+            "#[cfg(test]\n",
+            '#[cfg(any(test, feature = "fixture"))]\n',
+            '#[cfg_attr(test, cfg(feature = "fixture"))]\n',
+            "#![cfg(test)]\n",
+            "#[cfg(test)]\nunsupported! {\n",
+            "#[cfg(test)]\nuse crate::{helper;\n",
+            "#[cfg(test)]\nfn sample() { (] }\n",
+        ):
+            with self.subTest(guard=guard):
+                code = guard + declaration
+                before = source_snapshot(self.manifest, {"codex-session-end": code.replace("= 1;", "= 30;")})
+                after = source_snapshot(self.manifest, {"codex-session-end": code}, SHA)
+                source = next(s for s in after["sources"] if s["id"] == "codex-session-end")
+                self.assertEqual(CodexProvider(ROOT).extract(source), [])
+                _, state = monitor.run_monitor(before, self.manifest)
+                report, _ = monitor.run_monitor(after, self.manifest, state)
+                self.assertEqual(report["summary"], {"review_required": 1})
+                self.assertNotIn("compatible", report["invariant_summary"])
+
+    def test_previous_rust_test_declarations_cannot_establish_retirements(self):
+        old = """pub struct HookEventsToml {
+    #[serde(rename = "PreToolUse", default)]
+    pub pre_tool_use: Vec<MatcherGroup>,
+}
+pub enum HookHandlerConfig {
+    #[serde(rename = "command")]
+    Command { command: String },
+}
+"""
+        new = """pub struct HookEventsToml {
+    #[serde(rename = "Stop", default)]
+    pub stop: Vec<MatcherGroup>,
+}
+pub fn matcher_groups_mut(&mut self) {
+    [(Event::Stop, &mut self.stop)]
+    }
+pub enum HookHandlerConfig {
+    Other { command: String },
+}
+"""
+        source = {"id": "codex-hook-config", "url": "fixture:hook_config.rs", "revision": SHA, "text": new}
+        for prefix, suffix in (("#[cfg(test)] mod tests {\n", "}\n"), ("#[cfg(test)\n", "")):
+            previous = {**source, "revision": PARENT, "text": prefix + old + suffix}
+            with self.subTest(prefix=prefix):
+                claims = CodexProvider(ROOT).extract(source, previous)
+                self.assertEqual([c["kind"] for c in claims], ["event_inventory"])
+
+    def test_removing_a_formatted_rust_test_guard_is_not_informational(self):
+        for guard in ("# [ cfg (test) ]\n", "#[cfg(\n    test\n)]\n", "#\n[cfg(test)]\n"):
+            old = guard + "mod tests {\n    fn sample() {}\n}\n"
+            new = old.removeprefix(guard)
+            before = {"text": old, "revision": PARENT}
+            after = {"id": "fixture", "url": "fixture.rs", "text": new, "revision": SHA, "kind": "source"}
+            candidate = monitor.candidates(after, before)[0]
+            with self.subTest(guard=guard):
+                self.assertFalse(is_test_only_hunk(candidate, after, before))
+
+    def test_other_rust_conditionals_only_exclude_their_own_declarations(self):
+        timeout = "const SESSION_END_MAX_TIMEOUT_SEC: u64 = 1;\n"
+        default = "const SESSION_END_DEFAULT_TIMEOUT_SEC: u64 = 30;\n"
+        for guard in (
+            "#[cfg(unix)]\n",
+            "#[cfg(not(test))]\n",
+            '#[cfg(any(test, feature = "fixture"))]\n',
+            '#[cfg_attr(feature = "fixture", cfg(unix))]\n',
+        ):
+            for body in (timeout, "mod platform {\n" + timeout + "}\n"):
+                with self.subTest(guard=guard, body=body):
+                    code = guard + body
+                    self.assertEqual(rust_test_spans(code), [])
+                    source = {
+                        "id": "codex-session-end",
+                        "url": "fixture.rs",
+                        "revision": SHA,
+                        "text": default + code + default.replace("DEFAULT", "MAX"),
+                    }
+                    claims = CodexProvider(ROOT).extract(source)
+                    self.assertEqual(
+                        [(c["kind"], c["value"]) for c in claims],
+                        [("hard_timeout_seconds", 30), ("default_timeout_seconds", 30)],
+                    )
+                    old = code.replace("= 1;", "= 30;")
+                    before = {"text": old, "revision": PARENT}
+                    after = {"id": "fixture", "url": "fixture.rs", "text": code, "revision": SHA, "kind": "source"}
+                    candidate = monitor.candidates(after, before)[0]
+                    self.assertFalse(is_test_only_hunk(candidate, after, before))
 
     def test_comments_cannot_manufacture_a_timeout_conflict(self):
         provider = CodexProvider(ROOT)

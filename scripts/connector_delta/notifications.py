@@ -138,8 +138,6 @@ def envelope(report):
                 ],
             }
         )
-    if len(items) > OUTBOX_LIMIT:
-        raise ValueError("notification backlog exceeds 1000 items; review locally before publishing")
     return {"schema_version": 1, "connector": connector, "items": items}
 
 
@@ -148,6 +146,9 @@ def public_checkpoint(state, manifest):
     # Successful model output is intentionally not persisted as a public cache.
     allowed = {"id", "kind", "url", "revision", "collected_revision", "content_sha256", "text"}
     result = {"schema_version": 1, "cache": {}, "signature": state.get("signature")}
+    result["ai_completed"] = monitor.ai_progress(state, manifest)
+    if "ai_context_digest" in state:
+        result["ai_context_digest"] = state["ai_context_digest"]
     for key in ("sources", "pending_sources"):
         sources = state.get(key, {})
         monitor.check_snapshot({"schema_version": 1, "sources": list(sources.values())}, manifest)
@@ -209,9 +210,10 @@ def validate_envelope(value, limit=LIMIT):
     return items
 
 
-def publish(report, state, directory, receipt=None):
+def publish(report, state, directory, receipt=None, *, publication_enabled=True):
     directory = Path(directory)
     notices = envelope(report)
+    current_attention = any(item["kind"] != "informational" for item in notices["items"])
     prior = {**notices, "items": state.get("notification_outbox", [])}
     validate_envelope(prior, OUTBOX_LIMIT)
     acknowledged = set()
@@ -225,31 +227,67 @@ def publish(report, state, directory, receipt=None):
         ):
             raise ValueError("invalid notification receipt")
     pending = {item["id"]: item for item in prior["items"] if item["id"] not in acknowledged}
-    pending.update({item["id"]: item for item in notices["items"] if item["id"] not in acknowledged})
-    if len(pending) > OUTBOX_LIMIT:
-        raise ValueError("notification backlog exceeds bound; checkpoint retained for operator recovery")
-    notices["items"] = list(pending.values())[:LIMIT]
+    if publication_enabled:
+        pending.update({item["id"]: item for item in notices["items"] if item["id"] not in acknowledged})
+    delivery_gap = state.get("notification_delivery_gap", False)
+    if type(delivery_gap) is not bool:
+        raise ValueError("invalid notification delivery checkpoint")
+    delivery_gap = delivery_gap or len(pending) > OUTBOX_LIMIT
+    # Retain older notices first. Capacity is a delivery gap, not a reason to
+    # freeze upstream collection forever. Overflow is explicitly reported and
+    # remains sticky until an operator has reviewed/replayed the affected range.
+    pending = dict(list(pending.items())[:OUTBOX_LIMIT])
+    notices["items"] = list(pending.values())[:LIMIT] if publication_enabled else []
+    if publication_enabled and delivery_gap:
+        notices["items"] = notices["items"][: LIMIT - 1] + [
+            {
+                "id": fingerprint([report["connector"], "notification_delivery_gap"]),
+                "kind": "health",
+                "title": "Notification capacity exceeded; some notices require local review",
+                "url": "",
+                "files": [],
+                "focus": [
+                    "Existing notices were retained and source tracking continued. "
+                    "Review or replay the affected upstream range locally; overflow notices were not queued. "
+                    "This delivery gap requires operator acknowledgement after recovery."
+                ],
+            }
+        ]
     checkpoint = public_checkpoint(
         state, monitor.load_manifest(monitor.CONFIG / "connectors" / report["connector"] / "manifest.json")
     )
     checkpoint["notification_outbox"] = list(pending.values())
+    checkpoint["notification_delivery_gap"] = delivery_gap
+    # Persist tracking progress independently of report/envelope rendering and
+    # notification capacity. Only allowlisted public material crosses this boundary.
+    monitor.write_json(directory / "state.json", checkpoint)
     public = {
         "schema_version": 1,
         "connector": report["connector"],
         "outcome": report["outcome"],
-        "attention_required": any(item["kind"] != "informational" for item in notices["items"]),
+        "attention_required": delivery_gap
+        or current_attention
+        or any(item["kind"] != "informational" for item in pending.values()),
+        "notification_delivery_gap": delivery_gap,
+        "publication_enabled": publication_enabled,
         "notice": NOTICE,
         "details": "Full evidence stays local to the analysis runner; reproduce locally for private investigation.",
     }
     monitor.write_json(directory / "report.json", public)
     monitor.write_json(directory / "notification.json", notices)
-    monitor.write_json(directory / "state.json", checkpoint)
     review = "needed" if public["attention_required"] else "no new actionable signal"
     monitor.write_text(
         directory / "report.md",
         f"# {report['connector']} upstream monitor\n\n{NOTICE}\n\n"
         f"Analysis: {report['outcome']}. Maintainer review: {review}.\n\n"
-        "Full evidence and model output are deliberately not published in Actions artifacts.\n",
+        + (
+            "Notification capacity was exceeded: some notices were not queued. "
+            "Tracking continued; review/replay the affected range locally before clearing "
+            "`notification_delivery_gap` in the recovered checkpoint.\n\n"
+            if delivery_gap
+            else ""
+        )
+        + "Full evidence and model output are deliberately not published in Actions artifacts.\n",
     )
     return public
 
@@ -416,7 +454,13 @@ def main(argv=None):
                 raise ValueError("publish requires report, state and directory")
             report = json.loads(monitor.read_text(args.report, 64 * 1024 * 1024))
             receipt = monitor.load_json(args.receipt) if args.receipt and args.receipt.exists() else None
-            result = publish(report, monitor.load_json(args.state), args.directory, receipt)
+            result = publish(
+                report,
+                monitor.load_json(args.state),
+                args.directory,
+                receipt,
+                publication_enabled=os.environ.get("CONNECTOR_DELTA_NOTIFICATIONS_ENABLED") == "true",
+            )
         elif os.environ.get("CONNECTOR_DELTA_NOTIFICATIONS_ENABLED") != "true":
             result = {"status": "disabled", "new_items": 0}
         else:
@@ -439,7 +483,7 @@ def main(argv=None):
                     },
                 )
         print(json.dumps({key: value for key, value in result.items() if key != "acknowledged_ids"}))
-        return 0
+        return 2 if result.get("notification_delivery_gap") else 0
     except (ValueError, OSError, KeyError, TypeError):
         print("Connector notification failed; inspect configuration privately. No sensitive details were logged.")
         return 2

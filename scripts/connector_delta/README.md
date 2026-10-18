@@ -81,6 +81,9 @@ details and raw AI output are excluded from public posts/artifacts.
 Analysis has read-only permissions. The separate, opt-in publisher has
 `issues:write` and runs only from main. Checkpoints preserve unfinished batches;
 an outbox and receipts retry notices without repeatedly posting the same signal.
+With publication off, current findings still appear in the run summary but are
+not queued for later email. A full enabled queue keeps tracking upstream and
+raises a persistent delivery-gap warning; it never silently stops source progress.
 
 ## Files and tests
 

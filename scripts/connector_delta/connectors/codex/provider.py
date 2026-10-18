@@ -65,40 +65,101 @@ def rust_mask(text, comments_only=False):
     return "".join(result)
 
 
-def rust_test_spans(text):
-    """Recognized, balanced cfg(test) blocks; unknown attributes are not inferred."""
+RUST_TEST_GUARD = r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]"
+
+
+def rust_test_spans(text, include_conditional=False):
+    """Balanced test-only regions; optionally exclude other conditional items.
+
+    Other cfg/cfg_attr predicates are not evaluated or called test-only. Their
+    declarations cannot supply unconditional facts, but unrelated code can.
+    Malformed guards or unknown item boundaries leave the source uncertain.
+    """
     masked = rust_mask(text)
-    # Mask balanced cfg(test) modules/functions without truncating production
-    # code after a test-only import near the top of a source file.
-    guarded = re.compile(
-        r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
-        r"(?:mod\s+[A-Za-z_]+\s*|(?:async\s+)?fn\s+[^;{]{1,500})\{"
+    closing = {"}": "{", ")": "(", "]": "["}
+    attached_attribute = re.compile(r"\s*#\s*\[")
+    declaration = re.compile(
+        r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const)\s+)*"
+        r"(?P<kind>mod|fn|use|const|static|type|struct|enum|impl|trait|union)\b"
     )
-    spans = []
-    for guard in guarded.finditer(masked):
-        depth = 0
-        for end in range(guard.end() - 1, len(masked)):
-            depth += (masked[end] == "{") - (masked[end] == "}")
-            if depth == 0:
-                spans.append((guard.start(), end + 1))
+
+    def balanced_end(start):
+        stack = []
+        for end in range(start, len(masked)):
+            char = masked[end]
+            if char in "{([":
+                stack.append(char)
+            elif char in closing:
+                if not stack or stack.pop() != closing[char]:
+                    return None
+                if not stack:
+                    return end + 1
+        return None
+
+    spans, covered_end = [], 0
+    for attribute in re.finditer(r"#\s*(?P<inner>!?)\s*\[\s*cfg(?:_attr)?\b", masked):
+        if attribute.start() < covered_end:
+            continue
+        if attribute["inner"]:
+            return None  # Inner guards apply to an enclosing scope, not the next item.
+        position, test_only = attribute.start(), False
+        while attached := attached_attribute.match(masked, position):
+            end = balanced_end(attached.end() - 1)
+            if end is None:
+                return None
+            test_only |= re.fullmatch(RUST_TEST_GUARD, masked[position:end].strip()) is not None
+            position = end
+        item = declaration.match(masked, position)
+        if item is None:
+            return None
+        block_item = item["kind"] in {"mod", "fn", "struct", "enum", "impl", "trait", "union"}
+        stack, start = [], item.end()
+        for end in range(start, min(len(masked), start + 16000)):
+            char = masked[end]
+            if char == ";" and not stack:
+                covered_end = end + 1
                 break
+            if char == "{" and not stack and block_item:
+                covered_end = balanced_end(end)
+                if covered_end is None:
+                    return None
+                break
+            if char in "{([":
+                stack.append(char)
+            elif char in closing:
+                if not stack or stack.pop() != closing[char]:
+                    return None
+            elif char == "<" and block_item and (not stack or stack[-1] == "<"):
+                stack.append(char)  # Do not mistake a const-generic brace for an item body.
+            elif char == ">" and stack and stack[-1] == "<" and masked[end - 1] != "-":
+                stack.pop()
+            elif char == "#" and not stack:
+                return None
         else:
-            return None  # A malformed guard cannot establish production scope.
+            return None
+        if test_only or include_conditional:
+            spans.append((attribute.start(), covered_end))
     return spans
 
 
-def rust_body(text, marker):
-    """One uniquely identified code block; comments/strings cannot provide it."""
-    masked = rust_mask(text)
-    spans = rust_test_spans(text)
+def rust_production_mask(text, comments_only=False):
+    """Keep offsets while excluding tests; unsupported guards establish no facts."""
+    spans = rust_test_spans(text, include_conditional=True)
     if spans is None:
         return None
-    result = list(masked)
+    result = list(rust_mask(text, comments_only=comments_only))
     for start, end in spans:
         for index in range(start, end):
             if result[index] != "\n":
                 result[index] = " "
-    masked = "".join(result)
+    return "".join(result)
+
+
+def rust_body(text, marker):
+    """One uniquely identified code block; comments/strings cannot provide it."""
+    masked = rust_production_mask(text)
+    if masked is None:
+        return None
     matches = list(re.finditer(marker, masked))
     if len(matches) != 1:
         return None
@@ -117,6 +178,7 @@ def test_only_hunk(candidate, source, previous):
     hunk = re.fullmatch(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@[^\n]*\n([\s\S]*)", candidate["text"])
     if hunk is None:
         return False
+    guards = [match.span() for match in re.finditer(RUST_TEST_GUARD, rust_mask(previous["text"]))]
     sides = []
     for row, line in ((previous, int(hunk[1])), (source, int(hunk[2]))):
         spans = rust_test_spans(row["text"])
@@ -132,13 +194,15 @@ def test_only_hunk(candidate, source, previous):
     for line in hunk[3].splitlines():
         if not line or line[0] not in {" ", "+", "-"}:
             return False
-        if line[0] == "-" and "#[cfg(test)]" in line:
-            return False  # Removing a guard may activate unchanged test code.
         for index in (0, 1) if line[0] == " " else (0,) if line[0] == "-" else (1,):
             spans, lines, offsets, number = sides[index]
             if not 0 <= number < len(lines) or lines[number].rstrip("\n") != line[1:]:
                 return False
             if line[0] != " ":
+                if line[0] == "-" and any(
+                    low < offsets[number] + len(lines[number]) and offsets[number] < high for low, high in guards
+                ):
+                    return False  # Removing even a formatted guard can activate unchanged test code.
                 changed = True
                 value = lines[number].rstrip("\n")
                 start = offsets[number] + len(value) - len(value.lstrip())
@@ -833,8 +897,11 @@ class CodexProvider(CommandHookProvider):
                             field=field,
                         )
             return claims
-        # Exclude tests and comments. Unknown syntax does not imply removal.
-        code = rust_mask(text, comments_only=True).split("#[cfg(test)]", 1)[0]
+        # Mask only recognized test regions, preserving original evidence offsets.
+        # Strings cannot supply guards; unknown syntax cannot establish production.
+        code = rust_production_mask(text, comments_only=True)
+        if code is None:
+            return claims
         if source["id"] == "codex-home-discovery":
             default = re.search(
                 r"None => \{\s*let mut p = home_dir\(\)\.ok_or_else\(\|\| \{[\s\S]*?\}\)\?;"
@@ -844,6 +911,7 @@ class CodexProvider(CommandHookProvider):
             if default:
                 add("hook.discovery", "default_directory", "~/" + default[1], default.span())
         elif source["id"] == "codex-hook-config":
+            old_code = rust_production_mask(previous["text"], comments_only=True) if previous else None
             event_block = re.search(r"pub struct HookEventsToml\s*\{([\s\S]*?)\n\}", code)
             if event_block:
                 events = re.findall(r'#\[serde\(rename = "([A-Za-z]+)", default\)\]', event_block[1])
@@ -853,11 +921,7 @@ class CodexProvider(CommandHookProvider):
                     # exhaustive event-to-group dispatch. Require both before
                     # calling an absent old event a removal, and reject aliases.
                     dispatch = re.search(r"pub fn matcher_groups_mut\b([\s\S]*?)\n    \}", code)
-                    old_block = (
-                        re.search(r"pub struct HookEventsToml\s*\{([\s\S]*?)\n\}", previous["text"])
-                        if previous
-                        else None
-                    )
+                    old_block = re.search(r"pub struct HookEventsToml\s*\{([\s\S]*?)\n\}", old_code or "")
                     if dispatch and old_block and "alias" not in event_block[1]:
                         dispatched = re.findall(r"\(Event::([A-Za-z]+),\s*&mut self\.", dispatch[1])
                         if set(dispatched) == set(events):
@@ -869,7 +933,7 @@ class CodexProvider(CommandHookProvider):
                 add("hook.registration", "accepted_registration_key", "handler.type=command", command.span())
             elif previous:
                 handlers = re.search(r"pub enum HookHandlerConfig\s*\{([\s\S]*?)^\}", code, re.MULTILINE)
-                if handlers and 'rename = "command"' in previous["text"] and "alias" not in handlers[1]:
+                if handlers and 'rename = "command"' in (old_code or "") and "alias" not in handlers[1]:
                     add("hook.registration", "retired_registration_key", "handler.type=command", handlers.span())
             if re.search(r"pub struct HooksToml\s*\{\s*#\[serde\(flatten\)\]\s*pub events: HookEventsToml", code):
                 match = re.search(r"pub struct HooksToml\s*\{[\s\S]*?pub events: HookEventsToml", code)

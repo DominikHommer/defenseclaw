@@ -113,6 +113,8 @@ jobs:
 
       - name: Project only public-safe reports and source checkpoints
         if: ${{ always() }}
+        env:
+          CONNECTOR_DELTA_NOTIFICATIONS_ENABLED: ${{ vars.CONNECTOR_DELTA_NOTIFICATIONS_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.notify == true) }}
         run: |
           python3 -m scripts.connector_delta.notifications publish \
             --report monitor-output/report.json --state monitor-state/state.json \

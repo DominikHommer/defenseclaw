@@ -208,6 +208,87 @@ class NotificationTests(unittest.TestCase):
             self.assertFalse(monitor.load_json(Path(directory) / "notification.json")["items"])
             self.assertFalse(monitor.load_json(Path(directory) / "state.json")["notification_outbox"])
 
+    def test_disabled_publication_does_not_grow_existing_outbox(self):
+        report, state = informative_report()
+        item = n.envelope(report)["items"][0]
+        state["notification_outbox"] = [{**item, "id": n.fingerprint(index)} for index in range(n.OUTBOX_LIMIT)]
+        original = copy.deepcopy(state["notification_outbox"])
+        sources = copy.deepcopy(state["sources"])
+        with tempfile.TemporaryDirectory() as directory:
+            for index in range(3):
+                report["findings"][0]["candidate"]["id"] = n.fingerprint(["new", index])
+                n.publish(report, state, directory, publication_enabled=False)
+                state = monitor.load_json(Path(directory) / "state.json")
+                self.assertEqual(state["notification_outbox"], original)
+                self.assertEqual(state["sources"], sources)
+                self.assertEqual(monitor.load_json(Path(directory) / "notification.json")["items"], [])
+
+    def test_disabled_publication_does_not_hide_review_required(self):
+        report, state = informative_report()
+        report["findings"][0].update(decision="review_required", analysis_status="evidence_insufficient")
+        with tempfile.TemporaryDirectory() as directory:
+            public = n.publish(report, state, directory, publication_enabled=False)
+            self.assertTrue(public["attention_required"])
+            self.assertIn("Maintainer review: needed", (Path(directory) / "report.md").read_text())
+            self.assertEqual(monitor.load_json(Path(directory) / "notification.json")["items"], [])
+
+    def test_saturated_outbox_preserves_checkpoint_and_signals_delivery_gap(self):
+        report, state = informative_report()
+        item = n.envelope(report)["items"][0]
+        state["notification_outbox"] = [{**item, "id": n.fingerprint(index)} for index in range(n.OUTBOX_LIMIT)]
+        original = copy.deepcopy(state["notification_outbox"])
+        with tempfile.TemporaryDirectory() as directory:
+            public = n.publish(report, state, directory)
+            checkpoint = monitor.load_json(Path(directory) / "state.json")
+            self.assertEqual(checkpoint["sources"], state["sources"])
+            self.assertEqual(checkpoint["notification_outbox"], original)
+            self.assertTrue(checkpoint["notification_delivery_gap"])
+            self.assertTrue(public["attention_required"])
+            value = monitor.load_json(Path(directory) / "notification.json")
+            self.assertEqual(len(n.validate_envelope(value)), n.LIMIT)
+            self.assertTrue(any("capacity" in row["title"] for row in value["items"]))
+            n.publish({**report, "findings": [], "gaps": []}, checkpoint, directory)
+            self.assertTrue(monitor.load_json(Path(directory) / "state.json")["notification_delivery_gap"])
+
+    def test_publish_cli_defaults_to_disabled_and_reports_saturation_after_saving(self):
+        report, state = informative_report()
+        item = n.envelope(report)["items"][0]
+        state["notification_outbox"] = [{**item, "id": n.fingerprint(index)} for index in range(n.OUTBOX_LIMIT)]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor.write_json(root / "report.json", report)
+            monitor.write_json(root / "state.json", state)
+            args = [
+                "publish",
+                "--report",
+                str(root / "report.json"),
+                "--state",
+                str(root / "state.json"),
+                "--directory",
+                str(root / "public"),
+            ]
+            with patch.dict(os.environ, {"CONNECTOR_DELTA_NOTIFICATIONS_ENABLED": "false"}):
+                self.assertEqual(n.main(args), 0)
+            self.assertFalse(monitor.load_json(root / "public/notification.json")["items"])
+            with patch.dict(os.environ, {"CONNECTOR_DELTA_NOTIFICATIONS_ENABLED": "true"}):
+                self.assertEqual(n.main(args), 2)
+            self.assertTrue(monitor.load_json(root / "public/state.json")["notification_delivery_gap"])
+
+    def test_large_new_batch_does_not_prevent_source_checkpoint(self):
+        report, state = informative_report()
+        template = report["findings"][0]
+        report["findings"] = []
+        for index in range(n.OUTBOX_LIMIT + 1):
+            finding = copy.deepcopy(template)
+            finding["candidate"]["id"] = n.fingerprint(index)
+            report["findings"].append(finding)
+        with tempfile.TemporaryDirectory() as directory:
+            n.publish(report, state, directory)
+            checkpoint = monitor.load_json(Path(directory) / "state.json")
+            self.assertEqual(checkpoint["sources"], state["sources"])
+            self.assertEqual(len(checkpoint["notification_outbox"]), n.OUTBOX_LIMIT)
+            self.assertTrue(checkpoint["notification_delivery_gap"])
+
     def test_failed_publisher_does_not_acknowledge_or_remove_pending_notice(self):
         report, state = informative_report()
         api = FakeGitHub()

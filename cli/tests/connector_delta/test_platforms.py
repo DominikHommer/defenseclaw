@@ -12,12 +12,200 @@ from scripts.connector_delta.platform_bindings import canonical_path
 
 
 class PlatformTests(unittest.TestCase):
+    def claim(self, provider, text, invariant, kind, value, *, quote=None, **extra):
+        artifact, revision = "fixture:claim-source", monitor.digest(text)
+        provider.texts[(artifact, revision)] = text
+        quote = text if quote is None else quote
+        start = text.index(quote)
+        return {
+            "invariant_id": invariant,
+            "kind": kind,
+            "value": value,
+            "authority": "explicit_statement",
+            "evidence": [
+                invariants.evidence(
+                    text,
+                    start,
+                    start + len(quote),
+                    artifact=artifact,
+                    revision=revision,
+                    role="upstream",
+                    authority="explicit_statement",
+                )
+            ],
+            **extra,
+        }
+
     def check(self, connector, text, invariant):
         provider = monitor.PROVIDERS[connector](monitor.ROOT)
         revision, artifact = monitor.digest(text), "fixture:scoped-upstream"
         provider.texts[(artifact, revision)] = text
         claims = platforms.extract_scoped(provider, text, artifact, revision)
         return platforms.evaluate(provider, provider.local(), claims, [invariant], text)
+
+    def test_lowercase_window_nouns_are_not_windows_os_scope(self):
+        for text in ("context windows", "terminal windows", "multiple windows are open"):
+            with self.subTest(text=text):
+                self.assertEqual(platforms.scope(text), [])
+        self.assertEqual(platforms.scope("Linux supports multiple terminal windows."), ["linux"])
+
+    def test_recognized_os_spellings_remain_scoped(self):
+        for platform, variants in (
+            ("windows", ("Windows", "WINDOWS", "windows", "Win32", "win32", "PowerShell", "powershell")),
+            ("linux", ("Linux", "linux", "WSL", "WSL1", "WSL2", "wsl2")),
+            ("macos", ("macOS", "macos", "Darwin", "darwin", "Mac OS", "mac os")),
+        ):
+            for variant in variants:
+                with self.subTest(variant=variant):
+                    self.assertEqual(platforms.scope(f"On {variant}, hooks changed."), [platform])
+
+    def test_window_nouns_do_not_hide_a_global_path_retirement(self):
+        provider = monitor.PROVIDERS["claudecode"](monitor.ROOT)
+        for noun in ("context windows", "terminal windows"):
+            text = f"Hooks are no longer read from `~/.claude/settings.json`. Larger {noun} are supported."
+            claims = provider.extract(text, "fixture:nouns", monitor.digest(text))
+            rows = platforms.evaluate(provider, provider.local(), claims, ["hook.discovery"], text)
+            with self.subTest(noun=noun):
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["verdict"], "breaking_change")
+                self.assertEqual(rows[0]["platforms"], ["unspecified"])
+
+    def test_global_path_and_windows_managed_path_are_both_evaluated(self):
+        statements = (
+            "Hooks are no longer read from `~/.claude/settings.json`.",
+            "On Windows, managed hooks are no longer read from `~/.claude/settings.json`.",
+        )
+        for lines in (statements, statements[::-1]):
+            provider = monitor.PROVIDERS["claudecode"](monitor.ROOT)
+            text = "\n".join(lines)
+            claims = provider.extract(text, "fixture:mixed", monitor.digest(text))
+            rows = platforms.evaluate(provider, provider.local(), claims, ["hook.discovery"], text)
+            with self.subTest(lines=lines):
+                self.assertEqual(len(rows), 2)
+                global_row = next(row for row in rows if row["platforms"] == ["unspecified"])
+                scoped_row = next(row for row in rows if row["platforms"] == ["windows"])
+                self.assertEqual(global_row["verdict"], "breaking_change")
+                self.assertNotIn("deployment_scope", global_row)
+                self.assertEqual(scoped_row["verdict"], "compatible")
+                self.assertEqual(scoped_row["deployment_scope"], "managed")
+                self.assertEqual(len(global_row["upstream_claims"]), 1)
+                self.assertEqual(len(scoped_row["upstream_claims"]), 1)
+                self.assertEqual(
+                    global_row["upstream_claims"][0]["evidence"][0]["line"], lines.index(statements[0]) + 1
+                )
+        manifest = monitor.load_manifest()
+        _, state = monitor.run_monitor(snapshot(hooks="# Hooks\n\nOld discovery documentation.\n"), manifest)
+        report, _ = monitor.run_monitor(snapshot(hooks="# Hooks\n\n" + "\n".join(statements) + "\n"), manifest, state)
+        finding = next(finding for finding in report["findings"] if finding["decision"] == "breaking_change")
+        rows = [row for row in finding["invariants"] if row["invariant_id"] == "hook.discovery"]
+        self.assertEqual(
+            {(tuple(row["platforms"]), row["verdict"]) for row in rows},
+            {
+                (("unspecified",), "breaking_change"),
+                (("windows",), "compatible"),
+            },
+        )
+
+    def test_mixed_claims_for_multiple_invariants_providers_and_platforms(self):
+        for connector, cls in monitor.PROVIDERS.items():
+            provider = cls(monitor.ROOT)
+            bindings = provider.local()
+            for os in ("Windows", "Linux", "macOS", "WSL2"):
+                for invariant, kind, value, statement, scoped_statement, extra in (
+                    (
+                        "hook.discovery",
+                        "retired_path",
+                        bindings["hook.discovery"]["values"]["paths"][0],
+                        f"Hooks are no longer read from `{bindings['hook.discovery']['values']['paths'][0]}`.",
+                        "hooks are no longer read from `~/.unrelated/hooks.json`.",
+                        {},
+                    ),
+                    (
+                        "hook.registration",
+                        "retired_registration_key",
+                        "hooks",
+                        "The `hooks` registration key is no longer accepted.",
+                        "hooks no longer accept the `unrelated` registration key.",
+                        {},
+                    ),
+                    (
+                        "hook.execution",
+                        "synchronous",
+                        False,
+                        "`PreToolUse` hooks run asynchronously.",
+                        "hooks no longer accept `unrelated.exe` launchers.",
+                        {"event": "PreToolUse"},
+                    ),
+                ):
+                    text = statement + f"\nOn {os}, managed " + scoped_statement
+                    claim = self.claim(provider, text, invariant, kind, value, quote=statement, **extra)
+                    scoped = platforms.extract_scoped(provider, text, "fixture:claim-source", monitor.digest(text))
+                    rows = platforms.evaluate(provider, bindings, [claim, *scoped], [invariant], text)
+                    with self.subTest(connector=connector, os=os, invariant=invariant):
+                        self.assertEqual(len(rows), 2)
+                        self.assertEqual(rows[0]["verdict"], "breaking_change")
+                        self.assertEqual(rows[0]["platforms"], ["unspecified"])
+                        self.assertEqual(rows[1]["verdict"], "compatible")
+                        self.assertEqual(rows[1]["platforms"], platforms.scope(os))
+                        self.assertEqual(rows[1]["deployment_scope"], "managed")
+
+    def test_unrelated_os_prose_does_not_scope_a_claim_from_its_source(self):
+        provider = monitor.PROVIDERS["claudecode"](monitor.ROOT)
+        statement = "Hooks are no longer read from `~/.claude/settings.json`."
+        for text in (
+            statement + "\nWindows terminal rendering changed.",
+            "Windows terminal rendering changed.\n" + statement,
+        ):
+            start = text.index(statement)
+            claims = provider.extract(statement, "fixture:source", monitor.digest(text), base=start, full_text=text)
+            rows = platforms.evaluate(provider, provider.local(), claims, ["hook.discovery"], "Windows diff context")
+            with self.subTest(text=text):
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["verdict"], "breaking_change")
+                self.assertEqual(rows[0]["platforms"], ["unspecified"])
+
+    def test_unscoped_os_conditionals_do_not_borrow_global_or_scoped_proof(self):
+        provider = monitor.PROVIDERS["claudecode"](monitor.ROOT)
+        global_statement = "Hooks are no longer read from `~/.claude/settings.json`."
+        conditional = "Hooks are no longer read from `~/.unrelated/settings.json`"
+        for os in ("Windows", "Linux", "macOS", "WSL2", "PowerShell"):
+            for line in (f"If running on {os}, {conditional}.", f"{conditional} if running on {os}."):
+                text = global_statement + "\n" + line
+                claims = [
+                    self.claim(provider, text, "hook.discovery", "retired_path", path, quote=quote)
+                    for path, quote in (
+                        ("~/.claude/settings.json", global_statement),
+                        ("~/.unrelated/settings.json", conditional),
+                    )
+                ]
+                for selected_claims in (claims[1:], claims):
+                    rows = platforms.evaluate(provider, provider.local(), selected_claims, ["hook.discovery"], text)
+                    with self.subTest(os=os, line=line, mixed=len(selected_claims) == 2):
+                        self.assertEqual(len(rows), len(selected_claims))
+                        self.assertEqual(rows[-1]["verdict"], "review_required")
+                        self.assertEqual(rows[-1]["platforms"], platforms.scope(os))
+                        self.assertFalse(rows[-1]["local_binding_verified"])
+                        self.assertNotIn("deployment_scope", rows[-1])
+                        if len(selected_claims) == 2:
+                            self.assertEqual(rows[0]["verdict"], "breaking_change")
+                            self.assertEqual(rows[0]["platforms"], ["unspecified"])
+
+    def test_mixed_claims_keep_missing_invariants_and_invalid_evidence_in_review(self):
+        provider = monitor.PROVIDERS["claudecode"](monitor.ROOT)
+        statement = "Hooks are no longer read from `~/.claude/settings.json`."
+        text = statement + "\nOn Windows, managed hooks no longer accept `unrelated.exe` launchers."
+        claims = provider.extract(text, "fixture:unknown", monitor.digest(text))
+        rows = platforms.evaluate(
+            provider, provider.local(), claims, ["hook.discovery", "hook.registration", "hook.execution"], text
+        )
+        self.assertEqual([row["verdict"] for row in rows], ["breaking_change", "review_required", "compatible"])
+        for evidence in ([], [{"artifact": "missing", "revision": "missing"}]):
+            bad = self.claim(
+                provider, text, "hook.execution", "synchronous", False, quote=statement, event="PreToolUse"
+            )
+            bad["evidence"] = evidence
+            rows = platforms.evaluate(provider, provider.local(), [bad, claims[0]], ["hook.execution"], text)
+            self.assertEqual([row["verdict"] for row in rows], ["review_required", "compatible"])
 
     def test_all_supported_file_and_launcher_profiles_are_grounded(self):
         for name, cls in monitor.PROVIDERS.items():

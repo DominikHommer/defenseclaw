@@ -262,6 +262,64 @@ class DeltaMonitorTests(unittest.TestCase):
         self.assertIn("claude-changelog", updated["sources"])
         self.assertTrue(any(row["analysis_status"] == "cached" for row in second["findings"]))
 
+    def test_hosted_ai_budget_resumes_without_publishing_model_output(self):
+        from scripts.connector_delta.notifications import public_checkpoint
+
+        calls = []
+
+        def analyze(packet, model, system):
+            calls.append(packet["upstream"]["text"])
+            return grounded(packet)
+
+        first, state = self.run_snapshot(ai="anthropic", model="test", max_ai=1, analyzer=analyze)
+        self.assertEqual(first["outcome"], "incomplete")
+        restored = json.loads(json.dumps(public_checkpoint(state, self.manifest)))
+        self.assertEqual(restored["cache"], {})
+        second, state = self.run_snapshot(state=restored, ai="anthropic", model="test", max_ai=1, analyzer=analyze)
+        self.assertEqual(second["outcome"], "complete")
+        self.assertEqual(len(calls), len(set(calls)))
+        prior = next(row for row in second["findings"] if row["analysis_status"] == "completed_prior_run")
+        self.assertEqual(prior["decision"], "review_required")
+        self.assertNotIn("analysis", prior)
+        self.assertFalse(state["ai_completed"])
+
+    def test_hosted_ai_progress_is_invalidated_by_model_and_local_context(self):
+        from scripts.connector_delta.notifications import public_checkpoint
+
+        _, state = self.run_snapshot(ai="anthropic", model="test", max_ai=1, analyzer=grounded)
+        checkpoint = public_checkpoint(state, self.manifest)
+        read_text = monitor.read_text
+
+        def changed_context(path, *args, **kwargs):
+            text = read_text(path, *args, **kwargs)
+            return text + "\n" if Path(path).name == "hook_contracts.json" else text
+
+        for model, reader in (("another-model", read_text), ("test", changed_context)):
+            restored = copy.deepcopy(checkpoint)
+            with patch.object(monitor, "read_text", side_effect=reader):
+                report, _ = self.run_snapshot(state=restored, ai="anthropic", model=model, max_ai=1, analyzer=grounded)
+            with self.subTest(model=model, context_changed=reader == changed_context):
+                self.assertEqual(report["outcome"], "incomplete")
+                self.assertFalse(any(row["analysis_status"] == "completed_prior_run" for row in report["findings"]))
+
+    def test_ai_completion_checkpoint_rejects_non_digest_data(self):
+        for bad in ([], {"not-a-digest": "claude-changelog"}, {"a" * 64: "unknown-source"}):
+            with self.subTest(bad=bad), self.assertRaises(monitor.MonitorError):
+                self.run_snapshot(state={"schema_version": 1, "sources": {}, "cache": {}, "ai_completed": bad})
+
+    def test_stale_context_cannot_fill_ai_completion_ledger(self):
+        from scripts.connector_delta.notifications import public_checkpoint
+
+        _, state = self.run_snapshot(ai="anthropic", model="test", max_ai=1, analyzer=grounded)
+        state = public_checkpoint(state, self.manifest)
+        state["ai_context_digest"] = "0" * 64
+        state["ai_completed"] = {
+            format(index, "064x"): "claude-changelog" for index in range(monitor.AI_PROGRESS_LIMIT)
+        }
+        report, state = self.run_snapshot(state=state, ai="anthropic", model="test", max_ai=1, analyzer=grounded)
+        self.assertEqual(report["ai_calls"], 1)
+        self.assertEqual(len(state["ai_completed"]), 1)
+
     def test_new_releases_do_not_push_an_unreviewed_initial_batch_out_of_window(self):
         original = snapshot("## 2.1.300\n\n- Changed PreToolUse hooks.\n- Changed SessionEnd hooks.\n")
         _, state = self.run_snapshot(original, ai="anthropic", model="test", max_ai=1, lookback=1, analyzer=grounded)
