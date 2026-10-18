@@ -70,8 +70,12 @@ Okta through SSSD, and similar sources work. See
   on the base image `openshell.image.base` names in the administrator
   config, and the sandbox, a MicroVM included, starts from that local image.
   For an image of your own, build or load it in the Docker engine the people
-  use and set `openshell.image.base` to its tag or digest; a base the engine
-  already has is not pulled. `sandbox run` takes no image of the person's
+  use and set `openshell.image.base` to it by digest: `name@sha256:<digest>`,
+  where for an image built on that computer the digest is its image ID
+  (`docker image inspect --format '{{.Id}}' name:tag`). A tag alone is
+  refused. A base the engine already has is never pulled: the agent image is
+  built on a local name of exactly that image
+  (`defenseclaw/sandbox-base:<image ID>`), which stays in the engine. `sandbox run` takes no image of the person's
   choosing, and a sandbox made with `openshell sandbox create --from`
   directly is not a DefenseClaw sandbox: it is foreign (see
   [Foreign sandboxes](#foreign-sandboxes-rules-and-containers)) and may not
@@ -738,7 +742,14 @@ fails closed. A pack edited in place, with `config.yaml` unchanged, is applied
 by the next `ensure`: the effective policy the config computes to differs from
 the one the running gateway reports, so `ensure` records the next
 `config_generation` and starts the gateway again, and `policy.applied` reads
-`true` once the gateway reports the new digest. A run whose profile names no pack gets the default pack
+`true` once the gateway reports the new digest. The gateway reads each
+required pack once, with its configuration, so an edit takes effect at that
+`ensure`, not before. An edit that no longer loads (a value the pack does not
+build with, say) is refused: `ensure` fails with `config_refused` and the
+reason, records no `config_generation` and leaves the gateway running the last
+good pack; correct or restore the file and run `ensure` again. A gateway
+started on a pack that does not load refuses to start, and a reload keeps the
+previous configuration. A run whose profile names no pack gets the default pack
 (`openshell.pack`, else `balanced`; never `open`). Managed computers run every
 sandbox on a copy of the project, so a profile's pack that sets
 `workspace.mode: mount` is refused as looser than the default pack, and a
@@ -978,6 +989,13 @@ the user's OpenShell CLI that answers: everything those run is foreign.
   shown in `status` and `list`:
 
   ![defenseclaw sandbox status and sandbox list after raw openshell created a sandbox: Sandbox raw1 was removed: it wasn't started with defenseclaw sandbox run, which your organization requires, shown above the Sandboxes and OpenShell rows and again above the list, which holds only the sandbox DefenseClaw started](/images/sandboxes/managed/foreign-sandbox-removed.png)
+  Under `alert`, a foreign sandbox on the person's managed OpenShell gateway
+  keeps running while the gateway does, but it does not hold the one gateway
+  port for itself: when the person's last DefenseClaw sandbox stops or is
+  deleted, the gateway stops after the foreign sandboxes on it were recorded
+  (within about 45 seconds), and the foreign sandbox stops with it, so the
+  next account can start. A gateway that only a foreign sandbox keeps is
+  checked again every 15 seconds and stops soon after that sandbox ends.
   The record reaches the managed gateway even when the person has no
   registered sandbox, so someone who only runs raw `openshell` is audited too.
   Before any of the person's registrations names a floor (no managed sandbox
@@ -1046,9 +1064,24 @@ connection picks the change up on its next poll.
 
 | Kind of field | What happens |
 | --- | --- |
-| Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once, tighter or looser, and the person sees a status line |
+| Live fields (egress lists, approvals, `request_access`, silence, process tree, retention) | Switch at once and the person sees a status line. An edit of a profile's own settings applies tighter or looser; an assignment change only tightens a running sandbox (see below) |
 | Tighter create-time fields (for example mounts no longer allowed) | The violating sandbox is stopped; the notice begins "This sandbox was stopped: your profile no longer allows" and names the field and the command to start again. Only after a verified match, never on a failed lookup. |
 | Looser create-time fields | Apply at the next run |
+
+Floors are pinned per sandbox when it is created. When a person's profile
+assignment changes (a regroup, an edit of `profile_assignments`), each running
+sandbox is re-matched to the new profile, but it runs under the stricter of
+the two floors: the floor of the profile it was created under and the floor of
+the new one, combined as `openshell.admin` and a profile combine. A sandbox
+created under a strict profile keeps its blocked destinations after the person
+moves to a looser profile, and one created under a looser profile is tightened
+at once when the person moves to a stricter one. `sandbox status` and the
+refusals name the profile the person is assigned to now. The person's next
+sandbox takes the new profile alone; to loosen a running sandbox, stop it and
+run a new one. If the profile a sandbox was created under is removed from the
+configuration, that sandbox's policy no longer loads and it is refused until
+it is started again. Two sandboxes of one person created under different
+profiles therefore keep different floors side by side.
 
 A person whose group changes to one that no longer allows sandboxes sees this
 when the sandbox stops under them. The session summary says where the work is,
