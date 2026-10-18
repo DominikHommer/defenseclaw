@@ -22,6 +22,9 @@ artifacts and require the policy's capabilities. `AdmitPolicy` also requires a
 trusted translation receipt bound to that runtime, harness, policy digest and
 every policy component. Missing, duplicated, changed or unknown components
 refuse admission. Evidence from a workload or API client is never authoritative.
+Admission also compares the current trusted host authority binding. The caller
+must serialize authority rotation with admission and launch, or condition the
+launch on that generation; retaining an older policy handle grants no exception.
 
 A receipt checks structural consistency. It grants no process launch,
 credential, workspace path or lifecycle authority. The controller must still

@@ -338,11 +338,18 @@ func (p *ExecutionPolicy) DecideEgress(host string, port int) packs.EgressDecisi
 }
 
 // AdmitPolicy requires exact host-generated enforcement/routing evidence for
-// every component, as well as qualified runtime and harness capabilities. It
-// never chooses another adapter or interprets absence as a permissive default.
-func (p *ExecutionPolicy) AdmitPolicy(info RuntimeInfo, receipt PolicyReceipt) error {
+// every component, as well as qualified runtime and harness capabilities.
+// current must be fetched from trusted host authority at dispatch, never from
+// a guest or API request. The caller must serialize authority rotation with
+// admission and launch (or condition launch on this generation); a check alone
+// cannot prevent rotation immediately after it returns. This method never
+// chooses another adapter or interprets absence as a permissive default.
+func (p *ExecutionPolicy) AdmitPolicy(info RuntimeInfo, receipt PolicyReceipt, current PolicyAuthorityBinding) error {
 	if p == nil || p.effective == nil || !artifactDigest.MatchString(p.digest) {
 		return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox execution policy is not host-resolved")
+	}
+	if current != p.options.Authority {
+		return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox policy authority changed before dispatch")
 	}
 	if !p.enabled[info.Identity.Runtime] {
 		return sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandbox runtime %q is not enabled for this policy", info.Identity.Runtime)

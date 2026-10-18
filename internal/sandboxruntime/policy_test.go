@@ -156,14 +156,14 @@ func TestExecutionPolicyCopiesAllMutableInputsAndViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, receipt := policyEvidence(p)
-	wantCode(t, decoded.AdmitPolicy(info, receipt), sandboxapi.CodePolicyRejected)
+	wantCode(t, decoded.AdmitPolicy(info, receipt, options.Authority), sandboxapi.CodePolicyRejected)
 }
 
 func TestExecutionPolicyRequiresEveryExactComponentAndIdentity(t *testing.T) {
 	cfg, flags, options := policyTestInput()
 	p := mustPolicy(t, cfg, flags, options)
 	info, receipt := policyEvidence(p)
-	if err := p.AdmitPolicy(info, receipt); err != nil {
+	if err := p.AdmitPolicy(info, receipt, options.Authority); err != nil {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*PolicyReceipt){
@@ -174,7 +174,7 @@ func TestExecutionPolicyRequiresEveryExactComponentAndIdentity(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			changed := receipt
 			mutate(&changed)
-			wantCode(t, p.AdmitPolicy(info, changed), sandboxapi.CodePolicyRejected)
+			wantCode(t, p.AdmitPolicy(info, changed, options.Authority), sandboxapi.CodePolicyRejected)
 		})
 	}
 	for name, mutate := range map[string]func(*PolicyReceipt){
@@ -187,11 +187,11 @@ func TestExecutionPolicyRequiresEveryExactComponentAndIdentity(t *testing.T) {
 			changed := receipt
 			changed.Components = slices.Clone(receipt.Components)
 			mutate(&changed)
-			wantCode(t, p.AdmitPolicy(info, changed), sandboxapi.CodePolicyViolation)
+			wantCode(t, p.AdmitPolicy(info, changed, options.Authority), sandboxapi.CodePolicyViolation)
 		})
 	}
 	info.Supported = slices.DeleteFunc(info.Supported, func(cap Capability) bool { return cap == StrictFilesystem })
-	wantCode(t, p.AdmitPolicy(info, receipt), sandboxapi.CodePolicyViolation)
+	wantCode(t, p.AdmitPolicy(info, receipt, options.Authority), sandboxapi.CodePolicyViolation)
 }
 
 func TestExecutionPolicyCannotEnableAnotherRuntimeOrUseStalePolicy(t *testing.T) {
@@ -200,20 +200,23 @@ func TestExecutionPolicyCannotEnableAnotherRuntimeOrUseStalePolicy(t *testing.T)
 	info, receipt := policyEvidence(p)
 	info.Identity.Runtime, info.Identity.Backend, info.Identity.Driver = Axis, "mxc", "bubblewrap"
 	receipt.Runtime = info.Identity
-	wantCode(t, p.AdmitPolicy(info, receipt), sandboxapi.CodeDisabled)
+	wantCode(t, p.AdmitPolicy(info, receipt, options.Authority), sandboxapi.CodeDisabled)
 	info, receipt = policyEvidence(p)
 	cfg.OpenShell.Egress.Block = []string{"new-policy.example"}
 	newPolicy := mustPolicy(t, cfg, flags, options)
 	if newPolicy.Digest() == p.Digest() {
 		t.Fatal("policy change did not change the execution policy identity")
 	}
-	wantCode(t, newPolicy.AdmitPolicy(info, receipt), sandboxapi.CodePolicyRejected)
+	wantCode(t, newPolicy.AdmitPolicy(info, receipt, options.Authority), sandboxapi.CodePolicyRejected)
 }
 
 func TestExecutionPolicyAuthorityBindingPreventsStaleHostReceipt(t *testing.T) {
 	cfg, flags, options := policyTestInput()
 	p := mustPolicy(t, cfg, flags, options)
 	info, receipt := policyEvidence(p)
+	if err := p.AdmitPolicy(info, receipt, options.Authority); err != nil {
+		t.Fatal(err)
+	}
 	for name, change := range map[string]func(*PolicyOptions){
 		"snapshot":   func(o *PolicyOptions) { o.Authority.SnapshotID = "different-host-authority" },
 		"generation": func(o *PolicyOptions) { o.Authority.Generation++ },
@@ -225,7 +228,8 @@ func TestExecutionPolicyAuthorityBindingPreventsStaleHostReceipt(t *testing.T) {
 			if p.effective.Digest() != next.effective.Digest() || p.Digest() == next.Digest() {
 				t.Fatal("host authority rotation must change IR identity even when policy content is unchanged")
 			}
-			wantCode(t, next.AdmitPolicy(info, receipt), sandboxapi.CodePolicyRejected)
+			wantCode(t, next.AdmitPolicy(info, receipt, changed.Authority), sandboxapi.CodePolicyRejected)
+			wantCode(t, p.AdmitPolicy(info, receipt, changed.Authority), sandboxapi.CodePolicyRejected)
 		})
 	}
 	for _, binding := range []PolicyAuthorityBinding{
@@ -236,6 +240,7 @@ func TestExecutionPolicyAuthorityBindingPreventsStaleHostReceipt(t *testing.T) {
 		changed.Authority = binding
 		_, _, err := ResolveExecutionPolicy(cfg, flags, changed)
 		wantCode(t, err, sandboxapi.CodeInvalid)
+		wantCode(t, p.AdmitPolicy(info, receipt, binding), sandboxapi.CodePolicyRejected)
 	}
 }
 

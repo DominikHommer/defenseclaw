@@ -12,6 +12,9 @@ broker routing or host facts change. Adapter admission needs exact runtime,
 harness, policy and complete component receipts plus independently qualified
 capabilities. A structural receipt grants no launch, credential or session
 ownership authority. The contract starts nothing and does not enable AXIS.
+At dispatch, compare the fresh trusted host authority binding and serialize
+authority rotation with admission and launch, or condition launch on that
+generation. Never accept an API client's binding as current host state.
 
 ## Requirements: disclosure
 
