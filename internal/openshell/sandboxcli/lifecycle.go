@@ -554,7 +554,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
-	s := &session{app: a, api: api, cli: cli, transport: a.openShellSessionTransport(cli, sb.Name), spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
+	s := &session{app: a, api: api, cli: cli, transport: a.openShellSessionTransport(cli, sb.Name), workspaceTransport: a.openShellWorkspaceTransport(cli, sb.Name), spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
 		passArgs: len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
@@ -616,6 +616,10 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 
 // refreshCopy re-stages a copy-mode sandbox's project and uploads it.
 func (a *App) refreshCopy(ctx context.Context, s *session) error {
+	t, err := s.copyTransport()
+	if err != nil {
+		return err
+	}
 	// The sandbox's own policy decides what is held back, as at its run,
 	// its repository policy (the one its run read) included.
 	repo, err := a.sandboxRepoPolicy(ctx, s.api, s.sb.Name)
@@ -636,7 +640,6 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	if err != nil {
 		return err
 	}
-	t := a.transport(s.cli)
 	a.note("refreshing the project copy in " + s.sb.Name + "…")
 	rec, err := a.Workspace.Refresh(ctx, workspace.RefreshOptions{Stage: stage, Exec: t, Upload: t})
 	if err != nil {
@@ -834,7 +837,7 @@ func (a *App) Stop(ctx context.Context, o StopOptions) error {
 func (a *App) copyAtStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.Sandbox) *workspace.CopyStatus {
 	look, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	st, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.transport(cli))
+	st, err := a.Workspace.PendingWork(look, a.dataDir(), sb.Name, a.openShellWorkspaceTransport(cli, sb.Name))
 	if err != nil {
 		return nil
 	}
@@ -1090,7 +1093,7 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	var ex workspace.Execer
 	if sb.Phase == "ready" {
 		if gateway, err := a.gatewayName(ctx); err == nil {
-			ex = a.transport(a.cli(gateway))
+			ex = a.openShellWorkspaceTransport(a.cli(gateway), sb.Name)
 		}
 	}
 	st, err := a.Workspace.PendingWork(ctx, a.dataDir(), sb.Name, ex)

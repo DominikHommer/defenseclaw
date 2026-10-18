@@ -62,13 +62,14 @@ type session struct {
 	app *App
 	api API
 	cli openshell.CLI
-	// transport is bound explicitly when this session is created. cli remains
-	// only for the existing OpenShell workspace and state helpers.
-	transport SessionTransport
-	spec      *harness.Spec
-	sb        *sandboxapi.Sandbox
-	rm        bool
-	yes       bool
+	// Transports are bound explicitly when this session is created. cli
+	// remains only for the existing OpenShell state helpers.
+	transport          SessionTransport
+	workspaceTransport workspace.Transport
+	spec               *harness.Spec
+	sb                 *sandboxapi.Sandbox
+	rm                 bool
+	yes                bool
 	// cliErr holds the OpenShell CLI's own standard error of the session's
 	// interactive harness or shell (holdTransportErr).
 	cliErr *heldOutput
@@ -871,7 +872,10 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 // before any exec in the workdir, which the upload creates.
 func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) error {
 	a := s.app
-	t := a.transport(s.cli)
+	t, err := s.copyTransport()
+	if err != nil {
+		return err
+	}
 	report := func(result string, rec *workspace.CopyRecord, failure string) {
 		r := sandboxapi.WorkspaceReport{Operation: sandboxapi.WorkspaceUpload, Result: result, FailureClass: failure}
 		if rec != nil {
@@ -883,8 +887,7 @@ func (s *session) uploadCopy(ctx context.Context, rec *workspace.CopyRecord) err
 		}
 	}
 	a.note(fmt.Sprintf("Uploading the copy (%s, %s)…", plural(int64(rec.Files), "file", "files"), humanBytes(rec.Bytes)))
-	// The upload goes over the OpenShell CLI's ssh session; t's exec, over
-	// the gateway API in this sandbox, confirms it arrived here.
+	// The same bound target carries the upload and its arrival check.
 	up, err := a.Workspace.Upload(ctx, a.dataDir(), s.sb.Name, t, t)
 	if err != nil {
 		report("failed", rec, "upload_failed")
@@ -1943,7 +1946,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 	// before it failed and an earlier session may have left work unpulled:
 	// the pull still runs, without its progress line, which would stand
 	// between the harness's output and the summary that points at it.
-	pull, err := a.pull(ctx, s.api, s.cli, after, !s.failedAtStart(after, endedElsewhere))
+	pull, err := a.pull(ctx, s.api, s.workspaceTransport, after, !s.failedAtStart(after, endedElsewhere))
 	if err != nil {
 		a.println(s.summaryLine(after, nil))
 		s.printHookReach(after, endedElsewhere)
@@ -2121,9 +2124,4 @@ func (s *session) notDeleted(why, until string) {
 		s.app.warn(s.sb.Name + " is not deleted (--rm): " + why + "; delete it once " + until + ": `" + CommandName + " delete " + s.sb.Name + "`")
 	}
 	s.rm = false
-}
-
-// transport is copy mode's openshell CLI transport.
-func (a *App) transport(cli openshell.CLI) *workspace.CLI {
-	return &workspace.CLI{Binary: cli.Binary, Gateway: cli.Gateway, Workspace: cli.Workspace}
 }

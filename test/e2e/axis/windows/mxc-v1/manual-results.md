@@ -60,3 +60,45 @@ distinct diagnostic uses a separate std-only payload with the same policy,
 requires actual import inspection, and can report only its loader marker,
 exit23 and bounded ownership/cleanup observations. It cannot turn this failed
 boundary attempt into a passing qualification.
+
+## Separate std-only loader diagnostic: passed
+
+[Locked build 39115553188](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39115553188)
+at `a96ef846d7c75987c9266aa96f928c8915dbcc3d` passed compilation and the pure
+SDK admission tests. Those tests ran in the SDK's own workspace with its
+unchanged upstream lock; Cargo had refused external-dependency package testing
+in the earlier attempts. The contributor combined lock stayed unchanged.
+Independent reviews verified all 16 inventory files, nine source Git blobs,
+upstream locks/licenses, toolchain, overlays and exact successful workflow/API
+identities before execution. PE import inspection confirmed that the distinct
+122880-byte child imports kernel/NT/CRT support without the supervisor's
+Shell32/COM/TDH/Userenv dependency surface.
+
+| Input | SHA256 |
+| --- | --- |
+| GitHub ZIP, artifact `12132482302` | `9836ea32e96ca324bd19e0a96ff20213744f235a6ac416887d7f18770e1c1503` |
+| Provenance | `1107fbbd9fe328c8e3d9197b233de0a8ff856d6e4b296cfdc402909f0061f9f5` |
+| SDK supervisor | `c8e0f6bb418517e68d3b185cbac65320aa3ce165dfcb812ae4a597a7699d2c50` |
+| Std-only loader child | `9bad1152a7391eb3fb02cbec6cf3ba35845327f71c1cd705e63aded9528a1446` |
+| Reviewed custody Go source | `d08f4bad5d261708118017fb9f07efdb23f2842f009acae6a3a127166cb8e07e` |
+| Custody executable, Go 1.26.5 | `58329247f68ff9ebe962c663a7fa27e3bbf566560be7dd4c1dbf4b370e7a8981` |
+| Root verification receipt | `301792d55aaf0271393e63dc477c85ac32e94651d07a8367b06130493709faf6` |
+| Actual live result | `43be5131c408eff3d2285d4aaa65f9809d0100bb5c297c66e03be10327f49fc8` |
+
+The adversarial tester performed exactly one `run_live.py --loader-only`
+execution, with the pinned custody executable and receipt, in a fresh private
+fixture. It returned exit 0 in 5.047 seconds, with the exact
+`FIXED_PSEC_LOADER_STARTED` marker, typed `Exited(23)`, a signaled retained direct
+handle and all four loader diagnostic checks. Outer Job assignment happened
+before resume; its final active process count was zero. The receipt reported
+no deadline, overflow, reader error or retained exact owned fixture, and custody
+stderr was empty. Helper/image/receipt pins matched before and after the run.
+No filesystem, network or UI policy was relaxed.
+
+Evidence remains privately under
+`C:\Users\vnarajal\.codex\axis-manual-test\windows-current-psec-loader-max-02`.
+This proves this distinct minimal payload can start under the same native
+policy. It does not identify the exact cause of the SDK-bearing self-payload's
+DLL failure or qualify its failed nine boundary checks. A separate std-only
+filesystem/network/argv child remains the next gate; terminals, Claude, hooks,
+credential brokering and complete lifecycle still require their own tests.

@@ -393,7 +393,7 @@ func (a *App) Run(ctx context.Context, o RunOptions) (err error) {
 	a.saveRunLaunch(sb, newRunLaunch(sb, spec, o, llm))
 	a.warnUnkeptOptionValue(spec, o.Args)
 	autoRm := a.headlessRm(o, headless)
-	s := &session{app: a, api: api, cli: cli, transport: a.openShellSessionTransport(cli, sb.Name), spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
+	s := &session{app: a, api: api, cli: cli, transport: a.openShellSessionTransport(cli, sb.Name), workspaceTransport: a.openShellWorkspaceTransport(cli, sb.Name), spec: spec, sb: sb, rm: o.Rm || autoRm, autoRm: autoRm, yes: o.Yes, started: true, headless: headless,
 		passArgs: len(o.Args) > 0}
 	// fail removes the sandbox of a launch that failed before the harness
 	// ran: the upload, the probe, or starting the harness. An error from

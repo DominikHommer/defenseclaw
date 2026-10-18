@@ -85,13 +85,20 @@ it. Importing `sandboxruntime.RuntimeIdentity` back into those wire structs
 would create a cycle. Use a scalar runtime selector initially, with full
 identity in owned state, or first extract dependency-free identity wire types.
 
-The controller seam alone does not abstract execution. In
-`internal/openshell/sandboxcli/session.go`, `session.attach` still builds
-`s.cli.Exec` OpenShell invocations. Workspace staging/upload/download also
-uses OpenShell transports. Introduce one common session execution/terminal
-and workspace transport there, preserving current output filtering,
-interrupt/session handling, review, pull, accept and undo behavior. Keep the
-current OpenShell implementation as one transport.
+Session execution now uses an explicitly bound `SessionTransport` in
+`internal/openshell/sandboxcli/session_transport.go`. The OpenShell adapter
+constructs the existing vendor invocation; the session retains output filtering,
+interrupts, diagnostics, notices and lifecycle orchestration. Missing transports
+and another provider's unsupported fixed Unix recipes refuse without fallback.
+The copy workflow likewise retains one bound existing `workspace.Transport`
+through upload, baseline, refresh and pull; standalone commands bind their
+already resolved target explicitly. This does not yet select an AXIS transport.
+
+The current guest copy operations still use POSIX paths, shell, git and core
+utilities. Native Windows host staging still requires ACL, reparse-point,
+identity and locking qualification. Implement typed guest workspace operations
+and that host layer before advertising native Windows copied-workspace support;
+preserve bounded base64/git-bundle pull, secret filtering and review/apply/undo.
 
 The gateway and managed per-user daemon remain the execution owners. The CLI
 should attach to their authenticated execution stream on the existing API
