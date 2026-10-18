@@ -126,3 +126,84 @@ func TestRemovedMCPServerLeavesNoAdmissionIssue(t *testing.T) {
 		t.Fatalf("issues after the server was removed: %+v", issues)
 	}
 }
+
+// GAP-0216: a verdict is for a server's definition, not its name. An
+// enrolled account's admitted server whose arguments changed under the same
+// name kept the old outcome, so its calls reached the new program before any
+// scan. A changed server is pending until admission has run on the new
+// definition, that admission runs at once and its baseline is kept, and
+// another account's same-name server keeps its own outcome.
+func TestChangedMCPServerDefinitionIsPendingUntilReadmitted(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	base := t.TempDir()
+	servers := []config.MCPServerEntry{enrolledMCPServer(base, "1001", "benign"), enrolledMCPServer(base, "1002", "benign")}
+	rejected := map[string]bool{}
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	w.scannerFactory = func(evt InstallEvent) scanner.Scanner {
+		if rejected[evt.Path] {
+			return &countingScanner{name: "mcp-scanner", findings: []scanner.Finding{{
+				ID: "f1", RuleID: "MCP-001", Severity: scanner.SeverityHigh, Title: "credential harvesting",
+			}}}
+		}
+		return &countingScanner{name: "mcp-scanner"}
+	}
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+	w.firstCycleDone.Store(true)
+	ctx := context.Background()
+	query := func(server config.MCPServerEntry) MCPAdmissionQuery {
+		return MCPAdmissionQuery{Connector: "claudecode", Server: server.Name, Home: server.Home, CWD: server.Project}
+	}
+	runtime := func(server config.MCPServerEntry) string {
+		t.Helper()
+		entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry == nil {
+			return ""
+		}
+		return entry.Actions.Runtime
+	}
+
+	w.AdmitAddedMCPServers([]string{"gb05-benign"})
+	w.admitAddedMCPServers(ctx)
+	if len(admitted) != 2 {
+		t.Fatalf("first admissions: %+v, want both accounts' servers", admitted)
+	}
+	for _, server := range servers {
+		if _, pending := w.MCPAdmissionPending(query(server)); pending {
+			t.Fatalf("%s: an admitted server is pending", server.Home)
+		}
+	}
+
+	// The first account's server now runs another program under the same
+	// name, in the same project.
+	servers[0].Args = []string{"-y", "decoy"}
+	rejected[MCPEventPath(servers[0])] = true
+	if _, pending := w.MCPAdmissionPending(query(servers[0])); !pending {
+		t.Fatal("a server whose definition changed kept the verdict of the old definition")
+	}
+	if _, pending := w.MCPAdmissionPending(query(servers[1])); pending {
+		t.Fatal("the other account's unchanged same-name server is pending")
+	}
+	// The pending call queued the admission; the added-server loop runs it.
+	w.admitAddedMCPServers(ctx)
+	if len(admitted) != 3 || admitted[2].Verdict != VerdictRejected || admitted[2].Event.Path != MCPEventPath(servers[0]) {
+		t.Fatalf("admissions after the change: %+v, want the changed server rejected", admitted)
+	}
+	if _, pending := w.MCPAdmissionPending(query(servers[0])); pending {
+		t.Fatal("still pending after its admission: the new baseline was not kept")
+	}
+	if runtime(servers[0]) != "disable" || runtime(servers[1]) != "" {
+		t.Fatalf("runtime: changed %q, other account %q; want the changed server disabled, the other not",
+			runtime(servers[0]), runtime(servers[1]))
+	}
+	// Unchanged definitions are not admitted again.
+	w.AdmitAddedMCPServers([]string{"gb05-benign"})
+	w.admitAddedMCPServers(ctx)
+	if len(admitted) != 3 {
+		t.Fatalf("an unchanged server was admitted again: %+v", admitted[3:])
+	}
+}

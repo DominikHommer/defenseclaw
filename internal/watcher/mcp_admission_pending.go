@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -30,7 +31,9 @@ type MCPAdmissionQuery struct {
 // in between reached a server nothing had scanned and was allowed, even one
 // a later scan rejected. The hook refuses such a call until admission has
 // run: the call fails closed and a retry once the verdict allows it goes
-// through. It returns the configured name of the server.
+// through. A server whose definition changed since its outcome is pending
+// the same way, because that outcome was for another program (GAP-0216). It
+// returns the configured name of the server.
 //
 // A server the first rescan cycle lists at start stays with that cycle,
 // which admits or baselines it (an upgrade from 0.8.x only baselines), so
@@ -60,11 +63,12 @@ func (w *InstallWatcher) MCPAdmissionPending(q MCPAdmissionQuery) (string, bool)
 		if firstCycle && w.listedAtStartup(path) {
 			continue
 		}
-		if _, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err == nil {
+		if row, err := w.store.GetTargetSnapshot(string(InstallMCP), path); err == nil && mcpBaselineMatches(row, server) {
 			continue
 		}
-		// No outcome yet, or one that could not be read: refused either
-		// way, and admission says why when it runs.
+		// No outcome yet, one that could not be read, or one for another
+		// definition of the server: refused either way, and admission says
+		// why when it runs.
 		pending = append(pending, server.Name)
 	}
 	if len(pending) == 0 {
@@ -72,6 +76,16 @@ func (w *InstallWatcher) MCPAdmissionPending(q MCPAdmissionQuery) (string, bool)
 	}
 	w.AdmitAddedMCPServers(pending)
 	return pending[0], true
+}
+
+// mcpBaselineMatches reports whether the baseline admission recorded for an
+// MCP server is for its current definition. A verdict is for a definition,
+// not a name: a server whose command, arguments, folder or environment
+// changed under the same name keeps nothing of the old verdict until
+// admission has run on the new one (GAP-0216).
+func mcpBaselineMatches(row *audit.SnapshotRow, server config.MCPServerEntry) bool {
+	hash, err := mcpDefinitionHash(server)
+	return err == nil && row != nil && row.ContentHash != "" && row.ContentHash == hash
 }
 
 // mcpServerServesQuery reports whether a watched server can be the one the

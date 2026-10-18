@@ -494,8 +494,9 @@ func (w *InstallWatcher) admitAddedMCPServers(ctx context.Context) {
 }
 
 func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEvent) {
-	_, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err == nil {
+		w.readmitChangedMCPServer(ctx, evt, baseline)
 		return // admitted or baselined already
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -520,6 +521,24 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.cachedFingerprint(evt, nil)))
 	}
+}
+
+// readmitChangedMCPServer admits again, now, a queued MCP server whose
+// definition changed since its baseline (command, arguments, folder or
+// environment under the same name). Its verdict was for the old definition,
+// and the hook refuses its calls until admission has run on the new one
+// (MCPAdmissionPending); the rescan cycle would admit it only at its next
+// pass (GAP-0216). An unchanged server is left as it is. Secure Client keeps
+// main (issue #1092).
+func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow) {
+	if baseline == nil || w.secureClientActive() {
+		return
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil || snap.ContentHash == baseline.ContentHash {
+		return
+	}
+	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil))
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.

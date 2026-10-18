@@ -132,6 +132,11 @@ server with the same name is admitted, blocked and released on its own. A
 gateway cannot tell which user made a tool call, any user's block of that
 server name refuses the call.
 
+A verdict is for a server's definition, not only its name. When the command,
+arguments, folder or environment of a server change under the same name,
+DefenseClaw refuses its tool calls ("is not scanned yet") until admission has
+scanned the new definition, and it starts that admission at once.
+
 Admission decides on tool calls, not on process starts. Claude Code starts
 the servers of a project it opens as soon as the user approves the
 project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
