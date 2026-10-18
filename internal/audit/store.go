@@ -4202,15 +4202,18 @@ type LatestScanInfo struct {
 
 func (s *Store) LatestScansByScanner(scannerName string) ([]LatestScanInfo, error) {
 	rows, err := s.queryDB(context.Background(), "audit", `
-  SELECT sr.id, sr.target, sr.timestamp, sr.finding_count, sr.max_severity, sr.raw_json
-  FROM scan_results sr
-  WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0 AND COALESCE(sr.error, '') = ''
-   AND sr.rowid = (
-    SELECT candidate.rowid FROM scan_results candidate
-    WHERE candidate.scanner = sr.scanner AND candidate.target = sr.target
-     AND COALESCE(candidate.exit_code, 0) = 0 AND COALESCE(candidate.error, '') = ''
-    ORDER BY `+s.timeOrderForTable("scan_results", "candidate", true)+` LIMIT 1
-   )`, scannerName)
+		SELECT id, target, timestamp, finding_count, max_severity, raw_json
+		FROM (
+			SELECT sr.id, sr.target, sr.timestamp, sr.finding_count,
+				sr.max_severity, sr.raw_json,
+				ROW_NUMBER() OVER (
+					PARTITION BY sr.target ORDER BY `+s.timeOrderForTable("scan_results", "sr", true)+`
+				) AS dc_rank
+			FROM scan_results sr
+			WHERE sr.scanner = ? AND COALESCE(sr.exit_code, 0) = 0
+				AND COALESCE(sr.error, '') = ''
+		)
+		WHERE dc_rank = 1`, scannerName)
 	if err != nil {
 		return nil, fmt.Errorf("audit: latest scans by scanner: %w", err)
 	}
