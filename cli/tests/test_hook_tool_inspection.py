@@ -103,3 +103,30 @@ def test_doctor_fails_claude_code_hooks_without_pre_tool_use(tmp_path):
     assert row["status"] == "fail", row
     assert "4 DefenseClaw hook(s) registered, but the DefenseClaw PreToolUse hook is not registered" in row["detail"]
     assert "defenseclaw setup claude-code --yes" in row["remediation"]
+
+
+def test_windows_status_reports_a_missing_pre_tool_use_hook(tmp_path, monkeypatch):
+    """GAP-0068: per-user Windows status marks Claude Code DEGRADED without PreToolUse."""
+    from defenseclaw import hook_integrity
+
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    monkeypatch.setattr(hook_integrity, "hook_launcher_problems", lambda cfg, connector: [])
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    launcher = "C:\\Users\\dcw\\.defenseclaw\\bin\\defenseclaw-hook.exe hook --connector claudecode"
+    settings = tmp_path / "settings.json"
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+
+    def write(events):
+        hooks = {event: [{"matcher": "*", "hooks": [{"type": "command", "command": launcher}]}] for event in events}
+        settings.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+    write(_EVENTS)
+    assert hook_registration_problems(cfg, "claudecode") == []
+    write(tuple(event for event in _EVENTS if event != "PreToolUse"))
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "PreToolUse" in problems[0] and "tool calls are not inspected" in problems[0]
+    suffix = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert "DEGRADED" in suffix and "PreToolUse" in suffix

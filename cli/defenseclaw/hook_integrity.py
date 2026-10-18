@@ -630,10 +630,11 @@ def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
     Every recorded file that registers DefenseClaw hooks must register the
     connector's tool-inspection events too; on a managed install, whose
     hooks may sit in one machine layer, one file is enough. Per-user
-    Windows doctor already checks the full Claude Code hook matrix.
+    Windows status runs the same check: doctor failed the Claude Code hooks
+    row there while status kept the connector RUNNING (GAP-0068).
     """
 
-    if not TOOL_INSPECTION_EVENTS.get(connector) or _is_windows():
+    if not TOOL_INSPECTION_EVENTS.get(connector):
         return []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
     gaps: list[tuple[Path, str]] = []
