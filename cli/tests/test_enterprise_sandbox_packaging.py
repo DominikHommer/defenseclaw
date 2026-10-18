@@ -157,7 +157,7 @@ def _build_fixture(
     launchd = repo / "packaging" / "launchd-standalone" / "agents"
     launchd.mkdir(parents=True)
     for label in agents:
-        (launchd / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+        shutil.copyfile(LAUNCHD_AGENTS / f"{label}.plist", launchd / f"{label}.plist")
     payload = tmp_path / "payload"
     payload.mkdir()
     for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper", "defenseclaw-acp"):
@@ -247,7 +247,11 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
         agent = root / "Library" / "LaunchAgents" / f"{label}.plist"
         assert agent.is_file() and not agent.is_symlink(), label
         assert _mode(agent) == 0o644, label
-        assert plistlib.loads(agent.read_bytes())["Label"] == label
+        launchd = plistlib.loads(agent.read_bytes())
+        assert launchd["Label"] == label
+        # Both user jobs execute the signed gateway in bin. The e2fsprogs
+        # payload must not change their program to a helper under share.
+        assert launchd["ProgramArguments"][0] == "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
 
     # launchd and every account must be able to reach what the payload lays
     # down, whatever umask the builder has.
