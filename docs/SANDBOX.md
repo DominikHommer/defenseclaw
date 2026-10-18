@@ -1698,8 +1698,12 @@ modes and owners are set in the tar headers) and streams it to
    certificate in `/usr/local/share/ca-certificates/defenseclaw`
    (`trusted-ca/defenseclaw-trusted-ca-NN.crt` in the context), then
    `update-ca-certificates`, and a check that each one reached
-   `/etc/ssl/certs/ca-certificates.crt`; the build's own downloads trust
-   them. OpenShell's supervisor does not read that file: it makes the
+   `/etc/ssl/certs/ca-certificates.crt`. Then `ARG`s (build only, never
+   `ENV`) point `image.BuildCAEnv` (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+   `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`,
+   `npm_config_cafile`, `PIP_CERT`, `DENO_CERT`) at that bundle, so the
+   build's own downloads trust them: npm, pip and uv do not read the system
+   store (GAP-0192). OpenShell's supervisor does not read that file: it makes the
    workload's bundle (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
    `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`; `NODE_EXTRA_CA_CERTS` and
    `DENO_CERT` name its CA alone) from its own store, a container of its own

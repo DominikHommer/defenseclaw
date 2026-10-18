@@ -359,7 +359,30 @@ func trustedCAStep(c *Context) string {
 		`command -v update-ca-certificates >/dev/null 2>&1 || { echo "` + openshell.TrustedCAKey + `: the base image has no update-ca-certificates (the ca-certificates package), so its system store cannot take the trusted CAs" >&2; exit 1; }; ` +
 		`update-ca-certificates >/dev/null; ` +
 		`for f in ` + dir + `/*.crt; do line="$(sed -n 2p "$f")"; grep -qxF -- "$line" ` + bundle + ` || { echo "update-ca-certificates did not add $f to ` + bundle + `" >&2; exit 1; }; done` + "\n")
+	b.WriteString("# The build's own downloads (npm, uv, pip, curl) go through the proxy too, and Node, npm, pip and uv do not\n" +
+		"# read the system store: every one is pointed at it for this build only (ARG, not ENV: the sandbox shells\n" +
+		"# point them at the bundle that also holds OpenShell's CA).\n")
+	for _, name := range BuildCAEnv {
+		fmt.Fprintf(&b, "ARG %s=%s\n", name, bundle)
+	}
 	return b.String()
+}
+
+// BuildCAEnv are the variables the build steps of an image with trusted CAs
+// (trustedCAStep) take as ARGs naming the system bundle, so that every
+// download of the build trusts a TLS-inspecting proxy's root: Node and npm
+// (the npm harness installs) use their own root list and add only
+// NODE_EXTRA_CA_CERTS or npm's cafile, pip its certifi copy unless PIP_CERT
+// or REQUESTS_CA_BUNDLE, uv its bundled roots unless SSL_CERT_FILE, and Deno
+// DENO_CERT (GAP-0192: the pinned @openai/codex install failed with
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE behind an inspecting proxy, though the
+// system store held the CA). ARG and not ENV: a sandbox never sees them in
+// its image environment, where npm's cafile would replace Node's roots with
+// a bundle that lacks OpenShell's CA; the sandbox shells set the runtime
+// values (harness trustedCAScript).
+var BuildCAEnv = []string{
+	"SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+	"NODE_EXTRA_CA_CERTS", "npm_config_cafile", "PIP_CERT", "DENO_CERT",
 }
 
 // localhostStep is the Dockerfile step of an image for the MicroVM driver

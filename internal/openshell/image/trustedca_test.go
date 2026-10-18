@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -165,5 +166,52 @@ func TestTrustedCAsFor(t *testing.T) {
 	cfg.OpenShell.TrustedCAPEM, cfg.OpenShell.TrustedCABundle = "", "~/corp.pem"
 	if _, err := TrustedCAsFor(cfg); err == nil || !strings.Contains(err.Error(), "absolute path") {
 		t.Fatalf("managed ~ path: %v", err)
+	}
+}
+
+// GAP-0192: the build's downloads trust the CAs too. The system store holds
+// them, but npm (the pinned Codex install), pip and uv read their own
+// roots, so the Dockerfile of an image with CAs points every one of them at
+// the system bundle, before any download and for the build only (ARG, never
+// ENV); an image without CAs has none of it.
+func TestTrustedCAsReachEveryBuildDownload(t *testing.T) {
+	for _, name := range []string{"codex", "copilot", "claudecode"} {
+		h, ok := harness.Get(name)
+		if !ok {
+			t.Fatalf("no harness %s", name)
+		}
+		plain := string(mustContext(t, testSpec(h)).Dockerfile)
+		spec := testSpec(h)
+		spec.TrustedCAs = openshelltest.NewCA(t, "Corp Inspection Root").PEM
+		df := string(mustContext(t, spec).Dockerfile)
+		verified := strings.Index(df, "update-ca-certificates did not add")
+		first := len(df)
+		for _, marker := range []string{"for tool in jq curl", "npm pack", "npm install", "uv tool install", "curl -fsSL"} {
+			if i := strings.Index(df, marker); i >= 0 && i < first {
+				first = i
+			}
+		}
+		for _, v := range BuildCAEnv {
+			arg := "\nARG " + v + "=" + openshell.SandboxSystemCABundle + "\n"
+			i := strings.Index(df, arg)
+			if i < 0 {
+				t.Errorf("%s: Dockerfile lacks %q", name, strings.TrimSpace(arg))
+				continue
+			}
+			if i < verified || i > first {
+				t.Errorf("%s: %s is not set between the CA check and the first download:\n%s", name, v, df)
+			}
+			if strings.Contains(df, "ENV "+v) || strings.Contains(plain, v+"=") {
+				t.Errorf("%s: %s is in the image environment or in the image without CAs", name, v)
+			}
+		}
+		if name == "codex" && !strings.Contains(df[first:], "npm pack") {
+			t.Fatalf("codex: the npm download is not after the CA ARGs:\n%s", df)
+		}
+	}
+	for _, need := range []string{"NODE_EXTRA_CA_CERTS", "npm_config_cafile", "SSL_CERT_FILE", "PIP_CERT"} {
+		if !slices.Contains(BuildCAEnv, need) {
+			t.Errorf("BuildCAEnv lacks %s", need)
+		}
 	}
 }
