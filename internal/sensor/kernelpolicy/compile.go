@@ -500,7 +500,8 @@ func compileControls(fsys FS, set kernel.Set, in Input, scope Scope, homes map[i
 			for _, native := range install.NativeLaunches {
 				addBin(install.UID, native)
 			}
-			// Keep compatibility with resolved installs constructed by callers.
+			// Native is part of NativeLaunches for a resolved install; it is
+			// added too so an Install that names no launch path still anchors.
 			for _, native := range install.Native {
 				addBin(install.UID, native)
 			}

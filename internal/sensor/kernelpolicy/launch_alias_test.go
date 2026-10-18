@@ -76,3 +76,38 @@ func TestTrustedNativeLaunchAliasCoversLargeUID(t *testing.T) {
 		t.Fatalf("uncovered session = %+v, want armed with no anchor", state)
 	}
 }
+
+// A root keeps the exec name the kernel recorded even when it is not a
+// trusted launch path, and an exec under another name in the same process
+// replaces the root, so its Launch never outlives the name it was proven for.
+func TestTrackerFollowsTheExecNameOfANativeRoot(t *testing.T) {
+	const (
+		uid   = 94404135
+		home  = "/home/engineer@example.test"
+		alias = "/opt/agents/bin/claude"
+		exe   = "/opt/agents/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+	)
+	w := newWorld(t, `targets:
+- user: engineer@example.test
+  uid: 94404135
+  user_home: /home/engineer@example.test
+  connector: claudecode
+`)
+	w.fs.mkdir(home)
+	w.fs.elf(exe)
+	w.fs.symlink(alias, "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+	w.installs = ResolveInstalls(w.fs, w.enroll, ResolveOptions{ExtraPrefixes: []string{"/opt/agents"}})
+
+	p := nativeProc(4001, 1, 300, uid, exe)
+	p.Launch = "/tmp/other-claude"
+	for pass := 0; pass < 2; pass++ {
+		set := w.roots(p)
+		if len(set.Roots) != 1 || set.Roots[0].Launch != "" || set.Roots[0].execName != p.Launch {
+			t.Fatalf("pass %d: untrusted exec name root = %+v", pass, set.Roots)
+		}
+	}
+	p.Launch = alias
+	if set := w.roots(p); len(set.Roots) != 1 || set.Roots[0].Launch != alias {
+		t.Fatalf("re-exec under the trusted name = %+v", set.Roots)
+	}
+}
