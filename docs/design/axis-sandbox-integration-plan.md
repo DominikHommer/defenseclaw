@@ -15,6 +15,13 @@ its complete policy, hook, credential and agent paths are being qualified.
 On Windows, implicit/configured selection still encounters the legacy platform
 guard before configuration is loaded; an explicit `--runtime axis` reports the
 AXIS qualification refusal. This selection work does not enable native execution.
+The private [backend](../../internal/axis/backend/README.md) now owns held assets,
+one-use preparation and launch, canceled preparation, retired session IDs and
+independent native cleanup. Its installation catalog and policy compiler remain
+closed. The authenticated API has a bounded attachment transport for an already
+admitted process; it accepts no launch command or environment. The current
+manager does not expose native attachment yet. Latest Linux native outcomes and
+their limits are recorded in the [fixed peer evidence](../../test/e2e/axis/native-peer/live/README.md).
 [Claude's review approved starting Stages 1 and 2](https://github.com/cisco-ai-defense/defenseclaw/pull/1307#issuecomment-6243746197).
 That approval does not cover merging or releasing AXIS support; later production
 stages retain their acceptance gates.
