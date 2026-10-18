@@ -11,7 +11,7 @@ on:
     paths:
       - .github/workflows/axis-feasibility.yml
       - test/e2e/axis/runner/**
-      - test/e2e/axis/windows/**
+      - test/e2e/axis/windows/patches/**
   workflow_dispatch:
 
 permissions:

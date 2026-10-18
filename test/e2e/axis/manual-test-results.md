@@ -8,6 +8,12 @@ or certify `defenseclaw sandbox run claude` with AXIS.
 Recorded 2026-10-18 on Windows 11 Enterprise, build 26200.9457, x86-64.
 Native Windows and Windows-hosted Linux are separate test routes.
 
+Later [native Windows AXIS/MXC results](windows/manual-results.md) record actual
+ProcessContainer headless launches without WSL, including fixed filesystem,
+private-state, loopback receiver, exit-code and timeout observations. The Linux
+and initial CLI results below remain historical evidence and do not substitute
+for native Windows qualification. Customer AXIS support is still unavailable.
+
 The isolated `DefenseClawAXISTest` WSL2 distribution used Ubuntu 24.04 and
 kernel `6.18.40.1-microsoft-standard-WSL2`. The probe account is unprivileged;
 Windows drive automount and Windows process interoperability are disabled in
