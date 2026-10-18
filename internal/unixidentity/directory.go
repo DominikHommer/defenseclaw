@@ -897,6 +897,27 @@ func GroupNameLookupDefinitive() bool {
 	return true
 }
 
+// GroupDirectoryUsesWinbind reports whether this host looks directory groups
+// up through winbind rather than SSSD: the group line of nsswitch.conf names
+// winbind and not sss. Advice for a directory that does not answer names the
+// service the host uses (GAP-0712).
+func GroupDirectoryUsesWinbind() bool {
+	data, err := readSmallFile(nsswitchPath, 1<<20)
+	if err != nil {
+		return false
+	}
+	winbind := false
+	for _, service := range ParseNSSwitchServices(string(data), "group") {
+		switch service {
+		case "sss":
+			return false
+		case "winbind":
+			winbind = true
+		}
+	}
+	return winbind
+}
+
 // QualifiedGroupName returns name@domain, as the host spells it, for the
 // first realm the host is joined to (realmd) that has a group of that name,
 // or "" when name is already qualified or no realm has it.
