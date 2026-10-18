@@ -16,12 +16,14 @@ from pathlib import Path
 
 AXIS_COMMIT = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC_COMMIT = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
+LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 COMBINED_LOCK_SHA256 = "7f9aa8a01b125514a10c7c4067f77ab3c9a814807c0e837aa6531d0e78b161f7"
 UPSTREAM_LOCK_SHA256 = {
     "axis": "788c5b5ea12b19176969d495f53d2c97a8e056d035832ec529ffc042fd97f3b2",
     "mxc": "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0",
 }
 SOURCE_FILES = {
+    "mxc-literal-argv.patch",
     "Cargo.toml",
     "Cargo.lock",
     "prepare_build.py",
@@ -113,6 +115,7 @@ def verify(
         "schema": "defenseclaw-contributor-axis-mxc-macos-probe-v1",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
+        "mxc_literal_patch_sha256": LITERAL_PATCH_SHA256,
         "combined_lock_sha256": COMBINED_LOCK_SHA256,
         "upstream_lock_sha256": UPSTREAM_LOCK_SHA256,
         "build_mode": "build-locked",
@@ -136,9 +139,12 @@ def verify(
         if sha256(file_bytes(artifact, relative)) != expected_hash:
             raise ValueError(f"artifact content differs for {relative}")
     for name in SOURCE_FILES:
-        source = checkout / "test" / "e2e" / "axis" / "mxc-macos" / name
+        source_root = checkout / "test" / "e2e" / "axis"
+        source = source_root / ("patches" if name == "mxc-literal-argv.patch" else "mxc-macos") / name
         if source.is_symlink() or source.read_bytes() != file_bytes(artifact, "source/" + name):
             raise ValueError(f"packaged source differs from the reviewed commit for {name}")
+    if sha256(file_bytes(artifact, "source/mxc-literal-argv.patch")) != LITERAL_PATCH_SHA256:
+        raise ValueError("MXC literal-argv patch content differs")
     if sha256(file_bytes(artifact, "source/Cargo.lock")) != COMBINED_LOCK_SHA256:
         raise ValueError("combined lock content differs")
     for name, expected_hash in UPSTREAM_LOCK_SHA256.items():

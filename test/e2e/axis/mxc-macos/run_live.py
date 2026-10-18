@@ -30,6 +30,7 @@ CHECKS = {
     "pty_echo_resize_exit_23",
     "typed_timeout",
     "descendant_marker_absent",
+    "literal_argv_preserved_without_shell",
     "owned_fixture_removed",
 }
 OUTPUT_LIMIT = 128 * 1024

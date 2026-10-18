@@ -29,6 +29,7 @@ CHECKS = {
     "typed_timeout",
     "direct_child_pidfd_exited",
     "handle_kill_after_wait_idempotent",
+    "literal_argv_preserved_without_shell",
     "owned_fixture_removed",
 }
 OUTPUT_LIMIT = 128 * 1024

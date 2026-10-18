@@ -20,6 +20,8 @@ MXC_COMMIT = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 TOOLCHAIN = "1.95.0"
 BINARY = "defenseclaw-axis-mxc-macos-probe"
 ROOT = Path(__file__).resolve().parent
+LITERAL_PATCH = ROOT / "mxc-literal-argv.patch"
+LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 
 
 def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
@@ -59,6 +61,13 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def verify_literal_patch() -> None:
+    if LITERAL_PATCH.is_symlink() or not LITERAL_PATCH.is_file():
+        raise RuntimeError("the reviewed MXC literal-argv patch is missing or linked")
+    if digest(LITERAL_PATCH) != LITERAL_PATCH_SHA256:
+        raise RuntimeError("the MXC literal-argv patch differs from the reviewed bytes")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("generate-lock", "build-locked"))
@@ -73,6 +82,7 @@ def main() -> None:
         raise RuntimeError("generate-lock requires a fresh staging directory without Cargo.lock")
     if args.mode == "build-locked" and (lock.is_symlink() or not lock.is_file()):
         raise RuntimeError("build-locked requires the reviewed combined Cargo.lock")
+    verify_literal_patch()
     axis = verify_source("axis-source", AXIS_COMMIT)
     mxc = verify_source("mxc-source", MXC_COMMIT)
     toolchain = command(["rustc", f"+{TOOLCHAIN}", "-Vv"], capture=True)
@@ -80,6 +90,8 @@ def main() -> None:
     if not toolchain.startswith(f"rustc {TOOLCHAIN} "):
         raise RuntimeError("the already-installed Rust toolchain differs from the reviewed version")
     upstream_locks = {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}
+    command(["git", "apply", "--check", "--whitespace=error-all", str(LITERAL_PATCH)], cwd=mxc)
+    command(["git", "apply", "--whitespace=error-all", str(LITERAL_PATCH)], cwd=mxc)
     if args.mode == "generate-lock":
         command(["cargo", f"+{TOOLCHAIN}", "generate-lockfile"])
     lock_before = digest(lock)
@@ -89,6 +101,7 @@ def main() -> None:
         raise RuntimeError("the combined dependency lock changed during the locked build")
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
         raise RuntimeError("an upstream lock changed during the build")
+    verify_literal_patch()
 
     (artifact / "bin").mkdir(parents=True)
     for relative in (
@@ -99,6 +112,7 @@ def main() -> None:
         Path("src/main.rs"),
         Path("src/probe.rs"),
         Path("src/strict_profile.rs"),
+        Path("mxc-literal-argv.patch"),
     ):
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +131,7 @@ def main() -> None:
         "schema": "defenseclaw-contributor-axis-mxc-macos-probe-v1",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
+        "mxc_literal_patch_sha256": digest(LITERAL_PATCH),
         "combined_lock_sha256": lock_before,
         "upstream_lock_sha256": upstream_locks,
         "build_mode": args.mode,
