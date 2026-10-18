@@ -80,6 +80,11 @@ The app opens on a home page and groups its views into four menus:
 | **Demo Dashboards** | Agent Tokenomics Overview, Executive Agent Watch Overview, AI Discovery Inventory, AI Runtime Planes (on Linux with Tetragon: the kernel-controls fleet table and the events of your own Tetragon policies, through the `defenseclaw_demo_kernel_events` macro), Connector Activity, Policy Decisions, Findings and HITL |
 | **Operate** | Alerts and saved searches, search and drill-down |
 
+For the 1.0.3 release candidate, the bundled saved searches have static syntax
+and shipped-field checks, but have not been tested against a live Splunk
+instance. Validate their results in your Splunk deployment before relying on
+them for an operational decision.
+
 The demo dashboards below are the ones you would build by hand for a production
 deployment, pointed at the local index for a self-contained demo.
 
