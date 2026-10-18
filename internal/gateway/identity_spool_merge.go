@@ -396,6 +396,15 @@ func spoolUPNAssignmentWarnings(assignments []config.ProfileAssignment, now time
 // still list the account without its groups for a minute or two, so facts
 // resolved within openDirectorySettleWindow of the node last seen offline are
 // refreshed every 15 s (openDirectorySettling) instead of held for 15 minutes.
+//
+// Open Directory does not always list the node Offline: on a Mac whose
+// domain controller was blocked for an hour the node stayed Online, and
+// about 20 minutes in the accounts lost their other domain groups with
+// their primary group still named, so they got the default profile as a
+// verified "default" (GAP-0092). The root guardian checks the domain
+// controllers itself and lists the domains whose domain controllers stopped
+// answering (enterprisehooks.DirectoryUnreachableFile); an Active Directory
+// account of such a domain is a failed lookup too (unreachable).
 
 // openDirectorySettleWindow is how long after the node was last seen offline
 // an answer is refreshed at the retry pace.
@@ -432,16 +441,31 @@ func openDirectorySettling(facts useridentity.DirectoryFacts) bool {
 // primary group as a bare number, the lookup stopped failing, and the account
 // moved to the default profile as plain "default", not default_lookup_failed,
 // while a new sandbox run was refused as a policy change (GAP-0496, GAP-0517).
+//
+// unreachable reports whether the guardian lists the domain (lower case; ""
+// for an account without a record, whose domain is unknown: any domain) as
+// having no domain controller that answers.
 func openDirectoryGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord, localNode bool, primaryGID string, named func(gid string) bool,
-	offline func() bool, now time.Time) error {
+	offline func() bool, unreachable func(domain string) bool, now time.Time) error {
 	if record != nil && record.Facts.Directory != useridentity.DirectoryActiveDirectory || record == nil && localNode {
 		return nil
+	}
+	domain := ""
+	if record != nil {
+		domain = strings.ToLower(strings.TrimSpace(record.Facts.Domain))
 	}
 	var err error
 	switch {
 	case offline != nil && offline():
 		err = fmt.Errorf("the Mac's Open Directory lists its Active Directory node offline (odutil show nodenames): the domain "+
 			"controller does not answer, so this account's domain groups are unknown; the lookup is retried every %s", identityDirectoryRetry)
+	case unreachable != nil && unreachable(domain):
+		label := domain
+		if label == "" {
+			label = "the account's Active Directory domain"
+		}
+		err = fmt.Errorf("the hook guardian finds no domain controller of %s that answers (it checks every 15 seconds while one is "+
+			"away), so this account's domain groups are unknown; the lookup is retried every %s", label, identityDirectoryRetry)
 	case primaryGID != "" && !named(primaryGID):
 		err = fmt.Errorf("the Mac's Open Directory lists this directory account without its domain groups (its primary group %s has "+
 			"no name): the domain controller does not answer, or the Mac still answers from the caches it filled while it did not; "+

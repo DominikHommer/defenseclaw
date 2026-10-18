@@ -193,3 +193,112 @@ func TestDirectoryReturnRecoversEachDomainOnItsOwn(t *testing.T) {
 		t.Fatalf("the backoff was not reset once the groups were listed: %v", state.flushed)
 	}
 }
+
+func resetDirectoryReachState(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		state := &enterpriseHookDirectoryReachState
+		state.Lock()
+		state.watching, state.seen, state.away, state.marked = false, nil, nil, false
+		state.Unlock()
+	}
+	reset()
+	t.Cleanup(reset)
+}
+
+// reachDeps is s.deps for enterpriseHookWatchDirectoryReach: every domain of
+// the step is enrolled, and each write of the away domains is recorded.
+func (s *directoryReturnScript) reachDeps(marks *[][]string) enterpriseHookDirectoryReturnDeps {
+	deps := s.deps()
+	deps.domains = func(string, []enterprisehooks.IdentitySpoolAccount) []string {
+		if s.at >= len(s.steps) {
+			return nil
+		}
+		var domains []string
+		for domain := range s.steps[s.at] {
+			domains = append(domains, domain)
+		}
+		slices.Sort(domains)
+		return domains
+	}
+	deps.mark = func(_ string, domains []string) error {
+		*marks = append(*marks, slices.Clone(domains))
+		return nil
+	}
+	return deps
+}
+
+// GAP-0092, GAP-0095: Open Directory kept the Active Directory node Online
+// through an hour-long domain controller outage, and about 20 minutes in
+// listed the accounts with their primary group still named but without
+// their other domain groups: the accounts got the default profile as a
+// verified "default", and since no account lost its primary group's name,
+// nothing flushed the caches once the domain controller was back. The
+// guardian now checks the domain controllers of the enrolled accounts'
+// domains itself, records the domains that stopped answering for the
+// gateway every poll while they are away, and flushes the caches once at
+// their return; a domain it never reached is not put in an outage.
+func TestDirectoryReachMarksAnOutageAndFlushesAtTheReturn(t *testing.T) {
+	resetDirectoryReturnState(t)
+	resetDirectoryReachState(t)
+	accounts := []enterprisehooks.IdentitySpoolAccount{{UID: 94401103}}
+	var marks [][]string
+
+	// A tick while the domain controller answers: one check, nothing written.
+	healthy := &directoryReturnScript{now: time.Unix(1_800_000_000, 0), steps: []directoryReturnPoll{oneDomain(false, true)}}
+	var stderr bytes.Buffer
+	enterpriseHookWatchDirectoryReach(context.Background(), &stderr, healthy.reachDeps(&marks), "", accounts)
+	if healthy.at != 0 || len(marks) != 0 || len(healthy.flushes) != 0 {
+		t.Fatalf("healthy tick: %d sleeps, marks %v, flushes %v", healthy.at, marks, healthy.flushes)
+	}
+
+	// The next tick finds it away: recorded every poll until it is back,
+	// then the caches are flushed once and the record is removed.
+	outage := &directoryReturnScript{now: time.Unix(1_800_000_060, 0)}
+	for range 3 {
+		outage.steps = append(outage.steps, oneDomain(false, false))
+	}
+	outage.steps = append(outage.steps, oneDomain(false, true))
+	enterpriseHookWatchDirectoryReach(context.Background(), &stderr, outage.reachDeps(&marks), "", accounts)
+	want := [][]string{{"dclab.test"}, {"dclab.test"}, {"dclab.test"}, nil}
+	if len(marks) != len(want) {
+		t.Fatalf("marks %v, want %v", marks, want)
+	}
+	for i := range want {
+		if !slices.Equal(marks[i], want[i]) {
+			t.Fatalf("marks %v, want %v", marks, want)
+		}
+	}
+	if !slices.Equal(outage.flushes, []int{3}) {
+		t.Fatalf("flushes at polls %v, want 3 (the return) only", outage.flushes)
+	}
+	log := stderr.String()
+	if strings.Count(log, "no domain controller of dclab.test answers") != 1 ||
+		strings.Count(log, "a domain controller of dclab.test answers again after an outage; flushed") != 1 {
+		t.Fatalf("log = %q, want one line for the outage and one for the return", log)
+	}
+	// The return watch does not flush the same domain again at once.
+	if state := &enterpriseHookDirectoryReturnState; state.flushed["dclab.test"].at.IsZero() {
+		t.Fatalf("the return flush started no backoff: %v", state.flushed)
+	}
+
+	// A domain whose domain controllers never answered (a firewall in front
+	// of their LDAP port) is not put in an outage.
+	resetDirectoryReachState(t)
+	marks = nil
+	never := &directoryReturnScript{now: time.Unix(1_800_000_000, 0), steps: []directoryReturnPoll{{"never.test": {false, false}}}}
+	enterpriseHookWatchDirectoryReach(context.Background(), &bytes.Buffer{}, never.reachDeps(&marks), "", accounts)
+	if len(marks) != 0 || len(never.flushes) != 0 || never.at != 0 {
+		t.Fatalf("never reached: marks %v, flushes %v, %d sleeps", marks, never.flushes, never.at)
+	}
+
+	// A check cut short (the guardian stops) records nothing.
+	resetDirectoryReachState(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cut := &directoryReturnScript{now: time.Unix(1_800_000_000, 0), steps: []directoryReturnPoll{oneDomain(false, false)}}
+	enterpriseHookWatchDirectoryReach(ctx, &bytes.Buffer{}, cut.reachDeps(&marks), "", accounts)
+	if len(marks) != 0 {
+		t.Fatalf("a cancelled check wrote %v", marks)
+	}
+}

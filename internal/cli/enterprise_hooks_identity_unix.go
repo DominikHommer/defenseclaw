@@ -79,13 +79,22 @@ type enterpriseHookDirectoryReturnDeps struct {
 	flush   func(ctx context.Context) error
 	now     func() time.Time
 	sleep   func(ctx context.Context, d time.Duration) bool
+	// domains lists the enrolled accounts' Active Directory domains, and
+	// mark writes the ones whose domain controllers stopped answering
+	// (enterpriseHookWatchDirectoryReach).
+	domains func(dir string, accounts []enterprisehooks.IdentitySpoolAccount) []string
+	mark    func(dir string, domains []string) error
 }
 
 var enterpriseHookDirectoryReturn = enterpriseHookDirectoryReturnDeps{
 	stale:   enterprisehooks.DirectoryCachesStale,
 	answers: enterprisehooks.DomainControllerAnswers,
 	flush:   enterprisehooks.FlushDirectoryCaches,
-	now:     time.Now,
+	domains: enterprisehooks.DirectoryDomains,
+	mark: func(dir string, domains []string) error {
+		return enterprisehooks.WriteDirectoryUnreachable(dir, domains, time.Now(), enterpriseHookAuthorizationOwnershipSetter)
+	},
+	now: time.Now,
 	sleep: func(ctx context.Context, d time.Duration) bool {
 		t := time.NewTimer(d)
 		defer t.Stop()
@@ -106,6 +115,19 @@ var enterpriseHookDirectoryReturnState struct {
 	// and the gap before its next flush. A domain is dropped once none of
 	// its accounts is listed so.
 	flushed map[string]enterpriseHookDirectoryFlush
+}
+
+// enterpriseHookDirectoryReachState is the domain controller check's
+// (enterpriseHookWatchDirectoryReach): the domains whose domain controllers
+// answered at least once since the guardian started (seen), those that
+// stopped answering after that (away), and whether the guardian last wrote
+// a non-empty list (marked).
+var enterpriseHookDirectoryReachState struct {
+	sync.Mutex
+	watching bool
+	seen     map[string]bool
+	away     map[string]bool
+	marked   bool
 }
 
 // enterpriseHookDirectoryFlush is one domain's flush backoff.
@@ -184,6 +206,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
 	accounts, keys := enterpriseHookIdentitySpoolAccounts(stderr, run)
 	startEnterpriseHookDirectoryReturnWatch(ctx, stderr, dir, accounts)
+	startEnterpriseHookDirectoryReachWatch(ctx, stderr, dir, accounts)
 	sort.Strings(keys)
 	fingerprint := strings.Join(keys, ";")
 	now := time.Now()
@@ -324,4 +347,129 @@ func enterpriseHookDomainsAnswering(ctx context.Context, answers func(ctx contex
 		}
 	}
 	return back
+}
+
+// startEnterpriseHookDirectoryReachWatch starts the domain controller check
+// (enterpriseHookWatchDirectoryReach) unless one runs. The guardian's
+// reconcile tick calls it about once a minute.
+func startEnterpriseHookDirectoryReachWatch(ctx context.Context, stderr io.Writer, dir string,
+	accounts []enterprisehooks.IdentitySpoolAccount) {
+	state := &enterpriseHookDirectoryReachState
+	state.Lock()
+	if state.watching || len(accounts) == 0 {
+		state.Unlock()
+		return
+	}
+	state.watching = true
+	state.Unlock()
+	go func() {
+		defer func() {
+			state.Lock()
+			state.watching = false
+			state.Unlock()
+		}()
+		enterpriseHookWatchDirectoryReach(ctx, stderr, enterpriseHookDirectoryReturn, dir, accounts)
+	}()
+}
+
+// enterpriseHookWatchDirectoryReach checks whether a domain controller of
+// each enrolled account's Active Directory domain answers (macOS; Linux has
+// no such domains, enterprisehooks.DirectoryDomains). A domain that answered
+// before and no longer does is away: the guardian writes the away domains to
+// the identity spool (enterprisehooks.DirectoryUnreachableFile), so the
+// gateway takes their accounts' lookups as failed instead of trusting the
+// groups Open Directory lists then, and checks again every
+// enterpriseHookDirectoryReturnPoll. Once a domain answers again, the
+// directory caches are flushed: they hold the answers Open Directory gave
+// while it was away, without the accounts' other domain groups (GAP-0092,
+// GAP-0095). It returns once no domain is away, after one check when none
+// was, or when ctx ends.
+func enterpriseHookWatchDirectoryReach(ctx context.Context, stderr io.Writer, deps enterpriseHookDirectoryReturnDeps, dir string,
+	accounts []enterprisehooks.IdentitySpoolAccount) {
+	if deps.domains == nil {
+		return
+	}
+	state := &enterpriseHookDirectoryReachState
+	for {
+		domains := deps.domains(dir, accounts)
+		answering := enterpriseHookDomainsAnswering(ctx, deps.answers, domains)
+		if ctx.Err() != nil {
+			// A check cut short says nothing about the domain controllers.
+			return
+		}
+		var back, gone, away []string
+		state.Lock()
+		if state.seen == nil {
+			state.seen, state.away = map[string]bool{}, map[string]bool{}
+		}
+		for domain := range state.away {
+			if !slices.Contains(domains, domain) {
+				delete(state.away, domain)
+			}
+		}
+		for _, domain := range domains {
+			switch {
+			case slices.Contains(answering, domain):
+				if state.away[domain] {
+					back = append(back, domain)
+				}
+				delete(state.away, domain)
+				state.seen[domain] = true
+			case state.seen[domain] && !state.away[domain]:
+				state.away[domain] = true
+				gone = append(gone, domain)
+			}
+		}
+		for domain := range state.away {
+			away = append(away, domain)
+		}
+		slices.Sort(away)
+		marked := state.marked
+		state.Unlock()
+		if len(gone) > 0 {
+			fmt.Fprintf(stderr, "[hook-guardian] identity: no domain controller of %s answers; the gateway takes the lookups of "+
+				"its accounts as failed until one does\n", strings.Join(gone, ", "))
+		}
+		if len(back) > 0 {
+			enterpriseHookFlushAfterReturn(ctx, stderr, deps, back)
+		}
+		if deps.mark != nil && (len(away) > 0 || marked) {
+			if err := deps.mark(dir, away); err != nil {
+				fmt.Fprintf(stderr, "[hook-guardian] identity: record the domains whose domain controllers do not answer: %v\n", err)
+			} else {
+				state.Lock()
+				state.marked = len(away) > 0
+				state.Unlock()
+			}
+		}
+		if len(away) == 0 || !deps.sleep(ctx, enterpriseHookDirectoryReturnPoll) {
+			return
+		}
+	}
+}
+
+// enterpriseHookFlushAfterReturn flushes the directory caches for the
+// domains whose domain controllers answer again after an outage, and starts
+// their flush backoff, so the return watch (enterpriseHookWatchDirectoryReturn)
+// does not flush them again at once.
+func enterpriseHookFlushAfterReturn(ctx context.Context, stderr io.Writer, deps enterpriseHookDirectoryReturnDeps, back []string) {
+	err := deps.flush(ctx)
+	at := deps.now()
+	state := &enterpriseHookDirectoryReturnState
+	state.Lock()
+	if state.flushed == nil {
+		state.flushed = map[string]enterpriseHookDirectoryFlush{}
+	}
+	for _, domain := range back {
+		state.flushed[domain] = enterpriseHookDirectoryFlush{at: at, gap: enterpriseHookDirectoryFlushGap}
+	}
+	state.Unlock()
+	names := strings.Join(back, ", ")
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again after an outage, but the directory "+
+			"caches were not flushed: %v\n", names, err)
+		return
+	}
+	fmt.Fprintf(stderr, "[hook-guardian] identity: a domain controller of %s answers again after an outage; flushed the directory "+
+		"caches, so accounts get their domain groups at their next lookup\n", names)
 }

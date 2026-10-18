@@ -44,6 +44,11 @@ import (
 // flushed (FlushDirectoryCaches). Each domain is asked on its own, so a
 // domain that is still away does not hold up another that is back. During the outage nothing is flushed, so the answers
 // Open Directory still holds are kept.
+//
+// The guardian also checks the domain controllers of every enrolled Active
+// Directory account's domain on its own, since Open Directory can drop only
+// the accounts' other domain groups while it keeps the primary group named
+// (directory_unreachable_unix.go, GAP-0092, GAP-0095).
 
 // directoryLDAPPort is the port a domain controller's LDAP service listens on.
 const directoryLDAPPort = "389"
@@ -143,6 +148,24 @@ func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) []string 
 // listed, which reports whether the system names the account uid and its
 // primary group.
 func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed func(uid int) bool) []string {
+	return directoryADDomains(dir, accounts, func(uid int) bool { return !listed(uid) })
+}
+
+// DirectoryDomains returns the Active Directory domains of the enrolled
+// accounts, each once and sorted: the domains whose domain controllers the
+// guardian checks (DomainControllerAnswers, DirectoryUnreachableFile). Only
+// a Mac has any: SSSD on Linux says itself when it is offline.
+func DirectoryDomains(dir string, accounts []IdentitySpoolAccount) []string {
+	if !directoryCachesHoldOutageAnswers {
+		return nil
+	}
+	return directoryADDomains(dir, accounts, nil)
+}
+
+// directoryADDomains returns the domains of the accounts dir records as
+// Active Directory ones, of those include accepts (nil: all), each once and
+// sorted.
+func directoryADDomains(dir string, accounts []IdentitySpoolAccount, include func(uid int) bool) []string {
 	var domains []string
 	for _, account := range accounts {
 		if account.UID <= 0 {
@@ -156,7 +179,7 @@ func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed fu
 		if !validDirectoryDomain(domain) || slices.Contains(domains, domain) {
 			continue
 		}
-		if !listed(account.UID) {
+		if include == nil || include(account.UID) {
 			domains = append(domains, domain)
 		}
 	}

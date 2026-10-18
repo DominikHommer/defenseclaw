@@ -145,3 +145,73 @@ func TestDomainControllerAnswersIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0092: the guardian lists the Active Directory domains whose domain
+// controllers stopped answering for the gateway. The record is current for
+// DirectoryUnreachableMaxAge, names only valid domains, is removed when none
+// is away, and is not an account record (IdentitySpoolStale skips it).
+func TestDirectoryUnreachableRecord(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Unix(1_800_000_000, 0).UTC()
+	if err := WriteDirectoryUnreachable(dir, []string{"DCLab.Test.", "emea.dclab.test", "not a domain", "dclab.test"}, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadDirectoryUnreachable(dir, nil, now.Add(time.Minute)); !slices.Equal(got, []string{"dclab.test", "emea.dclab.test"}) {
+		t.Fatalf("domains = %v", got)
+	}
+	if got := ReadDirectoryUnreachable(dir, nil, now.Add(DirectoryUnreachableMaxAge+time.Second)); len(got) != 0 {
+		t.Fatalf("an old record is trusted: %v", got)
+	}
+	if got := ReadDirectoryUnreachable(dir, nil, now.Add(-2*time.Minute)); len(got) != 0 {
+		t.Fatalf("a record from the future is trusted: %v", got)
+	}
+	refuse := func(string, string) error { return os.ErrPermission }
+	if got := ReadDirectoryUnreachable(dir, refuse, now); len(got) != 0 {
+		t.Fatalf("an untrusted record is read: %v", got)
+	}
+	if _, key, stale := IdentitySpoolStale(dir, now.Add(2*time.Hour), time.Minute); stale || key != "" {
+		t.Fatalf("IdentitySpoolStale counts the reachability record: %q %v", key, stale)
+	}
+	if err := WriteDirectoryUnreachable(dir, nil, now, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, DirectoryUnreachableFile)); !os.IsNotExist(err) {
+		t.Fatalf("no domain away left the record: %v", err)
+	}
+	if err := WriteDirectoryUnreachable(dir, nil, now, nil); err != nil {
+		t.Fatalf("removing an absent record: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, DirectoryUnreachableFile), []byte(`{"v":1,"updated_at":"2027-01-15T08:00:00Z","domains":["dclab.test"],"x":1}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if got := ReadDirectoryUnreachable(dir, nil, time.Date(2027, 1, 15, 8, 0, 30, 0, time.UTC)); len(got) != 0 {
+		t.Fatalf("a record with an unknown field is read: %v", got)
+	}
+}
+
+// The guardian checks the domain controllers of the enrolled accounts'
+// Active Directory domains only, each domain once.
+func TestDirectoryADDomainsNamesTheEnrolledDomains(t *testing.T) {
+	dir := t.TempDir()
+	for _, record := range []IdentitySpoolRecord{
+		{Key: "501", User: "admin", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}},
+		{Key: "94401103", User: "ent-bob", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "DCLab.Test"}},
+		{Key: "94401106", User: "ent-ann", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test"}},
+		{Key: "94401104", User: "ent-ldap", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLDAP, Domain: "ldap.example.com"}},
+	} {
+		data, err := MarshalIdentitySpoolRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.Key+".json"), data, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accounts := []IdentitySpoolAccount{{UID: 501}, {UID: 94401103}, {UID: 94401104}, {UID: 94401106}, {UID: 94401199}}
+	if got := directoryADDomains(dir, accounts, nil); !slices.Equal(got, []string{"dclab.test"}) {
+		t.Fatalf("domains = %v, want the AD domain once", got)
+	}
+	if got := DirectoryDomains(dir, accounts); directoryCachesHoldOutageAnswers != (len(got) == 1) {
+		t.Fatalf("DirectoryDomains = %v on a host whose caches hold outage answers: %v", got, directoryCachesHoldOutageAnswers)
+	}
+}
