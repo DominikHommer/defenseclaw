@@ -372,7 +372,7 @@ separate systemd service's environment through `defenseclaw doctor`.
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 132 test-only variables">
+<Accordion title="Show the 134 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -401,6 +401,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_FAKE_CLAUDE_LOG`<br/>Default: `unset`<br/>Values: `absolute-path`, `unset`<br/>Managed host: `ignore` | Test-only stub: path the fake claude CLI logs invocations to.<br/>**Read by:** `internal/gateway/connector/codeguard_native_test.go` |
 | `DEFENSECLAW_GATEWAY_CODEX_APP_SERVER_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by gateway package tests.<br/>**Read by:** `internal/gateway/codex_setup_fixture_windows_test.go` |
 | `DEFENSECLAW_GATEWAY_URL`<br/>Default: `unset` (in-process e2e server)<br/>Values: `http(s) base URL e.g. http://127.0.0.1:18970`, `unset`<br/>Managed host: `ignore` | Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E).<br/>**Read by:** `internal/gateway/security_suite_test.go` |
+| `DEFENSECLAW_HOOKEXEC_TEST_CPU_BURN`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks a child process of the hookexec answer-watchdog tests that keeps one CPU busy, so the tests can fill every CPU of the host while a hook call runs.<br/>**Read by:** `internal/gateway/connector/hookexec/answer_watchdog_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT`<br/>Default: `unset`<br/>Values: `test-defined absolute directory path`, `unset`<br/>Managed host: `ignore` | Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated stable-hook delegation helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the connector hook-token cross-process lock fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
@@ -479,6 +480,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_TEST_WAIT_PROCESS_EXIT`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Activate the short-lived helper subprocess used to verify that native Windows daemon shutdown waits on the original process handle.<br/>**Read by:** `internal/daemon/proc_windows_flags_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_EXIT`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Selects the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |
 | `DEFENSECLAW_TEST_WATCHDOG_WAIT_READY`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries the readiness marker used by the native watchdog original-handle wait fixture.<br/>**Read by:** `internal/cli/watchdog_pidfile_windows_test.go` |
+| `DEFENSECLAW_TEST_WINDOWS_LIFECYCLE_PRIORITY`<br/>Default: `unset`<br/>Values: `1`, `child`, `unset`<br/>Managed host: `ignore` | Marks the child process of the Windows lifecycle-priority test that reports the priority class it inherited from a lifecycle run.<br/>**Read by:** `internal/cli/windows_enterprise_priority_test.go` |
 | `DEFENSECLAW_TEST_WINDOWS_NOTIFICATION`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the attended native Windows notification delivery test.<br/>**Read by:** `internal/notify/notify_windows_test.go` |
 | `DEFENSECLAW_UNSIGNED_PE`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Carries an unsigned portable-executable fixture path to the native Authenticode evidence regression.<br/>**Read by:** `cli/tests/test_windows_installer_artifacts.py` |
 | `DEFENSECLAW_UPDATE_GOLDEN`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, the bounded chain catalog and the kernel-control digest pin, instead of comparing against them.<br/>**Read by:** `internal/gateway/connector/hook_render_golden_test.go`, `policies/kernel/kernel_test.go`, `internal/gateway/connector/sandbox_artifacts_test.go`, `internal/openshell/policy/policy_test.go`, `internal/openshell/profiles/profiles_test.go`, `internal/guardrail/tool_chain_catalog_json_test.go`, `internal/sensor/kernelpolicy/world_test.go` |

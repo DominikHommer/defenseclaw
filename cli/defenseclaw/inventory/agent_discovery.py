@@ -1258,7 +1258,10 @@ def _keep_versions_of_slow_unchanged_agents(
         for signal in agents.values()
         if not signal.version
         and (
-            (signal.binary_path and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED))
+            (
+                signal.binary_path
+                and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
+            )
             or (not_found and not signal.binary_path and not signal.error)
         )
     ]
