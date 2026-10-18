@@ -21,10 +21,10 @@ from verify_native_artifact import manifest as peer_manifest  # noqa: E402
 from verify_native_artifact import record_matches, static_elf
 
 REPOSITORY = "cisco-ai-defense/defenseclaw"
-RECEIPT_SHA = "8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b"
+RECEIPT_SHA = "6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668"
 # Independently reviewed source/build/image inputs; no caller or API chooses a
 # pin. This source recipe needs its own review and explicit run authorization.
-DRIVER_PROVENANCE_SHA = "d53a38d6dcbeaf035edbc1210f20b1ae2fa1415de9323e77d9ca2784feb405cc"
+DRIVER_PROVENANCE_SHA = "1c0a98c32b475b967670e335acaf81c442083eae4a8b43197b531b3315b45e05"
 PINS = {
     "peer": {
         "commit": "c914cb9a66d3e05a11d5eac4dcf4da7a8c0de139",
@@ -38,32 +38,32 @@ PINS = {
         "event": "push",
     },
     "payload": {
-        "commit": "3f295c8351d29028278e99349de9036207df6590",
-        "run": 39167683927,
-        "artifact": 12151291706,
-        "archive": "ae4e4c905d707a4505b80c1d3343f7896051a6e5c51f56835e7d7552d4fc67a5",
-        "provenance": "0d92d049bf554404c8d4edfc7d124890258be0177bf336b44441298ac093f578",
+        "commit": "6a1f7080a39fbdfa39b98f3ea7db02516910dc3d",
+        "run": 39171740021,
+        "artifact": 12152816365,
+        "archive": "f27e44a36ff6d2349dff1ad38909f279ca027d429e85cb03a04b77322feb92db",
+        "provenance": "70979ab492b883e5c6c9d0c583477b9f1cb999b6d14fdc6a89ad356aa8134dae",
         "workflow": ".github/workflows/axis-native-payload-build.yml",
         "stem": "axis-fixed-native-payload-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "wrapper": {
-        "commit": "52e4a071109d1522d3cadf53085c9537467ef9c7",
-        "run": 39168692019,
-        "artifact": 12151861098,
-        "archive": "86d78d2aee702fbcbfb356a94b8bd654dc07b842f8c54b5531c744f434f59f5e",
-        "provenance": "7d4dad5aa155b47e932c61e88a72ff1f5d42bb00dca80c7fb2955d7add767d31",
+        "commit": "c76a05c3df66f43e76c6566b53aa2b3c1c7bca0b",
+        "run": 39172460882,
+        "artifact": 12153515281,
+        "archive": "ce84ed94fce099b59bea6b0593f23d7e845c3734ab1e62ea9f794fb38faa6e68",
+        "provenance": "d84f37d59f7830eda86de0bd562acbb85a0ddb2d7c8e42132f019c0f4a434b60",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "b38a49dda8da9aca450994b709b44e9cea7d5c19",
-        "run": 39169432727,
-        "artifact": 12151303749,
-        "archive": "08800337cd68304ac4038e2b6d12af13404ee725c819f3feae1a29124a6e6384",
+        "commit": "c63c08b86de46981f85d29e9d43add02bfea5b2c",
+        "run": 39173104546,
+        "artifact": 12153496454,
+        "archive": "83b916e71464d25a2470986ce8f9f60ff0e3bfb8e0e0df5b52d7827a25adfa7f",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
@@ -262,21 +262,21 @@ def prepare(root, metadata_api=api, download=None):
             "payload",
             "bin/payload",
             images / "fixed-payload",
-            "ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2",
+            "3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d",
             1929342,
         ),
         (
             "wrapper",
             "bin/reviewed-harness",
             images / "reviewed-wrapper",
-            "70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb",
+            "485aa37bf8fda4aa35f41247c802931fd73decfac28eda60ed8ea44577f63e87",
             3473534,
         ),
         (
             "driver",
             "bin/fixed-outer-driver",
             images / "fixed-driver",
-            "a93df15dba750e5e2363ec4276b7c0e75f593101fa58ee9ef0e5b901bb2b3f39",
+            "0f7ef1d91cd6a95d09b93341ca0cd59628d1c1346538002f554e0477cef23d60",
             3211390,
         ),
     ]
@@ -299,7 +299,7 @@ def prepare(root, metadata_api=api, download=None):
             "payload",
             "source/test/e2e/axis/native-peer/payload/main_linux.go",
             source / "payload-main_linux.go",
-            "80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb",
+            "aa695d4df73865cce90afd8dab41c819949a6f8dec66b9fe1a641be035df815e",
         ),
     ]:
         target.write_bytes(select(archives[role], member, digest))

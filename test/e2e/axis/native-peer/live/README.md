@@ -112,9 +112,9 @@ qualification fields remain false. Earlier failures remain unchanged above.
 
 ## Lifecycle pairing: first attempt failed
 
-The checked-in recipe now selects `--suite lifecycle`, retaining the wrapper's
-baseline default and the historical four-case evidence above. The new pairing
-uses the same reviewed c914 peer/Bubblewrap, reviewed 3f295 payload, and 52e4
+The first lifecycle recipe selected `--suite lifecycle`, retaining the wrapper's
+baseline default and the historical four-case evidence above. That historical
+pairing used the same reviewed c914 peer/Bubblewrap, 3f295 payload, and 52e4
 wrapper under combined receipt
 `8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`.
 The paired driver is built at `b38a49dda8da9aca450994b709b44e9cea7d5c19`,
@@ -150,6 +150,29 @@ finite observation corroborates only these three synthetic writers; independent
 native owner cleanup and zero pending custody remain mandatory. The unchanged
 offline filter must deny Setsid; only positive-group nonleader descendants
 substantiate that denial, and the parent result is consistency only.
+
+## Corrected group-query pairing: unrun
+
+The current fixed recipe retains `--suite lifecycle` and the same three cases,
+limits, cleanup and evidence collection. Its reviewed 6a1 payload queries raw
+allowed amd64 `SYS_GETPGRP` and checks errno before the same positive nonleader
+predicate. Peer, static Bubblewrap and offline policy remain unchanged. The new
+combined receipt is
+`6db10d2a73ee7860bb0d7ad8a6155166d2b59e7d504513e1222a634aac55c668`.
+
+The source-bound inputs are payload run `39171740021`, artifact `12152816365`
+(image `3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d`,
+1,929,342 bytes); wrapper run `39172460882`, artifact `12153515281`
+(image `485aa37bf8fda4aa35f41247c802931fd73decfac28eda60ed8ea44577f63e87`,
+3,473,534 bytes); and driver run `39173104546`, artifact `12153496454`
+(image `0f7ef1d91cd6a95d09b93341ca0cd59628d1c1346538002f554e0477cef23d60`,
+3,211,390 bytes). Payload, wrapper and driver recorded one, ten and twenty
+approved inert test passes respectively. Those tests do not execute a payload,
+query a real group, create a namespace or install a filter.
+
+This corrected pairing has not executed. The earlier c9e result stays failed,
+with only its two fixed wait cases passing. A new attempt requires exact-source
+review and a separate explicit one-shot dispatch; no retry occurs automatically.
 
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)

@@ -8,7 +8,7 @@
   "mxc_commit": "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2",
   "bubblewrap_commit": "8e51677abd7e3338e4952370bf7d902e37d8cbb6",
   "static_closure_sha256": "e6ce4df2d0118cfa0b1a26f554e4dcbd039d1fa3b77ad0d7628d5a3d1ba9665b",
-  "payload_source_sha256": "80c64fb6138218c40ebbfe646c6225d098e3734be2ca5e0c1ca020c386f4b8fb",
+  "payload_source_sha256": "aa695d4df73865cce90afd8dab41c819949a6f8dec66b9fe1a641be035df815e",
   "builds": [
     {
       "role": "peer_and_static_bwrap",
@@ -20,11 +20,11 @@
     },
     {
       "role": "fixed_payload",
-      "commit": "3f295c8351d29028278e99349de9036207df6590",
-      "run": 39167683927,
-      "artifact": 12151291706,
-      "archive_sha256": "ae4e4c905d707a4505b80c1d3343f7896051a6e5c51f56835e7d7552d4fc67a5",
-      "provenance_sha256": "0d92d049bf554404c8d4edfc7d124890258be0177bf336b44441298ac093f578"
+      "commit": "6a1f7080a39fbdfa39b98f3ea7db02516910dc3d",
+      "run": 39171740021,
+      "artifact": 12152816365,
+      "archive_sha256": "f27e44a36ff6d2349dff1ad38909f279ca027d429e85cb03a04b77322feb92db",
+      "provenance_sha256": "70979ab492b883e5c6c9d0c583477b9f1cb999b6d14fdc6a89ad356aa8134dae"
     }
   ],
   "images": [
@@ -43,7 +43,7 @@
     {
       "role": "fixed_payload",
       "path": "images/fixed-payload",
-      "sha256": "ff14f6e2bbce3c35566326ba98cec890b500b6032df3c3ee2b408c9a494128f2",
+      "sha256": "3990927d43320f78586fc669c1a700ecf4c7c8359ba6ada3e41ccd56d4e78e9d",
       "size": 1929342
     }
   ]
