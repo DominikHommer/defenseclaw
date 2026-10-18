@@ -10,6 +10,7 @@ on:
     paths:
       - .github/workflows/axis-native-driver-build.yml
       - test/e2e/axis/native-peer/driver/**
+      - internal/axis/namespaceinit/**
       - go.mod
       - go.sum
       - LICENSE
@@ -58,6 +59,7 @@ jobs:
             THIRD_PARTY_LICENSES.txt
             .github/workflows/axis-native-driver-build.yml
             test/e2e/axis/native-peer/driver
+            internal/axis/namespaceinit
           sparse-checkout-cone-mode: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
@@ -79,6 +81,7 @@ jobs:
           import subprocess
 
           roots = {
+              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
               'test/e2e/axis/native-peer/driver': ['README.md', 'cleanup.go', 'cleanup_test.go', 'custody_linux.go', 'driver_linux.go', 'driver_linux_test.go', 'images_linux.go', 'main.go', 'main_other.go', 'main_test.go'],
           }
           sources = ['go.mod', 'go.sum', 'LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt', '.github/workflows/axis-native-driver-build.yml']
@@ -156,7 +159,7 @@ jobs:
               raise SystemExit('dependency metadata exceeds bound')
           decoder, index, local = json.JSONDecoder(), 0, set()
           root = Path.cwd()
-          wanted = {'test/e2e/axis/native-peer/driver'}
+          wanted = {'test/e2e/axis/native-peer/driver', 'internal/axis/namespaceinit'}
           count = 0
           while index < len(raw):
               if raw[index].isspace():
@@ -199,15 +202,20 @@ jobs:
               retained[key] = {'path': target.relative_to(artifact).as_posix(), 'sha256': hashlib.sha256(target.read_bytes()).hexdigest(), 'size': target.stat().st_size}
           (artifact / 'DEPENDENCY-CLOSURE.json').write_text(json.dumps({'module': expected, 'local_packages': sorted(local), 'package_count': count, 'retained': retained, 'module_verification': True, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
-      - name: Run only the ten source-reviewed inert unit tests
+      - name: Run only source-reviewed inert driver and bootstrap unit tests
         shell: bash
         run: |
           set -euo pipefail
-          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/driver -count=1 -timeout=30s > driver-artifact/INERT-TESTS.jsonl
+          go test -mod=readonly -p 1 -json ./test/e2e/axis/native-peer/driver ./internal/axis/namespaceinit -count=1 -timeout=30s > driver-artifact/INERT-TESTS.jsonl
           python3 - <<'PY'
           import json
           from pathlib import Path
           expected = {
+              'TestProofAndSingleNonrootMaps',
+              'TestBootstrapStopsBeforeMutationOrReadinessOnEveryFailure',
+              'TestNamespaceOwnershipRefusesReusedOrForeignNamespaces',
+              'TestEveryThreadStatusRequiresAllFourZeroSetsAndNNP',
+              'TestAllThreadCapabilityDropStopsOnUnsupportedBarrier',
               'TestUnreviewedDriverRefusesBeforeAnyNativeOrFilesystemWork',
               'TestReviewedAdmissionUsesInjectedFakeRunnerOnly',
               'TestCleanupFailureRemainsFailureAfterSuccessfulRetry',

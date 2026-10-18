@@ -7,6 +7,7 @@ compile_error!("the initial private AXIS peer supports only native Linux x86_64"
 pub mod conversation;
 pub mod custody;
 pub mod linux;
+pub mod namespace;
 pub mod owner;
 pub mod transport;
 pub mod wire;

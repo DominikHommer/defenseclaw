@@ -3,8 +3,8 @@
 
 //! Linux capability handoff. Guest path labels are never reopened on the host.
 //!
-//! The trusted native factory supplies fd3=bwrap image, fd4=payload image,
-//! fd5=cwd, then read/write objects in preparation order. Deny masks and
+//! The trusted factory supplies fd3=namespace proof (consumed before control),
+//! fd4=bwrap image, fd5=payload image, fd6=cwd, then read/write objects. Deny masks and
 //! overlapping destinations refuse until a qualified translation exists.
 //! Images are immutable sealed memfds made from the host-admitted bytes. The
 //! full authority, original image digests and resolver records stay in Go.
@@ -14,7 +14,7 @@ use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 
-const FIRST_CAP: i32 = 3;
+const FIRST_CAP: i32 = 4;
 const IMAGE_BOUND: u64 = 512 << 20;
 const SEALS: i32 = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
 

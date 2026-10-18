@@ -11,8 +11,9 @@ authority, credentials, artifact verification, policy generation and outer
 native process custody. Correlation digests do not grant authority.
 
 Preparation consumes the trusted **unprivileged** factory's inherited table:
-fd3 = immutable sealed static-musl Bubblewrap image, fd4 = sealed ELF payload,
-fd5 = held cwd directory, then read and write object descriptors in exact plan
+fd3 = sealed namespace bootstrap proof (consumed before control),
+fd4 = immutable sealed static-musl Bubblewrap image, fd5 = sealed ELF payload,
+fd6 = held cwd directory, then read and write object descriptors in exact plan
 order. Every fd is close-on-exec before library preparation. A guest path label
 never authorizes a host source lookup. The cwd must be an exact grant naming the same held
 object. Images and grant objects stay held until their single-use launch.
@@ -108,3 +109,19 @@ descendant cleanup. This is a new enforcement posture and inherits none of the
 earlier Landlock contributor probe's successful boundary assertions. PTY,
 Windows/macOS peers, brokers, hooks, credentials and model traffic remain later
 gates. See [patch source contracts](patches/README.md).
+
+## Private proc bootstrap source revision
+
+The next source revision adds a fresh mount namespace and a fixed sealed FD3
+parent-identity proof to each owned child. Before READY/control/backend work,
+the child proves kernel ownership and single nonzero UID/GID mappings, makes
+mount propagation private, mounts matching procfs and clears startup capabilities.
+Only SYS_ADMIN inside the new user namespace crosses the trusted initialization
+interval; all Go threads use the CGO0 all-thread barrier, and the Rust peer proves
+it is single threaded with signals blocked until cap-zero. No host capability,
+UID0 mapping, grant, alternate backend or customer activation is added.
+
+This changes the private FD handoff. Existing e054 peer and d056 wrapper/c8d4
+driver artifacts remain historical evidence and cannot qualify this source.
+Fresh source-bound artifacts, registry pins and one separately reviewed runtime
+attempt are required. The two earlier native failures remain failures.

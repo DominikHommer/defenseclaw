@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/axis/namespaceinit"
 	"golang.org/x/sys/unix"
 )
 
@@ -88,11 +89,21 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 		}
 		childFiles = append(childFiles, os.NewFile(uintptr(fd), "fixed-child-owned-image"))
 	}
-	childFiles = append([]*os.File{grantRead, readyWrite}, childFiles...)
+	proof, err := namespaceinit.Capture()
+	if err != nil {
+		_ = grantRead.Close()
+		_ = readyWrite.Close()
+		for _, file := range childFiles {
+			_ = file.Close()
+		}
+		return err
+	}
+	childFiles = append([]*os.File{proof, grantRead, readyWrite}, childFiles...)
 	stdout, stderr := &boundedCapture{}, &boundedCapture{}
 	pidfd := -1
-	command := &exec.Cmd{Path: "/proc/self/fd/5", Args: []string{"fixed-native-peer-outer-driver", "--owned-wrapper-bootstrap", "--receipt", opts.receipt, "--evidence", opts.evidence}, Env: []string{}, Dir: "/", ExtraFiles: childFiles, Stdout: stdout, Stderr: stderr,
-		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-outer-driver", "--owned-wrapper-bootstrap", "--receipt", opts.receipt, "--evidence", opts.evidence}, Env: []string{}, Dir: "/", ExtraFiles: childFiles, Stdout: stdout, Stderr: stderr,
+		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+			AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN},
 			UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, PidFD: &pidfd}}
 	owner := &outerCustodian{pidfd: -1, done: make(chan struct{}), exit: -1}
 	defer func() {
@@ -182,14 +193,13 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	if os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" || len(args) != 4 || args[0] != "--receipt" || args[2] != "--evidence" || len(args[1]) == 0 || len(args[1]) > 4096 || len(args[3]) == 0 || len(args[3]) > 4096 {
 		return record, owner, errors.New("fixed owned bootstrap required")
 	}
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	// Before filesystem/image inspection. EOF before GRANT covers parent death
-	// before this prctl; the creator thread stays owned through native wait.
-	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0); err != nil {
+	// Setup installs PDEATHSIG, verifies owned fresh USER/MNT/PID namespaces,
+	// mounts matching procfs and drops capabilities on every Go OS thread.
+	// No READY or GRANT is processed before successful completion.
+	if err := namespaceinit.Setup(); err != nil {
 		return record, owner, err
 	}
-	grant, ready, self, wrapper := os.NewFile(3, "fixed-outer-grant"), os.NewFile(4, "fixed-outer-ready"), os.NewFile(5, "fixed-outer-self"), os.NewFile(6, "fixed-outer-wrapper")
+	grant, ready, self, wrapper := os.NewFile(4, "fixed-outer-grant"), os.NewFile(5, "fixed-outer-ready"), os.NewFile(6, "fixed-outer-self"), os.NewFile(7, "fixed-outer-wrapper")
 	defer grant.Close()
 	defer ready.Close()
 	defer self.Close()
@@ -239,7 +249,7 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	}
 	// Literal proc-self FD names the still-held sealed executable; no host image
 	// pathname is reopened. Exec has no PATH lookup or command-string parsing.
-	err = syscall.Exec("/proc/self/fd/6", []string{"reviewed-native-peer-wrapper", "--run-fixed", "--receipt", args[1], "--evidence", args[3]}, []string{})
+	err = syscall.Exec("/proc/self/fd/7", []string{"reviewed-native-peer-wrapper", "--run-fixed", "--receipt", args[1], "--evidence", args[3]}, []string{})
 	runtime.KeepAlive(wrapper)
 	return record, owner, err
 }

@@ -24,7 +24,7 @@ AXIS = "fb5fd5f0f9377c2ccb30d7e027a36373de0d037c"
 MXC = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 BWRAP = "8e51677abd7e3338e4952370bf7d902e37d8cbb6"
 TOOLCHAIN = "1.95.0"
-NATIVE_TEST_COUNT = 18
+NATIVE_TEST_COUNT = 19
 C_TESTS = (
     "topology_refuses_nested_bind_mounts_and_malformed_inventory",
     "locator_refuses_deleted_traversal_and_unrepresentable_names",
@@ -46,6 +46,7 @@ SOURCE = {
     "test_prepare_build.py",
     "src/lib.rs",
     "src/main.rs",
+    "src/namespace.rs",
     "src/conversation.rs",
     "src/custody.rs",
     "src/linux.rs",

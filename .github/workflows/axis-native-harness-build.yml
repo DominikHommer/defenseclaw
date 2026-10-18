@@ -12,6 +12,7 @@ on:
       - internal/axis/bridgeproto/**
       - internal/axis/bridgeowner/**
       - internal/axis/bridgeprocess/**
+      - internal/axis/namespaceinit/**
       - test/e2e/axis/native-peer/harness/**
       - go.mod
       - go.sum
@@ -63,6 +64,7 @@ jobs:
             internal/axis/bridgeproto
             internal/axis/bridgeowner
             internal/axis/bridgeprocess
+            internal/axis/namespaceinit
             test/e2e/axis/native-peer/harness
           sparse-checkout-cone-mode: false
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
@@ -85,6 +87,7 @@ jobs:
           import subprocess
 
           roots = {
+              'internal/axis/namespaceinit': ['README.md', 'bootstrap_linux.go', 'bootstrap_linux_test.go', 'proof.go', 'proof_test.go'],
               'internal/axis/bridgeproto': ['README.md', 'codec.go', 'fuzz_test.go', 'message.go', 'protocol_test.go', 'state.go'],
               'internal/axis/bridgeowner': ['README.md', 'owner.go', 'owner_test.go', 'pipe.go', 'pipe_other.go', 'pipe_test.go', 'pipe_windows.go', 'pipe_windows_test.go'],
               'internal/axis/bridgeprocess': ['README.md', 'image_linux.go', 'start.go', 'start_linux.go', 'start_linux_test.go', 'start_other.go', 'start_other_test.go', 'start_test.go'],
@@ -166,7 +169,7 @@ jobs:
               raise SystemExit('dependency metadata exceeds bound')
           decoder, index, local = json.JSONDecoder(), 0, set()
           root = Path.cwd()
-          wanted = {'internal/axis/bridgeproto', 'internal/axis/bridgeowner', 'internal/axis/bridgeprocess', 'test/e2e/axis/native-peer/harness'}
+          wanted = {'internal/axis/namespaceinit', 'internal/axis/bridgeproto', 'internal/axis/bridgeowner', 'internal/axis/bridgeprocess', 'test/e2e/axis/native-peer/harness'}
           count = 0
           while index < len(raw):
               if raw[index].isspace():

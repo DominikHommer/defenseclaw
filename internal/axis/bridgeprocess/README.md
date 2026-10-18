@@ -17,7 +17,15 @@ alone does not establish provenance or a static-musl loader closure.
 The factory duplicates held images and filesystem objects into the Rust peer's
 fixed FD table. Its only executable name is its own remapped sealed descriptor
 through `/proc/self/fd`; it supplies zero arguments and an empty environment.
-The peer starts inside fresh unprivileged user/PID/network/IPC/UTS namespaces.
+The peer starts inside fresh unprivileged user/mount/PID/network/IPC/UTS namespaces.
+FD3 is a sealed parent namespace-identity proof; image/root capabilities begin
+at FD4. Before control or backend work, the trusted peer proves new namespace
+ownership, mounts a private matching procfs and clears its startup capability.
+The only ambient startup capability is SYS_ADMIN in the new user namespace;
+the verified parent has none. See [namespace bootstrap](../namespaceinit/README.md)
+for the exact trusted initialization interval and refusal gates. This new
+private handoff needs a freshly admitted peer and harness artifact; prior
+artifact/runtime observations do not qualify it.
 An atomic clone pidfd owns the exact namespace init; no workload name, PID
 enumeration, process group or protocol completion is used for cleanup.
 The PID namespace is an outer lifecycle boundary; the peer's inner MXC/

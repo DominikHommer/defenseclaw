@@ -19,6 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeowner"
 	"github.com/defenseclaw/defenseclaw/internal/axis/bridgeproto"
+	"github.com/defenseclaw/defenseclaw/internal/axis/namespaceinit"
 	"golang.org/x/sys/unix"
 )
 
@@ -200,7 +201,11 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		len(inputs.Read) != len(plan.Filesystem.Read) || len(inputs.Write) != len(plan.Filesystem.Write) {
 		return nil, ErrAdmission
 	}
-	var extras []*os.File
+	proof, err := namespaceinit.Capture()
+	if err != nil {
+		return nil, err
+	}
+	extras := []*os.File{proof}
 	defer func() {
 		for _, file := range extras {
 			_ = file.Close()
@@ -255,7 +260,8 @@ func start(ctx context.Context, binding bridgeproto.Binding, plan bridgeproto.Pr
 		Args: []string{"defenseclaw-axis-peer"}, Env: []string{}, Dir: "/",
 		ExtraFiles: extras, Stdin: channels[0].Child, Stdout: channels[1].Child, Stderr: channels[2].Child,
 		SysProcAttr: &syscall.SysProcAttr{
-			Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+			Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+			AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN},
 			UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
 			GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}},
 			// Go's Pdeathsig checks getppid against the pre-clone PID, which

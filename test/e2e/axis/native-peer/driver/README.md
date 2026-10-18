@@ -62,3 +62,19 @@ This driver never changes host sysctls, services, ACLs, credentials or firewall.
 Unit tests always supply an unreviewed registry or fake runner. Linux-specific
 tests parse inert ELF headers, use memory-only READY/GRANT streams and fake
 custody; they never clone, call prctl, seal/execute an image or create a sandbox.
+
+## Private proc bootstrap source revision
+
+The next source revision adds a fresh mount namespace and a fixed sealed FD3
+parent-identity proof to each owned child. Before READY/control/backend work,
+the child proves kernel ownership and single nonzero UID/GID mappings, makes
+mount propagation private, mounts matching procfs and clears startup capabilities.
+Only SYS_ADMIN inside the new user namespace crosses the trusted initialization
+interval; all Go threads use the CGO0 all-thread barrier, and the Rust peer proves
+it is single threaded with signals blocked until cap-zero. No host capability,
+UID0 mapping, grant, alternate backend or customer activation is added.
+
+This changes the private FD handoff. Existing e054 peer and d056 wrapper/c8d4
+driver artifacts remain historical evidence and cannot qualify this source.
+Fresh source-bound artifacts, registry pins and one separately reviewed runtime
+attempt are required. The two earlier native failures remain failures.

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/axis/namespaceinit"
 	"golang.org/x/sys/unix"
 )
 
@@ -318,23 +319,31 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 		return err
 	}
 	defer readyRead.Close()
+	proof, err := namespaceinit.Capture()
+	if err != nil {
+		_ = grantRead.Close()
+		_ = readyWrite.Close()
+		return err
+	}
 	stdout, stderr := &boundedCapture{}, &boundedCapture{}
 	pidfd := -1
-	command := &exec.Cmd{Path: "/proc/self/fd/5", Args: []string{"fixed-native-peer-wrapper", "--owned-fixed-worker", "--receipt", opts.receipt, "--evidence", opts.evidence},
-		Env: []string{}, Dir: "/", ExtraFiles: []*os.File{grantRead, readyWrite, image}, Stdout: stdout, Stderr: stderr,
-		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-wrapper", "--owned-fixed-worker", "--receipt", opts.receipt, "--evidence", opts.evidence},
+		Env: []string{}, Dir: "/", ExtraFiles: []*os.File{proof, grantRead, readyWrite, image}, Stdout: stdout, Stderr: stderr,
+		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+			AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN},
 			UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}},
 			GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, PidFD: &pidfd}}
 	// An owned duplicate lets the creator alone release ExtraFiles, even if
 	// the caller times out while command.Start is still inside the kernel.
 	copyFD, err := unix.FcntlInt(image.Fd(), unix.F_DUPFD_CLOEXEC, 3)
 	if err != nil {
+		_ = proof.Close()
 		_ = grantRead.Close()
 		_ = readyWrite.Close()
 		return err
 	}
 	childImage := os.NewFile(uintptr(copyFD), "fixed-child-sealed-wrapper")
-	command.ExtraFiles[2] = childImage
+	command.ExtraFiles[3] = childImage
 	owner := &outerCustodian{pidfd: -1, done: make(chan struct{}), exit: -1}
 	defer func() {
 		cleanupErr := retained.close(owner)
@@ -344,7 +353,7 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
 	record["owned_worker_start_attempted"] = true
-	if err := owner.start(ctx, command, &pidfd, []*os.File{grantRead, readyWrite, childImage}); err != nil {
+	if err := owner.start(ctx, command, &pidfd, []*os.File{proof, grantRead, readyWrite, childImage}); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -412,9 +421,14 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 	if os.Getpid() != 1 || os.Getppid() != 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed worker requires its owned PID namespace")
 	}
+	record["worker_admission_stage"] = "namespace_bootstrap"
+	if err := namespaceinit.Setup(); err != nil {
+		return record, owner, err
+	}
+	record["namespace_bootstrap_complete"] = true
 	observeProcPIDView(record)
 	record["worker_admission_stage"] = "private_channels"
-	grant, ready, self := os.NewFile(3, "fixed-worker-grant"), os.NewFile(4, "fixed-worker-ready"), os.NewFile(5, "fixed-worker-self")
+	grant, ready, self := os.NewFile(4, "fixed-worker-grant"), os.NewFile(5, "fixed-worker-ready"), os.NewFile(6, "fixed-worker-self")
 	defer grant.Close()
 	defer ready.Close()
 	defer self.Close()
@@ -444,14 +458,6 @@ func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[st
 	closeErr := current.Close()
 	if errors.Join(currentErr, selfErr, closeErr) != nil || d != sd || i != si {
 		return record, owner, errors.New("fixed worker self image identity differs")
-	}
-	record["worker_admission_stage"] = "parent_death_guard"
-	// Install before READY; the parent never queues GRANT before READY. If the
-	// parent dies earlier, EOF refuses before runNative. Afterwards SIGKILL of
-	// namespace init also kills all its descendants. Avoid pre-exec getppid.
-	runtime.LockOSThread()
-	if err := unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0); err != nil {
-		return record, owner, errors.New("fixed worker parent death guard refused")
 	}
 	record["worker_admission_stage"] = "ready_and_grant"
 	if err := readyThenGrant(ready, grant); err != nil {

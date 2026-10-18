@@ -21,6 +21,7 @@ fn run() -> Result<(), ()> {
     {
         return Err(());
     }
+    defenseclaw_axis_native::namespace::setup()?;
     if std::env::args_os().len() != 1 {
         return Err(());
     }
