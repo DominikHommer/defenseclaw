@@ -70,7 +70,9 @@ func TestBundleDigesterMatchesGatewayForSettingsOnlyBundle(t *testing.T) {
 	writeBundleTestFile(t, filepath.Join(configDir, "config.generation.json"), fmt.Appendf(nil,
 		`{"generation":4,"config_sha256":"%x","actor":"bundle:%s","written_at":"2026-10-18T00:00:00Z","bundle_id":%q,"bundle_version":5,"signer_key_id":"k1"}`,
 		sum, bundleID, bundleID))
-	deviceCfg, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, installed)
+	// This device's managed layout is the temporary one above, so its
+	// gateway loads the installed config with that layout's defaults.
+	deviceCfg, err := config.LoadRuntimeV8InspectionCandidateForLayout(layout.ConfigPath, installed, layout.DataDir, runtime.GOOS)
 	if err != nil {
 		t.Fatal(err)
 	}
