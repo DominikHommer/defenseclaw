@@ -135,7 +135,7 @@ local tooling validation; no runtime implementation was changed.
 
 ## Reproduction and next use
 
-See the [tool README](../../scripts/connector_delta/README.md) for exact
+See the [tool README](../README.md) for exact
 collection/replay commands, workflow switches, model credentials and retention.
 The first local run over `2.1.280`–`2.1.301` selected 228 entries before tuning;
 natural-language “Continue” and unrelated compaction settings were false matches.

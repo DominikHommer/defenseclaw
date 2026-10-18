@@ -281,7 +281,7 @@ with lifecycle pairing even though that field is optional to JSON decoding.
 
 ## Reproduction
 
-See the [monitor README](../../scripts/connector_delta/README.md) for
+See the [monitor README](../README.md) for
 collection, historical replay and optional AI commands. Representative offline
 replays, after the snapshots/history have been collected:
 
