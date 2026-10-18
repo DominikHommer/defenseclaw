@@ -87,6 +87,16 @@ func requireNoError(t *testing.T, r *enterprisestatus.Result, code string) {
 	}
 }
 
+func countErrors(r *enterprisestatus.Result, code string) int {
+	n := 0
+	for _, e := range r.Errors {
+		if e.Code == code {
+			n++
+		}
+	}
+	return n
+}
+
 func TestBundleFailureAfterConfigWriteRestoresLastGoodPolicy(t *testing.T) {
 	for _, c := range afterWriteCases() {
 		t.Run(c.name(), func(t *testing.T) {
@@ -202,8 +212,12 @@ func TestBundleCommittedButUnreportedAfterFailureStaysApplied(t *testing.T) {
 			b.mapPromotedBundleOwners(version)
 			r := b.apply(b.dir(version, cfg))
 			requireError(t, r, codeLifecycleTestFault)
-			requireError(t, r, codeBundleNotConfirmed)
+			// The gateway reports the last good digest, not the bundle's.
+			requireError(t, r, string(enterprisebundle.CodeDigestMismatch))
 			requireNoError(t, r, string(enterprisebundle.CodeApplyFailed))
+			if n := countErrors(r, string(enterprisebundle.CodeDigestMismatch)); n != 1 {
+				t.Fatalf("%d digest_mismatch errors, want one: %+v", n, r.Errors)
+			}
 			rc := b.receipt(bundleID(version))
 			if rc.State != enterprisebundle.StateApplied {
 				t.Fatalf("receipt = %+v, want applied (not yet confirmed, not failed)", rc)

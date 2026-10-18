@@ -89,6 +89,9 @@ type bundleRun struct {
 	// committed is set once the transaction of this run committed the
 	// deployment of the bundle config, after the gateway reported its policy.
 	committed bool
+	// settled is set once finishBundle ran for this run: a receipt it left
+	// applied is settled by the next changing run, not again by this one.
+	settled bool
 }
 
 // bundleAnchorsPath is <etc>/trust/bundle-anchors.json (rooted).
@@ -541,9 +544,10 @@ func (l *lifecycle) markBundleApplied(digest string, generation uint64, configSH
 // gateway; anything else fails the receipt.
 func (l *lifecycle) finishBundle(ctx context.Context) {
 	env, r, run := l.env, l.result, l.bundle
-	if run == nil || enterprisebundle.Finished(run.receipt.State) {
+	if run == nil || run.settled || enterprisebundle.Finished(run.receipt.State) {
 		return
 	}
+	run.settled = true
 	rc := run.receipt
 	record, _ := env.loadDeployment()
 	// A step that fails after this run committed the bundle deployment (the
