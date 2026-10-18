@@ -224,26 +224,6 @@ func PurgeUserStateSummary(ctx context.Context, opts InstallOptions) (PurgeSumma
 	return summary, err
 }
 
-// keptManagedBackupsError refuses the purge while dataDir still holds a
-// connector backup after the teardowns. A teardown discards each backup it
-// restored from or no longer needs, so one that stays records a file that
-// differs from what DefenseClaw wrote (an edited OpenCode or Amp plugin),
-// which the teardown left for the account. The purge deleted that backup
-// with the rest of the state, and the file could never be put back
-// (rel-1-0-3 GAP-0258). A backup that cannot be read keeps the state too.
-func keptManagedBackupsError(dataDir string) error {
-	backups := filepath.Join(dataDir, "connector_backups")
-	targets, err := connector.ManagedFileBackupTargets(dataDir)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: kept the per-user state for its backups: a backup in %s cannot be read (%v); fix or remove that backup, then rerun the purge", backups, err)
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-	return fmt.Errorf("enterprise hooks: kept the per-user state for its backups: %s differs from what DefenseClaw wrote, so DefenseClaw left it and its backup in %s; to keep the file as it is, delete that backup, or put back the file DefenseClaw wrote; then rerun the purge",
-		strings.Join(targets, ", "), backups)
-}
-
 // removeStaleHookTempEntries removes the account's leftover hook temporary
 // entries (defenseclaw-hook.*, which a hook's exit trap misses when the
 // agent kills it) in dirs: only the account's own, and only ones old enough
