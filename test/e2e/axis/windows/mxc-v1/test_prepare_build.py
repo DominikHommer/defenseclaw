@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import stat
 import tempfile
@@ -22,6 +23,32 @@ _SPEC.loader.exec_module(build)
 
 
 class BuildGuardTests(TestCase):
+    def test_probe_slice_accepts_only_the_two_reviewed_fixed_contracts(self) -> None:
+        self.assertEqual(
+            build.PROBE_SLICE_CONTRACTS,
+            {
+                "dll-startup-only": (
+                    "standalone_std_fixed_dll_startup_diagnostic",
+                    "fixed_windows_native_psec_dll_startup_diagnostic",
+                ),
+                "claude-version-only": (
+                    "standalone_std_fixed_signed_claude_version",
+                    "fixed_windows_native_psec_signed_claude_version",
+                ),
+            },
+        )
+        with (
+            mock.patch.object(build.sys, "argv", ["prepare_build.py", "build-locked", "--probe-slice", "unreviewed"]),
+            mock.patch.object(build.sys, "stderr", io.StringIO()),
+            mock.patch.object(build, "command") as command,
+            mock.patch.object(build, "verify_source") as source,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            build.main()
+        self.assertEqual(failure.exception.code, 2)
+        command.assert_not_called()
+        source.assert_not_called()
+
     def test_source_identity_must_match_exact_commit(self) -> None:
         with (
             mock.patch.object(Path, "is_symlink", return_value=False),

@@ -360,9 +360,7 @@ class DLLArtifactVerificationTests(BoundaryArtifactVerificationTests):
             self.run_verify()
 
     def test_dll_pure_test_receipt_and_builder_inventory_are_exact(self) -> None:
-        spec = importlib.util.spec_from_file_location(
-            "fixed_dll_build", Path(__file__).with_name("prepare_build.py")
-        )
+        spec = importlib.util.spec_from_file_location("fixed_dll_build", Path(__file__).with_name("prepare_build.py"))
         assert spec is not None and spec.loader is not None
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
@@ -379,6 +377,42 @@ class DLLArtifactVerificationTests(BoundaryArtifactVerificationTests):
                 with self.assertRaisesRegex(ValueError, "pure DLL startup test evidence"):
                     self.run_verify()
                 self.provenance[name] = original
+
+
+class ClaudeArtifactVerificationTests(DLLArtifactVerificationTests):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mode = "claude-version-only"
+        self.provenance.update(variant=verify.CLAUDE_VARIANT, scope=verify.CLAUDE_SCOPE, probe_slice=self.mode)
+        self.write_artifact()
+
+    def test_dll_or_boundary_receipts_cannot_select_claude(self) -> None:
+        self.assertEqual(len(self.run_verify()["binaries"]), 4)
+        for variant, scope in [
+            (verify.DLL_VARIANT, verify.DLL_SCOPE),
+            (verify.BOUNDARY_VARIANT, verify.BOUNDARY_SCOPE),
+        ]:
+            with self.subTest(variant=variant):
+                self.provenance.update(variant=variant, scope=scope)
+                self.write_artifact()
+                with self.assertRaisesRegex(ValueError, "build contract"):
+                    self.run_verify()
+        self.provenance.update(variant=verify.CLAUDE_VARIANT, scope=verify.CLAUDE_SCOPE)
+
+    def test_claude_requires_its_explicit_locked_build_slice(self) -> None:
+        self.provenance["probe_slice"] = "dll-startup-only"
+        self.write_artifact()
+        with self.assertRaisesRegex(ValueError, "fixed Claude build slice"):
+            self.run_verify()
+
+    def test_local_image_does_not_enter_ci_archive_or_relax_ci_limits(self) -> None:
+        contract = verify.artifact_contract(self.mode)
+        self.assertEqual(
+            set(contract["binaries"]), {verify.BINARY, verify.LOADER_BINARY, verify.BOUNDARY_BINARY, verify.DLL_BINARY}
+        )
+        self.assertFalse(any("claude-reviewed.exe" in name for name in contract["all_files"]))
+        self.assertEqual(verify.MAX_FILE_BYTES, 64 * 1024 * 1024)
+
 
 class BoundedFileTests(unittest.TestCase):
     def test_growth_after_stat_cannot_exceed_the_read_bound(self) -> None:
@@ -416,6 +450,8 @@ class GitHubBuildAdmissionTests(unittest.TestCase):
             ("standalone-boundary", "codex/axis-native-build", "workflow_dispatch", True),
             ("standalone-boundary", "codex/axis-peer-experiments", "workflow_dispatch", True),
             ("dll-startup-only", "codex/axis-peer-experiments", "workflow_dispatch", True),
+            ("claude-version-only", "codex/axis-peer-experiments", "workflow_dispatch", True),
+            ("claude-version-only", "codex/axis-peer-experiments", "push", False),
             ("dll-startup-only", "codex/axis-native-build", "push", False),
             ("loader-only", "codex/axis-native-build", "workflow_dispatch", False),
             ("loader-only", "codex/axis-peer-experiments", "workflow_dispatch", False),

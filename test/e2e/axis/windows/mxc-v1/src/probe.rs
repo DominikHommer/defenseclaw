@@ -33,9 +33,10 @@ pub fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let loader_only = args.as_slice() == ["--loader-only"];
     let dll_only = args.as_slice() == ["--dll-startup-only"];
+    let claude_only = args.as_slice() == ["--claude-version-only"];
     ensure!(
-        args.is_empty() || loader_only || dll_only,
-        "only the fixed --loader-only or --dll-startup-only diagnostic selector is accepted"
+        args.is_empty() || loader_only || dll_only || claude_only,
+        "only a fixed contributor mode selector is accepted"
     );
     let system = PathBuf::from(std::env::var("SystemRoot")?).canonicalize()?;
     let executable = std::env::current_exe()?.canonicalize()?;
@@ -69,7 +70,19 @@ pub fn run() -> Result<i32> {
         std::process::exit(124);
     });
     let mut dll_initialization_all_succeeded = false;
-    if dll_only {
+    if claude_only {
+        // Supported only through the reviewed Go custody wrapper: it stages
+        // this exact supervisor beside the one fixed signed local image and
+        // holds both images against writes/rename and every ancestor name
+        // against rename through wait. Directory contents remain mutable.
+        // No caller path, command, argument or expected hash is accepted here.
+        let payload = executable.with_file_name("claude-reviewed.exe");
+        ensure!(
+            fs::metadata(&payload)?.len() == 254_858_400,
+            "fixed local image size differs"
+        );
+        run_case(&paths, &payload, "claude-version", &[0; 4])?;
+    } else if dll_only {
         let payload = executable
             .with_file_name("defenseclaw-axis-windows-psec-dll-child.exe")
             .canonicalize()?;
@@ -124,7 +137,13 @@ pub fn run() -> Result<i32> {
     fs::remove_dir_all(&root)
         .context("remove verified owned fixture after all SDK handles stopped")?;
     ensure!(!root.exists(), "owned fixture remains");
-    let checks = if dll_only {
+    let checks = if claude_only {
+        vec![
+            "fixed_signed_claude_version_output",
+            "retained_direct_process_handles_signaled",
+            "owned_fixture_removed",
+        ]
+    } else if dll_only {
         vec![
             "three_fixed_dll_start_markers",
             "three_fixed_dll_return_observations",
@@ -161,8 +180,10 @@ pub fn run() -> Result<i32> {
             "backend": "native_windows_psec_only", "production_qualification": false,
             "loader_only_diagnostic": loader_only, "checks": checks,
             "dll_startup_only_diagnostic": dll_only,
+            "claude_version_only": claude_only,
             "dll_initialization_all_succeeded": dll_initialization_all_succeeded,
-            "scope": if dll_only { "three fixed System32 DLL initialization observations; returned load errors are not compatibility success; no UI, boundary or customer qualification" }
+            "scope": if claude_only { "fixed reviewed signed local Claude 2.1.292 --version only; no authentication, model, hook, terminal or customer runtime qualification" }
+                else if dll_only { "three fixed System32 DLL initialization observations; returned load errors are not compatibility success; no UI, boundary or customer qualification" }
                 else if loader_only { "separate std loader marker and exit23 only; no boundary, network or customer qualification" }
                 else { "fixed offline canaries; no terminal, proxy, credentials, model or general resource audit" }
         })
@@ -258,7 +279,12 @@ impl Paths {
 }
 
 fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> Result<bool> {
-    let policy = paths.policy(executable, if mode == "timeout" { 1 } else { 5 })?;
+    let timeout = match mode {
+        "timeout" => 1,
+        "claude-version" => 10,
+        _ => 5,
+    };
+    let policy = paths.policy(executable, timeout)?;
     ensure!(
         policy.runtime.provider == RuntimeProvider::Mxc,
         "MXC required"
@@ -278,7 +304,9 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     let dll_case = dll_startup_protocol::CASES
         .into_iter()
         .find(|case| mode == format!("dll-{}", case.label()));
-    if let Some(case) = dll_case {
+    if mode == "claude-version" {
+        argv.push(std::ffi::OsString::from("--version"));
+    } else if let Some(case) = dll_case {
         argv.push(std::ffi::OsString::from(case.selector()));
     } else if mode == "argv" {
         argv.extend(
@@ -358,9 +386,19 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
             }),
         },
     )?;
+    if mode == "claude-version" {
+        // This fixed offline invocation never accepts interactive input.
+        drop(
+            process
+                .take_stdin()
+                .context("fixed version stdin pipe missing")?,
+        );
+    }
     // Duplicate read/query+synchronize rights from the SDK's retained native
     // CreateProcess object. No integer PID lookup or token fallback is allowed.
-    let observed = process.duplicate_query_process_handle()?;
+    let observed = process
+        .duplicate_query_process_handle()
+        .context("same retained native process observation unavailable")?;
     let native = if let Some(fixture) = &fixture_custody {
         Some(native_identity::expected_from_child(
             &observed, fixture, fixed_root,
@@ -427,6 +465,17 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         return Ok(observation == dll_startup_protocol::LoadResult::Loaded);
     }
     match mode {
+        "claude-version" => {
+            ensure!(
+                outcome == WaitResult::Exited(0),
+                "fixed Claude version failed: {outcome:?}"
+            );
+            ensure!(
+                output == "2.1.292 (Claude Code)\n" || output == "2.1.292 (Claude Code)\r\n",
+                "fixed Claude version transcript differs"
+            );
+            ensure!(diagnostics.is_empty(), "fixed Claude version wrote stderr");
+        }
         "argv" => {
             ensure!(
                 output == "FIXED_ARGV_PASS\n",

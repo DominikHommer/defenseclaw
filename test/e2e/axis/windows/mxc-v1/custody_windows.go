@@ -25,6 +25,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
@@ -145,6 +146,9 @@ func checkedReceipt(path, expectedSHA, mode string) (*receipt, pinnedImages, err
 		seen[boundaryName] = false
 	} else if mode == "dll-startup-only" {
 		variant, scope = dllVariant, dllScope
+		seen[boundaryName], seen[dllName] = false, false
+	} else if mode == "claude-version-only" {
+		variant, scope = claudeArtifactVariant, claudeArtifactScope
 		seen[boundaryName], seen[dllName] = false, false
 	} else if mode != "loader-only" {
 		return nil, nil, errors.New("unknown fixed mode")
@@ -285,7 +289,7 @@ func childPipe() (windows.Handle, *os.File, error) {
 	return write, os.NewFile(uintptr(read), "owned-output-pipe"), nil
 }
 
-func run(value *receipt, root, mode string) (record map[string]any, resultErr error) {
+func run(value *receipt, root, mode string, runtimeImages pinnedImages, localImage fixedLocalImage) (record map[string]any, resultErr error) {
 	record = map[string]any{"passed": false, "production_certification": false, "scope": value.Scope,
 		"variant": value.Variant, "mode": mode,
 		"binary_sha256": value.BinarySHA, "build_commit": value.BuildCommit, "build_run": value.BuildRun,
@@ -296,13 +300,30 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 	if err := noReparse(filepath.Dir(root)); err != nil {
 		return record, err
 	}
-	if err := os.Mkdir(root, 0700); err != nil {
-		return record, err
+	if mode == "claude-version-only" {
+		if created, err := safefile.CreatePrivateDirectory(root); err != nil || !created {
+			return record, errors.Join(errors.New("fresh private Claude case required"), err)
+		}
+	} else {
+		if err := os.Mkdir(root, 0700); err != nil {
+			return record, err
+		}
 	}
 	for _, relative := range []string{"home", "tmp", "workspace", filepath.Join("home", "AppData"), filepath.Join("home", "AppData", "Roaming"), filepath.Join("home", "AppData", "Local")} {
 		if err := os.Mkdir(filepath.Join(root, relative), 0700); err != nil {
 			return record, err
 		}
+	}
+	binary := filepath.Join(value.Artifact, filepath.FromSlash(binaryName))
+	if mode == "claude-version-only" {
+		staged, held, err := stageClaudeVersionImages(value, runtimeImages, localImage, root)
+		if err != nil {
+			return record, err
+		}
+		defer func() { resultErr = errors.Join(resultErr, held.Close()) }()
+		binary = staged
+		record["local_image_sha256"], record["local_image_size"] = claudeImageSHA, claudeImageSize
+		record["local_image_product_version"] = claudeProductVersion
 	}
 	system, err := windows.GetSystemWindowsDirectory()
 	if err != nil || !filepath.IsAbs(system) {
@@ -378,7 +399,6 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
 		return record, err
 	}
-	binary := filepath.Join(value.Artifact, filepath.FromSlash(binaryName))
 	application, err := windows.UTF16PtrFromString(binary)
 	if err != nil {
 		return record, err
@@ -388,6 +408,8 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 		command = append(command, "--loader-only")
 	} else if mode == "dll-startup-only" {
 		command = append(command, "--dll-startup-only")
+	} else if mode == "claude-version-only" {
+		command = append(command, "--claude-version-only")
 	} else if mode != "standalone-boundary" {
 		return record, errors.New("unknown fixed mode")
 	}
@@ -484,15 +506,18 @@ func run(value *receipt, root, mode string) (record map[string]any, resultErr er
 	return record, nil
 }
 
-func selectedMode(loader, boundary, dll bool) (string, error) {
+func selectedMode(loader, boundary, dll, claude bool) (string, error) {
 	choices := 0
-	for _, selected := range []bool{loader, boundary, dll} {
+	for _, selected := range []bool{loader, boundary, dll, claude} {
 		if selected {
 			choices++
 		}
 	}
 	if choices != 1 {
 		return "", errors.New("exactly one fixed mode is required")
+	}
+	if claude {
+		return "claude-version-only", nil
 	}
 	if dll {
 		return "dll-startup-only", nil
@@ -507,13 +532,21 @@ func main() {
 	loaderOnly := flag.Bool("loader-only", false, "explicit fixed std-only loader diagnostic")
 	boundary := flag.Bool("standalone-boundary", false, "explicit fixed std-only boundary and literal argv cases")
 	dll := flag.Bool("dll-startup-only", false, "explicit fixed System32 DLL startup observations")
+	claude := flag.Bool("claude-version-only", false, "explicit fixed signed Claude 2.1.292 --version")
+	localReceipt := flag.String("local-image-receipt", "", "independently reviewed fixed local-image receipt")
+	localReceiptSHA := flag.String("local-image-receipt-sha256", "", "independent local-image receipt SHA256")
 	receiptPath := flag.String("receipt", "", "absolute independently verified receipt")
 	receiptSHA := flag.String("receipt-sha256", "", "reviewed receipt SHA256")
 	caseRoot := flag.String("case-root", "", "absolute fresh psec-headless-* case path")
 	flag.Parse()
-	mode, modeErr := selectedMode(*loaderOnly, *boundary, *dll)
+	mode, modeErr := selectedMode(*loaderOnly, *boundary, *dll, *claude)
 	if flag.NArg() != 0 || modeErr != nil {
 		fmt.Fprintln(os.Stderr, "exactly one fixed mode is required; no workload arguments accepted")
+		os.Exit(2)
+	}
+	if (mode == "claude-version-only") != (*localReceipt != "" && *localReceiptSHA != "") ||
+		(mode != "claude-version-only" && (*localReceipt != "" || *localReceiptSHA != "")) {
+		fmt.Fprintln(os.Stderr, "only the fixed Claude mode accepts its separate local-image receipt")
 		os.Exit(2)
 	}
 	value, image, err := checkedReceipt(*receiptPath, *receiptSHA, mode)
@@ -521,9 +554,26 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	defer image.Close()
+	defer func() {
+		if image != nil {
+			_ = image.Close()
+		}
+	}()
+	var localImage fixedLocalImage
+	if mode == "claude-version-only" {
+		localImage, err = checkLocalClaudeReceipt(*localReceipt, *localReceiptSHA)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
 	started := time.Now()
-	record, err := run(value, *caseRoot, mode)
+	record, err := run(value, *caseRoot, mode, image, localImage)
+	if mode == "claude-version-only" {
+		err = errors.Join(err, localImage.held.Close(), image.Close())
+		image = nil
+		record["local_image_review_receipt_sha256"] = *localReceiptSHA
+	}
 	record["elapsed_seconds"] = time.Since(started).Seconds()
 	if err != nil {
 		record["error"] = err.Error()

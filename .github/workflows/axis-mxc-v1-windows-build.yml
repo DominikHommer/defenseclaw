@@ -12,6 +12,15 @@ on:
       - test/e2e/axis/windows/mxc-v1/**
       - test/e2e/axis/patches/mxc-literal-argv.patch
   workflow_dispatch:
+    inputs:
+      fixed_probe_slice:
+        description: Fixed contributor probe slice; no sandbox runs in this workflow
+        type: choice
+        required: true
+        default: dll-startup-only
+        options:
+          - dll-startup-only
+          - claude-version-only
 
 permissions:
   contents: read
@@ -107,8 +116,13 @@ jobs:
       - name: Build without executing PSEC or the contributor probe
         timeout-minutes: 30
         working-directory: probe
+        env:
+          AXIS_WINDOWS_FIXED_PROBE_SLICE: ${{ inputs.fixed_probe_slice || 'dll-startup-only' }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:AXIS_WINDOWS_FIXED_PROBE_SLICE -cnotin @('dll-startup-only', 'claude-version-only')) {
+            throw 'Unknown fixed contributor probe slice'
+          }
           # Initialize installed native tools in this same process. Otherwise
           # Rust can find Git's unrelated link.exe before the MSVC linker.
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -135,9 +149,9 @@ jobs:
           }
           Write-Host "Using native MSVC linker: $nativeLinker"
           if (Test-Path -LiteralPath Cargo.lock -PathType Leaf) {
-            python prepare_build.py build-locked
+            python prepare_build.py build-locked --probe-slice $env:AXIS_WINDOWS_FIXED_PROBE_SLICE
           } else {
-            python prepare_build.py generate-lock
+            python prepare_build.py generate-lock --probe-slice $env:AXIS_WINDOWS_FIXED_PROBE_SLICE
           }
           if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
           # Exact SDK tests cover pure pre-creation validators/quoting and one

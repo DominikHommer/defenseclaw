@@ -122,16 +122,16 @@ func TestNativeIdentityReceiptMatchesVerifierAuthority(t *testing.T) {
 }
 
 func TestModesRequireExactlyOneExplicitChoice(t *testing.T) {
-	for _, choice := range [][3]bool{{false, false, false}, {true, true, false}, {true, false, true}, {false, true, true}, {true, true, true}} {
-		if _, err := selectedMode(choice[0], choice[1], choice[2]); err == nil {
+	for _, choice := range [][4]bool{{false, false, false, false}, {true, true, false, false}, {true, false, true, false}, {false, true, true, false}, {true, true, true, false}, {true, false, false, true}, {false, true, false, true}, {false, false, true, true}, {true, true, true, true}} {
+		if _, err := selectedMode(choice[0], choice[1], choice[2], choice[3]); err == nil {
 			t.Fatal("ambiguous fixed mode accepted")
 		}
 	}
 	for _, choice := range []struct {
-		loader, boundary, dll bool
-		mode                  string
-	}{{true, false, false, "loader-only"}, {false, true, false, "standalone-boundary"}, {false, false, true, "dll-startup-only"}} {
-		if mode, err := selectedMode(choice.loader, choice.boundary, choice.dll); err != nil || mode != choice.mode {
+		loader, boundary, dll, claude bool
+		mode                          string
+	}{{true, false, false, false, "loader-only"}, {false, true, false, false, "standalone-boundary"}, {false, false, true, false, "dll-startup-only"}, {false, false, false, true, "claude-version-only"}} {
+		if mode, err := selectedMode(choice.loader, choice.boundary, choice.dll, choice.claude); err != nil || mode != choice.mode {
 			t.Fatal("explicit mode differs")
 		}
 	}
@@ -318,5 +318,59 @@ func TestVerifiedImageRemainsPinnedAgainstWrites(t *testing.T) {
 	binary := filepath.Join(value.Artifact, filepath.FromSlash(binaryName))
 	if err := os.WriteFile(binary, []byte("must not replace reviewed image"), 0600); err == nil {
 		t.Fatal("verified image allowed writes while pinned")
+	}
+}
+
+func TestClaudeReceiptHasSeparateAuthorityAndKeepsCIBinaryBounds(t *testing.T) {
+	source, err := os.ReadFile("verify_live_artifact.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"CLAUDE_VARIANT": claudeArtifactVariant, "CLAUDE_SCOPE": claudeArtifactScope} {
+		m := regexp.MustCompile(`(?m)^`+name+` = "([^"\r\n]+)"\r?$`).FindAllSubmatch(source, -1)
+		if len(m) != 1 || string(m[0][1]) != want {
+			t.Fatalf("fixed Claude %s authority differs", name)
+		}
+	}
+	path, value := syntheticBoundaryReceipt(t)
+	data := []byte("synthetic bytes; never executed")
+	if err := os.WriteFile(filepath.Join(value.Artifact, filepath.FromSlash(dllName)), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	value.Binaries = append(value.Binaries, component{Path: dllName, SHA256: value.BinarySHA, Size: value.BinarySize})
+	value.Variant, value.Scope = claudeArtifactVariant, claudeArtifactScope
+	pin := writeReceipt(t, path, value, nil)
+	_, held, err := checkedReceipt(path, pin, "claude-version-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 4 {
+		t.Fatal("fixed Claude receipt did not retain all four CI images")
+	}
+	if err := held.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"loader-only", "standalone-boundary", "dll-startup-only"} {
+		if _, held, err := checkedReceipt(path, pin, mode); err == nil {
+			held.Close()
+			t.Fatal("Claude receipt admitted as another slice")
+		}
+	}
+	for _, identity := range [][2]string{{dllVariant, dllScope}, {boundaryVariant, boundaryScope}} {
+		changed := value
+		changed.Variant, changed.Scope = identity[0], identity[1]
+		pin := writeReceipt(t, path, changed, nil)
+		if _, held, err := checkedReceipt(path, pin, "claude-version-only"); err == nil {
+			held.Close()
+			t.Fatal("historical artifact admitted as Claude slice")
+		}
+	}
+	changed := value
+	changed.Binaries = append([]component(nil), value.Binaries...)
+	changed.Binaries[0].Size = claudeImageSize
+	pin = writeReceipt(t, path, changed, nil)
+	if _, held, err := checkedReceipt(path, pin, "claude-version-only"); err == nil {
+		held.Close()
+		t.Fatal("local large-image exception widened the CI artifact bound")
 	}
 }

@@ -60,6 +60,8 @@ BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_native_identity_environment
 DLL_BINARY = "bin/defenseclaw-axis-windows-psec-dll-child.exe"
 DLL_VARIANT = "standalone_std_fixed_dll_startup_diagnostic"
 DLL_SCOPE = "fixed_windows_native_psec_dll_startup_diagnostic"
+CLAUDE_VARIANT = "standalone_std_fixed_signed_claude_version"
+CLAUDE_SCOPE = "fixed_windows_native_psec_signed_claude_version"
 IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
 BOUNDARY_OVERLAY_SHA256 = "195bd35366bf99ddd2f66a10dd9c86090e16d078adeedcbf69ae219ea63d3a44"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
@@ -173,32 +175,36 @@ BOUNDARY_OVERLAY_FILES = {
 
 
 def artifact_contract(mode: str = "loader-only") -> dict:
-    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only"}:
+    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"}:
         raise ValueError("unknown fixed artifact mode")
     boundary = mode != "loader-only"
     dll = mode == "dll-startup-only"
+    claude = mode == "claude-version-only"
     sources = {name: SOURCE_PREFIX + name for name in SOURCE_FILES}
     binaries = (BINARY, LOADER_BINARY)
     files = set(FILES)
     extra = {"PROVENANCE.json", "WORKFLOW.json"}
     if boundary:
         for name in (
-            "src/boundary_child.rs", "src/native_environment.rs", "src/native_identity.rs",
-            "patches/mxc-windows-literal-argv.patch", "patches/mxc-windows-process-identity.patch",
+            "src/boundary_child.rs",
+            "src/native_environment.rs",
+            "src/native_identity.rs",
+            "patches/mxc-windows-literal-argv.patch",
+            "patches/mxc-windows-process-identity.patch",
         ):
             sources[name] = SOURCE_PREFIX + name
         sources["patches/mxc-literal-argv.patch"] = "test/e2e/axis/patches/mxc-literal-argv.patch"
         binaries += (BOUNDARY_BINARY,)
         files |= {"source/" + name for name in sources} | {BOUNDARY_BINARY}
         extra.add("SDK-ADMISSION-TESTS.json")
-    if dll:
+    if dll or claude:
         for name in ("src/dll_startup_child.rs", "src/dll_startup_protocol.rs"):
             sources[name] = SOURCE_PREFIX + name
         binaries += (DLL_BINARY,)
         files |= {"source/" + name for name in sources} | {DLL_BINARY}
     return {
-        "variant": DLL_VARIANT if dll else BOUNDARY_VARIANT if boundary else VARIANT,
-        "scope": DLL_SCOPE if dll else BOUNDARY_SCOPE if boundary else SCOPE,
+        "variant": CLAUDE_VARIANT if claude else DLL_VARIANT if dll else BOUNDARY_VARIANT if boundary else VARIANT,
+        "scope": CLAUDE_SCOPE if claude else DLL_SCOPE if dll else BOUNDARY_SCOPE if boundary else SCOPE,
         "sources": sources,
         "binaries": binaries,
         "files": files,
@@ -321,7 +327,7 @@ def verify_github(
         and (
             run.get("head_branch") == "codex/axis-sandbox-feasibility"
             or (
-                mode in {"standalone-boundary", "dll-startup-only"}
+                mode in {"standalone-boundary", "dll-startup-only", "claude-version-only"}
                 and run.get("event") == "workflow_dispatch"
                 and run.get("head_branch") in {"codex/axis-native-build", "codex/axis-peer-experiments"}
             )
@@ -436,7 +442,7 @@ def verify(
         sha256(read("source/patches/mxc-strict-windows-psec.patch")) == provenance.get("mxc_patch_sha256"),
         "reviewed SDK overlay differs",
     )
-    if mode in {"standalone-boundary", "dll-startup-only"}:
+    if mode in {"standalone-boundary", "dll-startup-only", "claude-version-only"}:
         require(
             provenance.get("pure_native_environment_tests_passed") is True
             and provenance.get("pure_native_environment_tests") == PURE_ENVIRONMENT_TESTS,
@@ -493,7 +499,9 @@ def verify(
             },
             "exact SDK admission test evidence differs",
         )
-    if mode == "dll-startup-only":
+    if mode == "claude-version-only":
+        require(provenance.get("probe_slice") == mode, "fixed Claude build slice differs")
+    if mode in {"dll-startup-only", "claude-version-only"}:
         require(
             provenance.get("pure_dll_startup_tests_passed") is True
             and provenance.get("pure_dll_startup_tests") == PURE_DLL_TESTS,
@@ -562,7 +570,9 @@ def main() -> None:
     parser.add_argument("--build-run", type=int, required=True)
     parser.add_argument("--artifact-id", type=int, required=True)
     parser.add_argument(
-        "--variant", choices=("loader-only", "standalone-boundary", "dll-startup-only"), default="loader-only"
+        "--variant",
+        choices=("loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"),
+        default="loader-only",
     )
     args = parser.parse_args()
     require(args.build_run > 0 and args.artifact_id > 0, "positive exact GitHub IDs required")

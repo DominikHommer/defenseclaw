@@ -24,6 +24,16 @@ BINARY = "defenseclaw-axis-windows-psec-probe.exe"
 LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
 BOUNDARY_BINARY = "defenseclaw-axis-windows-psec-boundary-child.exe"
 DLL_BINARY = "defenseclaw-axis-windows-psec-dll-child.exe"
+PROBE_SLICE_CONTRACTS = {
+    "dll-startup-only": (
+        "standalone_std_fixed_dll_startup_diagnostic",
+        "fixed_windows_native_psec_dll_startup_diagnostic",
+    ),
+    "claude-version-only": (
+        "standalone_std_fixed_signed_claude_version",
+        "fixed_windows_native_psec_signed_claude_version",
+    ),
+}
 ROOT = Path(__file__).resolve().parent
 PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
 LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
@@ -93,6 +103,7 @@ PURE_DLL_TESTS = {
         "probe::dll_startup_protocol::tests::exact_dll_markers_distinguish_returned_error_from_success",
     ],
 }
+
 
 def command(argv: list[str], *, cwd: Path = ROOT, capture: bool = False) -> str:
     # Build tooling is already provisioned by the disposable CI job. Do not
@@ -217,7 +228,9 @@ def verify_identity_patch_paths(mxc: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("generate-lock", "build-locked"))
+    parser.add_argument("--probe-slice", choices=tuple(PROBE_SLICE_CONTRACTS), default="dll-startup-only")
     args = parser.parse_args()
+    variant, scope = PROBE_SLICE_CONTRACTS[args.probe_slice]
     if sys.platform != "win32" or platform.machine().lower() not in {"amd64", "x86_64"}:
         raise RuntimeError("build this contributor artifact on native Windows x86_64")
     artifact = ROOT / "build-artifact"
@@ -324,7 +337,8 @@ def main() -> None:
     (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
     provenance = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
-        "variant": "standalone_std_fixed_dll_startup_diagnostic",
+        "variant": variant,
+        "probe_slice": args.probe_slice,
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "mxc_patch_sha256": digest(PATCH),
@@ -348,7 +362,7 @@ def main() -> None:
         "native_directory_custody_tests_passed": True,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
-        "scope": "fixed_windows_native_psec_dll_startup_diagnostic",
+        "scope": scope,
         "production_certification": False,
         "files": {
             path.relative_to(artifact).as_posix(): digest(path)

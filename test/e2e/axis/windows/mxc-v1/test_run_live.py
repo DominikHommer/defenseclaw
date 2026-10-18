@@ -228,6 +228,123 @@ class DLLObservationTests(ObservationTests):
         self.assertEqual(live.DLL_CASES, ("user32", "gdi32", "shell32"))
 
 
+class ClaudeObservationTests(ObservationTests):
+    def setUp(self) -> None:
+        super().setUp()
+        self.mode = "claude-version-only"
+        self.local_receipt = "d" * 64
+        contract = live.artifact_verifier.artifact_contract(self.mode)
+        self.record.update(
+            mode=self.mode,
+            variant=contract["variant"],
+            scope=contract["scope"],
+            local_image_sha256=live.CLAUDE_IMAGE_SHA256,
+            local_image_size=live.CLAUDE_IMAGE_SIZE,
+            local_image_product_version=live.CLAUDE_PRODUCT_VERSION,
+            local_image_review_receipt_sha256=self.local_receipt,
+        )
+        self.record["stdout"] = "\n".join(
+            json.dumps(x)
+            for x in [
+                {
+                    "case": "claude-version",
+                    "outcome": "Exited(0)",
+                    "direct_handle_signaled": True,
+                    "stdout": "2.1.292 (Claude Code)\n",
+                    "stderr": "",
+                },
+                {
+                    "axis_commit": live.artifact_verifier.AXIS_COMMIT,
+                    "mxc_commit": live.artifact_verifier.MXC_COMMIT,
+                    "translation_contract": "fixed-axis-hard-block-to-mxc-typed-1.0.0",
+                    "backend": "native_windows_psec_only",
+                    "production_qualification": False,
+                    "loader_only_diagnostic": False,
+                    "dll_startup_only_diagnostic": False,
+                    "claude_version_only": True,
+                    "checks": sorted(live.CLAUDE_CHECKS),
+                },
+            ]
+        )
+
+    def validate(self, record: object) -> bool:
+        return live.valid_observations(record, self.receipt, self.mode, self.local_receipt)
+
+    def test_fixed_local_image_identity_and_external_receipt_are_required(self) -> None:
+        for field, value in [
+            ("local_image_sha256", "e" * 64),
+            ("local_image_size", True),
+            ("local_image_product_version", "other"),
+            ("local_image_review_receipt_sha256", "e" * 64),
+        ]:
+            with self.subTest(field=field):
+                self.assertFalse(self.validate({**self.record, field: value}))
+        self.assertFalse(live.valid_observations(self.record, self.receipt, self.mode))
+
+    def test_only_exact_native_newline_and_exit_zero_are_accepted(self) -> None:
+        for output, outcome, error, accepted in [
+            ("2.1.292 (Claude Code)\r\n", "Exited(0)", "", True),
+            ("2.1.292 (Claude Code)\nextra", "Exited(0)", "", False),
+            ("2.1.292 (Claude Code)\n", "Exited(23)", "", False),
+            ("2.1.292 (Claude Code)\n", "Exited(0)", "unexpected", False),
+        ]:
+            changed = copy.deepcopy(self.record)
+            rows = [json.loads(x) for x in changed["stdout"].splitlines()]
+            rows[0].update(stdout=output, outcome=outcome, stderr=error)
+            changed["stdout"] = "\n".join(json.dumps(x) for x in rows)
+            self.assertIs(self.validate(changed), accepted)
+
+    def test_malformed_or_missing_claude_output_refuses(self) -> None:
+        for value in [None, [], {}, True]:
+            changed = copy.deepcopy(self.record)
+            rows = [json.loads(x) for x in changed["stdout"].splitlines()]
+            rows[0]["stdout"] = value
+            changed["stdout"] = "\n".join(json.dumps(x) for x in rows)
+            self.assertFalse(self.validate(changed))
+
+    def test_fixed_rust_success_checks_match_driver(self) -> None:
+        source = Path(__file__).with_name("src").joinpath("probe.rs").read_text(encoding="utf-8")
+        blocks = re.findall(r"let checks = if claude_only \{(.*?)\} else", source, re.DOTALL)
+        self.assertEqual(len(blocks), 1)
+        names = re.findall(r'"([a-z0-9_]+)"', blocks[0])
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(names), live.CLAUDE_CHECKS)
+
+
+class FixedClaudeArgumentTests(unittest.TestCase):
+    def test_missing_or_cross_mode_local_receipts_fail_before_process_or_file_access(self) -> None:
+        base = [
+            "run_live.py",
+            "--custody",
+            "fixed.exe",
+            "--custody-sha256",
+            "a" * 64,
+            "--receipt",
+            "receipt.json",
+            "--receipt-sha256",
+            "b" * 64,
+            "--evidence",
+            "fresh",
+        ]
+        for extra in [
+            ["--claude-version-only"],
+            ["--claude-version-only", "--local-image-receipt", "image.json"],
+            ["--loader-only", "--local-image-receipt", "image.json", "--local-image-receipt-sha256", "c" * 64],
+        ]:
+            with (
+                self.subTest(extra=extra),
+                mock.patch.object(live.sys, "argv", base + extra),
+                mock.patch.object(live.sys, "stderr", io.StringIO()),
+                mock.patch.object(live.artifact_verifier, "ordinary_file") as read,
+                mock.patch.object(live.subprocess, "Popen") as process,
+                self.assertRaises(SystemExit) as failure,
+            ):
+                live.main()
+            self.assertEqual(failure.exception.code, 2)
+            read.assert_not_called()
+            process.assert_not_called()
+
+
 class BoundedCleanupTests(unittest.TestCase):
     def test_failed_poll_kill_and_second_wait_are_recorded_without_raising(self) -> None:
         process = mock.Mock()

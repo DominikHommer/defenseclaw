@@ -48,6 +48,15 @@ DLL_CHECKS = {
     "owned_fixture_removed",
 }
 DLL_CASES = ("user32", "gdi32", "shell32")
+CLAUDE_CHECKS = {
+    "fixed_signed_claude_version_output",
+    "retained_direct_process_handles_signaled",
+    "owned_fixture_removed",
+}
+CLAUDE_IMAGE_SHA256 = "eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23"
+CLAUDE_IMAGE_SIZE = 254858400
+CLAUDE_PRODUCT_VERSION = "2.1.292.0"
+CLAUDE_VERSION_OUTPUT = "2.1.292 (Claude Code)"
 PROCESS_ERRORS = (OSError, subprocess.SubprocessError, ValueError, RuntimeError)
 
 
@@ -150,13 +159,16 @@ def close_finished_stream(stream, reader, errors: list[str]) -> None:
             errors.append("custody stream close failed: " + type(error).__name__)
 
 
-def valid_observations(record: object, receipt: dict, mode: str = "loader-only") -> bool:
-    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only"}:
+def valid_observations(
+    record: object, receipt: dict, mode: str = "loader-only", local_receipt_sha256: str | None = None
+) -> bool:
+    if mode not in {"loader-only", "standalone-boundary", "dll-startup-only", "claude-version-only"}:
         return False
     contract = artifact_verifier.artifact_contract(mode)
     boundary = mode == "standalone-boundary"
     dll = mode == "dll-startup-only"
-    checks = DLL_CHECKS if dll else BOUNDARY_CHECKS if boundary else CHECKS
+    claude = mode == "claude-version-only"
+    checks = CLAUDE_CHECKS if claude else DLL_CHECKS if dll else BOUNDARY_CHECKS if boundary else CHECKS
     if not isinstance(record, dict):
         return False
     if not {"binary_sha256", "build_commit", "build_run", "combined_lock_sha256", "artifact_id"} <= receipt.keys():
@@ -180,6 +192,21 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
             "artifact_id": receipt["artifact_id"],
         }.items()
     ):
+        return False
+    if claude:
+        if not isinstance(local_receipt_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", local_receipt_sha256) is None:
+            return False
+        if any(
+            record.get(key) != value or type(record.get(key)) is not type(value)
+            for key, value in {
+                "local_image_sha256": CLAUDE_IMAGE_SHA256,
+                "local_image_size": CLAUDE_IMAGE_SIZE,
+                "local_image_product_version": CLAUDE_PRODUCT_VERSION,
+                "local_image_review_receipt_sha256": local_receipt_sha256,
+            }.items()
+        ):
+            return False
+    elif local_receipt_sha256 is not None:
         return False
     try:
         lines = [json.loads(line) for line in record["stdout"].splitlines() if line]
@@ -205,23 +232,41 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
                 if match is None or int(match[1]) > 0xFFFFFFFF:
                     return False
                 dll_all_loaded = False
-            if observation != {
-                "case": "dll-" + label,
-                "outcome": "Exited(0)",
-                "direct_handle_signaled": True,
-                "stdout": output,
-                "stderr": "",
-            } or observation.get("direct_handle_signaled") is not True:
+            if (
+                observation
+                != {
+                    "case": "dll-" + label,
+                    "outcome": "Exited(0)",
+                    "direct_handle_signaled": True,
+                    "stdout": output,
+                    "stderr": "",
+                }
+                or observation.get("direct_handle_signaled") is not True
+            ):
                 return False
+    claude_output = None
+    if claude:
+        if len(lines) != 2 or not all(isinstance(line, dict) for line in lines):
+            return False
+        claude_output = lines[0].get("stdout")
+        if not isinstance(claude_output, str) or claude_output not in {
+            CLAUDE_VERSION_OUTPUT + "\n",
+            CLAUDE_VERSION_OUTPUT + "\r\n",
+        }:
+            return False
     expected_cases = (
-        [
-            ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
-            ("boundary", "Exited(0)", "FIXED_BOUNDARIES_PASS\n"),
-            ("exit23", "Exited(23)", "FIXED_EXIT23_STARTED\n"),
-            ("timeout", "TimedOut", "FIXED_TIMEOUT_STARTED\n"),
-        ]
-        if boundary
-        else [("loader", "Exited(23)", "FIXED_PSEC_LOADER_STARTED\n")]
+        [("claude-version", "Exited(0)", claude_output)]
+        if claude
+        else (
+            [
+                ("argv", "Exited(0)", "FIXED_ARGV_PASS\n"),
+                ("boundary", "Exited(0)", "FIXED_BOUNDARIES_PASS\n"),
+                ("exit23", "Exited(23)", "FIXED_EXIT23_STARTED\n"),
+                ("timeout", "TimedOut", "FIXED_TIMEOUT_STARTED\n"),
+            ]
+            if boundary
+            else [("loader", "Exited(23)", "FIXED_PSEC_LOADER_STARTED\n")]
+        )
     )
     if not dll:
         if len(lines) != len(expected_cases) + 1 or not all(isinstance(line, dict) for line in lines):
@@ -244,7 +289,12 @@ def valid_observations(record: object, receipt: dict, mode: str = "loader-only")
         and final.get("production_qualification") is False
         and final.get("loader_only_diagnostic") is (mode == "loader-only")
         and (
-            not dll or (
+            not claude
+            or (final.get("claude_version_only") is True and final.get("dll_startup_only_diagnostic") is False)
+        )
+        and (
+            not dll
+            or (
                 final.get("dll_startup_only_diagnostic") is True
                 and final.get("dll_initialization_all_succeeded") is dll_all_loaded
             )
@@ -286,15 +336,27 @@ def main() -> None:
     modes.add_argument("--loader-only", action="store_true")
     modes.add_argument("--standalone-boundary", action="store_true")
     modes.add_argument("--dll-startup-only", action="store_true")
+    modes.add_argument("--claude-version-only", action="store_true")
     parser.add_argument("--custody", type=Path, required=True)
     parser.add_argument("--custody-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--receipt-sha256", type=artifact_verifier.digest_argument, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--local-image-receipt", type=Path)
+    parser.add_argument("--local-image-receipt-sha256", type=artifact_verifier.digest_argument)
     args = parser.parse_args()
+    if args.claude_version_only:
+        if args.local_image_receipt is None or args.local_image_receipt_sha256 is None:
+            parser.error("the fixed Claude case requires both independent local-image receipt pins")
+    elif args.local_image_receipt is not None or args.local_image_receipt_sha256 is not None:
+        parser.error("local-image receipt options require the fixed Claude case")
     mode = (
-        "dll-startup-only" if args.dll_startup_only
-        else "standalone-boundary" if args.standalone_boundary
+        "claude-version-only"
+        if args.claude_version_only
+        else "dll-startup-only"
+        if args.dll_startup_only
+        else "standalone-boundary"
+        if args.standalone_boundary
         else "loader-only"
     )
     contract = artifact_verifier.artifact_contract(mode)
@@ -314,6 +376,10 @@ def main() -> None:
         or receipt.get("scope") != contract["scope"]
     ):
         raise ValueError("an independently verified non-executing receipt is required")
+    if args.claude_version_only:
+        local_raw = artifact_verifier.ordinary_file(args.local_image_receipt.absolute(), 64 * 1024)
+        if hashlib.sha256(local_raw).hexdigest() != args.local_image_receipt_sha256:
+            raise ValueError("the independently reviewed local-image receipt differs")
     evidence = args.evidence.absolute()
     evidence.mkdir(mode=0o700)
     for name in ("wrapper-home", "wrapper-tmp"):
@@ -339,6 +405,13 @@ def main() -> None:
         "-case-root",
         str(evidence / "psec-headless-01"),
     ]
+    if args.claude_version_only:
+        command += [
+            "-local-image-receipt",
+            str(args.local_image_receipt.absolute()),
+            "-local-image-receipt-sha256",
+            args.local_image_receipt_sha256,
+        ]
     output, diagnostic = Capture(), Capture()
     started = time.monotonic()
     deadline = False
@@ -409,7 +482,7 @@ def main() -> None:
         and output_error is None
         and diagnostic_error is None
         and not fixtures
-        and valid_observations(result, receipt, mode)
+        and valid_observations(result, receipt, mode, args.local_image_receipt_sha256)
     )
     record = {
         "passed": passed,
@@ -425,9 +498,15 @@ def main() -> None:
         "retained_owned_fixtures": fixtures,
         "observations": result,
         "production_or_claude_qualification": False,
+        "local_image_review_receipt_sha256": args.local_image_receipt_sha256,
+        "fixed_claude_version_smoke_only": args.claude_version_only,
         "mode": mode,
         "scope": (
-            "fixed local canaries and literal argv only; loopback endpoints only; "
+            "fixed independently reviewed signed Claude --version only; eight private values requested, "
+            "realized Claude environment unverified; offline/default UI configured; "
+            "no authentication, model, hooks, terminal or general Claude/runtime qualification"
+            if args.claude_version_only
+            else "fixed local canaries and literal argv only; loopback endpoints only; "
             "no terminal, credentials, model or general resource audit"
             if mode == "standalone-boundary"
             else "fixed std-only loader diagnostic; marker, exit23 and owned custody only; "

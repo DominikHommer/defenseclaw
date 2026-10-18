@@ -328,3 +328,53 @@ station/desktop would need separate reviewed object ownership and access tests;
 [CreateWindowStation](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createwindowstationw)
 also restricts named creation to administrators. No UI policy, window station,
 desktop, existing ACL or host namespace is changed here.
+
+
+## Source-only fixed signed Claude version slice
+
+The separate `claude-version-only` slice is not built or executed yet. It tests
+only the fixed, independently reviewed Anthropic Claude Code 2.1.292 Windows
+image with literal `--version`, closed stdin, a ten-second native deadline,
+eight explicitly supplied private environment values, offline policy and the
+unchanged Win32k/UI restrictions. It provides no authentication, model, hook,
+terminal, workspace or customer-provider qualification. A prior boundary or DLL
+receipt cannot authorize this slice.
+The eight values are requested configuration; this version-only command does
+not observe Claude's realized environment or pass the boundary child's native
+environment frame handshake.
+
+`prepare_build.py build-locked --probe-slice claude-version-only` selects its
+separate `standalone_std_fixed_signed_claude_version` artifact contract. Omitting
+`--probe-slice` retains `dll-startup-only`. Both choices build the same four
+bounded CI executables and run the existing pure and filesystem-only admission
+gates; neither executes the probe, PSEC or Claude. The signed local Claude image
+is never uploaded as a CI-built executable, and the 64 MiB CI-image bound remains
+unchanged.
+
+The separately reviewed local-image receipt has schema
+`fixed-reviewed-anthropic-claude-version-v1`, a pinned receipt SHA256, exact
+254858400-byte image identity
+`eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23`,
+product version `2.1.292.0`, independently checked Valid Anthropic signature facts,
+and false execution/production-qualification flags. Receipt fields cannot admit
+another program. Signature facts describe an independent review; the source-
+pinned image SHA256 and size supply executable authority. There is no payload
+hash override, download, arbitrary executable selector or arbitrary argv.
+
+The host wrapper is built from the two reviewed source files together:
+`go build -o <fresh-private-output> custody_windows.go claude_image_windows.go`.
+It validates the separate CI receipt and local-image receipt, retains the image
+and ordinary mounted NTFS ancestors, then copies only that verified supervisor
+and the fixed Claude bytes into a new owner-private held bin. Images deny
+write/delete sharing; list-access directory pins deny rename while allowing
+ordinary contents/metadata to remain mutable. Held-root creation, SHA256 copy
+checks, retained image handles and the existing pre-resume owned Job stay in
+force through termination. No whole host HOME or credentials are granted.
+
+After separate source, artifact, signature and host-wrapper review, the closed
+`run_live.py --claude-version-only` case additionally requires
+`--local-image-receipt` and `--local-image-receipt-sha256`. Acceptance requires
+exact version output, exit zero, empty stderr, the held direct process signal,
+empty outer Job and owned-fixture cleanup. Timeouts, extra output, wrong images,
+receipt/mode mismatches and cleanup failures remain failures. No native run is
+authorized by this documentation or by a build-only artifact.
