@@ -884,6 +884,9 @@ filepath-securejoin is a mixed-license module: its unmodified root package
 license texts are retained here to describe the whole module accurately;
 this staging import does not use its MPL-2.0 pathrs-lite implementation.
 
+The golang.org/x/exp LICENSE and PATENTS texts for these exact hashes
+are reproduced in the earlier sections and are not duplicated below.
+
 Pinned module and license-text provenance:
   Module: github.com/ProtonMail/go-crypto
   Version: v1.1.6
@@ -1000,7 +1003,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 ==============================================================================
 github.com/ProtonMail/go-crypto v1.1.6 (PATENTS)
 ==============================================================================
@@ -1027,7 +1029,6 @@ implementation of Go constitutes direct or contributory patent
 infringement, or inducement of patent infringement, then any patent
 rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
-
 
 ==============================================================================
 github.com/cloudflare/circl v1.6.3 (LICENSE)
@@ -1091,7 +1092,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 ==============================================================================
 github.com/cloudflare/circl v1.6.3 (ecc/p384/LICENSE)
 ==============================================================================
@@ -1122,7 +1122,6 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 
 ==============================================================================
 github.com/cyphar/filepath-securejoin v0.6.1 (COPYING.md)
@@ -1576,7 +1575,6 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   defined by the Mozilla Public License, v. 2.0.
 ```
 
-
 ==============================================================================
 github.com/cyphar/filepath-securejoin v0.6.1 (LICENSE.BSD)
 ==============================================================================
@@ -1609,7 +1607,6 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 
 ==============================================================================
 github.com/cyphar/filepath-securejoin v0.6.1 (LICENSE.MPL-2.0)
@@ -1989,7 +1986,6 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
 
-
 ==============================================================================
 github.com/emirpasic/gods v1.18.1 (LICENSE)
 ==============================================================================
@@ -2036,7 +2032,6 @@ WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
 ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-
 ==============================================================================
 github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 (LICENSE)
 ==============================================================================
@@ -2069,7 +2064,6 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 
 ==============================================================================
 github.com/go-git/go-billy/v5 v5.9.2 (LICENSE)
@@ -2277,7 +2271,6 @@ github.com/go-git/go-billy/v5 v5.9.2 (LICENSE)
    See the License for the specific language governing permissions and
    limitations under the License.
 
-
 ==============================================================================
 github.com/go-git/go-git/v5 v5.19.3 (LICENSE)
 ==============================================================================
@@ -2484,7 +2477,6 @@ github.com/go-git/go-git/v5 v5.19.3 (LICENSE)
    See the License for the specific language governing permissions and
    limitations under the License.
 
-
 ==============================================================================
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 (LICENSE)
 ==============================================================================
@@ -2510,7 +2502,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
 
 ==============================================================================
 github.com/pjbgf/sha1cd v0.7.0 (LICENSE)
@@ -2718,7 +2709,6 @@ github.com/pjbgf/sha1cd v0.7.0 (LICENSE)
    See the License for the specific language governing permissions and
    limitations under the License.
 
-
 ==============================================================================
 github.com/sergi/go-diff v1.4.0 (LICENSE)
 ==============================================================================
@@ -2742,7 +2732,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-
 
 
 ==============================================================================
@@ -2777,7 +2766,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 ==============================================================================
 golang.org/x/crypto v0.56.0 (PATENTS)
 ==============================================================================
@@ -2804,68 +2792,6 @@ implementation of Go constitutes direct or contributory patent
 infringement, or inducement of patent infringement, then any patent
 rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
-
-
-==============================================================================
-golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f (LICENSE)
-==============================================================================
-
-Copyright 2009 The Go Authors.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-   * Redistributions of source code must retain the above copyright
-notice, this list of conditions and the following disclaimer.
-   * Redistributions in binary form must reproduce the above
-copyright notice, this list of conditions and the following disclaimer
-in the documentation and/or other materials provided with the
-distribution.
-   * Neither the name of Google LLC nor the names of its
-contributors may be used to endorse or promote products derived from
-this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-==============================================================================
-golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f (PATENTS)
-==============================================================================
-
-Additional IP Rights Grant (Patents)
-
-"This implementation" means the copyrightable works distributed by
-Google as part of the Go project.
-
-Google hereby grants to You a perpetual, worldwide, non-exclusive,
-no-charge, royalty-free, irrevocable (except as stated in this section)
-patent license to make, have made, use, offer to sell, sell, import,
-transfer and otherwise run, modify and propagate the contents of this
-implementation of Go, where such license applies only to those patent
-claims, both currently owned or controlled by Google and acquired in
-the future, licensable by Google that are necessarily infringed by this
-implementation of Go.  This grant does not include claims that would be
-infringed only as a consequence of further modification of this
-implementation.  If you or your agent or exclusive licensee institute or
-order or agree to the institution of patent litigation against any
-entity (including a cross-claim or counterclaim in a lawsuit) alleging
-that this implementation of Go or any code incorporated within this
-implementation of Go constitutes direct or contributory patent
-infringement, or inducement of patent infringement, then any patent
-rights granted to you under this License for this implementation of Go
-shall terminate as of the date such litigation is filed.
-
 
 ==============================================================================
 golang.org/x/net v0.58.0 (LICENSE)
@@ -2899,7 +2825,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 ==============================================================================
 golang.org/x/net v0.58.0 (PATENTS)
 ==============================================================================
@@ -2926,7 +2851,6 @@ implementation of Go constitutes direct or contributory patent
 infringement, or inducement of patent infringement, then any patent
 rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
-
 
 ==============================================================================
 golang.org/x/sys v0.47.0 (LICENSE)
@@ -2960,7 +2884,6 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 ==============================================================================
 golang.org/x/sys v0.47.0 (PATENTS)
 ==============================================================================
@@ -2987,7 +2910,6 @@ implementation of Go constitutes direct or contributory patent
 infringement, or inducement of patent infringement, then any patent
 rights granted to you under this License for this implementation of Go
 shall terminate as of the date such litigation is filed.
-
 
 ==============================================================================
 gopkg.in/warnings.v0 v0.1.2 (LICENSE)
