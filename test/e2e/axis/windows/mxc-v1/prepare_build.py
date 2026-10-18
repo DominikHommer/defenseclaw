@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -21,13 +22,31 @@ MXC_COMMIT = "fda29ac63bc306b7f97f3b86b4b63d44f7f40cf2"
 TOOLCHAIN = "1.95.0"
 BINARY = "defenseclaw-axis-windows-psec-probe.exe"
 LOADER_BINARY = "defenseclaw-axis-windows-psec-loader-child.exe"
+BOUNDARY_BINARY = "defenseclaw-axis-windows-psec-boundary-child.exe"
 ROOT = Path(__file__).resolve().parent
 PATCH = ROOT / "patches" / "mxc-strict-windows-psec.patch"
+LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
+WINDOWS_ARGV_PATCH = ROOT / "patches" / "mxc-windows-literal-argv.patch"
+LITERAL_PATCH_SOURCE = "test/e2e/axis/patches/mxc-literal-argv.patch"
+LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 PATCHED_PATHS = {
     "src/mxc-sdk/src/lib.rs",
     "src/mxc-sdk/src/core/mxc_engine/mod.rs",
     "src/mxc-sdk/src/core/mxc_engine/dispatch.rs",
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs",
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs",
+    "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs",
+    "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs",
+    "src/mxc-sdk/src/core/mxc_common/mod.rs",
+    "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs",
+    "src/mxc-sdk/src/core/mxc_common/validator.rs",
+    "src/mxc-sdk/src/policy.rs",
+    "src/mxc-sdk/src/policy/exact/mod.rs",
+}
+ADDED_PATHS = {
+    "src/mxc-sdk/src/core/mxc_common/literal_argv.rs",
+    "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs",
+    "src/mxc-sdk/src/literal_argv.rs",
 }
 
 
@@ -95,17 +114,38 @@ def verify_build_sources(axis: Path, mxc: Path) -> None:
         # command() strips surrounding whitespace; strip each expected status
         # line too, without accepting staged, added or untracked content.
         actual = {line.strip() for line in status.splitlines()}
-        expected_status = {f"M {path}" for path in PATCHED_PATHS} if source == mxc else set()
+        expected_status = (
+            {f"M {path}" for path in PATCHED_PATHS} | {f"?? {path}" for path in ADDED_PATHS} if source == mxc else set()
+        )
         if actual != expected_status:
-            raise RuntimeError("upstream source changes differ from the four reviewed MXC overlay paths")
+            raise RuntimeError("upstream source changes differ from the reviewed MXC overlay paths")
         staged = command(["git", "diff", "--cached", "--name-only"], cwd=source, capture=True)
         if staged:
             raise RuntimeError("upstream source staging is not permitted")
 
 
 def digest(path: Path) -> str:
+    result = hashlib.sha256()
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        while chunk := source.read(1024 * 1024):
+            result.update(chunk)
+    return result.hexdigest()
+
+
+def overlay_fingerprints(mxc: Path) -> dict[str, str]:
+    """Include newly added files: Git's unstaged diff does not contain them."""
+    result = {}
+    for relative in sorted(PATCHED_PATHS | ADDED_PATHS):
+        path = mxc / relative
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            or metadata.st_size > 2 * 1024 * 1024
+        ):
+            raise RuntimeError("reviewed MXC overlay target must be a bounded regular file")
+        result[relative] = digest(path)
+    return result
 
 
 def main() -> None:
@@ -129,10 +169,13 @@ def main() -> None:
     if not toolchain.startswith(f"rustc {TOOLCHAIN} "):
         raise RuntimeError("the already-installed Rust toolchain differs from the reviewed version")
     upstream_locks = {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}
-    command(["git", "apply", "--check", str(PATCH)], cwd=mxc)
-    command(["git", "apply", str(PATCH)], cwd=mxc)
+    if not LITERAL_PATCH.is_file() or digest(LITERAL_PATCH) != LITERAL_PATCH_SHA256:
+        raise RuntimeError("stage the exact reviewed shared literal-argv patch from Git before building")
+    for patch in (PATCH, LITERAL_PATCH, WINDOWS_ARGV_PATCH):
+        command(["git", "apply", "--check", str(patch)], cwd=mxc)
+        command(["git", "apply", str(patch)], cwd=mxc)
     verify_build_sources(axis, mxc)
-    overlay_before = command(["git", "diff", "--no-ext-diff", "--binary"], cwd=mxc, capture=True)
+    overlay_before = overlay_fingerprints(mxc)
     if args.mode == "generate-lock":
         command(["cargo", f"+{TOOLCHAIN}", "generate-lockfile"])
     lock_before = digest(lock)
@@ -144,7 +187,7 @@ def main() -> None:
     if upstream_locks != {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}:
         raise RuntimeError("an upstream lock changed during the build")
     verify_build_sources(axis, mxc)
-    if command(["git", "diff", "--no-ext-diff", "--binary"], cwd=mxc, capture=True) != overlay_before:
+    if overlay_fingerprints(mxc) != overlay_before:
         raise RuntimeError("reviewed MXC overlay bytes changed during the build")
 
     (artifact / "bin").mkdir(parents=True)
@@ -157,13 +200,16 @@ def main() -> None:
         Path("src/main.rs"),
         Path("src/probe.rs"),
         Path("src/loader_child.rs"),
+        Path("src/boundary_child.rs"),
         Path("patches/mxc-strict-windows-psec.patch"),
+        Path("patches/mxc-literal-argv.patch"),
+        Path("patches/mxc-windows-literal-argv.patch"),
     ]
     for relative in files:
         target = artifact / "source" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
-    for binary in (BINARY, LOADER_BINARY):
+    for binary in (BINARY, LOADER_BINARY, BOUNDARY_BINARY):
         shutil.copyfile(ROOT / "target" / "release" / binary, artifact / "bin" / binary)
         (artifact / "bin" / binary).chmod(0o755)
     (artifact / "upstream").mkdir()
@@ -176,18 +222,23 @@ def main() -> None:
     (artifact / "TOOLCHAIN.txt").write_text(toolchain + "\n" + cargo_version + "\n", encoding="utf-8")
     provenance = {
         "schema": "defenseclaw-contributor-axis-windows-psec-v1",
-        "variant": "separate_std_loader_diagnostic",
+        "variant": "standalone_std_boundary_literal_argv",
         "axis_commit": AXIS_COMMIT,
         "mxc_commit": MXC_COMMIT,
         "mxc_patch_sha256": digest(PATCH),
+        "mxc_literal_argv_patch_sha256": digest(LITERAL_PATCH),
+        "mxc_literal_argv_patch_source": LITERAL_PATCH_SOURCE,
+        "mxc_windows_argv_patch_sha256": digest(WINDOWS_ARGV_PATCH),
         "mxc_patched_paths": sorted(PATCHED_PATHS),
+        "mxc_added_paths": sorted(ADDED_PATHS),
+        "mxc_overlay_file_sha256": overlay_before,
         "combined_lock_sha256": lock_before,
         "upstream_lock_sha256": upstream_locks,
         "build_mode": args.mode,
         "probe_executed": False,
         "human_lock_review_required_before_live_execution": True,
         "locked_rebuild": args.mode == "build-locked",
-        "scope": "fixed_windows_native_psec_loader_diagnostic",
+        "scope": "fixed_windows_native_psec_boundary_literal_argv",
         "production_certification": False,
         "files": {
             path.relative_to(artifact).as_posix(): digest(path)

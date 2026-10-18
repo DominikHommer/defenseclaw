@@ -36,6 +36,20 @@ removal only; it never reports the nine boundary checks. Both image hashes and
 the diagnostic variant must be verified, and the child's imports inspected,
 before any separately reviewed native execution.
 
+That separate diagnostic passed once on the native host from build
+`a96ef846d7c75987c9266aa96f928c8915dbcc3d`: the std-only child printed its marker,
+returned typed exit 23, and its retained direct handle was signaled. The outer
+custody Job was empty and no owned fixture remained. This demonstrates startup
+under the unchanged policy; it does not establish the precise DLL failure cause
+or qualify the original boundary checks.
+
+The next source-only variant, `standalone_std_boundary_literal_argv`, moves
+the boundary, exit and timeout payload into a third, std-only binary. It also
+tests empty arguments, spaces, quotes, trailing backslashes, Unicode and shell
+metacharacters as literal arguments. These new sources have not been compiled
+or executed. The previously reviewed loader live helpers intentionally reject
+this different variant until separately updated and reviewed.
+
 ## Reviewed SDK overlay
 
 `patches/mxc-strict-windows-psec.patch` introduces a Windows-only public
@@ -49,6 +63,24 @@ This contributor entry point also refuses ingress/host-loopback allowances,
 egress allowances, proxy configuration, added capabilities and denial capture
 before constructing the backend. Only the explicit fixed offline posture is
 admitted; later proxy work requires its own capability and PSEC-version checks.
+
+The next build composes that strict overlay, the shared reviewed
+`test/e2e/axis/patches/mxc-literal-argv.patch` (SHA256
+`7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d`),
+then `patches/mxc-windows-literal-argv.patch`. The last overlay adds only a
+strict `v1::spawn_windows_psec_argv` route. It retains the native admission and
+fallback refusal, requires an empty legacy command, passes an explicit absolute
+application name to `CreateProcessW`, and encodes bounded UTF-16 arguments using
+Windows C/Rust quoting rules. It starts no shell. The generic Unix literal-argv
+dispatcher continues to reject ProcessContainer. Native pipes, Job setup,
+filesystem policy, UI restrictions and network policy remain unchanged.
+The new route admits only unambiguous local drive paths on fixed volumes.
+It refuses UNC/device/ADS paths, redirected or SUBST drives, and reparse points.
+It opens each path component without following reparse points, keeps read-only
+sharing custody through process creation, and uses the image handle's volume
+GUID path as the explicit application. The host still needs its own reviewed
+digest/identity admission before this contributor seam can become a general
+customer launcher.
 
 The patch also makes a failure to confirm an empty owned Job an error, instead
 of a warning followed by successful teardown. Native PSEC owns a security
@@ -72,7 +104,9 @@ helper never installs prerequisites or runs its resulting probe. Windows
 Server 2022 CI is a compilation host only; no PSEC live run is permitted there.
 
 Prepare a fresh staging directory containing this subtree's tracked files
-and exact clean child checkouts:
+and exact clean child checkouts. Stage the shared literal-argv patch from its
+exact repository Git bytes into `patches/mxc-literal-argv.patch`; it is an
+explicit additional build input rather than a duplicate tracked patch:
 
 ```text
 mxc-v1/
@@ -85,9 +119,12 @@ mxc-v1/
 ```
 
 Run `python prepare_build.py generate-lock`. It verifies source identities,
-applies only the reviewed MXC overlay, generates a combined lock, builds with
+applies the three reviewed MXC overlays in order, generates a combined lock, builds with
 `--locked`, compiles probe tests without running them, and packages the
-binary, source, patch, licenses, locks, compiler identity and SHA256 provenance.
+three binaries, source, patches, licenses, locks, compiler identity and SHA256
+provenance. It fingerprints the 12 modified and three added SDK files before
+and after the build; an unstaged Git diff alone cannot detect changes to added
+files. No dependency has been added for the separate std-only child.
 The pure Python build-helper gates run with:
 
 ```powershell
@@ -115,7 +152,7 @@ installation; Git for Windows' Unix linker is not a compatible MSVC linker.
 
 The probe accepts no caller command, path, policy or environment flags. Its only
 optional operator selector is the fixed `--loader-only` diagnostic. Its
-child selector accepts only fixed boundary, exit-23 and timeout cases. It
+standalone child accepts only fixed argv, boundary, exit-23 and timeout cases. It
 clears the supervisor environment before invoking SDK code or creating threads;
 the child receives only explicit system/private state entries with environment
 inheritance off. A harmless parent-only `DC_AXIS_INHERIT_CANARY=fixed-public`

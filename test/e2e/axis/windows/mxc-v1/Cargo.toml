@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "defenseclaw-axis-windows-psec-loader-child"
 path = "src/loader_child.rs"
 
+[[bin]]
+name = "defenseclaw-axis-windows-psec-boundary-child"
+path = "src/boundary_child.rs"
+
 [workspace]
 resolver = "3"
 exclude = ["axis-source", "mxc-source"]

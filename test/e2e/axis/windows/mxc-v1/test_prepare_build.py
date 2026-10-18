@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import stat
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -99,7 +101,7 @@ class BuildGuardTests(TestCase):
         mxc = Path("mxc")
         with (
             mock.patch.object(build, "command", side_effect=[build.AXIS_COMMIT, "?? extra.rs"]),
-            self.assertRaisesRegex(RuntimeError, "four reviewed MXC overlay paths"),
+            self.assertRaisesRegex(RuntimeError, "reviewed MXC overlay paths"),
         ):
             build.verify_build_sources(axis, mxc)
 
@@ -112,9 +114,51 @@ class BuildGuardTests(TestCase):
         ):
             build.verify_build_sources(axis, mxc)
 
-    def test_only_exact_four_unstaged_overlay_paths_are_accepted(self) -> None:
+    def test_only_exact_modified_and_added_overlay_paths_are_accepted(self) -> None:
         axis = Path("axis")
         mxc = Path("mxc")
-        status = "\n".join(f" M {path}" for path in sorted(build.PATCHED_PATHS))
+        status = "\n".join(
+            [f" M {path}" for path in sorted(build.PATCHED_PATHS)]
+            + [f"?? {path}" for path in sorted(build.ADDED_PATHS)]
+        )
         with mock.patch.object(build, "command", side_effect=[build.AXIS_COMMIT, "", "", build.MXC_COMMIT, status, ""]):
             build.verify_build_sources(axis, mxc)
+
+    def test_missing_added_overlay_file_is_refused(self) -> None:
+        status = "\n".join(f" M {path}" for path in sorted(build.PATCHED_PATHS))
+        with (
+            mock.patch.object(build, "command", side_effect=[build.AXIS_COMMIT, "", "", build.MXC_COMMIT, status]),
+            self.assertRaisesRegex(RuntimeError, "reviewed MXC overlay paths"),
+        ):
+            build.verify_build_sources(Path("axis"), Path("mxc"))
+
+    def test_fingerprints_detect_added_file_mutation_outside_git_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in build.PATCHED_PATHS | build.ADDED_PATHS:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"fixed source\n")
+            before = build.overlay_fingerprints(root)
+            changed = sorted(build.ADDED_PATHS)[0]
+            (root / changed).write_bytes(b"changed source\n")
+            after = build.overlay_fingerprints(root)
+            self.assertNotEqual(before[changed], after[changed])
+            self.assertEqual(set(before), build.PATCHED_PATHS | build.ADDED_PATHS)
+
+    def test_overlay_junction_is_refused_before_read(self) -> None:
+        with (
+            mock.patch.object(
+                Path,
+                "lstat",
+                return_value=SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+                    st_size=42,
+                ),
+            ),
+            mock.patch.object(build, "digest") as digest,
+            self.assertRaisesRegex(RuntimeError, "bounded regular file"),
+        ):
+            build.overlay_fingerprints(Path("mxc"))
+        digest.assert_not_called()

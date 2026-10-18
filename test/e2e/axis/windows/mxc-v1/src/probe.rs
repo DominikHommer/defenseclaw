@@ -9,8 +9,8 @@ use mxc_sdk::v1::{
     configs::ProcessContainerConfig,
 };
 use std::fs;
-use std::io::{self, Read};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::io::Read;
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -24,9 +24,6 @@ const LIMIT: u64 = 64 * 1024;
 
 pub fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--fixed-child") {
-        return child(&args[1..]);
-    }
     let loader_only = args.as_slice() == ["--loader-only"];
     ensure!(
         args.is_empty() || loader_only,
@@ -69,12 +66,16 @@ pub fn run() -> Result<i32> {
             .canonicalize()?;
         run_case(&paths, &payload, "loader", &[0; 4])?;
     } else {
+        let payload = executable
+            .with_file_name("defenseclaw-axis-windows-psec-boundary-child.exe")
+            .canonicalize()?;
         let endpoints = Endpoints::new()?;
         let ports = endpoints.ports();
-        run_case(&paths, &executable, "boundary", &ports)?;
+        run_case(&paths, &payload, "argv", &ports)?;
+        run_case(&paths, &payload, "boundary", &ports)?;
         endpoints.require_no_contained_delivery()?;
-        run_case(&paths, &executable, "exit23", &ports)?;
-        run_case(&paths, &executable, "timeout", &ports)?;
+        run_case(&paths, &payload, "exit23", &ports)?;
+        run_case(&paths, &payload, "timeout", &ports)?;
     }
     ensure!(
         fs::read(&paths.outside)? == SENTINEL,
@@ -99,6 +100,7 @@ pub fn run() -> Result<i32> {
         ]
     } else {
         vec![
+            "literal_windows_argv",
             "private_environment",
             "allowed_write",
             "outside_read_write_denied",
@@ -229,20 +231,35 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
         matches!(policy.network.mode, NetworkMode::Block),
         "offline policy required"
     );
-    let quoted = format!("\"{}\"", executable.display());
-    ensure!(
-        !executable.to_string_lossy().contains('"'),
-        "invalid executable path"
-    );
-    let command = if mode == "loader" {
-        quoted
-    } else {
-        format!(
-            "{quoted} --fixed-child {mode} {} {} {} {}",
-            ports[0], ports[1], ports[2], ports[3]
-        )
-    };
-    let mut request = ContainerRequest::new(command);
+    let mut argv = vec![executable.as_os_str().to_owned()];
+    if mode == "argv" {
+        argv.extend(
+            [
+                "--fixed-child",
+                "argv",
+                "",
+                "a b",
+                "a\"b",
+                "tail\\",
+                "λ-雪;$()`&|<>*?",
+                "quoted space\\",
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        );
+    } else if mode != "loader" {
+        argv.extend(
+            ["--fixed-child", mode]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+        );
+        argv.extend(
+            ports
+                .iter()
+                .map(|port| std::ffi::OsString::from(port.to_string())),
+        );
+    }
+    let mut request = ContainerRequest::new("");
     request.containment = Containment::ProcessContainer(ProcessContainerConfig::default());
     request.filesystem = Some(FilesystemPolicy {
         readwrite_paths: policy.filesystem.read_write.clone(),
@@ -271,8 +288,9 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     request.working_directory = Some(paths.workspace.to_string_lossy().into_owned());
     request.environment = Some(paths.environment());
     request.inherit_default_environment = Some(false);
-    let mut process = v1::spawn_windows_psec(
+    let mut process = v1::spawn_windows_psec_argv(
         request,
+        argv,
         SpawnOptions {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
@@ -300,6 +318,16 @@ fn run_case(paths: &Paths, executable: &Path, mode: &str, ports: &[u16; 4]) -> R
     ensure!(signaled, "retained direct process handle is not signaled");
     let outcome = outcome?;
     match mode {
+        "argv" => {
+            ensure!(
+                output == "FIXED_ARGV_PASS\n",
+                "literal argv marker missing: {output:?} {diagnostics}"
+            );
+            ensure!(
+                outcome == WaitResult::Exited(0),
+                "literal argv case differs: {outcome:?}"
+            );
+        }
         "loader" => {
             ensure!(
                 output == "FIXED_PSEC_LOADER_STARTED\n",
@@ -358,122 +386,6 @@ fn bounded(mut reader: Box<dyn Read + Send>) -> Result<String> {
         "fixed output exceeded its bound"
     );
     Ok(String::from_utf8(bytes)?)
-}
-
-fn child(args: &[String]) -> Result<i32> {
-    ensure!(
-        args.len() == 5,
-        "only fixed child mode and four canary ports are accepted"
-    );
-    match args[0].as_str() {
-        "exit23" => {
-            println!("FIXED_EXIT23_STARTED");
-            return Ok(23);
-        }
-        "timeout" => {
-            println!("FIXED_TIMEOUT_STARTED");
-            thread::sleep(Duration::from_secs(30));
-            return Ok(44);
-        }
-        "boundary" => {}
-        _ => bail!("unsupported fixed child"),
-    }
-    let workspace = std::env::current_dir()?.canonicalize()?;
-    ensure!(
-        workspace
-            .file_name()
-            .is_some_and(|name| name == "workspace"),
-        "private cwd missing"
-    );
-    let root = workspace.parent().context("fixture parent missing")?;
-    ensure!(
-        root.file_name()
-            .and_then(|p| p.to_str())
-            .is_some_and(|p| p.starts_with(PREFIX)),
-        "unexpected fixture root"
-    );
-    ensure!(
-        fs::read(workspace.join("fixture-seal"))? == SENTINEL,
-        "fixture seal missing"
-    );
-    for (key, relative) in [
-        ("HOME", "home"),
-        ("USERPROFILE", "home"),
-        ("TEMP", "tmp"),
-        ("TMP", "tmp"),
-    ] {
-        ensure!(
-            PathBuf::from(std::env::var(key)?) == root.join(relative),
-            "private {key} differs"
-        );
-    }
-    ensure!(
-        std::env::var_os("OPENAI_API_KEY").is_none()
-            && std::env::var_os("ANTHROPIC_API_KEY").is_none(),
-        "credential environment present"
-    );
-    ensure!(
-        std::env::var_os("DC_AXIS_INHERIT_CANARY").is_none(),
-        "parent-only inheritance canary reached child"
-    );
-    fs::write(workspace.join("allowed-write"), b"fixed write")?;
-    fs::write(
-        root.join("outside-parent").join("allowed-sibling"),
-        b"fixed parent-grant write",
-    )?;
-    ensure!(
-        fs::read(root.join("outside-parent").join("outside.txt")).is_err_and(permission_denied),
-        "outside read was not denied"
-    );
-    ensure!(
-        fs::write(
-            root.join("outside-parent").join("outside.txt"),
-            b"unexpected"
-        )
-        .is_err_and(permission_denied),
-        "outside write was not denied"
-    );
-    ensure!(
-        fs::read(root.join("readonly.txt"))? == SENTINEL,
-        "read-only read failed"
-    );
-    ensure!(
-        fs::write(root.join("readonly.txt"), b"unexpected").is_err_and(permission_denied),
-        "read-only write was not denied"
-    );
-    let ports: Vec<u16> = args[1..]
-        .iter()
-        .map(|port| port.parse())
-        .collect::<std::result::Result<_, _>>()?;
-    for (ip, port) in [
-        (IpAddr::V4(Ipv4Addr::LOCALHOST), ports[0]),
-        (IpAddr::V6(Ipv6Addr::LOCALHOST), ports[2]),
-    ] {
-        ensure!(
-            TcpStream::connect_timeout(&SocketAddr::new(ip, port), Duration::from_secs(1))
-                .is_err_and(permission_denied),
-            "contained TCP connect was not denied"
-        );
-    }
-    for (bind, destination) in [
-        ("0.0.0.0:0", format!("127.0.0.1:{}", ports[1])),
-        ("[::]:0", format!("[::1]:{}", ports[3])),
-    ] {
-        match UdpSocket::bind(bind) {
-            Ok(socket) => {
-                if let Err(error) = socket.send_to(b"FIXED_CONTAINED_UDP", destination) {
-                    ensure!(permission_denied(error), "unexpected UDP error");
-                }
-            }
-            Err(error) => ensure!(permission_denied(error), "unexpected UDP bind error"),
-        }
-    }
-    println!("FIXED_BOUNDARIES_PASS");
-    Ok(0)
-}
-
-fn permission_denied(error: io::Error) -> bool {
-    error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(10013)
 }
 
 struct Endpoints {
