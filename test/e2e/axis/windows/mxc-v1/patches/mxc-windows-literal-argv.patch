@@ -798,3 +798,20 @@
          Ok(Box::new(BaseContainerSandboxProcess::from_child(
              child, logger,
          )))
+--- a/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
++++ b/src/mxc-sdk/src/core/mxc_engine/dispatch.rs
+@@ -148,7 +148,11 @@
+                 .map_err(map_spawn_error)
+         }
+-        _ => Err(MxcError::unsupported_containment(
+-            "literal argv requires an explicitly supported native backend; no fallback is available",
+-        )),
++        _ => {
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++            let _ = (argv, logger);
++            Err(MxcError::unsupported_containment(
++                "literal argv requires an explicitly supported native backend; no fallback is available",
++            ))
++        }
+     }
+ }

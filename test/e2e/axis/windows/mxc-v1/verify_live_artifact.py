@@ -57,7 +57,7 @@ ALL_FILES = FILES | {"PROVENANCE.json", "WORKFLOW.json"}
 BOUNDARY_BINARY = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
 BOUNDARY_VARIANT = "standalone_std_boundary_literal_argv"
 BOUNDARY_SCOPE = "fixed_windows_native_psec_boundary_literal_argv"
-BOUNDARY_OVERLAY_SHA256 = "da5ba589f8ca09d70f30af1e43c5e3169e0223affe08c6cc9e14f92cf230e3aa"
+BOUNDARY_OVERLAY_SHA256 = "56e2597f8a01a62ddbac1417f08a38dc8ec5c33b806861e46ea0ad73cbac3e77"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 SDK_LOCK_SHA256 = "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0"
 SDK_TEST_GROUPS = {
@@ -101,36 +101,36 @@ BOUNDARY_ADDED_PATHS = {
 # Exact reviewed fda source with the three pinned overlays, including the typed flag fix.
 BOUNDARY_OVERLAY_FILES = {
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_command.rs": (
-        "752a526612d9e4d5c507b2084433c03c348fc611f7d9ddda0c08b4104e07a4ed"
+        "a13934345597bd3fcaa66353b37ed5a9f54e643d234a620257970035b6212abc"
     ),
     "src/mxc-sdk/src/backends/bubblewrap/common/bwrap_runner.rs": (
-        "522dc19070819955d0933b0e18ef4124b16a3a33afa5f4acf22d7d1bea18283b"
+        "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
     ),
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
         "7d82f2a5c8a69594fbbdb511b4bb6f508846d70223d279a87ddfabba572ffdbf"
     ),
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
-        "9458c371a352a09ea70df3fca580e4b07bd0d82817262ada2d633fce56fa256b"
+        "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"
     ),
     "src/mxc-sdk/src/core/mxc_common/literal_argv.rs": (
-        "3291f38ae3ca95ee36b4867862dfa815e5b28af2ba278af96e8e4ca1c9a7440e"
+        "9a75fbca0fe9152abe4349ed37dd0a5db0d272e10ba89ecfbeb1f54bbd07d89d"
     ),
-    "src/mxc-sdk/src/core/mxc_common/mod.rs": ("baa030e7f08d5d90507da788618de690fded3cfbe7203819c1a8d7a63d6943c6"),
+    "src/mxc-sdk/src/core/mxc_common/mod.rs": ("42bb9328a9beb5f5217a55f11f5a4341fc36f8dbda9cf72729aeb767f7d92289"),
     "src/mxc-sdk/src/core/mxc_common/sandbox_process.rs": (
-        "4d25493dbbf4295e5fbe093a364c4d4f71eb5f33368183ce5cd367a623eb4698"
+        "755c9809a0ea450dca815c41fab438ffe251beba2174c4e5806d0866b34b7293"
     ),
     "src/mxc-sdk/src/core/mxc_common/validator.rs": (
-        "52354ae2ee8c33ee48438648ef7b5139492f2a8c219e02627b9d2f82d741579d"
+        "a7487090a1693fb237acedd81f4e1c66b64d907c77e46824cc81a9f571c92191"
     ),
-    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs": ("1cb0d3e36407cbae3c7942a93078926bd5c70f4dd711fd9edc147c1324e8bb6e"),
+    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs": ("e1fd28a30b19f04d6be4c6694f33ee6cbad005e02aad334a1085d2438808df49"),
     "src/mxc-sdk/src/core/mxc_engine/literal_argv.rs": (
-        "3e88ef2b03bd29dd122f25d51973ea3f79017af5d06b08513ae5512dea528479"
+        "c35bb7f302e84fbca74c62d4d8d12bb142002a6f69f12476f386c7a858b5f719"
     ),
     "src/mxc-sdk/src/core/mxc_engine/mod.rs": ("67ff4af0b57c1e3adb51e638ec56796981d46daa75a3f2d6d7d6b7bbcd7e2cf5"),
     "src/mxc-sdk/src/lib.rs": ("4f9c1e49c52ffad33864fee9e83a22dfa30b26034386024fdf930534e46556b4"),
-    "src/mxc-sdk/src/literal_argv.rs": ("2526447ed5d2c29ceb0d0bd4788ce573b5c4440d225c328b8b6aab01fe3ea059"),
-    "src/mxc-sdk/src/policy/exact/mod.rs": ("dc10991d33dda35658c826e1494a3c6a51ff50e558c636a030af28475c398bc7"),
-    "src/mxc-sdk/src/policy.rs": ("38e0ab07e8b5fb01e20a167902197a961930fa9e6799050ce3b4cd78c3f918fa"),
+    "src/mxc-sdk/src/literal_argv.rs": ("3e5884c316403be2ad82052492f1d3fd9dbd7ea2500ccbb7c716a64a29602cd5"),
+    "src/mxc-sdk/src/policy.rs": ("43680b63e9e7d4c9351cee1936e791be1b4b877cfcee368b07429e22c355de9c"),
+    "src/mxc-sdk/src/policy/exact/mod.rs": ("da9ad3bd8cf1be1af225aa95c887718d67ce7efbb8270d2e7d578bab9dc87bb7"),
 }
 
 

@@ -162,3 +162,15 @@ class BuildGuardTests(TestCase):
         ):
             build.overlay_fingerprints(Path("mxc"))
         digest.assert_not_called()
+
+    def test_windows_overlay_requires_all_four_reviewed_paths(self) -> None:
+        rows = ["1\t0\t" + path for path in sorted(build.WINDOWS_ARGV_PATCH_PATHS)]
+        with mock.patch.object(build, "command", return_value="\n".join(rows)):
+            build.verify_windows_patch_paths(Path("mxc"))
+        for changed in [rows[:-1], rows + ["1\t0\tunreviewed.rs"], rows[:-1] + [rows[0]]]:
+            with (
+                self.subTest(rows=changed),
+                mock.patch.object(build, "command", return_value="\n".join(changed)),
+                self.assertRaisesRegex(RuntimeError, "four reviewed source paths"),
+            ):
+                build.verify_windows_patch_paths(Path("mxc"))

@@ -29,6 +29,12 @@ LITERAL_PATCH = ROOT / "patches" / "mxc-literal-argv.patch"
 WINDOWS_ARGV_PATCH = ROOT / "patches" / "mxc-windows-literal-argv.patch"
 LITERAL_PATCH_SOURCE = "test/e2e/axis/patches/mxc-literal-argv.patch"
 LITERAL_PATCH_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
+WINDOWS_ARGV_PATCH_PATHS = {
+    "src/mxc-sdk/src/lib.rs",
+    "src/mxc-sdk/src/core/mxc_engine/mod.rs",
+    "src/mxc-sdk/src/core/mxc_engine/dispatch.rs",
+    "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs",
+}
 PATCHED_PATHS = {
     "src/mxc-sdk/src/lib.rs",
     "src/mxc-sdk/src/core/mxc_engine/mod.rs",
@@ -148,6 +154,17 @@ def overlay_fingerprints(mxc: Path) -> dict[str, str]:
     return result
 
 
+def verify_windows_patch_paths(mxc: Path) -> None:
+    rows = command(["git", "apply", "--numstat", str(WINDOWS_ARGV_PATCH)], cwd=mxc, capture=True).splitlines()
+    fields = [row.split("\t") for row in rows]
+    if (
+        len(fields) != len(WINDOWS_ARGV_PATCH_PATHS)
+        or any(len(row) != 3 or not row[0].isdigit() or not row[1].isdigit() for row in fields)
+        or {row[2] for row in fields} != WINDOWS_ARGV_PATCH_PATHS
+    ):
+        raise RuntimeError("Windows argv overlay must touch exactly its four reviewed source paths")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("generate-lock", "build-locked"))
@@ -171,6 +188,7 @@ def main() -> None:
     upstream_locks = {"axis": digest(axis / "Cargo.lock"), "mxc": digest(mxc / "src" / "Cargo.lock")}
     if not LITERAL_PATCH.is_file() or digest(LITERAL_PATCH) != LITERAL_PATCH_SHA256:
         raise RuntimeError("stage the exact reviewed shared literal-argv patch from Git before building")
+    verify_windows_patch_paths(mxc)
     for patch in (PATCH, LITERAL_PATCH, WINDOWS_ARGV_PATCH):
         command(["git", "apply", "--check", str(patch)], cwd=mxc)
         command(["git", "apply", str(patch)], cwd=mxc)
