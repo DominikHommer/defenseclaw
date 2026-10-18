@@ -129,6 +129,7 @@ type recordingHookSocketGateway struct {
 	authorization []string
 	paths         []string
 	bodies        []string
+	resolved      []string
 }
 
 func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +138,7 @@ func (g *recordingHookSocketGateway) ServeHTTP(w http.ResponseWriter, r *http.Re
 	g.authorization = append(g.authorization, r.Header.Get("Authorization"))
 	g.paths = append(g.paths, r.URL.Path)
 	g.bodies = append(g.bodies, string(body))
+	g.resolved = append(g.resolved, r.Header.Get("X-DefenseClaw-Resolved-Writes"))
 	g.mu.Unlock()
 	response := g.response
 	if response == nil {

@@ -293,7 +293,7 @@ fi
 # cannot inspect this home under ProtectHome. Keep the payload off argv.
 _DC_RESOLVED_WRITES=
 if [ -z "${DEFENSECLAW_SESSION_FACTS_BIN:-}" ] ||
-   ! _DC_RESOLVED_WRITES="$("${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" ||
+   ! _DC_RESOLVED_WRITES="$(ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true; "${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" ||
    [ -z "${_DC_RESOLVED_WRITES}" ]; then
   # A truncated fact map makes the gateway evaluate writes with incomplete
   # evidence; an absent header would incorrectly permit local resolution.
