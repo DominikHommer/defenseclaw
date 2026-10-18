@@ -249,10 +249,47 @@ sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCR
 # result (exit 75) before that for the MDM wrapper to report it (GAP-1413).
 cat >"$SCRIPTS/postinstall" <<'EOF'
 #!/bin/sh
-gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
-state=/opt/cisco/defenseclaw/lifecycle
+prefix=/opt/cisco/defenseclaw
+gateway=$prefix/bin/defenseclaw-gateway
+state=$prefix/lifecycle
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
+# The Installer can write a payload file over the old one in place while a
+# daemon or an account's LaunchAgent still holds it. macOS keeps the code
+# signature it checked with that file and can kill every later start of the
+# new program for code signing (OS_REASON_CODESIGNING, GAP-0049). Give each
+# program the package installed a new file (a copy in the same folder renamed
+# over it) before ensure, which then reloads every account's loaded
+# LaunchAgent because the gateway file changed.
+refresh_program() {
+    file=$1
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+        return 1
+    fi
+    tmp=$(mktemp "${file%/*}/.${file##*/}.pkg.XXXXXXXX") || return 1
+    if ! cp -p "$file" "$tmp" || ! mv -f "$tmp" "$file"; then
+        rm -f "$tmp"
+        return 1
+    fi
+}
+refresh_programs() {
+    for program in "$1/bin/defenseclaw-gateway" "$1/bin/defenseclaw-hook" "$1/bin/defenseclaw-sensor-helper" \
+        "$1/bin/defenseclaw-acp" "$1"/bin/launch-agents/*/defenseclaw-gateway "$1"/share/e2fsprogs/sbin/*; do
+        case $program in
+        */bin/defenseclaw-acp | */bin/launch-agents/* | */share/e2fsprogs/sbin/*)
+            # Optional: an unmatched pattern stays literal and is skipped.
+            [ -e "$program" ] || [ -L "$program" ] || continue
+            ;;
+        esac
+        if ! refresh_program "$program"; then
+            echo "DefenseClaw: could not give $program a new file; reinstall the package." >&2
+            return 1
+        fi
+    done
+}
+if ! refresh_programs "$prefix"; then
+    exit 1
+fi
 downgrade=""
 if [ -f "$state/allow-downgrade" ] && [ ! -L "$state/allow-downgrade" ] && [ "$(stat -f %u "$state/allow-downgrade")" = 0 ]; then
     downgrade=--allow-downgrade

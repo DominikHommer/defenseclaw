@@ -317,6 +317,152 @@ func TestMacOSLaunchAgentStatusAndVerifyReportCodeSigningFailure(t *testing.T) {
 	}
 }
 
+func TestMacOSLaunchAgentStatusNamesCodeSigningStateAndRemedy(t *testing.T) {
+	h, f, _ := newLaunchdTestHost(t)
+	f.jobs[h.alice.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
+	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	before, err := os.Stat(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionStatus})
+	message := messagesOf(r.Errors, codeSandboxUserState)
+	for _, want := range []string{"failed: last start was killed for code signing (OS_REASON_CODESIGNING)", "run `" + h.env.lifecycleCommand(ActionRepair) + "`", "gives the LaunchAgent gateway a new file and reloads the job"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("status message %q lacks %q", message, want)
+		}
+	}
+	if after, err := os.Stat(gateway); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("status replaced the gateway file: %v", err)
+	}
+}
+
+// launchAgentGatewayCopy lays down the package's content-addressed copy of
+// the installed gateway, which the packaged LaunchAgents execute.
+func launchAgentGatewayCopy(t *testing.T, h *osHost) (gateway, program string, data []byte) {
+	t.Helper()
+	gateway = h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	data, err := os.ReadFile(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := sha256File(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program = h.env.P(filepath.Join(h.env.Layout.BinDir, "launch-agents", digest, binGateway))
+	if err := os.MkdirAll(filepath.Dir(program), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(program, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return gateway, program, data
+}
+
+func TestMacOSRepairGivesCodeSigningKilledGatewayANewFile(t *testing.T) {
+	// GAP-0049: after a package upgrade the user-domain sandbox job of a
+	// logged-out account stayed killed for code signing. A reload alone
+	// starts the same rejected file, so repair first gives the gateway and
+	// its LaunchAgent copy new files with the same bytes.
+	h, f, cfg := newLaunchdTestHost(t)
+	uid := h.alice.UID
+	gateway, program, data := launchAgentGatewayCopy(t, h)
+	f.domains[uid] = false
+	f.userDomains = map[int]bool{uid: true}
+	f.userJobs = map[int]map[string]*launchdJobFixture{uid: {labelSandbox: {loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}}}
+	before := map[string]os.FileInfo{}
+	for _, path := range []string{gateway, program} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = info
+	}
+	r := h.run(Options{Action: ActionRepair})
+	if len(r.Errors) != 0 || r.ExitCode != 0 {
+		t.Fatalf("repair failed: %+v", r.Errors)
+	}
+	domain := "user/" + strconv.Itoa(uid)
+	want := []string{
+		"launchctl bootout " + domain + "/" + labelSandbox,
+		"launchctl bootstrap " + domain + " " + h.env.P("/Library/LaunchAgents/"+labelSandbox+".plist"),
+		"launchctl kickstart " + domain + "/" + labelSandbox,
+	}
+	if !reflect.DeepEqual(f.mutated, want) {
+		t.Fatalf("repair mutations = %v, want %v", f.mutated, want)
+	}
+	for path, old := range before {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(old, info) {
+			t.Errorf("%s kept its file, so launchd starts the rejected file again", path)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Errorf("%s mode = %v, want 0755", path, info.Mode().Perm())
+		}
+		if got, err := os.ReadFile(path); err != nil || string(got) != string(data) {
+			t.Errorf("%s changed its bytes: %v", path, err)
+		}
+	}
+	if !strings.Contains(strings.Join(r.Changes, "\n"), "new file") {
+		t.Errorf("repair did not report the new gateway file: %v", r.Changes)
+	}
+	f.mutated = nil
+	requireOK(t, h.ensure(cfg))
+	if len(f.mutated) != 0 {
+		t.Fatalf("an ensure after the repair reloaded the healthy job again: %v", f.mutated)
+	}
+}
+
+func TestMacOSRepairKeepsTheGatewayFileForOtherFailures(t *testing.T) {
+	h, f, _ := newLaunchdTestHost(t)
+	gateway := h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))
+	before, err := os.Stat(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.jobs[h.alice.UID][labelOpenShellGateway] = &launchdJobFixture{loaded: true, state: "not running", spawn: "Input/output error", code: "(never exited)", runs: 2}
+	r := h.run(Options{Action: ActionRepair})
+	if len(r.Errors) != 0 || len(f.mutated) != 3 {
+		t.Fatalf("repair of a spawn failure: errors %+v, calls %v", r.Errors, f.mutated)
+	}
+	if after, err := os.Stat(gateway); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("a failure other than code signing replaced the gateway file: %v", err)
+	}
+}
+
+func TestMacOSRepairRefusesAnUntrustedLaunchAgentProgram(t *testing.T) {
+	h, f, _ := newLaunchdTestHost(t)
+	gateway, program, _ := launchAgentGatewayCopy(t, h)
+	if err := os.Remove(program); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(gateway, program); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(gateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.jobs[h.alice.UID][labelSandbox] = &launchdJobFixture{loaded: true, state: "not running", reason: "OS_REASON_CODESIGNING", code: "(never exited)", runs: 3}
+	r := h.run(Options{Action: ActionRepair})
+	if len(f.mutated) != 0 {
+		t.Fatalf("repair reloaded a job whose program it refused: %v", f.mutated)
+	}
+	if after, err := os.Stat(gateway); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("repair replaced the gateway while the LaunchAgent program was untrusted: %v", err)
+	}
+	if warning := messagesOf(r.Warnings, codeSandboxUserState); !strings.Contains(warning, "not a regular file") {
+		t.Errorf("repair did not name the refused program: %+v", r.Warnings)
+	}
+	if message := messagesOf(r.Errors, codeSandboxUserState); !strings.Contains(message, "reinstall a signed DefenseClaw package") {
+		t.Errorf("failed repair gave no next step: %+v", r.Errors)
+	}
+}
+
 func TestMacOSPackageGatewayIdentityReloadsOnlyLoadedJobsOnce(t *testing.T) {
 	h, f, cfg := newLaunchdTestHost(t)
 	bob := SandboxAccount{Name: "bob", UID: h.alice.UID + 1, Home: "/Users/bob"}

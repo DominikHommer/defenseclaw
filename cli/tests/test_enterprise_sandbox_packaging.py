@@ -333,6 +333,120 @@ def test_macos_pkg_postinstall_runs_lifecycle_ensure(tmp_path: Path):
     assert '--reason package --json' in body
 
 
+def _postinstall_refresh(tmp_path: Path) -> tuple[str, Path]:
+    """The generated postinstall and its program-refresh functions as a file."""
+    result, _ = _run_builder(tmp_path / "build")
+    assert result.returncode == 0, result.stderr
+    body = (tmp_path / "build" / "captured-scripts" / "postinstall").read_text(encoding="utf-8")
+    start = body.index("refresh_program() {")
+    end = body.index("\n}\n", body.index("refresh_programs() {")) + 3
+    functions = tmp_path / "refresh.sh"
+    functions.write_text(body[start:end], encoding="utf-8")
+    return body, functions
+
+
+def _refresh_programs(functions: Path, prefix: Path, path: str = "/usr/bin:/bin"):
+    return subprocess.run(
+        ["sh", "-c", '. "$1"; refresh_programs "$2"', "sh", str(functions), str(prefix)],
+        env={"PATH": path},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _installed_programs(prefix: Path, optional: bool = True) -> list[Path]:
+    names = ["defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"]
+    if optional:
+        names.append("defenseclaw-acp")
+    programs = [prefix / "bin" / name for name in names]
+    if optional:
+        programs.append(prefix / "bin" / "launch-agents" / ("0" * 64) / "defenseclaw-gateway")
+        programs += [prefix / "share" / "e2fsprogs" / "sbin" / name for name in E2FSPROGS_TOOLS]
+    for program in programs:
+        program.parent.mkdir(parents=True, exist_ok=True)
+        program.write_bytes(b"signed " + program.name.encode() + b"\n")
+        program.chmod(0o755)
+    return programs
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+def test_macos_pkg_postinstall_gives_every_program_a_new_file_before_ensure(tmp_path: Path):
+    # GAP-0049: a program rewritten in place keeps the code signature macOS
+    # checked before, so its LaunchAgent start is killed for code signing.
+    body, functions = _postinstall_refresh(tmp_path)
+    lines = body.splitlines()
+    refresh = lines.index('if ! refresh_programs "$prefix"; then')
+    ensure = next(i for i, line in enumerate(lines) if "enterprise macos ensure --from-package" in line)
+    assert refresh < ensure
+    assert lines[refresh + 1].strip() == "exit 1"
+
+    prefix = tmp_path / "opt" / "cisco" / "defenseclaw"
+    programs = _installed_programs(prefix)
+    other = prefix / "share" / "fleet" / "policy_compiler.py"
+    other.parent.mkdir(parents=True)
+    other.write_text("compiler\n", encoding="utf-8")
+    notice = prefix / "share" / "e2fsprogs" / "licenses" / "NOTICE"
+    notice.parent.mkdir(parents=True)
+    notice.write_text("notice\n", encoding="utf-8")
+    kept = {path: path.stat().st_ino for path in (other, notice)}
+    for run in range(2):  # a reinstall of the same version gives new files again
+        before = {program: program.stat().st_ino for program in programs}
+        result = _refresh_programs(functions, prefix)
+        assert result.returncode == 0, result.stderr
+        for program in programs:
+            assert program.stat().st_ino != before[program], (run, program)
+            assert program.read_bytes() == b"signed " + program.name.encode() + b"\n"
+            assert _mode(program) == 0o755
+    assert {path: path.stat().st_ino for path in kept} == kept
+    assert not [path for path in prefix.rglob(".*.pkg.*")]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+def test_macos_pkg_postinstall_refresh_skips_absent_optional_programs(tmp_path: Path):
+    _, functions = _postinstall_refresh(tmp_path)
+    prefix = tmp_path / "opt" / "cisco" / "defenseclaw"
+    programs = _installed_programs(prefix, optional=False)
+    before = {program: program.stat().st_ino for program in programs}
+    result = _refresh_programs(functions, prefix)
+    assert result.returncode == 0, result.stderr
+    assert all(program.stat().st_ino != before[program] for program in programs)
+    assert not (prefix / "bin" / "defenseclaw-acp").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
+@pytest.mark.parametrize("problem", ["symlink", "missing", "rename"])
+def test_macos_pkg_postinstall_refresh_fails_closed(tmp_path: Path, problem: str):
+    _, functions = _postinstall_refresh(tmp_path)
+    prefix = tmp_path / "opt" / "cisco" / "defenseclaw"
+    programs = _installed_programs(prefix)
+    gateway, hook = programs[0], programs[1]
+    path = "/usr/bin:/bin"
+    if problem == "symlink":
+        target = tmp_path / "elsewhere"
+        target.write_bytes(b"other program\n")
+        gateway.unlink()
+        gateway.symlink_to(target)
+    elif problem == "missing":
+        hook.unlink()
+    else:
+        fake = tmp_path / "fakebin"
+        fake.mkdir()
+        _stub(fake, "mv", "exit 1")
+        path = f"{fake}:{path}"
+    inode = gateway.lstat().st_ino
+    result = _refresh_programs(functions, prefix, path)
+    assert result.returncode != 0
+    assert "reinstall the package" in result.stderr
+    if problem != "missing":  # the gateway comes first; a later required program is missing
+        assert gateway.lstat().st_ino == inode
+    if problem == "symlink":
+        assert gateway.is_symlink()
+    else:
+        assert gateway.read_bytes() == b"signed defenseclaw-gateway\n"
+    assert not [path for path in prefix.rglob(".*.pkg.*")]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell contract")
 def test_macos_pkg_build_stops_when_a_launch_agent_is_missing(tmp_path: Path):
     result, _ = _run_builder(tmp_path, agents=LAUNCH_AGENTS[:1])
