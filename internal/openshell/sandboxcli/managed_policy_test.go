@@ -8,6 +8,7 @@ package sandboxcli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,45 @@ func TestPolicyExplainManagedUsesTheDaemonNotTheLocalConfig(t *testing.T) {
 	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{}))
 	has(t, ta.output(), "Your sandbox policy on this computer", "policy explain --sources")
 	lacks(t, ta.output(), "local-secret-pack")
+}
+
+func TestPolicyExplainManagedKeepsIdentityAfterLongSettings(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.IO.Width = 80
+	ta.daemon.explain.Managed = managedExplainFixture()
+	for i := range 36 {
+		ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{
+			Key: fmt.Sprintf("setting.%02d", i), Value: "enabled", Source: "pack", Origin: "pack contractors",
+		})
+	}
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Harness: "codex", Sources: true}))
+	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
+	lastPage := strings.Join(lines[max(0, len(lines)-24):], "\n")
+	has(t, lastPage, "Policy at a glance", "Organization profile: contractors", `matched: your group CORP\Contractors`, "Agent: codex")
+	has(t, ta.output(), "SETTING", "setting.35", "[from your organization profile]")
+}
+
+func TestPolicyExplainManagedFooterNamesTheSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		given PolicyOptions
+		want  string
+	}{
+		{"default agent", PolicyOptions{}, "Agent: default agent (add --harness NAME for another)"},
+		{"running sandbox", PolicyOptions{Sandbox: "bob-codex"}, "Agent: agent in sandbox bob-codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			m := managedExplainFixture()
+			m.Provisional = true
+			ta.daemon.explain.Managed = m
+			ta.ok(t, ta.PolicyExplain(bg, tc.given))
+			output := ta.output()
+			has(t, output, "Policy at a glance", tc.want, "Organization profile: contractors",
+				"matched: your group CORP\\Contractors", "provisional until your directory answers")
+			lacks(t, output, "Agent: default agent (Claude Code)")
+		})
+	}
 }
 
 // GAP-0179/GAP-0550: the floor's source map identifies who supplied each

@@ -15898,6 +15898,9 @@ def _fix_gateway_token(
                 default=True,
             ):
                 return ("skip", "declined by user")
+            from defenseclaw.logger import keep_running_gateway_token
+
+            keep_running_gateway_token(None, cfg.data_dir, cfg.gateway.resolved_token(), token)
             _save_secret_to_dotenv(env_var, token, cfg.data_dir)
             return ("pass", f"{env_var} updated from openclaw.json")
         # OpenClaw can be local and unauthenticated while the DefenseClaw

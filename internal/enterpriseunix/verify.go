@@ -1080,7 +1080,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
-	l.describeDeletedEnrolledAccounts()
+	l.describeUnavailableEnrolledHomes()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	l.describeDestinations()

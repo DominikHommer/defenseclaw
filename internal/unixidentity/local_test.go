@@ -51,6 +51,31 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 	}
 }
 
+// GAP-0669: the gateway's macOS account stamp lists each local account's
+// uid, GeneratedUID, home and primary group, so an account deleted and
+// created again under the same name and uid is seen as another account.
+func TestParseDSCLAccountRecords(t *testing.T) {
+	records := mergeDSCLAccountRecords(
+		parseDSCLAttribute("_www 70\nalice   501\nnobody -2\nbad 5 6\n\n"),
+		parseDSCLAttribute("alice  8C1F-AAAA\n_www FFFFEEEE-0046\nnobody\n"),
+		parseDSCLAttribute("alice  /Users/alice smith\n_www\t/Library/WebServer\n"),
+		parseDSCLAttribute("alice 20\n_www 70\nnobody -2\n"),
+	)
+	want := map[string]LocalAccountRecord{
+		"alice":  {UID: 501, RecordID: "8C1F-AAAA", Home: "/Users/alice smith", PrimaryGID: "20"},
+		"_www":   {UID: 70, RecordID: "FFFFEEEE-0046", Home: "/Library/WebServer", PrimaryGID: "70"},
+		"nobody": {UID: -2, PrimaryGID: "-2"},
+	}
+	if len(records) != len(want) {
+		t.Fatalf("records = %+v, want %+v", records, want)
+	}
+	for name, record := range want {
+		if records[name] != record {
+			t.Fatalf("records[%q] = %+v, want %+v", name, records[name], record)
+		}
+	}
+}
+
 // macOS: the enumerator assumed every Mac may be bound to a directory, so a
 // deleted local account whose source was not recorded as local was never
 // revoked on an unbound Mac. The search policy decides it.

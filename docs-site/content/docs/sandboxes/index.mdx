@@ -149,7 +149,7 @@ Linux machine or an Apple-silicon Mac. The TUI's Sandboxes tab on Windows says s
 | Topic | Linux (Docker driver, the default) | macOS (Apple silicon, MicroVM driver) |
 | --- | --- | --- |
 | OpenShell driver | Docker driver: one container per sandbox. A host with KVM can use the MicroVM driver instead (see below). | MicroVM driver (`vm`): one virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls it experimental. |
-| Isolation | Linux namespaces, Landlock (kernel 6.2 or newer), seccomp, your uid | The same, inside a MicroVM with its own Linux kernel |
+| Isolation | Linux namespaces, Landlock (ABI 3 or newer), seccomp, your uid | The same, inside a MicroVM with its own Linux kernel |
 | OpenShell gateway | `openshell-gateway` systemd user service | Homebrew's `nvidia/openshell/openshell` service |
 | Your project folder | Mounted live at `/work/<folder>`. `--copy` works on a copy. | Always a copy, at `/sandbox/work/<folder>`. A MicroVM mounts no host folders. |
 | Secret files | Appear empty inside | Held back from the copy |

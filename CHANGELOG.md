@@ -8,9 +8,17 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
-## [Unreleased] — 1.0.2: managed sandbox telemetry
+## [Unreleased] — 1.0.3
 
 ### Fixed
+
+- Inventory Summary now scrolls by keyboard at 80×24, Overview notices show their full action, and managed `sandbox policy explain` repeats the profile, match and agent after long settings tables.
+
+## [1.0.2] — managed sandbox telemetry
+
+### Fixed
+
+- Per-user setup now refuses a guardrail switch to an unregistered connector, verifies every connector in a batch, and names an unsafe OpenCode plugin folder. Config writes accept finite floating-point values, and status JSON includes healthy hook connector state. Gateway token edits keep CLI audit and restart aligned with the running gateway; an unset export secret no longer strands uninstall.
 
 - **A recovered hook evaluation error fails closed on a standalone managed device.** Before this fix an internal evaluator error followed the configured guardrail mode and fail mode, so on a standalone managed device a tool or prompt call was allowed in observe mode, or with `hook_fail_mode: open` (guardrail or `application_protection`) for every agent except Codex, Claude Code and Devin. It now gets the agent's native deny there in every guardrail mode and whatever `hook_fail_mode` says, as when the gateway gives no verdict; a stop or session-end event keeps its neutral allow. Per-user installs and the Secure Client profile are unchanged.
 - **Linux and macOS MDM wrapper: a base config must match the signed bundle's guardrail block and hook modes.** A config delivered with a signed bundle is now the base config: the wrapper compares its `guardrail:` block with the bundle's (only `custom_packs.<pack>.path` may differ) and its `claude_code:`, `codex:`, `connector_hooks:` and `application_protection:` blocks (equal, or absent from both), and refuses a mismatch with `mdm_base_config_mismatch` before anything is installed. It then applies the base config before the trust anchors and the bundle, so while the first bundle is pending the hooks answer under the compared blocks. The comparison needs `tar`; without it the wrapper refuses with `mdm_tar_missing`. The comparison reads the configs as text, so the wrapper also refuses a base config that writes a top-level key other than plainly in lowercase (a tag, anchor, escape or `?` key) or continues a quoted value or a `{...}` or `[...]` on the next line. The base config must also be plain ASCII with LF or CRLF line endings (one UTF-8 byte order mark at the start is allowed): the YAML loader also starts a line at a lone CR, NEL, LS or PS, which the text comparison did not see, so the wrapper refuses any other byte, even in a comment. The Intune Windows packager compares the same hook mode blocks and applies the same byte and spelling rules, reading the raw bytes (GAP-0090). The docs give the install order: package and bundle in one script.

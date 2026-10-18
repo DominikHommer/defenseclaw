@@ -159,6 +159,8 @@ class KeysProvenanceCliTests(unittest.TestCase):
                 )
                 self.assertEqual(saved.exit_code, 0, msg=saved.output)
                 self.assertNotIn(secret, saved.output)
+                self.assertNotIn(secret[-4:], saved.output)
+                self.assertIn("value hidden", saved.output)
                 # ``keys set`` updates its current process environment.
                 # Ending that process leaves only the persisted dotenv value.
                 os.environ.pop("VIRUSTOTAL_API_KEY", None)
@@ -256,7 +258,7 @@ class KeysSetTests(unittest.TestCase):
             self.assertIn("DEFENSECLAW_TEST_KEY", body)
             self.assertIn("s3cret", body)
 
-    def test_set_confirmation_shows_only_the_last_four_characters(self):
+    def test_set_confirmation_hides_every_secret_character(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)
             result = CliRunner().invoke(
@@ -265,7 +267,9 @@ class KeysSetTests(unittest.TestCase):
                 obj=app,
             )
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn("DEFENSECLAW_TEST_KEY = …wxyz", result.output)
+            self.assertIn("DEFENSECLAW_TEST_KEY", result.output)
+            self.assertIn("value hidden", result.output)
+            self.assertNotIn("wxyz", result.output)
             self.assertNotIn("abcd", result.output)
 
     def test_set_tells_a_running_gateway_to_restart(self):

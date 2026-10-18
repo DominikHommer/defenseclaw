@@ -325,6 +325,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// removed file.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	lock, err := env.acquireLock(ctx)
@@ -353,6 +354,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			return enterprisestatus.BusyExitCode(env.GOOS)
 		}
 		r.AddError(codeState, err.Error())
+		l.reportNoSpace(err)
 		return 0
 	}
 	defer lock.release()
@@ -1586,6 +1588,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			committedConfig = l.inPlaceConfigEdit(record)
 		}
 		r.AddError(code, err.Error())
+		l.reportNoSpace(err)
 		if record == nil && account.Created {
 			// Refused before any change: the service account this run
 			// created goes too (GAP-0542).
@@ -1704,6 +1707,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			env.discardSnapshot(snap)
 		}
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 	pending := &Pending{
@@ -1713,6 +1717,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.savePending(pending); err != nil {
 		env.discardSnapshot(snap)
 		r.AddError(codeApply, err.Error())
+		l.reportDiskFull(err)
 		return 0
 	}
 
@@ -1720,6 +1725,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
+		// Before the rollback, which can free space: what was full when the
+		// step failed (GAP-0662).
+		l.reportDiskFull(cause)
 		// The previous deployment's sandbox settings are back, not the plan's.
 		l.osPlan = nil
 		// The rollback undoes this transaction's changes.

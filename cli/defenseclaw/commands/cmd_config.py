@@ -678,6 +678,19 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
 
     path = str(config_module.config_path())
     key = ", ".join(getattr(change, "path", "") for change in changes)
+    if any(getattr(change, "path", "") == "gateway.token_env" for change in changes):
+        from defenseclaw.logger import keep_running_gateway_token
+
+        # The top-level `config` command skips the normal config load, so
+        # app.cfg is normally None. Capture the old token before the writer
+        # changes token_env; loading only afterward selects the new token.
+        try:
+            before_cfg = app.cfg if app.cfg is not None else config_module.load()
+            keep_running_gateway_token(
+                getattr(app, "logger", None), before_cfg.data_dir, before_cfg.gateway.resolved_token(), ""
+            )
+        except (yaml.YAMLError, V8ConfigError, config_module.ConfigVersionError, ValueError, OSError) as exc:
+            raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
     try:
         result = config_writer.apply(
             changes,
@@ -731,14 +744,13 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     pending = result.restart_required
     if pending:
         click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
-    logger = getattr(app, "logger", None)
-    if logger is not None:
-        try:
-            logger.log_config_change(
-                f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
-            )
-        except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
-            pass
+    from defenseclaw.commands._audit_notice import saved_change_audit
+    from defenseclaw.logger import Logger
+
+    logger = getattr(app, "logger", None) or Logger.from_config(cfg)
+    saved_change_audit(logger).log_config_change(
+        f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+    )
     return True
 
 
@@ -808,7 +820,7 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
 
     KEY is a dotted path with [i] list indexes, for example
     guardrail.block_at or asset_policy.skill.denied[0].name. VALUE is a YAML
-    scalar (true, 3, HIGH, off: only true and false are booleans) or, with
+    scalar (true, 3, 3.5, HIGH, off: only true and false are booleans) or, with
     --json, any JSON value. The change is
     validated before it is written; on a managed device it is refused (exit 3).
     """
