@@ -828,6 +828,10 @@ func shellVariableCandidates(file *syntax.File, cwd, home string) shellVariableC
 				value, ok := staticShellWordWithVars(item, home, states.varsFor(item), shellVariablePoison{})
 				if ok {
 					candidates.add(iter.Name.Value, value)
+				} else if values, bounded := shellProjectGlobCandidates(file, node, item, cwd); bounded {
+					for _, value := range values {
+						candidates.add(iter.Name.Value, value)
+					}
 				} else {
 					candidates.unknown[iter.Name.Value] = true
 				}
