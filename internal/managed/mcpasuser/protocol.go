@@ -50,9 +50,11 @@ const (
 
 // Frame kinds. The relay sends one request, then stdin data and the end of
 // stdin; the enumerator sends one answer, then the server's stdout and
-// stderr and finally its exit code.
+// stderr and finally its exit code. The gateway sends one refresh and reads
+// one answer.
 const (
 	FrameRequest  byte = 'R'
+	FrameRefresh  byte = 'F'
 	FrameAnswer   byte = 'A'
 	FrameStdin    byte = 'i'
 	FrameStdinEOF byte = 'c'
@@ -110,6 +112,28 @@ func (r Request) Validate() error {
 		return fmt.Errorf("%w: invalid project folder", ErrProtocol)
 	case !digestPattern.MatchString(r.Digest):
 		return fmt.Errorf("%w: invalid definition digest", ErrProtocol)
+	}
+	return nil
+}
+
+// RefreshRequest asks the enumerator to publish the enrolled users' MCP
+// servers again now, from their own files, and to answer once it has. The
+// gateway sends it before it decides an MCP tool call, so the call is
+// decided on the definition the user has now, not on one published up to a
+// refresh interval ago (GAP-0216). It names nothing: the enumerator
+// publishes every user it enrolls, as on its own interval.
+type RefreshRequest struct {
+	Version        int    `json:"version"`
+	GatewayService string `json:"gateway_service"`
+}
+
+// Validate checks the form of every field.
+func (r RefreshRequest) Validate() error {
+	switch {
+	case r.Version != ProtocolVersion:
+		return fmt.Errorf("%w: unsupported refresh version %d", ErrProtocol, r.Version)
+	case !serviceNamePattern.MatchString(r.GatewayService):
+		return fmt.Errorf("%w: invalid gateway service name", ErrProtocol)
 	}
 	return nil
 }
@@ -185,17 +209,34 @@ func DecodeRequestArg(arg string) (Request, error) {
 
 func decodeRequest(data []byte) (Request, error) {
 	var request Request
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
-		return Request{}, fmt.Errorf("%w: request is not JSON: %v", ErrProtocol, err)
-	}
-	// Exactly one JSON value: More() misses a trailing "}" or "]".
-	if err := decoder.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
-		return Request{}, fmt.Errorf("%w: trailing data after the request", ErrProtocol)
+	if err := decodeOneJSON(data, &request); err != nil {
+		return Request{}, err
 	}
 	request.SID = strings.ToUpper(request.SID)
 	return request, request.Validate()
+}
+
+func decodeRefreshRequest(data []byte) (RefreshRequest, error) {
+	var request RefreshRequest
+	if err := decodeOneJSON(data, &request); err != nil {
+		return RefreshRequest{}, err
+	}
+	return request, request.Validate()
+}
+
+// decodeOneJSON decodes data, exactly one JSON value with known fields only,
+// into value.
+func decodeOneJSON(data []byte, value any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return fmt.Errorf("%w: request is not JSON: %v", ErrProtocol, err)
+	}
+	// Exactly one JSON value: More() misses a trailing "}" or "]".
+	if err := decoder.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: trailing data after the request", ErrProtocol)
+	}
+	return nil
 }
 
 // RelayArgs are the gateway executable's arguments that run the relay.

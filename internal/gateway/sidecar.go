@@ -92,6 +92,10 @@ type Sidecar struct {
 	// installWatcher is the running install watcher, nil while none runs;
 	// a reload that changes a denied list asks it to rescan (GAP-0627).
 	installWatcher atomic.Pointer[watcher.InstallWatcher]
+	// enrolledMCPRefresh brings the running watcher's list of the enrolled
+	// users' MCP servers up to date before an MCP tool call is decided
+	// (managed Windows only, GAP-0216); nil while no such watcher runs.
+	enrolledMCPRefresh atomic.Pointer[enrolledMCPRefresher]
 	// projectSkills are the project skill folders the hooks report, which
 	// the install watcher watches next to the connectors' (GAP-1063).
 	projectSkills projectSkillRoots
@@ -4150,6 +4154,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
+		refresher := s.newEnrolledMCPRefresher(reg, wcfg, enrolled.live)
+		s.enrolledMCPRefresh.Store(refresher)
+		defer s.enrolledMCPRefresh.CompareAndSwap(refresher, nil)
 	}
 	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
@@ -7885,6 +7892,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			Connector: connector, Server: server, Home: home, CWD: cwd,
 		})
 	})
+	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)

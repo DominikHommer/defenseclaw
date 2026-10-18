@@ -30,11 +30,11 @@ var (
 	procImpersonateNamedPipeClient = modAdvapi32.NewProc("ImpersonateNamedPipeClient")
 )
 
-// Serve accepts relay connections on the as-user pipe of gatewayService
-// until ctx ends. Only a process whose token carries the gateway's service
-// SID may connect: the pipe access list says so, and each client's token is
-// checked again before its request is read.
-func Serve(ctx context.Context, gatewayService string, start Starter, logf func(string, ...any)) error {
+// Serve accepts relay and refresh connections on the as-user pipe of
+// gatewayService until ctx ends. Only a process whose token carries the
+// gateway's service SID may connect: the pipe access list says so, and each
+// client's token is checked again before its request is read.
+func Serve(ctx context.Context, gatewayService string, refresh Refresher, start Starter, logf func(string, ...any)) error {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -96,8 +96,12 @@ func Serve(ctx context.Context, gatewayService string, start Starter, logf func(
 			defer func() { <-slots }()
 			conn := os.NewFile(uintptr(pipe), name)
 			defer conn.Close()
-			request, err := ServeConn(ctx, conn, start, SessionLimit)
-			if err != nil {
+			request, err := ServeConn(ctx, conn, refresh, start, SessionLimit)
+			switch {
+			case err == nil:
+			case request.Name == "":
+				logf("[mcp-as-user] request of pid %d: %v", pid, err)
+			default:
 				logf("[mcp-as-user] server %q of %s (%s) for pid %d: %v", request.Name, request.SID, request.Connector, pid, err)
 			}
 		}(pipe, clientPID)

@@ -89,6 +89,9 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	probe.WorkspaceDir = req.CWD
 	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
+	if decision, refused := a.mcpDefinitionRefreshDecision(ctx, "claudecode", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -145,6 +148,31 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 	reason := fmt.Sprintf("the %s MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
 		"give SYSTEM read access to the file again or repair its JSON", label, state.Account(), state.Path, state.Reason)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, source)
+	decision.RegistryStatus = "unknown"
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
+	return decision, true
+}
+
+// mcpDefinitionRefreshDecision has a managed Windows gateway read the
+// enrolled users' current MCP servers before it decides a tool call about to
+// run, so the unreadable-state and pending checks that follow see the
+// definition the user has now: a server changed under the same name is then
+// refused until its own scan, never run on the old verdict (GAP-0216). A
+// refresh that fails refuses the call as not admitted yet (fail closed);
+// gateway.log says why. Every other gateway has nothing to refresh. Secure
+// Client keeps main (#1092).
+func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
+		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		return config.AssetPolicyDecision{}, false
+	}
+	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("mcp server %q is not scanned yet: DefenseClaw could not read its current definition; try again in a minute", probe.ServerName)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-admission-pending")
 	decision.RegistryStatus = "unknown"
 	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
 		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))

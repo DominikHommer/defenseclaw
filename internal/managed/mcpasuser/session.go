@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,6 +40,10 @@ type Session interface {
 // Starter starts the server a request names, or says why it does not.
 type Starter func(ctx context.Context, request Request) (Session, error)
 
+// Refresher publishes the enrolled users' MCP servers again and returns once
+// they are published (RefreshRequest).
+type Refresher func(ctx context.Context) error
+
 // RefusedError is the enumerator's reason for not starting a server.
 type RefusedError struct{ Reason string }
 
@@ -57,6 +63,9 @@ const (
 	closeGrace = 5 * time.Second
 	// maxStderrBytes bounds the server stderr relayed for diagnostics.
 	maxStderrBytes = 64 << 10
+	// refreshLimit bounds one refresh: reading every enrolled user's files
+	// takes well under a second.
+	refreshLimit = 20 * time.Second
 )
 
 // RunRelay is the relay half over conn: it sends request, then copies stdin
@@ -131,15 +140,95 @@ func RunRelay(conn io.ReadWriter, request Request, stdin io.Reader, stdout, stde
 	}
 }
 
-// ServeConn is the enumerator half of one connection: it reads the request,
-// starts its server with start, relays the server's stdio until it exits
-// and sends its exit code. limit bounds the whole session; the server is
-// killed when it ends, when ctx ends, or shortly after the relay goes away.
-func ServeConn(ctx context.Context, conn Conn, start Starter, limit time.Duration) (Request, error) {
+// RequestRefresh is the gateway half of a refresh over conn: it asks the
+// enumerator to publish the enrolled users' MCP servers again and returns
+// once they are published, or why they are not.
+func RequestRefresh(conn io.ReadWriter, gatewayService string) error {
+	request := RefreshRequest{Version: ProtocolVersion, GatewayService: strings.TrimSpace(gatewayService)}
+	if err := request.Validate(); err != nil {
+		return err
+	}
+	if err := writeJSONFrame(conn, FrameRefresh, request); err != nil {
+		return fmt.Errorf("send the refresh to the hook enumerator: %w", err)
+	}
+	kind, payload, err := ReadFrame(conn)
+	if err != nil {
+		return fmt.Errorf("read the hook enumerator answer: %w", err)
+	}
+	if kind != FrameAnswer {
+		return fmt.Errorf("%w: expected an answer, got frame %q", ErrProtocol, kind)
+	}
+	var answer Answer
+	if err := json.Unmarshal(payload, &answer); err != nil {
+		return fmt.Errorf("%w: answer is not JSON", ErrProtocol)
+	}
+	if !answer.OK {
+		reason := answer.Error
+		if reason == "" {
+			reason = "the hook enumerator did not publish the MCP servers"
+		}
+		return &RefusedError{Reason: reason}
+	}
+	return nil
+}
+
+// Refresh asks the enumerator serving gatewayService to publish the enrolled
+// users' MCP servers again (RequestRefresh), within ctx.
+func Refresh(ctx context.Context, gatewayService string) error {
+	conn, err := Dial(ctx, gatewayService)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	done := make(chan error, 1)
+	go func() { done <- RequestRefresh(conn, gatewayService) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		_ = conn.Close()
+		return fmt.Errorf("the hook enumerator did not answer the refresh: %w", ctx.Err())
+	}
+}
+
+// Coalescer runs one publish at a time and shares a publish among the
+// callers that wait for it: a caller is answered by the first publish that
+// started after it asked, so a burst of tool calls costs one read of the
+// users' files, and no caller gets a result older than its own request.
+type Coalescer struct {
+	mu      sync.Mutex
+	started atomic.Uint64
+	lastErr error
+}
+
+// Run returns the result of a publish that started after the call.
+func (c *Coalescer) Run(publish func() error) error {
+	asked := c.started.Load()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.started.Load() != asked {
+		// A publish started after this call asked, and it has finished.
+		return c.lastErr
+	}
+	c.started.Add(1)
+	c.lastErr = publish()
+	return c.lastErr
+}
+
+// ServeConn is the enumerator half of one connection. For a relay it reads
+// the request, starts its server with start, relays the server's stdio until
+// it exits and sends its exit code; limit bounds the whole session, and the
+// server is killed when it ends, when ctx ends, or shortly after the relay
+// goes away. For a refresh (FrameRefresh) it publishes the MCP servers again
+// with refresh and answers; a nil refresh refuses it.
+func ServeConn(ctx context.Context, conn Conn, refresh Refresher, start Starter, limit time.Duration) (Request, error) {
 	_ = conn.SetReadDeadline(time.Now().Add(requestTimeout))
 	kind, payload, err := ReadFrame(conn)
 	if err != nil {
 		return Request{}, fmt.Errorf("read the relay request: %w", err)
+	}
+	if kind == FrameRefresh {
+		return Request{}, serveRefresh(ctx, conn, payload, refresh)
 	}
 	if kind != FrameRequest {
 		return Request{}, fmt.Errorf("%w: expected a request, got frame %q", ErrProtocol, kind)
@@ -256,6 +345,26 @@ func ServeConn(ctx context.Context, conn Conn, start Starter, limit time.Duratio
 	case <-time.After(closeGrace):
 	}
 	return request, waitErr
+}
+
+// serveRefresh answers one refresh request.
+func serveRefresh(ctx context.Context, conn Conn, payload []byte, refresh Refresher) error {
+	if _, err := decodeRefreshRequest(payload); err != nil {
+		_ = writeJSONFrame(conn, FrameAnswer, Answer{Error: truncate(err.Error(), maxAnswerError)})
+		return err
+	}
+	if refresh == nil {
+		err := errors.New("this hook enumerator does not publish MCP servers")
+		_ = writeJSONFrame(conn, FrameAnswer, Answer{Error: err.Error()})
+		return err
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, refreshLimit)
+	defer cancel()
+	if err := refresh(refreshCtx); err != nil {
+		_ = writeJSONFrame(conn, FrameAnswer, Answer{Error: truncate(err.Error(), maxAnswerError)})
+		return fmt.Errorf("refresh: %w", err)
+	}
+	return writeJSONFrame(conn, FrameAnswer, Answer{OK: true})
 }
 
 func mustJSON(value any) []byte {

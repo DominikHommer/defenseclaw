@@ -105,6 +105,10 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
+	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
+	// Set once before serving.
+	mcpRefreshBeforeCall func(ctx context.Context, connector string) error
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -1035,6 +1039,16 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 		return
 	}
 	a.mcpAdmissionPending = pending
+}
+
+// SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
+// servers before an MCP tool call (GAP-0216). Call it before the server
+// starts.
+func (a *APIServer) SetMCPRefreshBeforeCall(refresh func(ctx context.Context, connector string) error) {
+	if a == nil {
+		return
+	}
+	a.mcpRefreshBeforeCall = refresh
 }
 
 func (a *APIServer) runtimeConfigSnapshot() *config.Config {

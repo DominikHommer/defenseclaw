@@ -16,7 +16,9 @@ import (
 var ErrUnsupported = errors.New("MCP as-user scans run only on managed Windows")
 
 // Serve is Windows only.
-func Serve(context.Context, string, Starter, func(string, ...any)) error { return ErrUnsupported }
+func Serve(context.Context, string, Refresher, Starter, func(string, ...any)) error {
+	return ErrUnsupported
+}
 
 // Dial is Windows only.
 func Dial(context.Context, string) (io.ReadWriteCloser, error) { return nil, ErrUnsupported }

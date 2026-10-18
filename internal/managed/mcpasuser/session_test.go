@@ -13,6 +13,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,7 +200,7 @@ func TestRelayAndServeCarryStdioAndExitCode(t *testing.T) {
 	var started Request
 	served := make(chan error, 1)
 	go func() {
-		got, err := ServeConn(context.Background(), serverConn, func(_ context.Context, r Request) (Session, error) {
+		got, err := ServeConn(context.Background(), serverConn, nil, func(_ context.Context, r Request) (Session, error) {
 			started = r
 			return newEchoSession(7, false), nil
 		}, time.Minute)
@@ -229,7 +230,7 @@ func TestRelayAndServeCarryStdioAndExitCode(t *testing.T) {
 func TestRelayReportsTheRefusal(t *testing.T) {
 	relayConn, serverConn := net.Pipe()
 	go func() {
-		_, _ = ServeConn(context.Background(), serverConn, func(context.Context, Request) (Session, error) {
+		_, _ = ServeConn(context.Background(), serverConn, nil, func(context.Context, Request) (Session, error) {
 			return nil, errors.New("dcw-std1 is not signed in")
 		}, time.Minute)
 		_ = serverConn.Close()
@@ -246,7 +247,7 @@ func TestServeKillsTheServerWhenTheRelayGoesAway(t *testing.T) {
 	session := newEchoSession(0, true)
 	served := make(chan error, 1)
 	go func() {
-		_, err := ServeConn(context.Background(), serverConn, func(context.Context, Request) (Session, error) {
+		_, err := ServeConn(context.Background(), serverConn, nil, func(context.Context, Request) (Session, error) {
 			return session, nil
 		}, time.Minute)
 		served <- err
@@ -272,7 +273,7 @@ func TestServeKillsTheServerAtTheSessionLimit(t *testing.T) {
 	relayConn, serverConn := net.Pipe()
 	session := newEchoSession(0, true)
 	go func() {
-		_, _ = ServeConn(context.Background(), serverConn, func(context.Context, Request) (Session, error) {
+		_, _ = ServeConn(context.Background(), serverConn, nil, func(context.Context, Request) (Session, error) {
 			return session, nil
 		}, 100*time.Millisecond)
 		_ = serverConn.Close()
@@ -293,7 +294,7 @@ func TestServeKillsTheServerAtTheSessionLimit(t *testing.T) {
 func TestServeRefusesAMalformedRequest(t *testing.T) {
 	relayConn, serverConn := net.Pipe()
 	go func() {
-		_, _ = ServeConn(context.Background(), serverConn, func(context.Context, Request) (Session, error) {
+		_, _ = ServeConn(context.Background(), serverConn, nil, func(context.Context, Request) (Session, error) {
 			t.Error("started a server for a malformed request")
 			return nil, errors.New("unreachable")
 		}, time.Minute)
@@ -305,5 +306,123 @@ func TestServeRefusesAMalformedRequest(t *testing.T) {
 	kind, payload, err := ReadFrame(relayConn)
 	if err != nil || kind != FrameAnswer || !strings.Contains(string(payload), `"ok":false`) {
 		t.Fatalf("answer %q %s, %v", kind, payload, err)
+	}
+}
+
+// GAP-0216: the gateway asks the enumerator to publish the enrolled users'
+// MCP servers again before it decides a tool call; the answer comes once the
+// publish is done, and no server is started for it.
+func TestRefreshIsAnsweredOnceThePublishIsDone(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refresh Refresher
+		want    string
+	}{
+		{"published", func(context.Context) error { return nil }, ""},
+		{"publish failed", func(context.Context) error { return errors.New("manifest unreadable") }, "manifest unreadable"},
+		{"no refresher", nil, "does not publish MCP servers"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gatewayConn, serverConn := net.Pipe()
+			calls := 0
+			refresh := tc.refresh
+			if refresh != nil {
+				inner := refresh
+				refresh = func(ctx context.Context) error { calls++; return inner(ctx) }
+			}
+			served := make(chan struct{})
+			go func() {
+				defer close(served)
+				_, _ = ServeConn(context.Background(), serverConn, refresh, func(context.Context, Request) (Session, error) {
+					t.Error("a refresh started a server")
+					return nil, errors.New("no")
+				}, time.Minute)
+				_ = serverConn.Close()
+			}()
+			err := RequestRefresh(gatewayConn, "DefenseClawGateway")
+			_ = gatewayConn.Close()
+			<-served
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("RequestRefresh: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("RequestRefresh = %v, want an error naming %q", err, tc.want)
+			}
+			if tc.refresh != nil && calls != 1 {
+				t.Fatalf("refresh ran %d times, want once", calls)
+			}
+		})
+	}
+}
+
+func TestMalformedRefreshIsRefusedWithoutAPublish(t *testing.T) {
+	for _, payload := range []string{
+		`{"version":2,"gateway_service":"DefenseClawGateway"}`,
+		`{"version":1,"gateway_service":"bad name"}`,
+		`{"version":1,"gateway_service":"DefenseClawGateway","sid":"S-1-5-18"}`,
+		`{"version":1,"gateway_service":"DefenseClawGateway"}}`,
+	} {
+		gatewayConn, serverConn := net.Pipe()
+		published := false
+		served := make(chan error, 1)
+		go func() {
+			_, err := ServeConn(context.Background(), serverConn, func(context.Context) error { published = true; return nil }, nil, time.Minute)
+			_ = serverConn.Close()
+			served <- err
+		}()
+		if err := WriteFrame(gatewayConn, FrameRefresh, []byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		kind, answer, err := ReadFrame(gatewayConn)
+		_ = gatewayConn.Close()
+		if err != nil || kind != FrameAnswer || !strings.Contains(string(answer), `"ok":false`) {
+			t.Fatalf("%s: answer %q %q (%v), want a refusal", payload, kind, answer, err)
+		}
+		if err := <-served; !errors.Is(err, ErrProtocol) {
+			t.Fatalf("%s: ServeConn = %v, want a protocol error", payload, err)
+		}
+		if published {
+			t.Fatalf("%s: a malformed refresh published", payload)
+		}
+	}
+}
+
+// A caller is answered by a publish that started after it asked: callers
+// that wait while a publish runs share the next one, and none of them gets
+// the result of the publish that was already running.
+func TestCoalescerAnswersWithAPublishStartedAfterTheCall(t *testing.T) {
+	var c Coalescer
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var publishes atomic.Int32
+	first := make(chan error, 1)
+	go func() {
+		first <- c.Run(func() error {
+			publishes.Add(1)
+			close(running)
+			<-release
+			return errors.New("old state")
+		})
+	}()
+	<-running
+	waiters := make(chan error, 3)
+	for range 3 {
+		go func() {
+			waiters <- c.Run(func() error { publishes.Add(1); return nil })
+		}()
+	}
+	// The waiters asked while the first publish ran; let them queue.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-first; err == nil {
+		t.Fatal("the first caller lost its own result")
+	}
+	for range 3 {
+		if err := <-waiters; err != nil {
+			t.Fatalf("a waiter got the result of the publish that started before it asked: %v", err)
+		}
+	}
+	if got := publishes.Load(); got != 2 {
+		t.Fatalf("%d publishes, want 2 (the running one and one shared by the waiters)", got)
 	}
 }
