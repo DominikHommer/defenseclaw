@@ -155,14 +155,22 @@ The requested AXIS integration uses MXC on all three native host platforms:
 
 | Native host | Required MXC executor | Product qualification |
 | --- | --- | --- |
-| Windows | `ProcessContainerWindows` | Pending; no WSL dependency or fallback. |
-| Linux | `BubblewrapLinux` | Pending; the pinned strict-filesystem probe is blocked as described below. |
-| macOS | `Seatbelt` | Pending; qualify the AXIS-to-MXC route rather than assuming AXIS's existing macOS dispatch uses MXC. |
+| Windows | `ProcessContainerWindows` | Native contained Claude `--version` passed. The environment/boundary handshake still refuses; interactive Claude, hooks and model access remain pending. No WSL dependency or fallback. |
+| Linux | `BubblewrapLinux` | The downstream fixed strict filesystem/offline cases and two wait/cancellation cases passed. The descendant test stopped at its own syscall precondition; production policy, broker and Claude qualification remain pending. |
+| macOS | `Seatbelt` | Twelve fixed downstream SDK checks passed, including literal arguments, filesystem/network denials, pipes, PTY/resize and timeout. Production policy, broker and Claude qualification remain pending. |
 
 This is the desired support matrix, not a claim that the pinned AXIS artifact
 already supplies these routes or that any platform is ready for production.
 Qualify each platform independently against the same DefenseClaw security
 contract. WSL and AXIS-native execution are not alternate product routes.
+
+The table distinguishes downstream contributor experiments from the pinned
+upstream behavior below. The Linux experiment supplies a reviewed held-object
+mount adapter and AXIS offline filter; it does not make stock MXC's filesystem
+translator suitable for the product unchanged. Exact results and preserved
+failures are in the [Linux evidence](../../test/e2e/axis/native-peer/live/README.md),
+[Windows evidence](../../test/e2e/axis/windows/mxc-v1/manual-results.md) and
+[macOS evidence](../../test/e2e/axis/mxc-macos-manual-results.md).
 
 ```mermaid
 flowchart TD
@@ -343,6 +351,8 @@ have not passed their own tests, including unsupported Secure Client routes.
 Each implementation PR includes every affected layer for its scoped behavior:
 schema, Go/Python mirrors, migration when needed, documentation, packaging,
 telemetry, and tests. No incomplete runtime is advertised as usable.
+This work remains in the single AXIS draft PR; the stages below are work and
+acceptance boundaries within it, not a request to open additional product PRs.
 
 | Stage | Deliverable | Acceptance gate |
 | --- | --- | --- |
@@ -481,8 +491,10 @@ Claude's review should resolve these design decisions before implementation:
    unsupported capabilities explicit enough for accurate customer claims?
 6. Which upstream changes are needed for the required native MXC executors to
    enforce strict read confinement and the full terminal/lifecycle contract?
-   The pinned Linux MXC Bubblewrap path is incompatible with the filesystem
-   requirement. Resolve that gap and independently verify Windows
+   The stock pinned Linux MXC Bubblewrap translator is incompatible with the
+   filesystem requirement. The downstream fixed peer has since passed the
+   bounded strict filesystem/offline cases, but its held-object adapter and
+   policy translation still require production qualification. Independently verify Windows
    ProcessContainerWindows and macOS Seatbelt without weakening policy,
    changing backends, or substituting WSL to make a feasibility probe pass.
 
