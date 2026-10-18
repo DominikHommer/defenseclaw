@@ -19,10 +19,19 @@ for package in "$@"; do
     case "$package" in
         *.deb) dpkg-deb --extract "$package" "$work/extracted" ;;
         *.rpm)
-            if command -v bsdtar >/dev/null; then
+            if command -v rpm >/dev/null; then
+                rpm -qpl "$package" > "$work/rpm-files"
+                if grep -E '(^|/)policy_compiler\.py$' "$work/rpm-files"; then
+                    echo "managed package contains Fleet compiler: $package" >&2
+                    exit 1
+                fi
+                echo "managed package has no Fleet compiler: $(basename "$package")"
+                continue
+            elif command -v bsdtar >/dev/null; then
                 bsdtar -xf "$package" -C "$work/extracted"
             else
-                (cd "$work/extracted" && rpm2cpio "$package" | cpio -id --quiet --no-absolute-filenames)
+                echo "rpm or bsdtar is required to inspect RPM packages" >&2
+                exit 2
             fi
             ;;
         *.pkg) pkgutil --expand-full "$package" "$work/extracted" ;;
