@@ -363,3 +363,53 @@ immediately. It classifies root/home/local-AppData/private-tmp/Packages prefixes
 component count, dot/slash components and final Temp component without logging
 values or accessing any filesystem path. A fresh locked build and independent
 artifact review are required before that diagnostic can execute.
+
+## Lexical diagnostic: three private Packages paths differ
+
+[Locked build 39133952217](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39133952217)
+at `42f8b10731b70b93bf754d493869f3e54a93ee68` passed the ten selected SDK
+units and the expanded exact pure path-comparison test. Two independent reviews
+verified all 24 archive files, 20 manifest entries, 15 reconstructed SDK paths,
+source/lock identity and unchanged PE import inventories. One fresh native
+attempt used the reviewed custody image and a fresh evidence directory under
+the atomically private parent created for control-02. No previous fixture was
+reused, and the artifact was not retried.
+
+Literal argv and direct seal read passed; both DOS path queries still returned
+Win32 5. The exact environment assertions failed with these bounded lexical
+observations:
+
+| Key | Actual/expected UTF-16 units | Relative components | Final component is exact `Temp` |
+| --- | --- | --- | --- |
+| TEMP | 245 / 166 | 7 | true |
+| TMP | 245 / 166 | 7 | true |
+| LOCALAPPDATA | 240 / 181 | 6 | false |
+
+All three reported exact lexical prefixes for this fixture root, its home,
+local AppData and Packages branch; none matched the originally supplied private
+tmp branch. No dot component or forward slash was reported. HOME, USERPROFILE
+and APPDATA matched exactly by the pinned loop's execution order. These are
+lexical comparisons, not held-file identity or a proof of the redirection
+mechanism. No values or profile names were logged, and no credential, write or
+socket operation was reached after the failing environment loop.
+
+The observed shape agrees with the documented AppContainer profile redirection
+cited above. The next investigation must bind expected native paths to the
+actual contained process's native identity; accepting an arbitrary matching
+prefix would not establish that binding. No assertion, grant, policy, host ACL,
+UI setting or firewall was broadened for this attempt.
+
+| Input | SHA256 |
+| --- | --- |
+| ZIP, artifact `12139512326` | `f2bca34f9cb442be4beecbc02c1364c318eacc530c4ff2c6f0962dbdf83616c1` |
+| Provenance | `b1703cf28cb7f2c0bdf858b10a0ab3d8739e0161f378200552b1f1f543706303` |
+| Root verification receipt | `3f39edc6cf949502839d34cbf0a461b6d13c6f15a4cfcfde9f92901c1d074f65` |
+| Actual live result | `7afa1f763bea5066373851117e47db2ba9c17e1af4aaaf352040cf8eae354901` |
+
+The wrapper exited 1 in 2.953 seconds without deadline, overflow or reader
+error. The owned outer Job was assigned before resume and ended empty with zero
+active processes. The exact synthetic fixture `dc-axis-windows-psec-Yhxaa8`
+remains under
+`environment-control-private-02/windows-current-psec-boundary-max-07`.
+Windows boundary, terminal, hooks, credentials and Claude qualification remain
+incomplete; customer AXIS execution is unavailable.
