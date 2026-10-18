@@ -102,3 +102,42 @@ policy. It does not identify the exact cause of the SDK-bearing self-payload's
 DLL failure or qualify its failed nine boundary checks. A separate std-only
 filesystem/network/argv child remains the next gate; terminals, Claude, hooks,
 credential brokering and complete lifecycle still require their own tests.
+
+## Separate std-only boundary and literal argv: failed
+
+[Locked build 39120734916](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39120734916)
+at `3a8b1e8cec430209254f62bbe5afe52f60ce7b77` passed all ten exact SDK
+admission tests, including one native file-custody fixture without payload
+execution. Two independent reviews verified 24 ZIP entries, 20 inventory
+files, 12 exact Git source blobs, all three overlays, all 15 reconstructed
+SDK source fingerprints, unchanged locks/licenses and three PE import tables.
+The std-only boundary child adds Winsock imports to the minimal loader's
+kernel/NT/CRT footprint; the SDK-bearing supervisor stays outside PSEC.
+
+| Input | SHA256 |
+| --- | --- |
+| GitHub ZIP, artifact `12135005005` | `6ce964e2ea6c37321780b32e061b1b73515a821f42cb9966b2aceded339e5ff5` |
+| Provenance | `9b8d87f8185f5336b2b4e2ffa386877f8279a6e8a7c8c682740efdcfed9ed5ad` |
+| Supervisor | `1ccbb1f1d7afb6f8be38cbc96cf89274f069ae655a1207564a1aa9daf7e4c338` |
+| Boundary child | `077028f01c154de5a1fc521f0a68d036711b27541dd29bc4790f42139b250064` |
+| Custody executable | `ab635640c1a6925854bd99f68b6a1d9d966dbb9e071b69cab704b544b4154b7d` |
+| Root verification receipt | `00d85eadc878066fd2eff35f99497e1706dc1fc07cf9e1e3d07b241b3f42534d` |
+| Actual live result | `7622beede7b34ff7694c5e4e904a708b34c80503ef9ecc50ca6b939a2e552aec` |
+
+The adversarial tester performed exactly one fixed `--standalone-boundary`
+run. The literal Windows argv case passed with `FIXED_ARGV_PASS`, typed exit 0
+and a signaled retained process handle. The next boundary case exited 1 with
+`Access is denied` before either permitted-write canary appeared. This does
+not identify the precise failing call or qualify any filesystem/network
+boundary checks. The wrapper took 9.265 seconds; its owned Job was assigned
+before resume and ended with zero active processes. No deadline, output
+overflow or reader error occurred. No policy, grant, ACL or UI restriction
+was relaxed, and the failed artifact was not retried.
+
+Private evidence remains under
+`C:\Users\vnarajal\.codex\axis-manual-test\windows-current-psec-boundary-max-01`.
+Its exact owned fixture `psec-headless-01\tmp\dc-axis-windows-psec-X8IPVg` is
+retained. The next source adds fixed operation labels around early cwd,
+seal-read and permitted-write calls, without changing those operations or
+their grants. A fresh locked build and independent review are required before
+another native attempt. Customer Windows AXIS remains unavailable.

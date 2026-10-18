@@ -32,6 +32,10 @@ fn require(condition: bool, message: &str) -> io::Result<()> {
     }
 }
 
+fn fixed_io<T>(operation: &'static str, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|error| io::Error::new(error.kind(), format!("{operation}: {error}")))
+}
+
 fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
     require(
         args.first().is_some_and(|arg| arg == "--fixed-child"),
@@ -83,7 +87,8 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         Some("boundary") => {}
         _ => return Err(io::Error::other("unsupported fixed child mode").into()),
     }
-    let workspace = std::env::current_dir()?.canonicalize()?;
+    let cwd = fixed_io("private cwd lookup", std::env::current_dir())?;
+    let workspace = fixed_io("private cwd canonicalize", cwd.canonicalize())?;
     require(
         workspace
             .file_name()
@@ -100,7 +105,10 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         "unexpected fixture root",
     )?;
     require(
-        fs::read(workspace.join("fixture-seal"))? == SENTINEL,
+        fixed_io(
+            "workspace seal read",
+            fs::read(workspace.join("fixture-seal")),
+        )? == SENTINEL,
         "fixture seal missing",
     )?;
     for (key, expected) in [
@@ -130,10 +138,16 @@ fn run(args: &[OsString]) -> Result<i32, Box<dyn std::error::Error>> {
         std::env::var_os("DC_AXIS_INHERIT_CANARY").is_none(),
         "parent-only inheritance canary reached child",
     )?;
-    fs::write(workspace.join("allowed-write"), b"fixed write")?;
-    fs::write(
-        root.join("outside-parent").join("allowed-sibling"),
-        b"fixed parent-grant write",
+    fixed_io(
+        "workspace permitted write",
+        fs::write(workspace.join("allowed-write"), b"fixed write"),
+    )?;
+    fixed_io(
+        "outside-parent permitted sibling write",
+        fs::write(
+            root.join("outside-parent").join("allowed-sibling"),
+            b"fixed parent-grant write",
+        ),
     )?;
     let outside = root.join("outside-parent").join("outside.txt");
     require(
