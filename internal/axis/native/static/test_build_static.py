@@ -4,11 +4,13 @@
 """Inert closure admission tests: no downloads, compiler or runtime executes."""
 
 import io
+import stat
 import struct
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from static import build_static as build
@@ -40,6 +42,41 @@ def image(ptype=1):
 
 
 class ClosureAdmissionTests(unittest.TestCase):
+    def test_copyright_chain_inventories_intermediate_links_and_refuses_escape_or_cycle(self):
+        root = Path(tempfile.gettempdir()).resolve() / "fixed-doc-root"
+        links = {root / "compiler": "middle", root / "middle": "base"}
+
+        def metadata(path):
+            return SimpleNamespace(st_mode=stat.S_IFLNK if path in links else stat.S_IFREG)
+
+        with (
+            patch.object(Path, "resolve", autospec=True, side_effect=lambda path, **_: path),
+            patch.object(Path, "lstat", autospec=True, side_effect=metadata),
+            patch.object(Path, "readlink", autospec=True, side_effect=lambda path: Path(links[path])),
+        ):
+            target, chain = build.copyright_chain(root / "compiler" / "copyright", root)
+            self.assertEqual(target, root / "base" / "copyright")
+            self.assertEqual(chain, [(root / "compiler", "middle"), (root / "middle", "base")])
+            for target in ("../../outside", "compiler"):
+                links[root / "compiler"] = target
+                with self.subTest(target=target), self.assertRaises(RuntimeError):
+                    build.copyright_chain(root / "compiler" / "copyright", root)
+
+    def test_copyright_inventory_retains_each_intermediate_package_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            packages = build.Packages(Mock(), Path(directory))
+            target = Path("/usr/share/doc/base/copyright")
+            chain = [(Path("/usr/share/doc/compiler"), "middle"), (Path("/usr/share/doc/middle"), "base")]
+            with (
+                patch.object(build, "copyright_chain", return_value=(target, chain)),
+                patch.object(packages, "package_for", side_effect=["compiler", "middle"]) as owner,
+                patch.object(packages, "add") as add,
+            ):
+                self.assertEqual(packages.copyright("compiler"), target)
+                self.assertEqual([call.args[0] for call in owner.call_args_list], [path for path, _ in chain])
+                self.assertEqual(packages.links[str(chain[1][0])], {"target": "base", "package": "middle"})
+                add.assert_called_once_with(target)
+
     def test_empty_prefix_header_is_inventoried_only_with_explicit_permission(self):
         with tempfile.TemporaryDirectory() as directory:
             header = Path(directory) / "inert-empty.h"
@@ -151,13 +188,38 @@ class ClosureAdmissionTests(unittest.TestCase):
                 process.poll.return_value = 0
                 with (
                     patch.object(build.subprocess, "Popen", return_value=process),
-                    patch.object(build.Path, "resolve", side_effect=lambda **_: evidence),
-                    patch.object(packages, "add"),
+                    patch.object(packages, "copyright", return_value=evidence / "inert-notice"),
                     patch.object(build.shutil, "copyfile"),
                 ):
                     if value == b"x":
                         packages.finish()
                         self.assertTrue((evidence / "UBUNTU-PACKAGES.json").is_file())
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            packages.finish()
+
+    def test_package_link_payload_must_match_installed_target_even_without_regular_inputs(self):
+        for target in ("base", "different"):
+            with tempfile.TemporaryDirectory() as directory:
+                evidence = Path(directory)
+                packages = build.Packages(Mock(home=evidence), evidence)
+                packages.packages = {"fixed": {"deb": "inert.deb", "package": "fixed"}}
+                packages.links = {"/usr/share/doc/fixed": {"target": "base", "package": "fixed"}}
+                buffer = io.BytesIO()
+                with tarfile.open(fileobj=buffer, mode="w") as output:
+                    member = tarfile.TarInfo("./usr/share/doc/fixed")
+                    member.type, member.linkname = tarfile.SYMTYPE, target
+                    output.addfile(member)
+                buffer.seek(0)
+                process = Mock(stdout=buffer)
+                process.wait.return_value, process.poll.return_value = 0, 0
+                with (
+                    patch.object(build.subprocess, "Popen", return_value=process),
+                    patch.object(packages, "copyright", return_value=evidence / "notice"),
+                    patch.object(build.shutil, "copyfile"),
+                ):
+                    if target == "base":
+                        packages.finish()
                     else:
                         with self.assertRaises(RuntimeError):
                             packages.finish()

@@ -84,8 +84,8 @@ requirements on a disposable runner. Nothing installs an AXIS service/runtime.
 CI compiles the Rust peer and runs protocol/fake-process/owned inert-FD tests.
 It separately compiles the C extension using ordinary dynamic host libraries,
 without running it; that output is not an admitted runtime and is not packaged
-as one. Five selected dependency unit gates separately exercise the AXIS BPF
-export and MXC inert-image/guest-path/compiled-image admission against unchanged
+as one. Six selected dependency unit gates separately exercise the AXIS BPF
+export and MXC inert-image/guest-path/compiled-image and private-filter admission against unchanged
 upstream workspace locks; these tests never install a filter or spawn a backend.
 Four separately compiled C unit tests exercise topology parsing, locator
 validation, restrictive flags and an owned inert sealed-byte copy. Their entry

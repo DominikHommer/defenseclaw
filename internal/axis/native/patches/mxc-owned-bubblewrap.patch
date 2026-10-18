@@ -24,10 +24,10 @@ index 95d3b27..88ad51c 100644
          MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult,
 diff --git a/src/mxc-sdk/src/owned_bubblewrap.rs b/src/mxc-sdk/src/owned_bubblewrap.rs
 new file mode 100644
-index 0000000..1b7b155
+index 0000000..134b885
 --- /dev/null
 +++ b/src/mxc-sdk/src/owned_bubblewrap.rs
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,607 @@
 +// Copyright 2026 Cisco Systems, Inc. and its affiliates
 +// SPDX-License-Identifier: MIT
 +
@@ -139,6 +139,37 @@ index 0000000..1b7b155
 +    Ok(unsafe { File::from_raw_fd(descriptor) })
 +}
 +
++fn private_filter(file: &File) -> io::Result<File> {
++    sealed(file, 1 << 20)?;
++    let length = file.metadata()?.len();
++    if length % 8 != 0 {
++        return Err(invalid());
++    }
++    let mut bytes = vec![0; length as usize];
++    file.read_exact_at(&mut bytes, 0)?;
++    // SAFETY: creates one owned anonymous file; no namespace or workload runs.
++    let descriptor = unsafe {
++        libc::memfd_create(
++            c"dc-axis-private-seccomp".as_ptr(),
++            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
++        )
++    };
++    if descriptor < 0 {
++        return Err(io::Error::last_os_error());
++    }
++    // SAFETY: the successful descriptor is transferred to exactly one File.
++    let mut copy = unsafe { File::from_raw_fd(descriptor) };
++    copy.write_all(&bytes)?;
++    // bwrap reads the current offset. A private open-file description prevents
++    // retained caller duplicates from changing it after constructor return.
++    if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, SEALED) } != 0
++        || unsafe { libc::lseek(descriptor, 0, libc::SEEK_SET) } != 0
++    {
++        return Err(io::Error::last_os_error());
++    }
++    retain(&copy)
++}
++
 +pub struct OwnedMount {
 +    object: File,
 +    destination: String,
@@ -200,10 +231,7 @@ index 0000000..1b7b155
 +        static_image(&image)?;
 +        let image = retain(&image)?;
 +        sealed(&payload, 512 << 20)?;
-+        sealed(&filter, 1 << 20)?;
-+        if filter.metadata()?.len() % 8 != 0 {
-+            return Err(invalid());
-+        }
++        let filter = private_filter(&filter)?;
 +        let mut names = std::collections::HashSet::new();
 +        let mut total = 0usize;
 +        for (name, value) in &environment {
@@ -279,7 +307,6 @@ index 0000000..1b7b155
 +            PAYLOAD.into(),
 +        ]);
 +        inherited.push(payload);
-+        let filter = retain(&filter)?;
 +        args.extend([
 +            "--seccomp".into(),
 +            filter.as_raw_fd().to_string().into(),
@@ -516,6 +543,30 @@ index 0000000..1b7b155
 +            );
 +        }
 +        file
++    }
++
++    #[test]
++    fn filter_copy_starts_at_zero_and_ignores_caller_offset_changes() {
++        let original = inert_image(1, true);
++        let length = original.metadata().unwrap().len();
++        assert_eq!(
++            unsafe { libc::lseek(original.as_raw_fd(), 0, libc::SEEK_CUR) },
++            length as i64
++        );
++        let copy = private_filter(&original).unwrap();
++        assert_eq!(
++            unsafe { libc::lseek(original.as_raw_fd(), 8, libc::SEEK_SET) },
++            8
++        );
++        assert_eq!(
++            unsafe { libc::lseek(copy.as_raw_fd(), 0, libc::SEEK_CUR) },
++            0
++        );
++        let mut expected = vec![0; length as usize];
++        original.read_exact_at(&mut expected, 0).unwrap();
++        let mut actual = Vec::new();
++        (&copy).read_to_end(&mut actual).unwrap();
++        assert_eq!(actual, expected);
 +    }
 +
 +    #[test]

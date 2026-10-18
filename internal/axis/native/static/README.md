@@ -44,8 +44,13 @@ repository archive SHA256 and exact installed-file hashes. This is compiler
 provenance, not a claim to have bootstrapped GCC from source.
 
 This is not a fully hermetic build. The fixed configure/Makefile commands also
-use the disposable runner's shell and ordinary coreutils; their complete
-transitive executable closure is not independently inventoried. The receipt
+use the disposable runner's shell and ordinary coreutils. Compiler/binutils
+shared libraries and GCC's dynamically loaded LTO linker plugin are also not
+independently inventoried or compared with package payloads. The receipt marks
+only the selected executable, startup, runtime-archive and link-input bytes as
+package verified, and explicitly marks compiler dynamic libraries and the LTO
+plugin unverified. The complete transitive executable closure is not
+independently inventoried. The receipt
 pins source, compiler/UAPI bytes, startup and link inputs, with that runner
 remaining a trusted build environment.
 
@@ -62,7 +67,10 @@ The fixed build sequence is:
    startup/runtime input by hash and Ubuntu binary-package provenance. Download
    the exact package archives, verify their SHA256 against authenticated APT
    metadata, and compare each installed input with its package payload bytes.
-   Retain package archives, exact copyright notices and file hashes. Scrub
+   Retain package archives, exact copyright notices and file hashes. Inventory
+   every intermediate shared-documentation symlink and its owning package;
+   compare each target with that owner's exact package payload. The independent
+   reviewer can then resolve each notice through archive metadata alone. Scrub
    environment; use only `/usr/bin:/bin`, `LC_ALL=C`, `TZ=UTC` and a recorded
    `SOURCE_DATE_EPOCH`. No caller `REALGCC`, loader, compiler or linker override
    is inherited.

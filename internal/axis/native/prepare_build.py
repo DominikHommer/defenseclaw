@@ -35,8 +35,8 @@ C_TEST_SUMMARY = "PASS 4 inert owned-FD tests; no namespace, mount or workload e
 SEED_SHA256 = "d6556677c6decd2d5d786ca082ac2bcdb37fc92130d45b7002a7e8bffe2154db"
 PATCHES = {
     "patches/axis-offline-bpf.patch": "914b75d4ad1da26f4f9850886093fb3560ade14d9870dd604de20a33d2f179f2",
-    "patches/mxc-owned-bubblewrap.patch": "bce13ce7c12f9c398382f1feaa9729b265feea26832115d933c1c54cbfe7cabb",
-    "patches/bwrap-owned-fds.patch": "c595239be76f5cb4f614ca051956c7bbc7b010d12a0c175b7d25bb45d0e1363e",
+    "patches/mxc-owned-bubblewrap.patch": "422aff2de2719878e6fe10a6c097153c58dc3f58d3fa53ee97b2b1d1ea43d5e8",
+    "patches/bwrap-owned-fds.patch": "91fa2035f9679edcd0490b778816f4dec94fea7079090e174871e127304370e1",
     "mxc-literal-argv.patch": "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d",
 }
 SOURCE = {
@@ -106,6 +106,7 @@ DEPENDENCY_TESTS = {
         "prefix": "owned_bubblewrap::tests::",
         "tests": {
             "owned_bubblewrap::tests::static_structure_refuses_interpreter_dynamic_and_mutable_images",
+            "owned_bubblewrap::tests::filter_copy_starts_at_zero_and_ignores_caller_offset_changes",
             "owned_bubblewrap::tests::guest_destinations_refuse_alias_components_and_synthetic_roots",
             "owned_bubblewrap::tests::fixed_image_uses_verified_copy_route_without_path_or_legacy_data_options",
         },

@@ -15,16 +15,25 @@ topology_refuses_nested_bind_mounts_and_malformed_inventory (void)
   const char *ordinary = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n";
   const char *nested = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n"
                        "12 11 0:1 /same-inode /grant/nested rw - ext4 /dev/fixed rw\n";
+  const char *unrelated_roots = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n"
+                                "40 11 0:4 net:[4026532282] /run/netns/x rw - nsfs nsfs rw\n"
+                                "41 11 0:1 /path//deleted /unrelated rw - ext4 /dev/fixed rw\n";
+  const char *nested_nsfs = "11 10 0:1 / / rw - ext4 /dev/fixed rw\n"
+                            "40 11 0:4 net:[4026532282] /grant/netns rw - nsfs nsfs rw\n";
   const char *malformed[] = {
     "11 10 0:1 / / rw - ext4 /dev/fixed rw",
     "11 10 invalid / / rw - ext4 /dev/fixed rw\n",
     "11 10 0:1 / / rw - ext4 /dev/fixed rw extra\n",
     "11 10 0:1 / / rw - ext4 /dev/fixed rw\n11 10 0:1 / /elsewhere rw - ext4 /dev/fixed rw\n",
     "11 10 0:1 / /bad\\999 rw - ext4 /dev/fixed rw\n",
+    "11 10 0:1 /bad\\999 / rw - ext4 /dev/fixed rw\n",
+    "11 10 0:4 net:[4026532282] relative rw - nsfs nsfs rw\n",
   };
   if (!owned_mountinfo_admits (ordinary, "/grant", 11) ||
       owned_mountinfo_admits (ordinary, "/grant", 99) ||
-      owned_mountinfo_admits (nested, "/grant", 11))
+      owned_mountinfo_admits (nested, "/grant", 11) ||
+      !owned_mountinfo_admits (unrelated_roots, "/grant", 11) ||
+      owned_mountinfo_admits (nested_nsfs, "/grant", 11))
     return FALSE;
   for (size_t i = 0; i < sizeof (malformed) / sizeof (malformed[0]); i++)
     if (owned_mountinfo_admits (malformed[i], "/grant", 11))

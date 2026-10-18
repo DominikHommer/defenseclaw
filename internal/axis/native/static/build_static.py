@@ -293,12 +293,39 @@ def ubuntu_origins(policy: str, version: str, mirrors: bytes | None = None) -> l
     return sorted(set(sources))
 
 
+def copyright_chain(path: Path, root: Path = Path("/usr/share/doc")) -> tuple[Path, list[tuple[Path, str]]]:
+    """Inventory every bounded shared-documentation link before resolving it."""
+    if not root.is_absolute() or root.resolve(strict=True) != root or not path.is_relative_to(root):
+        raise RuntimeError("copyright path is outside the canonical documentation root")
+    pending, current, links, seen = list(path.relative_to(root).parts), root, [], set()
+    while pending:
+        current /= pending.pop(0)
+        if not stat.S_ISLNK(current.lstat().st_mode):
+            continue
+        if current in seen or len(links) >= 32:
+            raise RuntimeError("copyright link chain is cyclic or oversized")
+        seen.add(current)
+        target = str(current.readlink())
+        if not target or len(target) > 4096 or any(ord(value) < 32 or ord(value) == 127 for value in target):
+            raise RuntimeError("copyright link target is unsupported")
+        links.append((current, target))
+        redirected = Path(os.path.normpath(current.parent / target))
+        if not redirected.is_relative_to(root):
+            raise RuntimeError("copyright link escapes the documentation root")
+        pending = list(redirected.relative_to(root).parts) + pending
+        current = root
+    if not stat.S_ISREG(current.lstat().st_mode) or current.resolve(strict=True) != current:
+        raise RuntimeError("copyright does not resolve to an ordinary recorded file")
+    return current, links
+
+
 class Packages:
     """Match installed inputs to SHA256-admitted Ubuntu package payloads."""
 
     def __init__(self, commands: Commands, evidence: Path):
         self.commands, self.evidence = commands, evidence
         self.files: dict[str, dict[str, object]] = {}
+        self.links: dict[str, dict[str, str]] = {}
         self.packages: dict[str, dict[str, str]] = {}
         self.directory = evidence / "package-downloads"
         self.directory.mkdir()
@@ -308,6 +335,11 @@ class Packages:
         name = str(path)
         if name in self.files:
             return
+        package = self.package_for(path)
+        self.files[name] = {**record(path), "package": package}
+
+    def package_for(self, path: Path) -> str:
+        name = str(path)
         # All callers supply fixed tools, their reported support files, the
         # three fixed UAPI trees, or package license paths. No caller workload.
         owner = self.commands.run(["/usr/bin/dpkg-query", "-S", name], self.directory).strip()
@@ -362,7 +394,17 @@ class Packages:
                 "deb": str(debs[0]),
                 "origins": origins,
             }
-        self.files[name] = {**record(path), "package": package}
+        return package
+
+    def copyright(self, name: str) -> Path:
+        path, links = copyright_chain(Path("/usr/share/doc") / name / "copyright")
+        for link, target in links:
+            value = {"target": target, "package": self.package_for(link)}
+            if str(link) in self.links and self.links[str(link)] != value:
+                raise RuntimeError("copyright link changed during inventory")
+            self.links[str(link)] = value
+        self.add(path)
+        return path
 
     def finish(self) -> None:
         # Copyright paths can be shared through a different binary package.
@@ -375,8 +417,7 @@ class Packages:
             if not pending:
                 break
             for name in sorted(pending):
-                copyright_path = (Path("/usr/share/doc") / name / "copyright").resolve(strict=True)
-                self.add(copyright_path)
+                copyright_path = self.copyright(name)
                 shutil.copyfile(copyright_path, self.evidence / f"copyright-{name}.txt")
                 noticed.add(name)
         # One streaming pass per admitted .deb, never extract package contents.
@@ -384,7 +425,8 @@ class Packages:
         # or its MD5 list as a SHA256 attestation of installed file contents.
         for package, metadata in self.packages.items():
             required = {path for path, value in self.files.items() if value["package"] == package}
-            seen = set()
+            required_links = {path for path, value in self.links.items() if value["package"] == package}
+            seen, seen_links = set(), set()
             process = subprocess.Popen(
                 ["/usr/bin/dpkg-deb", "--fsys-tarfile", metadata["deb"]],
                 env=environment(self.commands.home),
@@ -398,6 +440,14 @@ class Packages:
                 with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
                     for member in archive:
                         path = "/" + member.name.removeprefix("./")
+                        if path in required_links:
+                            if (
+                                not member.issym()
+                                or member.linkname != self.links[path]["target"]
+                                or path in seen_links
+                            ):
+                                raise RuntimeError("installed copyright link differs from admitted package payload")
+                            seen_links.add(path)
                         if path not in required:
                             continue
                         if not member.isfile() or member.size > 256 << 20:
@@ -409,7 +459,7 @@ class Packages:
                         if len(value) != member.size or digest(value) != self.files[path]["sha256"]:
                             raise RuntimeError("installed toolchain input differs from admitted package payload")
                         seen.add(path)
-                if process.wait(timeout=30) or seen != required:
+                if process.wait(timeout=30) or seen != required or seen_links != required_links:
                     raise RuntimeError("toolchain package payload inventory differs")
             finally:
                 if process.poll() is None:
@@ -417,7 +467,10 @@ class Packages:
                     process.wait(timeout=10)
                 if process.stdout is not None:
                     process.stdout.close()
-        write_json(self.evidence / "UBUNTU-PACKAGES.json", {"packages": self.packages, "installed_files": self.files})
+        write_json(
+            self.evidence / "UBUNTU-PACKAGES.json",
+            {"packages": self.packages, "installed_files": self.files, "installed_links": self.links},
+        )
 
 
 def toolchain(commands: Commands, evidence: Path) -> tuple[dict[str, Path], Packages]:
@@ -733,7 +786,8 @@ def build(peer: Path, bwrap: Path, artifact: Path) -> dict[str, object]:
         "reproducible_image": True,
         "source_date_epoch": EPOCH,
         "compiler_bootstrapped_from_source": False,
-        "compiler_package_bytes_verified": True,
+        "selected_compiler_and_link_inputs_package_bytes_verified": True,
+        "compiler_dynamic_libraries_and_lto_plugin_verified": False,
         "bubblewrap_execution_performed": False,
         "sandbox_execution_performed": False,
         "runtime_admission": False,

@@ -1,5 +1,5 @@
 diff --git a/bubblewrap.c b/bubblewrap.c
-index 9b78a9a..816e84f 100644
+index 9b78a9a..8ebb89d 100644
 --- a/bubblewrap.c
 +++ b/bubblewrap.c
 @@ -32,6 +32,14 @@
@@ -149,7 +149,7 @@ index 9b78a9a..816e84f 100644
 +/* mountinfo escapes exactly these four bytes. Unknown/truncated escapes fail,
 + * rather than changing where a mountpoint appears relative to the grant. */
 +static bool
-+owned_decode_mount_path (char *text)
++owned_decode_mount_path (char *text, bool require_path)
 +{
 +  char *output = text;
 +  for (char *input = text; *input != 0; input++)
@@ -172,7 +172,7 @@ index 9b78a9a..816e84f 100644
 +        }
 +    }
 +  *output = 0;
-+  return owned_path_valid (text, FALSE);
++  return *text != 0 && (!require_path || owned_path_valid (text, FALSE));
 +}
 +
 +/* No st_dev-only topology test: bind mounts can share device and inode. Parse
@@ -222,7 +222,7 @@ index 9b78a9a..816e84f 100644
 +      if (fields_count < 10 || separator < 6 || separator + 4 != fields_count ||
 +          !owned_number (fields[0], &mount_id) || !owned_number (fields[1], &parent_id) ||
 +          !owned_device_number (fields[2]) ||
-+          !owned_decode_mount_path (fields[3]) || !owned_decode_mount_path (fields[4]))
++          !owned_decode_mount_path (fields[3], FALSE) || !owned_decode_mount_path (fields[4], TRUE))
 +        return FALSE;
 +      for (size_t i = 0; i < count; i++)
 +        if (seen[i] == mount_id)
