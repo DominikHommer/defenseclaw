@@ -4,8 +4,6 @@
 package enterprisehooks
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,11 +26,6 @@ const GuardianOwnedFilesFile = "hook_guardian_owned_files.json"
 
 // GuardianOwnedFilesMaxBytes bounds the record.
 const GuardianOwnedFilesMaxBytes = 4 << 20
-
-// ownedFileFingerprintMaxBytes bounds the file a fingerprint reads; a larger
-// file reads as unreadable, which a change to or from a readable file still
-// tells apart.
-const ownedFileFingerprintMaxBytes = 16 << 20
 
 // GuardianOwnedFile is one file and its fingerprint (OwnedFileFingerprint).
 type GuardianOwnedFile struct {
@@ -75,16 +68,6 @@ func OwnedFileFingerprint(path string) string {
 		return "irregular:" + info.Mode().Type().String()
 	}
 	return ownedFileStateFingerprint(path, info)
-}
-
-// ownedFileContentFingerprint is the content digest and permission bits.
-func ownedFileContentFingerprint(path string, info os.FileInfo) string {
-	data, err := safefile.ReadRegularFileBounded(path, ownedFileFingerprintMaxBytes)
-	if err != nil {
-		return "unreadable"
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("sha256:%s:mode:%o", hex.EncodeToString(sum[:]), info.Mode().Perm())
 }
 
 // ChangedFiles returns the target's files whose fingerprint (through
