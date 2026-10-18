@@ -134,9 +134,10 @@ func validDirectoryDomain(domain string) bool {
 // DirectoryCachesStale returns the domains of the enrolled Active Directory
 // accounts the operating system's directory caches list without their domain
 // groups now, each once and sorted; none when the caches list every
-// account's groups. Only a Mac answers so (a Linux host's SSSD refreshes what
-// it served offline by itself); dir is the identity spool, whose records say
-// which accounts are Active Directory ones.
+// account's groups. Only a Mac answers so (SSSD names an account's primary
+// group from its cache; the reach check, DirectoryAnswers, covers its
+// outages); dir is the identity spool, whose records say which accounts are
+// Active Directory ones.
 func DirectoryCachesStale(dir string, accounts []IdentitySpoolAccount) []string {
 	if !directoryCachesHoldOutageAnswers {
 		return nil
@@ -151,31 +152,45 @@ func directoryCachesStale(dir string, accounts []IdentitySpoolAccount, listed fu
 	return directoryADDomains(dir, accounts, func(uid int) bool { return !listed(uid) })
 }
 
-// DirectoryDomains returns the Active Directory domains of the enrolled
-// accounts, each once and sorted: the domains whose domain controllers the
-// guardian checks (DomainControllerAnswers, DirectoryUnreachableFile). Only
-// a Mac has any: SSSD on Linux says itself when it is offline.
+// DirectoryDomains returns the directory domains of the enrolled accounts
+// whose reach the guardian checks (DirectoryAnswers, DirectoryUnreachableFile),
+// each once and sorted: on a Mac their Active Directory domains, on Linux the
+// SSSD domains InfoPipe holds them in (directoryReachDomain).
 func DirectoryDomains(dir string, accounts []IdentitySpoolAccount) []string {
-	if !directoryCachesHoldOutageAnswers {
-		return nil
-	}
-	return directoryADDomains(dir, accounts, nil)
+	return recordDomains(dir, accounts, directoryReachDomain, nil)
 }
 
 // directoryADDomains returns the domains of the accounts dir records as
 // Active Directory ones, of those include accepts (nil: all), each once and
 // sorted.
 func directoryADDomains(dir string, accounts []IdentitySpoolAccount, include func(uid int) bool) []string {
+	return recordDomains(dir, accounts, activeDirectoryDomain, include)
+}
+
+// activeDirectoryDomain is the domain of an Active Directory account's
+// record, "" for another account.
+func activeDirectoryDomain(record IdentitySpoolRecord) string {
+	if record.Facts.Directory != useridentity.DirectoryActiveDirectory {
+		return ""
+	}
+	return record.Facts.Domain
+}
+
+// recordDomains returns the domains domainOf names for the records dir holds
+// for the accounts, of those include accepts (nil: all), each once, valid and
+// sorted.
+func recordDomains(dir string, accounts []IdentitySpoolAccount, domainOf func(IdentitySpoolRecord) string,
+	include func(uid int) bool) []string {
 	var domains []string
 	for _, account := range accounts {
 		if account.UID <= 0 {
 			continue
 		}
 		record, err := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil)
-		if err != nil || record.Facts.Directory != useridentity.DirectoryActiveDirectory {
+		if err != nil {
 			continue
 		}
-		domain := strings.ToLower(strings.TrimSpace(record.Facts.Domain))
+		domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainOf(record))), ".")
 		if !validDirectoryDomain(domain) || slices.Contains(domains, domain) {
 			continue
 		}

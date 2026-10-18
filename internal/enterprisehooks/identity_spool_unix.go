@@ -204,3 +204,24 @@ func identitySpoolDirectoryRecord(record IdentitySpoolRecord) bool {
 	}
 	return record.SSSDDomain != "" || facts.Realm != "" || facts.Domain != "" || facts.UPN != ""
 }
+
+// trustedIdentityTool returns the first root-owned, non-writable candidate.
+func trustedIdentityTool(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// boundedOutput trims command output to a sane size.
+func boundedOutput(data []byte) string {
+	const limit = 64 << 10
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	return strings.ToValidUTF8(string(data), "")
+}

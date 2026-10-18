@@ -302,3 +302,34 @@ func TestDirectoryReachMarksAnOutageAndFlushesAtTheReturn(t *testing.T) {
 		t.Fatalf("a cancelled check wrote %v", marks)
 	}
 }
+
+// GAP-0191: SSSD reports its own offline state, so on Linux a domain it
+// reports offline is away at once, also when the guardian started during the
+// outage; at the return SSSD's caches are flushed once and the record goes.
+func TestDirectoryReachMarksADomainSSSDReportsOfflineAtOnce(t *testing.T) {
+	resetDirectoryReturnState(t)
+	resetDirectoryReachState(t)
+	accounts := []enterprisehooks.IdentitySpoolAccount{{UID: 94405134}}
+	var marks [][]string
+	outage := &directoryReturnScript{now: time.Unix(1_800_000_000, 0),
+		steps: []directoryReturnPoll{oneDomain(false, false), oneDomain(false, false), oneDomain(false, true)}}
+	deps := outage.reachDeps(&marks)
+	deps.awayUnseen = true
+	var stderr bytes.Buffer
+	enterpriseHookWatchDirectoryReach(context.Background(), &stderr, deps, "", accounts)
+	want := [][]string{{"dclab.test"}, {"dclab.test"}, nil}
+	if len(marks) != len(want) {
+		t.Fatalf("marks %v, want %v", marks, want)
+	}
+	for i := range want {
+		if !slices.Equal(marks[i], want[i]) {
+			t.Fatalf("marks %v, want %v", marks, want)
+		}
+	}
+	if !slices.Equal(outage.flushes, []int{2}) {
+		t.Fatalf("flushes at polls %v, want 2 (the return) only", outage.flushes)
+	}
+	if log := stderr.String(); !strings.Contains(log, "a domain controller of dclab.test answers again after an outage; flushed") {
+		t.Fatalf("log = %q, want the return line", log)
+	}
+}

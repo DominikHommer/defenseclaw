@@ -362,7 +362,7 @@ func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 	c.directoriesOnce.Do(func() {
 		c.directories = newIdentityDirectoryCache(resolvePeerDirectoryFacts)
 		c.directories.incomplete = func(facts useridentity.DirectoryFacts) bool {
-			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts)
+			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts) || facts.OnlyPrimaryGroup
 		}
 		c.directories.settling = openDirectorySettling
 	})

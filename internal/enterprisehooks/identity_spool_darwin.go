@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -63,6 +62,23 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 // it gave while the domain controller was away (DirectoryCachesStale).
 const directoryCachesHoldOutageAnswers = true
 
+// DirectoryAwayWithoutAnswer is false on a Mac: its own check cannot tell an
+// outage from a firewall in front of the LDAP port, so a domain whose
+// domain controllers never answered since the guardian started is not away.
+const DirectoryAwayWithoutAnswer = false
+
+// DirectoryAnswers reports whether a domain controller of the Active
+// Directory domain answers (DomainControllerAnswers).
+func DirectoryAnswers(ctx context.Context, domain string) bool {
+	return DomainControllerAnswers(ctx, domain)
+}
+
+// directoryReachDomain is the domain the guardian checks for an account's
+// record: its Active Directory domain.
+func directoryReachDomain(record IdentitySpoolRecord) string {
+	return activeDirectoryDomain(record)
+}
+
 // FlushDirectoryCaches empties Open Directory's caches (dscacheutil
 // -flushcache, dsmemberutil flushcache), which only root can do. The
 // guardian calls it when a domain controller answers again while Open
@@ -103,25 +119,4 @@ func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) stri
 		return ""
 	}
 	return boundedOutput(out)
-}
-
-// trustedIdentityTool returns the first root-owned, non-writable candidate.
-func trustedIdentityTool(candidates ...string) string {
-	for _, candidate := range candidates {
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
-			continue
-		}
-		return candidate
-	}
-	return ""
-}
-
-// boundedOutput trims command output to a sane size.
-func boundedOutput(data []byte) string {
-	const limit = 64 << 10
-	if len(data) > limit {
-		data = data[:limit]
-	}
-	return strings.ToValidUTF8(string(data), "")
 }

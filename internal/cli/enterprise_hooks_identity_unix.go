@@ -84,17 +84,22 @@ type enterpriseHookDirectoryReturnDeps struct {
 	// (enterpriseHookWatchDirectoryReach).
 	domains func(dir string, accounts []enterprisehooks.IdentitySpoolAccount) []string
 	mark    func(dir string, domains []string) error
+	// awayUnseen counts a domain that does not answer as away even when it
+	// never answered since the guardian started: SSSD reports its own
+	// offline state (enterprisehooks.DirectoryAwayWithoutAnswer).
+	awayUnseen bool
 }
 
 var enterpriseHookDirectoryReturn = enterpriseHookDirectoryReturnDeps{
 	stale:   enterprisehooks.DirectoryCachesStale,
-	answers: enterprisehooks.DomainControllerAnswers,
+	answers: enterprisehooks.DirectoryAnswers,
 	flush:   enterprisehooks.FlushDirectoryCaches,
 	domains: enterprisehooks.DirectoryDomains,
 	mark: func(dir string, domains []string) error {
 		return enterprisehooks.WriteDirectoryUnreachable(dir, domains, time.Now(), enterpriseHookAuthorizationOwnershipSetter)
 	},
-	now: time.Now,
+	awayUnseen: enterprisehooks.DirectoryAwayWithoutAnswer,
+	now:        time.Now,
 	sleep: func(ctx context.Context, d time.Duration) bool {
 		t := time.NewTimer(d)
 		defer t.Stop()
@@ -373,16 +378,18 @@ func startEnterpriseHookDirectoryReachWatch(ctx context.Context, stderr io.Write
 }
 
 // enterpriseHookWatchDirectoryReach checks whether a domain controller of
-// each enrolled account's Active Directory domain answers (macOS; Linux has
-// no such domains, enterprisehooks.DirectoryDomains). A domain that answered
-// before and no longer does is away: the guardian writes the away domains to
+// each enrolled account's Active Directory domain answers (macOS), or whether
+// SSSD is online for each enrolled account's SSSD domain (Linux,
+// enterprisehooks.DirectoryAnswers). A domain that answered before and no
+// longer does is away (on Linux also one SSSD reports offline from the
+// start, deps.awayUnseen): the guardian writes the away domains to
 // the identity spool (enterprisehooks.DirectoryUnreachableFile), so the
 // gateway takes their accounts' lookups as failed instead of trusting the
 // groups Open Directory lists then, and checks again every
 // enterpriseHookDirectoryReturnPoll. Once a domain answers again, the
-// directory caches are flushed: they hold the answers Open Directory gave
-// while it was away, without the accounts' other domain groups (GAP-0092,
-// GAP-0095). It returns once no domain is away, after one check when none
+// directory caches are flushed: they hold the answers Open Directory or SSSD
+// gave while it was away, without the accounts' other domain groups (GAP-0092,
+// GAP-0095, GAP-0191). It returns once no domain is away, after one check when none
 // was, or when ctx ends.
 func enterpriseHookWatchDirectoryReach(ctx context.Context, stderr io.Writer, deps enterpriseHookDirectoryReturnDeps, dir string,
 	accounts []enterprisehooks.IdentitySpoolAccount) {
@@ -415,7 +422,7 @@ func enterpriseHookWatchDirectoryReach(ctx context.Context, stderr io.Writer, de
 				}
 				delete(state.away, domain)
 				state.seen[domain] = true
-			case state.seen[domain] && !state.away[domain]:
+			case (state.seen[domain] || deps.awayUnseen) && !state.away[domain]:
 				state.away[domain] = true
 				gone = append(gone, domain)
 			}

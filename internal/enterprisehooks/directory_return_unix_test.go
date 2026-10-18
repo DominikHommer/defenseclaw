@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -195,9 +196,9 @@ func TestDirectoryADDomainsNamesTheEnrolledDomains(t *testing.T) {
 	dir := t.TempDir()
 	for _, record := range []IdentitySpoolRecord{
 		{Key: "501", User: "admin", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal}},
-		{Key: "94401103", User: "ent-bob", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "DCLab.Test"}},
-		{Key: "94401106", User: "ent-ann", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test"}},
-		{Key: "94401104", User: "ent-ldap", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLDAP, Domain: "ldap.example.com"}},
+		{Key: "94401103", User: "ent-bob", SSSDDomain: "DCLab.Test", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "DCLab.Test"}},
+		{Key: "94401106", User: "ent-ann", SSSDDomain: "dclab.test", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test"}},
+		{Key: "94401104", User: "ent-ldap", SSSDDomain: "ldap.example.com", Facts: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLDAP, Domain: "ldap.example.com"}},
 	} {
 		data, err := MarshalIdentitySpoolRecord(record)
 		if err != nil {
@@ -211,7 +212,13 @@ func TestDirectoryADDomainsNamesTheEnrolledDomains(t *testing.T) {
 	if got := directoryADDomains(dir, accounts, nil); !slices.Equal(got, []string{"dclab.test"}) {
 		t.Fatalf("domains = %v, want the AD domain once", got)
 	}
-	if got := DirectoryDomains(dir, accounts); directoryCachesHoldOutageAnswers != (len(got) == 1) {
-		t.Fatalf("DirectoryDomains = %v on a host whose caches hold outage answers: %v", got, directoryCachesHoldOutageAnswers)
+	// A Mac checks the Active Directory domains; Linux asks SSSD about every
+	// SSSD domain InfoPipe holds an enrolled account in (GAP-0191).
+	want := []string{"dclab.test"}
+	if runtime.GOOS == "linux" {
+		want = []string{"dclab.test", "ldap.example.com"}
+	}
+	if got := DirectoryDomains(dir, accounts); !slices.Equal(got, want) {
+		t.Fatalf("DirectoryDomains = %v, want %v", got, want)
 	}
 }

@@ -7,7 +7,6 @@ package gateway
 
 import (
 	"context"
-	"slices"
 	"strconv"
 	"time"
 
@@ -74,17 +73,6 @@ var openDirectoryOffline = func() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return unixidentity.OpenDirectoryOffline(ctx)
-}
-
-// directoryUnreachable reports whether the hook guardian lists domain ("":
-// any domain) as having no domain controller that answers, in a current,
-// trusted record of its identity spool (GAP-0092). Tests replace it.
-var directoryUnreachable = func(domain string) bool {
-	domains := enterprisehooks.ReadDirectoryUnreachable(currentIdentitySpoolDir(), validateManagedGuardianAuthorization, time.Now())
-	if domain == "" {
-		return len(domains) > 0
-	}
-	return slices.Contains(domains, domain)
 }
 
 // darwinLocalNodeAccount reports whether the local directory node holds the

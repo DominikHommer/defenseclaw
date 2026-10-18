@@ -410,15 +410,22 @@ func spoolUPNAssignmentWarnings(assignments []config.ProfileAssignment, now time
 // an answer is refreshed at the retry pace.
 const openDirectorySettleWindow = 5 * time.Minute
 
-// openDirectoryOfflineAt is when a lookup last found the Active Directory
-// node offline (Unix nanoseconds), 0 when never.
+// openDirectoryOfflineAt is when a lookup last found the directory away
+// (Unix nanoseconds), 0 when never: the Active Directory node of a Mac
+// offline or its domain controllers not answering, or SSSD offline for the
+// domain of a Linux account (sssdGroupsUnavailable).
 var openDirectoryOfflineAt atomic.Int64
 
-// openDirectorySettling marks Open Directory facts resolved shortly after the
-// Active Directory node was last seen offline.
+// openDirectorySettling marks Open Directory and SSSD facts resolved shortly
+// after the directory was last seen away.
 func openDirectorySettling(facts useridentity.DirectoryFacts) bool {
 	at := openDirectoryOfflineAt.Load()
-	if at == 0 || facts.Source != useridentity.SourceMacOSOpenDirectory || facts.ResolvedAt.IsZero() {
+	if at == 0 || facts.ResolvedAt.IsZero() {
+		return false
+	}
+	switch facts.Source {
+	case useridentity.SourceMacOSOpenDirectory, useridentity.SourceSSSD, useridentity.SourceSSSDInfoPipe:
+	default:
 		return false
 	}
 	since := facts.ResolvedAt.Sub(time.Unix(0, at))
@@ -488,4 +495,55 @@ func openDirectoryGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord,
 			"confirmed this account for %s, and %w", identitySpoolMaxAge, err)}
 	}
 	return err
+}
+
+// An SSSD account of a Linux host whose directory does not answer.
+//
+// SSSD then answers from its cache, without an error: for an account whose
+// memberships it looked up before, the memberships it cached; for one it
+// never looked them up for (a first sign-in during the outage, or a cleared
+// cache), the primary group alone. The gateway took that answer as verified
+// facts: the account got the default profile as plain "default", status and
+// verify did not warn, a new sandbox started without the provisional note,
+// and the facts were kept for 15 minutes after SSSD was back online
+// (GAP-0191). The root guardian asks SSSD whether it is online for each
+// enrolled account's SSSD domain and lists the offline ones in the identity
+// spool (enterprisehooks.DirectoryUnreachableFile). An SSSD account of such
+// a domain that SSSD lists with its primary group only
+// (useridentity.DirectoryFacts.OnlyPrimaryGroup) is a failed lookup: requests
+// get default_lookup_failed (provisional sandboxes), status and verify warn
+// directory_lookups_failing, and the lookup is retried every 15 seconds.
+// When SSSD is online again the guardian flushes SSSD's caches and removes
+// the domain from the list, so the next lookup gets the account's groups.
+
+// sssdGroupsUnavailable is the lookup error for an SSSD account whose groups
+// SSSD cannot list now, or nil: SSSD listed only its primary group, and the
+// guardian lists its SSSD domain offline (unreachable). The domain is the
+// guardian record's SSSD domain, else the domain of the account's SID, else
+// "" (any domain). Facts cached before are dropped too: SSSD would list the
+// memberships it holds, so it holds none.
+func sssdGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord, facts useridentity.DirectoryFacts,
+	unreachable func(domain string) bool, now time.Time) error {
+	if facts.Source != useridentity.SourceSSSD || !facts.OnlyPrimaryGroup || unreachable == nil {
+		return nil
+	}
+	domain := ""
+	if record != nil {
+		domain = strings.TrimSpace(record.SSSDDomain)
+	}
+	if domain == "" {
+		domain = strings.TrimSpace(facts.Domain)
+	}
+	domain = strings.ToLower(domain)
+	if !unreachable(domain) {
+		return nil
+	}
+	openDirectoryOfflineAt.Store(now.UnixNano())
+	label := domain
+	if label == "" {
+		label = "the account's domain"
+	}
+	return &identityFactsUnconfirmedError{err: fmt.Errorf("SSSD is offline for %s (the hook guardian asks SSSD every 15 seconds while it "+
+		"is) and lists this account in its primary group only, as it does for an account whose memberships it never looked up: "+
+		"its domain groups are unknown; the lookup is retried every %s", label, identityDirectoryRetry)}
 }
