@@ -5,6 +5,11 @@ name: AXIS fixed Linux native peer canary
 
 # One fixed contributor attempt. No caller-selected artifact, command or policy.
 on:
+  # Registration only: GitHub does not dispatch a new branch-only workflow
+  # until it has been registered. The complete job is skipped for push events.
+  push:
+    branches: [codex/axis-sandbox-feasibility]
+    paths: [.github/workflows/axis-native-peer-live.yml]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +22,7 @@ concurrency:
 
 jobs:
   fixed-canary:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
