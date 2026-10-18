@@ -1,20 +1,20 @@
 # Fixed Linux outer driver
 
-This contributor driver owns one run of the reviewed four-case native peer
-wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
+This contributor driver owns one closed baseline or lifecycle suite from the
+reviewed native peer wrapper in a separate user/mount/PID/network/IPC/UTS namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `ae9f9e0c8cea430501f723bb79430955f76df013`
-in Actions run `39160365924`, artifact `12148552547`. Two independent inert
+The fixed input wrapper was built at `52e4a071109d1522d3cadf53085c9537467ef9c7`
+in Actions run `39168692019`, artifact `12151861098`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818`
-(3,440,766 bytes); archive SHA-256 is
-`4b938f0b5df48dbc05c5fc0d0eaec516abda29a226bd1a9eeb16927eb3b9ad30`;
+`70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb`
+(3,473,534 bytes); archive SHA-256 is
+`86d78d2aee702fbcbfb356a94b8bd654dc07b842f8c54b5531c744f434f59f5e`;
 provenance SHA-256 is
-`bd0fe0646543173ddb244a12a41396884ab7652e23809b66d99fa3bed5d03bd7`.
+`7d4dad5aa155b47e932c61e88a72ff1f5d42bb00dca80c7fb2955d7add767d31`.
 Its fixed combined peer/payload receipt is
-`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6`.
+`8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b`.
 These are compiled source pins. There is no caller-supplied image, digest,
 command, environment, backend or policy option.
 
@@ -44,14 +44,14 @@ The outer deadline is 120 seconds. Cleanup gets a separate ten-second wait and
 one ten-second retry. A failed first cleanup remains a failed result even when
 retry succeeds; a pending exact owner stays reachable through reporting.
 Stdout/stderr each retain at most 64 KiB, including failure paths. Success
-requires the wrapper's exact four ordered cases, markers, canary controls,
-exit values and both levels of cleanup. The outer cleanup result describes
+requires the wrapper's exact selected suite, ordered cases, markers, canary
+controls, exit values and both levels of cleanup. The outer cleanup result describes
 whole-wrapper namespace custody; it does not replace SDK cleanup assertions.
 
-After independent driver artifact admission, the only intended selector is:
+After independent driver artifact admission, the fixed lifecycle invocation is:
 
 ```text
-fixed-outer-driver --run-fixed --receipt /private/admitted/REVIEWED-ARTIFACTS.json --evidence /private/fresh-evidence
+fixed-outer-driver --run-fixed --suite lifecycle --receipt /private/admitted/REVIEWED-ARTIFACTS.json --evidence /private/fresh-evidence
 ```
 
 The paths carry metadata, not executable/policy authority. The evidence path
@@ -103,7 +103,30 @@ mapping; only reserved `/proc` is replaced before native source admission.
 This is not provenance admission for arbitrary foreign production inputs.
 Fresh source/artifact reviews and a new driver pin remain required before use.
 
-This pairing uses the revised c914 static Bubblewrap image and combined receipt
-pinned above. The Rust peer bytes and d074 payload remain unchanged. Historical
-failed runs remain evidence for their exact earlier source only. A fresh driver
-artifact review and separately reviewed native attempt are required.
+Historically, the c914 static Bubblewrap, d074 payload and combined receipt
+`6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6` passed
+one four-case attempt with the ae9 wrapper and 5125 driver. The new lifecycle
+pairing replaces only that payload with 3f295; Rust peer and c914 Bubblewrap
+bytes stay unchanged. Historical runs remain evidence for their exact earlier
+source only. A fresh driver artifact review and separately reviewed native
+attempt are required.
+
+## Lifecycle suite handoff: source only
+
+The closed `--suite lifecycle` selector is passed unchanged through the existing
+owned bootstrap into the reviewed wrapper; omitted `--suite` remains baseline.
+The driver requires the returned suite to match and admits exactly three
+ordered results: wait-timeout, wait-cancel, tree-cancel. Every result must bind
+its marker, terminal flags, separate Destroyed and native cleanup; the tree
+result also requires verified ready files, live heartbeat progress and bounded
+stability before Destroy. The bounded public count snapshots must independently
+show progress in every fixed role and six stable post-terminal samples.
+Baseline and lifecycle evidence cannot replace one another. No new controller, arbitrary command, file selector or caller hash
+is introduced. This source pins the reviewed 52e4 wrapper, including its nine
+inert lifecycle unit-test passes. It still needs its own driver build and
+artifact reviews before one separately authorized lifecycle attempt. The
+new fixed payload requires EPERM from Setsid in every role and uses normal
+descendants; it does not change the offline filter or admit session creation.
+Only the positive-group, nonleader child/grandchild checks substantiate filter
+denial; the parent check is consistency only.
+The earlier four-case result remains evidence for its exact original pairing.

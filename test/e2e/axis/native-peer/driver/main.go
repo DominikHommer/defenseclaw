@@ -20,7 +20,7 @@ import (
 
 const outputLimit = 64 << 10
 const scope = "fixed_linux_native_peer_outer_driver_v1"
-const receiptSHA = "6af34ded1837e54d4909f782235613acd56232eafe0c60e2ebc61af5e7fd6ec6"
+const receiptSHA = "8b50970b9636ff84ff6ed0aa3ae7d68d2bc063809e5d8af9073d8e4c804a3e9b"
 
 var errUnreviewed = errors.New("fixed wrapper artifact has no reviewed driver admission")
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -35,8 +35,8 @@ type wrapperAdmission struct {
 // two reviewers. This admits only the fixed contributor wrapper as an input;
 // the driver needs its own build/image review before any run. No CLI/env override.
 var liveAdmission = wrapperAdmission{Reviewed: true,
-	SHA:  "97da655791b04a4983909b08a939bb8d4af444400c9868e1ac76e4fbfdbda818",
-	Size: 3440766,
+	SHA:  "70159109952811847fa4e16cc02fca1046d696ebcbb0ff3aa820e1562899dccb",
+	Size: 3473534,
 }
 
 func (a wrapperAdmission) validate() error {
@@ -46,7 +46,7 @@ func (a wrapperAdmission) validate() error {
 	return nil
 }
 
-type options struct{ receipt, evidence string }
+type options struct{ receipt, evidence, suite string }
 type driverRun func(context.Context, options, wrapperAdmission, map[string]any, *cleanupOwner) error
 
 func digestBytes(data []byte) string {
@@ -67,12 +67,30 @@ func execute(args []string, admission wrapperAdmission, run driverRun) (map[stri
 	var opts options
 	flags.StringVar(&opts.receipt, "receipt", "", "fixed reviewed artifact metadata")
 	flags.StringVar(&opts.evidence, "evidence", "", "fresh private wrapper evidence metadata")
-	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" || len(opts.receipt) > 4096 || len(opts.evidence) > 4096 || run == nil {
+	flags.StringVar(&opts.suite, "suite", "baseline", "fixed baseline or lifecycle suite")
+	if flags.Parse(args) != nil || !*explicit || flags.NArg() != 0 || opts.receipt == "" || opts.evidence == "" || len(opts.receipt) > 4096 || len(opts.evidence) > 4096 || !validSuite(opts.suite) || run == nil {
 		return record, owner, errors.New("fixed contributor selector and bounded metadata required")
 	}
+	record["fixed_suite"] = opts.suite
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	return record, owner, run(ctx, opts, admission, record, owner)
+}
+
+func validSuite(suite string) bool { return suite == "baseline" || suite == "lifecycle" }
+
+func bootstrapOptions(args []string) (options, error) {
+	if (len(args) != 4 && len(args) != 6) || args[0] != "--receipt" || args[2] != "--evidence" || args[1] == "" || len(args[1]) > 4096 || args[3] == "" || len(args[3]) > 4096 {
+		return options{}, errors.New("fixed bootstrap metadata required")
+	}
+	opts := options{receipt: args[1], evidence: args[3], suite: "baseline"}
+	if len(args) == 6 {
+		if args[4] != "--suite" || !validSuite(args[5]) {
+			return options{}, errors.New("fixed bootstrap suite refused")
+		}
+		opts.suite = args[5]
+	}
+	return opts, nil
 }
 
 func main() {

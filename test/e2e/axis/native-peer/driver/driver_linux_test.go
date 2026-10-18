@@ -116,7 +116,7 @@ func TestBoundedCaptureRetainsPrefixOnOverflow(t *testing.T) {
 }
 
 func validWrapperResult() map[string]any {
-	child := map[string]any{"scope": "fixed_linux_native_peer_offline_contributor_v1", "passed": true, "execution_performed": true, "production_certification": false, "common_launch_gate_qualified": false,
+	child := map[string]any{"scope": "fixed_linux_native_peer_offline_contributor_v1", "fixed_suite": "baseline", "passed": true, "execution_performed": true, "production_certification": false, "common_launch_gate_qualified": false,
 		"artifact_receipt_sha256": receiptSHA, "outer_namespace_cleanup_observed": true, "pending_outer_cleanup": float64(0), "pending_native_cleanup": float64(0),
 		"outer_worker_ready_observed": true, "outer_worker_grant_sent": true, "owned_worker_result_observed": true,
 		"host_outside_read_and_write_positive_controls": true, "original_canary_identities_and_bytes_preserved": true}
@@ -150,6 +150,61 @@ func TestWrapperResultRequiresEveryFixedControlAndCleanup(t *testing.T) {
 	child["cases"].([]any)[0].(map[string]any)["error"] = "fixed_failure"
 	if validateWrapperResult(child) == nil {
 		t.Fatal("case failure admitted")
+	}
+}
+
+func validLifecycleWrapperResult() map[string]any {
+	child := validWrapperResult()
+	child["fixed_suite"] = "lifecycle"
+	cases := []any{}
+	for _, mode := range []string{"wait-timeout", "wait-cancel", "tree-cancel"} {
+		result := map[string]any{"mode": mode, "passed": true, "prepared": true, "started": true, "fixed_payload_marker_observed": true, "destroyed": true, "native_cleanup_observed": true,
+			"exit_code": float64(-1), "timed_out": mode == "wait-timeout", "cancel_sent": mode != "wait-timeout", "native_terminal_before_outer_cleanup": true}
+		if mode == "tree-cancel" {
+			result["tree_ready_files_verified"], result["tree_heartbeat_progress_observed"], result["tree_heartbeat_stable_before_destroy"] = true, true, true
+			result["tree_heartbeat_samples"] = map[string]any{"before": []any{float64(1), float64(1), float64(1)}, "progressed": []any{float64(2), float64(2), float64(2)}, "terminal": []any{float64(3), float64(3), float64(3)}, "stable_samples": float64(6)}
+		}
+		cases = append(cases, result)
+	}
+	child["cases"] = cases
+	return child
+}
+
+func TestLifecycleWrapperResultRequiresExactSuiteTerminalAndTreeEvidence(t *testing.T) {
+	if err := validateWrapperSuiteResult(validLifecycleWrapperResult(), "lifecycle"); err != nil {
+		t.Fatal(err)
+	}
+	if validateWrapperSuiteResult(validLifecycleWrapperResult(), "baseline") == nil || validateWrapperSuiteResult(validWrapperResult(), "lifecycle") == nil {
+		t.Fatal("baseline and lifecycle evidence were interchangeable")
+	}
+	for _, key := range []string{"mode", "passed", "prepared", "started", "fixed_payload_marker_observed", "destroyed", "native_cleanup_observed", "exit_code", "timed_out", "cancel_sent", "native_terminal_before_outer_cleanup", "tree_ready_files_verified", "tree_heartbeat_progress_observed", "tree_heartbeat_stable_before_destroy", "tree_heartbeat_samples"} {
+		child := validLifecycleWrapperResult()
+		delete(child["cases"].([]any)[2].(map[string]any), key)
+		if validateWrapperSuiteResult(child, "lifecycle") == nil {
+			t.Fatalf("missing lifecycle evidence admitted: %s", key)
+		}
+	}
+	child := validLifecycleWrapperResult()
+	child["cases"].([]any)[0].(map[string]any)["timed_out"] = false
+	if validateWrapperSuiteResult(child, "lifecycle") == nil {
+		t.Fatal("non-timeout exit replaced the deadline observation")
+	}
+	for _, bad := range []string{"no-progress", "backward-terminal", "missing-sample", "extra-field"} {
+		child := validLifecycleWrapperResult()
+		samples := child["cases"].([]any)[2].(map[string]any)["tree_heartbeat_samples"].(map[string]any)
+		switch bad {
+		case "no-progress":
+			samples["progressed"].([]any)[1] = float64(1)
+		case "backward-terminal":
+			samples["terminal"].([]any)[0] = float64(1)
+		case "missing-sample":
+			samples["stable_samples"] = float64(5)
+		case "extra-field":
+			samples["unexpected"] = true
+		}
+		if validateWrapperSuiteResult(child, "lifecycle") == nil {
+			t.Fatalf("invalid heartbeat evidence admitted: %s", bad)
+		}
 	}
 }
 

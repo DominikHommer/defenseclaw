@@ -112,7 +112,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 	childFiles = append([]*os.File{proof, grantRead, readyWrite}, childFiles...)
 	stdout, stderr := &boundedCapture{}, &boundedCapture{}
 	pidfd := -1
-	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-outer-driver", "--owned-wrapper-bootstrap", "--receipt", opts.receipt, "--evidence", opts.evidence}, Env: []string{}, Dir: "/", ExtraFiles: childFiles, Stdout: stdout, Stderr: stderr,
+	command := &exec.Cmd{Path: "/proc/self/fd/6", Args: []string{"fixed-native-peer-outer-driver", "--owned-wrapper-bootstrap", "--receipt", opts.receipt, "--evidence", opts.evidence, "--suite", opts.suite}, Env: []string{}, Dir: "/", ExtraFiles: childFiles, Stdout: stdout, Stderr: stderr,
 		SysProcAttr: &syscall.SysProcAttr{Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNET | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
 			AmbientCaps: []uintptr{unix.CAP_SYS_ADMIN},
 			UidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}}, GidMappings: []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}, GidMappingsEnableSetgroups: false, PidFD: &pidfd}}
@@ -167,7 +167,7 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 		return errors.New("fixed wrapper output, exit or pipe bound failed")
 	}
 	record["wrapper_record"] = child
-	if err := validateWrapperResult(child); err != nil {
+	if err := validateWrapperSuiteResult(child, opts.suite); err != nil {
 		return err
 	}
 	record["wrapper_result_observed"], record["execution_performed"], record["passed"] = true, true, true
@@ -175,6 +175,13 @@ func runDriver(ctx context.Context, opts options, admission wrapperAdmission, re
 }
 
 func validateWrapperResult(child map[string]any) error {
+	return validateWrapperSuiteResult(child, "baseline")
+}
+
+func validateWrapperSuiteResult(child map[string]any, suite string) error {
+	if !validSuite(suite) || child["fixed_suite"] != suite {
+		return errors.New("fixed wrapper suite differs")
+	}
 	if child["scope"] != "fixed_linux_native_peer_offline_contributor_v1" || child["passed"] != true || child["execution_performed"] != true || child["production_certification"] != false || child["common_launch_gate_qualified"] != false || child["artifact_receipt_sha256"] != receiptSHA || child["outer_namespace_cleanup_observed"] != true || child["pending_outer_cleanup"] != float64(0) || child["pending_native_cleanup"] != float64(0) {
 		return errors.New("fixed wrapper result or native cleanup differs")
 	}
@@ -183,17 +190,61 @@ func validateWrapperResult(child map[string]any) error {
 			return errors.New("fixed wrapper control or canary evidence missing")
 		}
 	}
+	want := []string{"argv", "stdio", "exit23", "boundaries"}
+	if suite == "lifecycle" {
+		want = []string{"wait-timeout", "wait-cancel", "tree-cancel"}
+	}
 	cases, ok := child["cases"].([]any)
-	if !ok || len(cases) != 4 {
+	if !ok || len(cases) != len(want) {
 		return errors.New("fixed wrapper case inventory differs")
 	}
-	for index, mode := range []string{"argv", "stdio", "exit23", "boundaries"} {
+	for index, mode := range want {
 		result, ok := cases[index].(map[string]any)
-		if !ok || result["mode"] != mode || result["passed"] != true || result["prepared"] != true || result["started"] != true || result["fixed_payload_marker_observed"] != true || result["destroyed"] != true || result["native_cleanup_observed"] != true || result["exit_code"] != float64(23) || result["error"] != nil {
+		if !ok || result["mode"] != mode || result["passed"] != true || result["prepared"] != true || result["started"] != true || result["fixed_payload_marker_observed"] != true || result["destroyed"] != true || result["native_cleanup_observed"] != true || result["error"] != nil {
 			return errors.New("fixed wrapper case assertion differs")
+		}
+		if suite == "baseline" {
+			if result["exit_code"] != float64(23) {
+				return errors.New("fixed wrapper exit differs")
+			}
+		} else if result["exit_code"] != float64(-1) || result["timed_out"] != (mode == "wait-timeout") || result["cancel_sent"] != (mode != "wait-timeout") || result["native_terminal_before_outer_cleanup"] != true {
+			return errors.New("fixed lifecycle terminal/cancel assertions differ")
+		}
+		if mode == "tree-cancel" && (result["tree_ready_files_verified"] != true || result["tree_heartbeat_progress_observed"] != true || result["tree_heartbeat_stable_before_destroy"] != true) {
+			return errors.New("fixed lifecycle tree observations missing")
+		}
+		if mode == "tree-cancel" && !validTreeHeartbeatEvidence(result["tree_heartbeat_samples"]) {
+			return errors.New("fixed lifecycle heartbeat sample inventory differed")
 		}
 	}
 	return nil
+}
+
+func validTreeHeartbeatEvidence(value any) bool {
+	object, ok := value.(map[string]any)
+	if !ok || len(object) != 4 || object["stable_samples"] != float64(6) {
+		return false
+	}
+	var counts [3][3]uint32
+	for row, name := range []string{"before", "progressed", "terminal"} {
+		values, ok := object[name].([]any)
+		if !ok || len(values) != 3 {
+			return false
+		}
+		for column, value := range values {
+			number, ok := value.(float64)
+			if !ok || number < 1 || number > 1000000 || number != float64(uint32(number)) {
+				return false
+			}
+			counts[row][column] = uint32(number)
+		}
+	}
+	for column := range 3 {
+		if counts[1][column] <= counts[0][column] || counts[2][column] < counts[1][column] {
+			return false
+		}
+	}
+	return true
 }
 
 func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *cleanupOwner, error) {
@@ -202,9 +253,11 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	if err := admission.validate(); err != nil {
 		return record, owner, err
 	}
-	if os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" || len(args) != 4 || args[0] != "--receipt" || args[2] != "--evidence" || len(args[1]) == 0 || len(args[1]) > 4096 || len(args[3]) == 0 || len(args[3]) > 4096 {
+	opts, err := bootstrapOptions(args)
+	if err != nil || os.Getpid() != 1 || os.Getppid() != 0 || os.Geteuid() == 0 || runtime.GOARCH != "amd64" {
 		return record, owner, errors.New("fixed owned bootstrap required")
 	}
+	record["fixed_suite"] = opts.suite
 	// Setup installs PDEATHSIG, verifies owned fresh USER/MNT/PID namespaces,
 	// mounts matching procfs and drops capabilities on every Go OS thread.
 	// No READY or GRANT is processed before successful completion.
@@ -267,7 +320,7 @@ func bootstrap(args []string, admission wrapperAdmission) (map[string]any, *clea
 	}
 	// Literal proc-self FD names the still-held sealed executable; no host image
 	// pathname is reopened. Exec has no PATH lookup or command-string parsing.
-	err = syscall.Exec("/proc/self/fd/7", []string{"reviewed-native-peer-wrapper", "--run-fixed", "--receipt", args[1], "--evidence", args[3]}, []string{})
+	err = syscall.Exec("/proc/self/fd/7", []string{"reviewed-native-peer-wrapper", "--run-fixed", "--receipt", opts.receipt, "--evidence", opts.evidence, "--suite", opts.suite}, []string{})
 	runtime.KeepAlive(wrapper)
 	return record, owner, err
 }

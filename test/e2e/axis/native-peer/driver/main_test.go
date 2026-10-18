@@ -43,3 +43,30 @@ func TestReviewedAdmissionUsesInjectedFakeRunnerOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestLifecycleDriverSuiteIsClosedAndPropagatedWithoutNativeWork(t *testing.T) {
+	admission := wrapperAdmission{Reviewed: true, SHA: strings.Repeat("a", 64), Size: 128}
+	calls := 0
+	fake := func(_ context.Context, opts options, _ wrapperAdmission, record map[string]any, _ *cleanupOwner) error {
+		calls++
+		if opts.suite != "lifecycle" || record["fixed_suite"] != "lifecycle" {
+			t.Fatal("explicit lifecycle suite was lost")
+		}
+		return nil
+	}
+	if _, _, err := execute([]string{"--run-fixed", "--receipt", "missing", "--evidence", "missing", "--suite", "lifecycle"}, admission, fake); err != nil || calls != 1 {
+		t.Fatal("fixed lifecycle metadata refused before fake dispatch")
+	}
+	if _, _, err := execute([]string{"--run-fixed", "--receipt", "missing", "--evidence", "missing", "--suite", "arbitrary"}, admission, fake); err == nil || calls != 1 {
+		t.Fatal("arbitrary suite reached fake dispatch")
+	}
+	for _, suite := range []string{"baseline", "lifecycle"} {
+		opts, err := bootstrapOptions([]string{"--receipt", "missing", "--evidence", "missing", "--suite", suite})
+		if err != nil || opts.suite != suite {
+			t.Fatal("closed bootstrap suite did not round trip")
+		}
+	}
+	if _, err := bootstrapOptions([]string{"--receipt", "missing", "--evidence", "missing", "--suite", "unknown"}); err == nil {
+		t.Fatal("bootstrap accepted unknown suite")
+	}
+}
