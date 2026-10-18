@@ -180,9 +180,15 @@ remains fail-open. Such a call is recorded in
 `guardrail-degraded` alert when it starts again. On a managed standalone host
 (Linux, macOS and Windows) the administrator-owned Hermes hook is stricter: it
 blocks a `pre_tool_call` DefenseClaw cannot check (the gateway service is not
-running, its answer cannot be used, or the call is too large to inspect), and
-Hermes shows why, for example "DefenseClaw blocked this tool call: the
-DefenseClaw gateway service is not running on this computer".
+running, its answer cannot be used, or the call is too large to inspect). The
+block text says why and what to do next, for example "DefenseClaw blocked this
+tool call: the DefenseClaw gateway service is not running on this computer. Try
+again in a moment; if this continues, ask your administrator ...". Hermes shows
+no hook text itself: the text goes to the model as the tool's error, and the
+model words the reply, so the reply may shorten it. Each block is a
+`fail_mode: closed` line in the user's `hook-failures.jsonl`; the gateway is
+down while it happens, so its audit history shows the service stopping and
+starting, not each blocked call.
 
 </Tab>
 
