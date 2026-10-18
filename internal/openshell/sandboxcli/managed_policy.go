@@ -292,13 +292,7 @@ func managedExplainRows(m *sandboxapi.ManagedExplain, now time.Time) []managedRo
 	return managedExplainRowsFor(m, nil, "", now)
 }
 
-// managedExplainRowsFor is managedExplainRows with the explained run's
-// posture (ex: its pack and modes, nil when unknown) and the agent the
-// explain names ("" none).
-func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain, harnessName string, now time.Time) []managedRow {
-	var rows []managedRow
-	add := func(label, text string, keys ...string) { rows = append(rows, managedRow{label, text, keys}) }
-
+func managedProfileIdentity(m *sandboxapi.ManagedExplain) string {
 	profile := sandboxapi.DisplayText(m.Profile)
 	if profile == "" {
 		profile = "(your organization's floor)"
@@ -307,7 +301,17 @@ func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain,
 	if m.Provisional {
 		text += "; provisional until your directory answers"
 	}
-	add("Organization profile", text)
+	return text
+}
+
+// managedExplainRowsFor is managedExplainRows with the explained run's
+// posture (ex: its pack and modes, nil when unknown) and the agent the
+// explain names ("" none).
+func managedExplainRowsFor(m *sandboxapi.ManagedExplain, ex *sandboxapi.Explain, harnessName string, now time.Time) []managedRow {
+	var rows []managedRow
+	add := func(label, text string, keys ...string) { rows = append(rows, managedRow{label, text, keys}) }
+
+	add("Organization profile", managedProfileIdentity(m))
 	if d := strings.TrimSpace(m.Description); d != "" {
 		add("", sandboxapi.DisplayText(d))
 	}
