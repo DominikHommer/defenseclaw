@@ -457,6 +457,12 @@ func (m *Manager) ocsfFinding(ctx context.Context, b *box, id audit.SandboxIdent
 		ev.Remediation = "If the sandbox's conversation printed its environment, start a new conversation " +
 			"(`defenseclaw sandbox connect " + name + "`, without --continue)."
 	}
+	if r.FindingType == "openshell.provider_credential.endpoint_mismatch" {
+		ev.Description = strings.TrimSuffix(firstNonEmpty(r.Message, ev.Title), ".") +
+			". A credential placeholder is bound to its configured endpoint; it cannot be used as the model provider key at another endpoint."
+		ev.Remediation = "Check the model provider and endpoint for this sandbox. Use the model provider's configured credential for model requests; " +
+			"keep a sandbox credential placeholder only with the endpoint it was bound to."
+	}
 	if repeats > 0 {
 		ev.Description = strings.TrimSpace(ev.Description + " (OpenShell raised it " + strconv.Itoa(repeats) +
 			" more times after the alert of " + since.UTC().Format("15:04:05") + " UTC.)")

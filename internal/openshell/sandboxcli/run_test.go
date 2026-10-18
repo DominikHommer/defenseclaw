@@ -258,6 +258,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatal("a detached run attached the terminal")
 	}
 	has(t, ta.output(), "defenseclaw sandbox logs dc-claude-proj-1a2b -f")
+	has(t, ta.output(), "A completed detached Claude Code run may leave no saved conversation", "connect without --continue")
 	if n := ta.calls("POST", sbName+"/stop"); n != 0 {
 		t.Fatal("a detached run was stopped")
 	}
@@ -267,6 +268,7 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 	if last := sandboxCommand(ta.stream.runs[len(ta.stream.runs)-1]); slices.Contains(last, "stream-json") || last[4] != RunDir || last[5] != harness.CodexLauncherPath {
 		t.Fatalf("detached codex argv = %q", last)
 	}
+	lacks(t, ta.output(), "may leave no saved conversation")
 }
 
 // A refused run creates no sandbox and stages no copy, and says why: a

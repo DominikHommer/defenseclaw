@@ -864,6 +864,9 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 		a.line("review:  " + CommandName + " review " + s.sb.Name + "   undo: " + CommandName + " undo " + s.sb.Name)
 	}
 	a.line("stop:    " + CommandName + " stop " + s.sb.Name)
+	if s.spec.Name == harness.ClaudeCode.Name {
+		a.note("A completed detached Claude Code run may leave no saved conversation. If connect -- --continue cannot find one, connect without --continue to start a new conversation.")
+	}
 	return nil
 }
 

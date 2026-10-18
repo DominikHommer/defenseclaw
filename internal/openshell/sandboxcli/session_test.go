@@ -1396,6 +1396,15 @@ func TestDoctorReportsSandboxHooks(t *testing.T) {
 	if c := check(ta); c.Status != openshell.StatusPass || c.Detail != "no sandbox is running" {
 		t.Fatalf("no sandboxes: %+v", c)
 	}
+	silenced := sampleSandbox("silenced")
+	silenced.Phase = "stopped"
+	silenced.Hooks.Silent, silenced.Hooks.OnSilence = true, "stop"
+	ta.daemon.add(silenced)
+	if c := check(ta); c.Status != openshell.StatusWarn || !strings.Contains(c.Detail, "silenced stopped after its harness worked without hooks reaching DefenseClaw") ||
+		c.Fix == nil || !strings.Contains(c.Fix.Summary, "delete it") {
+		t.Fatalf("silence-stopped sandbox: %+v", c)
+	}
+	ta = newTestApp(t, "")
 	ta.daemon.add(sampleSandbox("good"))
 	if c := check(ta); c.Status != openshell.StatusPass || !strings.Contains(c.Detail, "1 running sandbox reach") {
 		t.Fatalf("healthy: %+v", c)

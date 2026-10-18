@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"slices"
 	"sort"
@@ -523,14 +524,30 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	}
 	if len(added) == 0 {
 		a.ok("already in " + key)
+		if list == "allow" {
+			a.warnNeverReachAllow(wanted)
+		}
 		return nil
 	}
 	a.ok("added " + strings.Join(added, ", ") + " to " + key)
 	if list == "allow" {
+		a.warnNeverReachAllow(added)
 		a.note("allow entries matter in the balanced and strict profiles; open allows everything not blocked")
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
 	return nil
+}
+
+// A saved allow cannot override the sandbox's host-internal address guard.
+func (a *App) warnNeverReachAllow(hosts []string) {
+	for _, host := range hosts {
+		if _, err := netip.ParseAddr(host); err != nil {
+			continue
+		}
+		if _, class, err := packs.ClassifyAllowedIP(host); err == nil && class == packs.AllowedIPNever {
+			a.warn(host + " is a loopback, link-local, cloud metadata or reserved address; the sandbox egress guard always refuses it, so this allow entry cannot open it")
+		}
+	}
 }
 
 // ManagedPolicyDecision records one host decision through the caller's

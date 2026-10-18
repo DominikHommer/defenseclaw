@@ -1548,6 +1548,17 @@ func TestPolicyEdit(t *testing.T) {
 	}
 }
 
+func TestPolicyAllowWarnsWhenTheGuardAlwaysRefusesAnAddress(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	ta.ok(t, ta.PolicyEdit(bg, "allow", []string{"169.254.169.254", "registry.npmjs.org"}))
+	has(t, ta.output(), "169.254.169.254 is a loopback, link-local, cloud metadata or reserved address", "this allow entry cannot open it")
+	lacks(t, ta.output(), "registry.npmjs.org is a loopback")
+	if got := loadConfig(t, ta).OpenShell.Egress.Allow; !slices.Equal(got, []string{"169.254.169.254", "registry.npmjs.org"}) {
+		t.Fatalf("saved allow entries = %v", got)
+	}
+}
+
 func TestManagedPolicyDecisionUsesDaemon(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("onebox"))
 	ta.daemon.managed = true
