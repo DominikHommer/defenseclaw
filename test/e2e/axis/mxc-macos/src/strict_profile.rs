@@ -53,12 +53,18 @@ pub fn runtime_read_paths() -> Result<Vec<String>> {
 
 fn validate_fixed_shell_selector() -> Result<()> {
     let selector = Path::new(REQUIRED_SHELL_SELECTOR);
-    for ancestor in selector.ancestors().skip(1) {
-        let metadata = fs::symlink_metadata(ancestor).context("inspect shell selector ancestor")?;
-        ensure!(
-            metadata.file_type().is_dir() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
-            "shell selector ancestor is not a root-owned nonwritable directory"
-        );
+    let target = Path::new(REQUIRED_SHELL_TARGET);
+    for path in [selector, target] {
+        for ancestor in path.ancestors().skip(1) {
+            let metadata =
+                fs::symlink_metadata(ancestor).context("inspect fixed shell ancestor")?;
+            ensure!(
+                metadata.file_type().is_dir()
+                    && metadata.uid() == 0
+                    && metadata.mode() & 0o022 == 0,
+                "fixed shell ancestor is not a root-owned nonwritable directory"
+            );
+        }
     }
     let selector_metadata =
         fs::symlink_metadata(selector).context("inspect fixed shell selector")?;
@@ -73,7 +79,6 @@ fn validate_fixed_shell_selector() -> Result<()> {
             == Path::new(REQUIRED_SHELL_TARGET),
         "fixed shell selector names an unreviewed target"
     );
-    let target = Path::new(REQUIRED_SHELL_TARGET);
     let target_metadata = fs::symlink_metadata(target).context("inspect fixed shell target")?;
     ensure!(
         target_metadata.file_type().is_file()

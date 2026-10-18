@@ -182,7 +182,7 @@ jobs:
           import stat
 
           selector = "/private/var/select/sh"
-          for path in ("/", "/private", "/private/var", "/private/var/select", selector, "/bin/bash"):
+          for path in ("/", "/private", "/private/var", "/private/var/select", selector, "/bin", "/bin/bash"):
               try:
                   metadata = os.lstat(path)
               except FileNotFoundError:
