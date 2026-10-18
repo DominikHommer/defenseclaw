@@ -59,6 +59,7 @@ import click
 
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
     HOOK_CONTRACTS,
@@ -3250,7 +3251,7 @@ def _check_recent_judge_outage(cfg, r: _DoctorResult, *, window_hours: int = 24)
         try:
             row = conn.execute(
                 "SELECT timestamp, target FROM audit_events WHERE action = 'watcher-block' "
-                "AND details LIKE ? ORDER BY timestamp DESC LIMIT 1",
+                f"AND details LIKE ? ORDER BY {audit_time_order(conn)} LIMIT 1",
                 (f"%{_JUDGE_OUTAGE_MARKER}%",),
             ).fetchone()
         finally:
@@ -10063,7 +10064,7 @@ def _check_judge_calls(cfg, r: _DoctorResult) -> None:
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
             rows = db.execute(
                 "SELECT structured_json FROM audit_events WHERE action = ? AND timestamp >= ? "
-                "ORDER BY timestamp DESC, rowid DESC LIMIT 20",
+                f"ORDER BY {audit_time_order(db)} LIMIT 20",
                 ("llm-judge-response", since),
             ).fetchall()
     except sqlite3.Error as exc:

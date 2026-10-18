@@ -27,6 +27,7 @@ from defenseclaw.alert_semantics import (
     copilot_hook_target,
     copilot_hook_target_spellings,
 )
+from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.hook_metrics import (
     POST_TOOL_DECISION,
     connector_hook_decision,
@@ -1767,7 +1768,8 @@ def _list_events_by_target(
     # Both harness spellings of a Copilot hook target (GAP-2619).
     spellings = copilot_hook_target_spellings(target, connector)
     try:
-        if hasattr(store, "list_events_by_target"):
+        db = getattr(store, "db", None)
+        if hasattr(store, "list_events_by_target") and (len(spellings) == 1 or db is None):
             events = [
                 _coerce_alert_event(item)
                 for spelling in spellings
@@ -1776,13 +1778,12 @@ def _list_events_by_target(
             if len(spellings) > 1:
                 events = sorted(events, key=lambda item: item.timestamp, reverse=True)[:limit]
         else:
-            db = getattr(store, "db", None)
             if db is None:
                 return ()
             marks = ",".join("?" * len(spellings))
             rows = db.execute(
                 "SELECT id, timestamp, action, target, actor, details, severity, run_id"
-                f" FROM audit_events WHERE target IN ({marks}) ORDER BY timestamp DESC LIMIT ?",
+                f" FROM audit_events WHERE target IN ({marks}) ORDER BY {audit_time_order(db)} LIMIT ?",
                 (*spellings, max(limit, 1)),
             ).fetchall()
             events = [_alert_event_from_row(row) for row in rows]
