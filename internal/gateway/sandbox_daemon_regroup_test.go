@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
@@ -41,7 +42,8 @@ func TestDaemonRegistrationTakesTheRematchedProfile(t *testing.T) {
 		UpdatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if !regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new", Profile: "contractors"}) {
+	if !regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Digest: "sha256:new", Profile: "contractors",
+		Floor: wireFloor(config.OpenShellAdminConfig{})}) {
 		t.Fatal("the re-matched answer changed nothing")
 	}
 	if r, _ := regs.get("dc-a"); r.Profile != "contractors" || r.Digest != "sha256:new" {
