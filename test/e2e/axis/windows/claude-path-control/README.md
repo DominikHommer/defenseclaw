@@ -82,3 +82,25 @@ Primary API contracts:
 [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew),
 [GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew),
 [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+
+The separately built `supervisor_windows.go` is excluded from the helper's
+ordinary package build. Build it explicitly with `authority_windows.go` and
+`native_windows.go`, excluding `main_windows.go`. It pins the independently
+reviewed helper build from `17ebe67f`: SHA256
+`a78aef62fd7f1b98293cf570a87e672fc3cb7b20d922748d7f34931b34adf823`,
+2,830,848 bytes. There is no image/hash/argument override.
+
+The supervisor uses a kill-on-close Job through the documented
+[JOB_LIST creation attribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
+It samples membership using the retained process handle and checks that
+handle's image identity before resuming the retained primary thread. It never
+enumerates or adopts PIDs. The helper has a 24-second run budget, reserving six
+seconds for cleanup within the 30-second absolute admission/acceptance limit.
+The root controller must also enforce a 30-second wall-clock cutoff for the
+supervisor, since filesystem setup calls cannot be interrupted by a Go context.
+The outer Job retains all helper descendants even if the supervisor is stopped.
+Capture, cleanup, close or deadline errors prevent a completed observation.
+`supervision_completed` means that the measurement helper exited successfully;
+the root controller must inspect each of its three case outcomes separately.
+Neither a completed measurement nor a passing version check qualifies a sandbox.
+This supervisor source has not been executed.
