@@ -94,7 +94,7 @@ jobs:
           /usr/bin/timeout --signal=TERM --kill-after=5s 160s \
             /usr/bin/env -i "$(pwd)/live-inputs/images/fixed-driver" --run-fixed \
             --receipt "$(pwd)/live-inputs/REVIEWED-ARTIFACTS.json" \
-            --evidence "$(pwd)/live-evidence/wrapper" \
+            --evidence "$(pwd)/live-evidence/native-peer-fixed-wrapper" \
             >live-evidence/DRIVER-RESULT.json 2>live-evidence/driver-stderr.log
       - name: Collect only the exact fixed fixture after whole-wrapper cleanup
         if: ${{ always() }}

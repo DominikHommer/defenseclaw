@@ -18,7 +18,16 @@ build, dependency and image evidence. CI preparation rechecks their exact
 byte identity; it does not repeat upstream source/toolchain reconstruction.
 The new peer, wrapper and driver include the reviewed FD3 namespace proof,
 private mount propagation, matching procfs and capability drop before control
-or workload launch. This source change has not yet been exercised natively.
+or workload launch. One [native attempt](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39152319549)
+at `dabf4fa5` completed that bootstrap and started the owned worker with a matching
+procfs PID view. It then refused before artifact admission or payload cases.
+Both namespace cleanup owners completed with zero pending custody, and the
+runner setting was restored. Source review found that this workflow supplied
+an evidence-directory basename `wrapper`, while the harness requires
+`native-peer-fixed-*` before creating evidence. The recipe now supplies
+`native-peer-fixed-wrapper`; the reviewed images and policy are unchanged.
+This explains a deterministic recipe refusal, without qualifying the unexecuted
+payload cases or attributing every observed failure to that check.
 The trust assumptions documented in
 [`artifact-review.md`](../../../../../internal/axis/native/artifact-review.md)
 still apply.
