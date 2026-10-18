@@ -160,3 +160,33 @@ func TestActivityAndScanReadersUseExactTimeAndInsertTies(t *testing.T) {
 		t.Fatalf("latest scan: %+v", latest)
 	}
 }
+
+func TestRecentSessionFindingsUseExactTimeAndInsertTies(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	for _, row := range []struct{ id, stamp string }{
+		{"short", "2026-10-13T12:00:00.12345Z"},
+		{"long", "2026-10-13T12:00:00.123451Z"},
+		{"tie-first", "2026-10-13T12:00:01Z"},
+		{"tie-second", "2026-10-13T12:00:01Z"},
+		{"offset", "2026-10-13T14:00:02+02:00"},
+	} {
+		_, err := store.db.Exec(`INSERT INTO scan_findings
+   (id, scan_id, scanner, target, severity, tags, timestamp, session_id, agent_instance_id)
+   VALUES (?, 'scan', 'hook', 'target', 'HIGH', '[]', ?, 'session', 'agent')`, row.id, row.stamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := store.ListRecentFindingsInSession("session", "agent", "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	if got, want := strings.Join(ids, ","), "offset,tie-second,tie-first,long,short"; got != want {
+		t.Fatalf("recent findings: %s want %s", got, want)
+	}
+}
