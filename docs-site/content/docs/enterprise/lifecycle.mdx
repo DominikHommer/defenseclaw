@@ -555,6 +555,14 @@ Defense or the LLM judge is the exception: the gateway tells the hook, and
 the call keeps the hook's whole time budget. Prompts and session, stop and
 other events keep their whole budget.
 
+The 4 seconds count from the start of the command the agent runs (on Windows
+that includes the PowerShell bridge some registrations use), and they hold on
+a busy computer: the hook prepares its block when the call starts and gives it
+at the deadline even when its own work is running late. Lifecycle runs
+(`install`, `upgrade`, `repair`, `ensure` and bundle applies) run at a lower
+CPU priority than the hooks on every OS, so a repair does not take the CPU the
+hooks need to answer in time.
+
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |
 | Linux | `sudo systemctl restart defenseclaw-gateway.service` | `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux repair --json` |
