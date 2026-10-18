@@ -26,6 +26,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -95,6 +96,7 @@ func newHookCmd() *cobra.Command {
 				return nil
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts.StartedAt = hookInvocationStart()
 			opts.HookContractID = hookContractID
 			opts.HookSurface = strings.TrimSpace(hookSurface)
 			// Only the standalone binary explains an unenrolled account.
@@ -186,6 +188,18 @@ func newHookSessionFactsCmd() *cobra.Command {
 			return err
 		},
 	}
+}
+
+// hookInvocationStart is when this hook call began, which its time budgets
+// count from. A process the agent launched for the call (its first argument
+// is `hook`) began when the system created it: the launch and the runtime
+// resolution before Run can take seconds on a busy host (GAP-0155). Any
+// other caller (a test running the command in process) began now.
+func hookInvocationStart() time.Time {
+	if len(os.Args) > 1 && os.Args[1] == "hook" {
+		return hookexec.ProcessStartTime()
+	}
+	return time.Now()
 }
 
 // hookProcessExit ends the hook process with hookexec's connector-native

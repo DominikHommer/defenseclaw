@@ -543,8 +543,17 @@ where the call waits in the socket systemd holds, the block names
 `enterprise_managed_gateway_restarting`; on macOS and Windows, where nothing
 accepts the call, it is the usual `enterprise_managed_gateway_not_running`
 (or the hook's generic refusal when the connection failed another way). A
-hook never allows a call because the gateway was restarting, and a gateway
-that is running and evaluating a call keeps the hook's whole time budget.
+hook never allows a call because the gateway was restarting.
+
+A hook for a tool call (`PreToolUse` and the like) also waits at most about 4
+seconds from its start for the gateway's decision, whatever holds it up: a
+restart, an upgrade, a rollback, a repair, a configuration change, or a
+gateway too busy to answer in time. After that it blocks the call with
+`enterprise_managed_gateway_no_answer`, so DefenseClaw never holds an agent's
+tool call for more than about 5 seconds. A decision that waits on Cisco AI
+Defense or the LLM judge is the exception: the gateway tells the hook, and
+the call keeps the hook's whole time budget. Prompts and session, stop and
+other events keep their whole budget.
 
 | OS | Restart the gateway | Re-apply the deployment and restart every service |
 | --- | --- | --- |

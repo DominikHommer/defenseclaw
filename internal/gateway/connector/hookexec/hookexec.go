@@ -234,6 +234,9 @@ type Options struct {
 	// gatewayRefusal is what a per-user hook the gateway refused with an
 	// error status shows in the agent (perUserRefusalText); doRequest sets it.
 	gatewayRefusal string
+	// answerBy is the answer deadline of a tool call (answerDeadline);
+	// doRequest sets it, and the request then asks for progress reports.
+	answerBy time.Time
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -667,6 +670,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
 	restartDeadline := gatewayRestartDeadline(opts, opts.StartedAt)
+	// One deadline bounds every wait of a tool call: the restart tries, the
+	// dials, a gateway that accepted the call but does not answer, and the
+	// resends below (hookAnswerBudget).
+	opts.answerBy = answerDeadline(opts, opts.StartedAt)
+	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy)
+	defer releaseAnswer()
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	defer releaseWatch()
 	send := func() (*http.Response, error) { return sendHookRequest(ctx, opts, sp, payload, token) }
@@ -721,6 +730,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// and starts the exact installer-owned gateway, including authenticated
 			// readiness, before this single retry.
 			resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		} else if gatewayNoAnswer(ctx) {
+			return failNoAnswer(opts, sp, failMode)
 		} else {
 			return failUnreachable(opts, sp, failMode, coldStartFailedReason)
 		}
@@ -733,10 +744,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < hookBusyRetries; retry++ {
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
 		_ = resp.Body.Close()
+		if !retryFitsAnswer(opts.answerBy, delay) {
+			// A resend could not be answered within the tool call's
+			// answer budget: the gateway is too busy for it now.
+			return failNoAnswer(opts, sp, failMode)
+		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if gatewayNoAnswer(ctx) {
+				return failNoAnswer(opts, sp, failMode)
+			}
 			return failUnreachable(opts, sp, failMode, "gateway busy")
 		case <-timer.C:
 		}
@@ -748,7 +767,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// can meet a 401 (GAP-0680). The call was not evaluated: send it again a
 	// few times within the hook's deadline. Secure Client is unchanged.
 	for retry := 0; err == nil && resp.StatusCode == http.StatusUnauthorized &&
-		opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && retry < hookAuthRetries; retry++ {
+		opts.ManagedEnterprise && opts.ExplainUnenrolledAccount && retry < hookAuthRetries &&
+		retryFitsAnswer(opts.answerBy, hookAuthRetryDelay); retry++ {
 		_ = resp.Body.Close()
 		timer := time.NewTimer(hookAuthRetryDelay)
 		select {
@@ -762,6 +782,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if err != nil {
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
+		case errors.Is(cause, errGatewayNoAnswer):
+			// No decision in time: blocked (closed for a managed hook),
+			// never allowed because the gateway was slow.
+			return failNoAnswer(opts, sp, failMode)
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
@@ -778,6 +802,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(opts, sp, failMode, reason)
 	}
 	defer resp.Body.Close()
+	// The decision is in: reading its body no longer counts against the
+	// answer budget.
+	stopAnswer()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody))
 
@@ -948,6 +975,11 @@ func sendHookRequest(
 	}
 	if opts.refusal != "" {
 		req.Header.Set(HookRefusalHeader, opts.refusal)
+	}
+	if !opts.answerBy.IsZero() {
+		// The call is bounded by hookAnswerBudget: ask the gateway to say
+		// when it waits on a remote scanner, which keeps the call waiting.
+		req.Header.Set(HookProgressHeader, "1")
 	}
 	if v := strings.TrimSpace(opts.TraceParent); v != "" && validTraceparent(v) {
 		req.Header.Set("traceparent", v)
@@ -1477,6 +1509,9 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	case reason == perUserGatewayRestartingReason:
 		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
 			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection."
+	case reason == perUserGatewayNoAnswerReason:
+		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
+			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
 	case strings.HasPrefix(reason, coldStartFailedReason):
 		// The logged reason carries the cause of the failed start (GAP-0480).
 		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
@@ -1512,6 +1547,9 @@ func unreachableDetail(opts Options, reason string) string {
 	case perUserGatewayRestartingReason:
 		return "this account's gateway is restarting or not running (no answer within 3 seconds); " +
 			"try again in a moment, or check `defenseclaw-gateway status`"
+	case perUserGatewayNoAnswerReason:
+		return "this account's gateway did not answer in time (it may be restarting or busy); " +
+			"try again in a moment, or check `defenseclaw-gateway status`"
 	}
 	return reason
 }
@@ -1538,6 +1576,11 @@ func perUserGatewayDownText(opts Options, reason string) string {
 			"restarting or not running and did not answer within 3 seconds (fail mode closed). Try again in a " +
 			"moment; if this continues, check it with `defenseclaw-gateway status` and start it with " +
 			"`defenseclaw-gateway start`."
+	}
+	if reason == perUserGatewayNoAnswerReason {
+		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway " +
+			"did not answer in time (fail mode closed); it may be restarting or busy. Try again in a moment; if " +
+			"this continues, check it with `defenseclaw-gateway status`."
 	}
 	if reason != "gateway unreachable" {
 		return ""
@@ -1976,7 +2019,7 @@ func ManagedGatewayPortHeld(err error) bool {
 // false for any other reason.
 func ManagedTransportFailureText(event, reason string) (string, bool) {
 	if reason != managedGatewayNotRunningReason && reason != managedGatewayPortHeldReason &&
-		reason != managedGatewayRestartingReason {
+		reason != managedGatewayRestartingReason && reason != managedGatewayNoAnswerReason {
 		return "", false
 	}
 	return managedStandaloneFailClosedText(event, "transport", reason), true
@@ -2053,6 +2096,12 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		code = reason
 	case reason == managedGatewayRestartingReason:
 		cause, advice = "the DefenseClaw gateway is restarting to apply a change on this computer",
+			"Try again in a few seconds; if this continues, contact your administrator."
+		code = reason
+	case reason == managedGatewayNoAnswerReason:
+		// A restart, an upgrade, a repair or a busy host: the gateway gave
+		// no decision within the tool call's answer budget (GAP-0155).
+		cause, advice = "the DefenseClaw gateway did not answer in time (it may be restarting or busy)",
 			"Try again in a few seconds; if this continues, contact your administrator."
 		code = reason
 	case reason == managedGatewayPortHeldReason:

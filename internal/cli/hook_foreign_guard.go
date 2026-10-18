@@ -89,7 +89,10 @@ const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: De
 // still evaluated and recorded, but hookexec answers it with the connector's
 // neutral allow: a block there would keep the agent running, not stop it.
 func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
-	startedAt := time.Now()
+	startedAt := opts.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		return
 	}
