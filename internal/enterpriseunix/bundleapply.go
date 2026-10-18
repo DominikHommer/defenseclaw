@@ -64,6 +64,9 @@ const (
 	codeBundleInbox         = "bundle_inbox_refused"
 	codeBundleConfirmedLate = "bundle_confirmed_after_interrupt"
 	codeBundleNotCurrent    = "bundle_not_current"
+	// codeBundleConfirmedWithErrors names a bundle this run committed and
+	// confirmed although a later step of the run failed.
+	codeBundleConfirmedWithErrors = "bundle_confirmed_with_errors"
 
 	// bundleConfigFileName is the rendered config of the bundle a run
 	// applies, root-only in the lifecycle directory; the transaction reads it
@@ -83,6 +86,9 @@ type bundleRun struct {
 	receipt *enterprisebundle.Receipt
 	// configSHA is the SHA-256 of the rendered config.yaml.
 	configSHA string
+	// committed is set once the transaction of this run committed the
+	// deployment of the bundle config, after the gateway reported its policy.
+	committed bool
 }
 
 // bundleAnchorsPath is <etc>/trust/bundle-anchors.json (rooted).
@@ -540,7 +546,12 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 	}
 	rc := run.receipt
 	record, _ := env.loadDeployment()
-	committed := record != nil && len(r.Errors) == 0 && record.ConfigSHA256 == run.configSHA
+	// A step that fails after this run committed the bundle deployment (the
+	// per-user sandbox report, the guardian report) does not undo the
+	// commit: the bundle config is the deployment, and the gateway reported
+	// its policy before the commit (GAP-0271). Failing the receipt then left
+	// a receipt that said failed over a policy that was in force.
+	committed := record != nil && record.ConfigSHA256 == run.configSHA && (len(r.Errors) == 0 || run.committed)
 	if committed && rc.State == enterprisebundle.StateStaged {
 		// Recorded without a reload: the gateway reports the generation it
 		// last loaded, so only its digest and reload state are compared.
@@ -559,6 +570,9 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		}
 	}
 	if committed && rc.State == enterprisebundle.StateApplied {
+		if len(r.Errors) > 0 && !l.committedBundleEnforced(ctx, record, rc) {
+			return
+		}
 		if env.fault("committed") != nil {
 			// The test seam ends the run here, as a crash between the commit
 			// and the swap would: settle finishes it on the next run.
@@ -595,6 +609,31 @@ func (l *lifecycle) finishBundle(ctx context.Context) {
 		}
 	}
 	l.failBundle(ctx, run, record, code, message)
+}
+
+// committedBundleEnforced reports whether the gateway still enforces the
+// policy of the bundle this run committed, when a step after the commit
+// failed. Then the bundle is confirmed as after a clean run, and a warning
+// says the errors of the run did not change the policy. Otherwise the
+// receipt stays applied, never failed while its config is the deployment:
+// the next changing run confirms it or applies the last good bundle again
+// (settleUnconfirmedBundle).
+func (l *lifecycle) committedBundleEnforced(ctx context.Context, record *Deployment, rc *enterprisebundle.Receipt) bool {
+	r := l.result
+	digest, _, err := l.awaitBundlePolicy(ctx, record.ServiceUID, true, rc)
+	if err == nil && digest != rc.EffectivePolicyDigest {
+		err = fmt.Errorf("the installed config computes to %s, not %s, which the gateway reported before the commit", shortDigest(digest), shortDigest(rc.EffectivePolicyDigest))
+	}
+	if err != nil {
+		r.AddError(string(bundleConfirmationCode(err)), fmt.Sprintf(
+			"policy bundle %s version %d is installed, but after a later step of this run failed the gateway did not report its policy again: %v; the next lifecycle run confirms it or applies the last good bundle again",
+			displayID(rc), rc.Version, err))
+		return false
+	}
+	r.AddWarning(codeBundleConfirmedWithErrors, fmt.Sprintf(
+		"policy bundle %s version %d is in force and confirmed: the gateway enforces its policy; the errors of this run come from steps after the policy change committed",
+		displayID(rc), rc.Version))
+	return true
 }
 
 // failBundle ends the receipt of run as failed(code), records whether the
