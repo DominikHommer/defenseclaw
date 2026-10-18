@@ -56,9 +56,11 @@ type GuardianOwnedFilesRecord struct {
 }
 
 // OwnedFileFingerprint names the state of the file at path: "absent", a
-// non-regular entry by its type, "unreadable", or the SHA-256 digest of its
-// content with its permission bits. It never follows a link at the name and
-// never blocks on a FIFO. Two equal fingerprints mean the file holds what it
+// non-regular entry by its type, "unreadable", or (ownedFileStateFingerprint)
+// the SHA-256 digest of its content with its permission bits; on Windows its
+// size, modification time and attributes, because a read handle there would
+// make the agent's own write of its config fail with a sharing violation.
+// It never follows a link at the name and never blocks on a FIFO. Two equal fingerprints mean the file holds what it
 // held; the guardian's watch loop compares them to tell its own writes from
 // a user's, and status to tell a file changed since the guardian's pass.
 func OwnedFileFingerprint(path string) string {
@@ -72,6 +74,11 @@ func OwnedFileFingerprint(path string) string {
 	if !info.Mode().IsRegular() {
 		return "irregular:" + info.Mode().Type().String()
 	}
+	return ownedFileStateFingerprint(path, info)
+}
+
+// ownedFileContentFingerprint is the content digest and permission bits.
+func ownedFileContentFingerprint(path string, info os.FileInfo) string {
 	data, err := safefile.ReadRegularFileBounded(path, ownedFileFingerprintMaxBytes)
 	if err != nil {
 		return "unreadable"

@@ -22,6 +22,16 @@ func TestOwnedFileFingerprintTellsContentModeAndAbsenceApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	issued := OwnedFileFingerprint(path)
+	if runtime.GOOS == "windows" {
+		// Windows reads metadata only; an overwrite changes it.
+		if err := os.WriteFile(path, []byte("lane-made-longer\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if OwnedFileFingerprint(path) == issued {
+			t.Fatal("an overwritten file kept its fingerprint")
+		}
+		return
+	}
 	if !strings.HasPrefix(issued, "sha256:") || strings.Contains(issued, "issued") {
 		t.Fatalf("fingerprint = %q, want a digest without the content", issued)
 	}
@@ -41,7 +51,7 @@ func TestOwnedFileFingerprintTellsContentModeAndAbsenceApart(t *testing.T) {
 	if OwnedFileFingerprint(path) != issued {
 		t.Fatal("the same bytes and mode did not give the same fingerprint")
 	}
-	if runtime.GOOS != "windows" {
+	{
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +96,7 @@ func TestGuardianOwnedFilesRecordRoundTripAndChangedFiles(t *testing.T) {
 	if changed := read.Targets[0].ChangedFiles(OwnedFileFingerprint); len(changed) != 0 {
 		t.Fatalf("untouched files reported changed: %v", changed)
 	}
-	if err := os.WriteFile(token, []byte("lane-made"), 0o600); err != nil {
+	if err := os.WriteFile(token, []byte("lane-made-longer"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(record); err != nil {

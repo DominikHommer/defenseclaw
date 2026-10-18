@@ -6,6 +6,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -52,11 +53,15 @@ func TestEnterpriseHookWatchOwnedFileChangedSeesInPlaceRewrites(t *testing.T) {
 	if !changed(config) {
 		t.Fatal("an in-place rewrite of the shared agent config was not seen (GAP-0045)")
 	}
-	write(config, "hooks:\n  pre_tool_call:\n  - command: defenseclaw\n")
-	if changed(config) {
-		t.Fatal("a rewrite back to the same bytes read as changed")
+	if runtime.GOOS != "windows" {
+		// Windows fingerprints metadata, so only there a rewrite of the
+		// same bytes counts as a change.
+		write(config, "hooks:\n  pre_tool_call:\n  - command: defenseclaw\n")
+		if changed(config) {
+			t.Fatal("a rewrite back to the same bytes read as changed")
+		}
 	}
-	write(token, "lane-made\n")
+	write(token, "lane-made-longer\n")
 	if !changed(token) {
 		t.Fatal("an in-place token overwrite was not seen (GAP-0044)")
 	}
