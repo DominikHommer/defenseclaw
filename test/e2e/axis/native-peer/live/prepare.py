@@ -24,7 +24,7 @@ REPOSITORY = "cisco-ai-defense/defenseclaw"
 RECEIPT_SHA = "9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db"
 # Independently reviewed source/build/image inputs; no caller or API chooses a
 # pin. This source recipe needs its own review and explicit run authorization.
-DRIVER_PROVENANCE_SHA = "7d0263acee3423f218015e0698f9c374aaed212728ffb7f7103e4fdd5b0fe71f"
+DRIVER_PROVENANCE_SHA = "2d23ef5fc839c8aabb02ccc0833f66a62178f2bbf0290c778a7eb1dc6c96092d"
 PINS = {
     "peer": {
         "commit": "aa21514cf1a1ce7c17ddd4a06d76efc001c7d5d7",
@@ -49,21 +49,21 @@ PINS = {
         "event": "push",
     },
     "wrapper": {
-        "commit": "efc2c3b304690320447dee57f01a51fc6df25060",
-        "run": 39150168377,
-        "artifact": 12144044675,
-        "archive": "038fcd824a661d4ab81ccdc8b29ef3201cc47453f8b657ac7753750002084fc2",
-        "provenance": "46e190705132b0e1098e37ee84af2ab775fc0f92a581c4411c822f7ebc19b2d7",
+        "commit": "6eec7b67ff8ff2d79dd32d362faa72e52efbac6c",
+        "run": 39154280846,
+        "artifact": 12146611161,
+        "archive": "bd6a71983f51505617d95bf630fd5b89cd7f393c3835213689bfb8ea36b7b40f",
+        "provenance": "da1572b265ca1a81e913df1c5754122418ca03290cc0cf1db3b273a237603a45",
         "workflow": ".github/workflows/axis-native-harness-build.yml",
         "stem": "axis-reviewed-native-harness-linux-",
         "branch": "codex/axis-sandbox-feasibility",
         "event": "workflow_dispatch",
     },
     "driver": {
-        "commit": "74290890763d4a049d9b343e0f25240a03fae496",
-        "run": 39150939990,
-        "artifact": 12144563368,
-        "archive": "d9d256f1587a3659d0d0ac689b28ffa3e98e62da2c3d623d6e01adc5dea9138e",
+        "commit": "90cd4a303e9414862bba00fb98163482ec7049d7",
+        "run": 39154759568,
+        "artifact": 12146781570,
+        "archive": "3b2fe7fc6dac6466073fc9b6454d32c3c6db9416cedb6f01f62c7cce65d6e4f2",
         "workflow": ".github/workflows/axis-native-driver-build.yml",
         "stem": "axis-fixed-native-outer-driver-linux-",
         "branch": "codex/axis-sandbox-feasibility",
@@ -269,15 +269,15 @@ def prepare(root, metadata_api=api, download=None):
             "wrapper",
             "bin/reviewed-harness",
             images / "reviewed-wrapper",
-            "cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233",
+            "fddd52c5ea5093de7e00128f85a5487d7fcce904ced5e6e669e1e4ea5127ff1c",
             3432574,
         ),
         (
             "driver",
             "bin/fixed-outer-driver",
             images / "fixed-driver",
-            "a82943121c4d69f35a8612d3bd30dcf59ae66dc86bbb745cc52e5f52d835a357",
-            3182718,
+            "067036c4f2ac304cf88260fdf15e42be5428790ab2b714f7223c3d3c4e8cfcd0",
+            3207294,
         ),
     ]
     for role, member, target, digest, size in members:
