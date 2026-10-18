@@ -77,6 +77,27 @@ static bool match_sequence(const dclaw_session_t *sess, const dclaw_sequence_rul
     return true;
 }
 
+/*
+ * Restrictiveness rank for combining matched rules. The enum values are wire
+ * codes, not an ordering (BLOCK=1 < WARN=2 < ESCALATE=3), so comparing them
+ * directly would let a co-matching WARN or ESCALATE rule downgrade a BLOCK.
+ * Unknown action bytes (e.g. from a malformed OTA bundle) rank as BLOCK.
+ */
+static int action_rank(uint8_t action) {
+    switch (action) {
+    case DCLAW_ACTION_ALLOW:    return 0;
+    case DCLAW_ACTION_WARN:     return 1;
+    case DCLAW_ACTION_ESCALATE: return 2;
+    default:                    return 3; /* BLOCK and unknown: fail closed */
+    }
+}
+
+static dclaw_action_t more_restrictive(dclaw_action_t cur, uint8_t candidate) {
+    if (action_rank(candidate) <= action_rank((uint8_t)cur)) return cur;
+    if (action_rank(candidate) == 3) return DCLAW_ACTION_BLOCK;
+    return (dclaw_action_t)candidate;
+}
+
 dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags) {
     dclaw_session_t *sess = find_session(session_id);
     if (!sess) {
@@ -93,9 +114,7 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
     dclaw_action_t worst = DCLAW_ACTION_ALLOW;
     for (size_t i = 0; i < sequence_rules_count; i++) {
         if (match_sequence(sess, &sequence_rules[i])) {
-            if (sequence_rules[i].action > worst) {
-                worst = (dclaw_action_t)sequence_rules[i].action;
-            }
+            worst = more_restrictive(worst, sequence_rules[i].action);
         }
     }
 
@@ -106,9 +125,7 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
         memcpy(&rule_buf, &rt->sequence_rules[i], sizeof(rule_buf));
         const dclaw_sequence_rule_t *rule = &rule_buf;
         if (match_sequence(sess, rule)) {
-            if (rule->action > worst) {
-                worst = (dclaw_action_t)rule->action;
-            }
+            worst = more_restrictive(worst, rule->action);
         }
     }
 
