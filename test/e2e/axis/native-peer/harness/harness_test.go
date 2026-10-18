@@ -35,15 +35,54 @@ func syntheticRegistry(t *testing.T) reviewedRegistry {
 	return reviewedRegistry{Reviewed: true, ReceiptSHA: digestBytes(data), Receipt: v}
 }
 
-func TestDefaultAndClosedRegistryNeverAccessArtifactsOrStart(t *testing.T) {
+func TestDefaultAndUnreviewedRegistryNeverAccessArtifactsOrStart(t *testing.T) {
+	closed := reviewedRegistry{}
+	mustNotStart := func(context.Context, options, reviewedRegistry, map[string]any, *cleanupOwner) error {
+		t.Fatal("unreviewed test registry reached native supervisor")
+		return nil
+	}
 	for _, args := range [][]string{nil, {"--run-fixed"}, {"--run-fixed", "--command", "anything"}, {"--run-fixed", "--receipt", "missing", "--evidence", "missing"}} {
-		record, _, err := execute(args)
+		record, _, err := executeWithRegistry(args, closed, mustNotStart)
 		if err == nil || record["execution_performed"] != false || record["passed"] != false {
 			t.Fatal("unreviewed/default source permitted execution")
 		}
 	}
-	if !errors.Is(liveRegistry.validate(), errUnreviewed) {
-		t.Fatal("live registry must remain closed pending independent artifacts")
+	if !errors.Is(closed.validate(), errUnreviewed) {
+		t.Fatal("explicit unreviewed test registry permitted execution")
+	}
+}
+
+func TestReviewedAdmissionUsesOnlyInjectedFakeSupervisor(t *testing.T) {
+	registry := syntheticRegistry(t)
+	expected := errors.New("fixed fake supervisor observation")
+	calls := 0
+	fake := func(ctx context.Context, opts options, got reviewedRegistry, record map[string]any, owner *cleanupOwner) error {
+		calls++
+		if _, ok := ctx.Deadline(); !ok || opts.receipt != "missing" || opts.evidence != "missing" || !reflect.DeepEqual(got, registry) || owner == nil || record["execution_performed"] != false {
+			t.Fatal("admission did not preserve fixed metadata for fake custody")
+		}
+		return expected
+	}
+	record, _, err := executeWithRegistry([]string{"--run-fixed", "--receipt", "missing", "--evidence", "missing"}, registry, fake)
+	if !errors.Is(err, expected) || calls != 1 || record["execution_performed"] != false {
+		t.Fatal("fake custody dispatch differed")
+	}
+	if _, _, err := executeWithRegistry([]string{"--run-fixed", "--receipt", "missing", "--evidence", "missing"}, registry, nil); err == nil {
+		t.Fatal("missing supervisor permitted")
+	}
+}
+
+func TestReviewedContributorRegistryMatchesExactCanonicalReceiptWithoutNativeCalls(t *testing.T) {
+	if err := liveRegistry.validate(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.MarshalIndent(liveRegistry.Receipt, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if _, err := admitReceipt(data, liveRegistry); err != nil {
+		t.Fatal("typed fixed contributor registry differs from reviewed receipt bytes:", err)
 	}
 }
 

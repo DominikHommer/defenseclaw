@@ -3,19 +3,24 @@
 
 # Fixed native peer contributor harness
 
-This is source for a separate Linux amd64 experiment. **Artifact admission is
-disabled:** `liveRegistry.Reviewed` is false, and the explicit command refuses
-before reading an artifact, creating a fixture, sealing a memfd or starting a
-peer. No peer, Bubblewrap or payload execution has been performed by this
-harness. Nothing here activates a customer runtime.
+This is source for a separate Linux amd64 experiment. Its compiled registry
+admits only receipt SHA256
+`4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621`
+for the four fixed contributor cases and the exact reviewed e054 peer/static
+Bubblewrap and d074 payload artifacts. No peer, Bubblewrap or payload execution
+has been performed by this harness. Nothing here activates a customer runtime.
 
-The separate `axis-native-harness-build.yml` workflow builds this closed wrapper
+The separate `axis-native-harness-build.yml` workflow builds this fixed wrapper
 twice with Go1.26.5, `CGO_ENABLED=0` and independent build caches. It verifies the
 complete committed source inventory before dependency/build commands, retains
 the exact x/sys module archive and notices, and checks static ELF structure and
 identical output bytes. The wrapper is never executed there. Source, toolchain,
 dependency and run evidence must be independently admitted before any later
-native invocation; a build artifact does not populate the registry.
+native invocation. The workflow pins the exact registry source and receipt,
+declares the distinct reviewed fixed-contributor build scope, and never accepts
+a caller hash or executable override. The earlier closed-registry wrapper
+artifact from 4e5683c4 cannot execute this experiment; a fresh source-bound
+wrapper build and independent artifact review are required.
 
 The first slice connects the actual `bridgeprocess` factory and Rust protocol
 to four fixed payload cases: literal argv, binary stdin plus EOF and separate
@@ -25,7 +30,7 @@ never call `bridgeprocess.Start`, create a namespace or execute a native image.
 
 ## External artifact review remains mandatory
 
-The eventual registry entry is a source-reviewed exact receipt digest and
+The compiled registry entry is a source-reviewed exact receipt digest and
 complete typed contents. There is no executable/hash/argv/policy CLI override,
 discovery, network request, download or fallback. An independent reviewer must
 first verify source Git blobs/patches, both build run/artifact/archive/provenance
@@ -49,8 +54,8 @@ source/payload-main_linux.go
 The receipt binds version1/scope, no prior execution or production certification,
 the three upstream commits, static-closure/payload-source SHA256, ordered peer
 and payload build identities, and the exact three image roles/paths/sizes/hashes.
-Only a subsequent independently reviewed source change can populate the closed
-registry. The running harness verifies the exact receipt/proof/source/image
+Only an independently reviewed source change can replace these pins. The
+running harness verifies the exact receipt/proof/source/image
 bytes through nonfollowing held-relative reads and copies admitted images into
 sealed memfds. The static Bubblewrap and payload also refuse ELF interpreter or
 dynamic program headers. The trusted peer permits only the known system ELF
@@ -151,6 +156,10 @@ go vet -p 1 ./test/e2e/axis/native-peer/harness
 Linux adds held-file/symlink/FIFO/identity and anonymous sealing tests. Other
 platforms run only portable fake-protocol/admission tests and refuse native use.
 No test installs or runs an artifact. Cross-compilation is not Linux execution.
+Entry-point tests inject an explicitly unreviewed registry and a must-not-call
+supervisor. Reviewed-admission tests use a fake supervisor only; the exact live
+registry is tested through pure JSON/digest validation. The hidden-worker test
+injects an unreviewed registry before native descriptor or PID-namespace checks.
 
 After exact artifacts are independently admitted, the source registry is
 reviewed, and one fresh native run is separately authorized, the only invocation

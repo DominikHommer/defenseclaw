@@ -323,9 +323,13 @@ func runSupervised(ctx context.Context, opts options, registry reviewedRegistry,
 }
 
 func executeWorker(args []string) (map[string]any, *cleanupOwner, error) {
+	return executeWorkerWithRegistry(args, liveRegistry)
+}
+
+func executeWorkerWithRegistry(args []string, registry reviewedRegistry) (map[string]any, *cleanupOwner, error) {
 	record := map[string]any{"scope": harnessScope, "passed": false, "execution_performed": false, "production_certification": false, "common_launch_gate_qualified": false}
 	owner := &cleanupOwner{}
-	if liveRegistry.validate() != nil {
+	if registry.validate() != nil {
 		return record, owner, errUnreviewed
 	}
 	if len(args) != 4 || args[0] != "--receipt" || args[2] != "--evidence" || len(args[1]) == 0 || len(args[1]) > 4096 || len(args[3]) == 0 || len(args[3]) > 4096 {
@@ -376,5 +380,5 @@ func executeWorker(args []string) (map[string]any, *cleanupOwner, error) {
 	record["owned_guardian_grant_observed"] = true
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	return record, owner, runNative(ctx, options{receipt: args[1], evidence: args[3]}, liveRegistry, record, workerPermit{granted: true}, owner)
+	return record, owner, runNative(ctx, options{receipt: args[1], evidence: args[3]}, registry, record, workerPermit{granted: true}, owner)
 }

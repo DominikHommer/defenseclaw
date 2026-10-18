@@ -56,8 +56,8 @@ func (r *orderedGrant) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-func TestClosedWorkerRegistryRefusesBeforeNativeDescriptors(t *testing.T) {
-	record, owner, err := executeWorker([]string{"--receipt", "missing", "--evidence", "missing"})
+func TestUnreviewedWorkerRegistryRefusesBeforeNativeDescriptors(t *testing.T) {
+	record, owner, err := executeWorkerWithRegistry([]string{"--receipt", "missing", "--evidence", "missing"}, reviewedRegistry{})
 	if !errors.Is(err, errUnreviewed) || record["execution_performed"] != false || len(owner.pending) != 0 {
 		t.Fatal("unreviewed worker reached a native capability")
 	}

@@ -14,6 +14,10 @@ func runSupervised(context.Context, options, reviewedRegistry, map[string]any, *
 	return errors.New("fixed native peer harness requires native Linux amd64")
 }
 
-func executeWorker([]string) (map[string]any, *cleanupOwner, error) {
+func executeWorker(args []string) (map[string]any, *cleanupOwner, error) {
+	return executeWorkerWithRegistry(args, liveRegistry)
+}
+
+func executeWorkerWithRegistry([]string, reviewedRegistry) (map[string]any, *cleanupOwner, error) {
 	return map[string]any{"passed": false, "execution_performed": false}, nil, errors.New("fixed native peer harness requires native Linux amd64")
 }

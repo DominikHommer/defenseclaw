@@ -31,6 +31,14 @@ func parseOptions(args []string) (options, error) {
 }
 
 func execute(args []string) (map[string]any, *cleanupOwner, error) {
+	return executeWithRegistry(args, liveRegistry, runSupervised)
+}
+
+type supervisedRun func(context.Context, options, reviewedRegistry, map[string]any, *cleanupOwner) error
+
+// Tests inject an unreviewed registry or a fake supervisor. They never inherit
+// native execution authority from the separately reviewed contributor entry.
+func executeWithRegistry(args []string, registry reviewedRegistry, supervise supervisedRun) (map[string]any, *cleanupOwner, error) {
 	record := map[string]any{"scope": harnessScope, "passed": false, "execution_performed": false, "production_certification": false, "common_launch_gate_qualified": false}
 	owner := &cleanupOwner{}
 	opts, err := parseOptions(args)
@@ -38,12 +46,15 @@ func execute(args []string) (map[string]any, *cleanupOwner, error) {
 		return record, owner, err
 	}
 	// This is before any artifact read, fixture creation, memfd or native clone.
-	if err := liveRegistry.validate(); err != nil {
+	if err := registry.validate(); err != nil {
 		return record, owner, err
+	}
+	if supervise == nil {
+		return record, owner, errors.New("fixed contributor supervisor required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	return record, owner, runSupervised(ctx, opts, liveRegistry, record, owner)
+	return record, owner, supervise(ctx, opts, registry, record, owner)
 }
 
 func main() {

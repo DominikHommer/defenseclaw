@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-name: AXIS closed Linux harness source build
+name: AXIS reviewed fixed Linux harness source build
 
 # Compile only. Never run this wrapper, a peer, clone, prctl or a sandbox.
 on:
@@ -116,9 +116,11 @@ jobs:
               target.write_bytes(raw)
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           registry = Path('test/e2e/axis/native-peer/harness/artifact.go').read_bytes()
-          if registry.count(b'var liveRegistry = reviewedRegistry{Reviewed: false}') != 1:
-              raise SystemExit('closed artifact registry required for this build scope')
-          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': True, 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          receipt_sha = '4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621'
+          registry_sha = hashlib.sha256(registry).hexdigest()
+          if registry_sha != '93a7d05a293ed5c9ad034e346ada3ed8c601a431714f24d1d75212b4f00ebfea' or registry.count(('const fixedContributorReceiptSHA = "' + receipt_sha + '"').encode()) != 1:
+              raise SystemExit('exact reviewed fixed-contributor registry source required')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'artifact_registry_closed': False, 'registry_source_sha256': registry_sha, 'reviewed_registry_receipt_sha256': receipt_sha, 'fixed_case_selectors': ['argv', 'stdio', 'exit23', 'boundaries'], 'go_embed_or_native_inputs': False, 'wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
       - name: Verify exact dependency closure without running the wrapper
         shell: bash
@@ -271,7 +273,7 @@ jobs:
               raw = path.read_bytes()
               files[path.relative_to(artifact).as_posix()] = {'sha256': hashlib.sha256(raw).hexdigest(), 'size': len(raw)}
           prebuild = json.loads((artifact / 'PREBUILD.json').read_text(encoding='utf-8'))
-          provenance = {'scope': 'closed_linux_native_peer_harness_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'artifact_registry_closed': True, 'wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
+          provenance = {'scope': 'reviewed_fixed_linux_native_peer_harness_build_only', 'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'go_version': 'go1.26.5', 'tool_sha256': tool_hashes, 'source_sha256': prebuild['source_sha256'], 'files': files, 'static_elf': True, 'two_independent_caches_byte_identical': True, 'artifact_registry_closed': False, 'registry_source_sha256': prebuild['registry_source_sha256'], 'reviewed_registry_receipt_sha256': prebuild['reviewed_registry_receipt_sha256'], 'fixed_case_selectors': prebuild['fixed_case_selectors'], 'wrapper_peer_payload_or_sandbox_execution': False, 'production_certification': False}
           (artifact / 'PROVENANCE.json').write_text(json.dumps(provenance, indent=2) + '\n')
           PY
       - name: Retain run identity even when the build refuses
@@ -287,11 +289,11 @@ jobs:
           value = {'repository': os.environ['GITHUB_REPOSITORY'], 'workflow': '.github/workflows/axis-native-harness-build.yml', 'build_commit': os.environ['GITHUB_SHA'], 'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'wrapper_peer_payload_or_sandbox_execution': False}
           Path('harness-artifact/WORKFLOW.json').write_text(json.dumps(value, indent=2) + '\n')
           PY
-      - name: Retain closed unexecuted wrapper and complete source evidence
+      - name: Retain reviewed fixed-contributor unexecuted wrapper and source evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: axis-closed-native-harness-linux-${{ github.sha }}
+          name: axis-reviewed-native-harness-linux-${{ github.sha }}
           path: harness-artifact/**
           include-hidden-files: true
           if-no-files-found: error
