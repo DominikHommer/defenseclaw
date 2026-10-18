@@ -288,6 +288,10 @@ type Config struct {
 	legacyOpenShellPackDir   string
 	// offlineInspection never probes a signer's filesystem for a device default.
 	offlineInspection bool
+	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
+	// under the target layout's shipped policy folder to a private copy of
+	// the policies this binary embeds (UseOfflineVendorPolicies).
+	offlineVendorPolicyDir, offlineVendorPolicyRoot string
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -586,7 +587,10 @@ func ComputeEffectivePolicyFor(ctx context.Context, cfg *config.Config, opts Eff
 // offlineVendorPolicyConfig loads shipped rule packs from this binary rather
 // than from the signer's /opt tree. Their content is pinned by product_version
 // and excluded from the bundle digest. The gateway still loads its installed
-// copies for enforcement.
+// copies for enforcement. Every pack that resolves under the vendor folder is
+// substituted, whatever policy_dir is: the shipped templates set policy_dir to
+// the administrator folder, whose missing default pack falls back to the
+// vendor folder on the signer as it does on a device (GAP-0223).
 func offlineVendorPolicyConfig(cfg *config.Config, goos string) (*config.Config, string, string, func(), error) {
 	if goos == "" {
 		goos = runtime.GOOS
@@ -598,7 +602,7 @@ func offlineVendorPolicyConfig(cfg *config.Config, goos string) (*config.Config,
 	if err != nil {
 		return nil, "", "", nil, err
 	}
-	if filepath.Clean(cfg.PolicyDir) != filepath.Clean(layout.VendorPolicyDir) {
+	if !referencesVendorPolicies(cfg, layout.VendorPolicyDir) {
 		return cfg, "", "", func() {}, nil
 	}
 	root, err := os.MkdirTemp("", "defenseclaw-vendor-policy-")
@@ -623,11 +627,24 @@ func offlineVendorPolicyConfig(cfg *config.Config, goos string) (*config.Config,
 		}
 	}
 	copy := cloneConfig(cfg)
-	copy.PolicyDir = root
-	if relative, err := filepath.Rel(layout.VendorPolicyDir, cfg.Guardrail.RulePackDir); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		copy.Guardrail.RulePackDir = filepath.Join(root, relative)
-	}
+	copy.UseOfflineVendorPolicies(layout.VendorPolicyDir, root)
 	return copy, root, layout.VendorPolicyDir, cleanup, nil
+}
+
+// referencesVendorPolicies reports whether a rule pack cfg can load resolves
+// under the shipped policy folder vendorDir.
+func referencesVendorPolicies(cfg *config.Config, vendorDir string) bool {
+	vendor := strings.TrimRight(path.Clean(filepath.ToSlash(vendorDir)), "/")
+	for _, dir := range cfg.ReferencedRulePackDirs() {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		clean := path.Clean(filepath.ToSlash(dir))
+		if clean == vendor || strings.HasPrefix(clean, vendor+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // generationRulePacks is the rule-pack set a generation digests: the reload
