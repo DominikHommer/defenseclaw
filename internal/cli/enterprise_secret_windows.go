@@ -399,6 +399,14 @@ func windowsSecretFileSDDL(reader *windows.SID) string {
 	return "O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + reader.String() + ")"
 }
 
+// windowsSecretsDirIsReal reports a plain directory. Since Go 1.23, Lstat on
+// Windows reports a junction or mount point as ModeDir|ModeIrregular without
+// ModeSymlink, so checking IsDir and ModeSymlink alone would let a junction
+// stand in for the secrets folder.
+func windowsSecretsDirIsReal(info os.FileInfo) bool {
+	return info.Mode().Type() == os.ModeDir
+}
+
 func ensureWindowsSecretsDir(dir string, reader *windows.SID) error {
 	if reader == nil {
 		return errors.New("the secrets directory needs the gateway service SID")
@@ -411,7 +419,7 @@ func ensureWindowsSecretsDir(dir string, reader *windows.SID) error {
 		}
 	case err != nil:
 		return err
-	case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+	case !windowsSecretsDirIsReal(info):
 		return fmt.Errorf("%s is not a real directory", dir)
 	}
 	// The credential write below proves the whole chain through the
@@ -524,7 +532,7 @@ func windowsSecretStatus(dir string) ([]windowsSecretState, error) {
 		return []windowsSecretState{}, nil
 	case err != nil:
 		return nil, err
-	case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+	case !windowsSecretsDirIsReal(info):
 		return nil, fmt.Errorf("%s is not a real directory", dir)
 	}
 	entries, err := os.ReadDir(dir)

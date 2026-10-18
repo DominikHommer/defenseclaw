@@ -649,11 +649,14 @@ Exit 0.
   `bundle_interrupted`). An `applied` one whose config is installed is
   `confirmed` when the gateway enforces it (warning
   `bundle_confirmed_after_interrupt`), else `failed` (warning
-  `bundle_unconfirmed`) and the run installs the last good bundle again. After
-  the run, status reports no `bundle_pending` for them. Windows settles under
+  `bundle_unconfirmed`) and the run installs the last good bundle again. On
+  Windows, when no bundle was confirmed before (a killed first bundle), there
+  is no last good bundle to put back: the verified config of the unconfirmed
+  bundle stays installed until a signed bundle is delivered and confirmed.
+  After the run, status reports no `bundle_pending` for them. Windows settles under
   `bundle.lock` (try-lock): a live apply that holds it keeps its own receipt.
   When an install transaction is pending, Windows recovers it first and
-  settles afterwards; the warning `bundle_settle_deferred` means it is still
+  settles afterward; the warning `bundle_settle_deferred` means it is still
   pending, so run ensure again.
 - Privilege: root or SYSTEM. Lock: Linux and macOS `lifecycle.lock` with
   `--lock-wait`; Windows the installer lock (1618), and `bundle.lock` (no

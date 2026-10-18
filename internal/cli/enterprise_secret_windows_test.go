@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -595,4 +596,39 @@ func windowsSecretTestACEs(t *testing.T, path string) map[string]windowsSecretTe
 		aces[sid.String()] = windowsSecretTestACE{mask: ace.Mask, flags: ace.Header.AceFlags}
 	}
 	return aces
+}
+
+// TestWindowsSecretsDirRefusesAJunction pins that a junction in place of the
+// secrets folder is not a real directory for status or for a write: since Go
+// 1.23 Lstat reports it as ModeDir|ModeIrregular, without ModeSymlink.
+func TestWindowsSecretsDirRefusesAJunction(t *testing.T) {
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "ai-defense-api-key"), []byte("elsewhere"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "secrets")
+	if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J %s %s: %v: %s", link, target, err, out)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if windowsSecretsDirIsReal(info) {
+		t.Fatalf("junction mode %v counted as a real directory", info.Mode())
+	}
+	if _, err := windowsSecretStatus(link); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("status through a junction: %v, want not a real directory", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureWindowsSecretsDir(link, system); err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("ensure through a junction: %v, want not a real directory", err)
+	}
+	real := t.TempDir()
+	if info, err := os.Lstat(real); err != nil || !windowsSecretsDirIsReal(info) {
+		t.Fatalf("a plain directory must count as real: %v %v", info, err)
+	}
 }
