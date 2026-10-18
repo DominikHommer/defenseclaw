@@ -9,6 +9,7 @@ import copy
 import importlib.util
 import json
 import os
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,6 +88,24 @@ def grounded(packet, model="test-model", system=""):
 
 
 class DeltaMonitorTests(unittest.TestCase):
+    def test_collector_requires_verified_tls13_without_redirects(self):
+        context = ssl.create_default_context()
+        with (
+            patch.object(monitor.ssl, "create_default_context", return_value=context),
+            patch.object(monitor.urllib.request, "build_opener") as build,
+        ):
+            response = build.return_value.open.return_value.__enter__.return_value
+            response.status = 200
+            response.read.return_value = b"# Public hooks documentation"
+            self.assertEqual(
+                monitor.request_text("https://code.claude.com/docs/en/hooks.md"), "# Public hooks documentation"
+            )
+        self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_3)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertIsInstance(build.call_args.args[0], monitor.NoRedirect)
+        self.assertIsInstance(build.call_args.args[1], monitor.urllib.request.HTTPSHandler)
+
     @classmethod
     def setUpClass(cls):
         cls.manifest = monitor.load_manifest()

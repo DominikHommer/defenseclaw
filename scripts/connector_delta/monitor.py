@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -190,7 +191,9 @@ def request_text(url, *, payload=None, headers=None, model=False):
         },
     )
     try:
-        opener = urllib.request.build_opener(NoRedirect())
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=context))
         with opener.open(req, timeout=60 if model else 25) as response:
             if response.status != 200:
                 raise MonitorError("unexpected upstream HTTP status")
