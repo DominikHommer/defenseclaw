@@ -254,6 +254,34 @@ func TestHostHookScriptBytesGolden(t *testing.T) {
 	t.Fatalf("host hook output drifted from %s:\n  %s", hostHookGoldenPath, strings.Join(diffs, "\n  "))
 }
 
+func TestClaudeManagedHookCarriesWriteProofOutsideSecureClient(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		managed      bool
+		secureClient bool
+		want         bool
+	}{
+		{"managed", true, false, true},
+		{"per-user", false, false, false},
+		{"secure-client", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := renderHookTemplate("claude-code-hook.sh", templateData{
+				Managed: tc.managed, SecureClient: tc.secureClient,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := bytes.Contains(body, []byte("hook resolve-writes"))
+			header := bytes.Contains(body, []byte("X-DefenseClaw-Resolved-Writes:"))
+			sent := bytes.Contains(body, []byte("RESOLVED_HEADER_ARGS[@]"))
+			if command != tc.want || header != tc.want || sent != tc.want {
+				t.Fatalf("managed write proof command=%v header=%v sent=%v, want %v", command, header, sent, tc.want)
+			}
+		})
+	}
+}
+
 // bridgeHostTemplateDir holds each plugin bridge's host template: the
 // template with its OpenShell sandbox branches resolved to the host ones
 // and the values setup renders left as placeholders. The Python plugin
