@@ -734,16 +734,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
-		// sources. A directory proof is relevant once the hook observed a
-		// different logical directory or a protected starting directory.
+		// sources. A directory proof is relevant when it names the
+		// protected directory; an ordinary directory fact cannot make a
+		// dynamic write target safe after a shell directory change.
 		// Generic ordinary or unknown write targets do not override the
 		// established shell-ordering decision. The process-cwd alias needs
 		// its own client target to be provable.
-		changedDirectory := false
+		procAlias := false
 		for key := range request.ResolvedWriteTargets {
-			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
-				key != hookpaths.DirectoryFactPrefix+facts.CWD {
-				changedDirectory = true
+			if strings.HasPrefix(key, "/proc/self/cwd/") {
+				procAlias = true
 				break
 			}
 		}
@@ -752,9 +752,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
-				directoryFact && (changedDirectory ||
-					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
-				operand == hookpaths.CWDKey && changedDirectory ||
+				directoryFact && canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh")) ||
+				operand == hookpaths.CWDKey && procAlias ||
 				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)

@@ -262,6 +262,21 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 			}
 		})
 	}
+	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
+		t.Fatal(err)
+	}
+	command := "f=`basename $PWD`; cd ..; echo marker >> $f/disklink"
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+		ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	request := trustedActionRequest{Input: input, Connector: "claudecode", ProtectedHomeHook: true,
+		ResolvedWriteTargets: map[string]string{
+			hookpaths.CWDKey:                     cwd,
+			hookpaths.DirectoryFactPrefix + cwd:  cwd,
+			hookpaths.DirectoryFactPrefix + home: home,
+		}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+		t.Fatal("managed header made a dynamic write after changing directory safe")
+	}
 }
 
 func TestR103B36DynamicCopyOptionRemainsUnknown(t *testing.T) {
