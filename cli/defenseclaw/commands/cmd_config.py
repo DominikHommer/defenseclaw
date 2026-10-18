@@ -1615,7 +1615,11 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
 
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
-        return f"{where}{field} has {len(node.value)} characters; the limit is 4096. All fields: {_ALL_FIELDS_COMMAND}"
+        # The gateway's limit for this field ("a string of at most 512
+        # characters"), not one fixed number (GAP-0181).
+        limit = re.search(r"at most (\d+) characters", text)
+        bound = f"the limit is {limit.group(1)}" if limit else "that is longer than the field allows"
+        return f"{where}{field} has {len(node.value)} characters; {bound}. All fields: {_ALL_FIELDS_COMMAND}"
 
     if code == "additionalProperties" and text.startswith(RETIRED_KEY_ACTION_PREFIX):
         return f"{where}{field} {text[len('this key '):]}"
@@ -1634,7 +1638,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     allowed = re.search(r"expected one of (\[.*?\])(?:;|$)", text)
     if allowed and isinstance(node, yaml.ScalarNode):
         try:
-            choices = ", ".join(str(choice) for choice in json.loads(allowed.group(1)))
+            # An empty value in the schema's enum means "unset", not a
+            # value to type (GAP-0199).
+            choices = ", ".join(str(choice) for choice in json.loads(allowed.group(1)) if str(choice) != "")
         except (TypeError, ValueError):
             choices = allowed.group(1)
         value = node.value if len(node.value) <= 60 else node.value[:57] + "..."

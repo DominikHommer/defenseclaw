@@ -156,6 +156,42 @@ func TestCapDecisions(t *testing.T) {
 	}
 }
 
+// GAP-0198: under a strict floor nothing lasting is allowed or unblocked,
+// whatever profile a running sandbox registered under, and saved allows are
+// capped away; session answers and user blocks still pass.
+func TestCheckDecisionStrictFloorKeepsNothingForFutureSandboxes(t *testing.T) {
+	f := config.OpenShellAdminConfig{MinProfile: " Strict "}
+	for _, tc := range []struct {
+		kind, scope, rule string
+	}{
+		{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways, RuleMinProfile},
+		{sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeAlways, RuleMinProfile},
+		{sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession, ""},
+		{sandboxrelay.DecisionUnblock, sandboxrelay.DecisionScopeSession, ""},
+		{sandboxrelay.DecisionEgressBlock, sandboxrelay.DecisionScopeAlways, ""},
+	} {
+		err := CheckDecision(f, decision(tc.kind, tc.scope, "api.example.org"))
+		var refusal *DecisionRefusedError
+		switch {
+		case tc.rule == "" && err != nil:
+			t.Errorf("%s/%s refused under a strict floor: %v", tc.kind, tc.scope, err)
+		case tc.rule != "" && (!errors.As(err, &refusal) || refusal.Rule != tc.rule || !strings.Contains(refusal.Message, "for this session instead")):
+			t.Errorf("%s/%s = %v, want refused by %s", tc.kind, tc.scope, err, tc.rule)
+		}
+	}
+	if err := CheckApprovals(config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileBalanced},
+		sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeAlways); err != nil {
+		t.Fatalf("a balanced floor refused an always allow: %v", err)
+	}
+	saved := []Decision{
+		{ID: "d1", Kind: sandboxrelay.DecisionEgressAllow, Host: "a.example.org", Scope: sandboxrelay.DecisionScopeAlways},
+		{ID: "d2", Kind: sandboxrelay.DecisionEgressBlock, Host: "c.example.org", Scope: sandboxrelay.DecisionScopeAlways},
+	}
+	if got := CapDecisions(f, saved); len(got) != 1 || got[0].ID != "d2" {
+		t.Fatalf("a strict floor kept %+v, want only the user block", got)
+	}
+}
+
 // A decision for this computer is a host-port ask's answer: allow_host_ports
 // decides it, for the session only, whatever the egress lists say.
 func TestCheckDecisionHostPort(t *testing.T) {

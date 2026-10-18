@@ -1381,11 +1381,34 @@ func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
 	}
 }
 
+// GAP-0198: after the organization raises the person's profile to strict,
+// a lasting allow for a sandbox still registered under the looser profile
+// is refused by the gateway's current floor and nothing is saved.
+func TestManagedPolicyAllowFollowsTheCurrentStrictFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "oldbox"})
+	e.register("oldbox")
+	strict := config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict}
+	auth.gatewayOnly.Store(&strict)
+	_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "allow", Sandbox: "oldbox"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || !strings.Contains(err.Error(), "strict sandbox profile") {
+		t.Fatalf("allow under a raised strict floor = %v, want the gateway's refusal", err)
+	}
+	if got := auth.decisions(); len(got) != 0 {
+		t.Fatalf("a refused allow reached the decision store: %+v", got)
+	}
+	// A block only tightens: it is still kept.
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "block", Sandbox: "oldbox"}); err != nil {
+		t.Fatalf("block under a strict floor: %v", err)
+	}
+}
+
 func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, pack string
 		edit             func(*config.Config)
 		requestAccess    bool
+		rule             string
 	}{
 		{name: "metadata address", host: "169.254.169.254"},
 		{name: "pack block list", host: "a.paste.example", pack: "team"},
@@ -1393,6 +1416,14 @@ func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing
 		{name: "unblocks disabled", host: "webhook.site", edit: func(c *config.Config) {
 			c.OpenShell.Admin.AllowUnblock = boolPtr(false)
 		}, requestAccess: true},
+		// GAP-0175: the organization's required pack and strict profile
+		// refuse with the request-access line, naming the floor rule.
+		{name: "required pack block list", host: "a.paste.example", pack: "team", edit: func(c *config.Config) {
+			c.OpenShell.Admin.RequiredPack = "team"
+		}, requestAccess: true, rule: "rule required_pack"},
+		{name: "required strict profile", host: "example.org", pack: "strict", edit: func(c *config.Config) {
+			c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+		}, requestAccess: true, rule: "rule min_profile"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, auth := managedEnv(t, tc.edit)
@@ -1413,6 +1444,12 @@ func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing
 			}
 			if tc.requestAccess && !strings.Contains(err.Error(), "Request access:") {
 				t.Fatalf("refusal has no request-access guidance: %v", err)
+			}
+			if !tc.requestAccess && strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("a refusal the person can change sends them to request access: %v", err)
+			}
+			if tc.rule != "" && !strings.Contains(err.Error(), tc.rule) {
+				t.Fatalf("refusal does not name %s: %v", tc.rule, err)
 			}
 			if got := auth.decisions(); len(got) != 0 {
 				t.Fatalf("refused allow reached the decision store: %+v", got)

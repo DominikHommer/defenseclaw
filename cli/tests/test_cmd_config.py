@@ -205,6 +205,45 @@ class ValidateConfigTests(unittest.TestCase):
             ],
         )
 
+    def test_enum_refusal_leaves_out_the_empty_unset_value(self):
+        # GAP-0199: no "allowed values: , open, balanced, strict."
+        refusal = ConfigInspectError(
+            "candidate field=$.guardrail.profiles.p.sandbox.min_profile; reason=...",
+            field_path="$.guardrail.profiles.p.sandbox.min_profile",
+            reason='[config_schema_invalid] configuration violates the enum constraint; expected one of '
+            '["","open","balanced","strict"]; inspect the config_version 9 settings reference and correct this field',
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 9\nguardrail:\n  profiles:\n    p:\n      sandbox:\n        min_profile: none\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(
+            res.errors,
+            ['line 6: guardrail.profiles.p.sandbox.min_profile is "none"; allowed values: open, balanced, strict.'],
+        )
+
+    def test_length_refusal_names_the_fields_own_limit(self):
+        # GAP-0181: the gateway's 512, not a fixed 4096.
+        refusal = ConfigInspectError(
+            "candidate field=$.openshell.admin.request_access; reason=...",
+            field_path="$.openshell.admin.request_access",
+            reason="[config_schema_invalid] configuration violates the maxLength constraint; expected a string of "
+            "at most 512 characters (it has 513); inspect the config_version 9 settings reference and correct this field",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 9\nopenshell:\n  admin:\n    request_access: " + "a" * 513 + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1, res.errors)
+        self.assertIn("openshell.admin.request_access has 513 characters; the limit is 512.", res.errors[0])
+        self.assertNotIn("4096", res.errors[0])
+
     def test_unknown_profile_refusal_names_the_assignment_and_its_line(self):
         # GAP-0288: no "candidate field=$; reason=configuration could not be compiled safely".
         refusal = ConfigInspectError(

@@ -83,6 +83,37 @@ func TestSandboxRelayNeverAdoptsSandboxTraceParent(t *testing.T) {
 	}
 }
 
+// #1213 / GAP-0056: a hook the managed gateway answers 200 with a
+// fail-closed block carries failed_closed in the verdict trailer, which
+// the daemon counts as a hook failure (TestSandboxRelayForwarding); a
+// normal block does not.
+func TestSandboxRelayTrailerMarksAFailClosedBlock(t *testing.T) {
+	const path = sandboxrelay.PathHookPrefix + "claudecode"
+	failClosed := false
+	var f *relayFixture
+	routes := map[string]sandboxRelayRoute{path: {
+		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
+		handler: func(w http.ResponseWriter, r *http.Request) {
+			if failClosed {
+				markSandboxHookFailedClosed(r.Context())
+			}
+			f.api.observeSandboxHookDecision(r.Context(), agentHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
+				agentHookResponse{Action: "block", WouldBlock: true})
+			w.WriteHeader(http.StatusOK)
+		},
+	}}
+	f = newRelayFixtureWith(t, routes)
+	reg := f.register(t, "failclosed", "claudecode", relayTestBindingID(402))
+	for _, want := range []bool{false, true} {
+		failClosed = want
+		resp, body := f.post(t, path, reg.ID, `{}`)
+		d, ok := relayTrailer(t, resp)
+		if resp.StatusCode != http.StatusOK || !ok || d.Action != "block" || d.FailedClosed != want {
+			t.Fatalf("fail closed %t: status %d %s trailer %+v (%t)", want, resp.StatusCode, body, d, ok)
+		}
+	}
+}
+
 // relayTestKey is the sandbox authority key of the relay tests.
 var relayTestKey = bytes.Repeat([]byte{7}, 32)
 

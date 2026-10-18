@@ -702,7 +702,11 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 	}
 	var v *packs.Violation
 	if errors.As(err, &v) {
-		if rule := adminRule(v); rule != "" {
+		rule := adminRule(v)
+		if rule == "" && m.authority() != nil {
+			rule = floorRule(v, m.floor(eff))
+		}
+		if rule != "" {
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
 			m.recordAdminRefusal(ctx, sandbox, op, host)
 			// The check's words when they name the host ("… matches
@@ -718,6 +722,22 @@ func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff 
 		}
 	}
 	return m.violationErrorFor(ctx, err, sandbox, op, host)
+}
+
+// floorRule is the floor key behind a pack or profile refusal that the
+// organization imposed on a managed sandbox: its required pack's own block
+// list (required_pack), or the strict profile min_profile requires
+// (min_profile). The person can't change either, so the refusal reads as
+// every managed refusal does, with the request-access line (GAP-0175). ""
+// for a pack or profile the person chose.
+func floorRule(v *packs.Violation, f config.OpenShellAdminConfig) string {
+	switch {
+	case strings.HasPrefix(v.Constraint, "pack ") && strings.TrimSpace(f.RequiredPack) != "":
+		return "required_pack"
+	case v.Constraint == "profile "+config.OpenShellProfileStrict && sandboxreg.StrictFloor(f):
+		return sandboxreg.RuleMinProfile
+	}
+	return ""
 }
 
 // syncConfig loads config.yaml into the configuration snapshot
