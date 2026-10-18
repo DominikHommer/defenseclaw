@@ -2510,7 +2510,9 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
         else:
             steps.append("defenseclaw doctor --fix --yes (rotates the exposed gateway token and makes .env private)")
     if unverified:
-        steps.append("restore this account's read access; inspect ownership and permissions for " + ", ".join(unverified))
+        steps.append(
+            "restore this account's read access; inspect ownership and permissions for " + ", ".join(unverified)
+        )
     others = [path for path in files if path != dotenv]
     # doctor.state.private-files.protect (GAP-0560) removes read access for
     # other accounts; another unsafe Windows ACL, such as a write grant or
@@ -6537,7 +6539,7 @@ def _check_hermes_hooks(
     if unsupported:
         _emit(
             "fail",
-            "Hermes hooks (fail-open)",
+            _HERMES_HOOKS_LABEL,
             f"unsupported profile topology: {unsupported}",
             r=r,
         )
@@ -6546,7 +6548,7 @@ def _check_hermes_hooks(
         _check_windows_native_hooks(
             cfg,
             "hermes",
-            "Hermes hooks (fail-open)",
+            _HERMES_HOOKS_LABEL,
             r,
             config_path=selected_config,
             install_root=install_root,
@@ -6627,8 +6629,12 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
 }
 
+# The Windows native Hermes hook fails open whatever is configured; the Linux
+# and macOS hook follows its fail mode (rel-1-0-3 GAP-0150).
+_HERMES_HOOKS_LABEL = "Hermes hooks (fail-open)" if os.name == "nt" else "Hermes hooks"
+
 _HOOK_HEALTH_LABELS = {
-    "hermes": "Hermes hooks (fail-open)",
+    "hermes": _HERMES_HOOKS_LABEL,
     "cursor": "Cursor hooks",
     "devin": "Devin hooks",
     "opencode": "OpenCode hooks",
@@ -8927,7 +8933,7 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "antigravity": "Antigravity hooks",
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
-    "hermes": "Hermes hooks (fail-open)",
+    "hermes": _HERMES_HOOKS_LABEL,
     "omnigent": "OmniGent policy",
     "openhands": "OpenHands hooks",
     "kiro": "Kiro hooks",
@@ -8959,7 +8965,11 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     if primary_label is None:
         return ConnectorSetupReadiness(False, name, "roster", "unsupported readiness connector")
 
-    from defenseclaw.fail_mode import connector_fail_mode_report, connector_registration_lock_state
+    from defenseclaw.fail_mode import (
+        connector_fail_mode_report,
+        connector_registration_lock_state,
+        upstream_fail_open,
+    )
 
     try:
         lock_mode, lock_drift = connector_registration_lock_state(cfg, name)
@@ -8981,7 +8991,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # explain observe-mode compatibility, but that raw value is not lock
     # authority.  Upstream fail-open connectors are the exception: their lock
     # records configured policy while the host remains effectively open.
-    if name not in {"antigravity", "copilot", "hermes"}:
+    if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if name == "cursor":
         configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"

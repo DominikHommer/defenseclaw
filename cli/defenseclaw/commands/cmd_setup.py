@@ -10333,8 +10333,13 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
         if connector == "hermes" and mode == "action":
             click.echo("  path; valid synchronous pre_tool_call JSON can deny tools,")
-            click.echo("  while pre_verify JSON can continue verification. Failures")
-            click.echo("  remain open, exit status is not enforcement, and there is no ask.")
+            if _hermes_upstream_fail_open():
+                click.echo("  while pre_verify JSON can continue verification. Failures")
+                click.echo("  remain open, exit status is not enforcement, and there is no ask.")
+            else:
+                click.echo("  while pre_verify JSON can continue verification. A gateway")
+                click.echo("  outage follows the hook fail mode; Hermes itself still runs")
+                click.echo("  the call when a hook times out, and there is no ask.")
         elif connector == "antigravity" and mode == "action":
             click.echo("  path; only synchronous PreToolUse JSON can ask or deny.")
             click.echo("  Other lifecycle outputs are non-blocking, and nonzero")
@@ -10439,6 +10444,16 @@ def _print_connector_next_steps(connector: str, *, os_name: str | None = None) -
     ux.echo(f"    • Recent alerts for this connector: defenseclaw alerts --limit 25 --connector {connector}")
 
 
+def _hermes_upstream_fail_open(os_name: str | None = None) -> bool:
+    """Whether the Hermes hook on this OS fails open whatever is configured.
+
+    The Windows native Hermes hook keeps Hermes' neutral result for a call it
+    cannot check; the Linux and macOS hook blocks it in fail mode closed
+    (rel-1-0-3 GAP-0150).
+    """
+    return (os_name or os.name) == "nt"
+
+
 def _print_observability_summary(
     connector: str,
     cfg=None,
@@ -10462,8 +10477,9 @@ def _print_observability_summary(
             else "configured (observe-only; live policy generation unverified)"
         )
     elif connector == "hermes":
+        failures = "failures open" if _hermes_upstream_fail_open(os_name) else "failures follow the fail mode"
         enforcement_label = (
-            "pre_tool deny; pre_verify continue; failures open; no ask"
+            f"pre_tool deny; pre_verify continue; {failures}; no ask"
             if mode == "action"
             else "disabled (observe-only)"
         )
@@ -10535,7 +10551,12 @@ def _print_observability_summary(
     elif connector == "hermes":
         rows.extend(
             [
-                ("hook failure posture", "upstream fail-open"),
+                (
+                    "hook failure posture",
+                    "upstream fail-open"
+                    if _hermes_upstream_fail_open(os_name)
+                    else "fail mode applies; Hermes hook timeouts still run the call",
+                ),
                 ("native ask/approve", "unsupported"),
                 ("native OTel", "unsupported; hook-derived audit only"),
                 (
@@ -10833,7 +10854,7 @@ def _setup_observability_alias(
         normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)
 
     _print_connector_observability_banner(connector, mode=normalized_mode)
-    if connector == "hermes" and (fail_mode or "").strip().lower() == "closed":
+    if connector == "hermes" and (fail_mode or "").strip().lower() == "closed" and _hermes_upstream_fail_open():
         ux.warn(
             "Hermes remains upstream fail-open. --fail-mode closed is recorded only as policy "
             "provenance; timeout, nonzero, malformed, authentication, and transport failures continue."

@@ -691,6 +691,8 @@ def test_restart_services_labels_hermes_pending_reload_without_live_claim(
 def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     cfg.guardrail = _guardrail(fail_mode="closed")
+    # The Windows native Hermes hook is the upstream fail-open one (GAP-0150).
+    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: True)
     entry = _entry("hermes", tmp_path)
     entry["hook_fail_mode"] = "closed"
     _patch_registration_ready(monkeypatch, entry)
