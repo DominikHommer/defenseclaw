@@ -20,7 +20,7 @@ import (
 
 const outputLimit = 64 << 10
 const scope = "fixed_linux_native_peer_outer_driver_v1"
-const receiptSHA = "4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621"
+const receiptSHA = "9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db"
 
 var errUnreviewed = errors.New("fixed wrapper artifact has no reviewed driver admission")
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -35,8 +35,8 @@ type wrapperAdmission struct {
 // two reviewers. This admits only the fixed contributor wrapper as an input;
 // the driver needs its own build/image review before any run. No CLI/env override.
 var liveAdmission = wrapperAdmission{Reviewed: true,
-	SHA:  "0197f67426caa1d0df19be5efc7bb7f9596caa67d50025a0522682ff9a1b9648",
-	Size: 3387518,
+	SHA:  "cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233",
+	Size: 3432574,
 }
 
 func (a wrapperAdmission) validate() error {

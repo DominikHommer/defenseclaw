@@ -4,17 +4,17 @@ This contributor driver owns one run of the reviewed four-case native peer
 wrapper in a separate user/PID/network/IPC/UTS namespace. It does not activate
 the AXIS customer provider or qualify the common launch gate.
 
-The fixed input wrapper was built at `d056852e147bfd79309eda1e346439bbe317f30e`
-in Actions run `39144832868`, artifact `12142861838`. Two independent inert
+The fixed input wrapper was built at `efc2c3b304690320447dee57f01a51fc6df25060`
+in Actions run `39150168377`, artifact `12144044675`. Two independent inert
 reviews checked its source, dependency, archive, provenance and static image.
 The image SHA-256 is
-`0197f67426caa1d0df19be5efc7bb7f9596caa67d50025a0522682ff9a1b9648`
-(3,387,518 bytes); archive SHA-256 is
-`744f4a72cc95874847cc503f0b6314d2532026826dc8ea09212b34f8c825bf3c`;
+`cd72428ee90356d4a9febe41bc8a131386c92dff43ad07871d74ec9763085233`
+(3,432,574 bytes); archive SHA-256 is
+`038fcd824a661d4ab81ccdc8b29ef3201cc47453f8b657ac7753750002084fc2`;
 provenance SHA-256 is
-`782708c28c02117a0ad984c2aa8a76db0e3f6268af0e78df7610a34dc9302adb`.
+`46e190705132b0e1098e37ee84af2ab775fc0f92a581c4411c822f7ebc19b2d7`.
 Its fixed combined peer/payload receipt is
-`4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621`.
+`9e7c6f82be689db0167067b0eb108f48870279e4a015c1b91604583b063e02db`.
 These are compiled source pins. There is no caller-supplied image, digest,
 command, environment, backend or policy option.
 
@@ -65,7 +65,7 @@ custody; they never clone, call prctl, seal/execute an image or create a sandbox
 
 ## Private proc bootstrap source revision
 
-The next source revision adds a fresh mount namespace and a fixed sealed FD3
+This source revision includes a fresh mount namespace and a fixed sealed FD3
 parent-identity proof to each owned child. Before READY/control/backend work,
 the child proves kernel ownership and single nonzero UID/GID mappings, makes
 mount propagation private, mounts matching procfs and clears startup capabilities.
