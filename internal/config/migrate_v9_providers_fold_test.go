@@ -357,8 +357,8 @@ func TestMigrateV9RefusesAnOverlayHeaderNamedTwiceWithTwoValues(t *testing.T) {
 			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			overlay := `{"providers":[{"name":"` + tc.name + `","domains":["llm.acme.internal"],"extra_headers":{"X-Team":"sec"}},
-  {"name":"` + tc.name + `","extra_headers":{"X-Team":"platform","X-Route":"eu"}}]}`
+			overlay := `{"providers":[{"name":"` + tc.name + `","domains":["llm.acme.internal"],"extra_headers":{"X-Team":"dummy-first"}},
+  {"name":"` + tc.name + `","extra_headers":{"X-Team":"dummy-later","X-Route":"eu"}}]}`
 			overlayPath := filepath.Join(dir, ProvidersOverlayFile)
 			if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
 				t.Fatal(err)
@@ -373,10 +373,10 @@ func TestMigrateV9RefusesAnOverlayHeaderNamedTwiceWithTwoValues(t *testing.T) {
 			if fold == nil || fold.Refused == "" || len(fold.Conflicts) != 0 || !reflect.DeepEqual(fold.Repeated, want) {
 				t.Fatalf("ProvidersFold = %+v, want the fold refused with %+v", fold, want)
 			}
-			if !strings.Contains(fold.Refused, "names "+tc.name+" more than once with different values for "+tc.name+" (extra_headers.X-Team: ") {
+			if !strings.Contains(fold.Refused, "the file sets different values for "+tc.name+" (extra_headers.X-Team: ") {
 				t.Errorf("refusal %q does not name the repeated header", fold.Refused)
 			}
-			for _, value := range []string{"sec", "platform"} {
+			for _, value := range []string{"dummy-first", "dummy-later"} {
 				if strings.Contains(fold.Refused, value) {
 					t.Errorf("refusal %q prints the value %q", fold.Refused, value)
 				}

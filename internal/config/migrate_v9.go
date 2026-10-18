@@ -3703,8 +3703,8 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 			reasons = append(reasons, "config.yaml and the file set different values for "+v9ConflictText(c, "the file's value is in use"))
 		}
 		for _, c := range repeated {
-			reasons = append(reasons, "the file names "+c.Provider+" more than once with different values for "+
-				v9ConflictText(c, "the first entry's value is in use"))
+			reasons = append(reasons, "the file sets different values for "+
+				v9ConflictText(c, "the first entry's value is in use")+" in two entries of the same name")
 		}
 		then := ""
 		if sentLater != "" {
