@@ -162,8 +162,9 @@ jobs:
             python prepare_build.py generate-lock --probe-slice $env:AXIS_WINDOWS_FIXED_PROBE_SLICE
           }
           if ($LASTEXITCODE -ne 0) { throw 'Pinned PSEC contributor build failed' }
-          # Exact SDK tests cover pure pre-creation validators/quoting and one
-          # synthetic file-custody fixture. They never create a process. The
+          # Exact SDK tests cover pure pre-creation validators/quoting, synthetic
+          # file custody and a read-only current-process image query. They never
+          # create a child process. The
           # hosted image never executes PSEC or any contributor payload.
           # Cargo requires the SDK's own workspace for its dev-dependencies.
           # Keep its reviewed upstream lock separate from the contributor lock.
@@ -201,6 +202,8 @@ jobs:
               'backend_modules::process_container::common::base_container_runner::strict_windows_path_tests': [
                   'local_lexical_admission_accepts_only_unambiguous_drive_paths',
                   'native_local_file_custody_holds_image_against_write_without_spawning',
+                  'literal_image_mapping_requires_exact_success_before_resume',
+                  'native_process_image_mapping_matches_current_image_and_refuses_wrong_file',
               ],
           }
           selected = [group + '::' + name for group, names in groups.items() for name in names]
@@ -217,7 +220,7 @@ jobs:
           ]
           listing = build.command(cargo + ['--', '--list', '--format', 'terse'], cwd=sdk_workspace, capture=True)
           listed = re.findall(r'^(.+): test$', listing, re.MULTILINE)
-          if len(set(selected)) != (13 if control else 12) or any(listed.count(name) != 1 for name in selected):
+          if len(set(selected)) != (15 if control else 14) or any(listed.count(name) != 1 for name in selected):
               raise RuntimeError('The exact reviewed SDK regression tests are missing or duplicated')
           for name in selected:
               output = build.command(cargo + [name, '--', '--exact', '--test-threads=1'], cwd=sdk_workspace, capture=True)
@@ -232,11 +235,12 @@ jobs:
               'tests': selected,
               'passed': len(selected),
               'sandbox_or_payload_execution': False,
-              'native_file_fixture_tests': 1,
+              'native_file_fixture_tests': 2,
+              'native_image_mapping_query_tests': 1,
               'upstream_lock_sha256': expected_sdk_lock,
           }, indent=2) + '\n', encoding='utf-8')
           '@ | python -
-          if ($LASTEXITCODE -ne 0) { throw 'Pure SDK native-admission regression tests failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'SDK no-child native-admission regression tests failed' }
           @'
           import json
           import os

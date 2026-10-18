@@ -216,7 +216,8 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             "tests": list(verify.SDK_TESTS),
             "passed": len(verify.SDK_TESTS),
             "sandbox_or_payload_execution": False,
-            "native_file_fixture_tests": 1,
+            "native_file_fixture_tests": 2,
+            "native_image_mapping_query_tests": 1,
             "upstream_lock_sha256": sdk_lock,
         }
         self.write_artifact()
@@ -268,7 +269,13 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             self.run_verify("dll-startup-only")
 
     def test_boundary_requires_exact_nonignored_sdk_test_evidence(self) -> None:
-        for name, value in [("passed", 9), ("native_file_fixture_tests", True), ("sandbox_or_payload_execution", 0)]:
+        for name, value in [
+            ("passed", 9),
+            ("native_file_fixture_tests", True),
+            ("native_image_mapping_query_tests", True),
+            ("native_image_mapping_query_tests", 0),
+            ("sandbox_or_payload_execution", 0),
+        ]:
             with self.subTest(name=name):
                 original = self.admission[name]
                 self.admission[name] = value
@@ -288,6 +295,21 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         self.write_artifact()
         with self.assertRaisesRegex(ValueError, "SDK admission test evidence"):
             self.run_verify()
+
+    def test_held_image_gate_and_readonly_kernel_query_cannot_be_omitted(self) -> None:
+        prefix = "backend_modules::process_container::common::base_container_runner::strict_windows_path_tests::"
+        original_tests = list(self.admission["tests"])
+        original_passed = self.admission["passed"]
+        for name in (
+            "literal_image_mapping_requires_exact_success_before_resume",
+            "native_process_image_mapping_matches_current_image_and_refuses_wrong_file",
+        ):
+            with self.subTest(name=name):
+                self.admission["tests"] = [item for item in original_tests if item != prefix + name]
+                self.admission["passed"] = original_passed - 1
+                self.write_artifact()
+                with self.assertRaisesRegex(ValueError, "SDK admission test evidence"):
+                    self.run_verify()
 
     def test_boundary_requires_exact_native_directory_custody_evidence(self) -> None:
         for field, value in (
@@ -587,7 +609,7 @@ class FixedControlArtifactTests(unittest.TestCase):
         self.assertIn("claude-create-control-only", workflow)
         self.assertIn("mxc-fixed-claude-create-control.patch", workflow)
         self.assertIn(verify.CONTROL_SDK_TEST.rsplit("::", 1)[-1], workflow)
-        self.assertIn("(13 if control else 12)", workflow)
+        self.assertIn("(15 if control else 14)", workflow)
 
 
 if __name__ == "__main__":

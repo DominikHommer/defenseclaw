@@ -3,6 +3,45 @@
 
 # Native Windows current-MXC PSEC contributor probe
 
+## Pending literal DOS application and held-image gate
+
+The Windows literal overlay now selects an ordinary DOS `lpApplicationName`
+from the held executable for compatibility. The separately recorded direct
+control accepted that spelling and refused the GUID/GLOBALROOT spellings;
+that uncontained observation does not qualify this SDK/PSEC launch path.
+Literal argv remains unchanged. A pathname selects the image to create, but
+cannot authorize it: after suspended creation and Job assignment, the overlay
+requires `NtQueryInformationProcess(ProcessImageFileMapping, 44)` to match the
+retained process image against the already held executable file HANDLE before
+`ResumeThread`. The held leaf additionally requests execute access, with no
+write/delete sharing. A nonzero status refuses and attempts termination and
+bounded waits for the owned child, reporting any cleanup failure. There is no
+name-reopen, NULL-application or runtime fallback.
+Legacy script launch behavior, PSEC attachment and UI/network/filesystem
+restrictions remain unchanged.
+
+This native query is documented by
+[NtDoc's original research](https://github.com/m417z/ntdoc/blob/main/descriptions/processinfoclass.md#processimagefilemapping-44)
+and [the phnt declarations](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h).
+It is not a Microsoft-supported compatibility promise. Only exact status zero
+permits resume; an unavailable or unsupported query refuses. The pure ordering
+test covers zero, informational, warning and failing statuses. A separate
+read-only Rust test compares the current process with its held image, a
+byte-identical fresh copy with a different full file identity, and an unrelated
+regular file. It creates no child and never executes the copy. Exact admission
+requires both new tests: fourteen SDK tests normally, fifteen for the distinct
+uncontained control, with two synthetic file-fixture tests and one read-only
+image-mapping query recorded. The fifth control overlay still changes only its
+explicitly selected PSEC attribute plan and cannot be admitted as a contained
+artifact.
+
+The equivalent Go current-process query passed once on the local Windows host
+with the identical-copy negative included. That result establishes only local
+read-only API support. The replacement Rust source, build and suspended PSEC
+child path have not been qualified by that result. A fresh independently
+reviewed build and one changed-source native attempt remain required; this
+contributor seam does not activate a customer provider.
+
 ## Current source-only native environment binding
 
 The new `standalone_std_boundary_native_identity_environment` variant follows

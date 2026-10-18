@@ -1,5 +1,5 @@
 diff --git a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
-index dfac09a..edd72f5 100644
+index b23ed52023ad209cebfbaae17c871ceabd71477c..ad3fa8019d2089f8044936523cf99ae93479375a 100644
 --- a/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
 +++ b/src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs
 @@ -149,7 +149,7 @@ const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str = "processContainer.filesystem.
@@ -8,13 +8,13 @@ index dfac09a..edd72f5 100644
  const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
 -    "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
 +    "CreateProcessW(fixed uncontained Claude control)";
-
+ 
  fn log_base_network_policy_audit(
      request: &ExecutionRequest,
-@@ -363,6 +363,99 @@ impl NativeLaunchShape {
+@@ -371,6 +371,99 @@ impl NativeLaunchShape {
      }
  }
-
+ 
 +// This entire helper exists only in the separately reviewed fifth overlay.
 +// Store exact bounded call buffers, not hashes that expose private path facts.
 +#[derive(Clone, PartialEq, Eq)]
@@ -111,10 +111,10 @@ index dfac09a..edd72f5 100644
  /// Encode the documented Windows C/Rust argv rules without invoking a shell.
  /// Keep the absolute application separate so CreateProcessW never searches or
  /// guesses which executable a command-line prefix names.
-@@ -738,6 +831,88 @@ mod strict_windows_argv_tests {
+@@ -908,6 +1001,88 @@ mod strict_windows_argv_tests {
          assert_eq!(command.last(), Some(&0));
      }
-
+ 
 +    #[test]
 +    fn fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads() {
 +        let buffers = [
@@ -200,10 +200,10 @@ index dfac09a..edd72f5 100644
      #[test]
      fn native_failure_diagnostics_are_numeric_bounded_and_ordered() {
          let calls = std::cell::RefCell::new(Vec::new());
-@@ -968,6 +1143,11 @@ impl BaseContainerRunner {
-         literal_argv: Option<&crate::mxc_common::literal_argv::LiteralArgv>,
-         literal_application: Option<&[u16]>,
-     ) -> Result<BaseChild, ScriptResponse> {
+@@ -1143,6 +1318,11 @@ impl BaseContainerRunner {
+                 "literal argv and held executable custody must be bound together",
+             ));
+         }
 +        if !fixed_claude_control_admitted(literal_argv, capture, request) {
 +            return Err(ScriptResponse::rejected(
 +                "separate uncontained contributor build accepts only the fixed Claude version control",
@@ -212,16 +212,16 @@ index dfac09a..edd72f5 100644
          let _ = writeln!(
              logger,
              "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
-@@ -1073,7 +1253,7 @@ impl BaseContainerRunner {
+@@ -1248,7 +1428,7 @@ impl BaseContainerRunner {
          let cwd_wide = string_util::to_wide(&working_directory.path);
          let cwd_ptr = cwd_wide.as_ptr();
-
+ 
 -        let identity = "<process-security-environment>".to_string();
 +        let identity = "<uncontained-fixed-contributor-control>".to_string();
-
+ 
          // --- Determine STDIO mode ---
          // If wxc-exec's stdout or stderr is not a terminal (i.e., piped by the SDK),
-@@ -1369,34 +1549,69 @@ impl BaseContainerRunner {
+@@ -1544,34 +1724,69 @@ impl BaseContainerRunner {
                          msg,
                          "; additionally failed to discard the learning-mode trace: {cleanup_error}"
                      );
@@ -318,7 +318,7 @@ index dfac09a..edd72f5 100644
          let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
          // Freeze numeric shape before the native call. UTF-16 block lengths
          // include their NUL terminators; counts never carry source values.
-@@ -1428,7 +1643,7 @@ impl BaseContainerRunner {
+@@ -1603,7 +1818,7 @@ impl BaseContainerRunner {
                      current_creation_flags | EXTENDED_STARTUPINFO_PRESENT.0,
                      current_env_ptr,
                      cwd_ptr,
@@ -328,7 +328,7 @@ index dfac09a..edd72f5 100644
                  )
              };
 diff --git a/src/mxc-sdk/src/backends/process_container/common/secenv.rs b/src/mxc-sdk/src/backends/process_container/common/secenv.rs
-index 4d76514..006eab2 100644
+index 4d76514088e0de1c9189368c47c7308d6e500e0e..006eab2673a43238410d76acdc9062213c2075a7 100644
 --- a/src/mxc-sdk/src/backends/process_container/common/secenv.rs
 +++ b/src/mxc-sdk/src/backends/process_container/common/secenv.rs
 @@ -187,11 +187,36 @@ pub struct SecurityEnvironmentStartupInfo {
@@ -373,7 +373,7 @@ index 4d76514..006eab2 100644
 @@ -225,21 +250,22 @@ impl SecurityEnvironmentStartupInfo {
              code: last_error(),
          })?;
-
+ 
 -        let environment_value = Box::new(environment);
 +        let environment_value = Box::new(environment.unwrap_or_default());
          // SAFETY: the attribute list is initialized, and the boxed HANDLE has

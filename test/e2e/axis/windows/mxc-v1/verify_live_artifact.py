@@ -64,14 +64,14 @@ CLAUDE_VARIANT = "standalone_std_fixed_signed_claude_version"
 CLAUDE_SCOPE = "fixed_windows_native_psec_signed_claude_version"
 CONTROL_VARIANT = "standalone_std_fixed_signed_claude_create_control"
 CONTROL_SCOPE = "fixed_windows_uncontained_claude_create_control"
-CONTROL_OVERLAY_SHA256 = "0cb98abddbd9cde1ced266d649a37c81c45bdc3fd347f480fc46c15abde7cc66"
+CONTROL_OVERLAY_SHA256 = "1c68169aeac3a777b9fb553e7697a61af8ef38381442d45f293bd6ab35cd76f2"
 CONTROL_SDK_TEST = (
     "backend_modules::process_container::common::base_container_runner::strict_windows_argv_tests::"
     "fixed_control_compares_exact_buffers_flags_stdio_and_refuses_other_payloads"
 )
 CONTROL_PATH = "src/mxc-sdk/src/backends/process_container/common/secenv.rs"
 IDENTITY_OVERLAY_SHA256 = "d2d3819325c3027f159d75d577dd02306d497234f99293df3c825fbeebddeeab"
-BOUNDARY_OVERLAY_SHA256 = "820484c5431d51f62466f07bd9fa4b670625fb4e6e6cb506d42e0ab8562b2e23"
+BOUNDARY_OVERLAY_SHA256 = "1a9c94cb33501091a504d5c4ff55281b183a9d41472709edf7f35541c25f45af"
 LITERAL_OVERLAY_SHA256 = "7117afc3c7ae28345757c364518b7b9120a7dd8e6b844403b06fe05403e4a76d"
 SDK_LOCK_SHA256 = "2d145ff3861cd19d1f50969083f8ac59e4d4fd50b030bef12f365a5fcc87afa0"
 SDK_TEST_GROUPS = {
@@ -96,6 +96,8 @@ SDK_TEST_GROUPS = {
     "backend_modules::process_container::common::base_container_runner::strict_windows_path_tests": [
         "local_lexical_admission_accepts_only_unambiguous_drive_paths",
         "native_local_file_custody_holds_image_against_write_without_spawning",
+        "literal_image_mapping_requires_exact_success_before_resume",
+        "native_process_image_mapping_matches_current_image_and_refuses_wrong_file",
     ],
 }
 SDK_TESTS = [group + "::" + name for group, names in SDK_TEST_GROUPS.items() for name in names]
@@ -156,7 +158,7 @@ BOUNDARY_OVERLAY_FILES = {
         "5b23635df276e0743f9f9986f1ee4b63d9b0c71685b8e14bfa7b099023cfa210"
     ),
     "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
-        "ced043d13810dd65360f79b81c30695fc7e51499c9fd54e8808e3b76ba268a53"
+        "68add915437007786ddef0d4fbf4100a5b3f034b2c910f283991c8730d77e95c"
     ),
     "src/mxc-sdk/src/backends/seatbelt/common/seatbelt_runner.rs": (
         "110534317bd4311b6ce1253126a7f6d507b7e98f381ad7945a63792e3297a13e"
@@ -187,7 +189,7 @@ CONTROL_OVERLAY_FILES = dict(BOUNDARY_OVERLAY_FILES)
 CONTROL_OVERLAY_FILES.update(
     {
         "src/mxc-sdk/src/backends/process_container/common/base_container_runner.rs": (
-            "41a89b229c4a39858940c483b63fc263928056675735afa2109bafe1fda26234"
+            "1c50a9b3f32d6eb68e3519f1dd4bc128a2c7b2e33a583f37b97e9aacc41af0b8"
         ),
         CONTROL_PATH: "3f6bb0972c5ddaa46eab77e8e28aea94f9310ecf168c13791ed9100cf4b551eb",
     }
@@ -542,13 +544,15 @@ def verify(
             isinstance(admission, dict)
             and type(admission.get("passed")) is int
             and type(admission.get("native_file_fixture_tests")) is int
+            and type(admission.get("native_image_mapping_query_tests")) is int
             and admission.get("sandbox_or_payload_execution") is False
             and admission
             == {
                 "tests": SDK_TESTS + ([CONTROL_SDK_TEST] if mode == "claude-create-control-only" else []),
                 "passed": len(SDK_TESTS) + int(mode == "claude-create-control-only"),
                 "sandbox_or_payload_execution": False,
-                "native_file_fixture_tests": 1,
+                "native_file_fixture_tests": 2,
+                "native_image_mapping_query_tests": 1,
                 "upstream_lock_sha256": SDK_LOCK_SHA256,
             },
             "exact SDK admission test evidence differs",
