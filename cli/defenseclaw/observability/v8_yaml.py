@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -525,6 +526,8 @@ def _validate_replacement_value(value: Any, source: str, path: YAMLPath) -> None
                 path=path,
             )
         if item is None or type(item) in {bool, int, str}:
+            return
+        if type(item) is float and math.isfinite(item):
             return
         if isinstance(item, (list, tuple)):
             identity = id(item)

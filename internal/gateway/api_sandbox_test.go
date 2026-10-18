@@ -148,6 +148,10 @@ func (f *fakeSandboxController) Unblock(_ context.Context, req sandboxapi.Unbloc
 	return answer(f, "unblock", &sandboxapi.UnblockResponse{Host: req.Host, Scope: "sandbox"}, func() { f.unblock = req })
 }
 
+func (f *fakeSandboxController) PolicyDecision(_ context.Context, req sandboxapi.PolicyDecisionRequest) (*sandboxapi.PolicyDecisionResponse, error) {
+	return answer(f, "policy decision", &sandboxapi.PolicyDecisionResponse{Sandbox: req.Sandbox, Host: req.Host, Kind: req.Kind})
+}
+
 func (f *fakeSandboxController) Explain(_ context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error) {
 	return answer(f, "explain", &sandboxapi.Explain{Pack: "open", Profile: "open"}, func() { f.explain = req })
 }
@@ -281,6 +285,8 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"GET", sandboxapi.PathApprovals + "?sandbox=box", "", 200, "approvals box"},
 		{"POST", sandboxapi.PathApprovals + "/ap_1", `{"decision":"approve","always":true}`, 200, "decide ap_1"},
 		{"POST", sandboxapi.PathEgressUnblock, `{"host":"webhook.site","sandbox":"box"}`, 200, "unblock"},
+		{"POST", sandboxapi.PathPolicyDecision, `{"sandbox":"box","host":"example.org","kind":"block"}`, 200, "policy decision"},
+		{"POST", sandboxapi.PathPolicyDecision, `{"sandbox":"box","host":"example.org","kind":"block","unexpected":true}`, 400, ""},
 		{"GET", sandboxapi.PathPolicyExplain + "?harness=codex&copy=true", "", 200, "explain"},
 		{"GET", sandboxapi.PathPrefix + "nope", "", 404, ""},
 		{"PUT", sandboxapi.PathSandboxes, `{}`, 404, ""},
@@ -477,6 +483,9 @@ func TestSandboxAPIClientRoundTrip(t *testing.T) {
 	}
 	if _, err := c.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: "box"}); err != nil {
 		t.Fatal(err)
+	}
+	if res, err := c.PolicyDecision(ctx, sandboxapi.PolicyDecisionRequest{Sandbox: "box", Host: "example.org", Kind: "block"}); err != nil || res.Sandbox != "box" || res.Host != "example.org" || res.Kind != "block" {
+		t.Fatalf("policy decision = %+v, %v", res, err)
 	}
 	if res, err := c.PolicyTest(ctx, sandboxapi.PolicyTestRequest{Sandbox: "box", Checks: []sandboxapi.PolicyCheck{{Host: "a.example", Port: 443}}}); err != nil ||
 		res.Sandbox != "box" || len(res.Decisions) != 1 || res.Decisions[0].Host != "a.example" || res.Decisions[0].Source != "pack balanced" {

@@ -100,8 +100,9 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				reason = "must be sha256: followed by 64 lowercase hexadecimal characters"
 			case strings.HasSuffix(field, ".block_at"), strings.HasSuffix(field, ".alert_at"):
 				reason = "must be one of CRITICAL, HIGH, MEDIUM, LOW"
-			case strings.HasPrefix(schemaErr.Expected, "an agent identity"):
-				// The assignment, the value and the form (GAP-0829).
+			case strings.HasPrefix(schemaErr.Expected, "an agent identity"), strings.HasPrefix(schemaErr.Expected, "one of "):
+				// The assignment, the value and the form (GAP-0829), or the
+				// words a severity takes (GAP-0760).
 				reason = "must be " + schemaErr.Expected
 				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)

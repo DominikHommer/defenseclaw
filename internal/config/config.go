@@ -3596,6 +3596,16 @@ func warnPlaintextSecrets(cfg *Config) {
 			"migrate it to ~/.defenseclaw/.env as %s and set %s.%s_env=%s instead",
 			section, field, envDefault, section, field, envDefault)
 	}
+	if cfg.StandaloneEnterprise() {
+		// A managed host has no per-user .env for the administrator's
+		// config: the key belongs in a protected credential (GAP-0138).
+		warn = func(section, field, _ string) {
+			log.Printf("WARNING: %s.%s contains a plain-text secret in the managed config.yaml — "+
+				"store the key with `enterprise secret set --name <name>`, name it in "+
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential "+
+				"(the AI Defense key), and remove %s.%s", section, field, section, field)
+		}
+	}
 	if cfg.LLM.APIKey != "" {
 		warn("llm", "api_key", DefenseClawLLMKeyEnv)
 	}

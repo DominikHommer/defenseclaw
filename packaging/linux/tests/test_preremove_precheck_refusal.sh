@@ -15,6 +15,7 @@ chmod +x "$work/gateway"
 sed -e "s#/opt/defenseclaw/bin/defenseclaw-gateway#$work/gateway#g" \
     -e "s#/var/lib/defenseclaw-enterprise#$work/state#g" \
     -e "s#/run/systemd/system#$work/systemd#g" \
+    -e "s#user_runtime=/run/user#user_runtime=$work/run-user#" \
     "$source_script" >"$work/preremove.sh"
 if TMPDIR="$work" sh "$work/preremove.sh" remove >"$work/stdout" 2>"$work/stderr"; then
     echo "preremove allowed package removal after the uninstall precheck refused" >&2

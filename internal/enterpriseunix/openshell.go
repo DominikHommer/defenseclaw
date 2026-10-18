@@ -283,13 +283,38 @@ func (e *Env) userUnitPath(u userUnit, channel string) string {
 // userUnitBytes reads a unit's embedded definition: the user units under
 // packaging/systemd/user and the LaunchAgents under
 // packaging/launchd-standalone/agents, which the system units' embed globs do
-// not carry (UserUnitSource overrides it in tests).
+// not carry (UserUnitSource overrides it in tests). On a managed Mac, a
+// verified packaged gateway copy gets a content-addressed program path.
 func (e *Env) userUnitBytes(u userUnit) ([]byte, error) {
 	if e.UserUnitSource != nil {
 		return e.UserUnitSource(u.Source)
 	}
 	if e.GOOS == "darwin" {
-		return launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		data, err := launchdstandalone.ReadAgentPlist(strings.TrimSuffix(u.Source, ".plist"))
+		if err != nil {
+			return nil, err
+		}
+		gateway := filepath.Join(e.Layout.BinDir, binGateway)
+		digest, err := sha256File(e.P(gateway))
+		if os.IsNotExist(err) {
+			return data, nil // A fresh non-package payload has not installed the gateway yet.
+		}
+		if err != nil {
+			return nil, fmt.Errorf("identify the LaunchAgent gateway: %w", err)
+		}
+		program := filepath.Join(e.Layout.BinDir, "launch-agents", digest, binGateway)
+		info, err := os.Lstat(e.P(program))
+		if os.IsNotExist(err) {
+			return data, nil // Older and non-package installations use the canonical path.
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("the packaged LaunchAgent gateway is not a regular file: %s", program)
+		}
+		copyDigest, err := sha256File(e.P(program))
+		if err != nil || copyDigest != digest {
+			return nil, fmt.Errorf("the packaged LaunchAgent gateway differs from %s", gateway)
+		}
+		return []byte(strings.Replace(string(data), gateway, program, 1)), nil
 	}
 	return systemdunits.ReadUserUnit(u.Source)
 }

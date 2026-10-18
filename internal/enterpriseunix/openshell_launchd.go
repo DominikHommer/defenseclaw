@@ -253,7 +253,11 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 		}
 		if failed != nil {
 			state.Pending[key] = pending{User: a.Name, UID: a.UID, Home: a.Home, Kind: "launchd", Reason: "the signed gateway binary or a loaded LaunchAgent changed (" + failed.Error() + ")", Since: e.Now().UTC().Format(time.RFC3339)}
-			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not reload the LaunchAgent of %s: %v; repair retries it", a.Name, failed))
+			next := "repair retries it"
+			if l.opts.Action == ActionRepair {
+				next = "reinstall a signed DefenseClaw package, then run status and verify; if it still fails, collect launchctl and codesign diagnostics"
+			}
+			l.result.AddWarning(codeSandboxUserState, fmt.Sprintf("could not reload the LaunchAgent of %s: %v; %s", a.Name, failed, next))
 		} else {
 			delete(state.Pending, key)
 		}
@@ -294,7 +298,11 @@ func (l *lifecycle) describeMacOSAgents(ctx context.Context) {
 		}
 		for _, job := range jobs {
 			if why := job.state.Failure(job.label == labelOpenShellGateway && running > 0); why != "" {
-				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s is %s; run `%s`", job.label, a.Name, a.UID, job.domain, why, l.env.lifecycleCommand(ActionRepair))
+				next := "run `" + l.env.lifecycleCommand(ActionRepair) + "`"
+				if l.opts.Action == ActionRepair {
+					next = "reinstall a signed DefenseClaw package, then run status and verify; if it still fails, collect launchctl and codesign diagnostics"
+				}
+				message := fmt.Sprintf("LaunchAgent %s of %s (uid %d) in %s is %s; %s", job.label, a.Name, a.UID, job.domain, why, next)
 				l.result.Services = append(l.result.Services, enterprisestatus.Service{Name: "sandbox " + a.Name + " " + job.domain + "/" + job.label, Kind: sandboxRowKind, State: "failed: " + why})
 				l.result.SecurityComplete = false
 				if l.opts.Action == ActionEnsure && l.opts.FromPackage {

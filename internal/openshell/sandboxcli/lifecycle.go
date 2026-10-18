@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -198,7 +199,7 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 		a.printStatus(st)
 		return nil
 	}
-	sb, err := api.Get(ctx, name)
+	sb, err := api.GetConfirmed(ctx, name)
 	if err != nil {
 		return apiError(err)
 	}
@@ -241,7 +242,7 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 			exit = " (exit status " + run.Exit + ")"
 		}
 		a.note("its detached run" + a.startedText(run.Started) + " finished" + exit + "; " + logs + " shows it. " + sb.Name +
-			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it)")
+			" keeps running until you stop it: `" + CommandName + " stop " + sb.Name + "` (or delete it). A detached run may leave no conversation to continue; connect normally to start a new one")
 	}
 }
 
@@ -340,6 +341,14 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	} else {
 		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
 	}
+	// On a managed computer: the organization profile the sandbox's
+	// registration matches now, with the digest of the same match, so a
+	// regroup shows here as in `policy explain` (#1199); and the
+	// organization's words for a stop its policy made.
+	if sb.OrganizationProfile != "" {
+		row("Your policy", organizationPolicyText(sb.OrganizationProfile, sb.Provisional, sb.PolicyDigest)+" — "+CommandName+" policy explain")
+	}
+	row("Stopped", sb.StopReason)
 	// What it was created with beyond the policy, which a resume keeps.
 	for _, c := range grantTexts(sb.Credentials) {
 		row("Secret", c)
@@ -554,8 +563,15 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 		}
 		started = true
 	}
+	continueAfterDetached := false
+	if spec.Name == "claudecode" && slices.Contains(o.Args, "--continue") {
+		if prior, priorErr := a.detachedRun(ctx, cli, sb); priorErr == nil && prior.State == sandboxapi.RunExited {
+			continueAfterDetached = true
+		}
+	}
 	s := &session{app: a, api: api, cli: cli, spec: spec, sb: sb, rm: o.Rm, yes: o.Yes, started: started, headless: headless, shell: o.Shell,
-		passArgs: len(o.Args) > 0}
+		continueAfterDetached: continueAfterDetached,
+		passArgs:              len(o.Args) > 0}
 	// fail stops the sandbox this command started for a session that never
 	// began: the probe, the refresh or the harness's start failed.
 	fail := func(err error) error {

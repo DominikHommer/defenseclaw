@@ -61,6 +61,9 @@ type fakeAuthority struct {
 	// no floor.
 	profile, gatewayOnly atomic.Pointer[config.OpenShellAdminConfig]
 	noFloor              atomic.Bool
+	// listFloor caps the saved decisions the gateway lists, as the
+	// gateway's decisions route caps them by the person's floor now.
+	listFloor atomic.Pointer[config.OpenShellAdminConfig]
 
 	mu      sync.Mutex
 	decided []sandboxrelay.DecisionRequest
@@ -140,7 +143,13 @@ func (a *fakeAuthority) Decisions(_ context.Context, registration string) ([]san
 	case a.gone[registration]:
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "the managed gateway no longer knows this sandbox"}
 	}
-	return append([]sandboxrelay.Decision(nil), a.saved[registration]...), nil
+	out := append([]sandboxrelay.Decision(nil), a.saved[registration]...)
+	if f := a.listFloor.Load(); f != nil {
+		out = slices.DeleteFunc(out, func(d sandboxrelay.Decision) bool {
+			return sandboxreg.CheckDecision(*f, sandboxrelay.DecisionRequest{V: 1, Registration: registration, Kind: d.Kind, Host: d.Host, Scope: d.Scope}) != nil
+		})
+	}
+	return out, nil
 }
 
 func (a *fakeAuthority) Events(_ context.Context, batch sandboxrelay.EventBatch) error {
@@ -1324,7 +1333,7 @@ func TestManagedDecisionsOfAGoneRegistration(t *testing.T) {
 func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	e, auth := managedEnv(t, nil)
 	always := sandboxapi.UnblockRequest{Host: "webhook.site", Always: true}
-	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "none is running") {
+	if _, err := e.m.Unblock(t.Context(), always); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
 		t.Fatalf("always unblock without a sandbox = %v", err)
 	}
 	e.live(sandboxapi.CreateRequest{Name: "onebox"})
@@ -1344,5 +1353,173 @@ func TestManagedAlwaysUnblockFindsThePersonsSandbox(t *testing.T) {
 	}
 	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "pastebin.com", Sandbox: "twobox", Always: true}); err != nil {
 		t.Fatalf("always unblock naming the sandbox = %v", err)
+	}
+}
+
+func TestManagedPolicyAllowAndBlockUseTheGatewayDecisionStore(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	request := sandboxapi.PolicyDecisionRequest{Host: "example.org", Kind: "block"}
+	if _, err := e.m.PolicyDecision(t.Context(), request); err == nil || !strings.Contains(err.Error(), "start a sandbox") {
+		t.Fatalf("decision without a sandbox = %v", err)
+	}
+	e.live(sandboxapi.CreateRequest{Name: "onebox"})
+	reg := e.register("onebox")
+	res, err := e.m.PolicyDecision(t.Context(), request)
+	if err != nil || res.Sandbox != "onebox" || res.Kind != "block" {
+		t.Fatalf("block = %+v, %v", res, err)
+	}
+	got := auth.decisions()
+	if len(got) != 1 || got[0].Registration != reg || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Scope != sandboxrelay.DecisionScopeAlways {
+		t.Fatalf("stored blocks = %+v", got)
+	}
+	request.Host, request.Kind = "api.example.org", "allow"
+	if _, err := e.m.PolicyDecision(t.Context(), request); err != nil {
+		t.Fatalf("allow = %v", err)
+	}
+	got = auth.decisions()
+	if len(got) != 2 || got[1].Kind != sandboxrelay.DecisionEgressAllow {
+		t.Fatalf("stored decisions = %+v", got)
+	}
+	off := false
+	auth.gatewayOnly.Store(&config.OpenShellAdminConfig{AllowUnblock: &off})
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "another.example.org", Kind: "allow"}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || len(auth.decisions()) != 2 {
+		t.Fatalf("an allow outside the gateway floor was saved: %v, %+v", err, auth.decisions())
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "*.example.org", Kind: "block"}); err == nil {
+		t.Fatal("wildcard decision was accepted")
+	}
+}
+
+// GAP-0198: after the organization raises the person's profile to strict,
+// a lasting allow for a sandbox still registered under the looser profile
+// is refused by the gateway's current floor and nothing is saved.
+func TestManagedPolicyAllowFollowsTheCurrentStrictFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "oldbox"})
+	e.register("oldbox")
+	strict := config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict}
+	auth.gatewayOnly.Store(&strict)
+	_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "allow", Sandbox: "oldbox"})
+	if !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) || !strings.Contains(err.Error(), "strict sandbox profile") {
+		t.Fatalf("allow under a raised strict floor = %v, want the gateway's refusal", err)
+	}
+	if got := auth.decisions(); len(got) != 0 {
+		t.Fatalf("a refused allow reached the decision store: %+v", got)
+	}
+	// A block only tightens: it is still kept.
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "api.example.org", Kind: "block", Sandbox: "oldbox"}); err != nil {
+		t.Fatalf("block under a strict floor: %v", err)
+	}
+}
+
+func TestManagedPolicyAllowRefusesDestinationsTheSandboxCannotUnblock(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, pack string
+		edit             func(*config.Config)
+		requestAccess    bool
+		rule             string
+	}{
+		{name: "metadata address", host: "169.254.169.254"},
+		{name: "pack block list", host: "a.paste.example", pack: "team"},
+		{name: "network deny", host: "example.org", pack: "strict"},
+		{name: "unblocks disabled", host: "webhook.site", edit: func(c *config.Config) {
+			c.OpenShell.Admin.AllowUnblock = boolPtr(false)
+		}, requestAccess: true},
+		// GAP-0175: the organization's required pack and strict profile
+		// refuse with the request-access line, naming the floor rule.
+		{name: "required pack block list", host: "a.paste.example", pack: "team", edit: func(c *config.Config) {
+			c.OpenShell.Admin.RequiredPack = "team"
+		}, requestAccess: true, rule: "rule required_pack"},
+		{name: "required strict profile", host: "example.org", pack: "strict", edit: func(c *config.Config) {
+			c.OpenShell.Admin.MinProfile = config.OpenShellProfileStrict
+		}, requestAccess: true, rule: "rule min_profile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, auth := managedEnv(t, tc.edit)
+			if tc.pack == "team" {
+				e.setConfig(func(c *config.Config) { c.OpenShell.PackDir = writeTeamPack(t) })
+			}
+			req := sandboxapi.CreateRequest{Name: "allowbox", Pack: tc.pack}
+			if tc.pack == "strict" {
+				req.Project = e.otherProject("strict")
+			}
+			e.live(req)
+			e.register("allowbox")
+			_, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{
+				Host: tc.host, Kind: "allow", Sandbox: "allowbox",
+			})
+			if !sandboxapi.IsCode(err, sandboxapi.CodePolicyViolation) && !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+				t.Fatalf("allow %s = %v, want a policy refusal", tc.host, err)
+			}
+			if tc.requestAccess && !strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("refusal has no request-access guidance: %v", err)
+			}
+			if !tc.requestAccess && strings.Contains(err.Error(), "Request access:") {
+				t.Fatalf("a refusal the person can change sends them to request access: %v", err)
+			}
+			if tc.rule != "" && !strings.Contains(err.Error(), tc.rule) {
+				t.Fatalf("refusal does not name %s: %v", tc.rule, err)
+			}
+			if got := auth.decisions(); len(got) != 0 {
+				t.Fatalf("refused allow reached the decision store: %+v", got)
+			}
+		})
+	}
+}
+
+// GAP-0224: a saved allow stayed in force in a running sandbox for minutes
+// after the organization raised the profile to strict, and again after a
+// restart, because the daemon kept the decisions it had loaded until the
+// next reconcile. A reload (the daemon asks for one when the gateway's
+// answer moved the policy, and at every start) follows the gateway's list,
+// which the floor now caps; a reload that fails keeps the user blocks only.
+func TestManagedReloadDecisionsFollowsTheCurrentFloor(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "keepbox"})
+	reg := e.register("keepbox")
+	if _, err := e.m.Unblock(t.Context(), sandboxapi.UnblockRequest{Host: "webhook.site", Sandbox: "keepbox", Always: true}); err != nil {
+		t.Fatalf("always unblock = %v", err)
+	}
+	if _, err := e.m.PolicyDecision(t.Context(), sandboxapi.PolicyDecisionRequest{Host: "blocked.example.org", Kind: "block", Sandbox: "keepbox"}); err != nil {
+		t.Fatalf("block = %v", err)
+	}
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the saved unblock does not reach the decider")
+	}
+	kept := func() []sandboxrelay.Decision {
+		st := e.m.managedSide()
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return slices.Clone(st.decisions[reg])
+	}
+
+	auth.listFloor.Store(&config.OpenShellAdminConfig{MinProfile: config.OpenShellProfileStrict})
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a saved unblock the strict floor no longer keeps still opens the host after the reload")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock {
+		t.Fatalf("decisions after the strict reload = %+v, want the user block only", got)
+	}
+
+	auth.listFloor.Store(nil)
+	e.m.ReloadDecisions(t.Context(), reg)
+	if !e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("the floor loosened again, but the reload did not bring the saved unblock back")
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down = true })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if e.decideEgress("keepbox", "webhook.site").Allowed {
+		t.Fatal("a reload that failed kept a saved unblock")
+	}
+	if got := kept(); len(got) != 1 || got[0].Kind != sandboxrelay.DecisionEgressBlock || got[0].Host != "blocked.example.org" {
+		t.Fatalf("decisions after a failed reload = %+v, want the user block kept", got)
+	}
+
+	auth.set(func(a *fakeAuthority) { a.down, a.gone = false, map[string]bool{reg: true} })
+	e.m.ReloadDecisions(t.Context(), reg)
+	if got := kept(); len(got) != 0 {
+		t.Fatalf("a registration the gateway no longer knows kept %+v", got)
 	}
 }

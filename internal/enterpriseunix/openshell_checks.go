@@ -535,8 +535,12 @@ type E2fsprogsCheckResult struct {
 // CheckE2fsprogsDir is checkE2fsprogs's macOS directory decision.
 func (e *Env) CheckE2fsprogsDir(dir string) E2fsprogsCheckResult {
 	if dir == "" {
-		return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set, so each account needs its own ~/.local/opt/e2fsprogs build",
-			Fix: "install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir to its install prefix or the folder that holds both mke2fs and debugfs"}
+		if info, err := os.Stat(e.P(openshell.PackageE2fsprogsDir)); err == nil && info.IsDir() {
+			dir = openshell.PackageE2fsprogsDir
+		} else {
+			return E2fsprogsCheckResult{Problem: "enterprise.openshell.e2fsprogs_dir is not set and the managed package has no e2fsprogs; each account needs its own ~/.local/opt/e2fsprogs build",
+				Fix: "install the managed package with e2fsprogs, or install e2fsprogs 1.43 or newer into a root-owned directory and set enterprise.openshell.e2fsprogs_dir"}
+		}
 	}
 	trust := e.Trust
 	if trust == nil {

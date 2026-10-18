@@ -357,6 +357,35 @@ class AlertFindingRowsTests(unittest.TestCase):
         rows = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)
         self.assertEqual(rows[0]["next_step"], structured["defenseclaw.finding.remediation"])
 
+    # GAP-0025: the finding's own next step is the only one; no second
+    # "Next:" pointer to agent identities beside it.
+    def test_sandbox_finding_next_step_replaces_the_identities_pointer(self):
+        from unittest.mock import patch
+
+        structured = dict(SANDBOX_FINDING, **{
+            "defenseclaw.finding.description": "A credential placeholder is bound to its configured endpoint",
+            "defenseclaw.finding.remediation": "Check the model provider and endpoint for this sandbox",
+        })
+        row = Event(action="sandbox-finding", target="", severity="HIGH", connector="claudecode",
+                    details="finding.observed", structured=structured)
+        self.app.store.log_event(row)
+        db = self.app.store.db
+        columns = {r[1] for r in db.execute("PRAGMA table_info(audit_events)")}
+        for column in ("bucket", "event_name"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+        db.execute("UPDATE audit_events SET bucket='security.finding', event_name='finding.observed' WHERE id=?",
+                   (row.id,))
+        db.commit()
+        facts = {row.id: [("User", "dcr-sbx")]}
+        with patch("defenseclaw.commands.cmd_alerts.alert_agent_facts", return_value=facts):
+            show = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(show.exit_code, 0, show.output)
+        self.assertIn("User:", show.output)
+        self.assertIn("Next step: Check the model provider and endpoint for this sandbox", show.output)
+        self.assertNotIn("agent identities", show.output)
+        self.assertNotIn("Next:  ", show.output)
+
     def test_post_tool_finding_is_not_called_observe_mode(self):
         store = self.app.store
         at = datetime.now(timezone.utc)

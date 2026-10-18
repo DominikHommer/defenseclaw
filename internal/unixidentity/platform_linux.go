@@ -65,6 +65,10 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 	return parseLocalPasswd(string(data)), nil
 }
 
+func platformLocalAccountRecords(context.Context) (map[string]LocalAccountRecord, error) {
+	return nil, errors.New("unixidentity: local account records are listed only on macOS")
+}
+
 // platformLocalGroups reads /etc/group, the files backend itself.
 func platformLocalGroups(context.Context) (map[string]int, error) {
 	data, err := readSmallFile(localGroupPath, 16<<20)
