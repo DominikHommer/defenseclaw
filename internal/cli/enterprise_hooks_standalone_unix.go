@@ -351,6 +351,22 @@ type enterpriseHookTargetHomeChangedError struct {
 	name, home, directoryHome string
 }
 
+// enterpriseHookTargetNoHomeReason is the pending reason of a manifest
+// target whose account the directory now gives no home (a removed macOS
+// mobile account answers with /var/empty): no agent of that account runs
+// on this computer, so it is waiting, not a protection failure. Status and
+// verify stayed failed (guardian_target_failed) until a reinstall
+// (rel-1-0-3 GAP-0177). The row goes when the enumerator drops the account,
+// or is protected again when it gets a home. Any other error is "".
+func enterpriseHookTargetNoHomeReason(err error) string {
+	var changed *enterpriseHookTargetHomeChangedError
+	if !errors.As(err, &changed) || !enterpriseHookDirectoryNoHome(changed.directoryHome) {
+		return ""
+	}
+	return fmt.Sprintf("the directory now gives account %q no home on this computer (%s instead of %s): it looks removed here, so the enrollment waits until the account is dropped from enrollment or gets a home again",
+		changed.name, changed.directoryHome, changed.home)
+}
+
 func (e *enterpriseHookTargetHomeChangedError) Error() string {
 	return fmt.Sprintf("enterprise hooks: target %q home %s no longer matches the directory home %s", e.name, e.home, e.directoryHome)
 }
@@ -664,6 +680,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
+			pendingRow(reason)
+			continue
+		}
 		if err != nil {
 			var binding *enterpriseHookUnixBinding
 			if previous, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {

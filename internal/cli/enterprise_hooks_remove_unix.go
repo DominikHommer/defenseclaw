@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
@@ -542,30 +544,74 @@ func runEnterpriseHookPendingCleanupsWith(cmd *cobra.Command, report *enterprise
 		return fmt.Sprintf("%d\x00%s\x00%s", entry.UID, strings.ToLower(strings.TrimSpace(entry.Connector)), filepath.Clean(strings.TrimSpace(entry.UserHome)))
 	}
 	ran := map[string]bool{}
+	finished := map[string]bool{}
 	for _, entry := range pending {
 		name := strings.ToLower(strings.TrimSpace(entry.Connector))
 		if enterpriseHookPendingCleanupCoveredByJob(jobs[entry.UID], name, entry, resolver) {
 			continue // a manifest row still names it, in the same home
 		}
 		ran[key(entry)] = true
-		finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver)
+		if finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver) {
+			finished[key(entry)] = true
+		}
 	}
 	for _, entry := range rehomed {
 		if !ran[key(entry)] {
 			ran[key(entry)] = true
-			finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver)
+			if finishEnterpriseHookRemoveAllCleanup(cmd, report, skip, entry, resolver) {
+				finished[key(entry)] = true
+			}
 		}
 		if skip[entry.UID] == "" {
 			skip[entry.UID] = enterpriseHookPurgeSkipRehomed
 		}
 	}
+	if len(finished) != 0 && cfg != nil {
+		if err := dropEnterpriseHookFinishedCleanups(cmd.Context(), finished, key); err != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: the finished per-user cleanups stay in the guardian's ledger until its next pass: %v\n", err)
+		}
+	}
 	return skip
 }
 
+// dropEnterpriseHookFinishedCleanups removes the ledger rows of the cleanups
+// remove-all just finished, under the reconcile lock. Without it the
+// guardian's ledger kept a done cleanup pending, with its old error, until
+// the guardian retried it after its retry interval (rel-1-0-3 GAP-0204). A
+// lock that is not free within a short wait leaves the rows for that retry.
+func dropEnterpriseHookFinishedCleanups(ctx context.Context, finished map[string]bool, key func(enterpriseHookUserCleanup) string) error {
+	ctx, cancel := context.WithTimeout(ctx, enterpriseHookFinishedCleanupLockWait)
+	defer cancel()
+	unlock, err := lockEnterpriseHookReconcile(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	pending, err := loadEnterpriseHookUserCleanups(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	kept := make([]enterpriseHookUserCleanup, 0, len(pending))
+	for _, entry := range pending {
+		if !finished[key(entry)] {
+			kept = append(kept, entry)
+		}
+	}
+	if len(kept) == len(pending) {
+		return nil
+	}
+	return saveEnterpriseHookUserCleanups(cfg.DataDir, kept, time.Now())
+}
+
+// enterpriseHookFinishedCleanupLockWait bounds how long remove-all waits for
+// a running reconcile before it leaves its finished rows to the guardian.
+var enterpriseHookFinishedCleanupLockWait = 20 * time.Second
+
 // finishEnterpriseHookRemoveAllCleanup runs one per-user cleanup for
 // remove-all and adds its outcome to report, and to skip the reason the
-// account's state must stay.
-func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, skip map[int]string, entry enterpriseHookUserCleanup, resolver unixidentity.Resolver) {
+// account's state must stay. It reports whether the cleanup is done, so its
+// ledger row can go.
+func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterpriseHooksRemoveAllReport, skip map[int]string, entry enterpriseHookUserCleanup, resolver unixidentity.Resolver) bool {
 	name := strings.ToLower(strings.TrimSpace(entry.Connector))
 	label := strings.TrimSpace(entry.User) + "/" + name
 	outcome, err := attemptEnterpriseHookStandaloneUnixCleanup(cmd.Context(), enterpriseHookWorkerLog, entry, resolver)
@@ -593,6 +639,7 @@ func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterprise
 		}
 	case outcome == enterpriseHookUserCleanupDone:
 		report.Removed++
+		return true
 	case outcome == enterpriseHookUserCleanupPending:
 		report.Pending = append(report.Pending, label)
 		if skip[entry.UID] == "" {
@@ -611,6 +658,7 @@ func finishEnterpriseHookRemoveAllCleanup(cmd *cobra.Command, report *enterprise
 		report.Failed = append(report.Failed, label+": "+reason)
 		skip[entry.UID] = enterpriseHookPurgeSkipFailed
 	}
+	return outcome == enterpriseHookUserCleanupDone
 }
 
 func init() {
@@ -708,6 +756,13 @@ func enterpriseHookRehomeFailureText(err error, maxBytes int) string {
 		}
 	}
 	raw = strings.Join(words, " ")
+	if len(raw)+len(keepConfigPath)+len(keepReceiptPath) > maxBytes {
+		// Still too long, as with homes deep below a long folder: every path
+		// that is not the kept config or receipt goes by its last element
+		// first, so the reason and the remedy after the paths are not cut
+		// (rel-1-0-3 GAP-0212).
+		raw = enterpriseHookCompactReportPaths(raw, paths)
+	}
 	if keepConfigPath != "" {
 		raw = strings.Replace(raw, "<current-config-path>", keepConfigPath, 1)
 	}
@@ -775,8 +830,34 @@ func enterpriseHookUnverifiedReceiptPath(reason string) string {
 	return ""
 }
 
+// enterpriseHookCompactReportPaths names each absolute path in raw longer
+// than enterpriseHookCompactPathMax by its last element.
+func enterpriseHookCompactReportPaths(raw string, paths []string) string {
+	sorted := append([]string(nil), paths...)
+	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) > len(sorted[j]) })
+	for _, path := range sorted {
+		if path != "" && filepath.IsAbs(path) && len(path) > enterpriseHookCompactPathMax {
+			raw = strings.ReplaceAll(raw, path, shortEnterpriseHookReportPathOver(path, enterpriseHookCompactPathMax))
+		}
+	}
+	words := strings.Fields(raw)
+	for i, word := range words {
+		path := strings.Trim(word, `"'(),;:`)
+		if filepath.IsAbs(path) && len(path) > enterpriseHookCompactPathMax {
+			words[i] = strings.Replace(word, path, shortEnterpriseHookReportPathOver(path, enterpriseHookCompactPathMax), 1)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+const enterpriseHookCompactPathMax = 40
+
 func shortEnterpriseHookReportPath(path string) string {
-	if len(path) <= 96 {
+	return shortEnterpriseHookReportPathOver(path, 96)
+}
+
+func shortEnterpriseHookReportPathOver(path string, limit int) string {
+	if len(path) <= limit {
 		return path
 	}
 	base := filepath.Base(path)
