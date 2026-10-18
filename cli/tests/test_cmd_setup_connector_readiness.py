@@ -708,6 +708,7 @@ def test_opencode_preflight_precedes_config_write(monkeypatch, tmp_path: Path, b
     folder = tmp_path / "plugins"
     folder.mkdir(mode=0o775)
     folder.chmod(0o775)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         connector_paths, "connector_config_files", lambda _name: [str(folder / "defenseclaw.js")]
     )

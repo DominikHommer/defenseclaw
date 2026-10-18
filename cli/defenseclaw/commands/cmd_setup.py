@@ -5632,7 +5632,7 @@ def _check_connector_version_supported_for_setup(
             # connector whose CLI is temporarily undiscoverable from losing
             # already-sealed version and contract status when the gateway
             # restarts every active connector.
-            persist_cache=not (
+            persist_cache=connector != "codex" and not (
                 connector in {"omnigent", "opencode", "amp"}
                 and platform_support.host_os() == "windows"
             ),
@@ -5664,6 +5664,11 @@ def _check_connector_version_supported_for_setup(
             if emit:
                 ux.err(problem)
             return False
+        if _discovery is None and platform_support.host_os() != "windows":
+            if not agent_discovery._write_cache(disc, data_dir=data_dir):
+                if emit:
+                    ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
+                return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
     # Some CLIs end their version banner with a period ("... 1.0.90.").

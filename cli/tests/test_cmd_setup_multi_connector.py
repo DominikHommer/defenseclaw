@@ -184,6 +184,9 @@ def _setup_patches(prompt=None):
 class TestAdditiveSetupCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
         self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
             self.cfg_path, b"x\n"

@@ -851,6 +851,9 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
 
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
+        preflight = patch("defenseclaw.commands.cmd_setup._preflight_opencode_plugin_folder")
+        preflight.start()
+        self.addCleanup(preflight.stop)
         self.app.cfg.claw.mode = "openclaw"
         self.app.cfg.guardrail.connector = "openclaw"
         self.save_calls = 0
