@@ -114,6 +114,7 @@ set(CORE_SOURCES
     src/decision/ssrf_guard.c
     src/decision/correlator.c
     src/decision/verdict_cache.c
+    src/enforce/deferred_reply.c
     src/enforce/ipc_hook.c
     src/enforce/ipc_json.c
     src/enforce/rate_limiter.c

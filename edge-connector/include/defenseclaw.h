@@ -359,6 +359,11 @@ typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
                                            const char *tool_name);
 void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
 
+/* Invoked for every authenticated gateway verdict, after it is cached. */
+typedef void (*dclaw_verdict_ready_fn)(uint16_t request_id, const dclaw_verdict_t *v);
+void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb);
+dclaw_verdict_ready_fn dclaw_get_verdict_ready_callback(void);
+
 /* Session revocation (correlator.c). A revoked session is denied with
  * DCLAW_REASON_RETROACTIVE until it expires from inactivity. */
 void dclaw_session_revoke(uint16_t session_id);

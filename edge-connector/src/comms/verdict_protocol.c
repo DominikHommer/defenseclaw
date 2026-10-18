@@ -481,6 +481,20 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                       | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24),
                       0);
 
+    /* Release any IPC reply waiting on this verdict. */
+    dclaw_verdict_ready_fn ready = dclaw_get_verdict_ready_callback();
+    if (ready) {
+        dclaw_verdict_t v = {
+            .action = (dclaw_action_t)action,
+            .reason = (dclaw_reason_t)reason,
+            .severity = (dclaw_severity_t)severity,
+            .mode = DCLAW_VERDICT_SYNC,
+            .ttl_minutes = ttl,
+            .from_cache = false,
+        };
+        ready(request_id, &v);
+    }
+
     return 0;
 }
 

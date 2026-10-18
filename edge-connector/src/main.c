@@ -20,6 +20,7 @@
 #include "platform.h"
 #include "config.h"
 #include "hmac_sha256.h"
+#include "deferred_reply.h"
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -67,6 +68,28 @@ static volatile sig_atomic_t g_running = 1;
 static int  client_fds[DCLAW_MAX_IPC_CLIENTS];
 static bool client_subscribed[DCLAW_MAX_IPC_CLIENTS];
 static int  num_clients = 0;
+
+/* Per-client accumulation buffers for newline-delimited message framing */
+static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
+static size_t client_buf_len[DCLAW_MAX_IPC_CLIENTS];
+
+/* Close client i and swap-remove it. Callers must not re-check slot i in
+ * the same pass: the swapped-in client's pollfd entry is stale (built
+ * before poll); it will be polled next cycle. */
+static void remove_client(int i) {
+    dclaw_deferred_drop_fd(client_fds[i]);
+    hal_ipc_socket_close(client_fds[i]);
+    num_clients--;
+    if (i < num_clients) {
+        client_fds[i] = client_fds[num_clients];
+        client_subscribed[i] = client_subscribed[num_clients];
+        client_buf_len[i] = client_buf_len[num_clients];
+        memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
+    }
+    client_fds[num_clients] = -1;
+    client_subscribed[num_clients] = false;
+    client_buf_len[num_clients] = 0;
+}
 
 static void notify_session_revoked(uint16_t session_id, const char *tool_name) {
     (void)tool_name;
@@ -272,10 +295,6 @@ int main(int argc, char *argv[]) {
     /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
     struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
 
-    /* Per-client accumulation buffers for newline-delimited message framing */
-    static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
-    static size_t client_buf_len[DCLAW_MAX_IPC_CLIENTS];
-
     memset(fds, 0, sizeof(fds));
     memset(client_buf_len, 0, sizeof(client_buf_len));
     for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++) {
@@ -283,6 +302,8 @@ int main(int argc, char *argv[]) {
         client_subscribed[i] = false;
     }
     dclaw_register_retroactive_callback(notify_session_revoked);
+    dclaw_deferred_init(write_verdict_response);
+    dclaw_register_verdict_ready_callback(dclaw_deferred_resolve);
 
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
@@ -296,7 +317,9 @@ int main(int argc, char *argv[]) {
         int nfds = 1;
         for (int i = 0; i < num_clients; i++) {
             fds[nfds].fd = client_fds[i];
-            fds[nfds].events = POLLIN;
+            /* Do not read from a client whose reply is held; hangups are
+             * still reported. */
+            fds[nfds].events = dclaw_deferred_pending_for_fd(client_fds[i]) ? 0 : POLLIN;
             fds[nfds].revents = 0;
             nfds++;
         }
@@ -325,44 +348,44 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < num_clients; i++) {
             int slot = 1 + i; /* pollfd index */
             if (slot >= nfds) break;
-            if (!(fds[slot].revents & POLLIN)) continue;
 
-            /* Read into the per-client accumulation buffer */
-            size_t space = DCLAW_IPC_BUF_SIZE - 1 - client_buf_len[i];
-            if (space == 0) {
-                /* Buffer full with no newline — discard and reset */
-                client_buf_len[i] = 0;
-                space = DCLAW_IPC_BUF_SIZE - 1;
-            }
-            ssize_t n = read(client_fds[i], client_buf[i] + client_buf_len[i], space);
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                /* Non-blocking: no data yet, skip this client */
+            if (dclaw_deferred_pending_for_fd(client_fds[i])) {
+                if (fds[slot].revents & (POLLHUP | POLLERR | POLLNVAL))
+                    remove_client(i);
                 continue;
             }
-            if (n <= 0) {
-                /* Client disconnected or error. Swap-remove and do NOT
-                 * re-check slot i: the swapped-in client's fds[] entry is
-                 * stale (built before poll). It will be polled next cycle. */
-                hal_ipc_socket_close(client_fds[i]);
-                num_clients--;
-                if (i < num_clients) {
-                    client_fds[i] = client_fds[num_clients];
-                    client_subscribed[i] = client_subscribed[num_clients];
-                    client_buf_len[i] = client_buf_len[num_clients];
-                    memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
+
+            if (fds[slot].revents & POLLIN) {
+                /* Read into the per-client accumulation buffer */
+                size_t space = DCLAW_IPC_BUF_SIZE - 1 - client_buf_len[i];
+                if (space == 0) {
+                    /* Buffer full with no newline — discard and reset */
+                    client_buf_len[i] = 0;
+                    space = DCLAW_IPC_BUF_SIZE - 1;
                 }
-                client_fds[num_clients] = -1;
-                client_subscribed[num_clients] = false;
-                client_buf_len[num_clients] = 0;
+                ssize_t n = read(client_fds[i], client_buf[i] + client_buf_len[i], space);
+                if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    /* Non-blocking: no data yet, skip this client */
+                    continue;
+                }
+                if (n <= 0) {
+                    remove_client(i);
+                    continue;
+                }
+                client_buf_len[i] += (size_t)n;
+            } else if (!memchr(client_buf[i], '\n', client_buf_len[i])) {
+                /* Nothing new and no complete message left over from a
+                 * reply that was held. */
                 continue;
             }
-            client_buf_len[i] += (size_t)n;
 
             /* Process complete newline-delimited messages */
             char *base = client_buf[i];
             size_t remaining = client_buf_len[i];
             char *nl;
-            while ((nl = memchr(base, '\n', remaining)) != NULL) {
+            /* Stop at a held reply so later replies stay in order. */
+            while (!dclaw_deferred_pending_for_fd(client_fds[i]) &&
+                   (nl = memchr(base, '\n', remaining)) != NULL) {
                 size_t msg_len = (size_t)(nl - base);
                 *nl = '\0';
 
@@ -449,7 +472,22 @@ int main(int argc, char *argv[]) {
                 dclaw_tool_request_t req;
                 if (msg_len > 0 && dclaw_ipc_parse_request(base, msg_len, &req) == 0) {
                     dclaw_verdict_t verdict = dclaw_evaluate(&req);
-                    (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                    if (verdict.action == DCLAW_ACTION_BLOCK &&
+                        verdict.mode == DCLAW_VERDICT_PENDING) {
+                        /* Synchronous escalation: hold the reply until the
+                         * gateway answers or the verdict timeout expires.
+                         * dclaw_evaluate just assigned next_request_id. */
+                        uint32_t th = (uint32_t)req.tool_hash[0] | ((uint32_t)req.tool_hash[1] << 8)
+                                    | ((uint32_t)req.tool_hash[2] << 16) | ((uint32_t)req.tool_hash[3] << 24);
+                        if (!dclaw_deferred_add(client_fds[i], req.request_id,
+                                                dclaw_get_state()->next_request_id,
+                                                req.session_id, th, hal_tick_ms())) {
+                            verdict.reason = DCLAW_REASON_CLOUD_TIMEOUT;
+                            (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                        }
+                    } else {
+                        (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
+                    }
                 } else if (msg_len > 0) {
                     /* Malformed request — send error response */
                     const char *err =
@@ -477,6 +515,7 @@ int main(int argc, char *argv[]) {
 #if DCLAW_MQTT_ENABLED
         dclaw_mqtt_poll(10);
 #endif
+        dclaw_deferred_expire(hal_tick_ms());
 
         /* Periodic tasks */
 #if DCLAW_MQTT_ENABLED

@@ -37,6 +37,7 @@ extern bool dclaw_mqtt_is_connected(void);
 
 static dclaw_state_t g_state;
 static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
+static dclaw_verdict_ready_fn g_verdict_ready_cb = NULL;
 
 static bool g_strict_mode = false;
 
@@ -185,6 +186,14 @@ void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb) {
 
 dclaw_retroactive_block_fn dclaw_get_retroactive_callback(void) {
     return g_retroactive_cb;
+}
+
+void dclaw_register_verdict_ready_callback(dclaw_verdict_ready_fn cb) {
+    g_verdict_ready_cb = cb;
+}
+
+dclaw_verdict_ready_fn dclaw_get_verdict_ready_callback(void) {
+    return g_verdict_ready_cb;
 }
 
 /* Forward declarations for key-material zeroing on shutdown */

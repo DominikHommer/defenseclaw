@@ -56,6 +56,13 @@ if(DCLAW_VERDICT_CACHE_SIZE GREATER 0)
     list(APPEND DCLAW_TEST_TARGETS test_verdict_cache)
 endif()
 
+add_executable(test_deferred_reply test_deferred_reply.c)
+target_link_libraries(test_deferred_reply PRIVATE dclaw_core)
+add_test(NAME deferred_reply COMMAND test_deferred_reply)
+list(APPEND DCLAW_TEST_TARGETS test_deferred_reply)
+set_tests_properties(deferred_reply PROPERTIES
+    ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-deferred.bin")
+
 add_executable(test_evaluate_pipeline test_evaluate_pipeline.c)
 target_link_libraries(test_evaluate_pipeline PRIVATE dclaw_core)
 add_test(NAME evaluate_pipeline COMMAND test_evaluate_pipeline)
