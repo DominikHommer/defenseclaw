@@ -11575,7 +11575,9 @@ def _apply_setup_batch(
         batch_discovery, data_dir=app.cfg.data_dir
     ):
         _restore_setup_config_snapshot(app, setup_snapshot)
-        raise click.ClickException("connector versions could not be saved for gateway restart; prior roster was not changed")
+        raise click.ClickException(
+            "connector versions could not be saved for gateway restart; prior roster was not changed"
+        )
 
     if protected_selection is not None:
         try:
