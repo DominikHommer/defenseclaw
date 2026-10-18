@@ -231,8 +231,11 @@ type enterpriseHookWorkerTargetResult struct {
 // enterpriseHookPurgeDetail is what uninstall --purge removed for one
 // account: its ~/.defenseclaw, its per-user binaries and launcher links in
 // ~/.local/bin, and whether it stopped a running per-user gateway first.
+// Backup says the data of the account's own per-user install was moved to a
+// ~/.defenseclaw-backup-<UTC time> folder before the purge.
 type enterpriseHookPurgeDetail struct {
 	Data     bool `json:"data,omitempty"`
+	Backup   bool `json:"backup,omitempty"`
 	Binaries bool `json:"binaries,omitempty"`
 	Gateway  bool `json:"gateway,omitempty"`
 	UVCache  bool `json:"uv_cache,omitempty"`
@@ -529,7 +532,7 @@ var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
-	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserStateSummary
+	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
 	// and watchdog before the purge removes the state they run from.
 	enterpriseHookWorkerStopPerUser = stopPerUserGatewayForPurge
@@ -589,7 +592,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Backup: summary.Backup, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache}
 			}
 		default:
 			err = fmt.Errorf("unknown worker mode %q", target.Mode)

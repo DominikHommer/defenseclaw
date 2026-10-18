@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,7 +303,11 @@ func TestSandboxDaemonUpgradeFloorRevokedRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertClosedFloorDeny(t, "the revoked registration", *raw)
+	// The floor stays closed; the views show the policy the sandbox was
+	// created with, not the closed floor's strict deny (GAP-0079).
+	if slices.ContainsFunc(raw.Violations, closedFloorDeny) || raw.Profile == "strict" || raw.NetworkMode == "deny" {
+		t.Fatalf("the revoked registration's sandbox shows the closed floor: %+v %s/%s", raw.Violations, raw.Profile, raw.NetworkMode)
+	}
 	if slices.Contains(raw.Warnings, sandboxConfirmingNote) {
 		t.Fatal("a revoked registration was presented as awaiting confirmation")
 	}
@@ -324,7 +329,10 @@ func TestSandboxDaemonUpgradeFloorKeepsGatewayOrganizationDeny(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(v.Violations, closedFloorDeny) || slices.Contains(v.Warnings, sandboxConfirmingNote) {
+	// The organization's deny is the stop's words; the views keep the
+	// policy the sandbox had (GAP-0079), and the floor stays closed.
+	if !strings.Contains(v.StopReason, "no longer allows sandboxes") || slices.ContainsFunc(v.Violations, closedFloorDeny) ||
+		slices.Contains(v.Warnings, sandboxConfirmingNote) {
 		t.Fatalf("the gateway's organization deny changed: %+v", v)
 	}
 }

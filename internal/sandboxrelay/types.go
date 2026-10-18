@@ -99,8 +99,6 @@ const (
 // AgentSurfaceHeader itself.
 var ForwardHeaders = [...]string{
 	"Content-Type",
-	"Traceparent",
-	"Tracestate",
 	"Idempotency-Key",
 	"X-Defenseclaw-Hook-Event",
 	"X-Defenseclaw-Hook-Contract",
@@ -117,6 +115,8 @@ var ForwardHeaders = [...]string{
 // them; the list exists so tests can assert each one, together with every
 // header under SandboxHeaderPrefix.
 var DroppedHeaders = [...]string{
+	"Traceparent",
+	"Tracestate",
 	"Authorization",
 	"X-Defenseclaw-Token",
 	"X-Dc-Auth",
@@ -388,6 +388,12 @@ type OperationalSettings struct {
 	LLM               string            `json:"llm,omitempty"`
 	KeepHeadless      bool              `json:"keep_headless,omitempty"`
 	UpstreamTelemetry bool              `json:"upstream_telemetry,omitempty"`
+	// TrustedCAs is the normalized PEM of the administrator's
+	// openshell.trusted_ca_bundle, read by the managed gateway (the
+	// account cannot name a CA of its own); TrustedCAError says why the
+	// gateway could not use the file, and the daemon then builds no image.
+	TrustedCAs     string `json:"trusted_cas,omitempty"`
+	TrustedCAError string `json:"trusted_ca_error,omitempty"`
 }
 
 // ImageSettings mirrors openshell.image.
@@ -467,7 +473,9 @@ type HookDecision struct {
 	// Action is allow, block, alert or confirm.
 	Action     string `json:"action"`
 	WouldBlock bool   `json:"would_block,omitempty"`
-	Severity   string `json:"severity,omitempty"`
+	// FailedClosed reports a block caused by a hook evaluation failure.
+	FailedClosed bool   `json:"failed_closed,omitempty"`
+	Severity     string `json:"severity,omitempty"`
 	// Reason is rule metadata only, as SandboxHookDecision.Reason.
 	Reason      string `json:"reason,omitempty"`
 	ModelError  string `json:"model_error,omitempty"`
@@ -515,6 +523,18 @@ type CurrentPolicy struct {
 	// a regroup re-matched the registration, status and refusals name it,
 	// not the profile the sandbox was created under (#1199).
 	Profile string `json:"profile,omitempty"`
+	// MinProfile is the min_profile of the caller's floor now. It is not a
+	// live field: a running sandbox keeps the profile it started with, and
+	// a sandbox that starts again takes this one, never the looser one it
+	// registered under (GAP-0224). nil is an answer without it.
+	MinProfile *string `json:"min_profile,omitempty"`
+	// Provisional is whether the same match is provisional (the directory
+	// could not be asked, so the organization's default applies). Status
+	// shows it next to Profile and Digest, so a sandbox created during an
+	// outage stops saying the default applies once a re-match verified its
+	// groups, and says so again if a later match is provisional (#1199). Nil,
+	// from a gateway that does not say, leaves the daemon's flag as it is.
+	Provisional *bool `json:"provisional,omitempty"`
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`

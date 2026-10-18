@@ -63,7 +63,7 @@ func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
-		"Also remove each enrolled user's ~/.defenseclaw, per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
+		"Also remove each enrolled user's ~/.defenseclaw (its own per-user install's data moved to ~/.defenseclaw-backup-<UTC time> first), per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllCheck, "check", false,
 		"Only check that every manifest row resolves to an account whose registrations can be removed; change nothing")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
@@ -103,7 +103,11 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 	} else if err == nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
 		for _, user := range report.Purged {
-			fmt.Fprintf(cmd.OutOrStdout(), "purged %s: ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone\n", user)
+			line := "purged " + user + ": ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone"
+			if report.PurgedDetail[user].Backup {
+				line += "; the data of its own DefenseClaw install from before the managed deployment is in ~/.defenseclaw-backup-<UTC time>"
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), line)
 		}
 		for _, entry := range report.StateFailed {
 			fmt.Fprintf(cmd.OutOrStdout(), "not purged %s\n", entry)
@@ -259,6 +263,10 @@ type enterpriseHookRemoveRow struct {
 	target  enterprisehooks.ManifestTarget
 	who     string
 	problem string
+	// gone is a row that names only a home, which no longer exists: its
+	// registrations went with the home, and no account is left to act as
+	// (#1287).
+	gone bool
 }
 
 func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterpriseHookRemoveRow {
@@ -278,6 +286,8 @@ func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterp
 		switch {
 		case err != nil:
 			row.problem = strings.TrimPrefix(err.Error(), "enterprise hooks: ")
+		case pendingReason != "" && user == "" && target.UID == nil && enterpriseHookRecordedHomeGone(home):
+			row.gone = true
 		case pendingReason != "":
 			row.problem = pendingReason + "; rerun once it is available"
 		default:
@@ -289,6 +299,13 @@ func resolveEnterpriseHookRemoveRows(manifest enterprisehooks.Manifest) []enterp
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// enterpriseHookHomeGoneEntry is the pending entry of a manifest row whose
+// home no longer exists: nothing is left to remove, and the uninstall warns
+// with this reason and goes on.
+func enterpriseHookHomeGoneEntry(label, home, connector string) string {
+	return fmt.Sprintf("%s: its home %s no longer exists, so no DefenseClaw hook registration is left there; if that home is restored, remove DefenseClaw's entries from the %s config in it", label, home, connector)
 }
 
 // enterpriseHookRemoveJobs groups the manifest rows into one worker job per
@@ -305,6 +322,9 @@ func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpri
 		name := strings.ToLower(strings.TrimSpace(target.Connector))
 		label := row.who + "/" + name
 		switch {
+		case row.gone:
+			pending = append(pending, enterpriseHookHomeGoneEntry(label, home, name))
+			continue
 		case row.problem != "":
 			failed = append(failed, label+": "+row.problem)
 			continue
@@ -316,6 +336,14 @@ func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpri
 		switch enterpriseHookCheckHome(home, uid).State {
 		case enterprisehooks.HomeAvailable:
 		case enterprisehooks.HomePending:
+			if enterpriseHookRecordedHomeGone(home) {
+				// The home folder of a live account was deleted or moved
+				// away (#1287): the registrations went with it, so the
+				// account is already clean. The uninstall warns with this
+				// reason and goes on.
+				pending = append(pending, enterpriseHookHomeGoneEntry(label, home, name))
+				continue
+			}
 			pending = append(pending, label)
 			continue
 		default:
@@ -542,6 +570,9 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 	notPurged := map[string]string{}
 	for _, row := range rows {
 		target, user := row.target, row.who
+		if row.gone {
+			continue // its ~/.defenseclaw went with the home
+		}
 		if row.problem != "" {
 			notPurged[user] = row.problem
 			continue
@@ -555,6 +586,12 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []
 			reason := "its home is not trusted"
 			home := filepath.Clean(strings.TrimSpace(target.UserHome))
 			if filepath.IsAbs(home) && enterpriseHookCheckHome(home, *target.UID).State == enterprisehooks.HomePending {
+				if enterpriseHookRecordedHomeGone(home) {
+					// Its ~/.defenseclaw went with the home (#1287):
+					// nothing is left to purge, and its manifest rows
+					// already warn that the home is gone.
+					continue
+				}
 				reason = "its home is not available; rerun the purge when it is"
 			}
 			notPurged[user] = reason

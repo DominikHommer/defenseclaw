@@ -129,7 +129,9 @@ func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest 
 	future := false
 	for _, entry := range entries {
 		name, ok := strings.CutSuffix(entry.Name(), ".json")
-		if entry.IsDir() || !ok {
+		// Only the accounts' records count: the guardian's other files
+		// (DirectoryUnreachableFile) are rewritten or removed on their own.
+		if entry.IsDir() || !ok || !validIdentitySpoolKey(name) {
 			continue
 		}
 		info, err := entry.Info()

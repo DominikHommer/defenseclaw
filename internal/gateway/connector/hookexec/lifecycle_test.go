@@ -94,10 +94,12 @@ func TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes(t *testing.T) 
 // TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes pins the
 // per-user (fail_mode closed and open) and Secure Client results of a missing
 // or unknown gateway action on every lifecycle event to commit 6210dbcee, the
-// last commit before the managed standalone lifecycle change. Only the managed
-// standalone profiles keep these events neutral. The golden file is the output
-// of a decide() probe run on a git-archive copy of 6210dbcee; regenerate it
-// only from that commit, never from the current code.
+// last commit before the managed standalone lifecycle change. The golden file
+// is the output of a decide() probe run on a git-archive copy of 6210dbcee;
+// regenerate it only from that commit, never from the current code. Since
+// #1140 a per-user fail-closed row whose golden result was a failure gets
+// the neutral allow instead (failClosedStopEvent); every other row keeps its
+// bytes.
 func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testing.T) {
 	f, err := os.Open("testdata/lifecycle_invalid_action_6210dbcee.jsonl")
 	if err != nil {
@@ -132,6 +134,13 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			t.Fatalf("unknown golden profile %q", want.Profile)
 		}
 		code := sp.decide(opts, []byte(want.Body))
+		if want.Profile == "oss-closed" && strings.Contains(want.Stderr, "hook error") {
+			// The connectors whose lifecycle failures reached the fail path
+			// (Claude Code and Codex) answer the allow with no body.
+			want.Code, want.Stdout = 0, ""
+			want.Stderr = "DefenseClaw is not blocking the " + want.Event +
+				" event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (invalid or missing action in gateway response)\n"
+		}
 		if code != want.Code || stdout.String() != want.Stdout || stderr.String() != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,

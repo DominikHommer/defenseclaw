@@ -520,9 +520,10 @@ supersedence alone cannot perform the attestation; deliver a separate elevated
 script or Remediation for each upgraded build.
 
 **Change the config.** In bundle mode, deliver a new signed bundle; Setup
-refuses a direct `CONFIG=` change with `bundle_required`. For a base-only
-deployment, Setup applies a new config when it runs `/ensure` with a config
-that differs from the installed one. The registry rule detects by version
+refuses a direct `CONFIG=` change with `bundle_required`, and refuses
+`TRUSTANCHORS=` together with `CONFIG=` the same way (exit `1639`, nothing
+applied). For a base-only deployment, Setup applies a new config when it
+runs `/ensure` with a config that differs from the installed one. The registry rule detects by version
 only, so Intune does not re-run an app for a config-only change. To roll out a
 new config, re-author `config.yaml` as `config_version: 9` (see
 `packaging/identity/entra/admin-config.windows.example.yaml`). The packager

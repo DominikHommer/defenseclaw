@@ -36,8 +36,11 @@ import (
 // The hash-pinned trust anchor staged next to an unsigned standalone payload.
 const standalonePayloadTrustName = "payload-trust.json"
 
-// Keep the running Setup image open without write/delete sharing while the
-// trailer is decoded and its Authenticode signature is verified.
+// Keep the Setup image file open without write/delete sharing while the
+// trailer is decoded and its Authenticode signature is verified, and stage
+// only the payload whose digests match the payload binding linked into the
+// running image (loadBoundEnterprisePayload): the file at the launch path is
+// not necessarily the image that is running.
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	path, err := os.Executable()
 	if err != nil {
@@ -73,7 +76,7 @@ func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	if err != nil {
 		return enterprisePayload{}, fmt.Errorf("read enterprise Setup image trailer: %w", err)
 	}
-	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	payload, err := loadBoundEnterprisePayload(result, standalonePayloadBinding)
 	if err != nil {
 		return enterprisePayload{}, err
 	}

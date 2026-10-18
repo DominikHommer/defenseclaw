@@ -36,7 +36,12 @@ const llmBaseURLProviderName = "custom-gateway"
 // buildGenerationProviders is a generation's LLM provider registry: the
 // embedded providers.json, the legacy operator overlay for non-managed
 // profiles (configs.LoadProviders skips a derived one), then llm_providers
-// from config, then llm.base_url's host when nothing above knows it.
+// from config, then llm.base_url's host when nothing above knows it. While a
+// legacy overlay is a live input (its fold into config.yaml was refused),
+// llm_providers merges with the header rule that overlay had before 1.0.3
+// (configs.ApplyLegacyOverlay), so the upgrade changes no header in use
+// (GAP-0184); once config.yaml is the only input, same-name entries keep
+// their headers (GAP-0361).
 // Managed standalone uses only config.yaml additions (GAP-0443); loading a
 // per-user overlay would make an offline bundle depend on the signer's home.
 func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) {
@@ -46,10 +51,11 @@ func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) 
 func buildGenerationProvidersForScope(cfg *config.Config, scope digestScope, offline bool) (*generationProviders, error) {
 	var reg *configs.ProvidersConfig
 	var err error
+	legacyOverlay := false
 	if cfg != nil && cfg.StandaloneEnterprise() {
 		reg, err = configs.LoadEmbeddedProviders()
 	} else {
-		reg, err = configs.LoadProviders()
+		reg, legacyOverlay, err = configs.LoadProvidersWithOverlay()
 	}
 	if err != nil || reg == nil {
 		reg = &configs.ProvidersConfig{}
@@ -68,7 +74,11 @@ func buildGenerationProvidersForScope(cfg *config.Config, scope digestScope, off
 			}
 			overlay.Providers = append(overlay.Providers, provider)
 		}
-		configs.ApplyOverlay(reg, overlay)
+		if legacyOverlay {
+			configs.ApplyLegacyOverlay(reg, overlay)
+		} else {
+			configs.ApplyOverlay(reg, overlay)
+		}
 		if host := llmBaseURLHost(cfg.LLM.BaseURL); host != "" && !registryKnowsHost(reg, host) {
 			configs.ApplyOverlay(reg, configs.ProvidersConfig{Providers: []configs.Provider{{
 				Name: llmBaseURLProviderName, Domains: []string{host}, EnvKeys: []string{"LLM_GATEWAY"},
