@@ -3607,15 +3607,38 @@ def _report_providers_fold(ctx: MigrationContext, result: dict, *, refusal_only:
     if isinstance(refused, str) and refused and refused.isprintable():
         ux.warn(refused, indent="    ")
         return
+    overlay, retired = str(fold.get("overlay") or ""), str(fold.get("retired") or "")
+    # GAP-0184: headers a same-name merge dropped while the file was an input
+    # are sent once it is folded; name them (never their values).
+    sent = _provider_field_names(fold.get("headers_after_fold"))
+    if sent:
+        when = "the gateway now also sends" if retired else f"once {overlay} is removed, the gateway also sends"
+        ctx.changes.append(
+            f"{when} {sent} (before 1.0.3 a provider entry named like a built-in provider or an earlier entry "
+            "lost its extra_headers); remove any you do not want from llm_providers.custom"
+        )
     if refusal_only:
         return
     folded = [name for name in fold.get("folded") or [] if isinstance(name, str) and name.isprintable()]
-    overlay, retired = str(fold.get("overlay") or ""), str(fold.get("retired") or "")
     if folded:
         line = f"moved provider(s) {', '.join(folded)} from {overlay} into config.yaml llm_providers.custom"
         ctx.changes.append(line + (f"; the file is kept as {retired}" if retired else ""))
     elif retired:
         ctx.changes.append(f"{overlay} held nothing config.yaml lacked; it is kept as {retired}")
+
+
+def _provider_field_names(entries: object) -> str:
+    """``provider (field, ...); ...`` for a list of ``{"provider", "fields"}``
+    entries (names only, never values)."""
+    parts = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        provider = entry.get("provider")
+        fields = [f for f in entry.get("fields") or [] if isinstance(f, str) and f.isprintable()]
+        if isinstance(provider, str) and provider.isprintable() and fields:
+            parts.append(f"{provider} ({', '.join(fields)})")
+    return "; ".join(parts)
 
 
 def _preview_config_v9(config_path: str, gateway_binary: str) -> None:

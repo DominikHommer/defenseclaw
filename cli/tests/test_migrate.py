@@ -796,7 +796,9 @@ def test_the_fold_step_reports_the_providers_config_yaml_took(
         config_inspect,
         "migrate_config_v9",
         lambda **_kwargs: {"migrated": False, "dry_run": False, "written": [retired], "record": {"from_version": 9},
-                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired}},
+                           "providers_fold": {"overlay": str(overlay), "folded": ["acme-gw"], "retired": retired,
+                                              "headers_after_fold": [{"provider": "openai",
+                                                                      "fields": ["extra_headers.X-Team"]}]}},
     )
 
     result = migrate(str(data_dir))
@@ -805,3 +807,5 @@ def test_the_fold_step_reports_the_providers_config_yaml_took(
     out = capsys.readouterr().out
     assert f"moved provider(s) acme-gw from {overlay} into config.yaml llm_providers.custom" in out
     assert retired in out
+    # GAP-0184: the headers sent from now on are named, never their values.
+    assert "the gateway now also sends openai (extra_headers.X-Team)" in out
