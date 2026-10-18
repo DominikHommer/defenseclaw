@@ -185,6 +185,10 @@ switches apply to them:
   `defenseclaw status` or `defenseclaw doctor` in the project folder: both
   check that folder's project settings. DefenseClaw cannot see a
   `--settings` file.
+- A `~/.claude/settings.json` that keeps DefenseClaw's other hooks but not its
+  `PreToolUse` hook leaves tool calls uninspected: `defenseclaw doctor` fails
+  the **Claude Code hooks** row and `defenseclaw status` marks Claude Code
+  DEGRADED until `defenseclaw setup claude-code --yes` registers it again.
 - A `~/.claude/settings.json` that is a symlink into a dotfiles folder works
   when the link ends at a file in your home folder that you own. A link to
   anywhere else is refused before any hook is written.
