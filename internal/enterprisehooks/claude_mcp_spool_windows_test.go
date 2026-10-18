@@ -251,7 +251,9 @@ func TestWriteWindowsClaudeMCPSpoolSkipsRefusedProject(t *testing.T) {
 	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, UserHome: home, Connector: "claudecode"}}}
 	var warnings []string
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, func(format string, args ...any) {
-		warnings = append(warnings, fmt.Sprintf(format, args...))
+		if line := fmt.Sprintf(format, args...); strings.Contains(line, "WARN") {
+			warnings = append(warnings, line)
+		}
 	}); err != nil {
 		t.Fatal(err)
 	}
