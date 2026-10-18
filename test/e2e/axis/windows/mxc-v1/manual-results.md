@@ -744,3 +744,63 @@ CreateProcess compatibility, PSEC enforcement, realized Claude environment or
 working authentication, hooks, model access or customer provider integration.
 This successful version observation was **uncontained** and cannot be used as a
 runtime fallback or sandbox qualification.
+
+## Native PSEC Claude version smoke passes after DOS image binding
+
+[Locked build 39161822089](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39161822089)
+at `be32bd247b840bf7ab810c6d0d3581e0c4b334e4` built the normal contained
+`claude-version-only` slice. Independent inert reviews verified thirty unique
+archive members, twenty-six manifest hashes, seventeen exact Git source files,
+unchanged combined/upstream locks, and all sixteen SDK fingerprints freshly
+reconstructed from four reviewed overlays. The actual CI log reports all
+twenty-five selected Rust tests passing exactly once: fourteen SDK tests, six
+pure environment tests, four pure DLL protocol tests and one native directory
+regression. This includes the exact-zero resume gate and read-only current-image
+query with a byte-identical, different-file-identity negative. CI did not execute
+PSEC or Claude.
+
+The changed downstream literal adapter selects an ordinary DOS application
+spelling from the held image. After suspended creation and Job assignment it
+requires a direct kernel `ProcessImageFileMapping` comparison with that held
+file HANDLE before resume. A nonzero status refuses with bounded owned-child
+cleanup attempts. This introduces no NULL-application, name-reopen or alternate
+runtime fallback, and does not relax the configured PSEC filesystem, network or
+UI settings.
+
+One fresh, separately reviewed native attempt then passed with the same fixed
+signed Claude Code 2.1.292 image and literal `--version`. The child exited zero,
+its retained direct process handle was signaled, and it emitted exactly
+`2.1.292 (Claude Code)` plus LF: twenty-two stdout bytes, SHA256
+`46ef67828dfb9d34aef4d5df24d529825edb3cfa334f333e445fe5d0f1b14cc2`.
+Child stderr was empty. The final record reported `psec_attribute_attached=true`
+and the three expected checks: fixed version output, signaled retained direct
+handle and removed owned fixture.
+
+The driver returned in 4.547 seconds; the probe observation took 4.3556386
+seconds. The outer Job was assigned before resume and ended empty with zero
+active processes. No deadline, overflow, output-read error or driver error was
+reported. The fresh owned fixture was removed, and no retained fixture was
+reported for this attempt. Earlier failed fixtures and evidence were preserved;
+this was one changed-source attempt, with no retry.
+
+| Input or observation | SHA256 |
+| --- | --- |
+| ZIP, artifact `12149401741` | `f31896fa66f99ca42b7c0873344f1aea06314129d8d0695e61203e6e4c2032e5` |
+| Provenance | `ad442c865e97bf08f5c1764496ad2686d8e364f9a868893372920084637a5090` |
+| Root verification receipt | `751d039adce0948b5c89333f121abc44ff16195ade7ffad8e4310a4b571aad31` |
+| Native PSEC probe image | `e651b97bf2979e83b70134ff8f0618b6bfe6d81051fae39c2eee228c789cc454` |
+| Fixed local image | `eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23` |
+| Fixed local image review receipt | `a9c38cec7b47197f04e6016eada1e9743e218f3b0ee8d77c1c913a5d2351fa3a` |
+| Go custody image | `32f21133e5037b4408fe6df89128e5b4e98014f4b4e5a7bb66ae130a9f13de77` |
+| One-shot driver | `2c1e5f1b824938f78b7e690cd93d87af12464f9fa181422d3b5189206ea39db7` |
+| Actual live result | `4240a692ad9baa3dc6a1f561d086478a69651e298be610256603c9bd5d0bbe60` |
+
+This establishes only the fixed version-start smoke through the downstream
+native PSEC adapter. Eight private environment values were supplied, but
+Claude's realized environment was not observed. This case does not exercise the
+boundary child's native-profile handshake, filesystem/network assertions,
+authentication, model access, hooks or terminal. It activates no customer
+provider and does not reproduce or establish a fix to unmodified MXC. The
+earlier environment-binding refusal remains a separate qualification gate.
+The compatibility chronology is tracked in
+[MXC issue 1523](https://github.com/microsoft/mxc/issues/1523).

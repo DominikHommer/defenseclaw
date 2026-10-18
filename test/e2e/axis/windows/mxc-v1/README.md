@@ -3,7 +3,7 @@
 
 # Native Windows current-MXC PSEC contributor probe
 
-## Pending literal DOS application and held-image gate
+## Literal DOS application and held-image gate
 
 The Windows literal overlay now selects an ordinary DOS `lpApplicationName`
 from the held executable for compatibility. The separately recorded direct
@@ -36,17 +36,23 @@ explicitly selected PSEC attribute plan and cannot be admitted as a contained
 artifact.
 
 The equivalent Go current-process query passed once on the local Windows host
-with the identical-copy negative included. That result establishes only local
-read-only API support. The replacement Rust source, build and suspended PSEC
-child path have not been qualified by that result. A fresh independently
-reviewed build and one changed-source native attempt remain required; this
-contributor seam does not activate a customer provider.
+with the identical-copy negative included. The reviewed replacement build also
+passed the Rust read-only query and exact-zero ordering tests. One fresh native
+PSEC run then passed the fixed signed Claude Code 2.1.292 `--version` case: exit
+zero, exact version stdout, empty child stderr, signaled retained direct handle,
+removed owned fixture and empty outer Job. This is a version smoke only; the
+eight private values were requested, while Claude's realized environment,
+filesystem/network boundaries, authentication, models, hooks, terminal and
+customer provider remain unqualified. See the exact build and result pins in
+[manual results](manual-results.md#native-psec-claude-version-smoke-passes-after-dos-image-binding).
 
 ## Current source-only native environment binding
 
-The new `standalone_std_boundary_native_identity_environment` variant follows
-the separately recorded Case07 lexical observations. It has not been built or
-executed. It changes no filesystem grant, network/UI restriction, SDK fallback,
+The `standalone_std_boundary_native_identity_environment` variant follows the
+separately recorded Case07 lexical observations. Its later native attempts
+refused the environment binding before the boundary assertions; the successful
+Claude version smoke does not resolve that separate gate. It changes no
+filesystem grant, network/UI restriction, SDK fallback,
 host ACL, profile registration or production provider. Existing argv, exit23,
 timeout and loader payload behavior remains unchanged.
 
@@ -449,9 +455,10 @@ The dependency-free `fixed-claude-create-control` Cargo feature binds the binary
 to this one selector before any fixture or API call. Ordinary binaries refuse
 the control selector; the control binary refuses every ordinary selector.
 Only this build slice applies `patches/mxc-fixed-claude-create-control.patch`
-after the four existing overlays. The original slices retain their sixteen
-reviewed SDK fingerprints and twelve SDK tests. The control binds seventeen
-SDK fingerprints and a thirteenth pure comparison/admission test; no dependency,
+after the four existing overlays. The original recorded control build used
+sixteen normal SDK fingerprints and twelve SDK tests, with seventeen control
+fingerprints and a thirteenth pure comparison/admission test. The replacement
+DOS/image-binding source adds the two gates described above; no dependency,
 upstream lock, CI executable-size limit or local-image authority is changed.
 
 The SDK still constructs and owns the requested strict PSEC object and the
@@ -465,7 +472,8 @@ fixed equality boolean and attribute counts, never the private values. The
 reference is constructed in this attempt; it is not an equality assertion about
 the differently named fixtures retained from earlier attempts.
 
-The selected call retains the held-image volume-GUID application spelling,
+In the recorded control attempt, the selected call retained the held-image
+volume-GUID application spelling,
 separately quoted original program/`--version`, eight explicit private values,
 NULL process/thread security attributes, `CREATE_SUSPENDED`, `CREATE_NO_WINDOW`,
 `CREATE_UNICODE_ENVIRONMENT`, `EXTENDED_STARTUPINFO_PRESENT`, cwd and pipe setup.
