@@ -134,7 +134,71 @@ MXC source [explicitly leaves profile, BFS policy and tracking cleanup as a stub
 These old paired binaries remain feasibility evidence. A maintained cleanup
 contract and review of the current MXC API are required for a customer adapter.
 
-A third `inherited-console-relay` build adds separately reviewed AXIS and MXC
-process-local Ctrl-C handlers. Its artifact and live behavior are pending.
-Claude, hook relay, credential confidentiality, strict proxy enforcement and
-the complete customer runtime remain unqualified.
+## Paired relay and real binary observations
+
+[Workflow run 39109085462](https://github.com/cisco-ai-defense/defenseclaw/actions/runs/39109085462)
+at workflow source `cef12ad976b31db4f6d11d5f41a9a06ea0934160` produced the
+distinct `inherited-console-relay` variant. Verification required the original
+admission overlay plus both byte-identical reviewed relay patches. Process-local
+handlers consume only the supervisors' own Ctrl-C event; they do not install
+an inheritable ignore flag. Close, break and shutdown handling stays in the
+existing chain.
+
+| Input | SHA256 |
+| --- | --- |
+| GitHub artifact ZIP, ID `12129374801` | `9629847162f21cb4b8911b4b7439ec36c18d4081d3aea29d15eaf1aee7b41a04` |
+| Packaged relay ZIP | `3d2b0067d111ed95765d615c443e46f5e7eaa766292f39a00795e9d35cdf214e` |
+| AXIS Ctrl-C relay patch | `874035bb9429abda372d8302ea8ef2adeec479020867f3ea3680c424f20a9919` |
+| MXC Ctrl-C relay patch | `8689309175f62ce2c112b1a22f7cc7b7878ac5938aa83cb94521f85c8c9508cf` |
+| Relay `axis.exe` | `fe8bead75ec0106a0691f397e3eb5c069cfc2e81b18b31db4555125597e22f99` |
+| Paired relay `wxc-exec.exe` | `b47e1ede591c7f6ab258a0036559d9546b0313763f656b5c2cae631f042df667` |
+| Final interrupt probe | `1c236eaf80674426bcc632905657b8a83d4559e289450a54efbb33fe886c979a` |
+| Final ConPTY harness | `a27b9ac7901bc10894fa7976b16239180ab5bdfe292e6bf04377256139b1581f` |
+| Signed Claude 2.1.292 | `eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23` |
+
+All artifact, source, lock, inventory, binary and patch checks passed before
+execution. The final Go helpers were built explicitly with Go 1.26.5 from
+committed source `bc713705f433a1d33d1435b6dbbe6f0848de4524`. The headless
+reruns used the unchanged boundary payload built from
+`bbd8c0b506483d32ca7cdfb605cf686a30a0abe0`. The fresh version-only run used
+the Python helper committed at `a9269f8660a8533774473616e7deba58ff3a6582`.
+Exact source copies and hashes remain beside the raw evidence under
+`C:\Users\vnarajal\.codex\axis-manual-test\windows-relay`.
+
+| Case | Actual observation |
+| --- | --- |
+| `headless-boundary-01` | All 19 observations passed, including AppContainer, private state, denied outside/RO writes and four positive-host/negative-contained loopback endpoints. |
+| `headless-exit23-01`, `headless-timeout-01` | Payload start confirmed; exit 23 propagated; one-second timeout returned 1 with the exact diagnostic. |
+| `outer-control-interrupt-01` | Explicit host control passed keyboard input, resize, actual Ctrl-C acknowledgement, continued input and exit 7. |
+| `terminal-02` | The same full sequence passed inside AppContainer with private HOME/CWD and all three console handles. Child exit 7 propagated through AXIS. |
+| `timeout-01`, `close-session-01` | Contained leaf confirmed; timeout returned 1; closing the owned ConPTY stopped the supervisor. |
+| `parent-death-01` | CIM observed all four runtime/payload processes before killing only the tracked harness handle; zero remained afterward. |
+| `claude-version-03` | Valid Anthropic Authenticode signature and exact binary hash checked; the private copy printed `2.1.292 (Claude Code)`, exit 0, in 1.036 seconds under hard filesystem/block-network policy. No credentials, login, model or hook invocation was supplied. |
+| Post-run inspection | Zero executable paths beneath the task's Windows runtime roots remained. |
+
+Failed diagnostic attempts are preserved. The first relay terminal run exposed
+the Go probe treating Windows' Ctrl-C zero-length console read as ordinary EOF.
+The corrected probe waits at most 500 ms for an actual `os/signal` interrupt
+acknowledgement before recreating its scanner. The independent host control
+passed before repeating the contained case. Unexpected EOF is not a passing
+terminal result. The first version preflight failed to load Windows
+PowerShell's security module because it inherited another PowerShell's module
+path; its verifier now receives an explicit system module environment. AXIS
+then correctly refused an unnecessary whole-original-HOME grant. Removing
+that grant retained the managed-HOME guard, and the fresh source-bound run
+above passed. The earlier manual retry is retained separately.
+
+After negative process checks and exact identity/path ownership verification,
+the documented Windows `DeleteAppContainerProfile` API removed 11 earlier and
+10 relay-test profiles; all returned success and their owned profile
+directories disappeared. Before/after proof is retained privately. Custom MXC
+tracking keys were not modified, so complete resource cleanup remains
+unqualified. Automatic approval review rejected removal of one task-owned
+255 MB Claude fixture; both private binary copies remain preserved, and the
+canonical host binary is unchanged.
+
+These are observations of the old pinned AXIS/MXC pair with reviewed
+contributor overlays. The current-SDK PSEC prototype has a separate source,
+lock and live-test gate. Authentication, model traffic, hook relay, credential
+confidentiality, strict proxy enforcement and the complete customer runtime
+remain unqualified.

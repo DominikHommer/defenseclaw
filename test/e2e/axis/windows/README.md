@@ -61,7 +61,7 @@ inside AXIS, and checks console handles, keyboard acknowledgement, resize from
 100×30 to 160×40, Ctrl-C acknowledgement, subsequent input and exit 7. It assigns
 the suspended AXIS supervisor to a kill-on-close Job before resuming it, drains
 bounded output on a separate goroutine, and signals only owned live handles on
-failure. This is an experiment pending actual results. It offers no arbitrary
+failure. Recorded fixed relay results are in `manual-results.md`. It offers no arbitrary
 workload-command flag and makes no completed descendant-cleanup claim.
 
 The earlier inherited-console variant passes basic terminal input and resize

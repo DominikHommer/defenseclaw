@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 const FIXED_POLICY_NAME: &str = "dc-mxc-macos-contributor";
 const REQUIRED_RUNTIME_READS: &[&str] = &["/bin/sh", "/usr/lib", "/System/Library"];
+const REQUIRED_SHELL_SELECTOR: &str = "/private/var/select/sh";
 const OPTIONAL_RUNTIME_READS: &[&str] = &["/private/var/db/dyld"];
 const REQUIRED_RUNTIME_READWRITE: &[&str] = &["/dev/null"];
 const REQUIRED_RUNTIME_READONLY: &[&str] = &["/dev/urandom"];
@@ -32,6 +33,18 @@ pub fn runtime_read_paths() -> Result<Vec<String>> {
         );
         result.push((*path).into());
     }
+    let selector = Path::new(REQUIRED_SHELL_SELECTOR);
+    let metadata = fs::symlink_metadata(selector).context("inspect fixed shell selector")?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "fixed shell selector is not an ordinary file"
+    );
+    let canonical_selector = fs::canonicalize(selector).context("canonicalize fixed shell selector")?;
+    ensure!(
+        canonical_selector.as_path() == selector,
+        "fixed shell selector has an aliased path"
+    );
+    result.push(REQUIRED_SHELL_SELECTOR.into());
     for path in OPTIONAL_RUNTIME_READS {
         if Path::new(path).exists() {
             result.push((*path).into());
@@ -411,6 +424,8 @@ network: { mode: block }
         assert!(profile.starts_with("(version 1)\n(deny default)\n"));
         assert!(profile.contains("(deny network-bind network-outbound)"));
         assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
+        assert!(profile.contains("(allow file-read* (literal \"/private/var/select/sh\"))"));
+        assert!(!profile.contains("(allow file-read* (subpath \"/private/var/select/sh\"))"));
         assert!(profile.contains("(regex #\"^/dev/ttys[0-9]+$\")"));
         assert!(!profile.contains("(allow file-read* (subpath \"/\"))"));
         assert!(!profile.contains("(allow file-read-metadata)"));
@@ -419,6 +434,15 @@ network: { mode: block }
         assert!(!profile.contains("(subpath \"/private/etc\")"));
         assert!(!profile.contains("(subpath \"/dev/fd\")"));
 
+        policy
+            .filesystem
+            .read_only
+            .retain(|path| path != REQUIRED_SHELL_SELECTOR);
+        assert!(build_profile(&policy, &root, &root.join("probe")).is_err());
+        policy
+            .filesystem
+            .read_only
+            .push(REQUIRED_SHELL_SELECTOR.into());
         policy.filesystem.read_only.push("/private/etc".into());
         assert!(build_profile(&policy, &root, &root.join("probe")).is_err());
         policy.filesystem.read_only.pop();

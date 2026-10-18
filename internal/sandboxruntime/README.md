@@ -11,8 +11,11 @@ repository and administrative restrictions, then freezes every shared setting
 and the resolved run into one immutable identity. Its host authority snapshot
 ID and generation must rotate when broker routing or host facts change.
 
-The private resolver remains the egress authority. Inspection JSON deliberately
-omits host facts and cannot reconstruct an executable policy. An adapter must
+The private resolver remains the egress authority. Inspection JSON omits its
+private evaluator state and cannot reconstruct an executable policy. It still
+contains host-confidential workspace paths and policy provenance. Keep the
+snapshot and component values inside trusted host admission/adapters; guests,
+external APIs, logs and telemetry need a separate redacted projection. An adapter must
 route authorized traffic through DefenseClaw's broker; copying a flattened
 allowlist into MXC does not reproduce approvals or administrative enforcement.
 Explicit offline execution is separate from the `strict` profile.

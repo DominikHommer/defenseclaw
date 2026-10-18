@@ -48,8 +48,10 @@ const (
 	PolicyResources PolicyComponentName = "resources"
 )
 
-// PolicyComponent is an inspection copy. Value is not an authorization input:
-// host facts and the curated/operator distinction remain in the host resolver.
+// PolicyComponent is a host-confidential inspection copy. Value can contain
+// workspace paths and policy provenance; never send it to guests, external
+// APIs, logs or telemetry. It is not an authorization input: private evaluator
+// state and the curated/operator distinction remain in the host resolver.
 type PolicyComponent struct {
 	Name   PolicyComponentName `json:"name"`
 	Digest string              `json:"digest"`
@@ -78,6 +80,7 @@ type PolicyReceipt struct {
 // constructor from JSON or backend-provided policy is supported. Its private
 // evaluator retains host facts and the existing DefenseClaw broker semantics;
 // exported JSON views cannot replace that authority with an MXC allowlist.
+// Those views remain host-confidential and are not external API projections.
 type ExecutionPolicy struct {
 	effective  *packs.Effective
 	options    PolicyOptions
@@ -298,7 +301,10 @@ func (p *ExecutionPolicy) Digest() string {
 	return p.digest
 }
 
-// Snapshot is copied inspection JSON, not a serializable runtime authority.
+// Snapshot is copied host-confidential enforcement JSON, not a serializable
+// runtime authority or an external API view. It includes policy/workspace
+// provenance and must never be sent to guests, logs or telemetry. External
+// consumers need a separate deliberately redacted projection.
 func (p *ExecutionPolicy) Snapshot() json.RawMessage {
 	if p == nil {
 		return nil
@@ -313,6 +319,8 @@ func (p *ExecutionPolicy) RequiredCapabilities() []Capability {
 	return slices.Clone(p.required)
 }
 
+// Components returns copied host-confidential values for trusted adapters.
+// Component values are not suitable for guest, external API or telemetry use.
 func (p *ExecutionPolicy) Components() []PolicyComponent {
 	if p == nil {
 		return nil

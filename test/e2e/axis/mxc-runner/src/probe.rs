@@ -26,6 +26,7 @@ const READONLY: &[u8] = b"synthetic-readonly-canary\n";
 const UNGRANTED: &[u8] = b"synthetic-ungranted-canary\n";
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 8 * 1024;
+const PTY_GROUP_MARKER: &[u8] = b"PTY_GROUPS=";
 const SUPERVISOR_LIMIT: Duration = Duration::from_secs(15);
 
 pub fn run() -> Result<i32> {
@@ -58,7 +59,7 @@ pub fn run() -> Result<i32> {
     // from the supervisor too. No inherited environment is logged or retained.
     private_supervisor_environment(&paths)?;
     run_piped(&paths, &executable, Case::Boundaries)?;
-    run_pty(&paths, &executable)?;
+    let pty_groups = run_pty(&paths, &executable)?;
     run_piped(&paths, &executable, Case::Timeout)?;
     ensure!(
         fs::read(&paths.readonly)? == READONLY,
@@ -89,6 +90,7 @@ pub fn run() -> Result<i32> {
             "axis_commit": AXIS_COMMIT, "mxc_commit": MXC_COMMIT,
             "containment": "mxc_sdk_v1_bubblewrap", "axis_child_guards": "landlock_and_offline_seccomp",
             "landlock_abi": abi, "filesystem": "hard_requirement", "network": "block",
+            "pty_groups": pty_groups,
             "checks": ["private_home_and_environment", "allowed_writes", "ungranted_read_and_write_eacces",
                 "readonly_write_denied", "ipv4_ipv6_tcp_udp_socket_eperm", "exit_23", "pty_isatty_and_foreground",
                 "pty_input_ack_and_resize", "typed_timeout", "direct_child_pidfd_exited",
@@ -440,7 +442,7 @@ fn fixed_child(case: Case) -> Result<i32> {
             Ok(23)
         }
         Case::Pty => {
-            terminal_state(30, 100)?;
+            terminal_state(30, 100, "initial")?;
             println!("PTY_READY isatty=true foreground=true rows=30 cols=100");
             io::stdout().flush()?;
             let mut line = String::new();
@@ -450,7 +452,7 @@ fn fixed_child(case: Case) -> Result<i32> {
                 line == "fixed-benign-input\n",
                 "PTY input acknowledgement differs"
             );
-            terminal_state(40, 120)?;
+            terminal_state(40, 120, "resized")?;
             println!("PTY_ACK input=true rows=40 cols=120 foreground=true");
             Ok(23)
         }
@@ -464,13 +466,23 @@ fn fixed_child(case: Case) -> Result<i32> {
     }
 }
 
-fn terminal_state(rows: u16, cols: u16) -> Result<()> {
+fn terminal_state(rows: u16, cols: u16, phase: &'static str) -> Result<()> {
     // SAFETY: all queries use the owned stdin fd and valid stack output memory.
     let (tty, foreground, group) =
         unsafe { (libc::isatty(0), libc::tcgetpgrp(0), libc::getpgrp()) };
+    // Record these fixed numeric observations before refusing, including the
+    // namespace-zero case that equality alone cannot distinguish.
+    println!(
+        "PTY_GROUPS={}",
+        serde_json::json!({
+            "phase": phase, "isatty": tty,
+            "foreground_pgrp": foreground, "process_pgrp": group
+        })
+    );
+    io::stdout().flush()?;
     ensure!(
-        tty == 1 && foreground >= 0 && foreground == group,
-        "PTY is not the foreground terminal"
+        tty == 1 && foreground > 0 && group > 0 && foreground == group,
+        "PTY requires positive matching groups: isatty={tty} foreground_pgrp={foreground} process_pgrp={group}"
     );
     let mut size = libc::winsize {
         ws_row: 0,
@@ -570,7 +582,7 @@ fn run_piped(paths: &Paths, executable: &Path, case: Case) -> Result<()> {
     result.with_context(|| format!("fixed {} experiment", case.argument()))
 }
 
-fn run_pty(paths: &Paths, executable: &Path) -> Result<()> {
+fn run_pty(paths: &Paths, executable: &Path) -> Result<serde_json::Value> {
     let terminal = v1::spawn_with_pty(
         paths.request(executable, Case::Pty)?,
         SpawnWithPtyOptions {
@@ -589,10 +601,13 @@ fn run_pty(paths: &Paths, executable: &Path) -> Result<()> {
         let reader = terminal.try_clone_reader()?;
         let output = Capture::start(reader, terminal.stdout_closer());
         let mut input = terminal.take_writer()?;
-        output.require_marker(
+        if let Err(error) = output.require_marker(
             b"PTY_READY isatty=true foreground=true rows=30 cols=100",
             Duration::from_secs(5),
-        )?;
+        ) {
+            output.emit_pty_diagnostic();
+            return Err(error);
+        }
         terminal.resize(terminal_size(40, 120))?;
         let size = terminal.size()?;
         ensure!(
@@ -601,26 +616,37 @@ fn run_pty(paths: &Paths, executable: &Path) -> Result<()> {
         );
         input.write_all(b"fixed-benign-input\n")?;
         input.flush()?;
+        let outcome = wait_terminal(&terminal).inspect_err(|_| output.emit_pty_diagnostic())?;
+        let bytes = output.finish()?;
+        let acknowledged = contains(
+            &bytes,
+            b"PTY_ACK input=true rows=40 cols=120 foreground=true",
+        );
+        if !matches!(outcome, WaitResult::Exited(23)) || !acknowledged {
+            eprintln!(
+                "AXIS_MXC_FIXED_PTY_DIAGNOSTIC={}",
+                fixed_pty_diagnostic(&bytes)
+            );
+        }
         ensure!(
-            matches!(wait_terminal(&terminal)?, WaitResult::Exited(23)),
+            matches!(outcome, WaitResult::Exited(23)),
             "PTY child exit was not 23"
         );
         ensure!(
             terminal.warnings().is_empty(),
             "MXC returned PTY teardown warnings"
         );
-        let bytes = output.finish()?;
-        ensure!(
-            contains(
-                &bytes,
-                b"PTY_ACK input=true rows=40 cols=120 foreground=true"
-            ),
-            "PTY input/resize acknowledgement missing"
-        );
+        ensure!(acknowledged, "PTY input/resize acknowledgement missing");
+        let groups = pty_group_evidence(&bytes).inspect_err(|_| {
+            eprintln!(
+                "AXIS_MXC_FIXED_PTY_DIAGNOSTIC={}",
+                fixed_pty_diagnostic(&bytes)
+            );
+        })?;
         tracked.require_exited()?;
         terminal.kill()?;
         terminal.kill()?;
-        Ok(())
+        Ok(groups)
     })();
     if result.is_err() {
         let killed = terminal.kill();
@@ -732,6 +758,15 @@ impl Capture {
             thread::sleep(Duration::from_millis(10));
         }
         bail!("fixed child readiness acknowledgement missing");
+    }
+
+    fn emit_pty_diagnostic(&self) {
+        if let Ok(bytes) = self.bytes.lock() {
+            eprintln!(
+                "AXIS_MXC_FIXED_PTY_DIAGNOSTIC={}",
+                fixed_pty_diagnostic(&bytes)
+            );
+        }
     }
 
     fn finish(mut self) -> Result<Vec<u8>> {
@@ -855,6 +890,43 @@ fn fixed_child_diagnostic(case: Case, outcome: &WaitResult, errors: &[u8]) -> se
     })
 }
 
+fn fixed_pty_diagnostic(output: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "scope": "fixed_synthetic_private_environment_contributor_child",
+        "case": "pty", "captured_output_bytes": output.len(),
+        "truncated": output.len() > DIAGNOSTIC_LIMIT,
+        "output": String::from_utf8_lossy(&output[..output.len().min(DIAGNOSTIC_LIMIT)])
+    })
+}
+
+fn pty_group_evidence(output: &[u8]) -> Result<serde_json::Value> {
+    let observations = output
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.strip_prefix(PTY_GROUP_MARKER))
+        .map(|value| {
+            serde_json::from_slice::<serde_json::Value>(value)
+                .context("invalid fixed PTY group evidence")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure!(
+        observations.len() == 2,
+        "fixed PTY group evidence is incomplete"
+    );
+    for (observation, phase) in observations.iter().zip(["initial", "resized"]) {
+        ensure!(
+            observation["phase"] == phase && observation["isatty"] == 1,
+            "fixed PTY group phase differs"
+        );
+        let foreground = observation["foreground_pgrp"].as_i64().unwrap_or(0);
+        let group = observation["process_pgrp"].as_i64().unwrap_or(0);
+        ensure!(
+            foreground > 0 && group > 0 && foreground == group,
+            "fixed PTY evidence requires positive matching groups"
+        );
+    }
+    Ok(serde_json::Value::Array(observations))
+}
+
 fn denied_errno<T>(result: io::Result<T>, allowed: &[i32], action: &str) -> Result<()> {
     match result {
         Err(error)
@@ -950,5 +1022,37 @@ mod tests {
         assert!(encoded.contains("\\u0000"));
         assert!(!encoded.contains('\0'));
         assert!(!encoded.contains("not-in-diagnostic"));
+        let pty = fixed_pty_diagnostic(&errors);
+        assert_eq!(pty["truncated"], true);
+        assert_eq!(pty["output"].as_str().unwrap().len(), DIAGNOSTIC_LIMIT);
+        let encoded = pty.to_string();
+        assert!(encoded.contains("\\u0000"));
+        assert!(!encoded.contains('\0'));
+        assert!(!encoded.contains("not-in-diagnostic"));
+    }
+
+    #[test]
+    fn pty_group_evidence_refuses_zero_namespace_ids() {
+        for (foreground, group, accepted) in [
+            (7, 7, true),
+            (0, 0, false),
+            (0, 7, false),
+            (7, 0, false),
+            (7, 8, false),
+            (-1, -1, false),
+        ] {
+            let output = ["initial", "resized"]
+                .map(|phase| {
+                    format!(
+                        "PTY_GROUPS={}\r\n",
+                        serde_json::json!({
+                            "phase": phase, "isatty": 1,
+                            "foreground_pgrp": foreground, "process_pgrp": group
+                        })
+                    )
+                })
+                .concat();
+            assert_eq!(pty_group_evidence(output.as_bytes()).is_ok(), accepted);
+        }
     }
 }
