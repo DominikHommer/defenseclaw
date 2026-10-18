@@ -122,6 +122,26 @@ func TestR103B07R2ProjectGlobProtectedAlias(t *testing.T) {
 	}
 }
 
+func TestR103B07R2ProjectGlobLimit(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	for i := 0; i <= MaxWriteTargets; i++ {
+		if err := os.MkdirAll(filepath.Join(cwd, "out", strconv.Itoa(i)), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": `for d in out/*; do printf x > "$d/entry.txt"; done`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := Decode(Resolve(payload))
+	if !ok || targets[TruncatedKey] != "1" {
+		t.Fatalf("unbounded glob must remain incomplete: targets=%v decode=%v", targets, ok)
+	}
+}
+
 func assertR103B07R2Resolved(t *testing.T, cwd, command string, want []string) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "cwd": cwd,
