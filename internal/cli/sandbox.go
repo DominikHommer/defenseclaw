@@ -48,6 +48,10 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			settings, ok := sandboxOpenShellDaemonSettings(ctx)
 			return settings.Enterprise.E2fsprogsDir, ok
 		},
+		ManagedTrustedCAs: func(ctx context.Context) (string, string, bool) {
+			settings, ok := sandboxOpenShellDaemonSettings(ctx)
+			return settings.Operational.TrustedCAs, settings.Operational.TrustedCAError, ok
+		},
 		ManagedAccountHome: sandboxAccountHome,
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),

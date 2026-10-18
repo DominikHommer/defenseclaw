@@ -73,7 +73,7 @@ MicroVMs do not run in Docker Desktop.
 | Xcode or the Command Line Tools | The formula may build from source, and Homebrew then wants current developer tools for your macOS release. See [developer tools](#developer-tools) below. |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). The driver looks for it only in the Homebrew kegs under `/opt/homebrew` and `/usr/local`, so with a [Homebrew of your own](#a-homebrew-that-belongs-to-another-account) an administrator installs it there. |
 | Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. Start it once on your own account before setup: its first start needs an administrator (see [Docker Desktop's first start](#docker-desktops-first-start)). |
-| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. The MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started. |
+| Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. A MicroVM image's first start uses about 11 GiB of free host space while preparing its disk: the VM volume needs at least 12 GiB free (22 GiB recommended). The driver then keeps a prepared disk of about 5 GB for each image it has started. |
 
 DefenseClaw does not check for a minimum macOS release itself. What matters
 is that Homebrew supports your release and that your developer tools are

@@ -21,6 +21,7 @@ package sandboxcli
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1049,6 +1050,8 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 		},
 		// Never the developer's own git identity.
 		GitConfig: func(_ context.Context, _, key string) string { return ta.gitConfig[key] },
+		// Never the network: the Sandbox TLS trust row is skipped.
+		TLSTrust: TLSTrust{Chain: func(context.Context, string) ([]*x509.Certificate, error) { return nil, errors.New("offline") }},
 	}
 	for _, sb := range sandboxes {
 		ta.daemon.add(sb)

@@ -777,6 +777,9 @@
         "pack_dir": {
           "$ref": "#/$defs/openShellPackDir"
         },
+        "trusted_ca_bundle": {
+          "$ref": "#/$defs/openShellTrustedCABundle"
+        },
         "profile": {
           "$ref": "#/$defs/openShellProfileOrInherit"
         },
@@ -947,6 +950,12 @@
       "type": "string",
       "maxLength": 4096,
       "pattern": "^(|~|~/.*|[/\\\\].*|[A-Za-z]:[/\\\\].*)$"
+    },
+    "openShellTrustedCABundle": {
+      "description": "A PEM file of CA certificates sandboxes trust besides the image's public roots, such as the root of a TLS-inspecting proxy: an absolute path or one starting with \"~/\" (absolute, administrator-owned, in a managed configuration). Every sandbox image built while it is set carries them. Empty: none.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(|~/.+|/.+)$"
     },
     "openShellHarnessVersionKey": {
       "description": "A harness name keying image.harness_versions. No \".\": the gateway's config loader reads a dotted key as a key path.",

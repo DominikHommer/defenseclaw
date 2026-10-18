@@ -162,6 +162,15 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	if err := a.machineFailure(rep, (macOS && !microVM) || noLandlock); err != nil {
 		return err
 	}
+	// A TLS-inspecting proxy does not stop setup (a provider it leaves
+	// alone still works), but every sandbox would fail on the ones it
+	// re-signs: say so now, with the key that fixes it.
+	if c := rep.Get(CheckIDTLSTrust); c != nil && (c.Status == openshell.StatusFail || c.Status == openshell.StatusWarn) {
+		a.warn(c.Title + ": " + c.Detail)
+		if c.Fix != nil {
+			a.note("→ " + c.Fix.Line())
+		}
+	}
 	// An OpenShell installed another way than the one whose service
 	// DefenseClaw starts and restarts the gateway through: setup uses its
 	// gateway while it answers, and writes a gateway change for the user
@@ -683,7 +692,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		skipped = append(skipped, "harness images (--skip-images; the first run builds them, or `"+CommandName+" image build`)")
 	}
 	if onMicroVMs {
-		a.note("the first run of each image prepares its MicroVM disk (about a minute, and about 5 GB, which OpenShell keeps)")
+		a.note("the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
 	}
 	a.importIngressProfile(ctx)
 

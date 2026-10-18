@@ -4315,6 +4315,30 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_SANDBOX_CA_BASE",
+      "category": "hook_internal",
+      "purpose": "Records OpenShell's original CA bundle path in a sandbox process tree so a nested login shell preserves a caller-set SSL_CERT_FILE while refreshing DefenseClaw's combined sandbox CA bundle. Set by the sandbox launcher or shell profile; do not override manually.",
+      "default": "unset (set by DefenseClaw in a trusted-CA sandbox)",
+      "accepted_values": [
+        "absolute path to OpenShell's CA bundle",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/openshell/trustedca.go",
+          "description": "Go constant naming the sandbox shell's original CA bundle variable"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "Launcher and login-shell fragment records the original bundle to preserve caller overrides in nested shells"
+        }
+      ],
+      "since": "1.0.3"
+    },
+    {
       "name": "DEFENSECLAW_SANDBOX_ID",
       "category": "hook_internal",
       "purpose": "The sandbox's DefenseClaw ingress binding id, which the sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It is not the OpenShell sandbox id. It tells a nested DefenseClaw launch that it already runs sandboxed: a nested `sandbox run` runs the harness natively and needs no configuration, and the shell wrapper steps aside. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",

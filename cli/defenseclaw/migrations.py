@@ -3811,6 +3811,7 @@ def migrate(
         raise MigrationError(str(exc)) from exc
     if reached != target:
         raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
+    _restore_set_aside_keys(data_dir, config_path)
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
     _refresh_rego_policies(data_dir, config_path)
@@ -3820,6 +3821,69 @@ def migrate(
         _select_windows_agents(data_dir)
         _seal_windows_hook_credentials(data_dir)
     return MigrateResult(version, target, names, changed=bool(names))
+
+
+def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
+    """Put back the config keys a downgrade set aside (GAP-0137).
+
+    ``defenseclaw upgrade --version`` to a release older than a key takes the
+    key out of config.yaml (the older installer refuses it) and keeps it in
+    ``upgrade_shim.SET_ASIDE_FILE``. This release puts back the keys it has,
+    unless config.yaml sets one again; keys of a later release stay in the
+    file for that release. Best effort: a key that cannot be put back is
+    named with the command that sets it, and the upgrade goes on.
+    """
+
+    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply, plain_error
+    from defenseclaw.upgrade_shim import NEWER_CONFIG_KEYS, SET_ASIDE_FILE
+
+    path = os.path.join(data_dir, SET_ASIDE_FILE)
+    try:
+        with open(path, encoding="utf-8") as stream:
+            record = json.load(stream)
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError) as exc:
+        ux.warn(f"Could not read {path} ({exc}); set the keys it lists again with 'defenseclaw config set'")
+        return
+    keys = record.get("keys") if isinstance(record, dict) else None
+    if not isinstance(keys, dict):
+        ux.warn(f"{path} lists no keys; remove it")
+        return
+    known = {key for key, _since in NEWER_CONFIG_KEYS}
+    current = yaml.safe_load(_read_config_text(config_path) or "") or {}
+    put: dict[str, object] = {}
+    for key, value in keys.items():
+        if key not in known:
+            continue
+        node: object = current
+        for part in key.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node in (None, ""):
+            put[key] = value
+    if put:
+        try:
+            apply(
+                [Change(key, value) for key, value in put.items()],
+                ACTOR_MIGRATION,
+                f"put back after the downgrade to {record.get('for') or 'an older release'}",
+                path=config_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
+            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in put.items())
+            ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
+            return
+        ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
+    later = {key: value for key, value in keys.items() if key not in known}
+    try:
+        if later:
+            from defenseclaw.upgrade_shim import _write_private_json
+
+            _write_private_json(path, {**record, "keys": later})
+        else:
+            os.remove(path)
+    except OSError as exc:
+        ux.warn(f"Could not update {path} ({exc})")
 
 
 def _seal_windows_hook_credentials(data_dir: str) -> None:
