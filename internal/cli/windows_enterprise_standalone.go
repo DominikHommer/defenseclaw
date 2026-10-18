@@ -653,11 +653,18 @@ func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error
 // reported for every action. Nothing is reported while the gateway is not
 // ready or when the installed CLI cannot compute it.
 func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
+	applyWindowsEnterprisePolicyAs(ctx, result, result.Action != "status" && result.Action != "verify")
+}
+
+// applyWindowsEnterprisePolicyAs is applyWindowsEnterprisePolicy for a run
+// that changed the deployment (change) or only read it, as a refused config
+// does whatever its action (GAP-0103): a read never records
+// policy-state.json.
+func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatus.Result, change bool) {
 	if !result.Installed || !result.Readiness.Gateway {
 		return
 	}
 	out, _ := windowsEnterprisePolicyDigest(ctx)
-	change := result.Action != "status" && result.Action != "verify"
 	state := applyEnterprisePolicyReport(result, out, change)
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
@@ -2329,7 +2336,7 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 		}
 		// The host as status reports it: its policy and its advisories.
 		applyWindowsEnterpriseInstallerReport(result, opts, status, run)
-		applyWindowsEnterprisePolicy(ctx, result)
+		applyWindowsEnterprisePolicyAs(ctx, result, false)
 		if status.Installed {
 			appendWindowsEnterpriseStatusAdvisories(ctx, result, status)
 		}

@@ -736,7 +736,10 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 // refusal reports, such as its security_incomplete advisory, are labelled as
 // the running deployment's, so they do not read as the refused file's.
 func TestWindowsEnterpriseConfigRefusalLabelsTheRunningDeploymentAdvisories(t *testing.T) {
-	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	// The probe's report carries an advisory of the host.
+	probe := installedStatus("status")
+	probe["stale_lifecycle_journal_removed"] = "retire stopped at an untrusted folder"
+	stub := &ensureStub{t: t, replies: []map[string]any{probe}}
 	stub.install(t)
 	command := &cobra.Command{}
 	var stdout bytes.Buffer
@@ -752,15 +755,17 @@ func TestWindowsEnterpriseConfigRefusalLabelsTheRunningDeploymentAdvisories(t *t
 		t.Fatal(err)
 	}
 	labelled, finishLabelled := false, false
+	var codes []string
 	for _, warning := range result.Warnings {
 		if !strings.HasPrefix(warning.Message, enterprisestatus.RunningDeploymentPrefix) {
 			t.Fatalf("warning %s is not labelled as the running deployment's: %q", warning.Code, warning.Message)
 		}
-		labelled = labelled || warning.Code == "security_incomplete"
+		codes = append(codes, warning.Code)
+		labelled = labelled || warning.Code == "stale_lifecycle_journal_removed"
 		finishLabelled = finishLabelled || warning.Code == config.LocalEnforcementEntriesIgnored
 	}
 	if !labelled || !finishLabelled || len(result.Errors) != 1 || strings.HasPrefix(result.Errors[0].Message, enterprisestatus.RunningDeploymentPrefix) {
-		t.Fatalf("result = %+v", result)
+		t.Fatalf("warnings %q (probe advisory labelled %v, finish advisory labelled %v), errors %+v", codes, labelled, finishLabelled, result.Errors)
 	}
 }
 
