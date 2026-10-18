@@ -250,8 +250,8 @@ sed -i.bak "s/@DC_PKG_VERSION@/${VERSION}/" "$SCRIPTS/preinstall" && rm -f "$SCR
 cat >"$SCRIPTS/postinstall" <<'EOF'
 #!/bin/sh
 prefix=/opt/cisco/defenseclaw
-gateway=$prefix/bin/defenseclaw-gateway
-state=$prefix/lifecycle
+gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+state=/opt/cisco/defenseclaw/lifecycle
 umask 077
 mkdir -p "$state" && chmod 0700 "$state"
 # The Installer can write a payload file over the old one in place while a

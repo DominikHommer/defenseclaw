@@ -1182,9 +1182,15 @@ def _macos_pkg_postinstall(host: _Host) -> str:
     builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
     match = re.search(r"cat >\"\$SCRIPTS/postinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
     assert match, "the pkg postinstall heredoc was not found"
+    # The installed programs the postinstall gives new files before ensure.
+    prefix = host.tmp / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    for name in ("defenseclaw-gateway", "defenseclaw-hook", "defenseclaw-sensor-helper"):
+        _write_stub(prefix / "bin", name, "exit 0")
     return _rooted(
         match.group(1) + "\n",
         {
+            "prefix=/opt/cisco/defenseclaw": f"prefix={prefix}",
             "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway": f"gateway={host.gateway}",
             "state=/opt/cisco/defenseclaw/lifecycle": f"state={host.state}",
         },
