@@ -32,6 +32,28 @@ CHECKS = {
 OUTPUT_LIMIT = 128 * 1024
 
 
+def positive_pty_groups(value: object) -> bool:
+    if not isinstance(value, list) or len(value) != 2:
+        return False
+    for observation, phase in zip(value, ("initial", "resized"), strict=True):
+        if not isinstance(observation, dict):
+            return False
+        foreground = observation.get("foreground_pgrp")
+        group = observation.get("process_pgrp")
+        if (
+            observation.get("phase") != phase
+            or type(observation.get("isatty")) is not int
+            or observation["isatty"] != 1
+            or type(foreground) is not int
+            or type(group) is not int
+            or foreground <= 0
+            or group <= 0
+            or foreground != group
+        ):
+            return False
+    return True
+
+
 def owned_processes(binary: Path) -> list[dict[str, object]]:
     """Report only exact executable matches or commands naming this artifact."""
     identity = binary.stat()
@@ -161,6 +183,7 @@ def main() -> None:
         and set(payload["checks"]) == CHECKS
         and type(payload.get("landlock_abi")) is int
         and payload["landlock_abi"] >= 3
+        and positive_pty_groups(payload.get("pty_groups"))
         and payload.get("production_or_claude_qualification") is False
         and payload.get("proxy_or_descendant_cleanup_qualification") is False
         and not remaining

@@ -20,7 +20,7 @@ _SPEC.loader.exec_module(live)
 
 
 class FailureReceiptTests(TestCase):
-    def run_case(self, *, timeout=False, checks=None, abi=3):
+    def run_case(self, *, timeout=False, checks=None, abi=3, groups=None):
         with tempfile.TemporaryDirectory(prefix="dc-live-receipt-unit-") as temporary:
             root = Path(temporary)
             artifact = root / "artifact"
@@ -46,6 +46,12 @@ class FailureReceiptTests(TestCase):
                 "filesystem": "hard_requirement",
                 "network": "block",
                 "landlock_abi": abi,
+                "pty_groups": [
+                    {"phase": phase, "isatty": 1, "foreground_pgrp": 7, "process_pgrp": 7}
+                    for phase in ("initial", "resized")
+                ]
+                if groups is None
+                else groups,
                 "checks": sorted(live.CHECKS) if checks is None else checks,
                 "production_or_claude_qualification": False,
                 "proxy_or_descendant_cleanup_qualification": False,
@@ -100,3 +106,19 @@ class FailureReceiptTests(TestCase):
 
     def test_complete_synthetic_result_admitted_without_executing_artifact(self):
         self.assertTrue(self.run_case()["passed"])
+
+    def test_invalid_foreground_evidence_is_a_recorded_failure(self):
+        for group in (0, -1, True, "7"):
+            with self.subTest(group=group):
+                groups = [
+                    {"phase": phase, "isatty": 1, "foreground_pgrp": group, "process_pgrp": group}
+                    for phase in ("initial", "resized")
+                ]
+                self.assertFalse(self.run_case(groups=groups)["passed"])
+
+    def test_incomplete_or_reversed_foreground_evidence_is_refused(self):
+        initial = {"phase": "initial", "isatty": 1, "foreground_pgrp": 7, "process_pgrp": 7}
+        resized = dict(initial, phase="resized")
+        for groups in ([], [initial], [resized, initial], [initial, resized, resized], [True, True]):
+            with self.subTest(groups=groups):
+                self.assertFalse(self.run_case(groups=groups)["passed"])
