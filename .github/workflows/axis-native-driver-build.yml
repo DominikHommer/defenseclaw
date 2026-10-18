@@ -108,9 +108,9 @@ jobs:
               source_hashes[name] = hashlib.sha256(raw).hexdigest()
           admission = Path('test/e2e/axis/native-peer/driver/main.go').read_bytes()
           admission_sha = hashlib.sha256(admission).hexdigest()
-          if admission_sha != 'fa33392109aa8bc833aa92945afd7dab02d1f157ebd3778768bfc6111e3adda1':
+          if admission_sha != 'f3b7daf6dbc5373ec86ead329fc1482cf6aa57b73049e02416eb4e70c1362503':
               raise SystemExit('exact reviewed fixed-wrapper admission source required')
-          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'wrapper_image_sha256': '2017f419020e862b7d5bc77d01b76c522655c07eab2bbb7918869c51e6cc2e03', 'wrapper_image_size': 3379326, 'reviewed_registry_receipt_sha256': '4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
+          (artifact / 'PREBUILD.json').write_text(json.dumps({'source_sha256': source_hashes, 'source_files': sorted(sources), 'complete_directory_inventory_verified': True, 'admission_source_sha256': admission_sha, 'wrapper_image_sha256': '0197f67426caa1d0df19be5efc7bb7f9596caa67d50025a0522682ff9a1b9648', 'wrapper_image_size': 3387518, 'reviewed_registry_receipt_sha256': '4f6cfd2e44f8b374f43aeb0587a0bd0c8220f3fafa8956a7ed6a93c7207ab621', 'go_embed_or_native_inputs': False, 'driver_wrapper_or_sandbox_execution': False}, indent=2) + '\n')
           PY
       - name: Verify exact dependency closure without running the outer driver
         shell: bash
