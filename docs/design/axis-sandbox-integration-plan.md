@@ -31,9 +31,15 @@ The shared host-policy handoff now captures one projected configuration,
 resolved evaluator and exact execution requirements for planning and binding,
 without rereading pack sources. It refuses stale or changed option binding.
 The existing OpenShell manager now carries one owned resolution through initial
-policy and provisioning, including image, token and undo settings. Native
-execution still needs the real gateway generation/rotation transaction; live
-policy refresh and restart continue to apply current policy deliberately.
+policy and provisioning, including image, token and undo settings. The gateway now has an optional native launch owner that pairs the real
+published Config/N with one captured run-specific policy. Its reload transaction
+revokes first and covers token/v8 changes, configuration/generation publication
+and the commit tail; a later first-token writer refuses. Authority also requires
+the same process-wide scanner/provider generation and an unchanged resolved
+gateway token. An out-of-band change closes native admission. The native controller
+factory still does not install it or qualify a runtime. Managed daemons need
+their own policy-adoption transaction. Live policy refresh and restart continue
+to apply current policy deliberately.
 [Claude's review approved starting Stages 1 and 2](https://github.com/cisco-ai-defense/defenseclaw/pull/1307#issuecomment-6243746197).
 That approval does not cover merging or releasing AXIS support; later production
 stages retain their acceptance gates.

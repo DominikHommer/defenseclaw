@@ -24,8 +24,9 @@ guard retains its existing refresh behavior rather than becoming a frozen
 address snapshot. OpenShell `Manager.Create` now uses `packs.ResolveRun` for one
 owned policy/configuration tuple through image selection, token delivery,
 workspace planning and initial undo setup. Later live-policy refresh and start
-still deliberately resolve current policy. Native authority capture from the
-gateway's real generation and its rotation transaction remain unwired.
+still deliberately resolve current policy. The gateway's optional native launch owner now captures one actual Config/N
+publication and binds one owned run-specific policy. The native controller
+factory and qualified runtime catalog remain unavailable.
 
 The private resolver remains the egress authority. Inspection JSON omits its
 private evaluator state and cannot reconstruct an executable policy. It still
@@ -56,7 +57,21 @@ before success.
 publisher when it assigns a generation during the transaction; never predict
 that publisher's counter. Decide no-op changes before entering the callback.
 An incomplete transition, cancellation during it or failed owned cleanup closes
-the gate. These methods still require wiring to the actual gateway owner.
+the gate. The Sidecar reload commit now uses this transaction when a native owner is
+installed: revocation precedes token/v8 changes, Config and Generation
+publication, and the commit tail. Candidate failures and unchanged asset
+reloads stay outside it. First-token writers share one helper and refuse
+missing-token publication after owner installation. Installation requires a
+paired Config/N and resolved startup token before ConfigManager starts; an
+unpaired or tokenless current publication refuses authority. The Sidecar and
+process-wide scanner/provider generation must be the same publication; an
+out-of-band global replacement closes native admission. Its opaque binding
+also detects a changed resolved gateway token, including environment
+overrides, using a private per-owner HMAC key rather than exposing a token
+fingerprint. A deliberate token change needs an advancing actual publication.
+The revocation callback must not reenter ConfigManager or LaunchGate while their locks are
+held. No controller installs this owner in the customer path yet, and managed
+daemons still need their own adoption transaction.
 
 Trusted preparation resources register a private one-use handle with copied
 runtime/receipt evidence and the complete launch specification. Dispatch checks
