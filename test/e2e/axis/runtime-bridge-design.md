@@ -108,13 +108,15 @@ stream carrying stdin/output, resize and completion can adapt
 uses `gorilla/websocket`; no additional network listener or transport
 dependency is necessary merely to provide this stream.
 
-`buildSandboxRuntime` currently constructs a concrete OpenShell manager, and
-`sandboxRuntime.manager` is `*manager.Manager`.
-`managedSandboxController` also embeds that concrete manager. Extract narrow
-broker/registration/health and custody interfaces around those calls before
-wiring a second implementation. Preserve the managed registration,
-generation and listener-loss transactions. Copying the manager into a second
-provider would duplicate its authority and lifecycle behavior.
+`buildSandboxRuntime` still constructs the OpenShell manager. Runtime
+supervision and the managed controller now consume a shared controller
+interface, including policy refresh and managed views. OpenShell gateway
+cache/reconciliation/idle-stop maintenance has its own dependency, so those
+vendor operations are not requirements for a native controller. The concrete
+OpenShell ingress/broker setup and managed create/start preparation still need
+extraction before wiring a second implementation. Preserve the managed
+registration, generation and listener-loss transactions. Copying the manager
+into a second provider would duplicate its authority and lifecycle behavior.
 
 ## Host bridge transport and launch data
 

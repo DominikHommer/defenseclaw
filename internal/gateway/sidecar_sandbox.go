@@ -46,8 +46,29 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
-// The sandbox manager is the SandboxController the REST API drives.
-var _ SandboxController = (*manager.Manager)(nil)
+// sandboxRuntimeController is the execution owner's control-plane surface.
+// Policy refresh, managed views and supervision stay with that owner even when
+// its contained-process provider changes. Vendor gateway maintenance is a
+// separate optional dependency; a native provider need not invent a gateway.
+type sandboxRuntimeController interface {
+	SandboxController
+	Run(context.Context) error
+	RefreshPolicies()
+	ConfirmingView(*sandboxapi.Sandbox, string)
+	ExplainUnder(context.Context, *config.Config, sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+}
+
+type openShellGatewayMaintenance interface {
+	ForgetGatewayError()
+	GatewayStopped()
+	Reconcile(context.Context) error
+	ForeignSandboxesRunning() bool
+}
+
+var (
+	_ sandboxRuntimeController    = (*manager.Manager)(nil)
+	_ openShellGatewayMaintenance = (*manager.Manager)(nil)
+)
 
 // sandboxListenerHost is where the sandbox ingress and egress proxy
 // listen: OpenShell relays host.openshell.internal to host loopback.
@@ -57,8 +78,10 @@ const sandboxListenerHost = "127.0.0.1"
 // openshell.enabled: the hook ingress, the egress proxy and the manager.
 // It restarts with the API, whose restart rules cover the listener ports.
 type sandboxRuntime struct {
-	api        *APIServer
-	manager    *manager.Manager
+	api     *APIServer
+	manager sandboxRuntimeController
+	// openShell belongs only to an owner with an OpenShell vendor gateway.
+	openShell  openShellGatewayMaintenance
 	proxy      *egress.Proxy
 	egressAddr string
 	health     *SidecarHealth
@@ -365,7 +388,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	}
 	mgr.AttachProxy(proxy)
 	api.SetSandboxController(mgr)
-	rt.manager, rt.proxy = mgr, proxy
+	rt.manager, rt.proxy, rt.openShell = mgr, proxy, mgr
 	feed := mgr.Feed()
 	rt.fleet = mgr
 	if deps.telemetry != nil {
