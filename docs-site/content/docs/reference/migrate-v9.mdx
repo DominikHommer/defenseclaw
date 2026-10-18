@@ -662,13 +662,22 @@ unioned and the later entry's values win, as the gateway read the file. A
 provider already in `llm_providers.custom` keeps the values `config.yaml` sets
 and takes the overlay's other domains, keys, path overrides and headers, and
 the fields `config.yaml` leaves unset: the gateway applied `llm_providers` over
-the overlay, so `config.yaml`'s values were the ones in use.
+the overlay, so `config.yaml`'s values were the ones in use, except for
+`extra_headers`. Before 1.0.3, a provider entry that merged into one of the
+same name (a built-in provider, or an earlier entry of the overlay or of
+`config.yaml`) lost its headers: the overlay's headers were sent, and
+`config.yaml`'s headers of such an entry were not. Once the overlay is folded,
+every entry's headers are sent. The fold names each header that is sent from
+then on, so you can remove any you do not want.
 
-If the overlay sets a field that `config.yaml` sets to another value, nothing
-is moved: both files stay as they are, the gateway keeps merging the overlay,
-and the upgrade and `config migrate` name each provider and field (never the
-values). Keep the value you want in `config.yaml`, remove the other one from
-the overlay (or remove the file), then run `defenseclaw migrate`.
+If the overlay sets a field that `config.yaml` sets to another value, or names
+a provider twice with different values for one header, nothing is moved. Both
+files stay as they are, and the gateway keeps merging the overlay as earlier
+releases did, so no value in use changes, headers included. The upgrade and
+`config migrate` name each provider and field (never the values), say whose
+value is in use for each one, and list the headers that are also sent once the
+file is folded. Keep the value you want in `config.yaml`, remove the other one
+from the overlay (or remove the file), then run `defenseclaw migrate`.
 
 The same step runs on a config that is already `config_version` 9 when a
 hand-written overlay sits next to it: `defenseclaw migrate --check` lists it
