@@ -734,16 +734,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
-		// sources. A directory proof is relevant when it names the
-		// protected directory; an ordinary directory fact cannot make a
-		// dynamic write target safe after a shell directory change.
+		// sources. A directory proof is relevant once the hook observed a
+		// different logical directory or a protected starting directory.
 		// Generic ordinary or unknown write targets do not override the
 		// established shell-ordering decision. The process-cwd alias needs
 		// its own client target to be provable.
-		procAlias := false
+		changedDirectory := false
 		for key := range request.ResolvedWriteTargets {
-			if strings.HasPrefix(key, "/proc/self/cwd/") {
-				procAlias = true
+			if strings.HasPrefix(key, hookpaths.DirectoryFactPrefix) &&
+				key != hookpaths.DirectoryFactPrefix+facts.CWD {
+				changedDirectory = true
 				break
 			}
 		}
@@ -752,8 +752,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
-				directoryFact && canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh")) ||
-				operand == hookpaths.CWDKey && procAlias ||
+				directoryFact && (changedDirectory ||
+					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
+				operand == hookpaths.CWDKey && changedDirectory ||
 				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
@@ -901,6 +902,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// operator contains a greater-than sign.
 		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
 			return true
+		}
+		if dynamic && request.Connector == "claudecode" && request.ProtectedHomeHook &&
+			request.ResolvedWriteTargets != nil {
+			// A physical-directory fact can resolve a static write after cd,
+			// but it cannot prove a dynamic redirect target is ordinary.
+			// Preserve the conservative decision from the header-free walk.
+			_, unknown := hookpaths.ShellDirectoryWriteOperands(
+				input.Command, input.CWD, input.ActiveHome, nil, false, cannotResolveLocally,
+			)
+			if unknown {
+				return true
+			}
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
