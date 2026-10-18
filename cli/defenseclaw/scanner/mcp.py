@@ -38,10 +38,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
 
@@ -1922,8 +1924,11 @@ def _analysis_gap(errors: list[tuple[str, str]], results: list[object], scanner:
         ran = getattr(result, "analyzers", None)
         if not isinstance(ran, list):
             continue
-        ran_names = {str(getattr(a, "value", a)) for a in ran}
-        if any(name not in ran_names for name in expected):
+        # The SDK lists the selected analyzers (enum members) and then the
+        # name of each custom analyzer that ran; a custom analyzer may share
+        # an enum member's value ("yara"), so only plain names count.
+        ran_custom = Counter(a for a in ran if isinstance(a, str) and not isinstance(a, Enum))
+        if Counter(expected) - ran_custom:
             return "the DefenseClaw YARA rules did not run on a tool of the server"
     return ""
 

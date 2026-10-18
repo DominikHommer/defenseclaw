@@ -50,10 +50,17 @@ def test_any_failed_analyzer_has_no_verdict(message: str) -> None:
 
 
 def test_custom_rules_that_did_not_run_have_no_verdict() -> None:
+    # The SDK lists the selected analyzers as enum members, then the name of
+    # each custom analyzer that ran; the bundled rules share the "yara" value.
+    import enum
+
+    class Selected(str, enum.Enum):
+        YARA = "yara"
+
     scanner = SimpleNamespace(get_custom_analyzers=lambda: [_CustomRules()])
     with pytest.raises(mcp.MCPScanIncompleteError, match="DefenseClaw YARA rules did not run"):
-        mcp._raise_if_analysis_incomplete("decoy", [], [_tool_result("ping", ["yara"])], scanner)
-    mcp._raise_if_analysis_incomplete("decoy", [], [_tool_result("ping", ["YARA", "yara"])], scanner)
+        mcp._raise_if_analysis_incomplete("decoy", [], [_tool_result("ping", [Selected.YARA])], scanner)
+    mcp._raise_if_analysis_incomplete("decoy", [], [_tool_result("ping", [Selected.YARA, "yara"])], scanner)
 
 
 def test_complete_scan_and_llm_skip_keep_their_verdict() -> None:
