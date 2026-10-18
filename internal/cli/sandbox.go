@@ -162,6 +162,15 @@ with --output json it prints the pull's result.`
 }
 
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
+	if flag := cmd.Flags().Lookup("runtime"); flag != nil && flag.Changed {
+		if _, err := sandboxcli.CheckRunRuntime(flag.Value.String(), ""); err != nil {
+			var exit *sandboxcli.ExitError
+			if errors.As(err, &exit) {
+				return withExitCode(err, exit.Code)
+			}
+			return withExitCode(err, 3)
+		}
+	}
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
 		return withExitCode(err, 3)
 	}
@@ -514,6 +523,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 		}),
 	}
 	f := cmd.Flags()
+	f.Var(&onceString{p: &o.Runtime, more: "choose one runtime for the new session"}, "runtime", "sandbox runtime: auto, openshell or axis (default: configured runtime; AXIS qualification pending)")
 	f.StringVar(&o.Name, "name", "", "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)")
 	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull")
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")

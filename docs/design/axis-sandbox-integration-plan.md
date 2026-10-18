@@ -6,7 +6,15 @@ credentials, and telemetry; runtime adapters supply the execution boundary.
 After selecting AXIS as the default, the customer continues to use
 `defenseclaw sandbox run claude`.
 
-Status: draft design, October 17, 2026. This PR contains the plan only.
+Status: implementation draft, October 18, 2026. The single AXIS PR contains this
+plan, shared policy/configuration and native boundary work. Current native test
+results are recorded in [the manual evidence](../../test/e2e/axis/mxc-v1-manual-results.md)
+and [the Windows evidence](../../test/e2e/axis/windows/mxc-v1/manual-results.md).
+The run command now accepts `--runtime`; AXIS execution remains unavailable while
+its complete policy, hook, credential and agent paths are being qualified.
+On Windows, implicit/configured selection still encounters the legacy platform
+guard before configuration is loaded; an explicit `--runtime axis` reports the
+AXIS qualification refusal. This selection work does not enable native execution.
 [Claude's review approved starting Stages 1 and 2](https://github.com/cisco-ai-defense/defenseclaw/pull/1307#issuecomment-6243746197).
 That approval does not cover merging or releasing AXIS support; later production
 stages retain their acceptance gates.

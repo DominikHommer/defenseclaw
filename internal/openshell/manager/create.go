@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
 
 // copyWorkRoot is where copy mode uploads the project: the upload runs as
@@ -85,7 +86,17 @@ func (r *rollback) run(m *Manager, sandbox string) {
 // step it completed is rolled back when a later one fails.
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
 	cfg := m.config()
-	if !cfg.OpenShell.Enabled {
+	selected, err := sandboxruntime.Select(sandboxruntime.ID(req.Runtime), sandboxruntime.ID(cfg.SandboxDefaultRuntime()))
+	if err != nil {
+		return nil, err
+	}
+	// This manager owns the current OpenShell execution route. Reject a native
+	// selection before listeners, project reads, bindings, credentials or a
+	// gateway lookup; config enablement alone is never adapter qualification.
+	if selected != sandboxruntime.OpenShell {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeUnavailable, "AXIS sandbox execution is not available: its native launch contract is still being qualified")
+	}
+	if !cfg.SandboxRuntimeEnabled(string(selected)) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
 	if err := m.listenersReady(); err != nil {

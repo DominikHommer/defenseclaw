@@ -174,6 +174,9 @@ type AdminStatus struct {
 // --credential values) are handed to OpenShell as provider credentials and
 // never stored or echoed by the daemon.
 type CreateRequest struct {
+	// Runtime selects the provider for a new session. Empty/auto uses the
+	// configured default; an unavailable provider never selects another route.
+	Runtime string `json:"runtime,omitempty"`
 	// Name is the sandbox name, at most openshell.MaxSandboxNameLen
 	// characters; empty generates <repo>-<rand4>.
 	Name string `json:"name,omitempty"`

@@ -178,6 +178,11 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["doctor", "--json"],
         ["doctor", "-o", "json", "--fix", "-y"],
         ["run", "claude"],
+        ["run", "claude", "--runtime", "openshell"],
+        ["run", "claude", "--runtime=auto"],
+        ["run", "claude", "--", "--runtime", "axis"],
+        ["run", "claude", "--prompt", "--runtime", "--runtime", "openshell"],
+        ["run", "claude", "-yp", "--runtime", "--runtime", "openshell"],
         ["run", "claude", "--copy", "--name", "fix-tests", "--", "--model", "sonnet"],
         ["run", "codex", "--host-port", "5432,6379", "--host-port", "8080", "--context", "~/code/lib"],
         ["run", "claude", "-d", "-p", "fix the failing tests", "--credential", "STRIPE_API_KEY=api.stripe.com"],
@@ -229,6 +234,44 @@ def test_stub_execs_the_gateway_with_the_same_argv(exec_capture: list[list[str]]
     result = CliRunner().invoke(sandbox, args, obj=AppContext(), catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert exec_capture == [["/opt/dc/defenseclaw-gateway", "/opt/dc/defenseclaw-gateway", "sandbox", *args]]
+
+
+@pytest.mark.parametrize("platform", ["windows", "linux", "macos"])
+def test_axis_runtime_refuses_before_gateway_resolution(monkeypatch, platform: str) -> None:
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: platform)
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary", lambda: pytest.fail("gateway lookup before AXIS refusal")
+    )
+    monkeypatch.setattr(cmd_sandbox, "_execv", lambda *_: pytest.fail("AXIS launched via a host fallback"))
+    result = CliRunner().invoke(sandbox, ["run", "claude", "--runtime", "axis"], obj=AppContext())
+    assert result.exit_code == 3
+    assert "AXIS sandbox execution is not available" in result.output
+
+
+def test_unknown_runtime_refuses_before_gateway_resolution(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary", lambda: pytest.fail("gateway lookup before runtime validation")
+    )
+    result = CliRunner().invoke(sandbox, ["run", "claude", "--runtime", "other"], obj=AppContext())
+    assert result.exit_code == 2
+    assert "--runtime" in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--runtime", "axis", "--runtime", "openshell"],
+        ["--runtime=openshell", "--runtime=axis"],
+        ["--runtime", "openshell", "--runtime=auto"],
+    ],
+)
+def test_duplicate_runtime_refuses_before_gateway_resolution(monkeypatch, args: list[str]) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary", lambda: pytest.fail("gateway lookup for repeated runtime")
+    )
+    result = CliRunner().invoke(sandbox, ["run", "claude", *args], obj=AppContext())
+    assert result.exit_code == 2
+    assert "choose one runtime" in result.output
 
 
 def test_the_root_cli_forwards_through_the_stub(exec_capture: list[list[str]], monkeypatch) -> None:

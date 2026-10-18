@@ -209,6 +209,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("harness"), _Arg("harness_args", required=False, many=True)),
         flags=(
             _Flag(
+                "runtime",
+                "string",
+                "sandbox runtime: auto, openshell or axis (default: configured runtime; AXIS qualification pending)",
+                metavar="RUNTIME",
+            ),
+            _Flag(
                 "name",
                 "string",
                 "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)",
@@ -796,6 +802,7 @@ def _click_view(command: click.Command, args: list[str]) -> list[str]:
                 by_opt[opt] = param
     out: list[str] = []
     takes_value = False
+    runtime_seen = False
     for i, arg in enumerate(args):
         if takes_value:
             # The value of the option before it, whatever it looks like.
@@ -807,6 +814,20 @@ def _click_view(command: click.Command, args: list[str]) -> list[str]:
             break
         name, eq, value = arg.partition("=")
         param = by_opt.get(name) if arg.startswith("-") else None
+        if param is None and arg.startswith("-") and not arg.startswith("--"):
+            # A short-option bundle can end in an option whose next token is
+            # its value, e.g. -yp --runtime. That token is not a runtime flag.
+            for offset, short in enumerate(arg[1:]):
+                bundled = by_opt.get("-" + short)
+                if bundled is None:
+                    break
+                if bundled.go_type != "bool":
+                    takes_value = offset == len(arg) - 2
+                    break
+        if param is not None and param.name == "runtime":
+            if runtime_seen:
+                raise click.BadParameter("choose one runtime for the new session", param_hint="--runtime")
+            runtime_seen = True
         if param is not None and param.go_type == "bool" and eq:
             if value in _PFLAG_TRUE:
                 out.append(name)
@@ -865,6 +886,17 @@ def _help_text(cmd: _Cmd) -> str:
 def _forward(ctx: click.Context, **_params: Any) -> NoReturn:
     command = ctx.command
     assert isinstance(command, GatewayCommand)
+    if command.gateway_path == ("run",):
+        requested = _params.get("runtime") or ""
+        if requested not in ("", "auto", "openshell", "axis"):
+            raise click.BadParameter("choose auto, openshell or axis", param_hint="--runtime")
+        if requested == "axis":
+            ux.echo(
+                "AXIS sandbox execution is not available: native policy enforcement and the Claude "
+                "integration are still being qualified",
+                err=True,
+            )
+            raise SystemExit(UNSUPPORTED_EXIT_CODE)
     raw = ctx.meta.get(_RAW_ARGS_KEY, ())
     exec_gateway(("sandbox", *command.gateway_path, *raw))
 
