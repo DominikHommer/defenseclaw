@@ -619,6 +619,17 @@ Uninstall does the following on every OS:
   entries stay. On Linux and macOS it restores the preimages it recorded.
 - It stops and removes the services.
 
+The registrations go before the hook binary and the runtime descriptor: up to
+that point a hook started from a registration gets the gateway's decision or
+is blocked. An agent session that started before the uninstall keeps the hook
+registration it read at its start until it is restarted. Once the uninstall
+has removed the hook binary, such a session runs that hook as a missing
+command, which the agent treats as a non-blocking hook error, so its tool calls
+run without DefenseClaw. Restart the agents after an uninstall. To go back to
+an older release without that window, use [Roll back](#roll-back)
+instead of an uninstall followed by an install: the rollback replaces the
+release in place and the hooks stay registered.
+
 On a standalone deployment it also removes the config, credentials, most
 machine state and logs, with the kept-sandbox exception below.
 Each user's DefenseClaw folder (`~/.defenseclaw`) and per-user binaries stay.
