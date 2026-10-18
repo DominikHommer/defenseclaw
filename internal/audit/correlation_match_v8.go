@@ -489,26 +489,33 @@ func (repo *CorrelationRepository) matchIdentifiers(ctx context.Context, connect
 		args = append(args, string(mirror.Rail), mirror.EventName)
 	}
 	// A session or agent identifier matches every earlier event of that
-	// session, and reading all of them on each hook made the hook path slower
-	// as the session grew (GAP-0186). classifyCorrelationMatches needs only the
-	// earliest match and whether any other match has a different logical
-	// group, so read those two rows.
+	// session. classifyCorrelationMatches needs only whether the matches span
+	// more than one logical group (then the result is ambiguous and uses no
+	// row) and, when they do not, the earliest match. So read any one match,
+	// then any match in another group; both reads stop at their first row.
+	// Only matches that all share one group are sorted for the earliest one.
+	// Sorting every match first made each hook of a long session read and sort
+	// all of the session's events, and the per-call cost grew with the session
+	// (rel-1-0-3 GAP-0247, GAP-0186).
+	const columns = `SELECT event.semantic_event_id, event.logical_group_id, event.received_time_unix_nano `
 	from := `FROM correlation_identifiers AS identifier
 		JOIN correlation_events AS event ON event.semantic_event_id=identifier.semantic_event_id
 		WHERE identifier.connector_instance_id=? AND (` + strings.Join(clauses, " OR ") + `)` + filters
-	rows, err := repo.queryCorrelationMatchRows(ctx, `SELECT event.semantic_event_id,
-		event.logical_group_id, event.received_time_unix_nano `+from+`
-		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 1`, args...)
+	rows, err := repo.queryCorrelationMatchRows(ctx, columns+from+` LIMIT 1`, args...)
 	if err != nil || len(rows) == 0 {
 		return rows, err
 	}
-	other, err := repo.queryCorrelationMatchRows(ctx, `SELECT event.semantic_event_id,
-		event.logical_group_id, event.received_time_unix_nano `+from+`
-		AND event.logical_group_id<>? LIMIT 1`, append(args, rows[0].logical)...)
+	otherArgs := append(append(make([]any, 0, len(args)+1), args...), rows[0].logical)
+	other, err := repo.queryCorrelationMatchRows(ctx, columns+from+`
+		AND event.logical_group_id<>? LIMIT 1`, otherArgs...)
 	if err != nil {
 		return nil, err
 	}
-	return append(rows, other...), nil
+	if len(other) != 0 {
+		return append(rows, other...), nil
+	}
+	return repo.queryCorrelationMatchRows(ctx, columns+from+`
+		ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT 1`, args...)
 }
 
 func (repo *CorrelationRepository) matchTraceSpan(ctx context.Context, connector ConnectorInstanceID, traceID, spanID string) ([]correlationMatchRow, error) {
