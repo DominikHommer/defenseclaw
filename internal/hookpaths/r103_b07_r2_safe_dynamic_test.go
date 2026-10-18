@@ -1,0 +1,131 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestR103B07R2ComputedProjectDirectoryRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "tmp"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"FG3-FIX-SHELL-N101", `d=$(printf %s "$PWD"); printf x > "$d/tmp/output.txt"`},
+		{"FG3-FIX-SHELL-N102", `d=$(dirname "$PWD/tmp/leaf"); printf x > "$d/output.txt"`},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok || targets[TruncatedKey] != "" {
+				t.Fatalf("target proof incomplete: %v, decode=%v", targets, ok)
+			}
+			path := filepath.Join(cwd, "tmp", "output.txt")
+			if targets[path] != path {
+				t.Fatalf("target %q = %q, all=%v", path, targets[path], targets)
+			}
+		})
+	}
+}
+
+func TestR103B07R2LiteralWorkspaceLoopRowBReal00080(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	var dirs []string
+	for i := 0; i < 20; i++ {
+		name := "workspace" + string(rune('a'+i))
+		dirs = append(dirs, name)
+		if err := os.MkdirAll(filepath.Join(cwd, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	command := `for d in ` + strings.Join(dirs, " ") + `; do printf x > "$d/out.txt"; done`
+	payload, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": command},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := Decode(Resolve(payload))
+	if !ok || targets[TruncatedKey] != "" {
+		t.Fatalf("B-REAL-00080 target proof incomplete: %v, decode=%v", targets, ok)
+	}
+	for _, dir := range dirs {
+		path := filepath.Join(cwd, dir, "out.txt")
+		if targets[path] != path {
+			t.Fatalf("B-REAL-00080 target %q = %q", path, targets[path])
+		}
+	}
+}
+
+func TestR103B07R2ProjectValueRows(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, tc := range []struct{ id, command string }{
+		{"FG3-HOLD3-N0052", `x=out; printf x > "${x:0}/entry.txt"`},
+		{"FG3-HOLD3-N0056", `printf x > "$PWD/out/entry.txt"`},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"tool_name": "Bash", "cwd": cwd,
+				"tool_input": map[string]string{"command": tc.command},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := Decode(Resolve(payload))
+			if !ok || targets[TruncatedKey] != "" {
+				t.Fatalf("target proof incomplete: %v, decode=%v", targets, ok)
+			}
+			path := filepath.Join(cwd, "out", "entry.txt")
+			if targets[path] != path {
+				t.Fatalf("target %q = %q, all=%v", path, targets[path], targets)
+			}
+		})
+	}
+}
+
+func TestR103B07R2ReadAfterWriteRowV20567A01(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(cwd, "out"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	command := `printf '%s\n' out/entry.txt > choice.txt; read -r d < choice.txt; printf x > "$d"`
+	payload, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": cwd,
+		"tool_input": map[string]string{"command": command},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := Decode(Resolve(payload))
+	if !ok || targets[TruncatedKey] != "" {
+		t.Fatalf("V2-0567-A01 target proof incomplete: %v, decode=%v", targets, ok)
+	}
+	path := filepath.Join(cwd, "out", "entry.txt")
+	if targets[path] != path {
+		t.Fatalf("V2-0567-A01 target %q = %q, all=%v", path, targets[path], targets)
+	}
+}

@@ -205,6 +205,18 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 		if len(names) == 0 {
 			return true
 		}
+		// Count the Cartesian product before expanding it. A loop with more
+		// than sixteen literal values is still a bounded write when the total
+		// fits in the wire format; an excessive product must remain unknown.
+		product := 1
+		for _, name := range names {
+			values := candidates.values[name]
+			if len(values) == 0 || len(values) > MaxWriteTargets/product {
+				unknown = true
+				return true
+			}
+			product *= len(values)
+		}
 		var expandCandidates func(int, shellVariables)
 		expandCandidates = func(index int, vars shellVariables) {
 			if index == len(names) {
@@ -221,7 +233,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 			}
 			name := names[index]
 			values := candidates.values[name]
-			if candidates.unknown[name] || len(values) == 0 || len(values) > 16 {
+			if candidates.unknown[name] {
 				unknown = true
 			}
 			for _, value := range values {
@@ -505,7 +517,7 @@ func staticShellParam(param *syntax.ParamExp, haveHome bool, vars shellVariables
 	}
 	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
 		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
-		param.Index != nil || len(param.Modifiers) != 0 || param.Slice != nil ||
+		param.Index != nil || len(param.Modifiers) != 0 || !shellIdentitySlice(param.Slice) ||
 		param.Repl != nil || param.Names != 0 {
 		return false
 	}
@@ -761,6 +773,9 @@ func shellVariableCandidates(file *syntax.File, cwd, home string) shellVariableC
 		}
 		return true
 	})
+	if cwdStable && filepath.IsAbs(cwd) {
+		candidates.add("PWD", cwd)
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.Assign:
@@ -855,7 +870,7 @@ func shellReadCandidates(file *syntax.File, cwd, home string) map[*syntax.CallEx
 	if !filepath.IsAbs(cwd) {
 		return result
 	}
-	for _, stmt := range file.Stmts {
+	for index, stmt := range file.Stmts {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || len(call.Args) < 2 || len(stmt.Redirs) != 1 {
 			continue
@@ -895,6 +910,12 @@ func shellReadCandidates(file *syntax.File, cwd, home string) map[*syntax.CallEx
 		case syntax.WordHdoc:
 			value = path
 		case syntax.RdrIn:
+			if index > 0 {
+				if written, ok := shellPreviousWrittenReadValue(file.Stmts[index-1], path, cwd, home); ok {
+					value = written
+					break
+				}
+			}
 			info, err := os.Stat(OperandPath(path, cwd))
 			if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
 				continue
@@ -918,6 +939,34 @@ func shellReadCandidates(file *syntax.File, cwd, home string) map[*syntax.CallEx
 		result[call] = map[string]string{name: value}
 	}
 	return result
+}
+
+// A simple immediately preceding writer determines the first line a read
+// sees, even when the input file did not exist when the hook ran.
+func shellPreviousWrittenReadValue(stmt *syntax.Stmt, path, cwd, home string) (string, bool) {
+	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 1 ||
+		stmt.Redirs[0].Op != syntax.RdrOut || stmt.Redirs[0].Word == nil {
+		return "", false
+	}
+	name, ok := StaticWord(stmt.Redirs[0].Word, home)
+	if !ok || OperandPath(name, cwd) != OperandPath(path, cwd) {
+		return "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 {
+		return "", false
+	}
+	words, ok := shellStaticWords(call.Args, home)
+	if !ok {
+		return "", false
+	}
+	switch {
+	case len(words) == 2 && programBase(words[0]) == "echo":
+		return words[1], true
+	case len(words) == 3 && programBase(words[0]) == "printf" && words[1] == `%s\n`:
+		return words[2], true
+	}
+	return "", false
 }
 
 func shellArrayCandidateWord(word *syntax.Word, vars shellVariables) (string, bool) {
@@ -964,6 +1013,10 @@ func (c *shellVariableCandidateSet) add(name, value string) {
 		c.seen[name] = map[string]bool{}
 	}
 	if c.seen[name][value] {
+		return
+	}
+	if len(c.values[name]) >= MaxWriteTargets {
+		c.unknown[name] = true
 		return
 	}
 	c.seen[name][value] = true
@@ -1041,6 +1094,9 @@ func shellComputedAssignValue(word *syntax.Word, cwd, home string) (string, bool
 		if len(words) == 2 && !strings.ContainsAny(words[1], "%\\") {
 			return words[1], true
 		}
+		if len(words) == 3 && words[1] == "%s" {
+			return words[2], true
+		}
 	case "basename":
 		if len(words) == 2 && words[1] != "" {
 			return filepath.Base(words[1]), true
@@ -1048,6 +1104,10 @@ func shellComputedAssignValue(word *syntax.Word, cwd, home string) (string, bool
 	case "realpath":
 		if len(words) == 2 && words[1] != "" {
 			return ResolveWriteTarget(OperandPath(words[1], cwd))
+		}
+	case "dirname":
+		if len(words) == 2 && words[1] != "" && !strings.HasPrefix(words[1], "-") {
+			return filepath.Dir(words[1]), true
 		}
 	}
 	return "", false
@@ -1445,7 +1505,7 @@ func shellWordDynamicParamNames(word *syntax.Word, home string) ([]string, bool)
 func shellDynamicParamName(param *syntax.ParamExp, home string) (string, bool) {
 	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
 		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
-		len(param.Modifiers) != 0 || param.Slice != nil ||
+		len(param.Modifiers) != 0 || !shellIdentitySlice(param.Slice) ||
 		param.Repl != nil || param.Names != 0 {
 		return "", false
 	}
@@ -1473,6 +1533,19 @@ func shellDynamicParamName(param *syntax.ParamExp, home string) (string, bool) {
 	}
 	_, ok := staticShellWordWithVars(param.Exp.Word, home, nil, shellVariablePoison{})
 	return name, ok
+}
+
+// ${name:0} preserves a scalar parameter exactly. Other slices can change
+// a path prefix and are left unresolved.
+func shellIdentitySlice(slice *syntax.Slice) bool {
+	if slice == nil {
+		return true
+	}
+	if slice.Length != nil {
+		return false
+	}
+	offset, ok := slice.Offset.(*syntax.Word)
+	return ok && offset.Lit() == "0"
 }
 
 func shellVolatileParam(name string) bool {
