@@ -26,11 +26,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// GAP-0709: a provider that the legacy custom-providers.json names twice, or
-// that llm_providers.custom already has, becomes one entry with the 0.8.x
-// overlay merge rules (configs.ApplyOverlay: the lists are unioned and the
-// overlay's values win). The migration skipped the second entry, so its
-// domains, env keys and settings were lost when the overlay was retired.
+// GAP-0709: a provider that the legacy custom-providers.json names twice
+// becomes one entry with the 0.8.x overlay merge rules (configs.ApplyOverlay:
+// the lists are unioned and the later entry's values win); one that
+// llm_providers.custom already has takes the overlay's other items and the
+// fields config leaves unset (config's values were the ones in use, GAP-0163;
+// a field both set differently is refused, see
+// TestMigrateV9KeepsAConflictingOverlayOutOfAV8Migration). The migration
+// skipped the second entry, so its domains, env keys and settings were lost
+// when the overlay was retired.
 func TestMigrateV9MergesSameNameOverlayProviders(t *testing.T) {
 	type tlsBlock struct {
 		CACertFile string `yaml:"ca_cert_file"`
@@ -75,10 +79,11 @@ func TestMigrateV9MergesSameNameOverlayProviders(t *testing.T) {
 			config: "llm_providers:\n  custom:\n  - name: acme\n    domains: [llm.acme.internal]\n    env_keys: [ACME_KEY]\n" +
 				"    base_url: https://llm.acme.internal/v1\n    available_models: [acme-small]\n",
 			overlay: `{"providers":[{"name":"Acme","domains":["eu.llm.acme.internal"],"env_keys":["ACME_EU_KEY"],
-   "base_url":"https://eu.llm.acme.internal/v1","allowed_requests":["chat"]}]}`,
+   "base_url":"https://llm.acme.internal/v1","allowed_requests":["chat"],"extra_headers":{"x-team":"sec"}}]}`,
 			want: provider{
 				Name: "acme", Domains: []string{"llm.acme.internal", "eu.llm.acme.internal"},
-				EnvKeys: []string{"ACME_KEY", "ACME_EU_KEY"}, BaseURL: "https://eu.llm.acme.internal/v1",
+				EnvKeys: []string{"ACME_KEY", "ACME_EU_KEY"}, BaseURL: "https://llm.acme.internal/v1",
+				ExtraHeaders:    map[string]string{"x-team": "sec"},
 				AllowedRequests: []string{"chat"}, AvailableModels: []string{"acme-small"},
 			},
 		},

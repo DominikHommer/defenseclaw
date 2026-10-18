@@ -26,8 +26,10 @@ llm_providers:
     - name: acme
       domains:
         - llm.acme.internal
+        - us.llm.acme.internal
       env_keys:
         - ACME_KEY
+        - ACME_US_KEY
       base_url: https://llm.acme.internal/v1
       available_models:
         - acme-small
