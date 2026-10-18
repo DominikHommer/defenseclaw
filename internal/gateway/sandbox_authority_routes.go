@@ -540,6 +540,11 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	access := sandboxRequestAccess(floor)
+	if sandboxDaemonOutdated(r) {
+		logOutdatedSandboxDaemon(peer, sandboxrelay.PathPolicyResolve)
+		refuse(sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated, access)
+		return
+	}
 	// Where sandboxes can run for the caller, and on which driver: the
 	// gateway's view under the caller's floor (a profile's driver_fallback:
 	// none applies here), then the driver the daemon chose at sandbox start.
@@ -733,18 +738,6 @@ func (a *APIServer) handleSandboxDeleted(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sandboxLiveFields are the floor fields a running sandbox applies at
-// once.
-func sandboxLiveFields(f config.OpenShellAdminConfig) sandboxrelay.LiveFields {
-	return sandboxrelay.LiveFields{
-		EgressBlock: slices.Clone(f.EgressBlock), EgressAllowOnly: slices.Clone(f.EgressAllowOnly),
-		BlockLargeUploads: f.BlockLargeUploads, AllowUnblock: f.AllowUnblock, AllowLearnMode: f.AllowLearnMode,
-		UserApprovals: f.UserApprovals, OnSilence: f.OnSilence, MaxSilenceAfter: f.MaxSilenceAfter,
-		ProcessTree: f.ProcessTree, ForeignSandboxes: f.ForeignSandboxes, DeleteStoppedAfter: f.DeleteStoppedAfter,
-		RequestAccess: sandboxRequestAccess(f),
-	}
-}
-
 // sandboxRevokedText is the user text of a revoked registration: what the
 // policy no longer allows when a re-match revoked it.
 func sandboxRevokedText(auth *sandboxAuthority, reg sandboxreg.Registration) string {
@@ -760,7 +753,7 @@ func sandboxRevokedText(auth *sandboxAuthority, reg sandboxreg.Registration) str
 }
 
 // handleSandboxCurrent answers GET policy/current?registration=ID: the
-// live fields of the caller's registration now, its generation, and
+// complete floor of the caller's registration now, its generation, and
 // whether it is revoked or must stop.
 func (a *APIServer) handleSandboxCurrent(w http.ResponseWriter, r *http.Request) {
 	a.serveSandboxCurrent(w, r, r.URL.Query().Get(sandboxrelay.RegistrationQuery), false)
@@ -801,6 +794,33 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 		}
 		reg = a.sandboxRematchIfDue(r.Context(), auth, peer, reg)
 	}
+	// A daemon below the floor contract gets a revocation and may report
+	// its sandbox stopped, which ends the lease at once; it never renews a
+	// running sandbox or confirms a floor it cannot carry (GAP-0182).
+	outdated := sandboxDaemonOutdated(r)
+	if outdated && reg.State != sandboxreg.StateRevoked && (!report || state.Running) {
+		refuseOutdatedSandboxDaemon(w, peer, r.URL.Path)
+		return
+	}
+	cfg := a.liveBaseConfig(r.Context())
+	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
+	if err != nil {
+		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+		return
+	}
+	var requiredPack json.RawMessage
+	if floor.RequiredPack != "" && !packs.IsBuiltin(floor.RequiredPack) && reg.State != sandboxreg.StateRevoked {
+		eff, _, err := sandboxRegistrationEffective(cfg, auth, peer, reg, floor)
+		if err != nil || eff.RequiredPackContent() == nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+		requiredPack, err = json.Marshal(eff.RequiredPackContent())
+		if err != nil {
+			writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
+			return
+		}
+	}
 	// Every live registration's daemon polls once a minute: the fleet's
 	// active-sandbox gauge is exported again on them, so a sandbox that runs
 	// quietly does not go stale on the Sandboxes board (#1241).
@@ -822,22 +842,20 @@ func (a *APIServer) serveSandboxCurrent(w http.ResponseWriter, r *http.Request, 
 	// A running sandbox counts again on its daemon's first poll after a
 	// gateway restart, not only at its next phase change (#1241).
 	a.trackManagedSandboxActive(r.Context(), auth, peer.UID, reg)
-	cfg := a.liveBaseConfig(r.Context())
-	floor, _, err := sandboxFloorFor(cfg, reg.Profile)
-	if err != nil {
-		writeSandboxReason(w, sandboxrelay.ReasonPolicyUnloadable, sandboxTextUnloadable)
-		return
-	}
 	provisional := reg.Provisional
 	current := sandboxrelay.CurrentPolicy{
 		V: sandboxrelay.WireVersion, Generation: a.sandboxViewGeneration(cfg, reg),
-		Live: sandboxLiveFields(floor), Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
+		Floor: &floor, RequiredPack: requiredPack, Digest: reg.EffectiveDigest, Profile: reg.Profile, Provisional: &provisional,
 		UpdatedAt: sandboxreg.PolicyUpdatedAt(reg),
 	}
 	minProfile := floor.MinProfile
 	current.MinProfile = &minProfile
-	if reg.State == sandboxreg.StateRevoked {
+	switch {
+	case reg.State == sandboxreg.StateRevoked:
 		current.Revoked, current.RevokedReason = true, sandboxRevokedText(auth, reg)
+	case outdated:
+		refuseOutdatedSandboxDaemon(w, peer, r.URL.Path)
+		return
 	}
 	a.writeJSON(w, http.StatusOK, current)
 }
@@ -1537,6 +1555,10 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	now := auth.clock()
+	if auth.eventReplay.duplicate(peer.UID, batch, now) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	refused, lifecycle := 0, false
 	for i, ev := range batch.Events {
 		if unreadable[i] {

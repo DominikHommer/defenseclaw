@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -91,7 +92,20 @@ const (
 	// SandboxHeaderPrefix: every header the sandbox sends with this prefix
 	// is dropped by the relay.
 	SandboxHeaderPrefix = "X-DefenseClaw-Sandbox-"
+	// DaemonContractHeader carries the DaemonContract of the daemon on
+	// every call it makes, relayed calls included (the sandbox's own value
+	// is dropped with the rest of SandboxHeaderPrefix).
+	DaemonContractHeader = "X-DefenseClaw-Sandbox-Daemon-Contract"
 )
+
+// DaemonContract is what the daemon does with a CurrentPolicy, as
+// DaemonContractHeader states it. A daemon that sends no header (1.0.2 and
+// earlier) adopts only the live fields of the floor and marks the
+// registration confirmed; contract 2 adopts the complete Floor and
+// RequiredPack and refuses an answer without them. The managed gateway
+// refuses new sandboxes, renewals and policy confirmations to a daemon
+// below this contract with ReasonDaemonOutdated (GAP-0182).
+const DaemonContract = 2
 
 // ForwardHeaders is the allowlist of request headers the relay copies from
 // the sandbox's request to the gateway (canonical MIME form). Nothing else
@@ -509,14 +523,19 @@ type BindRequest struct {
 	Driver string `json:"driver,omitempty"`
 }
 
-// CurrentPolicy answers GET policy/current: the registration's live fields
-// now.
+// CurrentPolicy answers GET policy/current: the registration's complete
+// policy floor now.
 type CurrentPolicy struct {
-	V             int        `json:"v"`
-	Generation    uint64     `json:"generation"`
-	Revoked       bool       `json:"revoked,omitempty"`
-	RevokedReason string     `json:"revoked_reason,omitempty"`
-	Live          LiveFields `json:"live"`
+	V             int    `json:"v"`
+	Generation    uint64 `json:"generation"`
+	Revoked       bool   `json:"revoked,omitempty"`
+	RevokedReason string `json:"revoked_reason,omitempty"`
+	// Floor is the complete gateway-owned policy floor. A managed daemon
+	// adopts it after confirmation instead of its user-writable cache.
+	Floor *config.OpenShellAdminConfig `json:"floor,omitempty"`
+	// RequiredPack is the gateway-owned content of Floor.RequiredPack when
+	// that pack is custom. A daemon must never install its user-owned cache.
+	RequiredPack json.RawMessage `json:"required_pack,omitempty"`
 	// Digest is the caller's effective sandbox policy digest.
 	Digest string `json:"digest"`
 	// Profile is the guardrail profile of the same match as Digest: after
@@ -538,23 +557,6 @@ type CurrentPolicy struct {
 	// UpdatedAt is when the registration's policy last changed
 	// (sandboxreg.PolicyUpdatedAt), the age the daemon's status shows.
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
-}
-
-// LiveFields are the floor fields that switch on a running sandbox at once
-// (plan §5.2 "live").
-type LiveFields struct {
-	EgressBlock        []string `json:"egress_block,omitempty"`
-	EgressAllowOnly    []string `json:"egress_allow_only,omitempty"`
-	BlockLargeUploads  bool     `json:"block_large_uploads,omitempty"`
-	AllowUnblock       *bool    `json:"allow_unblock,omitempty"`
-	AllowLearnMode     *bool    `json:"allow_learn_mode,omitempty"`
-	UserApprovals      string   `json:"user_approvals,omitempty"`
-	OnSilence          string   `json:"on_silence,omitempty"`
-	MaxSilenceAfter    string   `json:"max_silence_after,omitempty"`
-	ProcessTree        *bool    `json:"process_tree,omitempty"`
-	ForeignSandboxes   string   `json:"foreign_sandboxes,omitempty"`
-	DeleteStoppedAfter string   `json:"delete_stopped_after,omitempty"`
-	RequestAccess      string   `json:"request_access,omitempty"`
 }
 
 // Decision kinds and scopes (DecisionRequest).

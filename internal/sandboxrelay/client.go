@@ -348,8 +348,8 @@ func RelayPath(class RouteClass, target string) (string, error) {
 
 // ForwardedHeader returns the request headers a relayed call sends: only
 // the ForwardHeaders allowlist copied out of in, then the headers the relay
-// sets itself (RegistrationHeader, ClientHeader, AgentSurfaceHeader).
-// Anything else the sandbox sent (its bearer, identity, session facts,
+// sets itself (RegistrationHeader, ClientHeader, AgentSurfaceHeader,
+// DaemonContractHeader). Anything else the sandbox sent (its bearer, identity, session facts,
 // request ids, any X-DefenseClaw-Sandbox-* header) is dropped. The
 // allowlisted headers are at most MaxForwardHeaderBytes in total, or
 // ErrHeadersTooLarge.
@@ -368,6 +368,7 @@ func ForwardedHeader(in http.Header, registration string) (http.Header, error) {
 	out.Set(RegistrationHeader, registration)
 	out.Set(ClientHeader, ClientHeaderValue)
 	out.Set(AgentSurfaceHeader, AgentSurfaceValue)
+	out.Set(DaemonContractHeader, daemonContractValue)
 	return out, nil
 }
 
@@ -448,6 +449,7 @@ func (c *UnixClient) OTLP(ctx context.Context, call OTLPCall) error {
 	req.ContentLength = int64(len(call.Body))
 	req.Header.Set(RegistrationHeader, call.Registration)
 	req.Header.Set(ClientHeader, ClientHeaderValue)
+	req.Header.Set(DaemonContractHeader, daemonContractValue)
 	if call.ContentType != "" {
 		req.Header.Set("Content-Type", call.ContentType)
 	}
@@ -497,6 +499,9 @@ func truncateUTF8(s string, n int) string {
 	return s
 }
 
+// daemonContractValue is DaemonContractHeader's value.
+var daemonContractValue = strconv.Itoa(DaemonContract)
+
 // validRegistration refuses an empty or malformed registration id before
 // it goes into a header or a path.
 func validRegistration(id string) error {
@@ -543,6 +548,7 @@ func (c *UnixClient) call(ctx context.Context, method, path string, query url.Va
 		}
 	}
 	req.Header.Set(ClientHeader, ClientHeaderValue)
+	req.Header.Set(DaemonContractHeader, daemonContractValue)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

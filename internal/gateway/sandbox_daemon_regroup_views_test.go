@@ -156,7 +156,8 @@ func TestRematchStopKeepsTheOrganizationsWords(t *testing.T) {
 // lost its required pack and read strict (pack balanced), the closed
 // start-up floor's resolution. While the managed gateway does not answer the
 // list says the policy is being confirmed; once it answers, the entry has
-// the required pack the registration carries and its network profile.
+// the required pack the gateway's answer carries (the account's
+// registrations file never does, GAP-0182) and its network profile.
 func TestColdStoppedSandboxKeepsItsRequiredPack(t *testing.T) {
 	packDir := t.TempDir()
 	file := filepath.Join(packDir, "contractors-b10", packs.PackFileName)
@@ -182,6 +183,10 @@ func TestColdStoppedSandboxKeepsItsRequiredPack(t *testing.T) {
 	if err := json.Unmarshal(wire, &carried); err != nil || carried.Pack == nil {
 		t.Fatalf("pack wire form: %v", err)
 	}
+	packRaw, err := json.Marshal(carried.Pack)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The account cannot read the administrator's pack folder.
 	if err := os.RemoveAll(filepath.Dir(file)); err != nil {
 		t.Fatal(err)
@@ -195,7 +200,7 @@ func TestColdStoppedSandboxKeepsItsRequiredPack(t *testing.T) {
 		o.listPhases = func(context.Context) (map[string]string, bool) { return map[string]string{"dc-a": "stopped"}, true }
 		// The registrations file the daemon left before its restart.
 		doc := map[string]any{"v": 1, "registrations": []daemonRegistration{{ID: "reg-1", Sandbox: "dc-a", Profile: "contractors",
-			Digest: "sha256:contractors", Floor: floor, RequiredPack: carried.Pack, UpdatedAt: time.Now().UTC()}}}
+			Digest: "sha256:contractors", Floor: floor, UpdatedAt: time.Now().UTC()}}}
 		raw, err := json.Marshal(doc)
 		if err != nil {
 			t.Fatal(err)
@@ -211,7 +216,8 @@ func TestColdStoppedSandboxKeepsItsRequiredPack(t *testing.T) {
 		if !answers.Load() {
 			return sandboxrelay.CurrentPolicy{}, errors.New("connect: connection refused")
 		}
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors"}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Digest: "sha256:contractors", Profile: "contractors",
+			Floor: &floor, RequiredPack: packRaw}, nil
 	}
 	runPastRevalidate(t, f)
 	f.d.rt.manager.RefreshPolicies()

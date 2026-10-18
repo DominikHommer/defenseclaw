@@ -167,6 +167,7 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+	req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 	for k, v := range header {
 		if v == "" {
 			req.Header.Del(k)
@@ -584,7 +585,7 @@ func TestSandboxAuthorityConfigChangeSwitchesLiveFields(t *testing.T) {
 	gen = &Generation{N: 2, Config: &next, Profiles: f.api.guardrailProfileSet()}
 	genMu.Unlock()
 	code, after := f.current(sbxAlice, resp.Registration.ID)
-	if code != http.StatusOK || len(after.Live.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
+	if code != http.StatusOK || after.Floor == nil || len(after.Floor.EgressBlock) != 1 || after.Generation == before.Generation || after.Revoked {
 		t.Fatalf("current after the change: %d %+v (before %+v)", code, after, before)
 	}
 	f.mu.Lock()
@@ -1012,6 +1013,7 @@ func FuzzSandboxRelayHeaders(f *testing.F) {
 		req := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(sandboxrelay.ClientHeader, sandboxrelay.ClientHeaderValue)
+		req.Header.Set(sandboxrelay.DaemonContractHeader, strconv.Itoa(sandboxrelay.DaemonContract))
 		req.Header.Set(sandboxrelay.RegistrationHeader, registration)
 		if files != "" {
 			req.Header.Set(sandboxrelay.FilesHeader, files)
