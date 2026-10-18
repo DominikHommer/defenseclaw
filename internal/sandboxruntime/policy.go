@@ -91,6 +91,51 @@ type ExecutionPolicy struct {
 	digest     string
 }
 
+// HostResolvedRun binds one resolved policy to the host authority that was
+// current when its inputs were captured. The owner must obtain config and this
+// binding in the same snapshot transaction, serialized with LaunchGate.Rotate.
+// Retaining this handle cannot stamp an older policy with a newer generation.
+type HostResolvedRun struct {
+	run     *packs.ResolvedRun
+	options PolicyOptions
+}
+
+func (*HostResolvedRun) MarshalJSON() ([]byte, error) {
+	return nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "host sandbox resolution cannot be serialized")
+}
+
+func (*HostResolvedRun) UnmarshalJSON([]byte) error {
+	return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox policy must be resolved by the host owner")
+}
+
+// ResolveHostRun captures the common projection and existing resolver once.
+// Config, flags and options must remain stable for the duration of this call.
+// This creates no listener, process or runtime authority beyond that policy.
+func ResolveHostRun(cfg *config.Config, flags packs.Flags, options PolicyOptions) (*HostResolvedRun, []packs.Violation, error) {
+	if cfg == nil || !cfg.SandboxEnabled() {
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are disabled")
+	}
+	if err := validatePolicyOptions(options); err != nil {
+		return nil, nil, err
+	}
+	run, violations, err := packs.ResolveRun(cfg, flags)
+	if err != nil {
+		return nil, violations, err
+	}
+	return &HostResolvedRun{run: run, options: options}, violations, nil
+}
+
+// PlanningPolicy gives the host controller its own immutable planning copy of
+// the same resolution that BindResolvedExecutionPolicy uses. It rereads no
+// policy source and grants no launch or runtime qualification by itself.
+func (r *HostResolvedRun) PlanningPolicy() (*packs.Effective, []packs.Violation, error) {
+	if r == nil {
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox policy has no host resolution")
+	}
+	_, _, effective, violations, err := r.run.ExecutionInputs()
+	return effective, violations, err
+}
+
 // MarshalJSON refuses to present an authorization handle as transport data.
 // Snapshot is the explicit host-confidential inspection copy, never authority.
 func (*ExecutionPolicy) MarshalJSON() ([]byte, error) {
@@ -107,33 +152,30 @@ func (*ExecutionPolicy) UnmarshalJSON([]byte) error {
 // Input snapshots must be stable during this call; no mutable input is retained.
 // Nonfatal clamps remain visible as violations, matching the existing resolver.
 func ResolveExecutionPolicy(cfg *config.Config, flags packs.Flags, options PolicyOptions) (*ExecutionPolicy, []packs.Violation, error) {
-	if cfg == nil || !cfg.SandboxEnabled() {
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are disabled")
-	}
-	if options.Harness.Validate() != nil {
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "execution policy requires an exact harness identity")
-	}
-	if !sessionID.MatchString(options.Authority.SnapshotID) || options.Authority.Generation == 0 {
-		return nil, nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "execution policy requires an opaque host authority snapshot identity and positive generation")
-	}
-	owned, err := cfg.DeepCopy()
-	if err != nil {
-		return nil, nil, err
-	}
-	owned.OpenShell, err = owned.EffectiveSandboxPolicy()
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := owned.ValidateOpenShell(); err != nil {
-		return nil, nil, err
-	}
-	flags, err = copyPolicyFlags(flags)
-	if err != nil {
-		return nil, nil, err
-	}
-	effective, violations, err := packs.Resolve(owned, flags)
+	run, violations, err := ResolveHostRun(cfg, flags, options)
 	if err != nil {
 		return nil, violations, err
+	}
+	return BindResolvedExecutionPolicy(run, options)
+}
+
+// BindResolvedExecutionPolicy uses the exact host-owned config, flags and
+// effective evaluator captured by one ResolveRun. It never resolves sources
+// again and accepts no caller-assembled or wire policy tuple. Owners may use
+// the same resolution for provider planning and this immutable launch policy.
+func BindResolvedExecutionPolicy(run *HostResolvedRun, options PolicyOptions) (*ExecutionPolicy, []packs.Violation, error) {
+	if err := validatePolicyOptions(options); err != nil {
+		return nil, nil, err
+	}
+	if run == nil || run.options != options {
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox resolution belongs to different captured execution requirements")
+	}
+	owned, flags, effective, violations, err := run.run.ExecutionInputs()
+	if err != nil {
+		return nil, nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox execution policy requires a complete owned host resolution")
+	}
+	if !owned.SandboxEnabled() {
+		return nil, violations, sandboxapi.Errorf(sandboxapi.CodeDisabled, "sandboxes are disabled")
 	}
 	if fatal := packs.FirstFatal(violations); fatal != nil {
 		code := sandboxapi.CodePolicyViolation
@@ -161,31 +203,14 @@ func ResolveExecutionPolicy(cfg *config.Config, flags packs.Flags, options Polic
 	return policy, slices.Clone(violations), nil
 }
 
-func copyPolicyFlags(flags packs.Flags) (packs.Flags, error) {
-	flags.Unmask, flags.HostPorts, flags.UserPack = slices.Clone(flags.Unmask), slices.Clone(flags.HostPorts), slices.Clone(flags.UserPack)
-	var err error
-	if flags.Floor, err = clonePolicyValue(flags.Floor); err != nil {
-		return packs.Flags{}, err
+func validatePolicyOptions(options PolicyOptions) error {
+	if options.Harness.Validate() != nil {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "execution policy requires an exact harness identity")
 	}
-	if flags.RepoPolicy, err = clonePolicyValue(flags.RepoPolicy); err != nil {
-		return packs.Flags{}, err
+	if !sessionID.MatchString(options.Authority.SnapshotID) || options.Authority.Generation == 0 {
+		return sandboxapi.Errorf(sandboxapi.CodeInvalid, "execution policy requires an opaque host authority snapshot identity and positive generation")
 	}
-	if flags.Subject != nil {
-		subject := *flags.Subject
-		flags.Subject = &subject
-	}
-	// Observability is an immutable plan read only during resolution; the
-	// resolver retains its computed reserved ports, not the plan pointer.
-	return flags, nil
-}
-
-func clonePolicyValue[T any](value T) (T, error) {
-	var out T
-	data, err := json.Marshal(value)
-	if err == nil {
-		err = json.Unmarshal(data, &out)
-	}
-	return out, err
+	return nil
 }
 
 // commonPolicyValues preserves every shared config field, including settings

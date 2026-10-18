@@ -11,6 +11,19 @@ repository and administrative restrictions, then freezes every shared setting
 and the resolved run into one immutable identity. Its host authority snapshot
 ID and generation must rotate when broker routing or host facts change.
 
+`ResolveHostRun` captures an opaque host resolution for both provider planning
+and `BindResolvedExecutionPolicy`. They use independent copies of the same
+projected config, flags, violations and private evaluator, without reopening
+pack files or resolving host facts again. Binding requires the exact captured
+execution options, including authority generation, harness, terminal and offline
+requirements. An old handle cannot be stamped with a new generation. The owner
+must still capture the config and authority together under its launch/rotation
+transaction. Neither this handoff nor its planning copy qualifies a provider.
+The existing immutable egress decider is shared; its process-wide local-address
+guard retains its existing refresh behavior rather than becoming a frozen
+address snapshot. The current manager's deliberate policy re-resolution remains
+unchanged; it is not yet wired to this native handoff.
+
 The private resolver remains the egress authority. Inspection JSON omits its
 private evaluator state and cannot reconstruct an executable policy. It still
 contains host-confidential workspace paths and policy provenance. Keep the

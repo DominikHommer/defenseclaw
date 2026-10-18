@@ -22,6 +22,11 @@ closed. The authenticated API has a bounded attachment transport for an already
 admitted process; it accepts no launch command or environment. The current
 manager does not expose native attachment yet. Latest Linux native outcomes and
 their limits are recorded in the [fixed peer evidence](../../test/e2e/axis/native-peer/live/README.md).
+The shared host-policy handoff now captures one projected configuration,
+resolved evaluator and exact execution requirements for planning and binding,
+without rereading pack sources. It refuses stale or changed option binding;
+the production manager still needs to adopt this handoff under its real
+generation/rotation transaction.
 [Claude's review approved starting Stages 1 and 2](https://github.com/cisco-ai-defense/defenseclaw/pull/1307#issuecomment-6243746197).
 That approval does not cover merging or releasing AXIS support; later production
 stages retain their acceptance gates.
