@@ -52,6 +52,15 @@ def shim_os(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     return view
 
 
+def test_platform_pretence_stays_in_the_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0273: a pretend platform reaches only the shim, never the config
+    # writer and file helpers it calls; the environment stays shared.
+    real = os.name
+    monkeypatch.setattr(upgrade_shim.os, "name", "posix" if real == "nt" else "nt")
+    assert os.name == real
+    assert upgrade_shim.os.environ is os.environ
+
+
 @pytest.fixture()
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     data = tmp_path / "home" / ".defenseclaw"
