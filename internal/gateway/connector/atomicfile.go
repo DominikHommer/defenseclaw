@@ -50,6 +50,16 @@ func atomicWriteFileWithPublisher(
 	if err != nil {
 		return err
 	}
+	// In an account home bound for the enterprise per-user code, a path
+	// that leads out of the home is never changed, nor a folder created
+	// there; a write that would change nothing is still fine (rel-1-0-3
+	// GAP-0206).
+	if err := confineAtomicWritePath(path); err != nil {
+		if atomicFileAlreadyMatches(writePath, data, perm) {
+			return nil
+		}
+		return err
+	}
 
 	dir := filepath.Dir(writePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

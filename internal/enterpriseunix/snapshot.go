@@ -111,8 +111,16 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		}
 		seen[canonical] = true
 		entry := snapshotEntry{Path: canonical, Dir: true}
-		uid, gid, mode, err := statOwnerMode(e.P(canonical))
+		_, _, mode, err := statOwnerMode(e.P(canonical))
 		if err == nil && mode.IsDir() {
+			// The owner through OwnerOf, which every other lifecycle check
+			// reads (and the tests' fake host records), so the rollback puts
+			// back the owner the checks saw: a kept data folder goes back to
+			// root after a failed first install (GAP-0631).
+			uid, gid, ownerErr := e.OwnerOf(e.P(canonical))
+			if ownerErr != nil {
+				return nil, fmt.Errorf("snapshot %s: %w", canonical, ownerErr)
+			}
 			entry.Present, entry.Mode, entry.UID, entry.GID = true, mode.Perm(), uid, gid
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("snapshot %s: %w", canonical, err)

@@ -75,7 +75,9 @@ type Options struct {
 	// KeepState makes a (non-purge) uninstall keep the machine state: the
 	// config, secrets, gateway and guardian state, logs and lifecycle
 	// state, and the service account, so a reinstall resumes with them.
-	// Without it uninstall removes all of it.
+	// Without it uninstall removes that state except the gateway's sandbox
+	// registrations, their key and the sandbox setup record while an account
+	// keeps sandboxes. Purge removes those too.
 	KeepState bool
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
@@ -189,8 +191,9 @@ type lifecycle struct {
 	// sandboxesKept names the accounts whose sandboxes a non-purge
 	// uninstall kept; sandboxStoreKept is set once it kept the gateway's
 	// registrations of them with it (GAP-0598).
-	sandboxesKept    []string
-	sandboxStoreKept bool
+	sandboxesKept       []string
+	sandboxStoreKept    bool
+	openshellRecordKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -556,14 +559,18 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 // uninstall that then failed to remove another state folder left no record,
 // so its rerun was a not_installed no-op and the leftovers needed
 // --adopt-existing (GAP-1440).
-func (e *Env) removeLifecycleStateKeepingLock() error {
+func (e *Env) removeLifecycleStateKeepingLock(keep ...string) error {
 	dir := e.P(e.Layout.LifecycleDir)
+	skip := map[string]bool{lockFileName: true, deploymentFileName: true}
+	for _, name := range keep {
+		skip[name] = true
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == lockFileName || entry.Name() == deploymentFileName {
+		if skip[entry.Name()] {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -2940,9 +2947,10 @@ func (l *lifecycle) reconcile(ctx context.Context, record *Deployment) int {
 
 // uninstall stops and removes the deployment, with its machine state (the
 // config, secrets, gateway and guardian state, logs and lifecycle state) and
-// the service account. Each account keeps its own ~/.defenseclaw and
-// per-user binaries unless purge is set. KeepState keeps the machine state
-// for a reinstall to resume with.
+// the service account. Without purge each account keeps its ~/.defenseclaw,
+// per-user binaries and sandboxes; the gateway's sandbox registrations and
+// key stay for those sandboxes, and Linux keeps administrator policies.
+// KeepState keeps the other machine state for a reinstall to resume with.
 func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
@@ -3081,10 +3089,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
-	// The sandbox subsystem goes before the binaries it runs: each account's
-	// daemon and OpenShell gateway stop (its sandboxes first), the account's
-	// sandboxes are torn down as the account, and a purge removes what the
-	// subsystem left in the account's home.
+	// The sandbox subsystem goes before the binaries it runs: a non-purge
+	// uninstall stops and keeps each account's sandboxes, then its daemon
+	// and OpenShell gateway. A purge tears down the sandboxes as the account
+	// and removes what the subsystem left in its home.
 	l.teardownOpenShell(ctx, sandboxAccounts)
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
@@ -3309,7 +3317,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		if err := env.removeSensorState(); err != nil {
 			errs = append(errs, err)
 		}
-		if err := env.removeLifecycleStateKeepingLock(); err != nil {
+		var keepLifecycle []string
+		if l.openshellRecordKept {
+			keepLifecycle = append(keepLifecycle, openshellKeptStateFile)
+		}
+		if err := env.removeLifecycleStateKeepingLock(keepLifecycle...); err != nil {
 			errs = append(errs, err)
 		}
 		if !packageManaged {
@@ -3468,15 +3480,27 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	}
 	state := fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s, %s), the logs (%s)",
 		layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	if l.sandboxStoreKept {
+		state = fmt.Sprintf("the managed config and secrets (%s), the gateway and guardian state (%s except its sandbox registrations and their key, which stay, %s), the logs (%s)",
+			layout.ConfigDir, layout.DataDir, layout.GuardianAuthDir, layout.LogDir)
+	}
+	lifecycleState := "the lifecycle state (" + layout.LifecycleDir + ")"
+	if l.openshellRecordKept {
+		lifecycleState = "the lifecycle state (" + layout.LifecycleDir + " except the record of the sandbox setup the kept sandboxes were made under, " +
+			filepath.Join(layout.LifecycleDir, openshellKeptStateFile) + ")"
+	}
 	switch {
 	case l.opts.KeepState:
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
+		if l.openshellRecordKept {
+			lines = append(lines, "kept the record of the sandbox setup the kept sandboxes were made under in "+layout.LifecycleDir)
+		}
 	case l.opts.KeepServiceAccount:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; kept the service account "+layout.ServiceUser)
 	case l.serviceAccountKept:
-		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
+		lines = append(lines, "removed the machine state: "+state+" and "+lifecycleState+"; the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
-		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
+		lines = append(lines, "removed the machine state: "+state+", "+lifecycleState+" and the service account "+layout.ServiceUser)
 	}
 	if l.policiesKept {
 		// A package host keeps its binaries, so ensure --from-package turns
