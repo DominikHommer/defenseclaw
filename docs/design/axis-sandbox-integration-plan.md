@@ -109,6 +109,34 @@ runtime differs from a resumable session; it must not silently migrate it.
 
 ## Architecture
 
+Keep the provider contract extensible beyond OpenShell and AXIS. DefenseClaw is
+the sole authority for policy, approvals, hooks, credential brokering, workspace
+review, telemetry, and control-plane operations. A runtime adapter compiles the
+admitted effective policy into its enforcement mechanisms and executes only
+owned instances. It does not supply a second customer-editable policy source or
+an independent approval/control plane. AXIS proxy and OPA components must remain
+subordinate enforcement mechanisms for DefenseClaw's decisions.
+
+The common customer commands and session behavior must survive a provider
+change. Keep executor and vendor implementation details out of routine customer
+flows; use them in diagnostics and evidence where they explain capabilities.
+If a required capability cannot preserve the shared contract, refuse before
+launch with a specific reason. Never weaken policy or switch providers to make
+the request run.
+
+The requested AXIS integration uses MXC on all three native host platforms:
+
+| Native host | Required MXC executor | Product qualification |
+| --- | --- | --- |
+| Windows | `ProcessContainerWindows` | Pending; no WSL dependency or fallback. |
+| Linux | `BubblewrapLinux` | Pending; the pinned strict-filesystem probe is blocked as described below. |
+| macOS | `Seatbelt` | Pending; qualify the AXIS-to-MXC route rather than assuming AXIS's existing macOS dispatch uses MXC. |
+
+This is the desired support matrix, not a claim that the pinned AXIS artifact
+already supplies these routes or that any platform is ready for production.
+Qualify each platform independently against the same DefenseClaw security
+contract. WSL and AXIS-native execution are not alternate product routes.
+
 ```mermaid
 flowchart TD
     CLI[CLI and TUI] --> Control[Shared sandbox controller]
@@ -116,14 +144,20 @@ flowchart TD
     Policy --> Router[Runtime router]
     Router --> OpenShell[Existing OpenShell controller]
     Router --> AXIS[AXIS backend and controller]
-    Router --> Windows[Windows adapters when available]
-    AXIS --> Boundary[AXIS enforced execution boundary]
+    AXIS --> MXC[MXC execution adapter]
+    MXC --> Windows[Windows ProcessContainerWindows]
+    MXC --> Linux[Linux BubblewrapLinux]
+    MXC --> macOS[macOS Seatbelt]
+    Windows --> Boundary[Qualified native execution boundary]
+    Linux --> Boundary
+    macOS --> Boundary
     Boundary --> Agent[Claude and managed hooks]
     Agent --> Scoped[Scoped hook and model transport]
     Scoped --> Authority[DefenseClaw policy authority and credential broker]
 ```
 
-The diagram represents logical ownership. In per-user mode the policy authority
+The diagram represents target ownership, not the pinned AXIS platform dispatch.
+In per-user mode the policy authority
 is the user's gateway. On standalone managed computers, the per-user sandbox
 daemon uses authenticated registration and relays to the managed gateway;
 it does not gain an independent policy evaluator or a user-editable policy file.
@@ -165,11 +199,12 @@ work. They do not establish production certification.
 | Terminal | Linux has a PTY bridge, but it opens fixed 24 by 80 geometry without an evident resize protocol. | Prove resize, raw input, signals, prompt interaction, and terminal restoration; contribute upstream support if needed. |
 | Environment | The CLI collects a restricted environment, dropping arbitrary `DEFENSECLAW_*` keys and raw provider credentials. | Deliver derived hook configuration through protected files or a reviewed entrypoint/API. Do not rely on inherited variables. |
 | Model authentication | Host injection is limited to supported local HTTP inference targets; external HTTPS CONNECT does not provide equivalent credential injection or HTTP path enforcement. | Validate a scoped host model relay, including Anthropic streaming. API-key and OAuth paths need separate acceptance. |
-| Filesystem confidentiality | The default filesystem compatibility is `best_effort`. The pinned MXC Bubblewrap translation acknowledges a read-only host-root substrate in that mode and refuses a strict default-deny policy without a root-read grant. | Require `filesystem.compatibility: hard_requirement` without granting read access to `/`. A private HOME is state setup, not proof of read confinement. Treat an incompatible MXC launch as a failed feasibility gate; qualify another explicitly selected AXIS backend separately. |
+| Filesystem confidentiality | The default filesystem compatibility is `best_effort`. The pinned Linux MXC Bubblewrap translation acknowledges a read-only host-root substrate in that mode and refuses a strict default-deny policy without a root-read grant. | Require `filesystem.compatibility: hard_requirement` without granting read access to `/`. A private HOME is state setup, not proof of read confinement. Resolve the required MXC executor's gap before enabling that platform; do not switch to an alternate backend. |
 | Agent state | Recognized home directories can be copied, backed up, and temporarily redirected during preparation. | Give each session a private HOME and sanitized state; do not expose the customer's real Claude state or credential stores. |
 | Network | Strict Linux proxy mode requires enforceable namespace/firewall support or the optional privileged helper. | Doctor must probe the requested policy and fail before launch when enforcement is unavailable. Proxy environment variables alone are insufficient. |
 | Audit | Standalone execution bypasses daemon lifecycle handling; the proxy constructs an audit log without an evident export sink hookup. | DefenseClaw owns its lifecycle and policy events. Validate AXIS denial-event export before claiming complete runtime audit coverage. |
-| Windows | Current native code rejects interactive ConPTY; README and setup descriptions also disagree about the supported launch slice. | Exclude native Windows from the initial interactive Claude offer. Qualify later against exact artifacts. |
+| Windows | Current native code rejects interactive ConPTY; README and setup descriptions also disagree about the supported launch slice. | Native Windows with MXC ProcessContainerWindows remains a required target, blocked until real interactive and headless Claude pass against exact native artifacts. WSL is not a substitute. |
+| macOS | The requested route is AXIS through MXC Seatbelt; an upstream macOS or Seatbelt feature name alone does not verify that route. | Verify the actual dispatcher and qualify lifecycle, terminal, policy, hooks, and model transport on a native macOS host before offering it. |
 
 Pinned upstream sources:
 
@@ -196,9 +231,11 @@ Filesystem read confinement is mandatory as well as write confinement. Require
 `hard_requirement` compatibility and no host-root read grant. A read-only host
 view is not equivalent to an allowlist of readable files. Validate with synthetic
 canaries outside the allowed workspace and HOME; never inspect real credentials
-to prove the boundary. At the pinned source, the MXC process backend cannot
-satisfy this policy and must be refused. An explicit `axis_native` candidate
-requires its own reviewed policy and live qualification, not automatic fallback.
+to prove the boundary. At the pinned source, the Linux MXC Bubblewrap path cannot
+satisfy this policy and must be refused until the gap is resolved. Native Windows
+MXC ProcessContainerWindows and macOS MXC Seatbelt require their own live
+read-and-write confinement evidence. Earlier `axis_native` experiments are
+historical research only, not an alternate integration path or fallback.
 
 Require an enforced network boundary that permits only the scoped services
 needed for the session. General web traffic must reach DefenseClaw destination
@@ -283,11 +320,11 @@ telemetry, and tests. No incomplete runtime is advertised as usable.
 | Stage | Deliverable | Acceptance gate |
 | --- | --- | --- |
 | 1 | Reconcile current main with Windows abstraction work and preserve the complete current controller/API contract. | Review establishes one shared abstraction, managed-mode ownership, backwards compatibility, and prerequisite order. |
-| 2 | Build a small Linux Claude feasibility prototype against pinned AXIS. | Deterministic lifecycle, real interactive and headless Claude, authenticated hooks, API-key streaming, private HOME, and strict egress pass. Any upstream blockers have a concrete resolution. |
+| 2 | Build scoped Claude feasibility prototypes against pinned AXIS and the required native MXC executors: Windows ProcessContainerWindows, Linux BubblewrapLinux, and macOS Seatbelt. | Each platform independently proves deterministic lifecycle, real interactive and headless Claude, authenticated hooks, API-key streaming, private HOME, strict filesystem confinement, and strict egress. Any upstream blockers have a concrete resolution. |
 | 3 | Add common runtime selection, capability reporting, configuration, routing, and registry identity fields without enabling AXIS. | Existing OpenShell and managed-daemon tests pass; defaults, old records, and configuration round trips remain compatible. The same PR updates `defenseclaw.sandbox.runtime` and `defenseclaw.sandbox.driver`, adds proposed `defenseclaw.sandbox.runtime_version` and `defenseclaw.sandbox.backend`, and generates/tests affected telemetry outputs. |
 | 4 | Implement the AXIS backend, supervised I/O, session custody, artifacts, workspace handling, hooks, policy rendering, and scoped model transport. | Backend conformance, negative enforcement, failure cleanup, and crash recovery pass. Only proven capabilities are admitted. |
 | 5 | Expose AXIS setup/default selection, doctor, TUI, wrappers, teardown, package detection, and telemetry. | AXIS-only and mixed-runtime workflows work through DefenseClaw. Both CLIs preserve arguments and exit codes; the UI uses reported capabilities. |
-| 6 | Qualify the Linux preview and the separately offered deployment/authentication combinations. | Live acceptance evidence identifies host, artifact digests, harness version, policy, commands, and results. Support claims match that exact scope. |
+| 6 | Qualify the three native platform targets and each offered deployment/authentication combination independently. | Live acceptance evidence identifies the native host, MXC executor, artifact digests, harness version, policy, commands, and results. Support claims match that exact scope; unqualified combinations remain unavailable. |
 
 Stages 1 and 2 precede production adapter design. Stop the AXIS milestone if a
 required boundary or interactive transport cannot be established; do not convert
@@ -312,8 +349,9 @@ reconciliation with the Windows work.
 
 ## Validation and release scope
 
-Run unit and contract tests without an installed AXIS runtime, plus a separate
-Linux live suite with real AXIS and Claude. Mocked success does not certify an
+Run unit and contract tests without an installed AXIS runtime, plus separate
+native Windows, Linux, and macOS live suites with real AXIS, the required MXC
+executor, and Claude. WSL results do not qualify native Windows. Mocked success does not certify an
 isolation boundary. Preserve the repository's normal pre-PR and affected-area
 checks for each implementation PR.
 
@@ -327,14 +365,19 @@ checks for each implementation PR.
 | Deployment and UI | AXIS-only installation; both providers installed; disabled runtime has no background cost; missing prerequisites; config save/load and managed controls; correct TUI runtime arguments and action availability; uninstall cleans only owned artifacts. |
 | Managed execution | Per-user daemon identity; gateway registration and policy authority; generation/revocation; relay failures; cross-user refusal/privacy; upgrade and rollback against supported prior configurations. |
 
-Initial release scope is an opt-in Linux preview for Claude with copied
-workspaces, real interactive/headless execution, and individually qualified
-authentication profiles. Existing OpenShell behavior remains supported.
-Native macOS, Windows/WSL2, other harnesses, live mounts, GPU/VM backends,
-MCP import, executable-bound generic credentials, learn mode, and persistent
-attach are later qualification work unless explicitly added to the accepted
-initial scope. Unsupported features are visible refusals, not silently ignored
-settings.
+The requested release scope is opt-in Claude execution with copied workspaces
+on native Windows through MXC ProcessContainerWindows, Linux through MXC
+BubblewrapLinux, and native macOS through MXC Seatbelt. Each platform needs real
+interactive/headless execution and individually qualified authentication and
+deployment profiles before it becomes available. No platform is currently
+qualified by this plan or its initial prototype. Existing OpenShell behavior
+remains supported.
+
+WSL and alternate AXIS-native backends are outside this integration route.
+Other harnesses, live mounts, GPU/VM backends, MCP import, executable-bound
+generic credentials, learn mode, and persistent attach need separate accepted
+scope and qualification. Unsupported features and unqualified platform routes
+are visible refusals, not silently ignored settings or fallback execution.
 
 ## Review decisions
 
@@ -350,10 +393,12 @@ Claude's review should resolve these design decisions before implementation:
    configuration without weakening existing image evidence?
 5. Are initial platforms, deployment modes, authentication profiles, and
    unsupported capabilities explicit enough for accurate customer claims?
-6. Which explicitly selected AXIS backend can enforce strict read confinement?
-   The pinned MXC process backend is incompatible with this requirement; assess
-   upstream changes or a separately qualified native backend without weakening
-   the policy to make a feasibility probe pass.
+6. Which upstream changes are needed for the required native MXC executors to
+   enforce strict read confinement and the full terminal/lifecycle contract?
+   The pinned Linux MXC Bubblewrap path is incompatible with the filesystem
+   requirement. Resolve that gap and independently verify Windows
+   ProcessContainerWindows and macOS Seatbelt without weakening policy,
+   changing backends, or substituting WSL to make a feasibility probe pass.
 
 Record the review outcome and any amendments on this draft PR. A positive
 review authorizes starting the implementation sequence; it does not certify
