@@ -103,10 +103,16 @@ func isTracestateChar(c byte) bool {
 }
 
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
-// mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
+// when Home exists, mirroring defenseclaw_log_hook_failure. Best-effort: any error is ignored so
 // a read-only home or full disk never changes the hook's decision.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string) {
 	if opts.Home == "" {
+		return
+	}
+	// Never create the DefenseClaw folder itself for a log line: a managed
+	// hook whose folder was missing recreated it here, and the next event's
+	// hook found a folder and no longer said it was missing (GAP-0154).
+	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		return
 	}
 	logDir := filepath.Join(opts.Home, "logs")
