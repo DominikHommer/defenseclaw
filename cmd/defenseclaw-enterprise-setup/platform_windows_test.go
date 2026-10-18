@@ -99,7 +99,6 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 		"--hook-binary", filepath.Join(stage, "defenseclaw-hook.exe"),
 		"--sensor-helper-binary", filepath.Join(stage, "defenseclaw-sensor-helper.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),
-		"--policy-compiler", filepath.Join(stage, "policy_compiler.py"),
 		"--config", `C:\staging\config.yaml`,
 		// --bootstrap-parent is unconditional post-#839 (Authenticode-
 		// aware trailer reader + protected bootstrap parent): the
@@ -119,14 +118,12 @@ func TestEnterpriseLifecycleArgumentsForStandalonePayload(t *testing.T) {
 	}
 }
 
-// TestEnterpriseLifecycleArgumentsOmitWithheldPolicyCompiler pins DAMAGE-678
-// A1: a signed Setup whose outer signature did not verify forwards no
-// compiler, so the lifecycle and /ensure run without Fleet.
-func TestEnterpriseLifecycleArgumentsOmitWithheldPolicyCompiler(t *testing.T) {
+// Managed Setup never forwards a Fleet compiler.
+func TestEnterpriseLifecycleArgumentsOmitPolicyCompiler(t *testing.T) {
 	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
 	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
 		got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{
-			Action: action, Standalone: true, OmitPolicyCompiler: true,
+			Action: action, Standalone: true,
 		})
 		for _, argument := range got {
 			if argument == "--policy-compiler" {

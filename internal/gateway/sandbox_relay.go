@@ -352,6 +352,9 @@ func (a *APIServer) serveSandboxRelayCall(w http.ResponseWriter, r *http.Request
 	if status := rw.finalStatus(); status < 200 || status > 299 {
 		return
 	}
+	if outcome, ok := r.Context().Value(sandboxHookOutcomeKey{}).(*sandboxHookOutcome); ok && outcome.failedClosed.Load() {
+		state.sink.markFailedClosed()
+	}
 	if value, ok := state.sink.trailer(); ok {
 		h.Set(sandboxrelay.DecisionTrailer, value)
 	}
@@ -399,10 +402,17 @@ func (w *sandboxRelayResponseWriter) finalStatus() int {
 // sandboxRelayDecisionSink receives the verdict observeSandboxHookDecision
 // hands a local sandbox manager. The relay returns it in the trailer.
 type sandboxRelayDecisionSink struct {
-	mu       sync.Mutex
-	decision *sandboxrelay.HookDecision
+	mu           sync.Mutex
+	decision     *sandboxrelay.HookDecision
+	failedClosed bool
 	// egressTold: the answer told the agent of the call's refusals.
 	egressTold bool
+}
+
+func (s *sandboxRelayDecisionSink) markFailedClosed() {
+	s.mu.Lock()
+	s.failedClosed = true
+	s.mu.Unlock()
 }
 
 func (s *sandboxRelayDecisionSink) markEgressTold() {
@@ -446,13 +456,14 @@ func (s *sandboxRelayDecisionSink) put(d SandboxHookDecision) {
 // handler recorded none.
 func (s *sandboxRelayDecisionSink) trailer() (string, bool) {
 	s.mu.Lock()
-	d, told := s.decision, s.egressTold
+	d, told, failedClosed := s.decision, s.egressTold, s.failedClosed
 	s.mu.Unlock()
 	if d == nil {
 		return "", false
 	}
 	out := *d
 	out.EgressTold = told
+	out.FailedClosed = failedClosed
 	return encodeSandboxRelayDecision(out)
 }
 

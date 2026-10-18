@@ -71,6 +71,7 @@ var configValidateCmd = &cobra.Command{
 		}
 		warnings := append(gateway.ConfigHILTWarnings(loaded.runtime), loaded.runtime.SandboxDefaultProfileWarnings()...)
 		warnings = append(warnings, managedFailOpenValidateWarnings(loaded.runtime)...)
+		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)

@@ -912,6 +912,20 @@ func TestRepeatedOpenShellFindingsAreOneAlert(t *testing.T) {
 	}
 }
 
+func TestCredentialEndpointMismatchFindingNamesTheCauseAndFix(t *testing.T) {
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "findbox"})
+	const mismatch = `FINDING:BLOCKED [HIGH] "Provider credential used at an unauthorized endpoint" [type:openshell.provider_credential.endpoint_mismatch]`
+	for range 4 {
+		e.ocsf("findbox", mismatch, e.m.now())
+	}
+	findings := where(&e.tel.mu, &e.tel.findings, func(f audit.SandboxFindingEvent) bool { return f.Kind == audit.SandboxFindingOCSF })
+	if len(findings) != 1 || !strings.Contains(findings[0].Description, "credential placeholder is bound to its configured endpoint") ||
+		!strings.Contains(findings[0].Remediation, "model provider's configured credential") {
+		t.Fatalf("endpoint mismatch finding = %+v", findings)
+	}
+}
+
 func TestRecoverCredential(t *testing.T) {
 	sb := &openshell.Sandbox{Spec: openshell.SandboxSpec{Environment: map[string]string{"HTTPS_PROXY": "http://dcx-abc:secret@host.openshell.internal:18972"}}}
 	if c, ok := recoverCredential(sb, "dcx-abc"); !ok || c.Password != "secret" {

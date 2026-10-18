@@ -43,8 +43,12 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         text = " ".join(page("configuration.mdx").split())
         self.assertIn("umask 022 && mkdir -p /opt/cisco/defenseclaw/etc/policies/guardrail && cp -R", text)
         self.assertIn("umask 022 && mkdir -p /etc/defenseclaw/policies/guardrail && cp -R", text)
-        self.assertIn("sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt/cisco/defenseclaw/etc/policies/guardrail", text)
-        self.assertIn("sudo chmod 0755 /etc/defenseclaw/policies /etc/defenseclaw/policies/guardrail", text)
+        self.assertIn("sudo chmod 0755 /opt/cisco/defenseclaw/etc/policies/guardrail", text)
+        self.assertIn("sudo chmod 0755 /etc/defenseclaw/policies/guardrail", text)
+        # GAP-0454: the lifecycle keeps the policies folder at 0750.
+        self.assertNotIn("chmod 0755 /etc/defenseclaw/policies /etc", text)
+        self.assertNotIn("chmod 0755 /opt/cisco/defenseclaw/etc/policies /opt", text)
+        self.assertIn("leave `policies` itself to the lifecycle", text)
         self.assertIn("sudo chmod -R u=rwX,go=rX /opt/cisco/defenseclaw/etc/policies/guardrail/my-pack", text)
         self.assertIn("sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies/guardrail/my-pack", text)
         self.assertNotIn("sudo chmod -R u=rwX,go=rX /etc/defenseclaw/policies`", text)
@@ -61,8 +65,9 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("LocalSystem can read", text)
 
     def test_gap_0294_purge_removes_lifecycle_lock(self):
-        text = page("windows.mdx")
-        self.assertIn("Setup with `PURGE=1` removes that lock", text)
+        text = " ".join(page("windows.mdx").split())
+        self.assertIn("A standalone Setup uninstall removes the administrator-only", text)
+        self.assertIn("The Secure Client profile keeps the lock unless `PURGE=1`", text)
         self.assertNotIn("the uninstall keeps it in place. To leave nothing", text)
 
     def test_gap_0295_block_message_limit(self):

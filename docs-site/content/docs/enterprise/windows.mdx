@@ -1388,11 +1388,12 @@ uninstall, the marker key, the Add/Remove Programs entry and a
 `DisableSelfUpdate` value that the lifecycle wrote are gone, and so are their
 parent keys and `C:\Program Files\Cisco` when nothing else is left in them
 (after a CLI uninstall, once its cleanup finishes).
-The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A default uninstall
-also keeps the administrator-only
-`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock`, which serializes
-lifecycle runs. Setup with `PURGE=1` removes that lock and its directory after
-cleanup; do not delete a lock while a lifecycle run is active. On a
+The lifecycle log in `%WINDIR%\Logs\DefenseClaw` stays. A standalone Setup
+uninstall removes the administrator-only
+`C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory
+after cleanup, even without `PURGE=1`. The Secure Client profile keeps the lock
+unless `PURGE=1` is set. The lock serializes lifecycle runs; do not delete one
+while a lifecycle run is active. On a
 computer without DefenseClaw, uninstall succeeds and changes nothing.
 
 Run the CLI uninstall with `defenseclaw.exe`. The other installed binaries,

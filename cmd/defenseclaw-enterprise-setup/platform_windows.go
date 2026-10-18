@@ -33,10 +33,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// Keep the running Setup image open without write/delete sharing while the
-// trailer is decoded and its Authenticode signature is verified. The Python
-// compiler cannot be individually Authenticode signed; the signed outer
-// image and its digest manifest authenticate those bytes as one unit.
+// The hash-pinned trust anchor staged next to an unsigned standalone payload.
+const standalonePayloadTrustName = "payload-trust.json"
+
+// Keep the Setup image file open without write/delete sharing while the
+// trailer is decoded and its Authenticode signature is verified, and stage
+// only the payload whose digests match the payload binding linked into the
+// running image (loadBoundEnterprisePayload): the file at the launch path is
+// not necessarily the image that is running.
 func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	path, err := os.Executable()
 	if err != nil {
@@ -72,16 +76,13 @@ func loadTrustedEnterprisePayload() (enterprisePayload, error) {
 	if err != nil {
 		return enterprisePayload{}, fmt.Errorf("read enterprise Setup image trailer: %w", err)
 	}
-	payload, err := loadEnterprisePayload(result.AsPayloadFS())
+	payload, err := loadBoundEnterprisePayload(result, standalonePayloadBinding)
 	if err != nil {
 		return enterprisePayload{}, err
 	}
 	if payload.Standalone() && !payload.Manifest.Unsigned {
 		if err := verifySignedEnterpriseSetup(file, path); err != nil {
-			// The outer signature is what vouches for the unsignable Fleet
-			// compiler. Without it, withhold only the compiler instead of
-			// refusing every Fleet-off Setup run (DAMAGE-678 A1).
-			payload = payload.withoutPolicyCompiler()
+			return enterprisePayload{}, err
 		}
 	}
 	return payload, nil
@@ -166,7 +167,6 @@ func executeEnterpriseSetup(
 	}
 	opts.Standalone = standalone
 	opts.StandaloneUnsigned = standalone && payload.Manifest.Unsigned
-	opts.OmitPolicyCompiler = standalone && !payload.CarriesPolicyCompiler()
 	opts.ProductVersion = payload.Manifest.Version
 	for _, input := range []struct {
 		label string
@@ -675,9 +675,6 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--hook-binary", filepath.Join(stageRoot, "defenseclaw-hook.exe"))
 		appendValue("--sensor-helper-binary", filepath.Join(stageRoot, "defenseclaw-sensor-helper.exe"))
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
-		if opts.Standalone && !opts.OmitPolicyCompiler {
-			appendValue("--policy-compiler", filepath.Join(stageRoot, policyCompilerPayloadName))
-		}
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)
 		// QA shorthand pair. Forwarded only when both are non-empty

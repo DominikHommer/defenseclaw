@@ -781,7 +781,9 @@ func TestWindowsEnsureBundleConfirmsThenRequiresBundles(t *testing.T) {
 	anchored := &windowsEnterpriseLifecycleOptions{trustAnchors: e.anchors, configPath: filepath.Join(e.dir, "config.yaml"),
 		profile: managed.ProfileStandalone, jsonOutput: true, installedBeforeRun: true}
 	done, err = prepareWindowsEnterpriseBundle(ctx, cmd, "ensure", anchored)
-	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), "invalid_arguments") {
+	// #1288: the code is bundle_required (not invalid_arguments), the exit 1639.
+	if !done || commandExitCode(err) != enterprisestatus.WindowsExitInvalidArgs || !strings.Contains(out.String(), string(enterprisebundle.CodeBundleRequired)) ||
+		strings.Contains(out.String(), "invalid_arguments") {
 		t.Fatalf("TRUSTANCHORS= with CONFIG=: done=%v exit=%d\n%s", done, commandExitCode(err), out.String())
 	}
 	if _, err := os.Stat(filepath.Join(layout.ConfigDir, "trust", enterprisebundle.AnchorsName)); err == nil {

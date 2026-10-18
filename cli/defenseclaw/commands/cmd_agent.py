@@ -378,6 +378,8 @@ def usage(
         return
 
     if payload.get("enabled") is False and not (payload.get("signals") or []):
+        if sandboxes:
+            _sandboxes_not_found(client, payload, sandboxes)
         click.echo(
             "AI discovery is disabled, so there is no AI usage to show. "
             "Enable it with: defenseclaw agent discovery enable"
@@ -623,10 +625,11 @@ def processes(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> None:
-    """List AI processes the sidecar currently observes (PID, user, uptime).
+    """List AI processes matched by executable name (PID, user, uptime).
 
     Only signals whose detector emitted a ``runtime`` block are
-    surfaced (i.e. the process detector). For the broader installed
+    surfaced (i.e. the process detector). Names match exactly or as
+    separated name parts. For the broader installed
     surface use ``defenseclaw agent usage`` or
     ``defenseclaw agent components``.
     """

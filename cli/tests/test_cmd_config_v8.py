@@ -16,6 +16,24 @@ from defenseclaw.commands import cmd_config
 from defenseclaw.config_inspect import ConfigInspectError, ConfigV8WireResult
 
 
+def test_unreadable_config_set_confirms_file_unchanged(tmp_path: Path) -> None:
+    from defenseclaw import config as config_module
+    from defenseclaw.main import cli
+
+    path = tmp_path / "config.yaml"
+    original = b"config_version: 8\n"
+    path.write_bytes(original)
+    with (
+        patch.object(config_module, "config_path", return_value=path),
+        patch.object(config_module, "load", side_effect=PermissionError("Permission denied")),
+    ):
+        result = CliRunner().invoke(cli, ["config", "set", "gateway.token_env", "TEST_TOKEN"])
+    assert result.exit_code != 0
+    assert "config.yaml was not changed" in result.output
+    assert "Traceback" not in result.output
+    assert path.read_bytes() == original
+
+
 def _wire(kind: str, *, effective: dict | None = None) -> ConfigV8WireResult:
     return ConfigV8WireResult(
         wire_version=1,
@@ -164,6 +182,9 @@ def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monke
     assert run("set", "asset_policy.skill.denied[0]", "--json", '{"name": "evil", "reason": "x"}').exit_code == 0
     # A string enum whose value YAML 1.1 reads as a boolean (GAP-0157).
     assert run("set", "ai_discovery.ide_inventory", "off").exit_code == 0
+    assert run("set", "guardrail.judge.timeout", "30.0", "--json").exit_code == 0
+    timeout = run("get", "guardrail.judge.timeout", "--format", "json")
+    assert timeout.exit_code == 0 and json.loads(timeout.output) == 30.0
     off = run("get", "ai_discovery.ide_inventory")
     assert off.exit_code == 0 and off.output.strip() == "off"
     got = run("get", "asset_policy.skill.denied[0].name")
