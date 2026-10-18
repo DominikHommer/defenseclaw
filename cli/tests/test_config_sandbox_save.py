@@ -163,3 +163,75 @@ def test_vendor_only_save_preserves_concurrent_authority_change(saved_config, in
     document = yaml.safe_load(path.read_bytes())
     assert ("sandbox" in document) is not initial_common
     assert document["openshell"]["binary"] == "reviewed-openshell"
+
+
+@pytest.mark.parametrize(
+    ("name", "first", "second"),
+    [
+        (
+            "egress.block",
+            lambda cfg: cfg.sandbox.egress.block.append("first.example"),
+            lambda cfg: cfg.sandbox.egress.block.append("second.example"),
+        ),
+        (
+            "admin.allow_yolo",
+            lambda cfg: setattr(cfg.sandbox.admin, "allow_yolo", False),
+            lambda cfg: setattr(cfg.sandbox.admin, "allow_yolo", True),
+        ),
+        (
+            "profile",
+            lambda cfg: setattr(cfg.sandbox, "profile", "strict"),
+            lambda cfg: setattr(cfg.sandbox, "profile", "balanced"),
+        ),
+    ],
+)
+def test_stale_common_policy_edit_refuses_without_changing_state(saved_config, name, first, second):
+    stale, path = saved_config()
+    concurrent = config_module.load(data_dir=path.parent)
+    first(concurrent)
+    concurrent.save()
+    before = file_state(path)
+    snapshot = copy.deepcopy(stale._loaded_v8_modeled_snapshot)
+    second(stale)
+    with pytest.raises(config_writer.ConfigConflictError, match=r"sandbox\." + name.replace(".", r"\.")):
+        stale.save()
+    assert file_state(path) == before
+    assert stale._loaded_v8_modeled_snapshot == snapshot
+
+
+def test_independent_common_policy_edits_merge(saved_config):
+    stale, path = saved_config()
+    concurrent = config_module.load(data_dir=path.parent)
+    concurrent.sandbox.egress.block.append("first.example")
+    concurrent.save()
+    stale.sandbox.profile = "strict"
+    stale.save()
+    saved = yaml.safe_load(path.read_bytes())["sandbox"]
+    assert saved["egress"]["block"] == ["first.example"]
+    assert saved["profile"] == "strict"
+
+
+def test_same_concurrent_common_policy_value_is_idempotent(saved_config):
+    stale, path = saved_config()
+    concurrent = config_module.load(data_dir=path.parent)
+    concurrent.sandbox.profile = "strict"
+    concurrent.save()
+    before = file_state(path)
+    stale.sandbox.profile = "strict"
+    stale.save()
+    assert file_state(path) == before
+
+
+def test_inherited_legacy_policy_change_refuses_stale_common_edit(saved_config):
+    stale, path = saved_config(legacy={"egress": {"block": ["old.example"]}})
+    config_writer.apply(
+        [config_writer.Change("openshell.egress.block", ["old.example", "concurrent.example"])],
+        "cli:test", "synthetic concurrent legacy edit", path=path,
+    )
+    before = file_state(path)
+    snapshot = copy.deepcopy(stale._loaded_v8_modeled_snapshot)
+    stale.sandbox.egress.block.append("stale.example")
+    with pytest.raises(config_writer.ConfigConflictError, match=r"sandbox\.egress\.block"):
+        stale.save()
+    assert file_state(path) == before
+    assert stale._loaded_v8_modeled_snapshot == snapshot

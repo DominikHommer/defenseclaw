@@ -67,6 +67,10 @@ const configKey = "openshell"
 // (<data_dir>/sandboxes/manager/<name>.json, manager.recordDirName).
 var recordDir = filepath.Join("sandboxes", "manager")
 
+const liveSetupSkipped = "the live install has a sandbox setup of its own"
+
+var errLiveSetupAppeared = errors.New("statecarry: the live install gained a sandbox setup while carrying state")
+
 // Options names the two installs.
 type Options struct {
 	// FromDataDir and FromConfig are the install the installer leaves.
@@ -78,6 +82,9 @@ type Options struct {
 	// after a rollback by an earlier release uses it: the older install may
 	// have set up sandboxes since, and then its setup is the one in use.
 	OnlyIfUnset bool
+	// afterInstall lets package tests make a config change at the exact
+	// boundary between state installation and the locked config write.
+	afterInstall func() error
 }
 
 // Result says what Carry did.
@@ -149,7 +156,7 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 			return Result{}, err
 		}
 		if liveOn || len(sandboxRecords(o.DataDir)) > 0 {
-			return Result{Skipped: "the live install has a sandbox setup of its own"}, nil
+			return Result{Skipped: liveSetupSkipped}, nil
 		}
 	}
 	changes := make([]configwrite.Change, 0, len(sections))
@@ -177,10 +184,18 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 	if err := install(moves); err != nil {
 		return Result{}, errors.Join(err, undo(moves))
 	}
+	if o.afterInstall != nil {
+		if err := o.afterInstall(); err != nil {
+			return Result{}, errors.Join(err, undo(moves))
+		}
+	}
 	if _, err := configwrite.ApplyComputed(ctx, o.Config, func(current []byte) ([]configwrite.Change, error) {
-		live, _, err := parseSandboxSections(current)
+		live, liveOn, err := parseSandboxSections(current)
 		if err != nil {
 			return nil, err
+		}
+		if o.OnlyIfUnset && liveOn {
+			return nil, errLiveSetupAppeared
 		}
 		if sections["sandbox"] == nil && live["sandbox"] != nil {
 			return nil, errors.New("statecarry: the live install has sandbox policy but the source uses legacy openshell policy; explicitly reconcile the sandbox policy before carrying its setup")
@@ -193,6 +208,12 @@ func Carry(ctx context.Context, o Options) (Result, error) {
 		Actor:  configwrite.ActorMigration,
 		Reason: "installer: keep the sandbox setup of the install it replaced",
 	}); err != nil {
+		if errors.Is(err, errLiveSetupAppeared) {
+			if undoErr := undo(moves); undoErr != nil {
+				return Result{}, undoErr
+			}
+			return Result{Skipped: liveSetupSkipped}, nil
+		}
 		err = fmt.Errorf("write the sandbox settings into %s: %w", o.Config, err)
 		return Result{}, errors.Join(err, undo(moves))
 	}

@@ -35,7 +35,7 @@ import stat
 import subprocess
 import sys
 import urllib.parse
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
@@ -5141,6 +5141,46 @@ def _assert_sandbox_save_authority(
                 f"sandbox.{suffix} owns this setting; change sandbox.{suffix} instead of openshell.{suffix}, "
                 "then reload config.yaml and retry"
             )
+
+    # A modeled save merges into the latest document. That is safe for
+    # independent leaves, but a list or scalar edited by two loaded Configs
+    # must not silently replace the first writer's policy. Compare effective
+    # modeled values so an inherited openshell leaf is checked too.
+    old_common = baseline.get("sandbox", _V8_MISSING)
+    new_common = current.get("sandbox", _V8_MISSING)
+    if old_common == new_common:
+        return
+
+    def changed_leaves(before: Any, after: Any, prefix: tuple[str, ...] = ()) -> Iterator[tuple[str, ...]]:
+        if before == after:
+            return
+        if isinstance(before, dict) and isinstance(after, dict):
+            for key in sorted(set(before) | set(after)):
+                yield from changed_leaves(before.get(key, _V8_MISSING), after.get(key, _V8_MISSING), (*prefix, key))
+        else:
+            yield prefix
+
+    def at_path(value: Any, path: tuple[str, ...]) -> Any:
+        for key in path:
+            if not isinstance(value, dict):
+                return _V8_MISSING
+            value = value.get(key, _V8_MISSING)
+        return value
+
+    disk_common: Any = _V8_MISSING
+    if "sandbox" in existing:
+        from dataclasses import asdict
+
+        data_dir = str(existing.get("data_dir") or current.get("data_dir") or "")
+        disk_model = _merge_sandbox(existing["sandbox"], data_dir, existing.get("openshell"))
+        modeled = {"openshell": asdict(disk_model)}
+        _serialize_openshell(modeled)
+        disk_common = modeled["openshell"]
+    for path in changed_leaves(old_common, new_common):
+        observed = at_path(disk_common, path)
+        if observed != at_path(old_common, path) and observed != at_path(new_common, path):
+            name = ".".join(("sandbox", *path))
+            raise ConfigConflictError(f"{name} changed since load; reload config.yaml and retry")
 
 
 def _merge_v8_modeled_changes(

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -167,5 +168,47 @@ func TestCarryCommonMasterControlsSourceAndDestination(t *testing.T) {
 	res, err = Carry(context.Background(), Options{FromDataDir: legacy.data, FromConfig: legacy.config, DataDir: active.data, Config: active.config, OnlyIfUnset: true})
 	if err != nil || res.Carried || !strings.Contains(res.Skipped, "setup of its own") {
 		t.Fatalf("active common destination = %+v, %v; want skipped", res, err)
+	}
+}
+
+func TestCarryOnlyIfUnsetRefusesLateEnablementAfterStateInstall(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	root := t.TempDir()
+	live := newInstall(t, root, "live", "sandbox: {enabled: false, runtime: openshell, runtimes: {openshell: {enabled: true}}}\n")
+	left := newInstall(t, root, "left", commonSandboxAfterSetup)
+	plantSandboxState(t, left.data, "source-run", "source-binding")
+	write(t, filepath.Join(live.data, "sandboxes", "cache", "own-state"), "keep", 0o600)
+	beforeTree := tree(t, live.data)
+	var concurrentBytes []byte
+	var concurrentGeneration configwrite.GenerationState
+	result, err := Carry(context.Background(), Options{
+		FromDataDir: left.data, FromConfig: left.config, DataDir: live.data, Config: live.config,
+		OnlyIfUnset: true,
+		afterInstall: func() error {
+			if !reflect.DeepEqual(tree(t, live.data), tree(t, left.data)) {
+				t.Fatal("test did not reach the post-install boundary")
+			}
+			if _, err := configwrite.Apply(context.Background(), live.config,
+				[]configwrite.Change{{Path: "sandbox.enabled", Value: true}},
+				configwrite.Options{Actor: "cli:test"}); err != nil {
+				return err
+			}
+			var err error
+			concurrentBytes, err = os.ReadFile(live.config)
+			if err != nil {
+				return err
+			}
+			concurrentGeneration, err = configwrite.ReadGenerationState(live.config)
+			return err
+		},
+	})
+	if err != nil || result.Carried || result.Skipped != liveSetupSkipped {
+		t.Fatalf("late enablement = %+v, %v; want a clean skip", result, err)
+	}
+	after, readErr := os.ReadFile(live.config)
+	generation, generationErr := configwrite.ReadGenerationState(live.config)
+	if readErr != nil || generationErr != nil || string(after) != string(concurrentBytes) ||
+		generation != concurrentGeneration || !reflect.DeepEqual(tree(t, live.data), beforeTree) {
+		t.Fatalf("late refusal changed concurrent config, generation or own state: %v, %v", readErr, generationErr)
 	}
 }
