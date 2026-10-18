@@ -77,7 +77,53 @@ func TestManagedMacDoctorUsesTheGatewaysE2fsprogsSetting(t *testing.T) {
 		t.Fatalf("unknown administrator directory: %+v", got)
 	}
 	ta.daemon.status.Managed = nil
-	if got := row(); got == nil || got.Status != openshell.StatusFail || !strings.Contains(got.Detail, "did not answer") {
-		t.Fatalf("unknown daemon and administrator directory: %+v", got)
+	if got := row(); got == nil || got.Status != openshell.StatusFail || !strings.Contains(got.Detail, "rendered gateway configuration is unavailable") {
+		t.Fatalf("unknown daemon and rendered driver: %+v", got)
+	}
+}
+
+func TestManagedMacDoctorUsesRenderedDriverWhenDaemonDoesNotAnswer(t *testing.T) {
+	withManagedHost(t)
+	app := newTestApp(t, "")
+	app.GOOS = "darwin"
+	app.daemon.status.Managed = nil
+	app.HostDoctor = hostReport(nil)
+	app.ManagedE2fsprogsDir = func(context.Context) (string, bool) { return "", false }
+	path := filepath.Join(t.TempDir(), "gateway.toml")
+	previousPaths, previousTrust := managedRenderedGateway, managedRenderedVMConfigTrust
+	t.Cleanup(func() { managedRenderedGateway, managedRenderedVMConfigTrust = previousPaths, previousTrust })
+	managedRenderedGateway = func() *openshell.RenderedPaths { return &openshell.RenderedPaths{TOML: path} }
+	managedRenderedVMConfigTrust = func(string, string) error { return nil }
+	write := func(driver openshell.ComputeDriver) {
+		t.Helper()
+		data, err := (openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: driver}).TOML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(openshell.DriverDocker)
+	rep := app.runDoctor(bg)
+	if rep.Driver != openshell.DriverDocker || rep.Get(openshell.CheckIDManagedE2fsprogs) != nil {
+		t.Fatalf("rendered Docker should skip MicroVM prerequisites: driver=%q row=%+v", rep.Driver, rep.Get(openshell.CheckIDManagedE2fsprogs))
+	}
+	write(openshell.DriverVM)
+	rep = app.runDoctor(bg)
+	if row := rep.Get(openshell.CheckIDManagedE2fsprogs); rep.Driver != openshell.DriverVM || row == nil || row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "did not answer") {
+		t.Fatalf("rendered VM must check prerequisites: driver=%q row=%+v", rep.Driver, row)
+	}
+	if err := os.WriteFile(path, []byte("invalid = ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep = app.runDoctor(bg)
+	if row := rep.Get(openshell.CheckIDManagedE2fsprogs); rep.Driver != "" || row == nil || row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "rendered gateway.toml") {
+		t.Fatalf("invalid render must fail closed: driver=%q row=%+v", rep.Driver, row)
+	}
+	managedRenderedVMConfigTrust = func(string, string) error { return errors.New("not trusted") }
+	rep = app.runDoctor(bg)
+	if row := rep.Get(openshell.CheckIDManagedE2fsprogs); row == nil || row.Status != openshell.StatusFail || !strings.Contains(row.Detail, "not trusted") {
+		t.Fatalf("untrusted render must fail closed: %+v", row)
 	}
 }
