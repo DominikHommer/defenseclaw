@@ -1128,6 +1128,16 @@ keeps naming each folder that is still untrusted, removes the old copies of
 every account it can, and lists them under `changes`. With a pending
 transaction the run still fails with `1603` and names the same remedy.
 
+The same holds for an enrolled account that is signed out when the run
+starts and whose own `.defenseclaw` or `hooks` folder no longer has the
+owner or permissions DefenseClaw set. The guardian repairs that account's
+hooks only in its own Windows session, so an upgrade, Setup `/ensure` or
+`repair` goes on without it and names the account and the folder in a
+`user_runtime_folder_untrusted` warning; the account stays pending until its
+next sign-in, when the guardian repairs it. An upgrade from 1.0.2 used to
+fail with `1603` here. Any other failure of a signed-out account's hooks
+still stops the run and names the account.
+
 A hardening script that removes `NT SERVICE\DefenseClawGateway` from
 `C:\ProgramData\Cisco\DefenseClaw\runtime` or `etc` stops the gateway from
 starting. `status` and `verify` both fail and name the folder and the
