@@ -65,7 +65,7 @@ class R102EnterprisePagesDocsTest(unittest.TestCase):
         self.assertIn("LocalSystem can read", text)
 
     def test_gap_0294_purge_removes_lifecycle_lock(self):
-        text = page("windows.mdx")
+        text = " ".join(page("windows.mdx").split())
         self.assertIn("A standalone Setup uninstall removes the administrator-only", text)
         self.assertIn("The Secure Client profile keeps the lock unless `PURGE=1`", text)
         self.assertNotIn("the uninstall keeps it in place. To leave nothing", text)
