@@ -43,8 +43,9 @@ static dclaw_session_t *find_session(uint16_t session_id) {
 
 static dclaw_session_t *create_session(uint16_t session_id) {
     dclaw_state_t *s = dclaw_get_state();
-    /* Find empty slot or evict oldest */
-    dclaw_session_t *oldest = &s->sessions[0];
+    /* Find empty slot or evict the oldest, preferring non-revoked sessions
+     * so a burst of new session IDs cannot flush a revocation. */
+    dclaw_session_t *oldest = NULL;
     for (int i = 0; i < DCLAW_MAX_SESSIONS; i++) {
         if (s->sessions[i].started_at == 0) {
             memset(&s->sessions[i], 0, sizeof(dclaw_session_t));
@@ -53,7 +54,10 @@ static dclaw_session_t *create_session(uint16_t session_id) {
             s->sessions[i].last_activity = s->sessions[i].started_at;
             return &s->sessions[i];
         }
-        if (s->sessions[i].last_activity < oldest->last_activity) {
+        if (!oldest ||
+            (oldest->revoked && !s->sessions[i].revoked) ||
+            (oldest->revoked == s->sessions[i].revoked &&
+             s->sessions[i].last_activity < oldest->last_activity)) {
             oldest = &s->sessions[i];
         }
     }
@@ -63,6 +67,49 @@ static dclaw_session_t *create_session(uint16_t session_id) {
     oldest->started_at = hal_tick_ms();
     oldest->last_activity = oldest->started_at;
     return oldest;
+}
+
+void dclaw_session_revoke(uint16_t session_id) {
+    dclaw_session_t *sess = find_session(session_id);
+    if (!sess) sess = create_session(session_id);
+    sess->revoked = true;
+    sess->last_activity = hal_tick_ms();
+}
+
+bool dclaw_session_is_revoked(uint16_t session_id) {
+    dclaw_session_t *sess = find_session(session_id);
+    if (!sess || !sess->revoked) return false;
+    /* Continued attempts keep the revocation alive. */
+    sess->last_activity = hal_tick_ms();
+    return true;
+}
+
+/* Clear correlator state for REVOKE_SESSIONS. Revoked sessions stay
+ * revoked, and sessions with an unverified speculative call in flight are
+ * revoked too: the reset discards the slots that would have checked them. */
+void dclaw_sessions_reset_keep_revoked(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
+        if (s->speculative[i].request_id != 0) {
+            dclaw_session_revoke(s->speculative[i].session_id);
+        }
+    }
+    memset(s->speculative, 0, sizeof(s->speculative));
+
+    for (int i = 0; i < DCLAW_MAX_SESSIONS; i++) {
+        dclaw_session_t *sess = &s->sessions[i];
+        if (sess->started_at != 0 && sess->revoked) {
+            uint16_t id = sess->session_id;
+            uint64_t started = sess->started_at;
+            memset(sess, 0, sizeof(*sess));
+            sess->session_id = id;
+            sess->started_at = started;
+            sess->last_activity = hal_tick_ms();
+            sess->revoked = true;
+        } else {
+            memset(sess, 0, sizeof(*sess));
+        }
+    }
 }
 
 static bool match_sequence(const dclaw_session_t *sess, const dclaw_sequence_rule_t *rule) {

@@ -239,6 +239,36 @@ static bool is_sync_block_required(uint8_t cap_flags) {
     return (cap_flags & (DCLAW_CAP_ACTUATE | DCLAW_CAP_EXEC_SHELL |
                          DCLAW_CAP_WRITE_FS)) != 0;
 }
+
+/* Claim a speculative slot so the gateway verdict can be traced back to the
+ * session. A slot is free when empty or when its request is no longer
+ * pending (the pending slot was reclaimed and the verdict can never be
+ * matched). Returns false when no slot is free: the caller must wait. */
+static bool speculative_track(uint16_t session_id, uint16_t request_id, uint8_t cap_flags) {
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
+        dclaw_speculative_slot_t *slot = &g_state.speculative[i];
+        bool free_slot = slot->request_id == 0;
+        if (!free_slot) {
+            free_slot = true;
+            for (int p = 0; p < DCLAW_PENDING_SLOTS; p++) {
+                if (g_state.pending[p].request_id == slot->request_id &&
+                    !g_state.pending[p].resolved) {
+                    free_slot = false;
+                    break;
+                }
+            }
+        }
+        if (free_slot) {
+            memset(slot, 0, sizeof(*slot));
+            slot->session_id = session_id;
+            slot->request_id = request_id;
+            slot->cap_flags = cap_flags;
+            slot->stage = DCLAW_EXEC_STAGE_STARTED;
+            return true;
+        }
+    }
+    return false;
+}
 #endif
 
 static dclaw_verdict_t make_verdict(dclaw_action_t action, dclaw_reason_t reason,
@@ -280,6 +310,16 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         g_state.eval_denied_count++;
         dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
+    }
+
+    /* Step 1-rev: a session whose speculative call was later blocked by the
+     * gateway is denied outright. Not counted by the canary: retries from one
+     * revoked agent must not look like a bad policy push. */
+    if (dclaw_session_is_revoked(req->session_id)) {
+        dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE,
+                          target_hash, req->session_id);
+        g_state.eval_denied_count++;
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE, DCLAW_VERDICT_SYNC);
     }
 
     /* Step 1a: Hash-to-name binding — verify that the submitted tool_hash
@@ -471,7 +511,8 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         }
 
 #if DCLAW_SPECULATIVE_EXECUTION
-        if (!g_strict_mode && !is_sync_block_required(req->cap_flags)) {
+        if (!g_strict_mode && !is_sync_block_required(req->cap_flags) &&
+            speculative_track(req->session_id, request_id, req->cap_flags)) {
             /* Speculative mode: allow the agent to proceed, cloud will respond async.
              * If send failed, still return ALLOW — the request is logged for audit. */
             dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,

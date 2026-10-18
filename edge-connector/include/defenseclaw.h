@@ -204,6 +204,7 @@ typedef struct {
     uint64_t started_at;
     uint64_t last_activity;
     uint8_t  risk_score;
+    bool     revoked;  /* a speculative call was later blocked by the gateway */
 } dclaw_session_t;
 
 /* === Verdict Cache === */
@@ -358,6 +359,12 @@ void dclaw_shutdown(void);
 typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
                                            const char *tool_name);
 void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
+
+/* Session revocation (correlator.c). A revoked session is denied with
+ * DCLAW_REASON_RETROACTIVE until it expires from inactivity. */
+void dclaw_session_revoke(uint16_t session_id);
+bool dclaw_session_is_revoked(uint16_t session_id);
+void dclaw_sessions_reset_keep_revoked(void);
 
 /* === TLS Engine (mbedTLS transport for MQTT) === */
 

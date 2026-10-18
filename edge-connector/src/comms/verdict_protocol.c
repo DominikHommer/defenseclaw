@@ -456,15 +456,23 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     dclaw_cache_store_with_ttl(local_hash, (dclaw_action_t)action,
                                (dclaw_severity_t)severity, ttl);
 
-    /* Invoke retroactive callback when cloud returns BLOCK for a
-     * previously speculatively-allowed request. */
-    if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
-        dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
-        if (cb) {
-            uint32_t target_hash = (uint32_t)local_hash[0] | ((uint32_t)local_hash[1] << 8)
-                                 | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24);
-            cb((uint16_t)target_hash, "(cloud-verdict)");
+    /* Retroactive revocation: if this request was speculatively allowed and
+     * the gateway now blocks it, revoke the session and notify. */
+    for (int i = 0; i < DCLAW_SPECULATIVE_SLOTS; i++) {
+        dclaw_speculative_slot_t *slot = &s->speculative[i];
+        if (slot->request_id == 0 || slot->request_id != request_id) continue;
+        uint16_t spec_session = slot->session_id;
+        memset(slot, 0, sizeof(*slot));
+        if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
+            dclaw_session_revoke(spec_session);
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RETROACTIVE,
+                              (uint32_t)local_hash[0] | ((uint32_t)local_hash[1] << 8)
+                              | ((uint32_t)local_hash[2] << 16) | ((uint32_t)local_hash[3] << 24),
+                              spec_session);
+            dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
+            if (cb) cb(spec_session, "(cloud-verdict)");
         }
+        break;
     }
 
     /* Audit the decision */

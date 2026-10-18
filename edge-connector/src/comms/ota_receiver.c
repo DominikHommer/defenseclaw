@@ -444,12 +444,11 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     case 0x02: /* REVOKE_HASH / REVOKE_SESSIONS */
         /* payload[0:32] contains the hash to revoke */
         dclaw_cache_flush_all(); /* simplified: flush everything */
-        /* Clear session table to revoke all active sessions */
-        memset(s->sessions, 0, sizeof(s->sessions));
-        /* Reset correlator FSM states: zero out pending/speculative slots
-         * so no stale session state lingers after a revocation. */
+        /* Clear the session table and speculative slots. Revoked sessions,
+         * and sessions whose speculative calls are still unverified, stay
+         * revoked. Then zero pending slots so no stale state lingers. */
+        dclaw_sessions_reset_keep_revoked();
         memset(s->pending, 0, sizeof(s->pending));
-        memset(s->speculative, 0, sizeof(s->speculative));
         break;
 
     case 0x03: /* FORCE_SYNC */

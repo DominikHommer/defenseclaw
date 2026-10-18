@@ -86,6 +86,15 @@ if(DCLAW_MQTT_ENABLED)
     # from one test does not leak into another.
     set_tests_properties(ota_emergency PROPERTIES
         ENVIRONMENT "DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-ota-emergency.bin")
+
+    if(DCLAW_SPECULATIVE_EXECUTION)
+        add_executable(test_speculative_revocation test_speculative_revocation.c)
+        target_link_libraries(test_speculative_revocation PRIVATE dclaw_core)
+        add_test(NAME speculative_revocation COMMAND test_speculative_revocation)
+        list(APPEND DCLAW_TEST_TARGETS test_speculative_revocation)
+        set_tests_properties(speculative_revocation PROPERTIES
+            ENVIRONMENT "DCLAW_STRICT_MODE=0;DCLAW_FLASH_PATH=${DCLAW_TEST_FLASH_DIR}/flash-speculative.bin")
+    endif()
 endif()
 
 if(DCLAW_CONTENT_SCAN AND DCLAW_MQTT_ENABLED)

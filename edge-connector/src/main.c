@@ -60,6 +60,28 @@ extern void dclaw_lockdown_timeout_check(void);
 
 static volatile sig_atomic_t g_running = 1;
 
+/* Connected IPC clients. A client that sends "subscribe_revocations"
+ * receives one JSON-RPC notification per revoked session on that
+ * connection; it should use a separate connection for requests. Clients
+ * that never subscribe never receive unsolicited messages. */
+static int  client_fds[DCLAW_MAX_IPC_CLIENTS];
+static bool client_subscribed[DCLAW_MAX_IPC_CLIENTS];
+static int  num_clients = 0;
+
+static void notify_session_revoked(uint16_t session_id, const char *tool_name) {
+    (void)tool_name;
+    char msg[128];
+    int n = snprintf(msg, sizeof(msg),
+        "{\"jsonrpc\":\"2.0\",\"method\":\"session_revoked\","
+        "\"params\":{\"session_id\":%u,\"reason\":%u}}\n",
+        (unsigned)session_id, (unsigned)DCLAW_REASON_RETROACTIVE);
+    if (n <= 0 || (size_t)n >= sizeof(msg)) return;
+    for (int i = 0; i < num_clients; i++) {
+        if (!client_subscribed[i] || client_fds[i] < 0) continue;
+        if (write(client_fds[i], msg, (size_t)n) < 0) { /* best-effort */ }
+    }
+}
+
 /* Local lockdown timeout: auto-release block_all after this many seconds.
  * This is a faster local safety net (1 hour) in addition to the 24-hour
  * timeout in ota_receiver.c, and works even when MQTT is disabled. */
@@ -249,8 +271,6 @@ int main(int argc, char *argv[]) {
 
     /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
     struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
-    int client_fds[DCLAW_MAX_IPC_CLIENTS];
-    int num_clients = 0;
 
     /* Per-client accumulation buffers for newline-delimited message framing */
     static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
@@ -258,8 +278,11 @@ int main(int argc, char *argv[]) {
 
     memset(fds, 0, sizeof(fds));
     memset(client_buf_len, 0, sizeof(client_buf_len));
-    for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++)
+    for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++) {
         client_fds[i] = -1;
+        client_subscribed[i] = false;
+    }
+    dclaw_register_retroactive_callback(notify_session_revoked);
 
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
@@ -289,6 +312,7 @@ int main(int argc, char *argv[]) {
                     hal_ipc_socket_close(client_fd);
                 } else if (num_clients < DCLAW_MAX_IPC_CLIENTS) {
                     client_fds[num_clients] = client_fd;
+                    client_subscribed[num_clients] = false;
                     num_clients++;
                 } else {
                     /* At capacity, reject */
@@ -323,10 +347,12 @@ int main(int argc, char *argv[]) {
                 num_clients--;
                 if (i < num_clients) {
                     client_fds[i] = client_fds[num_clients];
+                    client_subscribed[i] = client_subscribed[num_clients];
                     client_buf_len[i] = client_buf_len[num_clients];
                     memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
                 }
                 client_fds[num_clients] = -1;
+                client_subscribed[num_clients] = false;
                 client_buf_len[num_clients] = 0;
                 continue;
             }
@@ -340,6 +366,11 @@ int main(int argc, char *argv[]) {
                 size_t msg_len = (size_t)(nl - base);
                 *nl = '\0';
 
+                if (msg_len == 21 && memcmp(base, "subscribe_revocations", 21) == 0) {
+                    client_subscribed[i] = true;
+                    const char *ok = "{\"jsonrpc\":\"2.0\",\"result\":{\"subscribed\":true},\"id\":null}\n";
+                    if (write(client_fds[i], ok, strlen(ok)) < 0) { /* best-effort */ }
+                } else
 #if DCLAW_MQTT_ENABLED
                 if (msg_len >= 16 && memcmp(base, "release_lockdown", 16) == 0) {
                     extern uint32_t dclaw_load_lockdown_release_seq(void);
