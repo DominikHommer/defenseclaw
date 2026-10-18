@@ -9238,11 +9238,6 @@ function Get-DefenseClawLayout {
         # treats an absent key as the Secure Client broker deployment.
         $layout['Profile'] = 'Standalone'
         $layout['BrokerEnabled'] = $false
-        # The Fleet compiler is executable Python source. Keep it in the
-        # protected installation, outside writable per-user runtimes.
-        $layout['CompilerLibDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib')
-        $layout['CompilerDirectory'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw')
-        $layout['CompilerPath'] = [IO.Path]::Combine($InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
     }
     return $layout
 }
@@ -27710,12 +27705,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
-            $compilerPath = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CompilerPath
-            if (-not [string]::IsNullOrWhiteSpace($compilerPath)) {
-                Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
-                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
-                    [IO.File]::Delete($compilerPath)
-                }
+            # Retire a compiler left by an older standalone install.
+            $compilerPath = [IO.Path]::Combine($Layout.InstallRoot, 'lib', 'defenseclaw', 'policy_compiler.py')
+            Assert-DefenseClawNoReparsePath -Path $compilerPath -AllowMissingLeaf
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $compilerPath -PathType Leaf) {
+                [IO.File]::Delete($compilerPath)
             }
         }
         foreach ($requiredPath in @(

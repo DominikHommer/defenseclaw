@@ -21,8 +21,7 @@
 #       file your MDM delivered (Intune and other MDMs pin the package hash).
 #
 #   --payload-dir <dir> (Authenticode-signed)
-#       Embeds the signed inner executables/scripts and the hash-bound
-#       policy_compiler.py source file.
+#       Embeds the signed inner executables/scripts.
 #       (Cisco release signing, or your own code-signing certificate for
 #       customer re-signing) with distribution_flavor "standalone". The
 #       lifecycle requires a Valid signature on every file; pass
@@ -119,7 +118,6 @@ PAYLOAD_FILES=(
     defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
-    policy_compiler.py
 )
 
 STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dc-standalone-windows.XXXXXX")"
@@ -146,8 +144,6 @@ if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
         [ -f "${SIGNED_PAYLOAD_DIR}/${name}" ] || die "signed payload is missing ${name}"
         cp -f "${SIGNED_PAYLOAD_DIR}/${name}" "${STAGE_DIR}/${name}"
     done
-    cmp -s "${STAGE_DIR}/policy_compiler.py" "${REPO_ROOT}/edge-connector/tools/policy_compiler.py" || \
-        die "signed payload policy_compiler.py differs from the release source"
     while IFS= read -r -d '' extra; do
         base="$(basename "${extra}")"
         found=0
@@ -186,14 +182,10 @@ else
     cp -f "${STAGE_DIR}/defenseclaw-gateway.exe" "${STAGE_DIR}/defenseclaw.exe"
     cp -f "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" "${STAGE_DIR}/install-enterprise.ps1"
     cp -f "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" "${STAGE_DIR}/DefenseClawEnterprise.psm1"
-    cp -f "${REPO_ROOT}/edge-connector/tools/policy_compiler.py" "${STAGE_DIR}/policy_compiler.py"
     if [ -n "${SIGN_COMMAND}" ]; then
         FLAVOR="standalone"
         UNSIGNED_FLAG=()
         for name in "${PAYLOAD_FILES[@]}"; do
-            # Python source is hash-bound by the signed outer Setup manifest.
-            # Authenticode cannot be embedded in a .py file.
-            if [ "${name}" = policy_compiler.py ]; then continue; fi
             echo "==> signing ${name}"
             "${SIGN_COMMAND}" "${STAGE_DIR}/${name}" || die "signing ${name} failed"
         done

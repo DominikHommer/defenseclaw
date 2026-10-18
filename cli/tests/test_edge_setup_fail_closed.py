@@ -28,6 +28,7 @@ def test_edge_setup_advertises_real_gateway_port_and_emits_compilable_policy(tmp
     assert help_result.exit_code == 0
     assert "18970" in help_result.output
     assert "13400" not in help_result.output
+    assert "defenseclaw-fleet-assets.tar.gz" in help_result.output
 
     sample = runner.invoke(
         cmd_setup_edge_connector.edge_connector, ["--emit-policy"], obj=_app(tmp_path)
@@ -45,6 +46,17 @@ def test_edge_setup_advertises_real_gateway_port_and_emits_compilable_policy(tmp
     )
     assert compiled.returncode == 0, compiled.stderr
     assert (tmp_path / "policy.bin").stat().st_size > 0
+
+
+def test_edge_install_help_and_missing_source_name_fleet_archive(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cmd_edge_install, "_find_edge_connector_source", lambda *_args: None)
+    runner = CliRunner()
+    help_result = runner.invoke(cmd_edge_install.edge_install, ["--help"], obj=_app(tmp_path))
+    assert help_result.exit_code == 0, help_result.output
+    assert "defenseclaw-fleet-assets.tar.gz" in help_result.output
+    refusal = runner.invoke(cmd_edge_install.edge_install, [], obj=_app(tmp_path))
+    assert refusal.exit_code != 0
+    assert "defenseclaw-fleet-assets.tar.gz" in refusal.output
 
 
 def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:

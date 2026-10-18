@@ -581,7 +581,7 @@ def _build_local(source: Path, profile: str) -> bool:
 @click.command("install")
 @click.option("--target", default=None, help="IP or hostname of the remote device (SSH).")
 @click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
-              help="Extracted Fleet assets or source checkout (required for wheel installs).")
+              help="Extract defenseclaw-fleet-assets.tar.gz and pass its directory, or use a source checkout (required for wheel installs).")
 @click.option("--user", default="root", help="SSH user for the remote device.")
 @click.option(
     "--profile", default="STANDARD",
@@ -617,7 +617,7 @@ def edge_install(
     if source is None:
         ux.err(
             "Could not locate edge-connector/ source directory.\n"
-            "  Pass --source-dir with the extracted Fleet assets, or run from\n"
+            "  Pass --source-dir with extracted defenseclaw-fleet-assets.tar.gz, or run from\n"
             "  a complete DefenseClaw source checkout."
         )
         raise SystemExit(1)

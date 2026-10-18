@@ -225,7 +225,7 @@ iot_extensions:
     help="Print a sample fleet policy YAML and exit.",
 )
 @click.option("--source-dir", type=click.Path(path_type=Path, exists=True, file_okay=False), default=None,
-              help="Extracted Fleet assets or source checkout (required for wheel installs).")
+              help="Extract defenseclaw-fleet-assets.tar.gz and pass its directory, or use a source checkout (required for wheel installs).")
 @click.option(
     "--non-interactive",
     is_flag=True,
