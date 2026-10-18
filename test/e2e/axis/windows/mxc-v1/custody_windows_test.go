@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -68,6 +69,56 @@ func syntheticBoundaryReceipt(t *testing.T) (string, receipt) {
 	value.Scope, value.Variant = boundaryScope, boundaryVariant
 	value.Binaries = append(value.Binaries, component{Path: boundaryName, SHA256: value.BinarySHA, Size: value.BinarySize})
 	return path, value
+}
+
+func TestNativeIdentityReceiptMatchesVerifierAuthority(t *testing.T) {
+	// Read the actual peer-language constants, rather than deriving the fixture
+	// from Go's constants alone: that missed the native-identity scope change.
+	source, err := os.ReadFile("verify_live_artifact.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"BOUNDARY_VARIANT": "standalone_std_boundary_native_identity_environment",
+		"BOUNDARY_SCOPE":   "fixed_windows_native_psec_boundary_native_identity_environment",
+	}
+	for name, expected := range want {
+		matches := regexp.MustCompile(`(?m)^`+name+` = "([^"\r\n]+)"\r?$`).FindAllSubmatch(source, -1)
+		if len(matches) != 1 || string(matches[0][1]) != expected {
+			t.Fatalf("verifier %s differs from the exact native-identity contract", name)
+		}
+	}
+	if boundaryVariant != want["BOUNDARY_VARIANT"] || boundaryScope != want["BOUNDARY_SCOPE"] {
+		t.Fatal("custody and verifier native-identity authority differ")
+	}
+	path, value := syntheticBoundaryReceipt(t)
+	// Use the independent exact values above in the serialized receipt.
+	value.Variant, value.Scope = want["BOUNDARY_VARIANT"], want["BOUNDARY_SCOPE"]
+	pin := writeReceipt(t, path, value, nil)
+	_, images, err := checkedReceipt(path, pin, "standalone-boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(images) != 3 {
+		images.Close()
+		t.Fatal("native-identity receipt did not pin all three synthetic images")
+	}
+	if err := images.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacy := range [][2]string{
+		{"standalone_std_boundary_literal_argv", value.Scope},
+		{value.Variant, "fixed_windows_native_psec_boundary_literal_argv"},
+		{"standalone_std_boundary_literal_argv", "fixed_windows_native_psec_boundary_literal_argv"},
+	} {
+		changed := value
+		changed.Variant, changed.Scope = legacy[0], legacy[1]
+		pin = writeReceipt(t, path, changed, nil)
+		if _, images, err := checkedReceipt(path, pin, "standalone-boundary"); err == nil {
+			images.Close()
+			t.Fatal("a historical literal-only receipt selected native-identity custody")
+		}
+	}
 }
 
 func TestModesRequireExactlyOneExplicitChoice(t *testing.T) {

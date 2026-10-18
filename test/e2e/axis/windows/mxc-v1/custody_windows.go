@@ -33,8 +33,8 @@ const loaderName = "bin/defenseclaw-axis-windows-psec-loader-child.exe"
 const diagnosticVariant = "separate_std_loader_diagnostic"
 const diagnosticScope = "fixed_windows_native_psec_loader_diagnostic"
 const boundaryName = "bin/defenseclaw-axis-windows-psec-boundary-child.exe"
-const boundaryVariant = "standalone_std_boundary_literal_argv"
-const boundaryScope = "fixed_windows_native_psec_boundary_literal_argv"
+const boundaryVariant = "standalone_std_boundary_native_identity_environment"
+const boundaryScope = "fixed_windows_native_psec_boundary_native_identity_environment"
 const combinedLock = "3b29ecb06dd2a81266c84712f8d6e088605290f386e87498bb7a7472a005af69"
 const outputBound = 64 * 1024
 
