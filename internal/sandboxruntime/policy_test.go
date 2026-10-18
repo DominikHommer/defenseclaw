@@ -152,8 +152,11 @@ func TestExecutionPolicyCopiesAllMutableInputsAndViews(t *testing.T) {
 		t.Fatal("private authority was mutable through caller input")
 	}
 	var decoded ExecutionPolicy
-	if err := json.Unmarshal(before, &decoded); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal(before, &decoded); err == nil {
+		t.Fatal("inspection JSON was accepted as a policy authority handle")
+	}
+	if _, err := json.Marshal(p); err == nil {
+		t.Fatal("policy authority was serialized instead of using the explicit inspection copy")
 	}
 	info, receipt := policyEvidence(p)
 	wantCode(t, decoded.AdmitPolicy(info, receipt, options.Authority), sandboxapi.CodePolicyRejected)

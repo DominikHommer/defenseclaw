@@ -91,6 +91,17 @@ type ExecutionPolicy struct {
 	digest     string
 }
 
+// MarshalJSON refuses to present an authorization handle as transport data.
+// Snapshot is the explicit host-confidential inspection copy, never authority.
+func (*ExecutionPolicy) MarshalJSON() ([]byte, error) {
+	return nil, sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox execution policy authority cannot be serialized")
+}
+
+// UnmarshalJSON refuses to reconstruct private resolver authority from JSON.
+func (*ExecutionPolicy) UnmarshalJSON([]byte) error {
+	return sandboxapi.Errorf(sandboxapi.CodePolicyRejected, "sandbox execution policy must be resolved on the trusted host")
+}
+
 // ResolveExecutionPolicy reuses common projection and the existing pack,
 // repository and administrative resolution. It starts no runtime or listener.
 // Input snapshots must be stable during this call; no mutable input is retained.
