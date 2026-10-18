@@ -918,6 +918,58 @@ func (e *capturedStageEngine) history(head plumbing.Hash, depth int, withheld fu
 	}
 	queue := []item{{head, 1}}
 	seen := map[plumbing.Hash]bool{}
+	// A subtree may occur at different paths with different withholding rules.
+	// Reuse only an identical tree at the identical path across history.
+	type treeVisit struct {
+		hash   plumbing.Hash
+		prefix string
+	}
+	trees := map[treeVisit]bool{}
+	entriesVisited, pathBytes := 0, 0
+	var walk func(plumbing.Hash, string, int) error
+	walk = func(h plumbing.Hash, prefix string, depth int) error {
+		if err := e.ctx.Err(); err != nil {
+			return err
+		}
+		if depth > hostStageMaxDepth {
+			return capturedRefuse("tree_depth_limit")
+		}
+		key := treeVisit{h, prefix}
+		if trees[key] {
+			return nil
+		}
+		if len(trees) >= capturedObjectMaxCount {
+			return capturedRefuse("history_tree_visit_limit")
+		}
+		trees[key] = true
+		tree, err := e.readTree(h)
+		if err != nil {
+			return err
+		}
+		e.objects[h] = true
+		for _, entry := range tree.Entries {
+			rel := prefix + entry.Name
+			if err := capturedRelativePath(rel); err != nil {
+				return err
+			}
+			entriesVisited++
+			pathBytes += len(rel)
+			if entriesVisited > capturedObjectMaxCount || pathBytes > capturedMetadataMaxBytes {
+				return capturedRefuse("history_tree_expansion_limit")
+			}
+			if entry.Mode == filemode.Dir {
+				if err := walk(entry.Hash, rel+"/", depth+1); err != nil {
+					return err
+				}
+			} else {
+				e.objects[entry.Hash] = true
+				if withheld(rel) {
+					drop[entry.Hash] = true
+				}
+			}
+		}
+		return nil
+	}
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
@@ -933,14 +985,8 @@ func (e *capturedStageEngine) history(head plumbing.Hash, depth int, withheld fu
 			return err
 		}
 		e.objects[current.hash] = true
-		entries, err := e.collectTree(commit.TreeHash, 0)
-		if err != nil {
+		if err := walk(commit.TreeHash, "", 0); err != nil {
 			return err
-		}
-		for rel, entry := range entries {
-			if withheld(rel) {
-				drop[entry.Hash] = true
-			}
 		}
 		if e.shallow[current.hash] || current.depth >= depth {
 			if len(commit.ParentHashes) > 0 {
@@ -958,13 +1004,7 @@ func (e *capturedStageEngine) history(head plumbing.Hash, depth int, withheld fu
 	return nil
 }
 
-func (e *capturedStageEngine) flatten(h plumbing.Hash, depth int) (map[string]object.TreeEntry, error) {
-	if depth > hostStageMaxDepth {
-		return nil, capturedRefuse("tree_depth_limit")
-	}
-	if cached, ok := e.trees[h]; ok {
-		return cached, nil
-	}
+func (e *capturedStageEngine) readTree(h plumbing.Hash) (*object.Tree, error) {
 	obj, err := e.store.EncodedObject(plumbing.TreeObject, h)
 	if err != nil {
 		return nil, err
@@ -1007,18 +1047,37 @@ func (e *capturedStageEngine) flatten(h plumbing.Hash, depth int) (map[string]ob
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]object.TreeEntry{}
 	folded := map[string]bool{}
 	for _, entry := range tree.Entries {
-		e.graphVisits++
-		if e.graphVisits > capturedObjectMaxCount {
-			return nil, capturedRefuse("tree_expansion_limit")
-		}
 		fold := strings.ToLower(entry.Name)
 		if folded[fold] {
 			return nil, capturedRefuse("tree_path_collision")
 		}
 		folded[fold] = true
+		if entry.Mode != filemode.Dir && entry.Mode != filemode.Regular && entry.Mode != filemode.Executable {
+			return nil, capturedRefuse("symlink_or_submodule_not_supported")
+		}
+	}
+	return tree, nil
+}
+
+func (e *capturedStageEngine) flatten(h plumbing.Hash, depth int) (map[string]object.TreeEntry, error) {
+	if depth > hostStageMaxDepth {
+		return nil, capturedRefuse("tree_depth_limit")
+	}
+	if cached, ok := e.trees[h]; ok {
+		return cached, nil
+	}
+	tree, err := e.readTree(h)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]object.TreeEntry{}
+	for _, entry := range tree.Entries {
+		e.graphVisits++
+		if e.graphVisits > capturedObjectMaxCount {
+			return nil, capturedRefuse("tree_expansion_limit")
+		}
 		switch entry.Mode {
 		case filemode.Dir:
 			children, err := e.flatten(entry.Hash, depth+1)
@@ -1318,7 +1377,7 @@ func (e *capturedStageEngine) writeConfig(gitDir string, source *gitconfig.Confi
 				continue
 			}
 			for _, remote := range section.Subsections {
-				if remote.Name == withheldRemote || len(remote.Name) > 255 || strings.ContainsAny(remote.Name, "\x00\r\n") {
+				if remote.Name == withheldRemote || len(remote.Name) > 255 || plumbing.ReferenceName("refs/remotes/"+remote.Name+"/fixed").Validate() != nil {
 					return capturedRefuse("invalid_remote_name")
 				}
 				urls := remote.Options.GetAll("url")
@@ -1335,9 +1394,7 @@ func (e *capturedStageEngine) writeConfig(gitDir string, source *gitconfig.Confi
 				}
 				rec.Remotes[remote.Name] = safe
 				cfg.SetOption("remote", remote.Name, "url", safe)
-				for _, spec := range remote.Options.GetAll("fetch") {
-					cfg.AddOption("remote", remote.Name, "fetch", spec)
-				}
+				cfg.SetOption("remote", remote.Name, "fetch", "+refs/heads/*:refs/remotes/"+remote.Name+"/*")
 			}
 		}
 	}

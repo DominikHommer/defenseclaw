@@ -85,8 +85,9 @@ count toward the output budget while writing, including headers and trailers.
 The accepted format is SHA1 loose objects or PACK v2 with an accompanying IDX
 v2; both indexed REF and OFS deltas are supported. Pack checksums, index
 checksums, entry CRCs and reconstructed object IDs are verified. Missing/thin
-bases refuse. Optional reverse-index, bitmap and keep sidecars are not used or
-copied. A promisor source refuses because the capture may be incomplete.
+bases refuse. Optional reverse-index, bitmap, keep and cruft timestamp sidecars
+and the multi-pack index are not used or copied. Each pack still needs its own
+verified IDX v2. A promisor source refuses because the capture may be incomplete.
 
 Index v2/v3 regular/executable files are supported. Unmerged, intent-to-add,
 sparse, split and v4 indexes refuse. SHA256, linked worktrees, alternates,
@@ -105,16 +106,21 @@ there is no fallback to a broader or incomplete matcher.
 Original reachable commits and trees retain their exact encoded bytes and
 object IDs. The configured depth creates real shallow boundaries; the engine
 does not flatten existing history. The baseline is a separate synthetic commit
-parented by the original HEAD. Shared `selectFilesFrom`/`detectSecretsFrom`
+parented by the original HEAD. History traversal reuses identical subtrees only
+at identical path prefixes, keeping path-dependent withholding intact. Its
+count and path-byte bounds apply to distinct tree/prefix visits, rather than a
+fresh flattened copy of every commit. Head and baseline flattening remain bounded.
+Shared `selectFilesFrom`/`detectSecretsFrom`
 decisions apply to the captured working files. A held tracked path retains
 skip-worktree semantics. Captured candidate read/stat errors refuse the whole
 selection, preserving the I/O cause before any selected file is emitted.
 Historical secret-named/held blobs are excluded from
 the guest promisor pack; public duplicate content needed at HEAD or baseline
 remains. The full object store stays outside the guest tree in `.dc-objects`.
-Only sanitized remote URLs, ordinary fetch refspecs and matching branch
-tracking are copied into fresh config. Source hooks and executable config are
-omitted.
+Only sanitized remote URLs and matching branch tracking are copied into fresh
+config. Each remote receives the fixed heads-to-remote-tracking fetch refspec
+used by the existing staging path; source fetch destinations are discarded.
+Source hooks and executable config are omitted.
 
 ## Focused native validation
 

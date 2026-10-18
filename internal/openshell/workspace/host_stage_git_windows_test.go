@@ -30,6 +30,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 type capturedRootsFixture struct {
@@ -243,6 +244,7 @@ func TestCapturedSHA1NativeTwoCommitPackedHistoryAndSecretBoundary(t *testing.T)
 	writeHostStageFixture(t, opts.Project, "nested/keep.tmp", "fixed included nested canary")
 	writeHostStageFixture(t, opts.Project, "nested/drop.tmp", "fixed ignored nested canary")
 	fixedGit(t, opts.Project, "config", "remote.origin.url", "https://fixed-user:fixed-password@example.invalid/project.git")
+	fixedGit(t, opts.Project, "config", "remote.origin.fetch", "+refs/*:refs/*")
 	writeHostStageFixture(t, opts.Project, ".git/hooks/post-checkout", "fixed nonexecutable hook canary")
 	roots := captureEngineFixture(t, opts)
 	var rec CopyRecord
@@ -277,6 +279,9 @@ func TestCapturedSHA1NativeTwoCommitPackedHistoryAndSecretBoundary(t *testing.T)
 	}
 	if rec.Remotes["origin"] != "https://example.invalid/project.git" {
 		t.Fatalf("remote was not sanitized: %v", rec.Remotes)
+	}
+	if got := fixedGit(t, stage, "config", "--get-all", "remote.origin.fetch"); got != "+refs/heads/*:refs/remotes/origin/*" {
+		t.Fatalf("source fetch destinations survived: %q", got)
 	}
 	for _, rel := range []string{".env", ".env.shared", "ignored-output.txt", "nested/drop.tmp", ".git/hooks/post-checkout"} {
 		if _, err := os.Stat(filepath.Join(stage, filepath.FromSlash(rel))); !errors.Is(err, os.ErrNotExist) {
@@ -410,6 +415,147 @@ func compressedLooseFixture(t *testing.T, root *os.Root, h plumbing.Hash, body [
 	}
 	if err := capturedWrite(root, ".git/objects/"+h.String()[:2]+"/"+h.String()[2:], encoded.Bytes()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func looseObjectFixture(t *testing.T, root *os.Root, kind plumbing.ObjectType, data []byte) plumbing.Hash {
+	t.Helper()
+	h := plumbing.ComputeHash(kind, data)
+	body := append([]byte(fmt.Sprintf("%s %d\x00", kind, len(data))), data...)
+	compressedLooseFixture(t, root, h, body)
+	return h
+}
+
+func looseTreeFixture(t *testing.T, root *os.Root, entries []object.TreeEntry) plumbing.Hash {
+	t.Helper()
+	encoded := &plumbing.MemoryObject{}
+	if err := (&object.Tree{Entries: entries}).Encode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	r, err := encoded.Reader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err = errors.Join(err, r.Close()); err != nil {
+		t.Fatal(err)
+	}
+	return looseObjectFixture(t, root, plumbing.TreeObject, data)
+}
+
+func looseCommitFixture(t *testing.T, root *os.Root, tree, parent plumbing.Hash, number int) plumbing.Hash {
+	t.Helper()
+	parents := ""
+	if parent != plumbing.ZeroHash {
+		parents = "parent " + parent.String() + "\n"
+	}
+	data := fmt.Sprintf("tree %s\n%sauthor Fixed Fixture <fixed@example.invalid> 1700000000 +0000\ncommitter Fixed Fixture <fixed@example.invalid> 1700000000 +0000\n\nfixed commit %d\n", tree, parents, number)
+	return looseObjectFixture(t, root, plumbing.CommitObject, []byte(data))
+}
+
+func TestCapturedSHA1DefaultDepthWithLargeUnchangedSubtree(t *testing.T) {
+	opts := hostStageFixture(t)
+	setupCapturedGitFixture(t, opts)
+	for i := range 1000 {
+		writeHostStageFixture(t, opts.Project, fmt.Sprintf("stable/file-%04d.txt", i), "fixed public subtree bytes\n")
+	}
+	writeHostStageFixture(t, opts.Project, "main.txt", "fixed initial bytes\n")
+	fixedGit(t, opts.Project, "add", "--all")
+	fixedGit(t, opts.Project, "commit", "--quiet", "-m", "fixed initial commit")
+	head := plumbing.NewHash(fixedGit(t, opts.Project, "rev-parse", "HEAD"))
+	stable := plumbing.NewHash(fixedGit(t, opts.Project, "rev-parse", "HEAD:stable"))
+	branch := fixedGit(t, opts.Project, "symbolic-ref", "HEAD")
+	root, err := os.OpenRoot(opts.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var final string
+	for i := range 110 {
+		final = fmt.Sprintf("fixed public change %d\n", i)
+		blob := looseObjectFixture(t, root, plumbing.BlobObject, []byte(final))
+		tree := looseTreeFixture(t, root, []object.TreeEntry{
+			{Name: "main.txt", Mode: filemode.Regular, Hash: blob},
+			{Name: "stable", Mode: filemode.Dir, Hash: stable},
+		})
+		head = looseCommitFixture(t, root, tree, head, i)
+	}
+	writeHostStageFixture(t, opts.Project, ".git/"+branch, head.String()+"\n")
+	writeHostStageFixture(t, opts.Project, "main.txt", final)
+	if got := fixedGit(t, opts.Project, "rev-list", "--count", "HEAD"); got != "111" {
+		t.Fatalf("native Git rejected source history: %q", got)
+	}
+	roots := captureEngineFixture(t, opts)
+	rec, err := stageEngineFixture(t, opts, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := fixedGuestOnlyFixture(t, filepath.Join(roots.outputPath, rec.RepoName))
+	if rec.Head != head.String() || fixedGit(t, guest, "rev-list", "--count", "HEAD") != "111" ||
+		fixedGit(t, guest, "show", "HEAD:main.txt") != strings.TrimSpace(final) ||
+		fixedGit(t, guest, "show", "HEAD~110:stable/file-0999.txt") != "fixed public subtree bytes" {
+		t.Fatal("large default-depth history or unchanged subtree was lost")
+	}
+}
+
+func TestCapturedSHA1HistoryMemoIncludesPathPrefix(t *testing.T) {
+	store, source, _ := newEmptyObjectFixture(t)
+	blob := looseObjectFixture(t, source, plumbing.BlobObject, []byte("fixed historic private bytes"))
+	subtree := looseTreeFixture(t, source, []object.TreeEntry{{Name: "fixed.txt", Mode: filemode.Regular, Hash: blob}})
+	tree := looseTreeFixture(t, source, []object.TreeEntry{
+		{Name: "a", Mode: filemode.Dir, Hash: subtree},
+		{Name: "private", Mode: filemode.Dir, Hash: subtree},
+	})
+	head := looseCommitFixture(t, source, tree, plumbing.ZeroHash, 0)
+	if err := store.inventory(); err != nil {
+		t.Fatal(err)
+	}
+	e := capturedStageEngine{ctx: context.Background(), store: store, objects: map[plumbing.Hash]bool{}, shallow: map[plumbing.Hash]bool{}}
+	drop := map[plumbing.Hash]bool{}
+	if err := e.history(head, DefaultGitDepth, func(rel string) bool { return strings.HasPrefix(rel, "private/") }, drop); err != nil {
+		t.Fatal(err)
+	}
+	if !drop[blob] {
+		t.Fatal("public subtree memo bypassed private path withholding")
+	}
+}
+
+func TestCapturedSHA1NativeCruftAndMultiPackIndexAreOptional(t *testing.T) {
+	opts := hostStageFixture(t)
+	setupCapturedGitFixture(t, opts)
+	writeHostStageFixture(t, opts.Project, "main.txt", "fixed reachable bytes\n")
+	fixedGit(t, opts.Project, "add", "--all")
+	fixedGit(t, opts.Project, "commit", "--quiet", "-m", "fixed reachable commit")
+	root, err := os.OpenRoot(opts.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	looseObjectFixture(t, root, plumbing.BlobObject, []byte("fixed unreachable cruft bytes"))
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fixedGit(t, opts.Project, "repack", "-ad", "--cruft")
+	fixedGit(t, opts.Project, "multi-pack-index", "write")
+	mtimes, err := filepath.Glob(filepath.Join(opts.Project, ".git", "objects", "pack", "*.mtimes"))
+	if err != nil || len(mtimes) == 0 {
+		t.Fatal("native Git did not create a real cruft pack")
+	}
+	if _, err := os.Stat(filepath.Join(opts.Project, ".git", "objects", "pack", "multi-pack-index")); err != nil {
+		t.Fatal(err)
+	}
+	roots := captureEngineFixture(t, opts)
+	rec, err := stageEngineFixture(t, opts, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := fixedGuestOnlyFixture(t, filepath.Join(roots.outputPath, rec.RepoName))
+	if fixedGit(t, guest, "show", "HEAD:main.txt") != "fixed reachable bytes" {
+		t.Fatal("optional native pack metadata broke object import")
+	}
+	for _, marker := range []string{"multi-pack-index", filepath.Base(mtimes[0])} {
+		if _, err := os.Stat(filepath.Join(guest, ".git", "objects", "pack", marker)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("optional source metadata was copied: %s (%v)", marker, err)
+		}
 	}
 }
 

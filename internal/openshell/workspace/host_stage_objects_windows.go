@@ -190,10 +190,12 @@ func (s *capturedObjectStore) inventory() error {
 					packs = append(packs, f.Name())
 					continue
 				}
-				// Reverse indexes and reachability bitmaps are optional caches;
-				// this reader neither interprets nor copies them. Promisor markers
+				// Reverse indexes, bitmaps, cruft timestamps and the multi-pack
+				// index are optional metadata; neither interpreted nor copied.
+				// Every pack still requires its independently verified IDX v2.
+				// Promisor markers
 				// are intentionally refused: a partial source is not complete.
-				if strings.HasSuffix(f.Name(), ".idx") || strings.HasSuffix(f.Name(), ".rev") || strings.HasSuffix(f.Name(), ".bitmap") || strings.HasSuffix(f.Name(), ".keep") {
+				if strings.HasSuffix(f.Name(), ".idx") || strings.HasSuffix(f.Name(), ".rev") || strings.HasSuffix(f.Name(), ".bitmap") || strings.HasSuffix(f.Name(), ".keep") || strings.HasSuffix(f.Name(), ".mtimes") || f.Name() == "multi-pack-index" {
 					continue
 				}
 				return capturedRefuse("unsupported_pack_sidecar")
