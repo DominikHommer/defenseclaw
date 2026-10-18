@@ -18,11 +18,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Only settleOpenShell reads this name. Status, verify and a later purge of
 // an uninstalled deployment must not treat it as the active state.
-const openshellKeptStateFile = "openshell-state.kept.json"
+const openshellKeptStateFile = managed.StandaloneKeptOpenShellStateFile
 
 func (e *Env) openshellKeptStatePath() string {
 	return filepath.Join(e.P(e.Layout.LifecycleDir), openshellKeptStateFile)

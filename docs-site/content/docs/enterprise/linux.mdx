@@ -596,7 +596,7 @@ install, `status` and `verify` name each such account with the
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay, with the root-only sandbox setup record in `/var/lib/defenseclaw-enterprise`. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` (custom rule packs, Rego) stay. | `defenseclaw-gateway enterprise linux uninstall --json` |
+| Stop and remove the deployment, its config, secrets and logs, most of its data and lifecycle state, and the `defenseclaw` account. When an account keeps sandboxes, `/var/lib/defenseclaw/sandbox` and `/var/lib/defenseclaw/redaction-correlation.key` stay, with the root-only sandbox setup record `/var/lib/defenseclaw-enterprise/openshell-state.kept.json`. They are root-owned while the service account is gone; the next `ensure` adopts them. Each user keeps `~/.defenseclaw`, and your policies in `/etc/defenseclaw/policies` (custom rule packs, Rego) stay. | `defenseclaw-gateway enterprise linux uninstall --json` |
 | Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise linux uninstall --purge --json` |
 | Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise linux uninstall --keep-state --json` |
 | Keep only the `defenseclaw` account | Add `--keep-service-account` |

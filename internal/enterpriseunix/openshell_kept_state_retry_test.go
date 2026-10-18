@@ -69,7 +69,7 @@ func TestKeptOpenShellSetupRetryPlainUninstallKeepsSandboxState(t *testing.T) {
 				t.Fatalf("plain retry lost kept sandbox state: changes %v", r.Changes)
 			}
 			changes := strings.Join(r.Changes, "\n")
-			for _, want := range []string{"kept the sandboxes of alice", filepath.Join(h.env.Layout.DataDir, "sandbox"), filepath.Join(h.env.Layout.DataDir, "redaction-correlation.key"), "except the record of the sandbox setup the kept sandboxes were made under"} {
+			for _, want := range []string{"kept the sandboxes of alice", filepath.Join(h.env.Layout.DataDir, "sandbox"), filepath.Join(h.env.Layout.DataDir, "redaction-correlation.key"), "except the record of the sandbox setup the kept sandboxes were made under, " + filepath.Join(h.env.Layout.LifecycleDir, "openshell-state.kept.json")} {
 				if !strings.Contains(changes, want) {
 					t.Errorf("plain retry summary omitted %q: %v", want, r.Changes)
 				}

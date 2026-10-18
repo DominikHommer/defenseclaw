@@ -3473,7 +3473,8 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	}
 	lifecycleState := "the lifecycle state (" + layout.LifecycleDir + ")"
 	if l.openshellRecordKept {
-		lifecycleState = "the lifecycle state (" + layout.LifecycleDir + " except the record of the sandbox setup the kept sandboxes were made under)"
+		lifecycleState = "the lifecycle state (" + layout.LifecycleDir + " except the record of the sandbox setup the kept sandboxes were made under, " +
+			filepath.Join(layout.LifecycleDir, openshellKeptStateFile) + ")"
 	}
 	switch {
 	case l.opts.KeepState:

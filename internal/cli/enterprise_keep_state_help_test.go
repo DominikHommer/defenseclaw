@@ -15,6 +15,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestEnterpriseUninstallKeepStateHelpNamesKeptSandboxException(t *testing.T) {
@@ -24,7 +26,16 @@ func TestEnterpriseUninstallKeepStateHelpNamesKeptSandboxException(t *testing.T)
 			if flag == nil {
 				t.Fatal("--keep-state is missing")
 			}
-			for _, phrase := range []string{"sandbox registrations", "their key", "sandbox setup record", "while an account keeps sandboxes", "--purge removes those too"} {
+			goos := map[string]string{"linux": "linux", "macos": "darwin"}[platform]
+			layout, err := managed.StandaloneLayoutFor(goos)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The help names each kept path, as the uninstall summary does
+			// (GAP-0067).
+			store, key, record := layout.KeptSandboxStatePaths()
+			for _, phrase := range []string{"sandbox registrations (" + store + ")", "their key (" + key + ")", "sandbox setup record (" + record + ")",
+				"while an account keeps sandboxes", "--purge removes those too"} {
 				if !strings.Contains(flag.Usage, phrase) {
 					t.Errorf("--keep-state help omits %q: %s", phrase, flag.Usage)
 				}
