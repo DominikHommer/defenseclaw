@@ -232,9 +232,10 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 		}
 		return true
 	}
-	// The stack records the status of components added after base. A link
-	// remains marked even after its target is resolved: the following ".."
-	// would otherwise erase the evidence of that hop.
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
 	var crossed []bool
 	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
 		switch part {
@@ -275,7 +276,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				crossed = append(crossed, true)
+				_, err = os.Lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return "", nil, linkDepth, false
+				}
+				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
@@ -460,6 +465,7 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -820,6 +826,13 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
+			if len(args) == 3 && !static[1] && static[2] &&
+				quotedDynamicCopySource(args[1]) && words[2] != "" && !strings.HasPrefix(words[2], "-") {
+				// A quoted source is one argv word. If it expands to an option,
+				// cp has no source and cannot write its fixed destination.
+				links.copyDestinations = append(links.copyDestinations, OperandPath(words[2], cwd))
+				return true
+			}
 			destination := cpDestination(words[1:], static[1:], cwd)
 			if destination != "" {
 				links.copyDestinations = append(links.copyDestinations, destination)
@@ -1165,6 +1178,62 @@ func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option
 	return option, dynamic
 }
 
+// quotedDynamicCopySource accepts only a single scalar shell parameter.
+// Double quoting makes its expansion one argv word, including when its value
+// contains spaces or starts with a dash.
+func quotedDynamicCopySource(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.Names != 0 ||
+		param.Exp != nil || param.Flags != nil || param.NestedParam != nil || len(param.Modifiers) != 0 {
+		return false
+	}
+	name := param.Param.Value
+	if name == "" {
+		return false
+	}
+	for i, ch := range name {
+		if ch != '_' && (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') &&
+			(i == 0 || ch < '0' || ch > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// QuotedDynamicCopyDestinations lists the fixed destinations of cp calls
+// whose only source is a quoted scalar parameter. The source is one argv
+// word; an option value cannot turn the fixed destination into a write
+// somewhere else because it leaves cp without a source operand.
+func QuotedDynamicCopyDestinations(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var destinations []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 3 || !quotedDynamicCopySource(call.Args[1]) {
+			return true
+		}
+		program, programOK := StaticWord(call.Args[0], home)
+		dest, destOK := StaticWord(call.Args[2], home)
+		if programOK && slices.Contains(copyPrograms, programBase(program)) &&
+			destOK && dest != "" && !strings.HasPrefix(dest, "-") {
+			destinations = append(destinations, OperandPath(dest, cwd))
+		}
+		return true
+	})
+	return destinations
+}
+
 func copyDestination(args []string, static []bool, cwd string) string {
 	for i := len(args) - 1; i >= 0; i-- {
 		if !static[i] {
@@ -1259,7 +1328,7 @@ func cpOperands(args []string, static []bool) (sources []string, destination str
 					targetDir = value
 				}
 				j = len(arg)
-			case 'b', 'f', 'H', 'i', 'L', 'l', 'n', 'p', 's', 'T', 'u', 'v', 'x':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'l', 'n', 'N', 'p', 's', 'T', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return nil, "", true, false
 			}
@@ -1457,7 +1526,10 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 		}
 		if strings.HasPrefix(arg, "--") {
 			name, value, joined := strings.Cut(arg[2:], "=")
-			option, unique := longOption(name, []string{"directory", "dir", "cd", "one-top-level"})
+			option, unique := longOption(name, []string{
+				"directory", "dir", "cd", "one-top-level", "file", "strip-components",
+				"exclude", "zstd", "absolute-names", "get", "extract", "list", "create",
+			})
 			if !unique {
 				return "", false
 			}
@@ -1475,6 +1547,17 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				}
 			case "one-top-level":
 				if joined && !consume(value) {
+					return "", false
+				}
+			case "file", "strip-components", "exclude":
+				if !joined {
+					i++
+					if i >= len(args) || !static[i] || args[i] == "" {
+						return "", false
+					}
+				}
+			case "zstd", "absolute-names", "get", "extract", "list", "create":
+				if joined {
 					return "", false
 				}
 			default:
@@ -1515,7 +1598,7 @@ func tarDestination(args []string, static []bool, cwd string) (string, bool) {
 				if !oldStyle {
 					j = len(cluster)
 				}
-			case 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			case 'a', 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
 			default:
 				// Unknown short options may consume a path.
 				return "", false

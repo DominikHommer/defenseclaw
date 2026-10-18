@@ -861,6 +861,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
 		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
 			input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets, false, cannotResolveLocally,
 		)
