@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"golang.org/x/sys/windows"
 )
 
 func digest(data []byte) string { h := sha256.Sum256(data); return hex.EncodeToString(h[:]) }
@@ -220,5 +221,44 @@ func TestFreshFixturePreservesSentinelsAndRefusesReuse(t *testing.T) {
 	}
 	if err := inspectFixture(f.root); err == nil {
 		t.Fatal("modified original sentinel accepted")
+	}
+}
+
+// No child or PSEC operation: only a fresh synthetic directory and public bytes.
+func TestPinParentsBlocksRenameUntilCloseAndAllowsContentWrites(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "fixed-parent")
+	moved := parent + "-renamed"
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, parent); err != nil {
+		t.Fatal(err)
+	}
+	held, err := pinParents(filepath.Join(parent, "fixed-not-executed.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.close()
+	if err := os.Rename(parent, moved); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("held parent rename: %v", err)
+	}
+	content := filepath.Join(parent, "fixed-public.txt")
+	if err := os.WriteFile(content, []byte("fixed public content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := held.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(parent, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, parent); err != nil {
+		t.Fatal(err)
 	}
 }

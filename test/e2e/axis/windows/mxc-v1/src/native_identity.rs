@@ -231,16 +231,18 @@ fn open_directory(root: HANDLE, value: &mut [u16]) -> Result<OwnedHandle> {
     let attrs = attributes(root, &name, 0x40 | 0x1000); // CASE_INSENSITIVE | DONT_REPARSE
     let mut result = HANDLE::default();
     let mut status = IO_STATUS_BLOCK::default();
-    // Open only; read attributes + synchronize, read sharing only; directory,
-    // synchronous nonalert, and open-reparse-point flags. No create/write path.
+    // Open only: list + attributes + synchronize makes no-delete sharing an
+    // effective directory-name pin. Share reads/writes to preserve normal
+    // ancestor/content operations; directory contents and metadata are not
+    // immutable. Refuse reparse points and never create a directory.
     ensure!(
         unsafe {
             NtOpenFile(
                 &mut result,
-                0x0010_0080,
+                0x0010_0081,
                 &attrs,
                 &mut status,
-                1,
+                3,
                 0x0020_0021,
             )
         }
@@ -402,6 +404,47 @@ pub(super) fn expected_from_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Native filesystem-only regression, deliberately separate from the six
+    // pure parser tests. No child/token/profile/PSEC operation or ACL mutation.
+    #[test]
+    fn directory_custody_blocks_rename_until_handles_close_without_spawning() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("fixed-owned-directory");
+        let moved = directory.path().join("fixed-renamed-directory");
+        std::fs::create_dir(&root).unwrap();
+        let units: Vec<u16> = root.as_os_str().encode_wide().collect();
+        let units = units.strip_prefix(&[92, 92, 63, 92]).unwrap_or(&units);
+        assert!(units.len() > 3 && units[1..3] == [58, 92]);
+        let mut native = effective_fixed_volume(units[0]).unwrap();
+        native.extend_from_slice(&units[3..]);
+        let name = unicode(&mut native).unwrap();
+        let attrs = attributes(HANDLE::default(), &name, 0x40 | 0x1000);
+        let mut raw = HANDLE::default();
+        let mut status = IO_STATUS_BLOCK::default();
+        // Positive control for the exact former attribute-only open. Its
+        // missing delete share does not itself pin this fresh directory name.
+        assert!(
+            unsafe { NtOpenFile(&mut raw, 0x0010_0080, &attrs, &mut status, 1, 0x0020_0021) }.0
+                >= 0
+        );
+        let attributes_only = owned(raw).unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+        drop(attributes_only);
+
+        // Exercise the actual held-volume/ancestor production helper, without
+        // looking up any process token or native profile.
+        let custody = pin_fixture_root(&root).unwrap();
+        let error = std::fs::rename(&root, &moved).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        let sibling = root.join("fixed-public-sibling.txt");
+        std::fs::write(&sibling, b"fixed public data").unwrap();
+        std::fs::remove_file(sibling).unwrap();
+        drop(custody);
+        std::fs::rename(&root, &moved).unwrap();
+        std::fs::rename(&moved, &root).unwrap();
+    }
 
     #[test]
     fn returned_sid_pointer_and_body_must_fit_the_fixed_native_result() {

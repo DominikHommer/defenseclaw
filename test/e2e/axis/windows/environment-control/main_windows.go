@@ -105,7 +105,8 @@ func ordinaryPath(path string) error {
 }
 
 // This fixed contributor wrapper refuses reparse ancestors and holds all path
-// components against deletion/replacement. It is not a production registry.
+// components against rename with list access and no delete sharing. Directory
+// contents and metadata remain mutable. It is not a production registry.
 func pinParents(path string) (heldFiles, error) {
 	if err := ordinaryPath(path); err != nil {
 		return nil, err
@@ -125,7 +126,7 @@ func pinParents(path string) (heldFiles, error) {
 			_ = held.close()
 			return nil, err
 		}
-		h, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+		h, err := windows.CreateFile(ptr, windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
 			windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 		if err != nil {

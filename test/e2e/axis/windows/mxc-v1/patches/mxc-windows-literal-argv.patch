@@ -312,7 +312,7 @@
       and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
       build does not support that policy, and enumeration-only access cannot fall back to \
       AppContainer enforcement";
-@@ -277,6 +276,369 @@
+@@ -277,6 +276,394 @@
              capture_factory: Arc::new(RealCaptureSessionFactory),
              request_serviceability_confirmed: false,
          }
@@ -447,7 +447,8 @@
 +
 +struct LocalExecutableCustody {
 +    application: Vec<u16>,
-+    // Deny write/delete sharing on every inspected object until CreateProcess.
++    // Hold directory names against rename; hold the image against writes/rename.
++    // Directory metadata and contents remain mutable under the caller's rights.
 +    // This is not a digest-based executable authorization for a production host.
 +    _handles: Vec<OwnedHandle>,
 +}
@@ -457,11 +458,12 @@
 +) -> Result<LocalExecutableCustody, ScriptResponse> {
 +    use std::os::windows::ffi::{OsStrExt, OsStringExt};
 +    use windows::Win32::Storage::FileSystem::{
-+        CreateFileW, GetDriveTypeW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-+        QueryDosDeviceW, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
++        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_ATTRIBUTE_DIRECTORY,
 +        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-+        FILE_GENERIC_READ, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-+        GETFINALPATHNAMEBYHANDLE_FLAGS, OPEN_EXISTING, VOLUME_NAME_GUID,
++        FILE_GENERIC_READ, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
++        FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS, GetDriveTypeW,
++        GetFileInformationByHandle, GetFinalPathNameByHandleW, OPEN_EXISTING, QueryDosDeviceW,
++        VOLUME_NAME_GUID,
 +    };
 +    let (drive, parts) = local_executable_parts(program)?;
 +    let alias = [drive, 58, 0];
@@ -492,16 +494,23 @@
 +    let open = |path: &Path, directory: bool| -> Result<OwnedHandle, ScriptResponse> {
 +        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
 +        wide.push(0);
-+        let access = if directory {
-+            FILE_READ_ATTRIBUTES.0
++        // Attribute-only directory opens do not participate in rename-sharing
++        // enforcement. List access makes no-delete sharing an effective pin.
++        // Share directory writes so holding ordinary ancestors does not deny
++        // unrelated content operations; the image still denies write sharing.
++        let (access, share) = if directory {
++            (
++                FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0,
++                FILE_SHARE_READ | FILE_SHARE_WRITE,
++            )
 +        } else {
-+            FILE_GENERIC_READ.0
++            (FILE_GENERIC_READ.0, FILE_SHARE_READ)
 +        };
 +        let handle = unsafe {
 +            CreateFileW(
 +                PCWSTR(wide.as_ptr()),
 +                access,
-+                FILE_SHARE_READ,
++                share,
 +                None,
 +                OPEN_EXISTING,
 +                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -510,7 +519,7 @@
 +        }
 +        .map_err(|_| {
 +            ScriptResponse::rejected(
-+                "cannot hold the local executable path without write/delete sharing",
++                "cannot hold local executable directory names or read-only image",
 +            )
 +        })?;
 +        let handle = OwnedHandle::new(handle);
@@ -615,7 +624,10 @@
 +    #[test]
 +    fn native_local_file_custody_holds_image_against_write_without_spawning() {
 +        let directory = tempfile::tempdir().unwrap();
-+        let image = directory.path().join("fixed-not-executed.exe");
++        let parent = directory.path().join("fixed-parent");
++        let moved = directory.path().join("fixed-renamed-parent");
++        std::fs::create_dir(&parent).unwrap();
++        let image = parent.join("fixed-not-executed.exe");
 +        std::fs::write(&image, b"fixed public file; never executed").unwrap();
 +        drop(
 +            std::fs::OpenOptions::new()
@@ -623,13 +635,24 @@
 +                .open(&image)
 +                .unwrap(),
 +        );
-+        let custody = pin_local_executable(image.as_os_str()).unwrap();
++        // Positive control: this exact ancestor can be renamed before pinning.
++        std::fs::rename(&parent, &moved).unwrap();
++        std::fs::rename(&moved, &parent).unwrap();
++        let mut custody = pin_local_executable(image.as_os_str()).unwrap();
 +        let error = std::fs::OpenOptions::new()
 +            .write(true)
 +            .open(&image)
 +            .unwrap_err();
 +        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
 +        assert!(String::from_utf16_lossy(&custody.application).starts_with(r"\\?\Volume{"));
++        // A held image can independently prevent parent rename. Release only
++        // that final image handle so it cannot mask weak directory custody.
++        drop(custody._handles.pop().unwrap());
++        let rename = std::fs::rename(&parent, &moved).unwrap_err();
++        assert_eq!(rename.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
++        let sibling = parent.join("fixed-public-sibling.txt");
++        std::fs::write(&sibling, b"fixed public sibling").unwrap();
++        std::fs::remove_file(sibling).unwrap();
 +        drop(custody);
 +        drop(
 +            std::fs::OpenOptions::new()
@@ -637,6 +660,8 @@
 +                .open(&image)
 +                .unwrap(),
 +        );
++        std::fs::rename(&parent, &moved).unwrap();
++        std::fs::rename(&moved, &parent).unwrap();
 +    }
 +}
 +
@@ -682,7 +707,7 @@
      }
  }
  
-@@ -466,6 +828,8 @@
+@@ -466,6 +853,8 @@
          request: &ExecutionRequest,
          logger: &mut Logger,
          capture: bool,
@@ -691,7 +716,7 @@
      ) -> Result<BaseChild, ScriptResponse> {
          let _ = writeln!(
              logger,
-@@ -548,8 +912,17 @@
+@@ -548,8 +937,17 @@
  
          let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Launch process");
  
@@ -711,7 +736,7 @@
  
          // Resolved via the shared helper so both Windows launch paths agree and
          // neither can pass a NULL cwd (see `working_directory`).
-@@ -631,19 +1004,19 @@
+@@ -631,19 +1029,19 @@
                  h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
                      Ok(h) => h,
                      Err(e) => {
@@ -734,7 +759,7 @@
                      }
                  };
  
-@@ -736,7 +1109,15 @@
+@@ -736,7 +1134,15 @@
                  0
              };
  
@@ -751,7 +776,7 @@
          let _ = writeln!(logger, "identity: {identity}");
  
          let current_env_ptr = env_ptr;
-@@ -882,7 +1263,9 @@
+@@ -882,7 +1288,9 @@
          let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
          let result = unsafe {
              CreateProcessW(
@@ -762,7 +787,7 @@
                  Some(PWSTR(cmd_wide.as_mut_ptr())),
                  None,
                  None,
-@@ -1223,7 +1606,34 @@
+@@ -1223,7 +1631,34 @@
          // Pipes → capture pipes the caller drives; Inherit → the child inherits
          // the binary's own std handles / console (a TTY when the binary has one).
          let capture = stdio == StdioMode::Pipes;

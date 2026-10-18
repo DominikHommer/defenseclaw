@@ -207,6 +207,8 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
             mxc_windows_process_identity_patch_sha256=identity,
             pure_native_environment_tests_passed=True,
             pure_native_environment_tests=verify.PURE_ENVIRONMENT_TESTS,
+            native_directory_custody_tests=verify.NATIVE_DIRECTORY_CUSTODY_TESTS,
+            native_directory_custody_tests_passed=True,
         )
         self.admission = {
             "tests": list(verify.SDK_TESTS),
@@ -273,6 +275,20 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
                     self.run_verify()
                 self.admission[name] = original
 
+    def test_boundary_requires_exact_native_directory_custody_evidence(self) -> None:
+        for field, value in (
+            ("native_directory_custody_tests", {}),
+            ("native_directory_custody_tests_passed", False),
+            ("native_directory_custody_tests", {"defenseclaw-axis-windows-psec-probe": ["missing"]}),
+        ):
+            with self.subTest(field=field, value=value):
+                original = self.provenance[field]
+                self.provenance[field] = value
+                self.write_artifact()
+                with self.assertRaisesRegex(ValueError, "native directory custody test evidence"):
+                    self.run_verify()
+                self.provenance[field] = original
+
     def test_forged_added_source_fingerprint_is_refused(self) -> None:
         self.provenance["mxc_overlay_file_sha256"][sorted(verify.BOUNDARY_ADDED_PATHS)[0]] = "0" * 64
         self.write_artifact()
@@ -299,6 +315,8 @@ class BoundaryArtifactVerificationTests(ArtifactVerificationTests):
         build = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(build)
         self.assertEqual(build.PURE_ENVIRONMENT_TESTS, verify.PURE_ENVIRONMENT_TESTS)
+        self.assertEqual(build.NATIVE_DIRECTORY_CUSTODY_TESTS, verify.NATIVE_DIRECTORY_CUSTODY_TESTS)
+        self.assertEqual(sum(map(len, verify.NATIVE_DIRECTORY_CUSTODY_TESTS.values())), 1)
         self.assertEqual(sum(map(len, verify.PURE_ENVIRONMENT_TESTS.values())), 6)
 
     def test_third_image_change_is_refused(self) -> None:

@@ -18,19 +18,28 @@ default to Unsupported, and a warning wrapper only delegates the same native
 object. The parent never reopens an integer PID. It queries TokenAppContainerSid
 from that same duplicate, bounds and validates the returned SID buffer, then
 uses GetAppContainerFolderPath. No child environment observation supplies an
-expectation. A missing native identity, API failure, host-user profile path,
-missing directory or unrecognized result refuses before the fixed child can
-perform a mutation. The API query does not create an AppContainer profile.
+expectation. The returned folder must match the caller's independently queried,
+unredirected `LocalAppData\Packages\<one bounded native-profile component>\AC`
+exactly. Only that same-SID profile component is re-rooted into the held fresh
+fixture; no caller profile directory is opened or mutated. A missing native
+identity, API failure, unexpected caller thread identity, mismatched prefix,
+missing private directory or unrecognized shape refuses before the fixed child
+can perform a mutation. The API queries create no AppContainer profile.
 
-The returned folder must match the fresh fixture's exact
+The resulting private expectation must match the fresh fixture's exact
 `home\AppData\Local\Packages\<one bounded native-profile component>\AC`
 shape. Only `Temp` is appended to obtain TEMP/TMP. Before native child creation,
 the parent pins the original fixture directory through a direct NT device
 volume and held-relative directory opens. After the native folder query, it
 extends that same root capability to each profile directory and Temp; it never
 rebinds authority to a DOS, GLOBALROOT or observed child path. Opens request only
-attributes/synchronize access, refuse reparse points and deny write/delete
-sharing while the case runs. The effective drive must equal its queried global
+list/attributes/synchronize access, refuse reparse points and deny delete
+sharing while the case runs. List access makes directory-name rename custody
+effective; attribute-only opens do not establish that property. Directory read
+and write sharing remain enabled so normal content operations can proceed.
+These pins do not make directory contents or metadata immutable. Executable
+image handles separately retain read-only access without write/delete sharing.
+The effective drive must equal its queried global
 mount, the target must be a local HarddiskVolume with NTFS, and mapping samples
 must remain unchanged. These checks do not claim qualification against arbitrary
 same-user concurrent namespace changes. No existing path or namespace is repaired.
@@ -48,7 +57,13 @@ imports no AXIS/SDK/native identity module or additional native API.
 The locked build records the fourth patch, every exact changed SDK source,
 the two new source modules, six exact pure parser/spelling/buffer tests and one
 new SDK Unsupported-default test. These tests perform no native token/profile
-query, process creation or PSEC execution. New source, compiler/imports, artifact
+query, process creation or PSEC execution. A separate native filesystem-only
+regression proves attribute-only rename remains possible, actual held directory
+custody rejects rename, sibling content writes remain possible, and rename works
+after close. Its exact non-ignored result is required in build provenance. The
+existing SDK synthetic image-custody test now also requires an actual ancestor
+rename refusal and release. Neither native fixture test launches a process or
+changes an ACL. New source, compiler/imports, artifact
 identity and one fresh native run require independent review. Old Case07 and
 direct-control results do not qualify this new variant.
 
@@ -131,8 +146,9 @@ dispatcher continues to reject ProcessContainer. Native pipes, Job setup,
 filesystem policy, UI restrictions and network policy remain unchanged.
 The new route admits only unambiguous local drive paths on fixed volumes.
 It refuses UNC/device/ADS paths, redirected or SUBST drives, and reparse points.
-It opens each path component without following reparse points, keeps read-only
-sharing custody through process creation, and uses the image handle's volume
+It opens each path component without following reparse points, holds directory
+names against rename and the image against writes/deletion through process
+creation, and uses the image handle's volume
 GUID path as the explicit application. The host still needs its own reviewed
 digest/identity admission before this contributor seam can become a general
 customer launcher.
