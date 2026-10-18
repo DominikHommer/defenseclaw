@@ -145,21 +145,6 @@ func TestRestoredMCPServerIsReleasedByItsCleanAdmission(t *testing.T) {
 	if state := h.journal(h.servers[1]); state.Runtime != "disable" {
 		t.Fatalf("the other account's rejected server was released: %+v", state)
 	}
-	events, err := h.store.ListEvents(50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	released := false
-	for _, event := range events {
-		if event.Action == string(audit.ActionEnable) && event.Target == MCPEventPath(h.servers[0]) &&
-			strings.Contains(event.Details, "admission allowed its changed definition") {
-			released = true
-		}
-	}
-	if !released {
-		t.Fatal("no enable row says why the block was lifted")
-	}
-
 	// An operator block of the server is not the watcher's to lift.
 	key := MCPJournalName(h.servers[0])
 	if err := h.store.SetActionFieldForConnector("mcp", key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {

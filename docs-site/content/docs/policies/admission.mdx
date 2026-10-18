@@ -135,7 +135,22 @@ server name refuses the call.
 A verdict is for a server's definition, not only its name. When the command,
 arguments, folder or environment of a server change under the same name,
 DefenseClaw refuses its tool calls ("is not scanned yet") until admission has
-scanned the new definition, and it starts that admission at once.
+scanned the new definition, and it starts that admission at once: at the
+first tool call, or within 30 seconds when no call comes first. The new
+verdict then decides. A rejected definition stays blocked. When a server
+that admission rejected is changed back to a definition that scans clean,
+DefenseClaw lifts its own block and the server's tool calls are allowed
+again. A block an administrator set stays. On a per-user gateway, two
+projects' servers of the same name share one block, which stays while
+another server of that name is configured.
+
+On a managed Windows computer the gateway service cannot read the users'
+profiles, so it learns their Claude Code and Kiro MCP servers from the hook
+enumerator service. Before it decides a Claude Code MCP tool call, the
+gateway has the enumerator read the users' server lists again, so the call
+is decided on the definition the user has now. If the enumerator does not
+answer within 10 seconds, the call is refused, and the gateway log says
+why.
 
 Admission decides on tool calls, not on process starts. Claude Code starts
 the servers of a project it opens as soon as the user approves the
