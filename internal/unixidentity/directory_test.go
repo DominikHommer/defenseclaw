@@ -332,3 +332,29 @@ func TestDirectoryFactsRejectsUnreadableNSSConfiguration(t *testing.T) {
 		t.Fatalf("unreadable NSS configuration returned verified facts: %+v", facts)
 	}
 }
+
+// GAP-0712: a host whose groups come from winbind is told to check winbind,
+// not SSSD, while the directory does not answer.
+func TestGroupDirectoryUsesWinbind(t *testing.T) {
+	nss := filepath.Join(t.TempDir(), "nsswitch.conf")
+	orig := nsswitchPath
+	nsswitchPath = nss
+	t.Cleanup(func() { nsswitchPath = orig })
+	for content, want := range map[string]bool{
+		"passwd: files winbind\ngroup: files [NOTFOUND=return] winbind\n": true,
+		"passwd: files sss\ngroup: files sss\n":                           false,
+		"group: files sss winbind\n":                                      false,
+		"group: files systemd\n":                                          false,
+	} {
+		if err := os.WriteFile(nss, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := GroupDirectoryUsesWinbind(); got != want {
+			t.Errorf("GroupDirectoryUsesWinbind(%q) = %t, want %t", content, got, want)
+		}
+	}
+	nsswitchPath = filepath.Join(t.TempDir(), "missing")
+	if GroupDirectoryUsesWinbind() {
+		t.Error("a missing nsswitch.conf reports winbind")
+	}
+}

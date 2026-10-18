@@ -38,6 +38,8 @@ the same config.
 | Tetragon | Optional. 1.7.x on RHEL 9 x86_64 is the target platform (expected, not verified yet). See [Tetragon on a Linux fleet](/docs/enterprise/tetragon). |
 | Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
+If a payload install reports that the staged gateway could not run, check fapolicyd trust, SELinux policy, execute permission, and `noexec` mount options before retrying. The error preserves the operating system's refusal.
+
 The systemd version decides how the gateway reads secrets:
 
 | systemd | Secrets |
@@ -211,6 +213,12 @@ guardrail:
 Each key under `guardrail.connectors` turns on protection for that agent. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
+
+For a custom rule pack, follow [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs)
+before applying the config. Create and copy its folders with `umask 022` so
+the gateway can read them; a folder made under a restrictive umask may be
+unreadable even when root can validate its files. Run `rulepack validate` to
+obtain the `custom_packs` pin, then apply the config.
 
 AI Discovery (each enrolled user's inventory scan in `ai-discovery/`, and the
 skill, MCP and AI component records it feeds) is off unless the config sets
@@ -683,7 +691,8 @@ On a tarball host, `uninstall --purge` removes everything, including
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
   [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
   new release migrates a `config_version: 8` config to 9 and keeps
-  `config.yaml.v8.bak` and `migration-v9.json` next to it.
+  `config.yaml.v8.bak` and `migration-v9.json` next to it. A host that never
+  needed that migration has no v8 backup.
 - **A package older than the config.** The package refuses to install,
   before it replaces any file, when `/etc/defenseclaw/config.yaml` has a
   `config_version` newer than the release reads (a config written for a

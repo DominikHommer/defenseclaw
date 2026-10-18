@@ -379,6 +379,90 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}
 }
 
+// A refused secret source or value must still give an MDM --json caller one
+// structured result. The value and the CLI usage are never in that document.
+func TestEnterpriseSecretJSONRefusals(t *testing.T) {
+	nameFlag := newEnterpriseSecretCommand("set", "").Flags().Lookup("name")
+	if legacy := nameFlag.Annotations[secureClientUsageAnnotation]; len(legacy) != 1 || legacy[0] != "credential name (lowercase letters, digits and dashes)" {
+		t.Fatalf("Secure Client name help changed: %v", legacy)
+	}
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previous })
+	untrusted := filepath.Join(t.TempDir(), "group-writable.key")
+	if err := os.WriteFile(untrusted, []byte("placeholder"), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrusted, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, action, input, code string
+		opts                      enterpriseSecretOptions
+	}{
+		{"missing source", "set", "", "invalid_arguments", enterpriseSecretOptions{name: "test-key", json: true}},
+		{"two sources", "set", "", "invalid_arguments", enterpriseSecretOptions{name: "test-key", fromStdin: true, fromFile: untrusted, json: true}},
+		{"unsafe file", "set", "", "secret_source_unreadable", enterpriseSecretOptions{name: "test-key", fromFile: untrusted, json: true}},
+		{"empty value", "set", "", "secret_value_invalid", enterpriseSecretOptions{name: "test-key", fromStdin: true, json: true}},
+		{"oversize value", "set", strings.Repeat("x", 1<<20), "secret_value_invalid", enterpriseSecretOptions{name: "test-key", fromStdin: true, json: true}},
+		{"long name", "set", "placeholder", "invalid_arguments", enterpriseSecretOptions{name: strings.Repeat("a", 64), fromStdin: true, json: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newEnterpriseSecretCommand(tc.action, "")
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetIn(strings.NewReader(tc.input))
+			err := runEnterpriseSecret(cmd, tc.action, &tc.opts)
+			if commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs || !cmd.SilenceErrors {
+				t.Fatalf("refusal = %v (exit %d), silence=%v", err, commandExitCode(err), cmd.SilenceErrors)
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+				t.Fatalf("non-JSON refusal %q: %v", out.String(), err)
+			}
+			if result.OK || result.ExitCode != enterprisestatus.UnixExitInvalidArgs || len(result.Errors) != 1 || result.Errors[0].Code != tc.code || strings.Contains(out.String(), "Usage:") || strings.Contains(out.String(), "placeholder") {
+				t.Fatalf("refusal = %s", out.String())
+			}
+		})
+	}
+}
+
+func TestEnterpriseSecretJSONRefusalKeepsSecureClientUsage(t *testing.T) {
+	previousHost := secureClientHost
+	secureClientHost = func() bool { return true }
+	t.Cleanup(func() { secureClientHost = previousHost })
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	previousEnv := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: t.TempDir(), Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previousEnv })
+	for _, opts := range []enterpriseSecretOptions{
+		{name: "test-key", json: true},
+		{name: "BAD_NAME", fromStdin: true, json: true},
+	} {
+		cmd := newEnterpriseSecretCommand("set", "")
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		err := runEnterpriseSecret(cmd, "set", &opts)
+		if err == nil || !strings.Contains(err.Error(), "\nUsage: ") || out.Len() != 0 {
+			t.Fatalf("Secure Client refusal = %v, stdout %q; want the prior usage error", err, out.String())
+		}
+	}
+}
+
 // secret set and secret remove both printed only "✓ ensure: done" and the
 // apply steps; each names the command and the credential it changed
 // (GAP-2305).

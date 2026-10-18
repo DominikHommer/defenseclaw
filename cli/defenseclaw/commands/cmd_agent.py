@@ -6083,6 +6083,85 @@ def _error_class(error: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# LookupAccountNameW answers: the name maps to no account, or the SID buffer
+# was too small (the name exists; the size probe asks for that on purpose).
+_ERROR_NONE_MAPPED = 1332
+_ERROR_INSUFFICIENT_BUFFER = 122
+_SID_TYPE_USER = 1
+
+
+def _windows_account_known(user: str, lookup=None) -> bool | None:
+    """Whether *user* names a Windows user account, or None when unknown.
+
+    Asks LookupAccountNameW for the account type: "no mapping" is a definite
+    unknown account, any other failure (for example an unreachable domain)
+    is not an answer. *lookup* replaces the Win32 call in tests and returns
+    ``(ok, last_error, sid_use)``.
+    """
+    if lookup is None:
+        lookup = _win32_lookup_account_name
+    try:
+        ok, error, use = lookup(user)
+    except OSError:
+        return None
+    if ok:
+        return use == _SID_TYPE_USER
+    if error == _ERROR_NONE_MAPPED:
+        return False
+    return None
+
+
+def _win32_lookup_account_name(user: str) -> tuple[bool, int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    lookup = advapi32.LookupAccountNameW
+    lookup.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    lookup.restype = wintypes.BOOL
+    sid_size, domain_size, use = wintypes.DWORD(0), wintypes.DWORD(0), ctypes.c_int(0)
+    lookup(None, user, None, ctypes.byref(sid_size), None, ctypes.byref(domain_size), ctypes.byref(use))
+    error = ctypes.get_last_error()
+    if error != _ERROR_INSUFFICIENT_BUFFER:
+        return False, error, 0
+    sid = ctypes.create_string_buffer(sid_size.value)
+    domain = ctypes.create_unicode_buffer(domain_size.value)
+    ok = bool(lookup(None, user, sid, ctypes.byref(sid_size), domain, ctypes.byref(domain_size), ctypes.byref(use)))
+    return ok, (0 if ok else ctypes.get_last_error()), use.value
+
+
+def _account_known(user: str) -> bool | None:
+    """Whether *user* is an account on this computer; None when it cannot tell.
+
+    ``agent identities --user`` refuses a name that is definitely not an
+    account (GAP-0089, GAP-0944) on Linux, macOS and Windows.
+    """
+    if os.name == "nt":
+        if user.upper().startswith("S-1-"):
+            return None  # a SID filter: the gateway matches it as given
+        return _windows_account_known(user)
+    if os.name == "posix":
+        import pwd
+
+        try:
+            if user.isdigit():
+                pwd.getpwuid(int(user))
+            else:
+                pwd.getpwnam(user)
+        except (KeyError, OverflowError):
+            return False
+        return True
+    return None
+
+
 @agent.command("identities")
 @click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
 @click.option("--connector", "connector_name", default=None, help="Only this connector.")
@@ -6181,6 +6260,8 @@ def identities(
             except requests.RequestException as exc:
                 raise click.ClickException(f"sidecar request failed: {exc}") from exc
             label = f"--user {user}" if user else f"--connector {connector_name}"
+            if user and _account_known(user) is False:
+                raise click.UsageError(f"unknown account for --user: {user}")
             click.echo(
                 f"No agent identity matches {label} "
                 f"({existing} identities exist; run without a filter to list them)."

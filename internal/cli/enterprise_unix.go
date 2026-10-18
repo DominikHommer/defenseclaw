@@ -275,7 +275,10 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		},
 	}
 	if action != "status" {
-		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (lowercase letters, digits and dashes)")
+		cmd.Flags().StringVar(&opts.name, "name", "", "credential name (1-63 lowercase letters, digits or dashes; starts with a letter or digit)")
+		cmd.Flags().Lookup("name").Annotations = map[string][]string{
+			secureClientUsageAnnotation: {"credential name (lowercase letters, digits and dashes)"},
+		}
 		_ = cmd.MarkFlagRequired("name")
 	}
 	if action == "set" {

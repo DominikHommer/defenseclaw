@@ -137,6 +137,13 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
+	if env.GOOS == "linux" && record.Channel == ChannelPackage {
+		if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
+			r.AddWarning(codeVerify, fmt.Sprintf(
+				"the rpm database records %d versions of %s (%s); remove duplicate records with `sudo dnf remove --duplicates %s`, then reinstall the package with `sudo dnf reinstall %s`",
+				len(duplicates), linuxPackageName, strings.Join(duplicates, ", "), linuxPackageName, linuxPackageName))
+		}
+	}
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify

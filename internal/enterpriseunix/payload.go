@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -88,6 +89,9 @@ func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 	}
 	version, err := e.binaryVersion(ctx, filepath.Join(clean, binGateway))
 	if err != nil {
+		if errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) {
+			return nil, fmt.Errorf("payload gateway could not run: check application control (fapolicyd or SELinux), execute permission, and noexec mounts for %s: %w", clean, err)
+		}
 		return nil, err
 	}
 	p.Version = version
