@@ -276,7 +276,7 @@ def verify_github(
             or (
                 mode == "standalone-boundary"
                 and run.get("event") == "workflow_dispatch"
-                and run.get("head_branch") == "codex/axis-native-build"
+                and run.get("head_branch") in {"codex/axis-native-build", "codex/axis-peer-experiments"}
             )
         )
         and run.get("repository", {}).get("full_name") == REPOSITORY

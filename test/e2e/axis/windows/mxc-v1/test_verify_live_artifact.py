@@ -310,8 +310,12 @@ class GitHubBuildAdmissionTests(unittest.TestCase):
         for mode, branch, event, accepted in [
             ("loader-only", "codex/axis-sandbox-feasibility", "push", True),
             ("standalone-boundary", "codex/axis-native-build", "workflow_dispatch", True),
+            ("standalone-boundary", "codex/axis-peer-experiments", "workflow_dispatch", True),
             ("loader-only", "codex/axis-native-build", "workflow_dispatch", False),
+            ("loader-only", "codex/axis-peer-experiments", "workflow_dispatch", False),
             ("standalone-boundary", "codex/axis-native-build", "push", False),
+            ("standalone-boundary", "codex/axis-peer-experiments", "push", False),
+            ("standalone-boundary", "codex/axis-peer-experiments", "pull_request", False),
             ("standalone-boundary", "unreviewed-branch", "workflow_dispatch", False),
         ]:
             with self.subTest(mode=mode, branch=branch, event=event):
@@ -322,6 +326,22 @@ class GitHubBuildAdmissionTests(unittest.TestCase):
                     else:
                         with self.assertRaisesRegex(ValueError, "workflow did not succeed"):
                             verify.verify_github(456, 123, commit, digest, mode)
+
+        admitted = {**baseline, "head_branch": "codex/axis-peer-experiments", "event": "workflow_dispatch"}
+        for key, changed in [
+            ("head_sha", "c" * 40),
+            ("repository", {"full_name": "unreviewed/defenseclaw"}),
+            ("head_repository", {"full_name": "unreviewed/defenseclaw"}),
+            ("path", ".github/workflows/unreviewed.yml"),
+            ("conclusion", "failure"),
+            ("status", "in_progress"),
+        ]:
+            with (
+                self.subTest(changed=key),
+                mock.patch.object(verify, "github_json", side_effect=[artifact, {**admitted, key: changed}]),
+                self.assertRaisesRegex(ValueError, "workflow did not succeed"),
+            ):
+                verify.verify_github(456, 123, commit, digest, "standalone-boundary")
 
 
 if __name__ == "__main__":
