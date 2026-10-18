@@ -897,3 +897,27 @@ func TestSandboxDaemonConfigForEachConfirmedSandbox(t *testing.T) {
 		}
 	}
 }
+
+// #1195 (GAP-0123): on a managed computer the supported way to run agents on
+// an image of the organization's own is openshell.image.base in the
+// administrator config: every run of the daemon, a new one and an existing
+// sandbox resolved under its registration's floor alike, builds its agent
+// image on that base in the person's own Docker engine (docker build
+// --pull=false). No run takes an image of the person's choosing.
+func TestSandboxDaemonRunsOnTheAdministratorsBaseImage(t *testing.T) {
+	const base = "corp-sandbox-base:1"
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.Settings.Operational.Image.Base = base
+	})
+	if got := f.d.config().OpenShell.Image.Base; got != base {
+		t.Fatalf("a new run builds on %q, want %q", got, base)
+	}
+	if err := f.d.regs.put(daemonRegistration{ID: "reg-1", Sandbox: "dc-a", UpdatedAt: time.Now(), Confirmed: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dc-a", "dc-unregistered"} {
+		if got := f.d.configForSandbox(name).OpenShell.Image.Base; got != base {
+			t.Fatalf("sandbox %s builds on %q, want %q", name, got, base)
+		}
+	}
+}

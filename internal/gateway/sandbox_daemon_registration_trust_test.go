@@ -170,3 +170,13 @@ func TestSandboxDaemonDecisionConfirmsTheSandboxPolicy(t *testing.T) {
 		t.Fatalf("asked for a sandbox without a registration: %d calls", f.calls.Load())
 	}
 }
+
+// wireFloor is floor in policy/current's wire form (CurrentPolicy.Floor),
+// which a daemon needs to confirm a registration it loaded from its file.
+func wireFloor(floor config.OpenShellAdminConfig) json.RawMessage {
+	raw, err := json.Marshal(floor)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}

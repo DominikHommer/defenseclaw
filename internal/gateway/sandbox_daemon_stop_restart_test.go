@@ -259,7 +259,7 @@ func TestSandboxDaemonStatusConfirmsAgainOnTheClosedFloor(t *testing.T) {
 	// The managed gateway answers: the same status shows the
 	// organization's policy at once.
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
-		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+		return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: wireFloor(closedFloorRegFloor)}, nil
 	}
 	sb, err = ctl.Get(ctx, "dc-a")
 	if err != nil {
@@ -378,7 +378,7 @@ func newClosedFloorFixture(t *testing.T, others ...string) *closedFloorFixture {
 	f.relay.current = func(string) (sandboxrelay.CurrentPolicy, error) {
 		switch c.relay.Load() {
 		case relayAnswers:
-			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3}, nil
+			return sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: wireFloor(closedFloorRegFloor)}, nil
 		case relayRevokes:
 			return sandboxrelay.CurrentPolicy{V: 1, Revoked: true, RevokedReason: "profile removed"}, nil
 		}
@@ -518,7 +518,7 @@ func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *test
 	for _, via := range []string{"status", "list"} {
 		t.Run(via, func(t *testing.T) {
 			c := newClosedFloorFixture(t)
-			c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+			c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: wireFloor(closedFloorRegFloor)})
 			c.assertClosed(t, "confirmed, before the "+via)
 			ctx := context.Background()
 			if via == "status" {
@@ -548,7 +548,7 @@ func TestSandboxDaemonStatusOpensTheClosedFloorForAConfirmedRegistration(t *test
 // floor, without waiting for the configuration check's next tick.
 func TestSandboxDaemonAdoptFloorReResolvesAtOnce(t *testing.T) {
 	c := newClosedFloorFixture(t, "dc-x")
-	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+	c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: wireFloor(closedFloorRegFloor)})
 	c.d.adoptFloor("dc-a")
 	c.assertRegistrationFloor(t, "after adoptFloor")
 	for _, name := range []string{"dc-a", "dc-x"} {
@@ -617,7 +617,7 @@ func TestSandboxDaemonRevokedRegistrationKeepsTheClosedFloor(t *testing.T) {
 	})
 	t.Run("confirmed then revoked", func(t *testing.T) {
 		c := newClosedFloorFixture(t)
-		c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3})
+		c.d.regs.applyLive("dc-a", sandboxrelay.CurrentPolicy{V: 1, Generation: 3, Floor: wireFloor(closedFloorRegFloor)})
 		c.d.regs.markRevoked("dc-a", "profile removed")
 		c.relay.Store(relayAnswers)
 		c.d.pollOnce(context.Background())
