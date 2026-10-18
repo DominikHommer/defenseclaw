@@ -3122,14 +3122,13 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 // before the Write, so the pass names both, not Chmod alone.
 func enterpriseHookWatchNoteTrigger(path string, op fsnotify.Op, event fsnotify.Event) (string, fsnotify.Op) {
 	name := filepath.Clean(event.Name)
-	switch {
-	case path == "":
+	if path == "" {
 		return name, event.Op
-	case path == name:
-		return path, op | event.Op
-	default:
-		return path, op
 	}
+	if path == name {
+		return path, op | event.Op
+	}
+	return path, op
 }
 
 // enterpriseHookOwnedFileFingerprint fingerprints an owned file for the
