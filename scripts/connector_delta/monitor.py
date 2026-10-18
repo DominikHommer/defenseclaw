@@ -33,7 +33,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.connector_delta import invariants as invariant_engine  # noqa: E402
+from scripts.connector_delta import platforms  # noqa: E402
 from scripts.connector_delta.connectors import PROVIDERS  # noqa: E402
+from scripts.connector_delta.history import CODEX_HISTORY_PATHS  # noqa: E402
 
 CONFIG = Path(__file__).resolve().parent
 MAX_BYTES = 4 * 1024 * 1024
@@ -140,7 +142,8 @@ def checked_url(url, *, model=False):
             allowed = (
                 set(query) == {"sha", "path", "per_page"}
                 and query["sha"] == ["main"]
-                and query["path"] in [["codex-rs/hooks"], ["codex-rs/config/src/hook_config.rs"]]
+                and len(query["path"]) == 1
+                and query["path"][0] in CODEX_HISTORY_PATHS
                 and len(query["per_page"]) == 1
                 and query["per_page"][0].isdigit()
                 and 1 <= int(query["per_page"][0]) <= 30
@@ -412,6 +415,7 @@ def local_context(candidate, matches, root, checks=None, connector="claudecode")
         "invariants": [
             {
                 **{key: check[key] for key in ("invariant_id", "scope", "verdict", "reason", "local_values")},
+                **{key: check[key] for key in ("platforms", "deployment_scope") if key in check},
                 "local_evidence_ranges": [
                     {
                         "path": ref["artifact"],
@@ -632,6 +636,7 @@ def run_monitor(
     check_snapshot({"schema_version": SCHEMA, "sources": list(pending.values())}, manifest)
     system = read_text(CONFIG / "shared/system-prompt.txt")
     provider = PROVIDERS[manifest["connector"]](root)
+    provider.platform_coverage = platforms.coverage(provider)
     context_digest = digest(
         {
             path: digest(read_text(safe_local(root, path)))
@@ -656,7 +661,9 @@ def run_monitor(
                 "shared/invariants.json",
                 "inventory.py",
                 "platforms.py",
+                "platform_bindings.py",
                 f"connectors/{manifest['connector']}/provider.py",
+                f"connectors/{manifest['connector']}/platforms.py",
                 f"connectors/{manifest['connector']}/bindings.json",
             )
         }
@@ -664,14 +671,12 @@ def run_monitor(
     signature = digest([manifest, system, implementation_digest, ai, model])
     reset = state.get("signature") not in (None, signature)
     if reset:
-        state = {
-            "schema_version": SCHEMA,
-            "sources": {},
-            "cache": {},
-            "pending_sources": {},
-            "notification_outbox": state.get("notification_outbox", []),
-        }
+        # An analyzer deployment may coincide with an upstream breaking change.
+        # Invalidate judgments, not the evidence needed to compare that delta.
+        # Retain frozen backlog, inventory cursor and undelivered notices too.
+        state["cache"] = {}
     state["signature"] = signature
+    provider.prepare(snapshot, state)
     revision = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -685,6 +690,8 @@ def run_monitor(
         "implementation_digest": implementation_digest,
         "analyzer_signature": signature,
         "baseline_reset": reset,
+        "analysis_reset": reset,
+        "checkpoint_strategy": "retain_source_baselines",
         "coverage": manifest.get(
             "coverage", "Public changelog and docs only; undisclosed runtime changes are not observable."
         ),
@@ -717,11 +724,18 @@ def run_monitor(
             "status": "baseline_created"
             if previous is None and source["kind"] in {"document", "source"}
             else "compared",
-            "initial_release_lookback": lookback if previous is None and source["kind"] == "changelog" else None,
+            "initial_release_lookback": lookback
+            if (previous is None or reset) and source["kind"] == "changelog"
+            else None,
         }
         report["sources"].append(row)
         try:
             changes = candidates(source, previous, lookback=lookback, lower=lower, upper=upper)
+            if reset and source["kind"] == "changelog":
+                window = candidates(source, lookback=lookback, lower=lower, upper=upper)
+                # Replay the declared window AND the actual delta, including
+                # removed/edited notes outside that window. Never drop evidence.
+                changes = list({row["id"]: row for row in [*window, *changes]}.values())
         except MonitorError as exc:
             report["gaps"].append({"source": source["id"], "decision": "collection_gap", "reason": str(exc)})
             continue
@@ -751,6 +765,15 @@ def run_monitor(
                 )
                 continue
             try:
+                scope_reason = provider.scope_delta(candidate, source, previous)
+                if scope_reason:
+                    finding.update(
+                        decision="observed",
+                        impact="none",
+                        analysis_status="informational_scope",
+                        scope_reason=scope_reason,
+                    )
+                    continue
                 checks = provider.checks(candidate, source, previous, finding["artifact_classes"])
                 finding["invariants"] = checks
                 finding["local_artifacts"] = sorted(
@@ -849,6 +872,12 @@ def run_monitor(
     )
     report["ai_calls"] = calls
     report["outcome"] = "incomplete" if report["gaps"] else "complete"
+    report["coverage_status"] = {
+        "collection": report["outcome"],
+        "analysis": "partial_static_coverage",
+        "runtime_verified": False,
+        "unmatched_pr_files": report.get("pr_inventory", {}).get("unmatched_files", 0),
+    }
     return report, state
 
 
@@ -988,6 +1017,8 @@ def markdown(report):
         )
         if "analysis" in row:
             lines.extend(["", row["analysis"]["summary"]])
+        if "scope_reason" in row:
+            lines.extend(["", row["scope_reason"]])
         for check in row["invariants"]:
             lines.extend(["", f"- `{check['invariant_id']}`: {check['verdict']} — {check['reason']}"])
             for claim in check["upstream_claims"]:

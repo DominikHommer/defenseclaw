@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 from scripts.connector_delta import invariants as engine  # noqa: E402
 from scripts.connector_delta import monitor  # noqa: E402
@@ -22,6 +22,61 @@ from scripts.connector_delta.connectors.claudecode.provider import ClaudeProvide
 
 
 class SharedInvariantTests(unittest.TestCase):
+    def test_literal_matcher_semantics_and_unknown_regexes(self):
+        for pattern, value, expected in (
+            ("startup|resume", "startup", True),
+            ("startup|resume", "fork", False),
+            ("startup|resume|fork", "fork", True),
+            ("", "fork", True),
+            ("*", "fork", True),
+            ("^fork$", "forked", False),
+            ("fork", "forked", True),
+            ("^fork", "forked", True),
+            ("(a+)+$", "a" * 100, None),
+            ("[a-z]+", "fork", None),
+            (None, "fork", None),
+        ):
+            with self.subTest(pattern=pattern, value=value):
+                self.assertIs(engine.selector_matches(pattern, value), expected)
+
+    def test_source_transition_requires_valid_shape_and_two_revisions_for_source_proof(self):
+        transition = self.claim(
+            "hook.event_delivery",
+            "event_selector_transition",
+            {"before": "startup", "after": "fork", "scenario": "fork"},
+            event="SessionStart",
+            field="source",
+        )
+        self.assertEqual(self.compare("hook.event_delivery", [transition])["verdict"], "compatible")
+        for malformed in ({"before": "startup"}, {"before": "startup", "after": [], "scenario": "fork"}):
+            bad = copy.deepcopy(transition)
+            bad["value"] = malformed
+            self.assertEqual(self.compare("hook.event_delivery", [bad])["verdict"], "review_required")
+        transition["authority"] = transition["evidence"][0]["authority"] = "source_assignment"
+        self.assertEqual(self.compare("hook.event_delivery", [transition])["verdict"], "review_required")
+
+    def test_added_field_scope_requires_two_grounded_schema_revisions(self):
+        claim = self.claim("hook.correlation", "fields_added", ["agent_id"], event="PreToolUse")
+        self.assertEqual(self.compare("hook.correlation", [claim])["verdict"], "review_required")
+        claim["authority"] = claim["evidence"][0]["authority"] = "declared_schema"
+        self.assertEqual(self.compare("hook.correlation", [claim])["verdict"], "review_required")
+        text = "Previous complete schema."
+        self.provider.texts[("fixture:before", "previous")] = text
+        claim["evidence"].append(
+            engine.evidence(
+                text,
+                0,
+                len(text),
+                artifact="fixture:before",
+                revision="previous",
+                role="upstream",
+                authority="declared_schema",
+            )
+        )
+        self.assertEqual(self.compare("hook.correlation", [claim])["verdict"], "compatible")
+        claim["value"] = ["tool_use_id"]
+        self.assertEqual(self.compare("hook.correlation", [claim])["verdict"], "review_required")
+
     def setUp(self):
         self.provider = ClaudeProvider(ROOT)
 

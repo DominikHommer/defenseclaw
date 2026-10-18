@@ -6,11 +6,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 
 from scripts.connector_delta import invariants as engine
 from scripts.connector_delta import platforms
-from scripts.connector_delta.provider import CONFIG, CommandHookProvider, _block
+from scripts.connector_delta.provider import CONFIG, CommandHookProvider, _block, _mask_go
 
 
 def rust_mask(text, comments_only=False):
@@ -64,6 +65,138 @@ def rust_mask(text, comments_only=False):
     return "".join(result)
 
 
+def rust_test_spans(text):
+    """Recognized, balanced cfg(test) blocks; unknown attributes are not inferred."""
+    masked = rust_mask(text)
+    # Mask balanced cfg(test) modules/functions without truncating production
+    # code after a test-only import near the top of a source file.
+    guarded = re.compile(
+        r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
+        r"(?:mod\s+[A-Za-z_]+\s*|(?:async\s+)?fn\s+[^;{]{1,500})\{"
+    )
+    spans = []
+    for guard in guarded.finditer(masked):
+        depth = 0
+        for end in range(guard.end() - 1, len(masked)):
+            depth += (masked[end] == "{") - (masked[end] == "}")
+            if depth == 0:
+                spans.append((guard.start(), end + 1))
+                break
+        else:
+            return None  # A malformed guard cannot establish production scope.
+    return spans
+
+
+def rust_body(text, marker):
+    """One uniquely identified code block; comments/strings cannot provide it."""
+    masked = rust_mask(text)
+    spans = rust_test_spans(text)
+    if spans is None:
+        return None
+    result = list(masked)
+    for start, end in spans:
+        for index in range(start, end):
+            if result[index] != "\n":
+                result[index] = " "
+    masked = "".join(result)
+    matches = list(re.finditer(marker, masked))
+    if len(matches) != 1:
+        return None
+    start = opening = matches[0].end() - 1
+    depth = 0
+    for end in range(opening, min(len(masked), opening + 16000)):
+        depth += (masked[end] == "{") - (masked[end] == "}")
+        if depth == 0:
+            return start + 1, end
+    return None
+
+
+def test_only_hunk(candidate, source, previous):
+    if previous is None:
+        return False
+    hunk = re.fullmatch(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@[^\n]*\n([\s\S]*)", candidate["text"])
+    if hunk is None:
+        return False
+    sides = []
+    for row, line in ((previous, int(hunk[1])), (source, int(hunk[2]))):
+        spans = rust_test_spans(row["text"])
+        if spans is None:
+            return False
+        lines = row["text"].splitlines(keepends=True)
+        offsets, position = [], 0
+        for value in lines:
+            offsets.append(position)
+            position += len(value)
+        sides.append([spans, lines, offsets, line - 1])
+    changed = False
+    for line in hunk[3].splitlines():
+        if not line or line[0] not in {" ", "+", "-"}:
+            return False
+        if line[0] == "-" and "#[cfg(test)]" in line:
+            return False  # Removing a guard may activate unchanged test code.
+        for index in (0, 1) if line[0] == " " else (0,) if line[0] == "-" else (1,):
+            spans, lines, offsets, number = sides[index]
+            if not 0 <= number < len(lines) or lines[number].rstrip("\n") != line[1:]:
+                return False
+            if line[0] != " ":
+                changed = True
+                value = lines[number].rstrip("\n")
+                start = offsets[number] + len(value) - len(value.lstrip())
+                end = max(start, offsets[number] + len(value.rstrip()))
+                if not any(low <= start <= end <= high for low, high in spans):
+                    return False
+            sides[index][3] += 1
+    return changed
+
+
+def session_routes(text):
+    span = rust_body(text, r"\blet session_start_source\s*=\s*match &initial_history\s*\{")
+    if span is None:
+        return [], None
+    body = rust_mask(text, comments_only=True)[slice(*span)]
+    variant = r"InitialHistory::[A-Za-z]+(?:\(_\))?"
+    value = r"codex_hooks::SessionStartSource::([A-Za-z]+)"
+    arm = re.compile(
+        rf"\s*({variant}(?:\s*\|\s*{variant})*)(?:\s+if\s+(forked_from_id\.is_some\(\)))?\s*=>\s*"
+        rf"(?:\{{\s*{value}\s*\}}|{value})\s*,?"
+    )
+    rows, position = [], 0
+    while body[position:].strip():
+        match = arm.match(body, position)
+        if match is None or len(rows) >= 32:
+            return [], None
+        for selector in re.findall(variant, match[1]):
+            rows.append((selector.removesuffix("(_)").split("::")[1], match[2] or "", match[3] or match[4]))
+        position = match.end()
+    return rows, span
+
+
+def source_matcher_map(text):
+    span = rust_body(text, r"\bimpl SessionStartSource\s*\{")
+    if span is None:
+        return {}, None
+    body = rust_mask(text, comments_only=True)[slice(*span)]
+    # Verify how the source is handed to matcher selection, not just an enum.
+    wiring = rust_body(text, r"\bfn matcher_input\(&self\)\s*->\s*&str\s*\{")
+    if wiring is None or not re.fullmatch(
+        r"\s*match self\s*\{\s*Self::SessionStart\s*\{\s*source\s*\}\s*=>\s*source\.as_str\(\),\s*"
+        r"Self::SubagentStart\s*\{\s*agent_type,\s*\.\.\s*\}\s*=>\s*agent_type\.as_str\(\),?\s*\}\s*",
+        rust_mask(text, True)[slice(*wiring)],
+    ):
+        return {}, None
+    declaration = re.fullmatch(
+        r"\s*pub fn as_str\(self\)\s*->\s*&'static str\s*\{\s*match self\s*\{"
+        r'((?:\s*Self::[A-Za-z]+\s*=>\s*"[a-z][a-z0-9_-]{0,63}"\s*,)+)\s*\}\s*\}\s*',
+        body,
+    )
+    if declaration is None:
+        return {}, None
+    rows = re.findall(r'Self::([A-Za-z]+)\s*=>\s*"([a-z][a-z0-9_-]{0,63})"', body)
+    if not rows or len(dict(rows)) != len(rows):
+        return {}, None
+    return dict(rows), (min(span[0], wiring[0]), max(span[1], wiring[1]))
+
+
 def json_span(text, pointer):
     """Resolve object keys to exact source spans, without executing a schema."""
     decoder = json.JSONDecoder()
@@ -98,6 +231,127 @@ def json_span(text, pointer):
     return value, start, end
 
 
+def schema_document(text):
+    """Strict, size/depth-bounded JSON; duplicate keys cannot manufacture proof."""
+    if len(text) > 4 * 1024 * 1024:
+        raise engine.InvariantError("schema exceeds size limit")
+    depth, quoted, escaped = 0, False, False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > 64:
+                raise engine.InvariantError("schema exceeds depth limit")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise engine.InvariantError("unbalanced schema")
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise engine.InvariantError("duplicate schema key")
+            result[key] = value
+        return result
+
+    def nonfinite(_):
+        raise engine.InvariantError("nonfinite schema number")
+
+    def number(value):
+        if len(value) > 128:
+            raise engine.InvariantError("schema number exceeds limit")
+        parsed = float(value) if any(char in value for char in ".eE") else int(value)
+        if isinstance(parsed, float) and not math.isfinite(parsed):
+            raise engine.InvariantError("nonfinite schema number")
+        return parsed
+
+    return json.loads(text, object_pairs_hook=unique, parse_constant=nonfinite, parse_float=number, parse_int=number)
+
+
+def schema_added_fields(document, before):
+    """Only top-level optional property additions; no ignored root constraints."""
+    allowed = {
+        "$schema",
+        "title",
+        "description",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "definitions",
+        "$defs",
+    }
+    if any(
+        not isinstance(row, dict)
+        or row.get("type") != "object"
+        or set(row) - allowed
+        or not isinstance(row.get("properties"), dict)
+        for row in (document, before)
+    ):
+        return []
+    added = sorted(set(document["properties"]) - set(before["properties"]))
+    if not 0 < len(added) <= 128:
+        return []
+    required = document.get("required", [])
+    if (
+        not isinstance(required, list)
+        or any(not isinstance(field, str) for field in required)
+        or set(added) & set(required)
+    ):
+        return []
+    reduced = {
+        **document,
+        "properties": {key: value for key, value in document["properties"].items() if key not in added},
+    }
+    # JSON equality must distinguish true/1 and other Python-equal values.
+    if json.dumps(reduced, sort_keys=True) != json.dumps(before, sort_keys=True):
+        return []
+    return added
+
+
+def schema_accepts_decision(node, value):
+    """Bounded primitive response constraints, not general JSON Schema execution."""
+    if node is False:
+        return False
+    annotations = {"title", "description", "default", "examples", "$comment", "deprecated", "readOnly", "writeOnly"}
+    if not isinstance(node, dict) or set(node) - annotations - {"type", "enum", "const"}:
+        return None
+    types = node.get("type", [])
+    types = [types] if isinstance(types, str) else types
+    if (
+        not isinstance(types, list)
+        or len(types) > 7
+        or any(
+            not isinstance(item, str)
+            or item not in {"string", "boolean", "number", "integer", "null", "object", "array"}
+            for item in types
+        )
+    ):
+        return None
+    if types and ("boolean" if type(value) is bool else "string") not in types:
+        return False
+    if "const" in node and not (type(node["const"]) is type(value) and node["const"] == value):
+        return False
+    if "enum" in node:
+        choices = node["enum"]
+        if not isinstance(choices, list) or not 0 < len(choices) <= 512:
+            return None
+        if not any(type(item) is type(value) and item == value for item in choices):
+            return False
+    if "const" in node or "enum" in node or type(value) is bool and "boolean" in types:
+        return True
+    return None  # An unconstrained string alone is not an event-specific deny contract.
+
+
 def schema_property(text, fields):
     """Only local refs and single allOf are supported. Unknown shapes stay unknown."""
     pointer, seen = [], set()
@@ -112,6 +366,8 @@ def schema_property(text, fields):
             if any(key in node for key in ("anyOf", "oneOf", "not", "if", "then", "else")):
                 return None, pointer
             if "$ref" in node:
+                if set(node) - {"$ref", "title", "description", "default", "examples", "$comment"}:
+                    return None, pointer
                 ref = node["$ref"]
                 if (
                     not isinstance(ref, str)
@@ -122,6 +378,8 @@ def schema_property(text, fields):
                 seen.add(ref)
                 pointer = ref[2:].split("/")
             elif "allOf" in node:
+                if set(node) - {"allOf", "title", "description", "default", "examples", "$comment"}:
+                    return None, pointer
                 if not isinstance(node["allOf"], list) or len(node["allOf"]) != 1:
                     return None, pointer
                 # json_span traverses objects only. A single allOf ref can be
@@ -150,8 +408,47 @@ def schema_property(text, fields):
 
 
 class CodexProvider(CommandHookProvider):
+    def platform_bindings(self, common):
+        from .platforms import profiles
+
+        return profiles(self, common)
+
     def __init__(self, root, binding_path=CONFIG / "connectors/codex/bindings.json"):
         super().__init__(root, binding_path, "codex")
+
+    def scope_delta(self, candidate, source, previous):
+        if previous is None or not source["url"].endswith(".rs"):
+            return None
+        if test_only_hunk(candidate, source, previous):
+            return (
+                "Every edited line is inside recognized cfg(test) blocks at its pinned revision. "
+                "Test evidence is retained; this does not establish runtime compatibility."
+            )
+        if source["id"] != "codex-hook-config":
+            return None
+        # Exact, narrowly documented metadata extension of HooksFile, not an
+        # inference that arbitrary optional fields cannot change runtime policy.
+        text = source["text"]
+        span = rust_body(text, r"\bpub struct HooksFile\s*\{")
+        if span is None:
+            return None
+        pattern = re.compile(
+            r'(?m)^    #\[serde\(default, skip_serializing_if = "Option::is_none"\)\]\n'
+            r"    pub description: Option<String>,\n"
+        )
+        additions = list(pattern.finditer(text, *span))
+        binding = self.local()["hook.registration"]
+        if (
+            len(additions) == 1
+            and text[: additions[0].start()] + text[additions[0].end() :] == previous["text"]
+            and binding["verified"]
+            and binding["scope"] == "local-user-inline"
+        ):
+            return (
+                "Only optional hooks.json description metadata was added; the verified local writer uses "
+                "inline TOML hooks. This scoped observation is not a runtime compatibility certificate."
+            )
+        return None
 
     def local(self, version=None):
         contract = self._contract(version)
@@ -188,6 +485,28 @@ class CodexProvider(CommandHookProvider):
         groups = {event: timeout for event, timeout, _ in group_rows}
         events = contract["events"]
         group_refs = [self._ref("registration", span) for event, _, span in group_rows if event in events]
+        matchers = {}
+        if group_block:
+            matchers = dict(re.findall(r'\{"([A-Za-z]+)",\s*"([^"\n]*)",\s*\d+\}', group_block[1]))
+        selection = _block(registration, "codexHookGroupsForSetup")
+        if contract["contract_id"] in {"codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"}:
+            selection_text = registration[slice(*selection)] if selection else ""
+            branch = re.search(r'if\s+eventType == "SessionStart"\s*&&\s*\(([^{};]+)\)\s*\{([^{}]+)\}', selection_text)
+            conditions = re.findall(r'contract\.ContractID == "([a-z0-9-]+)"', branch[1]) if branch else []
+            expected = {"codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"}
+            clean_body = re.sub(r"//[^\n]*|/\*[\s\S]*?\*/", "", branch[2]) if branch else ""
+            override = re.fullmatch(r'\s*group\.matcher = "([^"\n]*)"\s*', clean_body)
+            remainder = re.sub(r'contract\.ContractID == "[a-z0-9-]+"|\|\||\s', "", branch[1]) if branch else "?"
+            if (
+                override
+                and set(conditions) == expected
+                and not remainder
+                and selection_text.count("group.matcher =") == 1
+            ):
+                matchers["SessionStart"] = override[1]
+                group_refs.append(self._ref("registration", selection))
+            else:
+                matchers.pop("SessionStart", None)
         writer, writer_ref = self._function("registration", "registration_function")
         trust_hash, trust_ref = self._function("registration", "trust_hash_function")
         trust_key, key_ref = self._function("registration", "trust_key_function")
@@ -219,9 +538,10 @@ class CodexProvider(CommandHookProvider):
         stop = response.find('if rawAction == "confirm"', start)
         response = response[start:stop] if start >= 0 and stop > start else ""
         cases = list(re.finditer(r'case\s+((?:"[A-Za-z]+"\s*,?\s*)+)\s*:', response))
-        responses = {}
+        responses, decision_tags_verified = {}, True
         for i, case in enumerate(cases):
             body = response[case.end() : cases[i + 1].start() if i + 1 < len(cases) else len(response)]
+            body = _mask_go(body, comments_only=True)
             mapping = {}
             if re.search(r'"permissionDecision":\s*"deny"', body):
                 mapping["hookSpecificOutput.permissionDecision"] = "deny"
@@ -233,7 +553,19 @@ class CodexProvider(CommandHookProvider):
                 mapping["continue"] = False
             for event in re.findall(r'"([A-Za-z]+)"', case[1]):
                 if mapping and event in contract["capabilities"]["block_events"]:
-                    responses[event] = mapping
+                    emitted = dict(mapping)
+                    if event in {"PreToolUse", "PermissionRequest"}:
+                        masked_body = _mask_go(body)
+                        tags = [
+                            match[2]
+                            for match in re.finditer(r'"hookEventName"(\s*:\s*)"([A-Za-z]+)"', body)
+                            if masked_body[match.start(1) + match[1].index(":")] == ":"
+                        ]
+                        if len(tags) == 1:
+                            emitted["hookSpecificOutput.hookEventName"] = tags[0]
+                        else:
+                            decision_tags_verified = False
+                    responses[event] = emitted
         failure_text = self.sources["failure"][1]
         failure = re.search(r'"codex":\s*\{([\s\S]*?)\n\s*\},', failure_text)
         constant = re.search(r"\bconst blockExit\s*=\s*2\b", self.sources["execution"][1])
@@ -260,7 +592,10 @@ class CodexProvider(CommandHookProvider):
                 bool(handler and top_key and trust_hash and trust_key),
             ),
             "hook.event_delivery": self._binding(
-                "hook.event_delivery", {"events": events}, [registry_ref, *group_refs], set(events) <= set(groups)
+                "hook.event_delivery",
+                {"events": events, "matchers": matchers},
+                [registry_ref, *group_refs],
+                set(events) <= set(groups),
             ),
             "hook.payload": self._binding(
                 "hook.payload",
@@ -272,7 +607,9 @@ class CodexProvider(CommandHookProvider):
                 "hook.decision",
                 {"events": list(responses), "responses": responses},
                 [response_ref, registry_ref],
-                bool(responses) and set(responses) == set(contract["capabilities"]["block_events"]),
+                bool(responses)
+                and decision_tags_verified
+                and set(responses) == set(contract["capabilities"]["block_events"]),
             ),
             "hook.execution": self._binding(
                 "hook.execution",
@@ -316,6 +653,76 @@ class CodexProvider(CommandHookProvider):
         claims = []
         masked = "" if artifact.endswith(".schema.json") else rust_mask(text)
 
+        if source["id"] in {"codex-session-init", "codex-session-start"} and previous:
+            old_init = getattr(self, "upstream_before", {}).get("codex-session-init", {})
+            new_init = getattr(self, "upstream_current", {}).get("codex-session-init", {})
+            if old_init.get("revision") != previous["revision"] or new_init.get("revision") != source["revision"]:
+                return []
+            old_routes, old_span = session_routes(old_init["text"])
+            new_routes, new_span = session_routes(new_init["text"])
+            maps = []
+            for index, transition in (
+                (getattr(self, "upstream_before", {}), previous),
+                (getattr(self, "upstream_current", {}), source),
+            ):
+                other = index.get("codex-session-start", {})
+                if other.get("revision") != transition["revision"]:
+                    return []  # Never combine facts from different upstream versions.
+                mapping, span = source_matcher_map(other["text"])
+                if not mapping:
+                    return []
+                self.texts[(other["url"], other["revision"])] = other["text"]
+                maps.append((mapping, other, span))
+            if not old_routes or not new_routes:
+                return []
+            for row in (old_init, new_init):
+                self.texts[(row["url"], row["revision"])] = row["text"]
+            for selector, guard, new_value in new_routes:
+                old_value = next(
+                    (
+                        value
+                        for variant, condition, value in old_routes
+                        if variant == selector and condition in {"", guard}
+                    ),
+                    None,
+                )
+                before_value, after_value = maps[0][0].get(old_value), maps[1][0].get(new_value)
+                if before_value is None or after_value is None or before_value == after_value:
+                    continue
+                refs = []
+                for row, span in (
+                    (old_init, old_span),
+                    (new_init, new_span),
+                    (maps[0][1], maps[0][2]),
+                    (maps[1][1], maps[1][2]),
+                ):
+                    refs.append(
+                        engine.evidence(
+                            row["text"],
+                            *span,
+                            artifact=row["url"],
+                            revision=row["revision"],
+                            role="upstream",
+                            authority="source_assignment",
+                        )
+                    )
+                claims.append(
+                    {
+                        "invariant_id": "hook.event_delivery",
+                        "kind": "event_selector_transition",
+                        "value": {
+                            "before": before_value,
+                            "after": after_value,
+                            "scenario": selector + (" if " + guard if guard else " (fallback)"),
+                        },
+                        "event": "SessionStart",
+                        "field": "source",
+                        "authority": "source_assignment",
+                        "evidence": refs,
+                    }
+                )
+            return claims
+
         def add(invariant_id, kind, value, span, **extra):
             if ".schema.json" not in artifact:
                 first = re.search(r"\S", text[span[0] : span[1]])
@@ -336,7 +743,7 @@ class CodexProvider(CommandHookProvider):
             )
 
         if ".command." in artifact and ".schema.json" in artifact:
-            document = json.loads(text)
+            document = schema_document(text)
             if not isinstance(document, dict):
                 return []
             title = document.get("title", "")
@@ -366,12 +773,44 @@ class CodexProvider(CommandHookProvider):
                     types = [types] if isinstance(types, str) else types if isinstance(types, list) else []
                     span = json_span(text, pointer)
                     for value in types:
+                        value = "number" if value == "integer" else value
                         if value in {"string", "number", "boolean", "object", "array", "null"}:
                             add("hook.payload", "field_type", value, span[1:], event=event, field=field)
                             if field == "tool_use_id":
                                 add("hook.correlation", "field_type", value, span[1:], event=event, field=field)
-                before = json.loads(previous["text"]) if previous else {}
+                before = schema_document(previous["text"]) if previous else {}
                 before = before if isinstance(before, dict) else {}
+                added = schema_added_fields(document, before)
+                if (
+                    added
+                    and previous
+                    and event in self.local()["hook.correlation"]["values"]["events"]
+                    and previous["revision"] != revision
+                    and max(len(text), len(previous["text"])) <= 24000
+                ):
+                    self.texts[(previous["url"], previous["revision"])] = previous["text"]
+                    refs = [
+                        engine.evidence(
+                            row["text"],
+                            0,
+                            len(row["text"]),
+                            artifact=row["url"],
+                            revision=row["revision"],
+                            role="upstream",
+                            authority="declared_schema",
+                        )
+                        for row in (previous, source)
+                    ]
+                    claims.append(
+                        {
+                            "invariant_id": "hook.correlation",
+                            "kind": "fields_added",
+                            "value": added,
+                            "event": event,
+                            "authority": "declared_schema",
+                            "evidence": refs,
+                        }
+                    )
                 if document.get("additionalProperties") is False:
                     for field in set(before.get("properties", {})) - set(properties):
                         add("hook.payload", "field_removed", None, (0, len(text)), event=event, field=field)
@@ -383,20 +822,16 @@ class CodexProvider(CommandHookProvider):
                     span = json_span(text, pointer)
                     if span is None or node is None:
                         continue
-                    if node is False:
-                        add("hook.decision", "decision_rejected", value, span[1:], event=event, field=field)
-                    elif isinstance(node, dict) and isinstance(node.get("enum"), list):
-                        accepted = any(type(item) is type(value) and item == value for item in node["enum"])
-                        kind = "decision_accepted" if accepted else "decision_rejected"
-                        add("hook.decision", kind, value, span[1:], event=event, field=field)
-                    elif (
-                        isinstance(node, dict)
-                        and isinstance(node.get("type"), str)
-                        and node["type"] != ("boolean" if type(value) is bool else "string")
-                    ):
-                        add("hook.decision", "decision_rejected", value, span[1:], event=event, field=field)
-                    elif isinstance(node, dict) and type(value) is bool and node.get("type") == "boolean":
-                        add("hook.decision", "decision_accepted", value, span[1:], event=event, field=field)
+                    accepted = schema_accepts_decision(node, value)
+                    if accepted is not None:
+                        add(
+                            "hook.decision",
+                            "decision_accepted" if accepted else "decision_rejected",
+                            value,
+                            span[1:],
+                            event=event,
+                            field=field,
+                        )
             return claims
         # Exclude tests and comments. Unknown syntax does not imply removal.
         code = rust_mask(text, comments_only=True).split("#[cfg(test)]", 1)[0]
@@ -478,15 +913,26 @@ class CodexProvider(CommandHookProvider):
                 sort_keys=True,
             )
 
-        old = {key(claim) for claim in before}
+        old = {key(claim): [ref["quote"] for ref in claim["evidence"]] for claim in before}
         hunk = re.search(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", candidate["text"])
         start = int(hunk[1]) if hunk else 1
         end = start + (int(hunk[2]) if hunk and hunk[2] else 1)
         claims = [
             claim
             for claim in current
-            if key(claim) not in old
-            and any(ref["line"] < end and ref["line"] + ref["quote"].count("\n") >= start for ref in claim["evidence"])
+            if (
+                key(claim) not in old
+                or claim["kind"] == "decision_accepted"
+                and source["url"].endswith(".command.output.schema.json")
+                and old[key(claim)] != [ref["quote"] for ref in claim["evidence"]]
+            )
+            and any(
+                ref["artifact"] == source["url"]
+                and ref["revision"] == source["revision"]
+                and ref["line"] < end
+                and ref["line"] + ref["quote"].count("\n") >= start
+                for ref in claim["evidence"]
+            )
         ]
         selected = self.spec["source_invariants"].get(source["id"], self.selected(artifact_classes)) + [
             claim["invariant_id"] for claim in claims

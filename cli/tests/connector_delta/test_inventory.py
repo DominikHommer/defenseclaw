@@ -7,7 +7,7 @@ import copy
 import json
 import unittest
 
-from cli.tests.test_connector_delta_monitor import snapshot
+from cli.tests.connector_delta.test_monitor import snapshot
 from scripts.connector_delta import inventory, monitor, platforms
 
 
@@ -38,6 +38,85 @@ class InventoryTests(unittest.TestCase):
     def test_claude_example_outside_watchlist_is_found(self):
         result = inventory.collect(self.manifest(), fetcher([pr()], ["examples/settings/settings-hipaa.json"]))
         self.assertEqual(result["prs"][0]["changed_files"][0]["invariants"], ["hook.discovery", "hook.registration"])
+
+    def test_separate_diff_mod_and_test_only_prs_remain_informative_not_review(self):
+        for path in ("mods/diff/hooks/register.ts", "mods/telemetry/tests/gate.test.ts"):
+            manifest = self.manifest()
+            current = snapshot()
+            _, state = monitor.run_monitor(current, manifest)
+            current["pr_inventory"] = inventory.collect(manifest, fetcher([pr()], [path]))
+            result, _ = monitor.run_monitor(current, manifest, state)
+            with self.subTest(path=path):
+                self.assertEqual(result["summary"], {"observed": 1})
+                self.assertEqual(result["findings"][0]["analysis_status"], "informational_scope")
+
+    def test_unknown_files_are_in_inventory_without_becoming_compatibility_proof(self):
+        result = inventory.collect(self.manifest(), fetcher([pr()], ["src/new-dispatcher.ts"]))
+        item = result["prs"][0]["file_inventory"][0]
+        self.assertEqual(item["path"], "src/new-dispatcher.ts")
+        self.assertEqual(item["scope"], "unmatched")
+
+    def test_hook_references_in_patch_find_a_dispatcher_without_hook_in_its_path(self):
+        def fetch(url, **kwargs):
+            return json.dumps(
+                [
+                    {
+                        "filename": "codex-rs/core/src/session/dispatcher.rs",
+                        "patch": "+dispatch(SessionStartSource::Fork);",
+                    }
+                ]
+                if "/files?" in url
+                else [pr(1)]
+            )
+
+        result = inventory.collect(self.manifest("codex"), fetch)
+        self.assertEqual(result["prs"][0]["changed_files"][0]["scope"], "review")
+
+    def test_ui_new_tests_do_not_mask_removal_of_a_test_only_guard(self):
+        for patch, expected in (
+            ("+#[cfg(test)]\n+mod tests;", "informational"),
+            ("-#[cfg(test)]\n mod tests;", "review"),
+        ):
+            with self.subTest(patch=patch):
+                self.assertEqual(
+                    inventory.file_scope(
+                        self.manifest("codex"), "codex-rs/tui/src/bottom_pane/hooks_browser_render.rs", patch
+                    )[0],
+                    expected,
+                )
+
+    def test_render_style_is_not_confused_with_hook_state_mutation(self):
+        path = "codex-rs/tui/src/bottom_pane/hooks_browser_render.rs"
+        manifest = self.manifest("codex")
+        self.assertEqual(inventory.file_scope(manifest, path, "-buf.set_style(area, style);")[0], "informational")
+        self.assertEqual(inventory.file_scope(manifest, path, "+hooks.set_state(trusted);")[0], "review")
+
+    def test_managed_security_mod_is_not_blanket_ignored_as_an_unrelated_mod(self):
+        manifest = self.manifest()
+        current = snapshot()
+        _, state = monitor.run_monitor(current, manifest)
+        current["pr_inventory"] = inventory.collect(manifest, fetcher([pr()], ["mods/sec-default/hooks/register.ts"]))
+        report, _ = monitor.run_monitor(current, manifest, state)
+        self.assertEqual(report["summary"], {"review_required": 1})
+
+    def test_ui_path_with_hook_state_mutation_still_requires_review(self):
+        manifest = self.manifest("codex")
+        for code, expected in (
+            ('+title = format!("Hook {number}");', "informational"),
+            ("+set_hook_state(enabled);", "review"),
+            (None, "review"),
+        ):
+
+            def fetch(url, **kwargs):
+                return json.dumps(
+                    [{"filename": "codex-rs/tui/src/bottom_pane/hooks_browser_view.rs", "patch": code}]
+                    if "/files?" in url
+                    else [pr(51433)]
+                )
+
+            result = inventory.collect(manifest, fetch)
+            with self.subTest(code=code):
+                self.assertEqual(result["prs"][0]["file_inventory"][0]["scope"], expected)
 
     def test_codex_context_renderer_outside_watchlist_is_found(self):
         result = inventory.collect(

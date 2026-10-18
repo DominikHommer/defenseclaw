@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 SPEC = importlib.util.spec_from_file_location("connector_delta_monitor", ROOT / "scripts/connector_delta/monitor.py")
 monitor = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(monitor)
@@ -271,6 +271,39 @@ class DeltaMonitorTests(unittest.TestCase):
         report, _ = self.run_snapshot(state=state, ai="anthropic", model="test", analyzer=grounded)
         self.assertTrue(report["baseline_reset"])
         self.assertEqual(report["ai_calls"], 2)
+
+    def test_analyzer_upgrade_preserves_document_delta_and_inventory_checkpoint(self):
+        before = snapshot(hooks="# Hooks\n\nPreToolUse is synchronous.\n")
+        _, state = self.run_snapshot(before)
+        state["signature"] = "previous-analyzer"
+        state["pr_inventory"] = {"watermark": "2026-10-16T00:00:00Z", "seen": ["17"]}
+        after = snapshot(hooks="# Hooks\n\nPreToolUse is now asynchronous.\n")
+        report, updated = self.run_snapshot(after, state)
+        changed = [f for f in report["findings"] if f["candidate"]["source"] == "claude-hooks"]
+        self.assertTrue(changed, "analyzer upgrades must not swallow an upstream document delta")
+        self.assertEqual(report["checkpoint_strategy"], "retain_source_baselines")
+        self.assertEqual(updated["pr_inventory"]["seen"], ["17"])
+
+    def test_analyzer_upgrade_preserves_frozen_pending_document(self):
+        _, state = self.run_snapshot()
+        frozen = snapshot(hooks="# Hooks\n\nPreToolUse changed response handling.\n")["sources"][1]
+        state["pending_sources"]["claude-hooks"] = frozen
+        state["signature"] = "previous-analyzer"
+        newer = snapshot(hooks="# Hooks\n\nPreToolUse changed again.\n")
+        report, updated = self.run_snapshot(newer, state)
+        row = next(row for row in report["sources"] if row["id"] == "claude-hooks")
+        self.assertTrue(row["newer_snapshot_deferred"])
+        self.assertEqual(updated["sources"]["claude-hooks"]["text"], frozen["text"])
+        self.assertTrue(report["gaps"])
+
+    def test_analyzer_upgrade_reanalysis_does_not_lose_removed_old_release_notes(self):
+        _, state = self.run_snapshot()
+        state["signature"] = "previous-analyzer"
+        after = snapshot(changelog=CHANGELOG.split("## 2.1.299")[0])
+        report, _ = self.run_snapshot(after, state, lookback=1)
+        removed = [f for f in report["findings"] if f["candidate"]["kind"] == "removed_release_note"]
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(removed[0]["decision"], "review_required")
 
     def test_grounded_ai_envelope_and_authentication(self):
         candidate = monitor.candidates(snapshot()["sources"][0])[0]

@@ -19,9 +19,16 @@ def _sha(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _mask_go(text):
+def _mask_go(text, comments_only=False):
     token = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/|`[^`]*`|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
-    return token.sub(lambda match: "".join("\n" if char == "\n" else " " for char in match[0]), text)
+    return token.sub(
+        lambda match: (
+            match[0]
+            if comments_only and not match[0].startswith(("//", "/*"))
+            else "".join("\n" if char == "\n" else " " for char in match[0])
+        ),
+        text,
+    )
 
 
 def _block(text, symbol, *, struct=False):
@@ -79,6 +86,17 @@ class CommandHookProvider:
         path, text, revision = self.sources[label]
         start, end = span or (0, len(text))
         return engine.evidence(text, start, end, artifact=path, revision=revision, role="local", authority="local_code")
+
+    def prepare(self, snapshot, state):
+        # Snapshot dictionaries are public, validated data. Freeze the prior
+        # index before the runner advances individual source checkpoints.
+        self.upstream_before = dict(state.get("sources", {}))
+        self.upstream_current = {row["id"]: row for row in snapshot["sources"]}
+        self.upstream_current.update(state.get("pending_sources", {}))
+
+    def scope_delta(self, candidate, source, previous):
+        """Optional code-owned informational routing, never compatibility proof."""
+        return None
 
     def _function(self, label, selector):
         _, text, _ = self.sources[label]

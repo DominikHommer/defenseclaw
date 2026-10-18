@@ -1,4 +1,4 @@
-# Claude Code delta monitor: historical and invariant backtests
+# Claude Code delta monitor: initial historical and invariant backtests
 
 Local experiment, 2026-10-16. No push, remote workflow execution, agent installation
 or DefenseClaw runtime configuration change was performed.

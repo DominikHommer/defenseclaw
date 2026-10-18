@@ -14,19 +14,26 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 CATALOG = Path(__file__).resolve().parent / "shared/invariants.json"
-PROVEN = {"explicit_statement", "declared_schema", "contract_table"}
+PROVEN = {"explicit_statement", "declared_schema", "contract_table", "source_assignment"}
 KINDS = {
     "hook.discovery": {"accepted_paths", "retired_path", "exclusive_paths", "default_directory"},
     "hook.registration": {"retired_registration_key", "accepted_registration_key"},
-    "hook.event_delivery": {"event_removed", "event_added", "event_inventory"},
+    "hook.event_delivery": {"event_removed", "event_added", "event_inventory", "event_selector_transition"},
     "hook.payload": {"field_type", "field_removed"},
     "hook.decision": {"decision_rejected", "decision_accepted", "response_field_validated"},
-    "hook.execution": {"event_phase", "synchronous", "hard_timeout_seconds", "default_timeout_seconds"},
+    "hook.execution": {
+        "event_phase",
+        "synchronous",
+        "hard_timeout_seconds",
+        "default_timeout_seconds",
+        "launcher_rejected",
+    },
     "hook.failure": {"exit_code_blocks"},
-    "hook.correlation": {"field_type", "field_removed"},
+    "hook.correlation": {"field_type", "field_removed", "fields_added"},
 }
 
 
@@ -101,6 +108,33 @@ def valid_fact(claim, invariant_id):
         return False
     if kind in {"accepted_paths", "exclusive_paths", "event_inventory"}:
         return isinstance(value, list) and bool(value) and all(isinstance(item, str) and item for item in value)
+    if kind == "fields_added":
+        return (
+            isinstance(value, list)
+            and 0 < len(value) <= 128
+            and all(isinstance(field, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", field) for field in value)
+            and len(set(value)) == len(value)
+            and isinstance(claim.get("event"), str)
+            and bool(claim["event"])
+            and claim["authority"] == "declared_schema"
+            and len({ref["revision"] for ref in claim["evidence"]}) == 2
+        )
+    if kind == "event_selector_transition":
+        return (
+            isinstance(value, dict)
+            and set(value) == {"before", "after", "scenario"}
+            and all(isinstance(value[key], str) and 0 < len(value[key]) <= 200 for key in value)
+            and bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value["before"]))
+            and bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value["after"]))
+            and isinstance(claim.get("event"), str)
+            and bool(claim["event"])
+            and claim.get("field") == "source"
+            and (
+                claim["authority"] == "explicit_statement"
+                or claim["authority"] == "source_assignment"
+                and len({ref["revision"] for ref in claim["evidence"]}) >= 2
+            )
+        )
     if kind in {"event_removed", "event_added", "field_removed", "response_field_validated"}:
         valid = value is None
     elif kind in {"synchronous", "exit_code_blocks"}:
@@ -115,13 +149,46 @@ def valid_fact(claim, invariant_id):
         valid = valid and value in {"string", "object", "array", "number", "boolean", "null"}
     if kind == "event_phase":
         valid = valid and value in {"before", "after"}
-    if kind not in {"retired_path", "retired_registration_key", "accepted_registration_key", "default_directory"}:
+    if kind not in {
+        "retired_path",
+        "retired_registration_key",
+        "accepted_registration_key",
+        "default_directory",
+        "launcher_rejected",
+    }:
         valid = valid and isinstance(claim.get("event"), str) and bool(claim["event"])
     if kind in {"field_type", "field_removed", "decision_rejected", "decision_accepted", "response_field_validated"}:
         valid = valid and isinstance(claim.get("field"), str) and bool(claim["field"])
     if kind == "exit_code_blocks":
         valid = valid and type(claim.get("exit_code")) is int
     return bool(valid)
+
+
+def selector_matches(pattern, value):
+    """Evaluate a bounded literal-alternation subset, never an arbitrary regex.
+
+    Unrecognized local matcher syntax stays unknown. Unanchored alternatives
+    follow regex search semantics, as used by the command-hook transports.
+    """
+    if not isinstance(pattern, str) or not isinstance(value, str) or len(pattern) > 300 or len(value) > 200:
+        return None
+    if pattern in {"", "*"}:
+        return True
+    if not re.fullmatch(r"\^?[A-Za-z0-9_-]+\$?(?:\|\^?[A-Za-z0-9_-]+\$?)*", pattern):
+        return None
+    for alternative in pattern.split("|"):
+        literal = alternative.removeprefix("^").removesuffix("$")
+        if alternative.startswith("^") and alternative.endswith("$"):
+            matches = value == literal
+        elif alternative.startswith("^"):
+            matches = value.startswith(literal)
+        elif alternative.endswith("$"):
+            matches = value.endswith(literal)
+        else:
+            matches = literal in value
+        if matches:
+            return True
+    return False
 
 
 def _result(definition, binding, claims, verdict, reason, **extra):
@@ -203,7 +270,18 @@ def compare(definition, binding, claims, *, transport, texts):
         if not relevant:
             judgments.append(("compatible", "The changed event is outside this connector's declared binding."))
             continue
-        if kind == "default_directory":
+        if kind == "launcher_rejected":
+            launchers = values.get("launchers")
+            judgments.append(
+                (
+                    "review_required" if not launchers else "breaking_change" if value in launchers else "compatible",
+                    "The explicitly retired launcher is used by this OS/deployment binding."
+                    if launchers and value in launchers
+                    else "Compare the retired launcher with this scoped binding; "
+                    "other launchers and runtime behavior are not certified.",
+                )
+            )
+        elif kind == "default_directory":
             directories = {path.rsplit("/", 1)[0] for path in values.get("paths", []) if "/" in path}
             judgments.append(
                 (
@@ -273,6 +351,25 @@ def compare(definition, binding, claims, *, transport, texts):
                     else "An additive event is not removal of existing coverage.",
                 )
             )
+        elif kind == "event_selector_transition":
+            matcher = values.get("matchers", {}).get(event)
+            before = selector_matches(matcher, value["before"])
+            after = selector_matches(matcher, value["after"])
+            if before is None or after is None:
+                judgments.append(("review_required", "The event matcher could not be evaluated in the bounded subset."))
+            elif before and not after:
+                judgments.append(
+                    (
+                        "breaking_change",
+                        f"{event} source changes from {value['before']} to {value['after']} "
+                        f"for {value['scenario']}; the actual matcher {matcher!r} loses this delivery. "
+                        "Other events and runtime behavior are not certified by this comparison.",
+                    )
+                )
+            else:
+                judgments.append(
+                    ("compatible", "The source transition does not remove a previously matched delivery scenario.")
+                )
         elif kind == "event_inventory":
             missing = set(values.get("events", [])) - set(value)
             judgments.append(
@@ -281,6 +378,17 @@ def compare(definition, binding, claims, *, transport, texts):
                     "Inventory omission cannot establish event removal."
                     if missing
                     else "All bound events remain listed.",
+                )
+            )
+        elif kind == "fields_added":
+            affected = set(value) & set(values.get("fields", {}))
+            judgments.append(
+                (
+                    "review_required" if affected else "compatible",
+                    "An added pairing field needs its own behavioral comparison."
+                    if affected
+                    else "Only optional schema properties outside this pairing binding were added; "
+                    "prior properties and root constraints are unchanged. This does not verify runtime delivery.",
                 )
             )
         elif kind in {"field_type", "field_removed"}:

@@ -20,6 +20,11 @@ from scripts.connector_delta.provider import CONFIG, CommandHookProvider, _block
 
 
 class ClaudeProvider(CommandHookProvider):
+    def platform_bindings(self, common):
+        from .platforms import profiles
+
+        return profiles(self, common)
+
     def __init__(self, root, binding_path=CONFIG / "connectors/claudecode/bindings.json"):
         super().__init__(root, binding_path, "claudecode")
 
@@ -51,6 +56,7 @@ class ClaudeProvider(CommandHookProvider):
         event_matches = list(re.finditer(r'newClaudeCodeHookGroup\("([A-Za-z]+)"[^\n]*', registration))
         registered = {match[1] for match in event_matches}
         event_refs = [self._ref("registration", match.span()) for match in event_matches if match[1] in events]
+        matchers = dict(re.findall(r'newClaudeCodeHookGroup\("([A-Za-z]+)",\s*"([^"\n]*)"', registration))
         event_verified = set(events) <= registered
         matrix_span = _block(registration, "appendClaudeCodeHookGroups")
         matrix = registration[slice(*matrix_span)] if matrix_span else ""
@@ -168,7 +174,10 @@ class ClaudeProvider(CommandHookProvider):
                 bool(keys and handler_type),
             ),
             "hook.event_delivery": self._binding(
-                "hook.event_delivery", {"events": events}, [registry_ref, *event_refs], event_verified
+                "hook.event_delivery",
+                {"events": events, "matchers": matchers},
+                [registry_ref, *event_refs],
+                event_verified,
             ),
             "hook.payload": self._binding(
                 "hook.payload",
@@ -220,7 +229,7 @@ class ClaudeProvider(CommandHookProvider):
     def extract(self, text, artifact, revision, *, release=False, base=0, full_text=None):
         full_text = full_text if full_text is not None else text
         self.texts[(artifact, revision)] = full_text
-        claims = []
+        claims = platforms.extract_scoped(self, text, artifact, revision, base=base, full_text=full_text)
 
         def local_scope(match):
             # Scoped/conditional/fix/example sentences must not become a
@@ -258,6 +267,19 @@ class ClaudeProvider(CommandHookProvider):
             )
 
         # Explicit retirement is required. A path missing from a table is NOT retirement.
+        for match in re.finditer(
+            r'Changed (SessionStart) hooks to report source `"([a-z]+)"` '
+            r'when a session begins as a ([a-z]+) instead of `"([a-z]+)"`',
+            text,
+        ):
+            add(
+                "hook.event_delivery",
+                "event_selector_transition",
+                {"before": match[4], "after": match[2], "scenario": match[3]},
+                match,
+                event=match[1],
+                field="source",
+            )
         patterns = [
             r"(?:Claude Code |Command )?[Hh]ooks? (?:are |is )?no longer (?:loaded|read) from `([^`]+)`",
             r"`([^`]+)` is no longer (?:read|loaded) for (?:command )?hooks",
@@ -457,7 +479,19 @@ class ClaudeProvider(CommandHookProvider):
 
             def key(claim):
                 return json.dumps(
-                    {k: claim.get(k) for k in ("invariant_id", "kind", "value", "event", "field", "exit_code")},
+                    {
+                        k: claim.get(k)
+                        for k in (
+                            "invariant_id",
+                            "kind",
+                            "value",
+                            "event",
+                            "field",
+                            "exit_code",
+                            "platforms",
+                            "deployment_scope",
+                        )
+                    },
                     sort_keys=True,
                 )
 

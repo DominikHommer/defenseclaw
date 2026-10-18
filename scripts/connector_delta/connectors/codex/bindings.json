@@ -3,6 +3,8 @@
   "connector": "codex",
   "transport": "command-hook",
   "source_invariants": {
+    "codex-session-init": ["hook.event_delivery"],
+    "codex-session-start": ["hook.event_delivery"],
     "codex-home-discovery": [
       "hook.discovery"
     ],
@@ -101,7 +103,12 @@
     "request": "internal/gateway/codex_hook.go",
     "profile": "internal/gateway/connector/codex_hook_profile.go",
     "execution": "internal/gateway/connector/hookexec/hookexec.go",
-    "failure": "internal/gateway/connector/hookexec/spec.go"
+    "failure": "internal/gateway/connector/hookexec/spec.go",
+    "machine_paths": "internal/enterprisepolicy/paths.go",
+    "machine_policy": "internal/enterprisepolicy/codex.go",
+    "helpers": "internal/gateway/connector/helpers.go",
+    "managed_bridge": "internal/gateway/connector/managed_policy_exports.go",
+    "managed_launcher": "internal/gateway/connector/codex_machine_requirements.go"
   },
   "selectors": {
     "config_root_function": "codexHomeDir",

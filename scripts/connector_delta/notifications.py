@@ -25,7 +25,7 @@ from . import monitor
 
 LIMIT = 200
 OUTBOX_LIMIT = 1000
-KINDS = {"review", "contract_conflict", "health"}
+KINDS = {"review", "informational", "contract_conflict", "health"}
 NOTICE = (
     "Zero watched changes is not proof that the connector is safe. Static analysis is not live-client verification."
 )
@@ -46,12 +46,22 @@ def envelope(report):
         raise ValueError("unsupported notification connector")
     manifest = monitor.load_manifest(monitor.CONFIG / "connectors" / connector / "manifest.json")
     items = []
+    conflict_revisions = {
+        f["candidate"].get("source_revision") for f in report["findings"] if f["decision"] == "breaking_change"
+    } - {None}
+    conflict_notices = set()
     for finding in report["findings"]:
         if finding["decision"] == "filtered":
             continue
         candidate = finding["candidate"]
+        if finding["decision"] != "breaking_change" and candidate.get("source_revision") in conflict_revisions:
+            continue  # Do not link private conflicts through a companion PR inventory notice.
         key = fingerprint([connector, candidate["id"], finding["decision"]])
         if finding["decision"] == "breaking_change":
+            key = fingerprint([connector, "private_conflict", candidate.get("source_revision", candidate["id"])])
+            if key in conflict_notices:
+                continue
+            conflict_notices.add(key)
             # Do not publish a bypass recipe, invariant name, value or evidence.
             items.append(
                 {
@@ -74,22 +84,46 @@ def envelope(report):
                 raise ValueError("invalid PR number")
             url = f"https://github.com/{repo}/pull/{number}"
             title = safe_text(pr["title"])
-            for changed in pr["changed_files"][:30]:
+            informational = finding.get("analysis_status") == "informational_scope"
+            for changed in (pr.get("file_inventory", []) if informational else pr["changed_files"])[:30]:
                 path = changed["path"]
                 if not re.fullmatch(r"[A-Za-z0-9_./-]{1,300}", path):
                     continue
                 files.append(path)
-                for rule in manifest["pr_inventory"]["paths"]:
+                for rule in [] if informational else manifest["pr_inventory"]["paths"]:
                     if re.search(rule["pattern"], path):
                         focus.append(rule["review_focus"])
+            if informational:
+                focus.append(
+                    "Informational change summary: no connector action established. "
+                    "Review scope locally if needed; unchanged watched files are not proof of compatibility."
+                )
+            elif not focus:
+                focus.append(
+                    "Inspect changed dispatch, registration or hook-state references outside the watchlist; "
+                    "a concrete runtime break has not been established."
+                )
         else:
+            informational = finding.get("analysis_status") == "informational_scope"
+            if informational:
+                title = "Upstream change retained for information"
             title += " (" + safe_text(candidate.get("version", candidate["source"])) + ")"
             focus.append(
-                "Inspect registered events, payloads, deny responses and execution assumptions. "
+                "Edits were limited to a recognized test-only or optional-metadata scope. "
+                "Consult the local report for the scoped comparison; runtime compatibility is not established."
+                if informational
+                else "Inspect registered events, payloads, deny responses and execution assumptions. "
                 "No runtime break has been established."
             )
         items.append(
-            {"id": key, "kind": "review", "title": title, "url": url, "files": files, "focus": sorted(set(focus))}
+            {
+                "id": key,
+                "kind": "informational" if finding.get("analysis_status") == "informational_scope" else "review",
+                "title": title,
+                "url": url,
+                "files": files,
+                "focus": sorted(set(focus)),
+            }
         )
     if report["gaps"]:
         items.append(
@@ -203,14 +237,14 @@ def publish(report, state, directory, receipt=None):
         "schema_version": 1,
         "connector": report["connector"],
         "outcome": report["outcome"],
-        "attention_required": bool(notices["items"]),
+        "attention_required": any(item["kind"] != "informational" for item in notices["items"]),
         "notice": NOTICE,
         "details": "Full evidence stays local to the analysis runner; reproduce locally for private investigation.",
     }
     monitor.write_json(directory / "report.json", public)
     monitor.write_json(directory / "notification.json", notices)
     monitor.write_json(directory / "state.json", checkpoint)
-    review = "needed" if notices["items"] else "no new signal"
+    review = "needed" if public["attention_required"] else "no new actionable signal"
     monitor.write_text(
         directory / "report.md",
         f"# {report['connector']} upstream monitor\n\n{NOTICE}\n\n"
@@ -324,7 +358,11 @@ def notify(value, api, *, run_url=""):
             lines += ["Upstream: " + item["url"]]
         if item["files"]:
             lines += [
-                "Changed outside the configured watchlist: "
+                (
+                    "Changed artifacts (informational scope): "
+                    if item["kind"] == "informational"
+                    else "Changed outside the configured watchlist: "
+                )
                 + ", ".join("`" + safe_text(path) + "`" for path in item["files"])
             ]
         lines += ["What to inspect: " + safe_text(focus, 1000) for focus in item["focus"]]

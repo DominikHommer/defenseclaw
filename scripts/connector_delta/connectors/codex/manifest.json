@@ -1,13 +1,29 @@
 {
   "schema_version": 1,
   "connector": "codex",
-  "pr_inventory": {"paths": [
+  "pr_inventory": {"informational_paths": [
+    {"pattern": "^codex-rs/tui/src/bottom_pane/hooks_browser_(?:view|render)\\.rs$", "requires_patch": true, "reason": "Hook-browser presentation surface; no runtime connector conflict established. Recheck if this changes hook-state or trust mutations."}
+  ], "paths": [
     {"pattern": "(?i)^codex-rs/.*hook", "invariants": ["hook.payload", "hook.decision", "hook.execution"], "review_focus": "Check that hook input, emitted denial and additional-context delivery remain effective through the changed runtime path."},
     {"pattern": "^codex-rs/(?:protocol/src/models|tools/src/tool_output|context-fragments/src/fragment)\\.rs$", "invariants": ["hook.payload", "hook.decision"], "review_focus": "Check typed-content and tool-output conversions used by hook context; unchanged schemas do not prove end-to-end behavior."}
   ]},
   "upstream_repository": "openai/codex",
   "coverage": "Pinned public Codex hook source and selected JSON schemas; not complete tool-routing or runtime coverage.",
   "sources": [
+    {
+      "id": "codex-session-init",
+      "kind": "source",
+      "path": "codex-rs/core/src/session/session.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/core/src/session/session.rs",
+      "artifact_classes": ["hook_events"]
+    },
+    {
+      "id": "codex-session-start",
+      "kind": "source",
+      "path": "codex-rs/hooks/src/events/session_start.rs",
+      "url": "https://raw.githubusercontent.com/openai/codex/{revision}/codex-rs/hooks/src/events/session_start.rs",
+      "artifact_classes": ["hook_events"]
+    },
     {
       "id": "codex-home-discovery",
       "kind": "source",

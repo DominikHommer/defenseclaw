@@ -1,10 +1,121 @@
-# Connector Delta Monitor: Claude Code and Codex
+# Connector Delta Monitor: Claude Code and Codex backtests
 
 Local results, 2026-10-17. Both providers were tested against DefenseClaw main
 `a6ab014b0ceb4c783e4afafce39fe6e1a76f249b`, refreshed from `origin/main`.
 The measurements below were collected locally before the refactor. At collection
 time no push, issue/PR write, hosted workflow run, client installation or runtime
 configuration change was performed. Downloaded source was parsed, never executed.
+
+## Iterative improvement audit (after the results below)
+
+Three improvement/replay cycles targeted the deficiencies found by the historical
+audit, still against current main `a6ab014` and with AI off:
+
+1. Added source/matcher transition comparisons grounded in the actual local
+   writer and both upstream revisions. The previously generic Codex review now
+   identifies the exact static delivery conflict. Two companion artifacts expand
+   the fixed Codex watchlist from 24 to 26 files.
+2. Retained all PR filenames and separated informational scope from actionable
+   review. Separate Claude mod changes and test-only changes remain visible;
+   UI styling no longer masquerades as hook-state mutation.
+3. Hardened proof and notification boundaries using failing-first tests: unknown
+   guards/regexes, raw strings, test-only declarations, unreachable mapping shapes,
+   missing/mixed-version evidence, unwatched patch references, and private-conflict
+   attribution. A final replay confirmed the same outcomes after hardening.
+
+| Evaluation | Result |
+| --- | --- |
+| Targeted historical merged PRs | 13 exact first-parent replays: 10 Codex, 3 Claude |
+| Preselected holdout PRs | 5/5 routing expectations passed: 3 Codex runtime/trust reviews, 2 Claude informational mod changes |
+| Six benign PR controls | 0 breaking alerts; actionable review on 5/6 before, 3/6 after |
+| Three fully collected benign controls | All informational after improvement; none silently discarded |
+| Historical collection limitations | Six tuning PRs and one holdout have missing older artifacts; these remain incomplete |
+| Expanded prior Codex corpus | 15 transitions, 26 artifacts per bundle, 0 gaps; one distinct static conflict (multiple evidence hunks) |
+| Claude release replay | 126 releases / 4,807 notes; 21/21 curated relevance checks retained |
+| Synthetic mutations | Claude 35/35 and Codex 23/23 |
+| Focused monitor/inventory/notification/CI suite | 152 tests plus 162 subtests passed |
+
+The holdouts were Codex #43876, #24317 and #52220, and Claude #98275 and #96917.
+Expectations were declared before their replay; no expected labels were weakened
+after seeing outcomes. They test conservative routing, not live compatibility.
+The six benign controls were Codex #21969, #22882, #30229, #51433 and Claude
+#96570, #96930. The three remaining reviews have incomplete historical coverage
+and/or unresolved runtime comparisons; a benign audit label cannot supply the
+missing production evidence.
+
+Detailed conflict evidence and generated snapshots remain in the local audit
+outputs rather than public notifications. Scope is still partial static analysis:
+no client installation, native OS run, live AI request, GitHub issue or email send
+was performed. The new checks do not change or repair either connector itself.
+These small, selected corpora do not establish a population false-positive rate.
+
+### Continued cycles 4–6
+
+Further iterations found and fixed a checkpoint regression: changing the
+analyzer/model discarded source baselines, so a simultaneous upstream source or
+document regression could become an unchecked first baseline. Failing-first
+tests now pin retention of source deltas, frozen backlog, inventory progress and
+removed older release notes. The real historical positive control remains
+detected when an analyzer upgrade is simulated at the same transition.
+
+Additional precise scoping distinguishes edits inside balanced Rust `cfg(test)`
+blocks and an exact optional `HooksFile.description` addition from runtime
+changes. These are informative observations, not compatibility verdicts. Guard
+removal, fake guard strings and additional runtime edits stay under review.
+
+| Additional evaluation | Result |
+| --- | --- |
+| Original six benign controls, same pinned revisions | 0 breaking alerts; actionable reviews now 2/6, versus 3/6 after cycle 3 and 5/6 initially |
+| Optional metadata control | Informational only; its unavailable historical SessionEnd artifact still produces a separate coverage warning |
+| Additional predeclared controls | 4/4 expectations: Codex #44288 and #45248 require review; Claude #99206 and #98445 are informational |
+| All holdout routing checks | 9/9 passed across the original five and four new cases; not runtime ground truth |
+| Same earlier 15-transition Codex corpus | 129 generic review hunks become 85 reviews + 44 informational test-only hunks; all 3 evidence hunks for the same distinct static conflict remain detected; 0 collection gaps |
+| Wider history collector | Seven allowlisted dependency paths; core-only session/tool dispatch changes are eligible |
+| Fresh sampled history | 3 first-parent transitions, 6 pinned bundles, 26 artifacts each; 0 collection gaps, 0 proven breaking changes |
+| Focused regression suite | 161 tests plus 171 subtests passed |
+
+The new history sample includes Codex #53990, #54059 and #54619. It is a bounded
+sample, not a labeled accuracy benchmark. Historical gaps are annotated as no
+parent baseline, current artifact unavailable, or unavailable at both revisions;
+none is automatically dismissed as a not-yet-introduced feature. Both versions
+being unavailable does not prove either compatibility or retirement.
+
+Current DefenseClaw main was rechecked as `a6ab014`; neither actual connector was
+modified. All new results remain local. No live model, client installation,
+native OS certification, issue/comment write or email delivery was exercised.
+
+### Further precision and proof-boundary checks (2026-10-18)
+
+Further iterations compare additive input changes against both complete pinned
+schemas, instead of sending an unrelated pairing question to AI. In Codex
+#22882, adding optional `agent_id` and `agent_type` no longer creates two
+spurious `tool_use_id` reviews: 24 source/inventory reviews after the previous
+pass become 22, while runtime edits and missing historical files remain visible.
+This does not relabel the entire PR as compatible.
+
+Integer input types are no longer ignored. Output comparisons intersect the
+supported type, enum and const constraints and bind the literal event tag emitted
+with PreToolUse and PermissionRequest denies. Unsupported constraints beside
+references/patterns stay unknown. Duplicate keys, nonfinite or excessive numeric
+values and excessive nesting produce gaps. Failing-first counterexamples pin
+new schema conflicts, invalid compatibility claims and event-tag mismatches.
+
+Four additional predeclared controls passed without breaking alerts:
+Codex #24962 (event-specific schema tightening; scoped acceptance checks plus
+other unresolved changes), Codex #19194 (generated-file display attributes),
+Claude #98080 (security-default plugin policy), and Claude #22072 (settings
+examples). The latter policy/example cases remain conditional reviews. The two
+old Codex cases retain historical collection warnings. These are routing labels,
+not runtime ground truth or a population precision estimate.
+
+The original 13 targeted cases and all 13 held-out routing controls were replayed.
+The known static conflict remains detected. Focused pytest passed 172 tests plus
+187 subtests. Notification tests and a fake-publisher preview verified all five
+configured handles. The publisher is implemented but absent from current main;
+no repository setting, live issue/comment, email delivery or client setup was
+changed by these checks. Generated evidence and the preview stay local.
+
+The following sections preserve the earlier pre-improvement measurements.
 
 ## Organized implementation and regression comparison
 
@@ -74,7 +185,7 @@ credential was used to semantically classify those remaining items.
 Claude's two compatible comparisons are the already-supported DirectoryAdded
 event and validation of `updatedInput`, which DefenseClaw does not emit. Other
 unresolved checks keep those overall entries at review-required. The earlier
-[Claude-only experiment](claude-delta-monitor-backtest.md) has the detailed
+[Claude-only experiment](claude-initial-backtest.md) has the detailed
 manual comparisons; its original baseline was older main `f9c88b4`.
 
 Codex history is selected from the main-filtered `codex-rs/hooks` and

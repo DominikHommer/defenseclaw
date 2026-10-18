@@ -8,7 +8,10 @@
     "request": "internal/gateway/claude_code_hook.go",
     "profile": "internal/gateway/connector/claudecode_hook_profile.go",
     "execution": "internal/gateway/connector/hookexec/hookexec.go",
-    "failure": "internal/gateway/connector/hookexec/spec.go"
+    "failure": "internal/gateway/connector/hookexec/spec.go",
+    "machine_paths": "internal/enterprisepolicy/paths.go",
+    "machine_policy": "internal/enterprisepolicy/claude.go",
+    "launcher": "internal/gateway/connector/claudecode_launcher_guard.go"
   },
   "selectors": {
     "config_root_function": "claudeCodeConfigDir",

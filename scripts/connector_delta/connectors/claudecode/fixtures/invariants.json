@@ -2,6 +2,9 @@
   "schema_version": 1,
   "evaluation": "Synthetic upstream contract mutations against current DefenseClaw code. Not historical regressions or live-client verification.",
   "cases": [
+    {"id":"source-fork-already-matched","text":"Changed SessionStart hooks to report source `\"fork\"` when a session begins as a fork instead of `\"resume\"`","expected":{"hook.event_delivery":"compatible"}},
+    {"id":"source-transition-loses-delivery","text":"Changed SessionStart hooks to report source `\"branch\"` when a session begins as a branch instead of `\"startup\"`","expected":{"hook.event_delivery":"breaking_change"}},
+    {"id":"source-transition-cloud-not-default","text":"Changed SessionStart hooks to report source `\"branch\"` when a session begins as a branch instead of `\"startup\"` in cloud sessions","selected":["hook_events"],"expected":{"hook.event_delivery":"review_required"}},
     {"id":"discovery-retired","text":"Hooks are no longer read from `~/.claude/settings.json`.","expected":{"hook.discovery":"breaking_change"}},
     {"id":"discovery-exclusive-move","text":"Hooks are now read only from `~/.claude/hooks.json`.","expected":{"hook.discovery":"breaking_change"}},
     {"id":"discovery-legacy-supported","text":"Hooks are read only from `~/.claude/hooks.json` or `~/.claude/settings.json`.","expected":{"hook.discovery":"compatible"}},

@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cli.tests.test_connector_delta_inventory import fetcher, pr
-from cli.tests.test_connector_delta_monitor import snapshot
+from cli.tests.connector_delta.test_inventory import fetcher, pr
+from cli.tests.connector_delta.test_monitor import snapshot
 from scripts.connector_delta import inventory, monitor
 from scripts.connector_delta import notifications as n
 
@@ -47,6 +47,48 @@ def informative_report():
 
 
 class NotificationTests(unittest.TestCase):
+    def test_source_scope_notice_uses_fixed_informational_wording_not_raw_reason(self):
+        report, _ = informative_report()
+        finding = report["findings"][0]
+        finding["candidate"].pop("pr")
+        finding.update(
+            decision="observed",
+            analysis_status="informational_scope",
+            scope_reason="PRIVATE-REASON-SENTINEL @unexpected-user",
+        )
+        notice = n.envelope(report)
+        n.validate_envelope(notice)
+        self.assertEqual(notice["items"][0]["kind"], "informational")
+        self.assertIn("information", notice["items"][0]["title"])
+        self.assertNotIn("PRIVATE-REASON-SENTINEL", json.dumps(notice))
+        self.assertNotIn("needs review", notice["items"][0]["title"])
+
+    def test_informational_notice_explains_scope_and_preserves_the_file_list(self):
+        manifest = monitor.load_manifest()
+        value = snapshot()
+        _, state = monitor.run_monitor(value, manifest)
+        value["pr_inventory"] = inventory.collect(manifest, fetcher([pr()], ["mods/diff/hooks/register.ts"]))
+        report, state = monitor.run_monitor(value, manifest, state)
+        notice = n.envelope(report)
+        self.assertEqual(notice["items"][0]["kind"], "informational")
+        api = FakeGitHub()
+        n.notify(notice, api)
+        self.assertIn("mods/diff/hooks/register.ts", api.issues[0]["body"])
+        self.assertIn("no connector action established", api.issues[0]["body"])
+        with tempfile.TemporaryDirectory() as directory:
+            n.publish(report, state, directory)
+            self.assertFalse(monitor.load_json(Path(directory) / "report.json")["attention_required"])
+
+    def test_private_conflict_cannot_be_linked_back_through_same_revision_inventory(self):
+        report, _ = informative_report()
+        conflict = copy.deepcopy(report["findings"][0])
+        conflict["decision"] = "breaking_change"
+        conflict["candidate"]["id"] = "c" * 64
+        report["findings"].append(conflict)
+        value = n.envelope(report)
+        self.assertEqual([item["kind"] for item in value["items"]], ["contract_conflict"])
+        self.assertNotIn("100293", json.dumps(value))
+
     def test_informative_review_is_sent_without_breaking_change(self):
         report, _ = informative_report()
         self.assertNotIn("breaking_change", report["summary"])

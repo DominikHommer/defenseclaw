@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "23 */6 * * *"
   workflow_dispatch:
+    inputs:
+      notify:
+        description: Publish contributor notices (requires the repository notification switch too)
+        type: boolean
+        default: false
 
 # Analysis is read-only. Only the opt-in publisher job can write alert issues.
 permissions:
@@ -40,11 +45,7 @@ jobs:
 
       - name: Run hermetic monitor tests
         run: |
-          python3 -m unittest discover -s cli/tests -p test_connector_delta_monitor.py
-          python3 -m unittest discover -s cli/tests -p test_connector_invariants.py
-          python3 -m unittest discover -s cli/tests -p test_connector_codex_delta.py
-          python3 -m unittest discover -s cli/tests -p test_connector_delta_notifications.py
-          python3 -m unittest discover -s cli/tests -p test_connector_delta_inventory.py
+          python3 -m unittest discover -s cli/tests/connector_delta
 
       - name: Restore last checkpoint from this trusted workflow
         env:
@@ -147,7 +148,7 @@ jobs:
 
   notify:
     needs: monitor
-    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && vars.CONNECTOR_DELTA_NOTIFICATIONS_ENABLED == 'true' }}
+    if: ${{ always() && !cancelled() && needs.monitor.result != 'skipped' && github.ref == 'refs/heads/main' && vars.CONNECTOR_DELTA_NOTIFICATIONS_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.notify == true) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

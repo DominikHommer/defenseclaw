@@ -1,7 +1,9 @@
 {
   "schema_version": 1,
   "connector": "claudecode",
-  "pr_inventory": {"paths": [
+  "pr_inventory": {"informational_paths": [
+    {"pattern": "^mods/(?:diff|telemetry|agents-md)/", "reason": "Separate first-party mod surface, not DefenseClaw's settings-based command-hook transport; no direct connector action established."}
+  ], "paths": [
     {"pattern": "^examples/settings/", "invariants": ["hook.discovery", "hook.registration"], "review_focus": "Inspect allowManagedHooksOnly and strictPluginOnlyCustomization if this optional example is deployed; it is not a host-default change."},
     {"pattern": "(?i)(?:^|/)[^/]*hook[^/]*", "invariants": ["hook.event_delivery", "hook.payload", "hook.decision"], "review_focus": "Check whether this is our local command-hook API rather than a separate mod, plugin or cloud API."}
   ]},

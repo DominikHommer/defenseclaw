@@ -14,6 +14,18 @@ import urllib.parse
 
 from scripts.connector_delta.invariants import InvariantError
 
+# Fixed production dependency paths, not arbitrary user-supplied history URLs.
+# The hooks subtree covers its schemas/events/engine; other paths are explicit.
+CODEX_HISTORY_PATHS = (
+    "codex-rs/hooks",
+    "codex-rs/config/src/hook_config.rs",
+    "codex-rs/config/src/lib.rs",
+    "codex-rs/utils/home-dir/src/lib.rs",
+    "codex-rs/core/src/hook_runtime.rs",
+    "codex-rs/core/src/tools/registry.rs",
+    "codex-rs/core/src/session/session.rs",
+)
+
 
 def collect_history(manifest, fetch, collector, *, count=15):
     if manifest["connector"] != "codex" or not 1 <= count <= 30:
@@ -22,7 +34,7 @@ def collect_history(manifest, fetch, collector, *, count=15):
     if os.environ.get("GH_TOKEN"):
         headers["Authorization"] = "Bearer " + os.environ["GH_TOKEN"]
     commits = {}
-    for path in ("codex-rs/hooks", "codex-rs/config/src/hook_config.rs"):
+    for path in CODEX_HISTORY_PATHS:
         query = urllib.parse.urlencode({"sha": "main", "path": path, "per_page": count})
         rows = json.loads(fetch("https://api.github.com/repos/openai/codex/commits?" + query, headers=headers))
         if not isinstance(rows, list) or len(rows) > count:
@@ -63,6 +75,7 @@ def collect_history(manifest, fetch, collector, *, count=15):
     return {
         "schema_version": 1,
         "connector": "codex",
+        "sampled_paths": list(CODEX_HISTORY_PATHS),
         "scope": "Sampled commits reachable from main path history, each compared to its first parent. "
         "Not an exhaustive merged-PR feed or an as-of-time local-code experiment.",
         "cases": list(reversed(cases)),
@@ -110,6 +123,7 @@ def replay_history(history, manifest, runner, *, root, ai="off", model="", max_a
         # Missing baseline files are coverage gaps too; otherwise additions of
         # unavailable/renamed artifacts could look like benign first baselines.
         old_ids = {source["id"] for source in before["sources"]}
+        current_ids = {source["id"] for source in after["sources"]}
         for spec in manifest["sources"]:
             if spec["id"] not in old_ids:
                 report["gaps"].append(
@@ -119,6 +133,14 @@ def replay_history(history, manifest, runner, *, root, ai="off", model="", max_a
                         "reason": "parent snapshot source unavailable; transition not comparable",
                     }
                 )
+        for gap in report["gaps"]:
+            source_id = gap["source"]
+            if source_id not in old_ids and source_id not in current_ids:
+                gap["availability"] = "unavailable_in_both_revisions"
+            elif source_id not in old_ids:
+                gap["availability"] = "no_parent_baseline"
+            elif source_id not in current_ids:
+                gap["availability"] = "current_artifact_unavailable"
         report["outcome"] = "incomplete" if report["gaps"] else "complete"
         remaining -= report["ai_calls"]
         report["transition"] = case
@@ -138,4 +160,5 @@ def replay_history(history, manifest, runner, *, root, ai="off", model="", max_a
     )
     result["ai_calls"] = max_ai - remaining
     result["outcome"] = "incomplete" if result["gaps"] else "complete"
+    result["coverage_status"]["collection"] = result["outcome"]
     return result
