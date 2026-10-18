@@ -72,10 +72,84 @@ func TestWindowsEnterpriseGuardianTargetGapsClearSecurityComplete(t *testing.T) 
 	}
 
 	failed := waiting
-	failed.Error = "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable"
+	failed.Error = "enterprise hooks: target install failed: access is denied"
 	result = run(failed)
-	if result.SecurityComplete || len(result.Warnings) != 0 {
-		t.Fatalf("failed row: security_complete=%t warnings=%+v, want incomplete; the guardian status error names it", result.SecurityComplete, result.Warnings)
+	if result.SecurityComplete || len(result.Warnings) != 1 ||
+		result.Warnings[0].Code != windowsEnterpriseGuardianRepairPendingCode ||
+		!strings.Contains(result.Warnings[0].Message, hookFile) ||
+		!strings.Contains(result.Warnings[0].Message, "dcw-std1 for copilot") {
+		t.Fatalf("failed row with its hook file deleted: security_complete=%t warnings=%+v, want incomplete with one guardian_repair_pending naming the file",
+			result.SecurityComplete, result.Warnings)
+	}
+}
+
+// GAP-0146 (train T2, BW-02 step 4): the guardian could not repair a
+// deleted Copilot hook file of an account with no active Windows session.
+// Status and verify gave only the guardian's lifecycle error, without the
+// guardian_repair_pending warning that names the account and the agent.
+// Signed out, disconnected and connected accounts are covered.
+func TestWindowsEnterpriseGuardianTargetGapsNameTargetsTheGuardianCannotRepair(t *testing.T) {
+	previousCfg := cfg
+	t.Cleanup(func() { cfg = previousCfg })
+	cfg = nil // the enterprise windows commands skip the config load
+
+	home := t.TempDir()
+	hookFile := enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)
+	if err := os.MkdirAll(filepath.Dir(hookFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1017"
+	row := func(ok bool, rowErr string) enterpriseHookReconcileRow {
+		return enterpriseHookReconcileRow{
+			User: `WIN-HOST\dcw-std1`, UserHome: home, SID: sid, Connector: "copilot", OK: ok, Error: rowErr,
+		}
+	}
+	signedOut := row(false, "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable "+
+		"(verification: enterprise hooks: copilot VS Code Local hooks: DefenseClaw's VS Code Local hooks are not current: "+hookFile+")")
+	disconnected := row(false, (&enterprisehooks.WindowsTargetSessionUnavailableError{SID: sid}).Error())
+	connected := row(true, "")
+	files := windowsEnterpriseGuardianTargetHookFiles(true)
+	run := func(action string, r enterpriseHookReconcileRow) *enterprisestatus.Result {
+		result := &enterprisestatus.Result{Action: action, SecurityComplete: true}
+		applyWindowsEnterpriseGuardianTargetGaps(result, enterpriseHookGuardianState{Results: []enterpriseHookReconcileRow{r}}, files)
+		return result
+	}
+	pending := func(name string, result *enterprisestatus.Result, wants ...string) {
+		t.Helper()
+		if result.SecurityComplete || len(result.Warnings) != 1 || result.Warnings[0].Code != windowsEnterpriseGuardianRepairPendingCode {
+			t.Fatalf("%s: security_complete=%t warnings=%+v, want incomplete with one guardian_repair_pending",
+				name, result.SecurityComplete, result.Warnings)
+		}
+		for _, want := range wants {
+			if !strings.Contains(result.Warnings[0].Message, want) {
+				t.Fatalf("%s: warning %q does not name %q", name, result.Warnings[0].Message, want)
+			}
+		}
+	}
+
+	for _, action := range []string{"status", "verify"} {
+		// Hook file absent.
+		pending(action+": signed out, hook file deleted", run(action, signedOut),
+			"copilot for "+signedOut.User, "signed out", hookFile)
+		pending(action+": disconnected, hook file deleted", run(action, disconnected),
+			"copilot for "+disconnected.User, "disconnected", hookFile)
+		pending(action+": connected, hook file deleted since the pass", run(action, connected),
+			signedOut.User+" for copilot", hookFile)
+	}
+
+	if err := os.WriteFile(hookFile, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Hook file present: an account the guardian cannot reach is still not
+	// verified; a connected, verified one is complete again.
+	pending("signed out, hook file present", run("status", signedOut), "copilot for "+signedOut.User)
+	pending("disconnected, hook file present", run("verify", disconnected), "copilot for "+disconnected.User)
+	if result := run("status", connected); !result.SecurityComplete || len(result.Warnings) != 0 {
+		t.Fatalf("connected, hook file restored: security_complete=%t warnings=%+v, want complete and none",
+			result.SecurityComplete, result.Warnings)
+	}
+	if msg := run("status", signedOut).Warnings[0].Message; strings.Contains(msg, "missing") {
+		t.Fatalf("signed out, hook file present: warning %q names a missing file", msg)
 	}
 }
 

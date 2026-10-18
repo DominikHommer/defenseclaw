@@ -26,55 +26,99 @@ const windowsEnterpriseGuardianRepairPendingCode = "guardian_repair_pending"
 // applyWindowsEnterpriseGuardianTargetGaps clears security_complete for each
 // enrolled target the guardian's last pass (state) did not leave protected,
 // and for each target whose recorded hook file is absent now (ownedFiles
-// lists the files to look for). A signed-out account's target that waits for
-// its next sign-in failed that pass without an error in the guardian status,
-// so status and verify said the host was security-complete while its hook
-// file was deleted (GAP-0146). Such a row and a missing file get a warning
-// that names the account and the agent; any other failed row already fails
-// the guardian status. A row of a removed account protects no one and is
-// left to the enumerator, and a pending row was never enrolled.
+// lists the files to look for). Status and verify said the host was
+// security-complete, or gave only the guardian's lifecycle error, while such
+// a target's hook file was deleted (GAP-0146), so each of these targets also
+// gets a guardian_repair_pending warning that names the account and the
+// agent:
+//   - a row that waits for its signed-out account's next sign-in;
+//   - a row the guardian could not repair because its account has no active
+//     Windows session (signed out, or a disconnected session): the guardian
+//     repairs only in that session;
+//   - a row with a hook file that is absent now (a verified row since the
+//     pass, or a failed row).
+//
+// Any other failed row already fails the guardian status, which names it. A
+// row of a removed account protects no one and is left to the enumerator,
+// and a pending row was never enrolled.
 func applyWindowsEnterpriseGuardianTargetGaps(
 	result *enterprisestatus.Result,
 	state enterpriseHookGuardianState,
 	ownedFiles func(enterpriseHookReconcileRow) []string,
 ) {
 	for _, row := range state.Results {
-		if row.Pending {
+		if row.Pending || (!row.OK && enterpriseHookRemovedAccountRow(row)) {
 			continue
 		}
 		connector := strings.TrimSpace(row.Connector)
 		account := windowsEnterpriseGuardianRowAccount(row)
+		missing := windowsEnterpriseGuardianMissingHookFiles(row, ownedFiles)
+		var reason string
 		if !row.OK {
-			if enterpriseHookRemovedAccountRow(row) {
-				continue
-			}
 			result.SecurityComplete = false
-			if enterpriseHookAwaitingSignInError(row) {
-				result.AddWarning(windowsEnterpriseGuardianRepairPendingCode, fmt.Sprintf(
+			switch {
+			case enterpriseHookAwaitingSignInError(row):
+				reason = fmt.Sprintf(
 					"the hook guardian's last pass could not verify %s for %s, and it repairs it only in that account's "+
 						"own Windows session; that agent's hook calls may not be inspected until the account signs in "+
-						"and the guardian repairs it", connector, account))
-			}
-			continue
-		}
-		if ownedFiles == nil {
-			continue
-		}
-		var missing []string
-		for _, path := range ownedFiles(row) {
-			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
-				missing = append(missing, path)
+						"and the guardian repairs it", connector, account)
+			case enterpriseHookSessionUnavailable(row.Error):
+				reason = fmt.Sprintf(
+					"the hook guardian's last pass could not verify %s for %s, and it cannot repair it while that "+
+						"account is signed out or its session is disconnected: it repairs DefenseClaw hooks only in the "+
+						"account's own active Windows session; that agent's hook calls may not be inspected until the "+
+						"account signs in or reconnects and the guardian repairs it", connector, account)
 			}
 		}
-		if len(missing) == 0 {
+		if reason == "" && len(missing) == 0 {
 			continue
 		}
 		result.SecurityComplete = false
-		result.AddWarning(windowsEnterpriseGuardianRepairPendingCode, fmt.Sprintf(
-			"%d DefenseClaw hook file(s) of %s for %s are missing since the hook guardian last verified them (%s); "+
-				"that agent's hook calls may not be inspected until the guardian puts them back on its next pass",
-			len(missing), account, connector, strings.Join(missing, ", ")))
+		message := reason
+		switch {
+		case reason != "" && len(missing) > 0:
+			message = fmt.Sprintf("%s (missing: %s)", reason, strings.Join(missing, ", "))
+		case row.OK:
+			message = fmt.Sprintf(
+				"%d DefenseClaw hook file(s) of %s for %s are missing since the hook guardian last verified them (%s); "+
+					"that agent's hook calls may not be inspected until the guardian puts them back on its next pass",
+				len(missing), account, connector, strings.Join(missing, ", "))
+		case reason == "":
+			message = fmt.Sprintf(
+				"%d DefenseClaw hook file(s) of %s for %s are missing and the hook guardian's last pass failed on that "+
+					"target (%s); that agent's hook calls may not be inspected until the guardian repairs it",
+				len(missing), account, connector, strings.Join(missing, ", "))
+		}
+		result.AddWarning(windowsEnterpriseGuardianRepairPendingCode, message)
 	}
+}
+
+// windowsEnterpriseGuardianMissingHookFiles lists the hook files of row
+// (ownedFiles) that do not exist now. Only "does not exist" counts: any other
+// error leaves the guardian as the verifier, because the caller's token may
+// not read every profile.
+func windowsEnterpriseGuardianMissingHookFiles(
+	row enterpriseHookReconcileRow,
+	ownedFiles func(enterpriseHookReconcileRow) []string,
+) []string {
+	if ownedFiles == nil {
+		return nil
+	}
+	var missing []string
+	for _, path := range ownedFiles(row) {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			missing = append(missing, path)
+		}
+	}
+	return missing
+}
+
+// enterpriseHookSessionUnavailable matches the two errors a protected
+// Windows target records while its account has no active Windows session
+// (signed out, or a disconnected session).
+func enterpriseHookSessionUnavailable(message string) bool {
+	return strings.Contains(message, "exact active Windows session is unavailable") ||
+		strings.Contains(message, "no active interactive session token matches")
 }
 
 // applyWindowsEnterpriseGuardianTargetsFrom applies the guardian's last pass
